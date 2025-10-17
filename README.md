@@ -40,6 +40,7 @@ conda activate moirekp
 
 3. Install the package:
 ```bash
+cd tapw
 pip install -e .
 ```
 

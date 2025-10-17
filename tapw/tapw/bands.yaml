@@ -1,0 +1,33 @@
+kpath_in: "/data/work/zy/software/1.tapw_code/tapw/tapw/KPATH_GMKG.in"
+kpath_out: "/data/work/zy/software/1.tapw_code/tapw/tapw/KPATH_GMKG.out"
+title: "MoTe2 Band Structure"
+ymin: -8.
+ymax: -4.
+output: "bands.pdf"
+legend_show: False   #默认False
+legend_loc: "upper right" 
+legend_fontsize: 8  #默认9
+global_plot_type: "scatter"  # 可选：全局设置所有band的绘图类型
+marker_size: 1
+marker: "o"
+fermi_energy: -4.6  # 设置费米能级
+fermi_line: true   # 是否画费米能级线
+
+bands:
+  - file: "band_data_K1_valley.txt"
+    label: "K1 Valley"
+    color: "#DE6E66"
+    plot_type: "line"     # 可选：单独设置这条band的绘图类型
+    linestyle: "-"
+    linewidth: 1.5
+    
+  - file: "band_data_K2_valley.txt"
+    label: "K2 Valley"
+    color: "dodgerblue"
+    plot_type: "scatter"  # 这条用散点图
+    marker_size: 1
+    marker: "o"
+    
+  - file: "band_data_Gamma_valley.txt"
+    label: "Gamma Valley"
+    color: "g"

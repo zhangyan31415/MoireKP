@@ -1,0 +1,68 @@
+material:
+  name: bitei
+  hamk_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/7_4.41_bitei_tete/tapw/Q_shell_5/band/hamk_Gamma_valley.npy"
+  qset1_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/7_4.41_bitei_tete/tapw/Q_shell_5/g_vec_list_5_Gamma_1layer.npy"
+  qset2_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/7_4.41_bitei_tete/tapw/Q_shell_5/g_vec_list_5_Gamma_2layer.npy"
+  # Precomputed band energies (fast path)
+  band_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/7_4.41_bitei_tete/tapw/Q_shell_5/band/band_VBM_Gamma_valley.txt"
+  # Explicit Fermi level in eV (overrides vbm_file)
+  efermi: -4.7
+  # vbm_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89/tapw/Q_shell_6/band/band_VBM_Gamma_valley.txt"
+  spin: "all"
+  num_layers: 2
+  # Optional: provide per-layer orbitals; otherwise inferred
+  # num_orb_per_layer: [46, 46]
+  # Optional: orbital order string (not used in this plot step)
+  orbital_order: "I-s3p2d2,Bi-s3p2d2,Te-s3p2d2"
+
+plot:
+  hamk_index: 0
+  target: "all"  # 'all' plots full spectrum; or 'valence'/'conduction'/band index
+  ref_q_index: 0
+  out: "plots_bitei_tete/bitei_gamma_scatter.png"
+  data_out: "plots_bitei_tete/bitei_gamma_spectrum.txt"
+  title: "bitei_tete Gamma valley — VBM band vs Q"
+  ylim: [-4, 4]
+  sort_by_qnorm: true
+  q_rotation_deg: 210
+  report_below: 8
+  report_above: 4
+  report_components: 12
+
+
+  # nlow_state_list: [[36,37,40, 41,42,43]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2, 3, 4,7,8]]
+
+  # nlow_state_list: [[40, 41,42,43]]
+  # # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[50,142,123,31]]
+
+  nlow_state_list: [[36,37,38,39,40, 41,42,43]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  norb_fix_list: [[95,3,30,122,50,142,123,31]]
+
+project:
+  enable: false
+  # select bands to project (per layer or flat list)
+  # nlow_state_list: [[34,35,36,37,38,39,40, 41, 42, 43]]
+  # # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2, 3, 4,5,6,7,8,9,10]]
+
+  # nlow_state_list: [[34,35,36,37,38,39,40, 41, 42, 43]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2, 3, 4,5,6,7,8,9,10]]
+
+  # nlow_state_list: [[74,75]]
+  # # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2]]
+
+  nlow_state_list: [[76,77,78,79]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  norb_fix_list: [[1, 2, 3, 4]]
+  workers: 4
+  out_dir: "plots_bitei_tete"
+  report_below: 8      # bands below EF to report
+  report_above: 8      # bands above EF to report
+  report_components: 10 # top-N orbital components per band
+  ylim: [-5.,-4.8]

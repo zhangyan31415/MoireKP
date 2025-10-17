@@ -1,0 +1,48 @@
+material:
+  name: MgI2
+  hamk_file: "//data/work/zy/software/1.tapw_code/tapw/examples/tGa2Se2/2.13/2soc/Q_shell_6_cbm/band_Gamma_shell_6_st_nsymm_eigsh_50__cbm_hamk.npy"
+  qset1_file: "/data/work/zy/software/1.tapw_code/tapw/examples/tGa2Se2/2.13/2soc/Q_shell_6_cbm/g_vec_list_6_Gamma_1layer.npy"
+  qset2_file: "/data/work/zy/software/1.tapw_code/tapw/examples/tGa2Se2/2.13/2soc/Q_shell_6_cbm/g_vec_list_6_Gamma_2layer.npy"
+  # Precomputed band energies (fast path)
+  band_file: "/data/work/zy/software/1.tapw_code/tapw/examples/tGa2Se2/2.13/2soc/Q_shell_6_cbm/band_data/band_data_Gamma_valley.txt"
+  # Explicit Fermi level in eV (overrides vbm_file)
+  efermi: -4.168612
+  # vbm_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89/tapw/Q_shell_6/band/band_VBM_Gamma_valley.txt"
+  spin: "all"
+  num_layers: 2
+  # Optional: provide per-layer orbitals; otherwise inferred
+  # num_orb_per_layer: [46, 46]
+  # Optional: orbital order string (not used in this plot step)
+  orbital_order: "Ga-s3p2d2,Se-s3p2d2,Ga-s3p2d2,Se-s3p2d2"
+
+plot:
+  hamk_index: 0
+  target: "all"  # 'all' plots full spectrum; or 'valence'/'conduction'/band index
+  ref_q_index: 0
+  out: "plots_ga2se2/mgi2_gamma_scatter.png"
+  data_out: "plots_ga2se2/mgi2_gamma_spectrum.txt"
+  title: "Ga2Se2 Gamma valley — CBM band vs Q"
+  ylim: [-4, 10]
+  sort_by_qnorm: true
+  q_rotation_deg: 210
+  report_below: 12
+  report_above: 2
+  report_components: 8
+
+project:
+  enable: false
+  # select bands to project (per layer or flat list)
+  # nlow_state_list: [[34,35,36,37,38,39,40, 41, 42, 43]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2, 3, 4,5,6,7,8,9,10]]
+  nlow_state_list : [[76,77,78,79]]
+  norb_fix_list : [[1,153,77,229]]
+  workers: 2
+  out_heff: "plots_ga2se2/heff_list.npy"
+  out_eig:  "plots_ga2se2/heff_eig.npy"
+  out_vec:  "plots_ga2se2/heff_vec.npy"
+  report_below: 8      # bands below EF to report
+  report_above: 8      # bands above EF to report
+  report_components: 10 # top-N orbital components per band
+  ylim: [-0.2,1]
+  efermi: -4.168612

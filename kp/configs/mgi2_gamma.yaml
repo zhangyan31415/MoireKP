@@ -1,0 +1,89 @@
+material:
+  name: MgI2
+  hamk_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89_mgi2/tapw/Q_shell_6/band/hamk_Gamma_valley.npy"
+  qset1_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89_mgi2/tapw/Q_shell_6/g_vec_list_6_Gamma_1layer.npy"
+  qset2_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89_mgi2/tapw/Q_shell_6/g_vec_list_6_Gamma_2layer.npy"
+  # Precomputed band energies (fast path)
+  band_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89_mgi2/tapw/Q_shell_6/band/band_VBM_Gamma_valley.txt"
+  # Explicit Fermi level in eV (overrides vbm_file)
+  efermi: -4.168612
+  # vbm_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89/tapw/Q_shell_6/band/band_VBM_Gamma_valley.txt"
+  spin: "all"
+  num_layers: 2
+  # Optional: provide per-layer orbitals; otherwise inferred
+  # num_orb_per_layer: [46, 46]
+  # Optional: orbital order string (not used in this plot step)
+  orbital_order: "I-s3p2d2,Mg-s2p2,I-s3p2d2"
+
+plot:
+  hamk_index: 0
+  target: "all"  # 'all' plots full spectrum; or 'valence'/'conduction'/band index
+  ref_q_index: 0
+  out: "plots_mgi2/mgi2_gamma_scatter.png"
+  data_out: "plots_mgi2/mgi2_gamma_spectrum_8.txt"
+  title: "MgI2 Gamma valley — VBM band vs Q"
+  ylim: [-4, -1]
+  sort_by_qnorm: true
+  q_rotation_deg: 210
+  report_below: 12
+  report_above: 0
+  report_components: 12
+
+
+  # nlow_state_list: [[36,37,40, 41,42,43]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2, 3, 4,7,8]]
+
+  # nlow_state_list: [[40, 41,42,43]]
+  # # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[50,142,123,31]]
+
+  # nlow_state_list: [[36,37,38,39,40, 41,42,43]]
+  # # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[95,3,32,124,50,142,123,31]]
+  # nlow_state_list: [[40,41,42,43], [40,41,42,43]]
+  # norb_fix_list:
+  #   -  # top
+  #     - [[50, 1.0]]
+  #     - [[142, 1.0]]
+  #     - [[123, 1.0]]
+  #     - [[31, 1.0]]
+  #   -  # bottom
+  #     - [[50, 1.0]]
+  #     - [[142, 1.0]]
+  #     - [[123, 1.0]]
+  #     - [[31, 1.0]]
+
+  nlow_state_list: [[36,37,38,39,40,41,42,43]]
+  norb_fix_list:
+    -  # bottom
+      - [[95, 1.0],[96,'-1j']]
+      - [[3, 1.0],[4,'1j']]
+      - [[32, 1.0],[51,1]]
+      - [[124, 1.0],[143,1]]
+      - [[50, 1.0],[49,'-1j']]
+      - [[142, 1.0],[141,'1j']]
+      - [[123, 1.0],[122,'1j']]
+      - [[31, 1.0],[30, '-1j']]
+  
+
+project:
+  enable: false
+  # select bands to project (per layer or flat list)
+  # nlow_state_list: [[34,35,36,37,38,39,40, 41, 42, 43]]
+  # # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2, 3, 4,5,6,7,8,9,10]]
+
+  # nlow_state_list: [[34,35,36,37,38,39,40, 41, 42, 43]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  # norb_fix_list: [[1, 2, 3, 4,5,6,7,8,9,10]]
+
+  nlow_state_list: [[36,37,40, 41,42,43]]
+  # reference orbital indices for alignment (same length as flattened bands)
+  norb_fix_list: [[1, 2, 3, 4,7,8]]
+  workers: 4
+  out_dir: "plots_mgi2"
+  report_below: 8      # bands below EF to report
+  report_above: 8      # bands above EF to report
+  report_components: 10 # top-N orbital components per band
+  ylim: [-5.8,-5.6]
