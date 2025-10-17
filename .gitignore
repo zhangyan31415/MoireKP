@@ -56,3 +56,4 @@ ENV/
 
 # Ignore examples directory
 examples/
+*npy
