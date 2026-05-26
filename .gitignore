@@ -52,8 +52,10 @@ output/
 .venv
 env/
 venv/
-ENV/ 
+ENV/
 
 # Ignore examples directory
 examples/
+kp/configs/
+Mote_DFT_gen/
 *npy

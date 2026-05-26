@@ -1,38 +1,50 @@
-kp — From TAPW to moiré k·p (developer skeleton)
+# kp
 
-Overview
-- Developer-first skeleton to migrate the current Jupyter notebook workflow to a Python package.
-- Mirrors the notebook structure: IO, k-path generation, block diagonalization, symmetry, continuum model build, and visualization.
+Utilities for building moire k.p models from TAPW Hamiltonians.
 
-Install (editable)
-- pip install -e .
+## Install
 
-CLI
-- Plot example (MgI2, Gamma valley):
-  - Edit paths if needed in `configs/mgi2_gamma.yaml`.
-  - Run: `kp plot -c configs/mgi2_gamma.yaml`
-  - Output: `plots/mgi2_gamma_scatter.png`
+From this directory:
 
-- Project low-energy Heff (separate command):
-  - Configure `project` section in config (select `nlow_state_list`, `norb_fix_list`, `workers`).
-  - Run: `kp project -c configs/mgi2_gamma.yaml`
-  - Outputs:
-    - `plots/heff_list.npy` (Heff per Q)
-    - `plots/heff_eig.npy` (Heff eigenvalues per Q)
-    - `plots/heff_vec.npy` (Heff eigenvectors per Q)
-    - `plots/heff_scatter.png` and `plots/heff_spectrum.txt`
+```bash
+pip install -e .
+```
 
-Package Layout (key modules)
-- kp/io: Load TAPW outputs (hamiltonians, Q-sets, orbital order)
-- kp/kmesh: k-path and BZ utilities
-- kp/blocks: Low-energy block assembly and diagonalization helpers
-- kp/analysis: Orbital weight computation and selection strategies
-- kp/symmetry: Symmetry operators and checks
-- kp/model: Continuum terms, builder, orthogonalization, fitting
-- kp/viz: Band plots and orbital projection diagnostics
-- kp/config: Config schemas (dataclasses)
+If the `kp` command is not installed, run the CLI as:
 
-Next Steps
-- Port functions from model.ipynb into corresponding modules.
-- Replace hard-coded paths with config-driven inputs (see configs/example.yaml).
-- Add minimal scripts to run selection, build, and plot for a target material.
+```bash
+PYTHONPATH=. python -m kp.cli
+```
+
+## Examples
+
+Runnable examples are under `examples/`. Start with:
+
+```bash
+kp plot -c examples/mgi2/mgi2_8_gamma.yaml
+kp project -c examples/mgi2/mgi2_8_gamma.yaml
+
+kp plot -c examples/mote2/mote2_8_K.yaml
+kp project -c examples/mote2/mote2_8_K.yaml
+```
+
+After `kp project` generates `heff_list.npy` and `heff_eig.npy`, run the matching notebook:
+
+```text
+examples/mgi2/model_mgi2_G.ipynb
+examples/mote2/model_mote2_K.ipynb
+```
+
+See `examples/README.md` for the full input/output workflow and the meaning of `nlow_state_list` and `norb_fix_list`.
+
+## Local Scratch Configs
+
+`configs/` is treated as a local scratch area for experiments and generated plots. It is ignored by git and should not be uploaded to GitHub. Share reproducible examples through `examples/` instead.
+
+## Package Layout
+
+- `kp/io`: load TAPW Hamiltonians and Q sets
+- `kp/blocks`: assemble Q blocks and project low-energy effective Hamiltonians
+- `kp/symmetry`: symmetry operators and symmetry projection helpers
+- `kp/model`: continuum-model building blocks
+- `kp/viz`: plotting utilities
