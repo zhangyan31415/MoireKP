@@ -1,0 +1,58 @@
+source_config: mgi2_3.89_Gamma.yaml
+
+kpath:
+  file: ../../tapw/KPATH.in
+  tmat:
+    - [60.9508659523, 0.0, 0.0]
+    - [-30.4754329751, 52.7849982976, 0.0]
+    - [0.0, 0.0, 50.0]
+  phase_deg: 210
+
+model:
+  q_rotation_deg: 210
+  n_orb: [2, 2]
+  nlow_state: [2, 2]
+  bM:
+    infer_from_q: true
+    angle_deg: 60
+  harmonics:
+    intra:
+      1: zero
+      2: -bM1
+      3: bM1 + bM2
+      4: 2*bM1
+    inter:
+      1: zero
+      2: -bM1
+      3: bM1 + bM2
+      4: 2*bM1
+  max_order:
+    Kinect: 10
+    intra: 6
+    inter: 10
+  symmetry_map:
+    Kinect:
+      - {name: TR}
+      - {name: C2x}
+    Onsite:
+      - {name: TR}
+      - {name: C2x}
+    intra:
+      - {name: C3z}
+      - {name: TR}
+      - {name: C2x}
+    inter:
+      - {name: C3z}
+      - {name: TR}
+      - {name: C2x}
+
+fit:
+  indices: [0, 40]
+  coeff_tol: 1.0e-6
+
+bands:
+  compare_to_heff: true
+  band_slice: [0, 124]
+
+output:
+  dir: ../outputs/model/mgi2_3.89_Gamma_formal

@@ -2,6 +2,8 @@
 # >>> SECTION: 00. Module Overview & Public API
 # =============================================================================
 # >>> SPLIT_HINT: move this section into __init__.py
+from __future__ import annotations
+
 """
 Moire k·p continuum model (single-file module).
 

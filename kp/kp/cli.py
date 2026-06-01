@@ -1230,6 +1230,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p_symm = sub.add_parser("symm", help="Project TAPW symmetry representations into the KP basis")
     p_symm.add_argument("-c", "--config", required=True, help="YAML config path")
 
+    p_model = sub.add_parser("model", help="Build/fit a configured continuum model and compare to Heff")
+    p_model.add_argument("-c", "--config", required=True, help="YAML model config path")
+
     return p
 
 
@@ -1262,6 +1265,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         cmd_sweep_from_config(args.config, overrides)
     elif args.cmd == "symm":
         run_symmetry_projection_from_config(args.config)
+    elif args.cmd == "model":
+        from .model.configured import run_configured_model
+
+        results = run_configured_model(args.config)
+        comparison = results.get("comparison")
+        if comparison:
+            print("[kp] Model comparison:")
+            rms = float(comparison["rms_error"])
+            max_abs = float(comparison["max_abs_error"])
+            print(f"[kp]   RMS error: {rms:.6e} eV ({1000.0 * rms:.3f} meV)")
+            print(f"[kp]   Max error: {max_abs:.6e} eV ({1000.0 * max_abs:.3f} meV)")
     else:
         raise SystemExit(2)
 
