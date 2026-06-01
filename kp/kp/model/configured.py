@@ -438,6 +438,67 @@ def compare_bands(
     }
 
 
+def save_band_comparison_plot(
+    model_eigvals: np.ndarray,
+    heff_eigvals: np.ndarray,
+    path: str | Path,
+    *,
+    band_slice: Sequence[int] | None = None,
+    title: str | None = None,
+) -> Path:
+    model = np.asarray(model_eigvals, dtype=float)
+    heff = np.asarray(heff_eigvals)
+    if heff.ndim == 3:
+        heff = np.linalg.eigvalsh(heff)
+    heff = np.asarray(heff, dtype=float)
+    if model.ndim != 2 or heff.ndim != 2:
+        raise ValueError(f"model/heff eigvals must be 2D after eigensolve, got {model.shape} and {heff.shape}")
+    if model.shape[0] != heff.shape[0]:
+        raise ValueError(f"k-point counts differ: model={model.shape[0]}, heff={heff.shape[0]}")
+
+    nbands = min(model.shape[1], heff.shape[1])
+    start = 0
+    stop = nbands
+    if band_slice is not None:
+        if len(band_slice) != 2:
+            raise ValueError(f"band_slice must be [start, stop], got {band_slice}")
+        start, stop = int(band_slice[0]), int(band_slice[1])
+    model_sel = np.sort(model, axis=1)[:, start:stop]
+    heff_sel = np.sort(heff, axis=1)[:, start:stop]
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    x = np.arange(model_sel.shape[0], dtype=float)
+    fig, ax = plt.subplots(figsize=(8.0, 4.8), dpi=180)
+    for ib in range(heff_sel.shape[1]):
+        ax.plot(x, heff_sel[:, ib], color="0.72", linewidth=0.55, alpha=0.9)
+    for ib in range(model_sel.shape[1]):
+        ax.plot(x, model_sel[:, ib], color="#c9252d", linewidth=0.45, alpha=0.75)
+    ax.set_xlabel("k-point index")
+    ax.set_ylabel("Energy (eV)")
+    if title:
+        ax.set_title(title)
+    ax.grid(True, color="0.9", linewidth=0.5)
+    ax.legend(
+        handles=[
+            Line2D([0], [0], color="0.72", lw=1.2, label="Heff"),
+            Line2D([0], [0], color="#c9252d", lw=1.2, label="Continuum model"),
+        ],
+        loc="best",
+        frameon=False,
+    )
+    fig.tight_layout()
+    fig.savefig(out)
+    plt.close(fig)
+    return out
+
+
 def run_configured_model(path: str | Path) -> dict[str, Any]:
     moire_config, model_config = build_moire_config_from_file(path)
     output_dir = model_config.output_dir
@@ -465,6 +526,13 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         comparison = compare_bands(eigvals_array, heff_selected, band_slice=model_config.band_slice)
         with (output_dir / "comparison.json").open("w", encoding="utf-8") as handle:
             json.dump(comparison, handle, indent=2)
+        save_band_comparison_plot(
+            eigvals_array,
+            heff_selected,
+            output_dir / "band_comparison.png",
+            band_slice=model_config.band_slice,
+            title=str(model_config.raw.get("title", model_config.path.stem)),
+        )
     results["configured_model"] = model_config
     results["moire_config"] = moire_config
     results["comparison"] = comparison

@@ -163,6 +163,7 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
     assert results["moire_config"].output_dir == tmp_path / "model_out"
     assert (tmp_path / "model_out" / "eigvals.npy").exists()
     assert (tmp_path / "model_out" / "comparison.json").exists()
+    assert (tmp_path / "model_out" / "band_comparison.png").exists()
 
 
 def test_compare_bands_reports_rms_and_max_error() -> None:
