@@ -229,10 +229,6 @@ def get_H_block(
 
     else:
         # Per-layer, per-Q blocks
-        print("num_layer_arr = ",num_layer_arr)
-        print("num_q_list = ",num_q_list)
-        print("orb_per_layer_0 = ",orb_per_layer_0)
-        print("q_count_0 = ",q_count_0)
         for ilx in range(len(num_layer_arr)):
             for jj in range(num_layer_arr[ilx]):
                 for iq in range(int(num_q_list[ilx][0])):
@@ -250,19 +246,25 @@ def get_H_block(
                             # Flatten per-layer definitions into band list and per-band combos
                             bands_flat: list[int] = []
                             ref_flat: list[list[tuple[int, complex]]] = []
-                            for layer in range(1):
-                                for b in nlow_state_list[layer]:
-                                    bands_flat.append(int(b))
-                                for combos in norb_fix_list[layer]:
-                                    parsed: list[tuple[int, complex]] = []
-                                    for it in combos:
-                                        if isinstance(it, (list, tuple)) and len(it) == 2:
-                                            idxc, coef = it
-                                            coef_c = complex(coef) if not isinstance(coef, complex) else coef
-                                            parsed.append((int(idxc), coef_c))
-                                        else:
-                                            parsed.append((int(it), complex(1.0)))
-                                    ref_flat.append(parsed)
+                            layer = int(ilx)
+                            if layer >= len(nlow_state_list) or layer >= len(norb_fix_list):
+                                raise IndexError(
+                                    f"Missing low-state/reference config for layer {layer}: "
+                                    f"nlow_state_list has {len(nlow_state_list)} layers, "
+                                    f"norb_fix_list has {len(norb_fix_list)} layers"
+                                )
+                            for b in nlow_state_list[layer]:
+                                bands_flat.append(int(b))
+                            for combos in norb_fix_list[layer]:
+                                parsed: list[tuple[int, complex]] = []
+                                for it in combos:
+                                    if isinstance(it, (list, tuple)) and len(it) == 2:
+                                        idxc, coef = it
+                                        coef_c = complex(coef) if not isinstance(coef, complex) else coef
+                                        parsed.append((int(idxc), coef_c))
+                                    else:
+                                        parsed.append((int(it), complex(1.0)))
+                                ref_flat.append(parsed)
                             # print("bands_flat :",bands_flat)
                             # ref_flat = [[(50, (1+0j))], [(142, (1+0j))], [(123, (1+0j))], [(31, (1+0j))], [(50, (1+0j))], [(142, (1+0j))], [(123, (1+0j))], [(31, (1+0j))]]
 

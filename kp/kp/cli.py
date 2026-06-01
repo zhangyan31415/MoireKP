@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 from typing import Any, Dict, List, Sequence
 
 import yaml
@@ -255,6 +256,88 @@ def _e_ref_from_project_cfg(project_cfg: dict[str, Any]) -> float | None:
 def _top_n_list_from_project_cfg(project_cfg: dict[str, Any]) -> list[int]:
     value = project_cfg.get("top_n", project_cfg.get("top_n_list", [2, 4, 6, 10, 20]))
     return parse_int_list(value)
+
+
+def _downfold_method_label(method: str) -> str:
+    labels = {
+        "first_order": "first_order (projected block only)",
+        "fixed_schur": "fixed_schur (fixed-energy downfolding)",
+        "linearized_lowdin": "linearized_lowdin (linearized downfolding)",
+    }
+    return labels.get(method, method)
+
+
+def _print_project_diagnostics(
+    diag_list: Sequence[Any],
+    *,
+    pole_warning_mev: float,
+    pole_danger_mev: float,
+    print_k_diagnostics: bool = False,
+) -> None:
+    if not diag_list:
+        return
+
+    print("[kp] Downfolding diagnostics:")
+
+    pole_rows = [
+        (ik, d)
+        for ik, d in enumerate(diag_list)
+        if getattr(d, "pole_distance_min_mev", None) is not None
+    ]
+    if pole_rows:
+        pole_vals = np.array([float(d.pole_distance_min_mev) for _, d in pole_rows], dtype=float)
+        min_pos = int(np.argmin(pole_vals))
+        min_k, _ = pole_rows[min_pos]
+        median_margin = float(np.median(pole_vals))
+        print(
+            "[kp]   E_ref margin to discarded bands: "
+            f"min={pole_vals[min_pos]:.3f} meV at k={min_k:03d}, "
+            f"median={median_margin:.3f} meV"
+        )
+        print(
+            "[kp]   status: "
+            f"{'OK' if not any(getattr(d, 'near_pole', False) for _, d in pole_rows) else 'CHECK'} "
+            f"(warning < {pole_warning_mev:.3f} meV, danger < {pole_danger_mev:.3f} meV)"
+        )
+
+        cond_rows = [
+            (ik, float(d.pole_condition_number))
+            for ik, d in pole_rows
+            if getattr(d, "pole_condition_number", None) is not None
+        ]
+        if cond_rows:
+            cond_k, cond_max = max(cond_rows, key=lambda item: item[1])
+            if print_k_diagnostics or cond_max >= 1.0e8:
+                print(f"[kp]   Schur solve conditioning: max={cond_max:.3e} at k={cond_k:03d}")
+
+        flagged = [
+            (ik, d)
+            for ik, d in pole_rows
+            if getattr(d, "near_pole", False) or getattr(d, "warnings", None)
+        ]
+        if flagged:
+            print("[kp]   k-points requiring attention:")
+            for ik, d in flagged[:20]:
+                print(f"[kp]     k={ik:03d}: margin={float(d.pole_distance_min_mev):.3f} meV")
+                for warning in getattr(d, "warnings", []):
+                    print(f"[kp]       {warning}")
+            if len(flagged) > 20:
+                print(f"[kp]     ... {len(flagged) - 20} more")
+
+        if print_k_diagnostics:
+            print("[kp]   per-k diagnostics:")
+            for ik, d in pole_rows:
+                cond = getattr(d, "pole_condition_number", None)
+                cond_text = "" if cond is None else f", Schur condition={float(cond):.3e}"
+                print(f"[kp]     k={ik:03d}: margin={float(d.pole_distance_min_mev):.3f} meV{cond_text}")
+
+    herm_vals = [
+        float(d.hermiticity_residual)
+        for d in diag_list
+        if getattr(d, "hermiticity_residual", None) is not None
+    ]
+    if herm_vals:
+        print(f"[kp]   Hermiticity check: max residual={max(herm_vals):.3e}")
 
 
 def cmd_plot_from_config(cfg_path: str) -> None:
@@ -733,7 +816,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     spin = material.get("spin", "all")
     num_layers = int(material.get("num_layers", 2))
 
-    print(f"[kp] Using Hamiltonian: {hamk_file}")
+    print("[kp] Loading input data")
     hamk = load_hamk(hamk_file, mmap_mode="r")*hartree
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
 
@@ -755,6 +838,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     pole_warning_mev = float(project_cfg.get("pole_warning_mev", 10.0))
     pole_danger_mev = float(project_cfg.get("pole_danger_mev", 1.0))
     fail_on_near_pole = _as_bool(project_cfg.get("fail_on_near_pole", False))
+    verbose = _as_bool(project_cfg.get("verbose", False))
+    print_k_diagnostics = _as_bool(project_cfg.get("print_k_diagnostics", False))
     # top_n_list = _top_n_list_from_project_cfg(project_cfg)
     if method in {"fixed_schur", "linearized_lowdin"} and e_ref is None:
         raise ValueError(f"project.downfold_method={method!r} requires project.e_ref")
@@ -779,22 +864,24 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         for i in range(len(hamk3d)):
             hamk3d_new.append(hamk3d[i][hamk3d[i].shape[0]//2:,hamk3d[i].shape[0]//2:])
         hamk3d = np.array(hamk3d_new)
-    print(f"[kp] spin = {spin}")
-    print(f"[kp] Using mode: {mode}")
-    print(f"[kp] orb0 = {orb0}")
-    print(f"[kp] nlow_state_list = {nlow_state_list}")
-    print(f"[kp] norb_fix_list = {norb_fix_list}")
-    print(f"[kp] downfold_method = {method}")
+    active_indices = _active_indices_from_project_cfg(project_cfg)
+    model_dim = q_count * len(active_indices)
+    print("[kp] Project setup:")
+    print(f"[kp]   material={material.get('name', 'unknown')}, mode={mode}, spin={spin}")
+    print(f"[kp]   k-points={nk}, Q-points={q_count}, orbitals/layer/Q={orb0}")
+    print(f"[kp]   active bands={active_indices}, model dimension={model_dim}")
+    method_line = f"[kp]   method={_downfold_method_label(method)}"
     if e_ref is not None:
-        print(f"[kp] E_ref = {e_ref:.6f} eV")
-    print(f"[kp] active indices = {_active_indices_from_project_cfg(project_cfg)}")
-    print(f"[kp] q1 shape = {q1.shape}")
-    print(f"[kp] q2 shape = {q2.shape}")
-    print(f"[kp] hamk shape = {hamk.shape}")
-    print(f"[kp] hamk2d shape = {hamk2d.shape}")
-    model_dim = q_count * len(_active_indices_from_project_cfg(project_cfg))
-    print(f"[kp] q_count = {q_count}")
-    print(f"[kp] final model dimension = {model_dim}")
+        method_line += f", E_ref={e_ref:.6f} eV"
+    print(method_line)
+    print(f"[kp]   output directory={resolve(project_cfg.get('out_dir', 'plots'))}")
+    if verbose:
+        print(f"[kp]   hamk={hamk_file}")
+        print(f"[kp]   qset1={qset1_file}")
+        print(f"[kp]   qset2={qset2_file}")
+        print(f"[kp]   hamk shape={hamk.shape}, reference block shape={hamk2d.shape}")
+        print(f"[kp]   nlow_state_list={nlow_state_list}")
+        print(f"[kp]   norb_fix_list={norb_fix_list}")
     # Unified output directory for all artifacts
     out_dir = resolve(project_cfg.get("out_dir", "plots"))
     if out_dir is None:
@@ -813,14 +900,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             print(f"[kp] Overlay warning: failed to load original bands from {band_file}: {ex}")
 
     # Run projection for each k (first dim of hamk)
-    if method == "first_order":
-        print(f"[kp] Projecting Heff across k (first-order/direct H_PP): workers={workers}")
-    elif method == "fixed_schur":
-        print(f"[kp] Projecting Heff across k (fixed-energy Schur): workers={workers}")
-    elif method == "linearized_lowdin":
-        print(f"[kp] Projecting Heff across k (linearized Lowdin static Hamiltonian): workers={workers}")
-    else:
-        print(f"[kp] Projecting Heff across k (method={method}): workers={workers}")
+    print(f"[kp] Running projection: {nk} k-points, workers={workers}")
 
     try:
         from joblib import Parallel, delayed
@@ -846,7 +926,14 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
                 return_diagnostics=True,
                 mode=mode,
             )
-            for i in tqdm(range(nk))
+            for i in tqdm(
+                range(nk),
+                desc="[kp] project",
+                unit="k",
+                ncols=80,
+                leave=False,
+                disable=not sys.stderr.isatty(),
+            )
         )
     except Exception as ex:
         print(f"[kp] Parallel projection failed, falling back to serial: {ex}")
@@ -896,25 +983,16 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     np.save(out_vec, hvec_arr)
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
         print(f"[kp] Heff shape: {heff_arr.shape}")
-    print(f"[kp] Saved Heff to: {out_heff}")
-    print(f"[kp] Saved Heff eig to: {out_eig}")
-    print(f"[kp] Saved Heff vec to: {out_vec}")
-    if diag_list:
-        pole_vals = [d.pole_distance_min_mev for d in diag_list if d.pole_distance_min_mev is not None]
-        if pole_vals:
-            global_min = float(np.min(pole_vals))
-            print(f"[kp] global min |E_ref - E_high| = {global_min:.3f} meV")
-            for ik, d in enumerate(diag_list):
-                if d.pole_distance_min_mev is not None:
-                    print(
-                        f"[kp]   k={ik:03d}: pole_distance_min={d.pole_distance_min_mev:.3f} meV, "
-                        f"cond={d.pole_condition_number:.3e}"
-                    )
-                for warning in d.warnings:
-                    print(f"[kp]   {warning}")
-        herm_vals = [d.hermiticity_residual for d in diag_list]
-        if herm_vals:
-            print(f"[kp] max Hermiticity residual ||H-H†||/||H|| = {max(herm_vals):.3e}")
+    print("[kp] Saved arrays:")
+    print(f"[kp]   {out_heff}")
+    print(f"[kp]   {out_eig}")
+    print(f"[kp]   {out_vec}")
+    _print_project_diagnostics(
+        diag_list,
+        pole_warning_mev=pole_warning_mev,
+        pole_danger_mev=pole_danger_mev,
+        print_k_diagnostics=print_k_diagnostics,
+    )
 
     # Plot projected bands
     # Shift: subtract only if project.efermi is provided; otherwise no shift
@@ -936,7 +1014,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     #         print_top_n_metrics(metrics)
     #     except ValueError as ex:
     #         print(f"[kp] Top-N comparison warning: {ex}")
-    print(f"[kp] Plotting Heff bands to: {plot_out}")
+    print(f"[kp] Saving Heff plot: {plot_out}")
     plot_eigs_scatter(
         heig_list,
         efermi,
@@ -947,7 +1025,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         original_eigs_list=original_eigs_list,
     )
     save_spectrum_txt(heig_list, data_out)
-    print(f"[kp] Saved Heff spectrum to: {data_out}")
+    print(f"[kp] Saved Heff spectrum: {data_out}")
 
 
 def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:

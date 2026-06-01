@@ -13,6 +13,11 @@ from ..blocks.blocks import calculate_energy_lists, get_H_block
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..io.tapw_loader import load_Q_sets, load_hamk
 
+try:
+    import scipy.sparse as _sparse
+except Exception:  # pragma: no cover - scipy is optional for dense-only inputs
+    _sparse = None
+
 
 @dataclass
 class ProjectionState:
@@ -26,6 +31,18 @@ class RepresentationData:
     matrix: np.ndarray
     from_full_spinful: bool
     spin_leakage: float | None
+
+
+@dataclass
+class ActionRepresentation:
+    matrix: Any
+    representation: RepresentationData
+    pg: RepresentationData | None
+    raw_h: RepresentationData | None
+    pg_filename: str | None
+    raw_h_filename: str | None
+    action_source: str
+    combined_raw_h_residual: float | None
 
 
 def _resolve(path: str | None, base_dir: str) -> str | None:
@@ -83,11 +100,27 @@ def _spin_slice_hamk(hamk2d: np.ndarray, spin: str) -> np.ndarray:
     raise ValueError(f"Unsupported spin value: {spin!r}")
 
 
-def _fro_relative(lhs: np.ndarray, rhs: np.ndarray, denominator: np.ndarray) -> float:
-    denom = float(np.linalg.norm(denominator))
+def _is_sparse(matrix: Any) -> bool:
+    return _sparse is not None and _sparse.issparse(matrix)
+
+
+def _matrix_norm(matrix: Any) -> float:
+    if _is_sparse(matrix):
+        return float(_sparse.linalg.norm(matrix))
+    return float(np.linalg.norm(matrix))
+
+
+def _as_dense(matrix: Any) -> np.ndarray:
+    if _is_sparse(matrix):
+        return np.asarray(matrix.toarray(), dtype=np.complex128)
+    return np.asarray(matrix, dtype=np.complex128)
+
+
+def _fro_relative(lhs: Any, rhs: Any, denominator: Any) -> float:
+    denom = _matrix_norm(denominator)
     if denom == 0.0:
         denom = 1.0
-    return float(np.linalg.norm(lhs - rhs) / denom)
+    return float(_matrix_norm(lhs - rhs) / denom)
 
 
 def _unitarity_error(matrix: np.ndarray) -> float:
@@ -104,8 +137,7 @@ def _load_matrix(path: Path) -> np.ndarray:
         try:
             import scipy.sparse
 
-            sparse = scipy.sparse.load_npz(path)
-            return np.asarray(sparse.toarray(), dtype=np.complex128)
+            return scipy.sparse.load_npz(path).tocsr()
         except Exception:
             data = np.load(path)
             for key in ("matrix", "D", "representation", "arr_0"):
@@ -116,9 +148,9 @@ def _load_matrix(path: Path) -> np.ndarray:
 
 
 def _slice_representation_for_spin(matrix: np.ndarray, spin: str, target_dim: int) -> RepresentationData:
-    matrix = np.asarray(matrix, dtype=np.complex128)
     if matrix.shape == (target_dim, target_dim):
-        return RepresentationData(matrix=matrix, from_full_spinful=False, spin_leakage=None)
+        matrix_out = matrix.tocsr() if _is_sparse(matrix) else np.asarray(matrix, dtype=np.complex128)
+        return RepresentationData(matrix=matrix_out, from_full_spinful=False, spin_leakage=None)
     if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
         raise ValueError(f"Representation matrix must be square, got shape={matrix.shape}")
     spin_lower = str(spin).lower()
@@ -135,8 +167,9 @@ def _slice_representation_for_spin(matrix: np.ndarray, spin: str, target_dim: in
     else:
         raise ValueError(f"Unsupported spin value: {spin!r}")
     leakage_blocks = [matrix[row, other], matrix[other, row]]
-    leakage = float(np.sqrt(sum(float(np.linalg.norm(block) ** 2) for block in leakage_blocks)) / np.sqrt(target_dim))
-    return RepresentationData(matrix=matrix[row, row], from_full_spinful=True, spin_leakage=leakage)
+    leakage = float(np.sqrt(sum(float(_matrix_norm(block) ** 2) for block in leakage_blocks)) / np.sqrt(target_dim))
+    matrix_out = matrix[row, row].tocsr() if _is_sparse(matrix) else np.asarray(matrix[row, row], dtype=np.complex128)
+    return RepresentationData(matrix=matrix_out, from_full_spinful=True, spin_leakage=leakage)
 
 
 def _operation_entry(manifest: dict[str, Any], valley: str, operation: str) -> dict[str, Any]:
@@ -186,6 +219,13 @@ def _entry_filename(entry: dict[str, Any], valley: str, operation: str) -> str:
     return f"{valley}/{operation}.npz"
 
 
+def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
+    for key in keys:
+        if entry.get(key):
+            return str(entry[key])
+    return None
+
+
 def _pairs_from_entry(entry: dict[str, Any], nk: int, *, default_k_index: int | None = None) -> list[tuple[int, int]]:
     raw_pairs = entry.get("k_pairs", entry.get("pairs"))
     if raw_pairs is not None:
@@ -213,6 +253,116 @@ def _pairs_from_entry(entry: dict[str, Any], nk: int, *, default_k_index: int | 
     if default_k_index is not None:
         return [(int(default_k_index), int(default_k_index))]
     raise ValueError("Manifest operation must provide k_pairs/source_indices or a supported k rule")
+
+
+def _check_spin_leakage(operation: str, label: str, rep: RepresentationData, tolerance: float) -> None:
+    if rep.spin_leakage is not None and rep.spin_leakage > tolerance:
+        raise ValueError(f"{operation} {label} spin off-block leakage {rep.spin_leakage:.3e} exceeds tolerance")
+
+
+def _load_spin_sliced_representation(
+    *,
+    path: Path,
+    spin: str,
+    full_dim: int,
+) -> RepresentationData:
+    return _slice_representation_for_spin(_load_matrix(path), spin, full_dim)
+
+
+def _build_action_representation(
+    *,
+    operation: str,
+    entry: dict[str, Any],
+    rep_root: Path,
+    filename: str,
+    antiunitary: bool,
+    spin: str,
+    full_dim: int,
+    tolerance: float,
+) -> ActionRepresentation:
+    rep = _load_spin_sliced_representation(
+        path=rep_root / filename,
+        spin=spin,
+        full_dim=full_dim,
+    )
+    _check_spin_leakage(operation, "representation", rep, tolerance)
+    if rep.matrix.shape != (full_dim, full_dim):
+        raise ValueError(f"{operation} D shape {rep.matrix.shape} does not match U_low full dimension {full_dim}")
+
+    pg_filename = _optional_entry_filename(entry, "pg_file", "periodic_gauge_file", "source_pg_file")
+    raw_h_filename = _optional_entry_filename(
+        entry,
+        "raw_h_operator_file",
+        "raw_operator_file",
+        "full_space_action_file",
+        "action_operator_file",
+    )
+    pg_rep: RepresentationData | None = None
+    raw_h_rep: RepresentationData | None = None
+    combined: np.ndarray | None = None
+    combined_residual: float | None = None
+
+    if pg_filename is not None:
+        pg_rep = _load_spin_sliced_representation(
+            path=rep_root / pg_filename,
+            spin=spin,
+            full_dim=full_dim,
+        )
+        _check_spin_leakage(operation, "periodic-gauge", pg_rep, tolerance)
+        if pg_rep.matrix.shape != (full_dim, full_dim):
+            raise ValueError(f"{operation} PG shape {pg_rep.matrix.shape} does not match U_low full dimension {full_dim}")
+        pg_for_raw_h = pg_rep.matrix.conj() if antiunitary else pg_rep.matrix
+        combined = rep.matrix @ pg_for_raw_h
+
+    if raw_h_filename is not None:
+        raw_h_rep = _load_spin_sliced_representation(
+            path=rep_root / raw_h_filename,
+            spin=spin,
+            full_dim=full_dim,
+        )
+        _check_spin_leakage(operation, "raw-H operator", raw_h_rep, tolerance)
+        if raw_h_rep.matrix.shape != (full_dim, full_dim):
+            raise ValueError(f"{operation} raw-H operator shape {raw_h_rep.matrix.shape} does not match U_low full dimension {full_dim}")
+        if combined is not None:
+            combined_residual = _fro_relative(raw_h_rep.matrix, combined, raw_h_rep.matrix)
+            if combined_residual > tolerance:
+                raise ValueError(
+                    f"{operation} manifest raw-H operator disagrees with D_g^(0)+PG by "
+                    f"{combined_residual:.3e}"
+                )
+        return ActionRepresentation(
+            matrix=raw_h_rep.matrix,
+            representation=rep,
+            pg=pg_rep,
+            raw_h=raw_h_rep,
+            pg_filename=pg_filename,
+            raw_h_filename=raw_h_filename,
+            action_source="raw_h_operator_file",
+            combined_raw_h_residual=combined_residual,
+        )
+
+    if combined is not None:
+        return ActionRepresentation(
+            matrix=combined,
+            representation=rep,
+            pg=pg_rep,
+            raw_h=None,
+            pg_filename=pg_filename,
+            raw_h_filename=None,
+            action_source="representation_file+pg_file",
+            combined_raw_h_residual=None,
+        )
+
+    return ActionRepresentation(
+        matrix=rep.matrix,
+        representation=rep,
+        pg=None,
+        raw_h=None,
+        pg_filename=None,
+        raw_h_filename=None,
+        action_source="representation_file",
+        combined_raw_h_residual=None,
+    )
 
 
 def _projectors_for_k(
@@ -276,7 +426,10 @@ def _full_space_covariance_residual(
     antiunitary: bool,
 ) -> float:
     h_source_work = h_source.conj() if antiunitary else h_source
-    h_cov = d_full @ h_source_work @ d_full.conj().T
+    d_dag = d_full.conjugate().transpose() if _is_sparse(d_full) else d_full.conj().T
+    h_cov = (d_full @ h_source_work) @ d_dag
+    if _is_sparse(h_cov):
+        h_cov = h_cov.toarray()
     return _fro_relative(h_target, h_cov, h_target)
 
 
@@ -297,12 +450,15 @@ def _project_operation(
         source = states[source_idx]
         u_source = source.u_low.conj() if antiunitary else source.u_low
         h_source = source.heff.conj() if antiunitary else source.heff
-        d_raw = target.u_low.conj().T @ d_full @ u_source
+        image = d_full @ u_source
+        if _is_sparse(image):
+            image = image.toarray()
+        image = np.asarray(image, dtype=np.complex128)
+        d_raw = target.u_low.conj().T @ image
         x, singular_values, yh = np.linalg.svd(d_raw, full_matrices=False)
         d_polar = x @ yh
 
         def metrics(d_matrix: np.ndarray) -> dict[str, Any]:
-            image = d_full @ u_source
             leakage = float(np.linalg.norm(image - target.u_low @ d_matrix) / np.sqrt(d_matrix.shape[0]))
             h_cov = d_matrix @ h_source @ d_matrix.conj().T
             return {
@@ -363,8 +519,19 @@ def _write_summary_md(path: Path, summary: dict[str, Any]) -> None:
         lines.append("")
         lines.append(f"- antiunitary: {op['antiunitary']}")
         lines.append(f"- representation_file: `{op['representation_file']}`")
+        lines.append(f"- action_source: {op.get('action_source', 'representation_file')}")
+        if op.get("pg_file") is not None:
+            lines.append(f"- pg_file: `{op['pg_file']}`")
+        if op.get("raw_h_operator_file") is not None:
+            lines.append(f"- raw_h_operator_file: `{op['raw_h_operator_file']}`")
+        if op.get("combined_raw_h_residual") is not None:
+            lines.append(f"- combined_raw_h_residual: {op['combined_raw_h_residual']:.6e}")
         if op.get("spin_leakage") is not None:
             lines.append(f"- spin_leakage: {op['spin_leakage']:.6e}")
+        if op.get("pg_spin_leakage") is not None:
+            lines.append(f"- pg_spin_leakage: {op['pg_spin_leakage']:.6e}")
+        if op.get("raw_h_spin_leakage") is not None:
+            lines.append(f"- raw_h_spin_leakage: {op['raw_h_spin_leakage']:.6e}")
         for pair in op["pairs"]:
             raw = pair["raw"]
             polar = pair["polar"]
@@ -460,16 +627,20 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         entry = operation_entries[operation]
         antiunitary = _as_bool(entry.get("antiunitary", False))
         filename = _entry_filename(entry, valley, operation)
-        matrix_raw = _load_matrix(rep_root / filename)
-        rep = _slice_representation_for_spin(matrix_raw, spin, full_dim)
-        if rep.spin_leakage is not None and rep.spin_leakage > tolerance:
-            raise ValueError(f"{operation} spin off-block leakage {rep.spin_leakage:.3e} exceeds tolerance")
-        if rep.matrix.shape != (full_dim, full_dim):
-            raise ValueError(f"{operation} D shape {rep.matrix.shape} does not match U_low full dimension {full_dim}")
+        action = _build_action_representation(
+            operation=operation,
+            entry=entry,
+            rep_root=rep_root,
+            filename=filename,
+            antiunitary=antiunitary,
+            spin=spin,
+            full_dim=full_dim,
+            tolerance=tolerance,
+        )
         full_pair_rows = []
         for target_idx, source_idx in entry["_pairs"]:
             full_residual = _full_space_covariance_residual(
-                d_full=rep.matrix,
+                d_full=action.matrix,
                 h_target=hamk_spin_by_k[target_idx],
                 h_source=hamk_spin_by_k[source_idx],
                 antiunitary=antiunitary,
@@ -491,7 +662,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             "entry": entry,
             "antiunitary": antiunitary,
             "filename": filename,
-            "representation": rep,
+            "action": action,
             "full_pair_rows": full_pair_rows,
         }
 
@@ -534,12 +705,13 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         entry = payload["entry"]
         antiunitary = bool(payload["antiunitary"])
         filename = str(payload["filename"])
-        rep = payload["representation"]
+        action = payload["action"]
+        rep = action.representation
 
         raw_mats, polar_mats, pair_rows = _project_operation(
             operation=operation,
             antiunitary=antiunitary,
-            d_full=rep.matrix,
+            d_full=action.matrix,
             states=states,
             pairs=entry["_pairs"],
             tolerance=tolerance,
@@ -553,8 +725,14 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
                 "operation": operation,
                 "antiunitary": antiunitary,
                 "representation_file": str(rep_root / filename),
+                "pg_file": None if action.pg_filename is None else str(rep_root / action.pg_filename),
+                "raw_h_operator_file": None if action.raw_h_filename is None else str(rep_root / action.raw_h_filename),
+                "action_source": action.action_source,
+                "combined_raw_h_residual": action.combined_raw_h_residual,
                 "from_full_spinful": rep.from_full_spinful,
                 "spin_leakage": rep.spin_leakage,
+                "pg_spin_leakage": None if action.pg is None else action.pg.spin_leakage,
+                "raw_h_spin_leakage": None if action.raw_h is None else action.raw_h.spin_leakage,
                 "pairs": pair_rows,
             }
         )
