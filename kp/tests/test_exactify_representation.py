@@ -28,7 +28,6 @@ def _source_meta(*, antiunitary: bool = False) -> dict[str, object]:
         "target_role": "continuum_internal_rep",
         "gauge_correction": {"kind": "none"},
         "antiunitary_convention": "U_K" if antiunitary else "none",
-        "production_use": "exactify_to_continuum_internal_rep",
         "spin_map": "from_kp_symm_output",
         "valley_map": "identity",
     }
@@ -269,7 +268,7 @@ def test_exactify_infers_missing_sector_q_offsets() -> None:
             "operations": [
                 {
                     **_source_meta(antiunitary=True),
-                    "name": "T_eff",
+                    "name": "TR_eff",
                     "antiunitary": True,
                     "k_map": {"type": "identity"},
                     "sector_map": "identity",
@@ -277,7 +276,7 @@ def test_exactify_infers_missing_sector_q_offsets() -> None:
                 }
             ]
         },
-        matrices={"T_eff": np.eye(2, dtype=complex)},
+        matrices={"TR_eff": np.eye(2, dtype=complex)},
         Q_set1=q1,
         Q_set2=q2,
         sectors=[
@@ -290,10 +289,10 @@ def test_exactify_infers_missing_sector_q_offsets() -> None:
         raw_config={"exactification": {"support_mode": "monomial"}},
     )
 
-    np.testing.assert_allclose(exactified["T_eff"], np.eye(2, dtype=complex))
-    assert reports["T_eff"]["inferred_q_offsets"] == {"bottom": True, "top": True}
-    np.testing.assert_allclose(reports["T_eff"]["q_offsets"]["bottom"], (-0.5 * b2).tolist())
-    np.testing.assert_allclose(reports["T_eff"]["q_offsets"]["top"], (-0.5 * b1 - 0.5 * b2).tolist())
+    np.testing.assert_allclose(exactified["TR_eff"], np.eye(2, dtype=complex))
+    assert reports["TR_eff"]["inferred_q_offsets"] == {"bottom": True, "top": True}
+    np.testing.assert_allclose(reports["TR_eff"]["q_offsets"]["bottom"], (-0.5 * b2).tolist())
+    np.testing.assert_allclose(reports["TR_eff"]["q_offsets"]["top"], (-0.5 * b1 - 0.5 * b2).tolist())
 
 
 def test_exactify_preserves_explicit_in_model_frame_reflection_axis() -> None:
@@ -445,8 +444,7 @@ def test_exactify_strict_forbids_inferred_q_offset() -> None:
                         "source_gauge": "raw_saved_TAPW",
                         "target_role": "continuum_internal_rep",
                         "antiunitary_convention": "none",
-                        "production_use": "exactify_to_continuum_internal_rep",
-                        "antiunitary": False,
+                                        "antiunitary": False,
                         "k_map": {"type": "rotation", "angle_deg": 120},
                         "sector_map": "identity",
                         "q_map": {"type": "rotation", "angle_deg": 120},
@@ -486,8 +484,7 @@ def test_exactify_strict_requires_action_candidates() -> None:
                         "source_gauge": "raw_saved_TAPW",
                         "target_role": "continuum_internal_rep",
                         "antiunitary_convention": "none",
-                        "production_use": "exactify_to_continuum_internal_rep",
-                        "antiunitary": False,
+                                        "antiunitary": False,
                         "k_map": {"type": "rotation", "angle_deg": 120},
                         "sector_map": "identity",
                         "q_map": {"type": "rotation", "angle_deg": 120},
@@ -526,8 +523,7 @@ def test_exactify_strict_requires_group_relations() -> None:
                         "source_gauge": "raw_saved_TAPW",
                         "target_role": "continuum_internal_rep",
                         "antiunitary_convention": "none",
-                        "production_use": "exactify_to_continuum_internal_rep",
-                        "antiunitary": False,
+                                        "antiunitary": False,
                         "k_map": {"type": "rotation", "angle_deg": 120},
                         "sector_map": "identity",
                         "q_map": {"type": "rotation", "angle_deg": 120},
@@ -582,8 +578,7 @@ def test_exactify_report_contains_source_semantics_and_inference_flag() -> None:
                     "source_gauge": "raw_saved_TAPW",
                     "target_role": "continuum_internal_rep",
                     "antiunitary_convention": "none",
-                    "production_use": "exactify_to_continuum_internal_rep",
-                    "antiunitary": False,
+                                "antiunitary": False,
                     "k_map": {"type": "identity"},
                     "sector_map": "identity",
                     "q_map": {"type": "identity"},

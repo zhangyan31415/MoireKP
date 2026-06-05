@@ -23,9 +23,8 @@ _REQUIRED_METADATA = {
     "target_role",
     "gauge_correction",
     "antiunitary_convention",
-    "production_use",
 }
-_CANONICAL_OPERATION_NAMES = {"C3z", "C2", "TR", "C2T", "T_eff", "C2_eff", "C2T_eff"}
+_CANONICAL_OPERATION_NAMES = {"C3z", "C2", "TR", "C2T", "TR_eff", "C2_eff", "C2TR_eff"}
 _ACTION_MAP_TYPES = {"rotation", "reflection", "identity", "negation"}
 _REPRESENTATION_MATRIX_KINDS = {"representation", "d0", "D0"}
 

@@ -336,7 +336,7 @@ bands:
     top_bands: 4
     align: top
 output:
-  dir: ../../../outputs/model/production/mgi2_3.89_Gamma
+  dir: ../../../runs/release/mgi2_3.89_Gamma
   save_coefficients: true
   verbose: false
   progress: true

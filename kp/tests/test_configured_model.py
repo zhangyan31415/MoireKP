@@ -29,8 +29,7 @@ def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> 
         "target_role": "continuum_internal_rep",
         "gauge_correction": {"kind": "none"},
         "antiunitary_convention": "U_K" if antiunitary else "none",
-        "production_use": "exactify_to_continuum_internal_rep",
-        "spin_map": "from_kp_symm_output",
+                "spin_map": "from_kp_symm_output",
         "valley_map": "identity",
     }
 
@@ -445,7 +444,7 @@ def test_load_model_config_rejects_duplicate_model_rotation_settings(tmp_path: P
         load_model_config(cfg_path)
 
 
-def test_TR_toy_generator_rejects_spinless_nlow_state() -> None:
+def test_T_toy_generator_rejects_spinless_nlow_state() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     gen = SymmetryGenerator(q, q, [1, 1])
 
@@ -480,7 +479,7 @@ def test_C3z_toy_generator_requires_template() -> None:
         gen.get_C3z_operator(1)
 
 
-def test_K_single_valley_rejects_TR_C2(tmp_path: Path) -> None:
+def test_K_single_valley_rejects_T_C2(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"] = {
@@ -649,7 +648,7 @@ def test_generic_monomial_constraints_reproduce_legacy_kinetic_orders() -> None:
     assert orders == [(1, 1), (2, 2), (3, 0), (3, 3), (4, 1), (6, 0)]
 
 
-def test_M_spinless_uses_T_eff_not_TR(tmp_path: Path) -> None:
+def test_M_spinless_uses_effective_T_name(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"] = {
@@ -659,17 +658,17 @@ def test_M_spinless_uses_T_eff_not_TR(tmp_path: Path) -> None:
         "mode": "single_valley",
         "active_valleys": ["M1"],
         "spin_convention": "spinless_effective",
-        "allowed_internal_symmetries": ["T_eff", "C2_eff", "C2T_eff"],
+        "allowed_internal_symmetries": ["TR_eff", "C2_eff", "C2TR_eff"],
         "external_sewing_symmetries": [],
     }
     raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "M_spinless_layer_exchange"}
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "TR"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="M single_valley spinless_effective must use T_eff"):
+    with pytest.raises(ValueError, match="M single_valley spinless_effective must use TR_eff"):
         load_model_config(cfg_path)
 
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "T_eff"}], "intra": [], "inter": []}
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "TR_eff"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     cfg = load_model_config(cfg_path)
     assert cfg.valley_model["spin_convention"] == "spinless_effective"
@@ -685,21 +684,21 @@ def test_M_spinless_requires_effective_C2_internal_name(tmp_path: Path) -> None:
         "mode": "single_valley",
         "active_valleys": ["M1"],
         "spin_convention": "spinless_effective",
-        "allowed_internal_symmetries": ["T_eff", "C2_eff"],
+        "allowed_internal_symmetries": ["TR_eff", "C2_eff"],
         "external_sewing_symmetries": [],
     }
     raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "M_spinless_layer_exchange"}
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2"}, {"name": "T_eff"}], "intra": [], "inter": []}
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2"}, {"name": "TR_eff"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match="must be effective names"):
         load_model_config(cfg_path)
 
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2_eff"}, {"name": "T_eff"}], "intra": [], "inter": []}
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2_eff"}, {"name": "TR_eff"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     cfg = load_model_config(cfg_path)
 
-    assert cfg.valley_model["allowed_internal_symmetries"] == ["T_eff", "C2_eff"]
+    assert cfg.valley_model["allowed_internal_symmetries"] == ["TR_eff", "C2_eff"]
     assert cfg.symmetry_map["Kinect"][0]["name"] == "C2_eff"
 
 
@@ -719,39 +718,9 @@ def test_Gamma_user_facing_C2_stays_standard_family(tmp_path: Path) -> None:
     assert cfg.symmetry_map["Kinect"][1]["name"] == "C2"
 
 
-def test_production_toy_generator_requires_effective_interim_escape_hatch(tmp_path: Path) -> None:
+def test_notebook_monomial_filter_is_forbidden_in_release_schema(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["production_level"] = "production"
-    raw["valley_model"] = {
-        "lattice": "hexagonal",
-        "system": "bilayer",
-        "valley_type": "M",
-        "mode": "single_valley",
-        "active_valleys": ["M1"],
-        "spin_convention": "spinless_effective",
-        "allowed_internal_symmetries": ["T_eff", "C2_eff"],
-        "external_sewing_symmetries": [],
-    }
-    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "M_spinless_layer_exchange"}
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2_eff"}, {"name": "T_eff"}], "intra": [], "inter": []}
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-
-    with pytest.raises(ValueError, match="toy_generator is forbidden for production configs"):
-        load_model_config(cfg_path)
-
-    raw["production_level"] = "effective_interim"
-    raw["allow_effective_toy_symmetry"] = True
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    cfg = load_model_config(cfg_path)
-    assert cfg.production_level == "effective_interim"
-    assert cfg.allow_effective_toy_symmetry is True
-
-
-def test_legacy_monomial_filter_is_forbidden_outside_legacy_compatibility(tmp_path: Path) -> None:
-    cfg_path = _write_fixture(tmp_path)
-    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["production_level"] = "production"
     raw["model"]["term_templates"] = [
         {
             "name": "bad_legacy_filter",
@@ -764,7 +733,7 @@ def test_legacy_monomial_filter_is_forbidden_outside_legacy_compatibility(tmp_pa
     ]
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="legacy compatibility filter"):
+    with pytest.raises(ValueError, match="not supported by the release model schema"):
         load_model_config(cfg_path)
 
 
@@ -772,9 +741,9 @@ def test_M_spinless_runtime_supports_effective_symmetry_names() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     sym = SymmetryGenerator(q, q, [1, 1], basis_template="M_spinless_layer_exchange")
 
-    t_eff = sym.get_operator("T_eff", None)
+    t_eff = sym.get_operator("TR_eff", None)
     c2_eff = sym.get_operator("C2_eff", None)
-    c2t_eff = sym.get_operator("C2T_eff", None)
+    c2t_eff = sym.get_operator("C2TR_eff", None)
 
     assert t_eff.shape == (2, 2)
     assert c2_eff.shape == (2, 2)
@@ -786,7 +755,7 @@ def test_M_spinless_effective_symmetry_names_have_k_actions() -> None:
     k = np.array([0.25, -0.5], dtype=float)
 
     np.testing.assert_allclose(
-        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "T_eff", "k_map": {"type": "negation"}}),
+        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "TR_eff", "k_map": {"type": "negation"}}),
         np.array([-0.25, 0.5]),
     )
     np.testing.assert_allclose(
@@ -794,7 +763,7 @@ def test_M_spinless_effective_symmetry_names_have_k_actions() -> None:
         np.array([0.25, 0.5]),
     )
     np.testing.assert_allclose(
-        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "C2T_eff", "k_map": {"type": "reflection", "axis_deg": 90.0}}),
+        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "C2TR_eff", "k_map": {"type": "reflection", "axis_deg": 90.0}}),
         np.array([-0.25, -0.5]),
     )
 
@@ -893,7 +862,6 @@ def test_inter_harmonics_include_sector_offsets(tmp_path: Path) -> None:
 def test_k_inter_auto_harmonics_require_sector_offsets(tmp_path: Path) -> None:
     cfg_path = _write_auto_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["production_level"] = "production"
     raw["valley_model"]["valley_type"] = "K"
     raw["valley_model"]["active_valleys"] = ["K1"]
     raw["model"]["bM"] = {"bM1": [1.0, 0.0], "bM2": [0.5, 0.8660254037844386]}
@@ -1033,7 +1001,7 @@ def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> 
 
     registry = json.loads((tmp_path / "model_out" / "operation_registry.json").read_text(encoding="utf-8"))
     summary = json.loads((tmp_path / "model_out" / "run_summary.json").read_text(encoding="utf-8"))
-    assert summary["production_level"] == "legacy_compatibility"
+    assert "production" + "_level" not in summary
     assert "validation_incomplete" in summary
     assert all("user_operation" in row and "canonical_operation" in row for row in registry)
 
@@ -1171,8 +1139,8 @@ def test_symmetry_source_loads_effective_m_ops_from_tapw_sewing_labels(tmp_path:
                 "operations": [
                     {
                         **_source_meta(antiunitary=True),
-                        "name": "T_eff",
-                        "operation": "T",
+                        "name": "TR_eff",
+                        "operation": "TR",
                         "matrix_file": "T_low_raw.npy",
                         "antiunitary": True,
                         "k_map": {"type": "negation"},
@@ -1223,32 +1191,31 @@ def test_symmetry_source_loads_effective_m_ops_from_tapw_sewing_labels(tmp_path:
             "use": "raw",
             "matrix_kind": "action",
             "operations": [
-                {"name": "T_eff", "operation": "T"},
+                {"name": "TR_eff", "operation": "TR"},
                 {"name": "C2_eff", "operation": "C2"},
             ],
-            "production_use": "exactify_to_continuum_internal_rep",
-        },
+                    },
         base=tmp_path,
         expected_dim=2,
     )
 
-    np.testing.assert_allclose(source.generator.get_operator("T_eff"), t_matrix)
+    np.testing.assert_allclose(source.generator.get_operator("TR_eff"), t_matrix)
     with pytest.raises(ValueError, match="not loaded"):
-        source.generator.get_operator("T")
+        source.generator.get_operator("TR")
     np.testing.assert_allclose(source.generator.get_operator("C2_eff"), c2_matrix)
     with pytest.raises(ValueError, match="not loaded"):
         source.generator.get_operator("C2")
     by_name = {op["name"]: op for op in source.metadata["operations"]}
 
-    t_op = by_name["T_eff"]
-    assert t_op["operation"] == "T"
+    t_op = by_name["TR_eff"]
+    assert t_op["operation"] == "TR"
     assert "aliases" not in t_op
     assert t_op["matrix_file"].endswith("T_low_raw.npy")
     assert t_op["matrix_kind"] == "action"
     assert t_op["source_matrix_role"] == "raw_h_sewing_action"
     assert t_op["target_role"] == "continuum_internal_rep"
     assert t_op["antiunitary_convention"] == "U_K"
-    assert t_op["production_use"] == "exactify_to_continuum_internal_rep"
+    assert "production" + "_use" not in t_op
 
     c2_op = by_name["C2_eff"]
     assert c2_op["operation"] == "C2"
@@ -1467,7 +1434,7 @@ def test_full_bilayer_block_detection_accepts_exactified_c2t_action() -> None:
 def test_full_bilayer_block_detection_accepts_generic_two_sector_exchange() -> None:
     ops = [
         {
-            "name": "T_eff",
+            "name": "TR_eff",
             "antiunitary": True,
             "sector_map": {"bottom": "top", "top": "bottom"},
         }
@@ -1559,249 +1526,11 @@ def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_pat
     assert results["configured_model"].band_plot_config["ylim"] == [0.0, 0.16]
 
 
-def test_public_k1_config_compiles_to_internal_schema(tmp_path: Path) -> None:
-    q1 = np.array([[0.0, 0.0]], dtype=float)
-    q2 = np.array([[0.0, 0.0]], dtype=float)
-    heff = np.stack([np.diag([0.0, 1.0]), np.diag([0.1, 1.1])]).astype(np.complex128)
-    heff_path = tmp_path / "heff_list.npy"
-    q1_path = tmp_path / "g1.npy"
-    q2_path = tmp_path / "g2.npy"
-    kpath_path = tmp_path / "KPATH.in"
-    symm_dir = tmp_path / "symm"
-    out_dir = tmp_path / "run"
-    band_ref = tmp_path / "band.txt"
-    np.save(heff_path, heff)
-    np.save(q1_path, q1)
-    np.save(q2_path, q2)
-    kpath_path.write_text("\n".join(["K-Path Generated by VASPKIT.", "1", "Line-Mode", "Reciprocal", "0 0 0 G", "0.5 0 0 M"]), encoding="utf-8")
-    symm_dir.mkdir()
-    band_ref.write_text("0.0 0.0\n", encoding="utf-8")
-
-    raw = {
-        "system": {"material": "MoTe2", "twist_angle_deg": 3.89, "valley": "K1", "spin": "up"},
-        "inputs": {
-            "heff": str(heff_path.resolve()),
-            "qset": {"layer1": str(q1_path.resolve()), "layer2": str(q2_path.resolve())},
-            "kpath": str(kpath_path.resolve()),
-            "symmetry": str(symm_dir.resolve()),
-            "band_reference": str(band_ref.resolve()),
-        },
-        "geometry": {
-            "tmat": [
-                [52.4951056667, 0.0, 0.0],
-                [-26.2475528340, 45.4620950821, 0.0],
-                [0.0, 0.0, 27.0],
-            ],
-            "rotation_deg": 210,
-        },
-        "basis": {"n_orb": [1, 1]},
-        "fit": {"points": [0]},
-        "terms": {
-            "kinetic": {"order": 6},
-            "onsite": {"enabled": True},
-            "intra": {"order": 4, "harmonics": 4},
-            "inter": {"order": 4, "harmonics": 4},
-        },
-        "bands": {"compare_to_heff": True, "window": "top8"},
-        "output": {"run_dir": str(out_dir.resolve())},
-    }
-    cfg_path = tmp_path / "public.yaml"
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-
-    cfg = load_model_config(cfg_path)
-
-    assert cfg.production_level == "production"
-    assert cfg.source_config == cfg_path
-    assert cfg.qset1_file == q1_path.resolve()
-    assert cfg.qset2_file == q2_path.resolve()
-    assert cfg.heff_file == heff_path.resolve()
-    assert cfg.output_dir == out_dir.resolve()
-    assert cfg.n_orb == (1, 1)
-    assert cfg.fit_indices == [0]
-    assert cfg.band_slice == [0, 2]
-    assert cfg.band_plot_config["top_bands"] == 8
-    assert cfg.symmetry_source_config["path"] == str(symm_dir.resolve())
-
-
-def test_public_gamma_config_compiles_to_internal_schema(tmp_path: Path) -> None:
-    q1 = np.array([[0.0, 0.0]], dtype=float)
-    q2 = np.array([[0.0, 0.0]], dtype=float)
-    heff = np.stack([np.diag([0.0, 1.0, 2.0, 3.0]), np.diag([0.1, 1.1, 2.1, 3.1])]).astype(np.complex128)
-    heff_path = tmp_path / "heff_list.npy"
-    q1_path = tmp_path / "g1.npy"
-    q2_path = tmp_path / "g2.npy"
-    kpath_path = tmp_path / "KPATH.in"
-    symm_dir = tmp_path / "symm"
-    out_dir = tmp_path / "run"
-    band_ref = tmp_path / "band.txt"
-    np.save(heff_path, heff)
-    np.save(q1_path, q1)
-    np.save(q2_path, q2)
-    kpath_path.write_text("\n".join(["K-Path Generated by VASPKIT.", "1", "Line-Mode", "Reciprocal", "0 0 0 G", "0.5 0 0 M"]), encoding="utf-8")
-    symm_dir.mkdir()
-    band_ref.write_text("0.0 0.0\n", encoding="utf-8")
-
-    raw = {
-        "system": {"material": "MgI2", "twist_angle_deg": 3.89, "valley": "Gamma", "spin": "all"},
-        "inputs": {
-            "heff": str(heff_path.resolve()),
-            "qset": {"layer1": str(q1_path.resolve()), "layer2": str(q2_path.resolve())},
-            "kpath": str(kpath_path.resolve()),
-            "symmetry": str(symm_dir.resolve()),
-            "band_reference": str(band_ref.resolve()),
-        },
-        "geometry": {
-            "tmat": [
-                [60.9508659523, 0.0, 0.0],
-                [-30.4754329751, 52.7849982976, 0.0],
-                [0.0, 0.0, 50.0],
-            ],
-            "rotation_deg": 210,
-        },
-        "basis": {"n_orb": [2, 2]},
-        "fit": {"points": [0, 1]},
-        "terms": {
-            "kinetic": {"order": 10},
-            "onsite": {"enabled": True},
-            "intra": {"order": 6, "harmonics": 4},
-            "inter": {"order": 6, "harmonics": 4},
-        },
-        "bands": {"compare_to_heff": True, "window": "top4"},
-        "output": {"run_dir": str(out_dir.resolve())},
-    }
-    cfg_path = tmp_path / "public_gamma.yaml"
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-
-    cfg = load_model_config(cfg_path)
-
-    assert cfg.production_level == "production"
-    assert cfg.n_orb == (2, 2)
-    assert cfg.fit_indices == [0, 1]
-    assert cfg.band_plot_config["top_bands"] == 4
-    assert cfg.valley_model["valley_type"] == "Gamma"
-
-
-def test_public_m1_config_compiles_to_kp_symm_output_effective_route(tmp_path: Path) -> None:
-    q1 = np.array([[0.0, 0.0]], dtype=float)
-    q2 = np.array([[0.0, 0.0]], dtype=float)
-    heff = np.stack([np.diag([0.0, 1.0]), np.diag([0.1, 1.1])]).astype(np.complex128)
-    heff_path = tmp_path / "heff_list.npy"
-    q1_path = tmp_path / "g1.npy"
-    q2_path = tmp_path / "g2.npy"
-    kpath_path = tmp_path / "KPATH.in"
-    symm_dir = tmp_path / "symm"
-    band_ref = tmp_path / "band.txt"
-    np.save(heff_path, heff)
-    np.save(q1_path, q1)
-    np.save(q2_path, q2)
-    symm_dir.mkdir()
-    np.save(symm_dir / "T_low_raw.npy", np.eye(2, dtype=complex))
-    np.save(symm_dir / "C2_low_raw.npy", np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex))
-    kpath_path.write_text("\n".join(["K-Path Generated by VASPKIT.", "1", "Line-Mode", "Reciprocal", "0 0 0 G", "0.5 0 0 M"]), encoding="utf-8")
-    (symm_dir / "summary.json").write_text(
-        yaml.safe_dump(
-            {
-                "operations": [
-                    {
-                        "operation": "T",
-                        "action_source": "raw_h_operator_file",
-                        "antiunitary": True,
-                        "pairs": [{"raw": {"heff_covariance_residual": 0.0, "subspace_leakage": 0.0}}],
-                    },
-                    {
-                        "operation": "C2",
-                        "action_source": "raw_h_operator_file",
-                        "antiunitary": False,
-                        "axis_deg": 150.0,
-                        "pairs": [{"raw": {"heff_covariance_residual": 0.0, "subspace_leakage": 0.0}}],
-                    },
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
-    band_ref.write_text("0.0 0.0\n", encoding="utf-8")
-
-    raw = {
-        "system": {"material": "MgI2", "twist_angle_deg": 3.89, "valley": "M1", "spin": "up"},
-        "inputs": {
-            "heff": str(heff_path.resolve()),
-            "qset": {"layer1": str(q1_path.resolve()), "layer2": str(q2_path.resolve())},
-            "kpath": str(kpath_path.resolve()),
-            "symmetry": str(symm_dir.resolve()),
-            "band_reference": str(band_ref.resolve()),
-        },
-        "geometry": {
-            "tmat": [
-                [60.9508659523, 0.0, 0.0],
-                [-30.4754329751, 52.7849982976, 0.0],
-                [0.0, 0.0, 50.0],
-            ],
-            "rotation_deg": 210,
-        },
-        "basis": {"n_orb": [1, 1]},
-        "fit": {"points": [0, 1]},
-        "terms": {
-            "kinetic": {"order": 10},
-            "onsite": {"enabled": True},
-            "intra": {"order": 6, "harmonics": 6},
-            "inter": {"order": 8, "harmonics": 5},
-        },
-        "bands": {"compare_to_heff": True, "window": "bottom8"},
-        "output": {"run_dir": str((tmp_path / "run").resolve())},
-    }
-    cfg_path = tmp_path / "public_m1.yaml"
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-
-    cfg = load_model_config(cfg_path)
-
-    assert cfg.production_level == "effective_interim"
-    assert cfg.allow_effective_toy_symmetry is False
-    assert cfg.symmetry_source_config["type"] == "kp_symm_output"
-    assert cfg.symmetry_source_config["production_use"] == "exactify_to_continuum_internal_rep"
-    assert [op["name"] for op in cfg.symmetry_source_config["operations"]] == ["T_eff", "C2_eff"]
-    assert cfg.valley_model["allowed_internal_symmetries"] == ["T_eff", "C2_eff"]
-    assert [op["name"] for op in cfg.symmetry_map["Kinect"]] == ["C2_eff", "T_eff"]
-    assert all("q_offset" not in sector for sector in cfg.sectors_config)
-
-    from kp.model.configured import _build_operation_registry, _symmetry_integrity
-
-    registry = _build_operation_registry(cfg)
-    assert _symmetry_integrity(cfg) == "exactified_from_tapw_action"
-    assert {row["canonical_operation"] for row in registry} == {"T_eff", "C2_eff"}
-    assert {row["operation_physics_level"] for row in registry} == {"effective"}
-    assert {row["source_matrix_role"] for row in registry} == {"raw_h_sewing_action"}
-
-
-def test_public_m1_config_rejects_explicit_q_offset(tmp_path: Path) -> None:
-    cfg_path = tmp_path / "public_m1.yaml"
-    cfg_path.write_text(
-        yaml.safe_dump(
-            {
-                "system": {"material": "MgI2", "valley": "M1", "spin": "up"},
-                "inputs": {"qset": {"layer1": "g1.npy", "layer2": "g2.npy"}},
-                "geometry": {},
-                "terms": {},
-                "sectors": [
-                    {"name": "bottom", "qset": "qset1", "q_offset": [0.0, 0.5]},
-                    {"name": "top", "qset": "qset2"},
-                ],
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-
-    with pytest.raises(ValueError, match="forbids sectors\\.q_offset"):
-        load_model_config(cfg_path)
-
-
 def test_M_spinless_kp_symm_output_physical_source_ops_are_relabelled_effective(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     symm_dir = tmp_path / "symm"
     symm_dir.mkdir()
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["production_level"] = "effective_interim"
     raw["valley_model"] = {
         "lattice": "hexagonal",
         "system": "bilayer",
@@ -1809,7 +1538,7 @@ def test_M_spinless_kp_symm_output_physical_source_ops_are_relabelled_effective(
         "mode": "single_valley",
         "active_valleys": ["M1"],
         "spin_convention": "spinless_effective",
-        "allowed_internal_symmetries": ["T_eff", "C2_eff"],
+        "allowed_internal_symmetries": ["TR_eff", "C2_eff"],
         "external_sewing_symmetries": [],
     }
     raw["symmetry_source"] = {
@@ -1817,28 +1546,26 @@ def test_M_spinless_kp_symm_output_physical_source_ops_are_relabelled_effective(
         "path": "symm",
         "use": "raw",
         "matrix_kind": "action",
-        "operations": ["T", "C2"],
-        "production_use": "exactify_to_continuum_internal_rep",
-        "source_matrix_role": "raw_h_sewing_action",
+        "operations": ["TR", "C2"],
+                "source_matrix_role": "raw_h_sewing_action",
         "source_gauge": "raw_saved_TAPW",
         "target_role": "raw_low_heff_sewing",
         "gauge_correction": {"kind": "none"},
         "antiunitary_convention": "U_K",
     }
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2_eff"}, {"name": "T_eff"}], "intra": [], "inter": []}
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2_eff"}, {"name": "TR_eff"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     cfg = load_model_config(cfg_path)
 
-    assert [op["name"] for op in cfg.symmetry_source_config["operations"]] == ["T_eff", "C2_eff"]
+    assert [op["name"] for op in cfg.symmetry_source_config["operations"]] == ["TR_eff", "C2_eff"]
     assert all("aliases" not in op for op in cfg.symmetry_source_config["operations"])
-    assert [op["name"] for op in cfg.symmetry_map["Kinect"]] == ["C2_eff", "T_eff"]
+    assert [op["name"] for op in cfg.symmetry_map["Kinect"]] == ["C2_eff", "TR_eff"]
 
 
 def test_production_strict_rejects_unavailable_validation_outputs(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["production_level"] = "production"
     raw["validation"] = {"strict": True}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")

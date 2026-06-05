@@ -858,14 +858,14 @@ class SymmetryGenerator:
 
         Returns
         -------
-        TR_proj_matrix : np.ndarray
+        T_proj_matrix : np.ndarray
             时间反演(自旋部分)在整个多层空间的投影矩阵（分块对角拼接）。
         """
 
         if any(int(n) % 2 for n in self.nlow_state):
             raise ValueError(
                 "TR toy generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
-                "for spinless effective TR use operation name T_eff with explicit matrix convention."
+                "for spinless effective TR use operation name TR_eff with explicit matrix convention."
             )
 
         # 先写好 i*sigma_y 在基 (down, up) 下的 2x2 矩阵：
@@ -934,9 +934,9 @@ class SymmetryGenerator:
             T_blocks.append(T_matrix_layer)
 
         # 分块对角拼接两层
-        TR_proj_matrix = scipy.linalg.block_diag(*T_blocks)
+        T_proj_matrix = scipy.linalg.block_diag(*T_blocks)
 
-        return TR_proj_matrix
+        return T_proj_matrix
 
     def get_time_reversal_matrix_effective(self) -> np.ndarray:
         """
@@ -963,7 +963,7 @@ class SymmetryGenerator:
                             T_matrix_layer[idx(orb_i, q_i), idx(orb_i, q_j)] = 1.0
                             matched = True
                     if not matched:
-                        raise ValueError("T_eff toy generator requires Q -> -Q matching within each layer")
+                        raise ValueError("TR_eff toy generator requires Q -> -Q matching within each layer")
             T_blocks.append(T_matrix_layer)
 
         return scipy.linalg.block_diag(*T_blocks)
@@ -1105,13 +1105,13 @@ class SymmetryGenerator:
                 D = self.get_C2T_operator()
             elif name == "TR":
                 D = self.get_time_reversal_matrix()
-            elif name == "T_eff":
+            elif name == "TR_eff":
                 D = self.get_time_reversal_matrix_effective()
             elif name == "C2":
                 D = self.get_C2_operator()
             elif name == "C2_eff":
                 D = self.get_C2_operator()
-            elif name == "C2T_eff":
+            elif name == "C2TR_eff":
                 D = self.get_C2_operator() @ self.get_time_reversal_matrix_effective()
             else:
                 raise ValueError(f"Unknown symmetry operation: {name}")
@@ -1207,7 +1207,7 @@ class ContinuumModelBuilder:
     _SYMMETRIZE_COMPOSED_OP_VALIDATED = SYMMETRIZE_COMPOSED_OP_VALIDATED
     _SYMMETRIZE_ORBIT_CACHE: Dict[Tuple[int, Tuple[float, float], Tuple[Tuple[str, Any], ...]], Any] = {}
     _KZ_POW_CACHE: Dict[Tuple[int, Tuple[float, float]], np.ndarray] = {}
-    _SYMM_ANTIUNITARY_OPS = frozenset({"TR", "T_eff", "C2T", "C2T_eff"})
+    _SYMM_ANTIUNITARY_OPS = frozenset({"TR", "TR_eff", "C2T", "C2TR_eff"})
     _SYMM_UNITARY_OPS = frozenset({"C2", "C2_eff"})
     _SYMM_VALIDATE_MONOMIAL = True
     _SYMM_VALIDATE_SPARSE = True
@@ -1278,7 +1278,7 @@ class ContinuumModelBuilder:
             if not isinstance(sym, Mapping):
                 continue
             name = str(sym.get("name", ""))
-            antiunitary = bool(sym.get("antiunitary", name in {"TR", "C2T", "C2T_eff"}))
+            antiunitary = bool(sym.get("antiunitary", name in {"TR", "TR_eff", "C2T", "C2TR_eff"}))
             if not antiunitary:
                 continue
             sector_map = ContinuumModelBuilder._normalised_sector_map(sym.get("sector_map", "identity"), sector_names)

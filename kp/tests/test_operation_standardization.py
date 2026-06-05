@@ -18,7 +18,6 @@ def _source_meta(antiunitary: bool = False) -> dict[str, object]:
         "target_role": "continuum_internal_rep",
         "gauge_correction": {"kind": "none"},
         "antiunitary_convention": "U_K" if antiunitary else "none",
-        "production_use": "exactify_to_continuum_internal_rep",
         "spin_map": "from_kp_symm_output",
         "valley_map": "identity",
     }

@@ -1,8 +1,11 @@
 source_config: ../../source/mote2_3.89_K1.yaml
 validation:
   allow_missing_wavefunction_overlap: true
-  reason: K1 production currently validates Hamiltonian/symmetry numerics without
-    exported projector-overlap data
+  reason: wavefunction/projector overlap is not exported by the current K1 pipeline
+heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/project/mote2_3.89_K1/heff_list.npy
+kpoints_file: null
+coordinate_frame:
+  rotation_deg: 210.0
 valley_model:
   lattice: hexagonal
   system: bilayer
@@ -17,7 +20,7 @@ valley_model:
   external_sewing_symmetries: []
 symmetry_source:
   type: kp_symm_output
-  path: ../../../outputs/symm/mote2_3.89_K1
+  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1
   use: raw
   matrix_kind: action
   operations:
@@ -37,9 +40,9 @@ symmetry_source:
     target_role: continuum_internal_rep
     gauge_correction:
       kind: none
-    antiunitary_convention: none
     spin_map: from_kp_symm_output
     valley_map: identity
+    antiunitary_convention: none
   - name: C2T
     operation: C2T
     matrix_file: C2T_low_raw.npy
@@ -56,9 +59,9 @@ symmetry_source:
     target_role: continuum_internal_rep
     gauge_correction:
       kind: none
-    antiunitary_convention: U_K
     spin_map: from_kp_symm_output
     valley_map: identity
+    antiunitary_convention: U_K
   exactification:
     support_source: geometry
     reject_if_off_support_rel_gt: 3.0e-06
@@ -71,7 +74,8 @@ symmetry_source:
         allowed_roots: sixth_roots_cube_minus_one
         phase_classes: global
         action_candidates:
-        - k_map:
+        - antiunitary: false
+          k_map:
             type: rotation
             angle_deg: 120.0
             in_model_frame: true
@@ -79,13 +83,13 @@ symmetry_source:
             type: rotation
             angle_deg: 120.0
           sector_map: identity
-          antiunitary: false
       C2T:
         support_mode: block
         power: 2
         central_phase: 1
         action_candidates:
-        - k_map:
+        - antiunitary: true
+          k_map:
             type: reflection
             axis_deg: 180.0
             in_model_frame: true
@@ -93,11 +97,8 @@ symmetry_source:
             type: reflection
             axis_deg: 180.0
           sector_map: layer_exchange
-          antiunitary: true
-coordinate_frame:
-  rotation_deg: 210
 kpath:
-  file: ../../../../tapw/KPATH.in
+  file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/KPATH.in
   tmat:
   - - 52.4951056667
     - 0.0
@@ -113,12 +114,8 @@ model:
   - 1
   - 1
   bM:
-    bM1:
-    - 0.13820712168748003
-    - 0.0
-    bM2:
-    - 0.06910356084374003
-    - 0.11969087836528494
+    source: tmat
+    angle_deg: 60
   harmonics:
     intra:
       1: zero
@@ -135,8 +132,9 @@ model:
     intra: 4
     inter: 4
   term_templates:
-  - name: notebook_kinetic_layer1
+  - name: kinetic_layer1
     source: diagonal_kp
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
@@ -147,15 +145,17 @@ model:
       difference_mod: 3
       difference_residue: 0
       require_mz_ge_mz_star: true
-  - name: notebook_onsite_layer1
+  - name: onsite_layer1
     source: onsite
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
     orbital_pairs: diagonal
     max_order: 0
-  - name: notebook_intra_layer1_nonzero
+  - name: intra_layer1
     source: moire_potential
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
@@ -167,8 +167,10 @@ model:
       - 3
       - 4
     max_order: 4
-  - name: notebook_inter_21_positive
+    harmonics_source: explicit_count
+  - name: inter_21_positive
     source: tunneling
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 2
       - 1
@@ -181,8 +183,10 @@ model:
       - 3
       - 4
     max_order: 4
-  - name: notebook_inter_21_negative
+    harmonics_source: explicit_count
+  - name: inter_21_negative
     source: tunneling
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 2
       - 1
@@ -195,6 +199,7 @@ model:
       - 4
       sign: -1
     max_order: 4
+    harmonics_source: explicit_count
   symmetry_map:
     Kinect:
     - name: C2T
@@ -207,6 +212,7 @@ model:
         axis_deg: 0.0
       sector_map: identity
       model_action_profile: K_notebook
+      user_name: C2T
     Onsite:
     - name: C2T
       antiunitary: true
@@ -218,6 +224,7 @@ model:
         axis_deg: 0.0
       sector_map: identity
       model_action_profile: K_notebook
+      user_name: C2T
     intra:
     - name: C3z
       antiunitary: false
@@ -228,6 +235,7 @@ model:
         type: rotation
         angle_deg: 120.0
       sector_map: identity
+      user_name: C3z
     - name: C2T
       antiunitary: true
       k_map:
@@ -238,6 +246,7 @@ model:
         axis_deg: 0.0
       sector_map: identity
       model_action_profile: K_notebook
+      user_name: C2T
     inter:
     - name: C3z
       antiunitary: false
@@ -248,6 +257,7 @@ model:
         type: rotation
         angle_deg: 120.0
       sector_map: identity
+      user_name: C3z
     - name: C2T
       antiunitary: true
       k_map:
@@ -258,6 +268,7 @@ model:
         axis_deg: 0.0
       sector_map: identity
       model_action_profile: K_notebook
+      user_name: C2T
 fit:
   indices:
   - 0
@@ -274,7 +285,7 @@ bands:
     - 3.0
     - 5.8
 output:
-  dir: ../../../outputs/model/production/mote2_3.89_K1
+  dir: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/runs/release/mote2_3.89_K1
   save_coefficients: true
   verbose: false
   progress: true

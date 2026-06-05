@@ -37,14 +37,12 @@ from ..src.moire_refactored import (
 )
 
 DEFAULT_MAX_ORDER = {"Kinect": 2, "intra": 0, "inter": 0}
-PUBLIC_MODEL_SCHEMA = "kp_model_public_v1alpha"
 SOURCE_META_KEYS = (
     "source_matrix_role",
     "source_gauge",
     "target_role",
     "gauge_correction",
     "antiunitary_convention",
-    "production_use",
     "spin_map",
     "valley_map",
 )
@@ -84,8 +82,6 @@ class ConfiguredModel:
     band_plot_config: dict[str, Any] = field(default_factory=dict)
     bM_diagnostics: dict[str, Any] = field(default_factory=dict)
     harmonics_diagnostics: dict[str, Any] = field(default_factory=dict)
-    production_level: str = "production"
-    allow_effective_toy_symmetry: bool = False
     validation_config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -106,52 +102,15 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def _is_public_model_config(raw: Mapping[str, Any]) -> bool:
-    if str(raw.get("schema", "")) == PUBLIC_MODEL_SCHEMA:
-        return True
-    return (
-        "source_config" not in raw
-        and isinstance(raw.get("system"), Mapping)
-        and isinstance(raw.get("inputs"), Mapping)
-        and isinstance(raw.get("geometry"), Mapping)
-        and isinstance(raw.get("terms"), Mapping)
-    )
-
-
-def _band_slice_from_window(window: Any, *, heff_file: Path) -> tuple[list[int] | None, dict[str, Any]]:
-    if window is None:
-        return None, {}
-    text = str(window).strip().lower()
-    if text.startswith("top") and text[3:].isdigit():
-        count = int(text[3:])
-        arr = np.load(heff_file, mmap_mode="r")
-        dim = int(arr.shape[-1])
-        return [max(0, dim - count), dim], {"top_bands": count, "align": "top", "figsize": [3.0, 5.8]}
-    if text.startswith("bottom") and text[6:].isdigit():
-        count = int(text[6:])
-        return [0, count], {"bottom_bands": count, "align": "bottom", "figsize": [3.0, 5.8]}
-    raise ValueError(f"Unsupported bands.window={window!r}; expected topN or bottomN")
-
-
-def _public_spin_convention(spin: str, *, valley_type: str) -> str:
-    spin_value = str(spin).lower()
-    if valley_type == "K" and spin_value == "up":
-        return "spin_up_only"
-    if valley_type == "K" and spin_value == "down":
-        return "spin_down_only"
-    if spin_value == "all":
-        return "spinful"
-    return "spinful"
-
 
 ACTION_SPECS: dict[str, dict[str, Any]] = {
     "C3z": {"antiunitary": False, "k_map": {"type": "rotation", "angle_deg": 120.0}, "sector_map": "identity"},
     "TR": {"antiunitary": True, "k_map": {"type": "negation"}, "sector_map": "identity"},
     "C2": {"antiunitary": False, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "layer_exchange"},
     "C2T": {"antiunitary": True, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "identity"},
-    "T_eff": {"antiunitary": True, "k_map": {"type": "negation"}, "sector_map": "identity"},
+    "TR_eff": {"antiunitary": True, "k_map": {"type": "negation"}, "sector_map": "identity"},
     "C2_eff": {"antiunitary": False, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "layer_exchange"},
-    "C2T_eff": {"antiunitary": True, "k_map": {"type": "reflection", "axis_deg": 90.0}, "sector_map": "layer_exchange"},
+    "C2TR_eff": {"antiunitary": True, "k_map": {"type": "reflection", "axis_deg": 90.0}, "sector_map": "layer_exchange"},
 }
 
 SOURCE_SEMANTICS: dict[str, Any] = {
@@ -159,7 +118,6 @@ SOURCE_SEMANTICS: dict[str, Any] = {
     "source_gauge": "raw_saved_TAPW",
     "target_role": "continuum_internal_rep",
     "gauge_correction": {"kind": "none"},
-    "production_use": "exactify_to_continuum_internal_rep",
     "spin_map": "from_kp_symm_output",
     "valley_map": "identity",
 }
@@ -169,7 +127,6 @@ REPRESENTATION_SEMANTICS: dict[str, Any] = {
     "source_gauge": "raw_saved_TAPW",
     "target_role": "continuum_internal_rep",
     "gauge_correction": {"kind": "none"},
-    "production_use": "exactify_to_continuum_internal_rep",
     "spin_map": "from_kp_symm_output",
     "valley_map": "identity",
 }
@@ -242,644 +199,6 @@ def _ops(*operations: dict[str, Any]) -> list[dict[str, Any]]:
     return [copy.deepcopy(op) for op in operations]
 
 
-def _public_k1_internal_config(raw: Mapping[str, Any], cfg_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    system = raw.get("system", {})
-    inputs = raw.get("inputs", {})
-    geometry = raw.get("geometry", {})
-    basis = raw.get("basis", {})
-    fit = raw.get("fit", {})
-    terms = raw.get("terms", {})
-    bands = raw.get("bands", {})
-    output = raw.get("output", {})
-
-    if not isinstance(system, Mapping) or not isinstance(inputs, Mapping) or not isinstance(geometry, Mapping):
-        raise ValueError("public model config requires system/inputs/geometry mappings")
-    qset = inputs.get("qset", {})
-    if not isinstance(qset, Mapping):
-        raise ValueError("inputs.qset must be a mapping")
-    n_orb = basis.get("n_orb")
-    if not isinstance(n_orb, Sequence) or isinstance(n_orb, (str, bytes)) or len(n_orb) != 2:
-        raise ValueError("basis.n_orb must be a length-2 list")
-
-    heff_file = Path(str(inputs.get("heff", ""))).resolve()
-    q1_file = Path(str(qset.get("layer1", ""))).resolve()
-    q2_file = Path(str(qset.get("layer2", ""))).resolve()
-    kpath_file = Path(str(inputs.get("kpath", ""))).resolve()
-    symmetry_input = Path(str(inputs.get("symmetry", ""))).resolve()
-    band_reference = inputs.get("band_reference")
-    run_dir = Path(str(output.get("run_dir", cfg_path.parent / "run"))).resolve()
-    fit_points = fit.get("points", [])
-    if not isinstance(fit_points, Sequence) or isinstance(fit_points, (str, bytes)):
-        raise ValueError("fit.points must be a list")
-    fit_points = [int(item) for item in fit_points]
-    band_slice, plot_cfg = _band_slice_from_window(bands.get("window"), heff_file=heff_file)
-
-    kinetic_order = int(((terms.get("kinetic") or {}) if isinstance(terms.get("kinetic"), Mapping) else {}).get("order", 6))
-    intra_cfg = (terms.get("intra") or {}) if isinstance(terms.get("intra"), Mapping) else {}
-    inter_cfg = (terms.get("inter") or {}) if isinstance(terms.get("inter"), Mapping) else {}
-    onsite_cfg = (terms.get("onsite") or {}) if isinstance(terms.get("onsite"), Mapping) else {}
-    intra_count = int(intra_cfg.get("harmonics", 4))
-    inter_count = int(inter_cfg.get("harmonics", 4))
-    intra_indices = list(range(1, intra_count + 1))
-    inter_indices = list(range(1, inter_count + 1))
-    nonzero_intra_indices = [idx for idx in intra_indices if idx != 1]
-    negative_inter_indices = [idx for idx in inter_indices if idx != 1]
-
-    valley = str(system.get("valley", "K1"))
-    spin = str(system.get("spin", "up"))
-    term_templates = [
-        {
-            "name": "public_kinetic_layer1",
-            "source": "diagonal_kp",
-            "generation_mode": "explicit_legacy",
-            "sector_pairs": [[1, 1]],
-            "orbital_pairs": "diagonal",
-            "max_order": kinetic_order,
-            "monomial_constraints": {
-                "exclude_m_sum_zero": True,
-                "difference_mod": 3,
-                "difference_residue": 0,
-                "require_mz_ge_mz_star": True,
-            },
-        },
-        {
-            "name": "public_intra_layer1",
-            "source": "moire_potential",
-            "generation_mode": "explicit_legacy",
-            "sector_pairs": [[1, 1]],
-            "orbital_pairs": "all",
-            "harmonics": {"kind": "intra", "indices": nonzero_intra_indices},
-            "max_order": int(intra_cfg.get("order", 4)),
-            "harmonics_source": "public_explicit_count",
-        },
-        {
-            "name": "public_inter_21_positive",
-            "source": "tunneling",
-            "generation_mode": "explicit_legacy",
-            "sector_pairs": [[2, 1]],
-            "orbital_pairs": "all",
-            "harmonics": {"kind": "inter", "indices": inter_indices},
-            "max_order": int(inter_cfg.get("order", 4)),
-            "harmonics_source": "public_explicit_count",
-        },
-        {
-            "name": "public_inter_21_negative",
-            "source": "tunneling",
-            "generation_mode": "explicit_legacy",
-            "sector_pairs": [[2, 1]],
-            "orbital_pairs": "all",
-            "harmonics": {"kind": "inter", "indices": negative_inter_indices, "sign": -1},
-            "max_order": int(inter_cfg.get("order", 4)),
-            "harmonics_source": "public_explicit_count",
-        },
-    ]
-    if bool(onsite_cfg.get("enabled", True)):
-        term_templates.insert(
-            1,
-            {
-                "name": "public_onsite_layer1",
-                "source": "onsite",
-                "generation_mode": "explicit_legacy",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": "diagonal",
-                "max_order": 0,
-            },
-        )
-
-    compiled = {
-        "source_config": str(cfg_path),
-        "production_level": "production",
-        "validation": {
-            "allow_missing_wavefunction_overlap": True,
-            "reason": "wavefunction/projector overlap is not exported by the current public K1 pipeline",
-        },
-        "heff_file": str(heff_file),
-        "kpoints_file": None,
-        "coordinate_frame": {"rotation_deg": float(geometry.get("rotation_deg", 0.0))},
-        "valley_model": {
-            "lattice": "hexagonal",
-            "system": "bilayer",
-            "valley_type": "K",
-            "mode": "single_valley",
-            "active_valleys": [valley],
-            "spin_convention": _public_spin_convention(spin, valley_type="K"),
-            "allowed_internal_symmetries": ["C3z", "C2T"],
-            "external_sewing_symmetries": [],
-        },
-        "symmetry_source": {
-            "type": "kp_symm_output",
-            "path": str(symmetry_input),
-            "use": "raw",
-            "matrix_kind": "action",
-            "operations": [
-                _source_op("C3z", "C3", "C3_low_raw.npy"),
-                _source_op("C2T", "C2T", "C2T_low_raw.npy", axis_deg=180.0, sector_map="layer_exchange"),
-            ],
-            "production_use": "exactify_to_continuum_internal_rep",
-            "exactification": {
-                "support_source": "geometry",
-                "reject_if_off_support_rel_gt": 3.0e-6,
-                "reject_if_amplitude_deviation_gt": 2.0e-2,
-                "operations": {
-                    "C3z": {
-                        "support_mode": "monomial",
-                        "power": 3,
-                        "central_phase": -1,
-                        "allowed_roots": "sixth_roots_cube_minus_one",
-                        "phase_classes": "global",
-                        "action_candidates": [
-                            _exact_candidate("C3z")
-                        ],
-                    },
-                    "C2T": {
-                        "support_mode": "block",
-                        "power": 2,
-                        "central_phase": 1,
-                        "action_candidates": [
-                            _exact_candidate("C2T", axis_deg=180.0, sector_map="layer_exchange")
-                        ],
-                    },
-                },
-            },
-        },
-        "kpath": {
-            "file": str(kpath_file),
-            "tmat": geometry.get("tmat"),
-        },
-        "model": {
-            "n_orb": [int(n_orb[0]), int(n_orb[1])],
-            "bM": {"source": "tmat", "angle_deg": 60},
-            "harmonics": {
-                "intra": {
-                    1: "zero",
-                    2: "-bM1",
-                    3: "bM1 + bM2",
-                    4: "2*bM1",
-                },
-                "inter": {
-                    1: "q1",
-                    2: "-2*q1",
-                    3: "q1 + bM2",
-                    4: "2*bM2 + q3",
-                },
-            },
-            "max_order": {
-                "Kinect": kinetic_order,
-                "intra": int(intra_cfg.get("order", 4)),
-                "inter": int(inter_cfg.get("order", 4)),
-            },
-            "term_templates": term_templates,
-            "symmetry_map": {
-                "Kinect": _ops(_model_op("C2T", profile="K_notebook")),
-                "Onsite": _ops(_model_op("C2T", profile="K_notebook")) if bool(onsite_cfg.get("enabled", True)) else [],
-                "intra": _ops(_model_op("C3z"), _model_op("C2T", profile="K_notebook")),
-                "inter": _ops(_model_op("C3z"), _model_op("C2T", profile="K_notebook")),
-            },
-        },
-        "fit": {
-            "indices": fit_points,
-            "coeff_tol": 1.0e-6,
-        },
-        "bands": {
-            "compare_to_heff": bool(bands.get("compare_to_heff", True)),
-            "band_slice": band_slice,
-            "plot": plot_cfg,
-        },
-        "output": {
-            "dir": str(run_dir),
-            "save_coefficients": True,
-            "verbose": False,
-            "progress": True,
-        },
-    }
-    synthetic_source = {
-        "material": {
-            "name": str(system.get("material", "")),
-            "spin": spin,
-            "num_layers": 2,
-            "qset1_file": str(q1_file),
-            "qset2_file": str(q2_file),
-            "band_file": str(Path(str(band_reference)).resolve()) if band_reference else None,
-        },
-        "plot": {},
-        "project": {
-            "out_dir": str(heff_file.parent),
-        },
-        "symm": {
-            "output_dir": str(symmetry_input),
-        },
-    }
-    return compiled, synthetic_source
-
-
-def _public_gamma_internal_config(raw: Mapping[str, Any], cfg_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    system = raw.get("system", {})
-    inputs = raw.get("inputs", {})
-    geometry = raw.get("geometry", {})
-    basis = raw.get("basis", {})
-    fit = raw.get("fit", {})
-    terms = raw.get("terms", {})
-    bands = raw.get("bands", {})
-    output = raw.get("output", {})
-
-    if not isinstance(system, Mapping) or not isinstance(inputs, Mapping) or not isinstance(geometry, Mapping):
-        raise ValueError("public model config requires system/inputs/geometry mappings")
-    qset = inputs.get("qset", {})
-    if not isinstance(qset, Mapping):
-        raise ValueError("inputs.qset must be a mapping")
-    n_orb = basis.get("n_orb")
-    if not isinstance(n_orb, Sequence) or isinstance(n_orb, (str, bytes)) or len(n_orb) != 2:
-        raise ValueError("basis.n_orb must be a length-2 list")
-
-    heff_file = Path(str(inputs.get("heff", ""))).resolve()
-    q1_file = Path(str(qset.get("layer1", ""))).resolve()
-    q2_file = Path(str(qset.get("layer2", ""))).resolve()
-    kpath_file = Path(str(inputs.get("kpath", ""))).resolve()
-    symmetry_input = Path(str(inputs.get("symmetry", ""))).resolve()
-    band_reference = inputs.get("band_reference")
-    run_dir = Path(str(output.get("run_dir", cfg_path.parent / "run"))).resolve()
-    fit_points = [int(item) for item in fit.get("points", [0, 40])]
-    band_slice, plot_cfg = _band_slice_from_window(bands.get("window"), heff_file=heff_file)
-    if symmetry_input.suffix in {".yaml", ".yml"}:
-        baseline_raw = _load_yaml(symmetry_input)
-        baseline_symmetry_source = dict(baseline_raw.get("symmetry_source", {}))
-    else:
-        baseline_symmetry_source = {
-            "type": "kp_symm_output",
-            "path": str(symmetry_input),
-            "use": "raw",
-            "matrix_kind": "representation",
-            "operations": [
-                _source_op("C3z", "C3", "C3_low_representation_raw.npy", semantics=REPRESENTATION_SEMANTICS),
-                _source_op("C2", "C2", "C2_low_representation_raw.npy", axis_deg=150.0, semantics=REPRESENTATION_SEMANTICS),
-                _source_op("TR", "T", "T_low_representation_raw.npy", semantics=REPRESENTATION_SEMANTICS),
-            ],
-            "production_use": "exactify_to_continuum_internal_rep",
-            "exactification": {
-                "support_source": "geometry",
-                "central_phase": {"C3z^3": -1, "C2^2": 1, "TR^2": -1},
-                "allowed_roots": {"C3z": "sixth_roots_cube_minus_one"},
-                "phase_classes": "global",
-                "reject_if_off_support_rel_gt": 1.0e-5,
-                "reject_if_amplitude_deviation_gt": 5.0e-2,
-            },
-        }
-
-    kinetic_order = int(((terms.get("kinetic") or {}) if isinstance(terms.get("kinetic"), Mapping) else {}).get("order", 10))
-    intra_cfg = (terms.get("intra") or {}) if isinstance(terms.get("intra"), Mapping) else {}
-    inter_cfg = (terms.get("inter") or {}) if isinstance(terms.get("inter"), Mapping) else {}
-    onsite_cfg = (terms.get("onsite") or {}) if isinstance(terms.get("onsite"), Mapping) else {}
-    intra_count = int(intra_cfg.get("harmonics", 4))
-    inter_count = int(inter_cfg.get("harmonics", 4))
-    intra_indices = list(range(1, intra_count + 1))
-    inter_indices = list(range(1, inter_count + 1))
-    nonzero_intra_indices = [idx for idx in intra_indices if idx != 1]
-    nonzero_inter_indices = [idx for idx in inter_indices if idx != 1]
-
-    valley = str(system.get("valley", "Gamma"))
-    spin = str(system.get("spin", "all"))
-    term_templates = [
-        {
-            "name": "public_gamma_kinetic",
-            "source": "diagonal_kp",
-            "sector_pairs": [[1, 1]],
-            "orbital_pairs": [[1, 1]],
-            "max_order": kinetic_order,
-        },
-        {
-            "name": "public_gamma_intra_zero",
-            "source": "moire_potential",
-            "sector_pairs": [[1, 1]],
-            "orbital_pairs": [[2, 1]],
-            "harmonics": {"kind": "intra", "indices": [1]},
-            "max_order": int(intra_cfg.get("order", 6)),
-            "harmonics_source": "public_explicit_count",
-        },
-        {
-            "name": "public_gamma_intra_nonzero",
-            "source": "moire_potential",
-            "sector_pairs": [[1, 1]],
-            "orbital_pairs": [[1, 1], [1, 2], [2, 1]],
-            "harmonics": {"kind": "intra", "indices": nonzero_intra_indices},
-            "max_order": int(intra_cfg.get("order", 6)),
-            "harmonics_source": "public_explicit_count",
-        },
-        {
-            "name": "public_gamma_inter_zero",
-            "source": "tunneling",
-            "sector_pairs": [[2, 1]],
-            "orbital_pairs": [[1, 1], [2, 1]],
-            "harmonics": {"kind": "inter", "indices": [1]},
-            "max_order": kinetic_order,
-            "harmonics_source": "public_explicit_count",
-        },
-        {
-            "name": "public_gamma_inter_nonzero",
-            "source": "tunneling",
-            "sector_pairs": [[2, 1]],
-            "orbital_pairs": [[1, 1], [2, 1]],
-            "harmonics": {"kind": "inter", "indices": nonzero_inter_indices},
-            "max_order": int(inter_cfg.get("order", 6)),
-            "harmonics_source": "public_explicit_count",
-        },
-        {
-            "name": "public_gamma_inter_nonzero_negative",
-            "source": "tunneling",
-            "sector_pairs": [[2, 1]],
-            "orbital_pairs": [[1, 1]],
-            "harmonics": {"kind": "inter", "indices": nonzero_inter_indices, "sign": -1},
-            "max_order": int(inter_cfg.get("order", 6)),
-            "harmonics_source": "public_explicit_count",
-        },
-    ]
-    if bool(onsite_cfg.get("enabled", True)):
-        term_templates.insert(
-            1,
-            {
-                "name": "public_gamma_onsite",
-                "source": "onsite",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": [[1, 1]],
-                "max_order": 0,
-            },
-        )
-
-    compiled = {
-        "source_config": str(cfg_path),
-        "production_level": "production",
-        "validation": {
-            "allow_missing_wavefunction_overlap": True,
-            "reason": "wavefunction/projector overlap is not exported by the current public Gamma pipeline",
-        },
-        "heff_file": str(heff_file),
-        "coordinate_frame": {"rotation_deg": float(geometry.get("rotation_deg", 0.0))},
-        "valley_model": {
-            "lattice": "hexagonal",
-            "system": "bilayer",
-            "valley_type": "Gamma",
-            "mode": "single_valley",
-            "active_valleys": [valley],
-            "spin_convention": _public_spin_convention(spin, valley_type="Gamma"),
-            "allowed_internal_symmetries": ["C3z", "TR", "C2"],
-            "external_sewing_symmetries": [],
-        },
-        "symmetry_source": baseline_symmetry_source,
-        "kpath": {
-            "file": str(kpath_file),
-            "tmat": geometry.get("tmat"),
-        },
-        "model": {
-            "n_orb": [int(n_orb[0]), int(n_orb[1])],
-            "bM": {"infer_from_q": True, "angle_deg": 60},
-            "harmonics": {
-                "intra": {1: "zero", 2: "-bM1", 3: "bM1 + bM2", 4: "2*bM1"},
-                "inter": {1: "zero", 2: "-bM1", 3: "bM1 + bM2", 4: "2*bM1"},
-            },
-            "max_order": {
-                "Kinect": kinetic_order,
-                "intra": int(intra_cfg.get("order", 6)),
-                "inter": int(inter_cfg.get("order", 10)),
-            },
-            "term_templates": term_templates,
-            "symmetry_map": {
-                "Kinect": _ops(_model_op("C3z"), _model_op("C2"), _model_op("TR")),
-                "Onsite": _ops(_model_op("C3z"), _model_op("C2"), _model_op("TR")) if bool(onsite_cfg.get("enabled", True)) else [],
-                "intra": _ops(_model_op("C3z"), _model_op("C2"), _model_op("TR")),
-                "inter": _ops(_model_op("C3z"), _model_op("C2"), _model_op("TR")),
-            },
-        },
-        "fit": {"indices": fit_points, "coeff_tol": 1.0e-6},
-        "bands": {"compare_to_heff": bool(bands.get("compare_to_heff", True)), "band_slice": band_slice, "plot": plot_cfg},
-        "output": {"dir": str(run_dir), "save_coefficients": True, "verbose": False, "progress": True},
-    }
-    synthetic_source = {
-        "material": {
-            "name": str(system.get("material", "")),
-            "spin": spin,
-            "num_layers": 2,
-            "qset1_file": str(q1_file),
-            "qset2_file": str(q2_file),
-            "band_file": str(Path(str(band_reference)).resolve()) if band_reference else None,
-        },
-        "plot": {},
-        "project": {"out_dir": str(heff_file.parent)},
-        "symm": {"output_dir": str(symmetry_input if symmetry_input.is_dir() else symmetry_input.parent)},
-    }
-    return compiled, synthetic_source
-
-
-def _looks_like_kp_symm_output_dir(path: Path) -> bool:
-    if not path.exists() or not path.is_dir():
-        return False
-    stems = ("T", "TR", "C2", "T_eff", "C2_eff")
-    has_matrix = any((path / f"{stem}_low_raw.npy").exists() for stem in stems)
-    has_manifest = (path / "summary.json").exists() or (path / "manifest.json").exists()
-    return bool(has_matrix and has_manifest)
-
-
-def _public_m1_symmetry_path(symmetry_input: Path, *, heff_file: Path) -> Path:
-    if _looks_like_kp_symm_output_dir(symmetry_input):
-        return symmetry_input
-    parents = list(heff_file.parents)
-    if len(parents) >= 3:
-        inferred = parents[2] / "symm" / heff_file.parent.name
-        if _looks_like_kp_symm_output_dir(inferred):
-            return inferred
-    raise ValueError(
-        "public M1 config requires inputs.symmetry to point to a kp_symm_output folder "
-        "with T/C2 low-energy matrices, or an inferable sibling outputs/symm/<case> folder"
-    )
-
-
-def _public_m1_internal_config(raw: Mapping[str, Any], cfg_path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
-    system = raw.get("system", {})
-    inputs = raw.get("inputs", {})
-    geometry = raw.get("geometry", {})
-    basis = raw.get("basis", {})
-    fit = raw.get("fit", {})
-    terms = raw.get("terms", {})
-    bands = raw.get("bands", {})
-    output = raw.get("output", {})
-
-    if not isinstance(system, Mapping) or not isinstance(inputs, Mapping) or not isinstance(geometry, Mapping):
-        raise ValueError("public model config requires system/inputs/geometry mappings")
-    qset = inputs.get("qset", {})
-    if not isinstance(qset, Mapping):
-        raise ValueError("inputs.qset must be a mapping")
-    public_sectors = raw.get("sectors")
-    if public_sectors is not None:
-        if not isinstance(public_sectors, Sequence) or isinstance(public_sectors, (str, bytes)):
-            raise ValueError("public M1 config sectors must be a list when provided")
-        if any(isinstance(sector, Mapping) and "q_offset" in sector for sector in public_sectors):
-            raise ValueError("public M1 config forbids sectors.q_offset; q_offset is inferred from qset files")
-    n_orb = basis.get("n_orb")
-    if not isinstance(n_orb, Sequence) or isinstance(n_orb, (str, bytes)) or len(n_orb) != 2:
-        raise ValueError("basis.n_orb must be a length-2 list")
-
-    heff_file = Path(str(inputs.get("heff", ""))).resolve()
-    q1_file = Path(str(qset.get("layer1", ""))).resolve()
-    q2_file = Path(str(qset.get("layer2", ""))).resolve()
-    kpath_file = Path(str(inputs.get("kpath", ""))).resolve()
-    symmetry_input = Path(str(inputs.get("symmetry", ""))).resolve()
-    band_reference = inputs.get("band_reference")
-    run_dir = Path(str(output.get("run_dir", cfg_path.parent / "run"))).resolve()
-    fit_points = [int(item) for item in fit.get("points", [20, 40])]
-    band_slice, plot_cfg = _band_slice_from_window(bands.get("window"), heff_file=heff_file)
-    if not symmetry_input.exists():
-        raise ValueError("public M1 config requires inputs.symmetry pointing to an existing symmetry folder")
-    symmetry_path = _public_m1_symmetry_path(symmetry_input, heff_file=heff_file)
-
-    kinetic_order = int(((terms.get("kinetic") or {}) if isinstance(terms.get("kinetic"), Mapping) else {}).get("order", 10))
-    intra_cfg = (terms.get("intra") or {}) if isinstance(terms.get("intra"), Mapping) else {}
-    inter_cfg = (terms.get("inter") or {}) if isinstance(terms.get("inter"), Mapping) else {}
-    onsite_cfg = (terms.get("onsite") or {}) if isinstance(terms.get("onsite"), Mapping) else {}
-    intra_count = int(intra_cfg.get("harmonics", 6))
-    inter_count = int(inter_cfg.get("harmonics", 8))
-
-    valley = str(system.get("valley", "M1"))
-    spin = str(system.get("spin", "up"))
-    intra_vectors = {
-        1: "bM1",
-        2: "bM2",
-        3: "-bM1 + bM2",
-        4: "bM1 + bM2",
-        5: "-2*bM1 + bM2",
-        6: "2*bM1",
-    }
-    inter_vectors = {
-        1: "q1",
-        3: "bM2 - q1",
-        5: "bM2 + q1",
-        7: "bM1 + q1",
-        8: "bM2 - 3*q1",
-    }
-    term_templates = [
-        {
-            "name": "public_m1_kinetic_bottom",
-            "source": "diagonal_kp",
-            "sector_pairs": [["bottom", "bottom"]],
-            "orbital_pairs": "diagonal",
-            "max_order": kinetic_order,
-        },
-        {
-            "name": "public_m1_intra_bottom",
-            "source": "moire_potential",
-            "sector_pairs": [["bottom", "bottom"]],
-            "orbital_pairs": "all",
-            "harmonics": "intra",
-            "max_order": int(intra_cfg.get("order", 6)),
-            "harmonics_source": "public_explicit_count",
-        },
-        {
-            "name": "public_m1_inter_top_to_bottom",
-            "source": "tunneling",
-            "sector_pairs": [["top", "bottom"]],
-            "orbital_pairs": "all",
-            "harmonics": "inter",
-            "max_order": int(inter_cfg.get("order", 8)),
-            "harmonics_source": "public_explicit_count",
-        },
-    ]
-    if bool(onsite_cfg.get("enabled", True)):
-        term_templates.insert(
-            1,
-            {
-                "name": "public_m1_onsite_bottom",
-                "source": "onsite",
-                "sector_pairs": [["bottom", "bottom"]],
-                "orbital_pairs": "diagonal",
-                "max_order": 0,
-            },
-        )
-
-    compiled = {
-        "source_config": str(cfg_path),
-        "production_level": "effective_interim",
-        "allow_effective_toy_symmetry": False,
-        "validation": {
-            "allow_missing_wavefunction_overlap": True,
-            "reason": "M1 public pipeline is an effective-interim closure without projector-overlap export",
-        },
-        "heff_file": str(heff_file),
-        "coordinate_frame": {"rotation_deg": float(geometry.get("rotation_deg", 0.0))},
-        "valley_model": {
-            "lattice": "hexagonal",
-            "system": "bilayer",
-            "valley_type": "M",
-            "mode": "single_valley",
-            "active_valleys": [valley],
-            "spin_convention": "spinless_effective",
-            "allowed_internal_symmetries": ["T_eff", "C2_eff"],
-            "external_sewing_symmetries": [],
-        },
-        "symmetry_source": {
-            "type": "kp_symm_output",
-            "path": str(symmetry_path),
-            "use": "raw",
-            "matrix_kind": "action",
-            "operations": [
-                _source_op("T_eff", "T", "T_low_raw.npy"),
-                _source_op("C2_eff", "C2", "C2_low_raw.npy", axis_deg=150.0),
-            ],
-            "production_use": "exactify_to_continuum_internal_rep",
-            "effective_interpretation": "single-spin M1 effective operators derived from TAPW T/C2 sewing output",
-            "exactification": {
-                "support_source": "geometry",
-                "central_phase": {"T_eff^2": 1, "C2_eff^2": 1},
-                "phase_classes": "global",
-                "reject_if_off_support_rel_gt": 1.0e-5,
-                "reject_if_amplitude_deviation_gt": 5.0e-2,
-            },
-        },
-        "kpath": {
-            "file": str(kpath_file),
-            "tmat": geometry.get("tmat"),
-        },
-        "sectors": [
-            {"name": "bottom", "qset": "qset1", "n_orb": int(n_orb[0])},
-            {"name": "top", "qset": "qset2", "n_orb": int(n_orb[1])},
-        ],
-        "model": {
-            "n_orb": [int(n_orb[0]), int(n_orb[1])],
-            "bM": {"source": "tmat", "angle_deg": 60},
-            "vectors": {"q1": "[0.5 * bM_norm, 0.0]"},
-            "harmonics": {
-                "intra": {idx: intra_vectors[idx] for idx in range(1, intra_count + 1) if idx in intra_vectors},
-                "inter": {idx: inter_vectors[idx] for idx in range(1, inter_count + 1) if idx in inter_vectors},
-            },
-            "max_order": {
-                "Kinect": kinetic_order,
-                "intra": int(intra_cfg.get("order", 6)),
-                "inter": int(inter_cfg.get("order", 8)),
-            },
-            "term_templates": term_templates,
-            "symmetry_map": {
-                "Kinect": _ops(_model_op("C2_eff"), _model_op("T_eff")),
-                "Onsite": _ops(_model_op("C2_eff")) if bool(onsite_cfg.get("enabled", True)) else [],
-                "intra": _ops(_model_op("C2_eff"), _model_op("T_eff")),
-                "inter": _ops(_model_op("C2_eff"), _model_op("T_eff")),
-            },
-        },
-        "fit": {"indices": fit_points, "coeff_tol": 1.0e-6},
-        "bands": {"compare_to_heff": bool(bands.get("compare_to_heff", True)), "band_slice": band_slice, "plot": plot_cfg},
-        "output": {"dir": str(run_dir), "save_coefficients": True, "verbose": False, "progress": True},
-    }
-    synthetic_source = {
-        "material": {
-            "name": str(system.get("material", "")),
-            "spin": spin,
-            "num_layers": 2,
-            "qset1_file": str(q1_file),
-            "qset2_file": str(q2_file),
-            "band_file": str(Path(str(band_reference)).resolve()) if band_reference else None,
-        },
-        "plot": {},
-        "project": {"out_dir": str(heff_file.parent)},
-        "symm": {"output_dir": str(symmetry_input)},
-    }
-    return compiled, synthetic_source
-
-
 def _as_int_list(value: Any, *, name: str) -> list[int]:
     if value is None:
         return []
@@ -926,13 +245,6 @@ def _default_symmetry_map_from_valley_model(valley_model: Mapping[str, Any]) -> 
         raise ValueError("valley_model.allowed_internal_symmetries must be a list")
     ops = [{"name": str(name)} for name in names]
     return {"Kinect": list(ops), "Onsite": list(ops), "intra": list(ops), "inter": list(ops)}
-
-
-def _default_production_level(cfg_path: Path) -> str:
-    parts = {part.lower() for part in cfg_path.parts}
-    if "production" in parts:
-        return "production"
-    return "legacy_compatibility"
 
 
 def _normalize_user_symmetry_names(raw: Mapping[str, Any]) -> dict[str, Any]:
@@ -1024,9 +336,9 @@ def _effective_m_source_operation_entry(operation: Any, valley_model: Mapping[st
         row = {}
         source_name = str(operation)
     canonical = canonical_source_operation_name_for_valley(source_name, valley_model)
-    if canonical == "T_eff":
-        source = source_name or "T"
-        compiled = _source_op("T_eff", source, _source_matrix_file(source, use, matrix_kind))
+    if canonical == "TR_eff":
+        source = source_name or "TR"
+        compiled = _source_op("TR_eff", source, _source_matrix_file(source, use, matrix_kind))
     elif canonical == "C2_eff":
         source = source_name or "C2"
         compiled = _source_op("C2_eff", source, _source_matrix_file(source, use, matrix_kind), axis_deg=150.0)
@@ -1124,10 +436,17 @@ def _enrich_symmetry_map(
             if name and name in op_index:
                 source_row = dict(op_index[name])
                 merged = dict(source_row)
-                merged.update(row)
+                keep_model_action = bool(row.get("model_action_profile"))
+                for key, value in row.items():
+                    if keep_model_action or key not in {"antiunitary", "k_map", "q_map", "sector_map"}:
+                        merged[key] = value
                 if "q_map" not in merged and "k_map" in merged:
                     merged["q_map"] = dict(merged["k_map"]) if isinstance(merged["k_map"], Mapping) else merged["k_map"]
                 row = merged
+            if name in ACTION_SPECS:
+                action = _operation_action(name)
+                for key, value in action.items():
+                    row.setdefault(key, value)
             _require_resolved_operation_action(row)
             rows.append(row)
         out[str(tag)] = rows
@@ -1225,31 +544,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     cfg_path = Path(path).resolve()
     raw = _load_yaml(cfg_path)
     base = cfg_path.parent
-    source_raw_override: dict[str, Any] | None = None
-    source_config_override: Path | None = None
-    if _is_public_model_config(raw):
-        system = raw.get("system", {})
-        if not isinstance(system, Mapping):
-            raise ValueError("public model config requires system mapping")
-        material = str(system.get("material", "")).lower()
-        valley = str(system.get("valley", ""))
-        if material == "mote2" and valley == "K1":
-            raw, source_raw_override = _public_k1_internal_config(raw, cfg_path)
-            source_config_override = cfg_path
-        elif material == "mgi2" and valley == "Gamma":
-            raw, source_raw_override = _public_gamma_internal_config(raw, cfg_path)
-            source_config_override = cfg_path
-        elif material == "mgi2" and valley == "M1":
-            raw, source_raw_override = _public_m1_internal_config(raw, cfg_path)
-            source_config_override = cfg_path
-        else:
-            raise ValueError(
-                f"Unsupported public model config example {material!r}/{valley!r}; "
-                "currently only MoTe2 K1, MgI2 Gamma, and MgI2 M1 public schemas are implemented"
-            )
     raw = dict(raw)
-    raw.setdefault("production_level", _default_production_level(cfg_path))
-    raw.setdefault("allow_effective_toy_symmetry", False)
     validation = raw.get("validation", {})
     if validation is None:
         validation = {}
@@ -1257,10 +552,10 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         raise ValueError("validation section must be a mapping when provided")
     raw["validation"] = dict(validation)
 
-    source_config = source_config_override or _resolve_path(raw.get("source_config"), base)
+    source_config = _resolve_path(raw.get("source_config"), base)
     if source_config is None:
         raise ValueError("Configured model YAML requires source_config")
-    source_raw = source_raw_override or _load_yaml(source_config)
+    source_raw = _load_yaml(source_config)
     source_base = source_config.parent
     material = source_raw.get("material", {})
     project = source_raw.get("project", {})
@@ -1396,8 +691,6 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         output_config=dict(output_section),
         band_slice=band_slice,
         band_plot_config=dict(band_plot),
-        production_level=str(raw.get("production_level", "production")),
-        allow_effective_toy_symmetry=bool(raw.get("allow_effective_toy_symmetry", False)),
         validation_config=dict(raw.get("validation", {})),
     )
 
@@ -1725,7 +1018,7 @@ def _auto_inter_harmonics_from_sectors(
                 "sector_pair": item["sector_pair"],
                 "shell": int(item["shell"]),
                 "C3_orbit_id": None,
-                "TR_or_Hermitian_orbit_id": None,
+                "T_or_Hermitian_orbit_id": None,
                 "support_count": int(item["support_count"]),
                 "support_weight_norm": None,
                 "q_offset_from": item["q_offset_from"],
@@ -1960,15 +1253,15 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     expected_dim = len(Q_set1) * config.n_orb[0] + len(Q_set2) * config.n_orb[1]
     loaded_symmetry = load_symmetry_source(config.symmetry_source_config, base=config.path.parent, expected_dim=expected_dim)
     source_type = str(config.symmetry_source_config.get("type", "none"))
-    production_use = str(config.symmetry_source_config.get("production_use", ""))
     matrix_kind = str(config.symmetry_source_config.get("matrix_kind", config.symmetry_source_config.get("kind", "action")))
+    exactification = config.symmetry_source_config.get("exactification")
+    has_exactification = isinstance(exactification, Mapping) and bool(exactification)
     if source_type == "kp_symm_output" and any(config.symmetry_map.get(tag) for tag in ("Kinect", "Onsite", "intra", "inter")):
-        if matrix_kind == "action" and production_use != "exactify_to_continuum_internal_rep":
+        if matrix_kind == "action" and not has_exactification:
             raise ValueError(
-                "kp_symm_output matrix_kind=action cannot be used for production term symmetrization without exactification; "
-                "set symmetry_source.production_use: exactify_to_continuum_internal_rep with an exactification block"
+                "kp_symm_output matrix_kind=action cannot be used for term symmetrization without an exactification block"
             )
-        if production_use == "exactify_to_continuum_internal_rep":
+        if has_exactification:
             if not hasattr(loaded_symmetry.generator, "matrices"):
                 raise ValueError("Exactification requires a matrix-backed symmetry generator")
             exact_output_dir = config.output_dir / "symmetry_exactification"
@@ -2759,23 +2052,20 @@ def _term_to_dict(term: Any) -> dict[str, Any]:
 
 def _operation_physics_level(model_config: ConfiguredModel, operation: Mapping[str, Any]) -> str:
     name = str(operation.get("name", ""))
-    if model_config.production_level == "legacy_compatibility":
-        return "legacy"
     if model_config.symmetry_source_config.get("type") == "toy_generator":
-        return "effective" if name.endswith("_eff") or name == "T_eff" else "legacy"
-    if name.endswith("_eff") or name == "T_eff":
+        return "effective" if name.endswith("_eff") or name == "TR_eff" else "toy"
+    if name.endswith("_eff") or name == "TR_eff":
         return "effective"
     return "physical"
 
 
 def _symmetry_integrity(model_config: ConfiguredModel) -> str:
-    if model_config.production_level == "legacy_compatibility":
-        return "legacy_compatibility"
     if model_config.symmetry_source_config.get("type") == "toy_generator":
-        return "effective_not_physical_closed"
-    if str(model_config.symmetry_source_config.get("production_use", "")) == "exactify_to_continuum_internal_rep":
+        return "toy_generator"
+    exactification = model_config.symmetry_source_config.get("exactification")
+    if isinstance(exactification, Mapping) and exactification:
         return "exactified_from_tapw_action"
-    return "physical_closed"
+    return "matrix_backed"
 
 
 def _build_operation_registry(model_config: ConfiguredModel) -> list[dict[str, Any]]:
@@ -2994,7 +2284,6 @@ def _build_run_summary(
 ) -> dict[str, Any]:
     uses_toy = model_config.symmetry_source_config.get("type") == "toy_generator"
     return {
-        "production_level": model_config.production_level,
         "symmetry_integrity": _symmetry_integrity(model_config),
         "symmetry_source_type": str(model_config.symmetry_source_config.get("type", "none")),
         "uses_toy_generator": bool(uses_toy),

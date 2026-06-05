@@ -5,12 +5,11 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-PHYSICAL_TR_NAMES = {"TR", "T"}
+PHYSICAL_TR_NAMES = {"TR"}
 PHYSICAL_C2_NAMES = {"C2", "C2z"}
 K_SINGLE_ALLOWED_INTERNAL = {"C3z", "C2T"}
-M_SPINLESS_ALLOWED_INTERNAL = {"T_eff", "C2_eff", "C2T_eff"}
-CANONICAL_INTERNAL_NAMES = {"C3z", "C2", "TR", "C2T", "T_eff", "C2_eff", "C2T_eff"}
-PRODUCTION_LEVELS = {"production", "effective_interim", "legacy_compatibility"}
+M_SPINLESS_ALLOWED_INTERNAL = {"TR_eff", "C2_eff", "C2TR_eff"}
+CANONICAL_INTERNAL_NAMES = {"C3z", "C2", "TR", "C2T", "TR_eff", "C2_eff", "C2TR_eff"}
 
 
 def canonical_operation_name_for_valley(name: str, valley_model: Mapping[str, Any] | None = None) -> str:
@@ -31,8 +30,8 @@ def canonical_source_operation_name_for_valley(name: str, valley_model: Mapping[
     mode = str(valley_model.get("mode", ""))
     spin_convention = str(valley_model.get("spin_convention", ""))
     if valley_type == "M" and mode == "single_valley" and spin_convention == "spinless_effective":
-        if raw in {"T", "TR"}:
-            return "T_eff"
+        if raw == "TR":
+            return "TR_eff"
         if raw in {"C2", "C2_eff"}:
             return "C2_eff"
     return canonical_operation_name_for_valley(raw, valley_model)
@@ -121,13 +120,6 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
     unsupported_ops = sym_names - CANONICAL_INTERNAL_NAMES
     if unsupported_ops:
         raise ValueError(f"Unsupported internal symmetry operation names: {sorted(unsupported_ops)}")
-    production_level = str(raw.get("production_level", "production"))
-    if production_level not in PRODUCTION_LEVELS:
-        raise ValueError(
-            f"production_level must be one of {sorted(PRODUCTION_LEVELS)}, got {production_level!r}"
-        )
-    allow_effective_toy_symmetry = bool(raw.get("allow_effective_toy_symmetry", False))
-
     symmetry_source = raw.get("symmetry_source", {})
     if symmetry_source is None:
         symmetry_source = {}
@@ -152,7 +144,7 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
 
     if valley_type == "M" and mode == "single_valley" and spin_convention == "spinless_effective":
         if (sym_names & PHYSICAL_TR_NAMES) and source_type != "kp_symm_output":
-            raise ValueError("M single_valley spinless_effective must use T_eff, not physical TR, unless kp_symm_output matrix is provided")
+            raise ValueError("M single_valley spinless_effective must use TR_eff, not physical TR, unless kp_symm_output matrix is provided")
         invalid = sym_names - M_SPINLESS_ALLOWED_INTERNAL
         if invalid and source_type != "kp_symm_output":
             raise ValueError(f"M spinless_effective internal symmetries must be effective names, got {sorted(invalid)}")
@@ -167,22 +159,13 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
     if source_type == "toy_generator":
         if not bool(symmetry_source.get("allow", False)):
             raise ValueError("toy_generator requires explicit symmetry_source.allow: true")
-        if production_level == "production":
-            raise ValueError(
-                "toy_generator is forbidden for production configs; use kp_symm_output or mark the config "
-                "production_level: effective_interim with allow_effective_toy_symmetry: true"
-            )
-        if production_level == "effective_interim" and not allow_effective_toy_symmetry:
-            raise ValueError(
-                "effective_interim toy symmetry requires allow_effective_toy_symmetry: true"
-            )
         template = symmetry_source.get("basis_template")
-        if any(name in sym_names for name in {"C3z", "C2", "C2T", "T_eff", "C2_eff", "C2T_eff"}) and not template:
+        if any(name in sym_names for name in {"C3z", "C2", "C2T", "TR_eff", "C2_eff", "C2TR_eff"}) and not template:
             raise ValueError("toy_generator symmetry operations require explicit basis_template")
         if sym_names & PHYSICAL_TR_NAMES and any(int(n) % 2 for n in nlow_state):
             raise ValueError(
                 "TR toy generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
-                "for spinless effective TR use operation name T_eff with explicit matrix convention."
+                "for spinless effective TR use operation name TR_eff with explicit matrix convention."
             )
         if ({"C2", "C2_eff"} & sym_names) and str(template) not in {"Gamma_four_orbital", "M_spinless_layer_exchange"}:
             raise ValueError("C2 toy generator requires Gamma_four_orbital or M_spinless_layer_exchange basis_template")
@@ -235,11 +218,8 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
         if monomial_constraints is not None and not isinstance(monomial_constraints, Mapping):
             raise ValueError(f"term_templates[{idx}].monomial_constraints must be a mapping")
         legacy_filter = template.get("legacy_monomial_filter", template.get("monomial_filter"))
-        if legacy_filter == "notebook_kinetic_c3_diag" and production_level != "legacy_compatibility":
-            raise ValueError(
-                "notebook_kinetic_c3_diag is a legacy compatibility filter and is forbidden outside "
-                "production_level: legacy_compatibility"
-            )
+        if legacy_filter == "notebook_kinetic_c3_diag":
+            raise ValueError("notebook_kinetic_c3_diag is not supported by the release model schema")
 
     bM = model.get("bM", {})
     if isinstance(bM, Mapping):

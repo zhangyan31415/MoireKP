@@ -74,6 +74,7 @@ kp/kp.tar.gz
 kp/examples/**/outputs/
 kp/examples/**/runs/
 kp/examples/garbage/
+kp/examples/**/kp/configs/model/reference/
 
 # Scratch notebooks and external notebook data dumps
 kp/model_*.ipynb
