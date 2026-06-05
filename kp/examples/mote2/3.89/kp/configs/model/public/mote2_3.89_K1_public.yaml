@@ -1,0 +1,53 @@
+# Public-facing example config draft for the MoTe2 3.89 K1 release path.
+# This file is intentionally concise and user-oriented.
+# It is organized around the physical inputs to the continuum model.
+
+system:
+  material: MoTe2
+  twist_angle_deg: 3.89
+  valley: K1
+  spin: up
+
+inputs:
+  heff: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/project/mote2_3.89_K1/heff_list.npy
+  qset:
+    layer1: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/Q_shell_6/g_vec_list_6_K1_1layer.npy
+    layer2: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/Q_shell_6/g_vec_list_6_K1_2layer.npy
+  kpath: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/KPATH.in
+  symmetry: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1
+  band_reference: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/Q_shell_6/band/band_VBM_K1_valley.txt
+
+geometry:
+  tmat:
+    - [52.4951056667, 0.0, 0.0]
+    - [-26.2475528340, 45.4620950821, 0.0]
+    - [0.0, 0.0, 27.0]
+  rotation_deg: 210
+
+basis:
+  n_orb: [1, 1]
+
+fit:
+  points: [0]
+
+terms:
+  kinetic:
+    order: 6
+
+  onsite:
+    enabled: true
+
+  intra:
+    order: 4
+    harmonics: 4
+
+  inter:
+    order: 4
+    harmonics: 4
+
+bands:
+  compare_to_heff: true
+  window: top8
+
+output:
+  run_dir: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/runs/mote2_3.89_K1_public

@@ -19,12 +19,8 @@ class SymmetryGenerator:
         """Return C3z operator matrix (placeholder)."""
         raise NotImplementedError
 
-    def get_C2yT_operator(self) -> np.ndarray:
-        """Return C2yT operator matrix (placeholder)."""
-        raise NotImplementedError
-
-    def get_C2zT_operator(self) -> np.ndarray:
-        """Return C2zT operator matrix (placeholder)."""
+    def get_C2T_operator(self) -> np.ndarray:
+        """Return C2T operator matrix (placeholder)."""
         raise NotImplementedError
 
     def get_time_reversal_matrix(self) -> np.ndarray:
@@ -34,4 +30,3 @@ class SymmetryGenerator:
     def get_operator(self, name: str, params: Any | None = None) -> Tuple[np.ndarray, np.ndarray]:
         """Return (k_transform, D) for a named symmetry (placeholder)."""
         raise NotImplementedError
-

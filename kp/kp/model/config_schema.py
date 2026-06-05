@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+
+
+PHYSICAL_TR_NAMES = {"TR", "T"}
+PHYSICAL_C2_NAMES = {"C2", "C2z"}
+K_SINGLE_ALLOWED_INTERNAL = {"C3z", "C2T"}
+M_SPINLESS_ALLOWED_INTERNAL = {"T_eff", "C2_eff", "C2T_eff"}
+CANONICAL_INTERNAL_NAMES = {"C3z", "C2", "TR", "C2T", "T_eff", "C2_eff", "C2T_eff"}
+PRODUCTION_LEVELS = {"production", "effective_interim", "legacy_compatibility"}
+
+
+def canonical_operation_name_for_valley(name: str, valley_model: Mapping[str, Any] | None = None) -> str:
+    raw = str(name)
+    valley_model = valley_model or {}
+    valley_type = str(valley_model.get("valley_type", ""))
+    mode = str(valley_model.get("mode", ""))
+    spin_convention = str(valley_model.get("spin_convention", ""))
+    if raw == "C2T" and valley_type == "K" and mode == "single_valley" and spin_convention in {"spin_up_only", "spin_down_only"}:
+        return "C2T"
+    return raw
+
+
+def canonical_source_operation_name_for_valley(name: str, valley_model: Mapping[str, Any] | None = None) -> str:
+    raw = str(name)
+    valley_model = valley_model or {}
+    valley_type = str(valley_model.get("valley_type", ""))
+    mode = str(valley_model.get("mode", ""))
+    spin_convention = str(valley_model.get("spin_convention", ""))
+    if valley_type == "M" and mode == "single_valley" and spin_convention == "spinless_effective":
+        if raw in {"T", "TR"}:
+            return "T_eff"
+        if raw in {"C2", "C2_eff"}:
+            return "C2_eff"
+    return canonical_operation_name_for_valley(raw, valley_model)
+
+
+def canonical_vector_key(vector: Sequence[float], *, tol: float = 1.0e-9) -> tuple[int, int]:
+    arr = np.asarray(vector, dtype=float)
+    if arr.shape != (2,):
+        raise ValueError(f"canonical_vector_key expects a 2-vector, got shape {arr.shape}")
+    if tol <= 0:
+        raise ValueError(f"tol must be positive, got {tol}")
+    return tuple(np.rint(arr / float(tol)).astype(int).tolist())
+
+
+def symmetry_operation_names(symmetry_map: Mapping[str, Any], *, valley_model: Mapping[str, Any] | None = None) -> list[str]:
+    names: list[str] = []
+    for ops in symmetry_map.values():
+        if not isinstance(ops, Sequence) or isinstance(ops, (str, bytes)):
+            continue
+        for op in ops:
+            if isinstance(op, Mapping) and "name" in op:
+                names.append(canonical_operation_name_for_valley(str(op["name"]), valley_model))
+            elif isinstance(op, str):
+                names.append(canonical_operation_name_for_valley(op, valley_model))
+    return names
+
+
+def _model_section(raw: Mapping[str, Any]) -> Mapping[str, Any]:
+    model = raw.get("model", {})
+    if not isinstance(model, Mapping):
+        raise ValueError("model section must be a mapping")
+    return model
+
+
+def _operation_set_from_source(
+    symmetry_source: Mapping[str, Any],
+    *,
+    valley_model: Mapping[str, Any] | None = None,
+) -> set[str]:
+    operations = symmetry_source.get("operations", [])
+    out: set[str] = set()
+    if isinstance(operations, Mapping):
+        iterable = []
+        for key, value in operations.items():
+            if isinstance(value, Mapping):
+                row = dict(value)
+                row.setdefault("name", str(key))
+                iterable.append(row)
+            else:
+                iterable.append({"name": str(key)})
+        operations = iterable
+    if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
+        return out
+    for op in operations:
+        if isinstance(op, Mapping):
+            if "name" in op:
+                out.add(canonical_source_operation_name_for_valley(str(op["name"]), valley_model))
+        elif isinstance(op, str):
+            out.add(canonical_source_operation_name_for_valley(op, valley_model))
+    return out
+
+
+def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) -> None:
+    model = _model_section(raw)
+    symmetry_map = model.get("symmetry_map", {})
+    if not isinstance(symmetry_map, Mapping):
+        raise ValueError("model.symmetry_map must be a mapping")
+
+    valley_model = raw.get("valley_model")
+    if not isinstance(valley_model, Mapping):
+        raise ValueError("model config requires explicit valley_model")
+    sym_names = set(symmetry_operation_names(symmetry_map, valley_model=valley_model))
+    lattice = str(valley_model.get("lattice", ""))
+    system = str(valley_model.get("system", ""))
+    valley_type = str(valley_model.get("valley_type", ""))
+    mode = str(valley_model.get("mode", ""))
+    spin_convention = str(valley_model.get("spin_convention", ""))
+    if lattice != "hexagonal":
+        raise ValueError(f"Only lattice=hexagonal is currently supported, got {lattice!r}")
+    if system != "bilayer":
+        raise ValueError(f"Only system=bilayer is currently supported, got {system!r}")
+    if valley_type not in {"Gamma", "K", "M"}:
+        raise ValueError(f"valley_model.valley_type must be Gamma/K/M, got {valley_type!r}")
+    if mode not in {"single_valley", "valley_pair", "triple_valley"}:
+        raise ValueError(f"valley_model.mode must be single_valley/valley_pair/triple_valley, got {mode!r}")
+    unsupported_ops = sym_names - CANONICAL_INTERNAL_NAMES
+    if unsupported_ops:
+        raise ValueError(f"Unsupported internal symmetry operation names: {sorted(unsupported_ops)}")
+    production_level = str(raw.get("production_level", "production"))
+    if production_level not in PRODUCTION_LEVELS:
+        raise ValueError(
+            f"production_level must be one of {sorted(PRODUCTION_LEVELS)}, got {production_level!r}"
+        )
+    allow_effective_toy_symmetry = bool(raw.get("allow_effective_toy_symmetry", False))
+
+    symmetry_source = raw.get("symmetry_source", {})
+    if symmetry_source is None:
+        symmetry_source = {}
+    if not isinstance(symmetry_source, Mapping):
+        raise ValueError("symmetry_source must be a mapping when provided")
+    source_type = str(symmetry_source.get("type", "none"))
+    source_ops = _operation_set_from_source(symmetry_source, valley_model=valley_model)
+
+    if sym_names and source_type == "none":
+        raise ValueError("model.symmetry_map is non-empty; provide symmetry_source")
+
+    if valley_type == "K" and mode == "single_valley":
+        forbidden = (sym_names & PHYSICAL_TR_NAMES) | (sym_names & PHYSICAL_C2_NAMES)
+        if forbidden:
+            raise ValueError(
+                "K single_valley cannot use physical TR/C2 as internal symmetry; "
+                "use valley_pair with external_sewing_symmetries or provide C2T/C3z internal operations."
+            )
+        invalid = sym_names - K_SINGLE_ALLOWED_INTERNAL
+        if invalid:
+            raise ValueError(f"K single_valley internal symmetries must be C3z/C2T, got {sorted(invalid)}")
+
+    if valley_type == "M" and mode == "single_valley" and spin_convention == "spinless_effective":
+        if (sym_names & PHYSICAL_TR_NAMES) and source_type != "kp_symm_output":
+            raise ValueError("M single_valley spinless_effective must use T_eff, not physical TR, unless kp_symm_output matrix is provided")
+        invalid = sym_names - M_SPINLESS_ALLOWED_INTERNAL
+        if invalid and source_type != "kp_symm_output":
+            raise ValueError(f"M spinless_effective internal symmetries must be effective names, got {sorted(invalid)}")
+
+    if valley_type == "M" and mode == "triple_valley":
+        active_valleys = list(valley_model.get("active_valleys", []))
+        if sorted(active_valleys) != ["M1", "M2", "M3"]:
+            raise ValueError("M triple_valley requires active_valleys: [M1, M2, M3]")
+        if "C3z" in sym_names and source_type != "kp_symm_output":
+            raise ValueError("M triple_valley C3z requires kp_symm_output or explicit triple-valley template")
+
+    if source_type == "toy_generator":
+        if not bool(symmetry_source.get("allow", False)):
+            raise ValueError("toy_generator requires explicit symmetry_source.allow: true")
+        if production_level == "production":
+            raise ValueError(
+                "toy_generator is forbidden for production configs; use kp_symm_output or mark the config "
+                "production_level: effective_interim with allow_effective_toy_symmetry: true"
+            )
+        if production_level == "effective_interim" and not allow_effective_toy_symmetry:
+            raise ValueError(
+                "effective_interim toy symmetry requires allow_effective_toy_symmetry: true"
+            )
+        template = symmetry_source.get("basis_template")
+        if any(name in sym_names for name in {"C3z", "C2", "C2T", "T_eff", "C2_eff", "C2T_eff"}) and not template:
+            raise ValueError("toy_generator symmetry operations require explicit basis_template")
+        if sym_names & PHYSICAL_TR_NAMES and any(int(n) % 2 for n in nlow_state):
+            raise ValueError(
+                "TR toy generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
+                "for spinless effective TR use operation name T_eff with explicit matrix convention."
+            )
+        if ({"C2", "C2_eff"} & sym_names) and str(template) not in {"Gamma_four_orbital", "M_spinless_layer_exchange"}:
+            raise ValueError("C2 toy generator requires Gamma_four_orbital or M_spinless_layer_exchange basis_template")
+    elif source_type == "kp_symm_output":
+        if not symmetry_source.get("path"):
+            raise ValueError("symmetry_source.type=kp_symm_output requires path")
+        missing = sym_names - source_ops
+        if missing and source_ops:
+            raise ValueError(f"symmetry_source is missing matrices for operations: {sorted(missing)}")
+    elif source_type != "none":
+        raise ValueError(f"Unsupported symmetry_source.type: {source_type}")
+
+    exactification = symmetry_source.get("exactification", {})
+    if exactification is None:
+        exactification = {}
+    if exactification and not isinstance(exactification, Mapping):
+        raise ValueError("symmetry_source.exactification must be a mapping")
+    if isinstance(exactification, Mapping):
+        operations_cfg = exactification.get("operations", {})
+        if operations_cfg not in ({}, None) and not isinstance(operations_cfg, Mapping):
+            raise ValueError("symmetry_source.exactification.operations must be a mapping")
+        if isinstance(operations_cfg, Mapping):
+            for op_name, op_cfg in operations_cfg.items():
+                if not isinstance(op_cfg, Mapping):
+                    raise ValueError(f"symmetry_source.exactification.operations.{op_name} must be a mapping")
+                support_mode = op_cfg.get("support_mode")
+                if support_mode is not None and str(support_mode) not in {"auto", "monomial", "block", "block_monomial"}:
+                    raise ValueError(
+                        f"symmetry_source.exactification.operations.{op_name}.support_mode must be "
+                        "'auto', 'monomial', 'block', or 'block_monomial'"
+                    )
+                action_candidates = op_cfg.get("action_candidates")
+                if action_candidates is not None:
+                    if not isinstance(action_candidates, Sequence) or isinstance(action_candidates, (str, bytes)):
+                        raise ValueError(f"symmetry_source.exactification.operations.{op_name}.action_candidates must be a list")
+                    if not all(isinstance(item, Mapping) for item in action_candidates):
+                        raise ValueError(
+                            f"symmetry_source.exactification.operations.{op_name}.action_candidates entries must be mappings"
+                        )
+
+    term_templates = model.get("term_templates", raw.get("term_templates", []))
+    if term_templates is None:
+        term_templates = []
+    if not isinstance(term_templates, Sequence) or isinstance(term_templates, (str, bytes)):
+        raise ValueError("term_templates must be a list when provided")
+    for idx, template in enumerate(term_templates):
+        if not isinstance(template, Mapping):
+            raise ValueError(f"term_templates[{idx}] must be a mapping")
+        monomial_constraints = template.get("monomial_constraints")
+        if monomial_constraints is not None and not isinstance(monomial_constraints, Mapping):
+            raise ValueError(f"term_templates[{idx}].monomial_constraints must be a mapping")
+        legacy_filter = template.get("legacy_monomial_filter", template.get("monomial_filter"))
+        if legacy_filter == "notebook_kinetic_c3_diag" and production_level != "legacy_compatibility":
+            raise ValueError(
+                "notebook_kinetic_c3_diag is a legacy compatibility filter and is forbidden outside "
+                "production_level: legacy_compatibility"
+            )
+
+    bM = model.get("bM", {})
+    if isinstance(bM, Mapping):
+        source = str(bM.get("source", "auto"))
+        if bM.get("infer_from_q", False):
+            source = "q_distance"
+        if valley_type in {"K", "M"} and source in {"q", "q_distance", "q_distances"}:
+            sectors = raw.get("sectors", [])
+            has_offsets = (
+                isinstance(sectors, Sequence)
+                and not isinstance(sectors, (str, bytes))
+                and all(isinstance(sector, Mapping) and "q_offset" in sector for sector in sectors)
+                and len(sectors) > 0
+            )
+            if not has_offsets:
+                raise ValueError("K/M q_distance bM requires explicit sectors with q_offset; prefer bM.source: tmat")

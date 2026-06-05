@@ -1,0 +1,283 @@
+source_config: ../../source/mote2_3.89_K1.yaml
+production_level: production
+validation:
+  allow_missing_wavefunction_overlap: true
+  reason: K1 production currently validates Hamiltonian/symmetry numerics without
+    exported projector-overlap data
+valley_model:
+  lattice: hexagonal
+  system: bilayer
+  valley_type: K
+  mode: single_valley
+  active_valleys:
+  - K1
+  spin_convention: spin_up_only
+  allowed_internal_symmetries:
+  - C3z
+  - C2T
+  external_sewing_symmetries: []
+symmetry_source:
+  type: kp_symm_output
+  path: ../../../outputs/symm/mote2_3.89_K1
+  use: raw
+  matrix_kind: action
+  operations:
+  - name: C3z
+    operation: C3
+    matrix_file: C3_low_raw.npy
+    antiunitary: false
+    k_map:
+      type: rotation
+      angle_deg: 120.0
+    q_map:
+      type: rotation
+      angle_deg: 120.0
+    sector_map: identity
+    source_matrix_role: raw_h_sewing_action
+    source_gauge: raw_saved_TAPW
+    target_role: continuum_internal_rep
+    gauge_correction: &id001
+      kind: none
+    production_use: exactify_to_continuum_internal_rep
+    antiunitary_convention: none
+    spin_map: from_kp_symm_output
+    valley_map: identity
+  - name: C2T
+    operation: C2T
+    matrix_file: C2T_low_raw.npy
+    antiunitary: true
+    k_map:
+      type: reflection
+      axis_deg: 180.0
+    q_map:
+      type: reflection
+      axis_deg: 180.0
+    sector_map: layer_exchange
+    source_matrix_role: raw_h_sewing_action
+    source_gauge: raw_saved_TAPW
+    target_role: continuum_internal_rep
+    gauge_correction: *id001
+    production_use: exactify_to_continuum_internal_rep
+    antiunitary_convention: U_K
+    spin_map: from_kp_symm_output
+    valley_map: identity
+  production_use: exactify_to_continuum_internal_rep
+  exactification:
+    support_source: geometry
+    reject_if_off_support_rel_gt: 3.0e-06
+    reject_if_amplitude_deviation_gt: 0.02
+    operations:
+      C3z:
+        support_mode: monomial
+        power: 3
+        central_phase: -1
+        allowed_roots: sixth_roots_cube_minus_one
+        phase_classes: global
+        action_candidates:
+        - k_map:
+            type: rotation
+            angle_deg: 120.0
+            in_model_frame: true
+          q_map:
+            type: rotation
+            angle_deg: 120.0
+          sector_map: identity
+          antiunitary: false
+      C2T:
+        support_mode: block
+        power: 2
+        central_phase: 1
+        action_candidates:
+        - k_map:
+            type: reflection
+            axis_deg: 180.0
+            in_model_frame: true
+          q_map:
+            type: reflection
+            axis_deg: 180.0
+          sector_map: layer_exchange
+          antiunitary: true
+coordinate_frame:
+  rotation_deg: 210
+kpath:
+  file: ../../../../tapw/KPATH.in
+  tmat:
+  - - 52.4951056667
+    - 0.0
+    - 0.0
+  - - -26.247552834
+    - 45.4620950821
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 27.0
+model:
+  n_orb:
+  - 1
+  - 1
+  bM:
+    bM1:
+    - 0.13820712168748003
+    - 0.0
+    bM2:
+    - 0.06910356084374003
+    - 0.11969087836528494
+  harmonics:
+    intra:
+      1: zero
+      2: -bM1
+      3: bM1 + bM2
+      4: 2*bM1
+    inter:
+      1: q1
+      2: -2*q1
+      3: q1 + bM2
+      4: 2*bM2 + q3
+  max_order:
+    Kinect: 6
+    intra: 4
+    inter: 4
+  term_templates:
+  - name: notebook_kinetic_layer1
+    source: diagonal_kp
+    sector_pairs:
+    - - 1
+      - 1
+    orbital_pairs: diagonal
+    max_order: 6
+    monomial_constraints:
+      exclude_m_sum_zero: true
+      difference_mod: 3
+      difference_residue: 0
+      require_mz_ge_mz_star: true
+  - name: notebook_onsite_layer1
+    source: onsite
+    sector_pairs:
+    - - 1
+      - 1
+    orbital_pairs: diagonal
+    max_order: 0
+  - name: notebook_intra_layer1_nonzero
+    source: moire_potential
+    sector_pairs:
+    - - 1
+      - 1
+    orbital_pairs: all
+    harmonics:
+      kind: intra
+      indices:
+      - 2
+      - 3
+      - 4
+    max_order: 4
+  - name: notebook_inter_21_positive
+    source: tunneling
+    sector_pairs:
+    - - 2
+      - 1
+    orbital_pairs: all
+    harmonics:
+      kind: inter
+      indices:
+      - 1
+      - 2
+      - 3
+      - 4
+    max_order: 4
+  - name: notebook_inter_21_negative
+    source: tunneling
+    sector_pairs:
+    - - 2
+      - 1
+    orbital_pairs: all
+    harmonics:
+      kind: inter
+      indices:
+      - 2
+      - 3
+      - 4
+      sign: -1
+    max_order: 4
+  symmetry_map:
+    Kinect:
+    - name: C2T
+      antiunitary: true
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: identity
+      model_action_profile: K_notebook
+    Onsite:
+    - name: C2T
+      antiunitary: true
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: identity
+      model_action_profile: K_notebook
+    intra:
+    - name: C3z
+      antiunitary: false
+      k_map:
+        type: rotation
+        angle_deg: 120.0
+      q_map:
+        type: rotation
+        angle_deg: 120.0
+      sector_map: identity
+    - name: C2T
+      antiunitary: true
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: identity
+      model_action_profile: K_notebook
+    inter:
+    - name: C3z
+      antiunitary: false
+      k_map:
+        type: rotation
+        angle_deg: 120.0
+      q_map:
+        type: rotation
+        angle_deg: 120.0
+      sector_map: identity
+    - name: C2T
+      antiunitary: true
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: identity
+      model_action_profile: K_notebook
+fit:
+  indices:
+  - 0
+  coeff_tol: 1.0e-06
+bands:
+  compare_to_heff: true
+  band_slice:
+  - 46
+  - 54
+  plot:
+    top_bands: 8
+    align: top
+    figsize:
+    - 3.0
+    - 5.8
+output:
+  dir: ../../../outputs/model/production/mote2_3.89_K1
+  save_coefficients: true
+  verbose: false
+  progress: true

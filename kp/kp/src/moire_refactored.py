@@ -79,12 +79,44 @@ from tqdm import tqdm
 
 # Plotting is optional; imports are kept local to plotting section when possible.
 
+
+def _summarize_symmetry_ops(symm: Sequence[Mapping[str, Any]] | Sequence[Any]) -> str:
+    names: list[str] = []
+    for op in symm:
+        if isinstance(op, Mapping):
+            name = str(op.get("name", op.get("operation", "?")))
+            matrix_kind = op.get("matrix_kind")
+            source = op.get("source")
+            suffix = []
+            if source:
+                suffix.append(str(source))
+            if matrix_kind:
+                suffix.append(str(matrix_kind))
+            if suffix:
+                name = f"{name}({','.join(suffix)})"
+            names.append(name)
+        else:
+            names.append(str(op))
+    return "[" + ", ".join(names) + "]"
+
+
+def _summarize_coefficients(values: Sequence[Any] | np.ndarray) -> str:
+    arr = np.asarray(values, dtype=np.complex128).ravel()
+    if arr.size == 0:
+        return "count=0"
+    abs_arr = np.abs(arr)
+    return (
+        f"count={arr.size}, nonzero={int(np.count_nonzero(abs_arr > 0.0))}, "
+        f"max_abs={float(np.max(abs_arr)):.6g}, median_abs={float(np.median(abs_arr)):.6g}"
+    )
+
 # =============================================================================
 # >>> SECTION: 02. Constants & Global Toggles
 # =============================================================================
 # >>> SPLIT_HINT: move this section into constants.py
 
 hartree = 27.2113845
+CANONICAL_P_TOL = 1.0e-10
 
 # Symmetrization caches (shared by ContinuumModelBuilder static methods).
 # Key structure is internal; safe to clear between runs by calling `clear_symmetry_caches()`.
@@ -613,7 +645,9 @@ class ContinuumTermKey:
     
     def __post_init__(self):
         # 但 dataclass(frozen=True) 下不能直接赋值；可以用 object.__setattr__
-        object.__setattr__(self, 'p', (float(self.p[0]), float(self.p[1])))
+        p0 = round(float(self.p[0]) / CANONICAL_P_TOL) * CANONICAL_P_TOL
+        p1 = round(float(self.p[1]) / CANONICAL_P_TOL) * CANONICAL_P_TOL
+        object.__setattr__(self, 'p', (p0, p1))
 
 @dataclass
 class ContinuumTerm:
@@ -635,6 +669,7 @@ class ContinuumTerm:
     active: bool = False
     tag: str = "intra"
     symmetry_ops: List[Dict[str, Any]] = field(default_factory=list)
+    registry_metadata: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class MoireConfig:
@@ -664,6 +699,11 @@ class MoireConfig:
     inter_harmonics_map: Dict[int, np.ndarray] = field(default_factory=dict)
     max_order: Dict[str, int] = field(default_factory=lambda: {"Kinect": 10, "intra": 4, "inter": 4})
     symmetry_map: Dict[str, List[Dict[str, Any]]] = field(default_factory=dict)
+    symmetry_gen: Any | None = None
+    symmetry_source_metadata: Dict[str, Any] = field(default_factory=dict)
+    sectors: List[Dict[str, Any]] = field(default_factory=list)
+    term_templates: List[Dict[str, Any]] = field(default_factory=list)
+    bM_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     # --- k sampling / fitting ---
     kpoints: np.ndarray | None = None
@@ -731,10 +771,11 @@ class SymmetryGenerator:
     根据输入的 Q 数据生成对称操作矩阵，其维度与基函数矩阵一致。
     """
 
-    def __init__(self, Qlayer1: np.ndarray, Qlayer2: np.ndarray, nlow_state: List[int]):
+    def __init__(self, Qlayer1: np.ndarray, Qlayer2: np.ndarray, nlow_state: List[int], basis_template: str | None = None):
         self.Qlayer1 = Qlayer1
         self.Qlayer2 = Qlayer2
         self.nlow_state = nlow_state
+        self.basis_template = basis_template
         self.Q_set = np.concatenate([Qlayer1, Qlayer2], axis=0)
 
         # 预计算所有操作矩阵并缓存
@@ -750,10 +791,7 @@ class SymmetryGenerator:
         for params in range(3):
             self.cached_operators[f'C3z_{params}'] = self.get_C3z_operator(params)
         
-        # 计算C2yT矩阵
-        self.cached_operators['C2yT'] = self.get_C2yT_operator()
-        # 计算C2zT矩阵
-        self.cached_operators['C2zT'] = self.get_C2zT_operator()
+        self.cached_operators['C2T'] = self.get_C2T_operator()
 
     def rotation_matrix(self, theta: float) -> np.ndarray:
         """生成二维旋转矩阵"""
@@ -765,26 +803,16 @@ class SymmetryGenerator:
         生成 C3z 对称操作的投影矩阵（示例代码，维度与各层 Q 数和轨道数匹配）
         这里利用输入的 Qlayer 与 nlow_state 生成 block_diag 矩阵
         """
+        if self.basis_template not in {"Gamma_four_orbital", "K_notebook"}:
+            raise ValueError("C3z toy generator requires Gamma_four_orbital or K_notebook basis_template; use kp_symm_output for production.")
+        gamma_template_phases = [np.exp(1j * np.pi / 3)]
         q1norm = np.max(np.linalg.norm(self.Q_set, axis=1)) - np.min(np.linalg.norm(self.Q_set, axis=1))
-        value = np.exp(-1j*np.pi/3)
-        value = 1
         C3_matrix = []
         for i in range(2):
             Qlayer = self.Qlayer1 if i == 0 else self.Qlayer2
             num_low_orb = self.nlow_state[i]
             for j in range(num_low_orb):
-                if j%2 == 0:
-                    value = np.exp(1j*np.pi/3)
-                    value = 1
-                    value = np.exp(1j*np.pi/3)
-                    
-                    # value = np.exp(2j*np.pi/3)
-                else:
-                    value = np.exp(1j*np.pi/3)
-                    value = -1
-                    value = np.exp(1j*np.pi/3)
-                    
-                    # value = np.exp(2j*np.pi/3)
+                value = gamma_template_phases[j % len(gamma_template_phases)]
                 matrix = np.array([
                     [value if np.linalg.norm(ii - self.rotation_matrix(np.deg2rad(120)) @ jj) < q1norm/60 else 0
                      for jj in Qlayer]
@@ -833,6 +861,12 @@ class SymmetryGenerator:
         TR_proj_matrix : np.ndarray
             时间反演(自旋部分)在整个多层空间的投影矩阵（分块对角拼接）。
         """
+
+        if any(int(n) % 2 for n in self.nlow_state):
+            raise ValueError(
+                "TR toy generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
+                "for spinless effective TR use operation name T_eff with explicit matrix convention."
+            )
 
         # 先写好 i*sigma_y 在基 (down, up) 下的 2x2 矩阵：
         #   i*sigma_y = [[0, -1],
@@ -903,17 +937,46 @@ class SymmetryGenerator:
         TR_proj_matrix = scipy.linalg.block_diag(*T_blocks)
 
         return TR_proj_matrix
-    
-    def get_C2yT_operator(self) -> np.ndarray:
+
+    def get_time_reversal_matrix_effective(self) -> np.ndarray:
         """
-        生成 C2yT 对称操作的投影矩阵
-        这里利用反射矩阵 R_y = diag(1,-1)
+        Spinless effective time-reversal sewing matrix D for the antiunitary operator D K.
+
+        This matches Q -> -Q within each layer and keeps orbital labels fixed.
+        """
+        T_blocks = []
+        for i in range(2):
+            Qlayer = self.Qlayer1 if i == 0 else self.Qlayer2
+            nQ = len(Qlayer)
+            num_low_orb = int(self.nlow_state[i])
+            dim_layer = num_low_orb * nQ
+            T_matrix_layer = np.zeros((dim_layer, dim_layer), dtype=complex)
+
+            def idx(orb, q):
+                return orb * nQ + q
+
+            for orb_i in range(num_low_orb):
+                for q_i in range(nQ):
+                    matched = False
+                    for q_j in range(nQ):
+                        if np.sum(np.abs(Qlayer[q_i] + Qlayer[q_j])) < 1e-8:
+                            T_matrix_layer[idx(orb_i, q_i), idx(orb_i, q_j)] = 1.0
+                            matched = True
+                    if not matched:
+                        raise ValueError("T_eff toy generator requires Q -> -Q matching within each layer")
+            T_blocks.append(T_matrix_layer)
+
+        return scipy.linalg.block_diag(*T_blocks)
+    
+    def get_C2T_operator(self) -> np.ndarray:
+        """
+        Build the single-valley antiunitary twofold action matrix.
         """
         Qset = self.Q_set
         q1norm = np.min(np.linalg.norm(Qset, axis=1))
         mat = np.zeros((len(Qset), len(Qset)), dtype=complex)
         if self.nlow_state[0] != self.nlow_state[1] or len(self.Qlayer1) != len(self.Qlayer2) or self.nlow_state[0] != 1:
-            raise ValueError("Different number of low energy states or Q points or not 1 low energy state per layer. Not supported C2yT.")
+            raise ValueError("Different number of low energy states or Q points or not 1 low energy state per layer. Not supported C2T.")
         
         for i in range(2):
             Qlayer_i = self.Qlayer1 if i == 0 else self.Qlayer2
@@ -924,33 +987,14 @@ class SymmetryGenerator:
                     for jj in range(len(Qlayer_j)):
                         if np.linalg.norm(Qlayer_i[ii] - R_y @ Qlayer_j[jj]) < q1norm/10:
                             mat[ii + i*len(Qlayer_i), jj + j*len(Qlayer_j)] = 1
-        C2yT_proj = mat.T
-        return C2yT_proj
+        return mat.T
 
-    def get_C2zT_operator(self) -> np.ndarray:
+    def get_C2_operator(self, qtol: float | None = None) -> np.ndarray:
         """
-        生成 C2zT 对称操作的投影矩阵
-        这里简单取负单位阵作为示例（占位符），但必须保证维度与当前基底一致：
-        对第 i 层，基底维度为 len(Qlayer_i) * nlow_state[i]。
-        """
-        C2zT_matrices = []
-        for i in range(2):
-            Qlayer = self.Qlayer1 if i == 0 else self.Qlayer2
-            n = len(Qlayer)
-            dim_layer = n * int(self.nlow_state[i])
-            C2zT_matrices.append(-np.eye(dim_layer, dtype=complex))
-        C2zT_proj = scipy.linalg.block_diag(*C2zT_matrices)
-        return C2zT_proj
+        Construct a twofold layer-exchange unitary matrix.
 
-
-    def get_C2x_operator(self, qtol: float | None = None) -> np.ndarray:
-        """
-        构造 C2x（绕 x 轴 180°）的酉算符矩阵。
-
-        作用规则（与上次说明一致）：
-        • 交换两层（z→-z）；
-        • 面内倒格矢/动量变换： (kx, ky) → (kx, -ky)；
-        • 轨道对 (p-↑, p+↓) 做 σ_x 交换（不加 -i，相当于令 C2x^2 = I，便于数值检查）。
+        The in-plane action is supplied as metadata by configured models; this
+        fallback generator keeps the historical layer/orbital matrix template.
 
         基底顺序假定与 get_C3z_operator 一致：
         [ layer1: orb0(Qs), orb1(Qs), ..., layer2: orb0(Qs), orb1(Qs), ... ]，
@@ -963,8 +1007,8 @@ class SymmetryGenerator:
 
         返回
         ----
-        U_C2x : np.ndarray (complex)
-            整个 2 层 × 轨道 × Q 空间上的 C2x 表示矩阵（酉矩阵，且近似满足 U^2 = I）。
+        U_C2 : np.ndarray (complex)
+            The two-sector representation matrix.
         """
         import numpy as np
         import scipy.linalg
@@ -981,6 +1025,8 @@ class SymmetryGenerator:
             raise ValueError(f"两层的 Q 数不一致: {nQ1} vs {nQ2}")
 
         m, nQ = m1, nQ1
+        if self.basis_template not in {"Gamma_four_orbital", "M_spinless_layer_exchange"}:
+            raise ValueError("C2 toy generator requires Gamma_four_orbital or M_spinless_layer_exchange basis_template")
 
         if qtol is None:
             qset = getattr(self, "Q_set", None)
@@ -990,9 +1036,8 @@ class SymmetryGenerator:
                 qnorms = np.linalg.norm(np.asarray(qset, dtype=float), axis=1)
             qtol = (np.max(qnorms) - np.min(qnorms)) / 60.0 if len(qnorms) else 1e-12
 
-        # 平面上的 C2x: (kx, ky) → (kx, -ky)
-        C2x_inplane = np.array([[1.0, 0.0],
-                                [0.0, -1.0]], dtype=float)
+        c2_inplane = np.array([[1.0, 0.0],
+                               [0.0, -1.0]], dtype=float)
 
         # ---- 构造层间 Q 的置换矩阵：P12 把 layer2 的 Q 旋到 layer1 ----
         def build_perm(Q_src, Q_tgt, A, tol):
@@ -1006,7 +1051,15 @@ class SymmetryGenerator:
                     P[i, j] = 1.0
             return P
 
-        P12 = build_perm(Q1, Q2, C2x_inplane, qtol)  # map layer2 → layer1
+        P12 = build_perm(Q1, Q2, c2_inplane, qtol)  # map layer2 to layer1
+
+        if self.basis_template == "M_spinless_layer_exchange":
+            if m != 1:
+                raise ValueError("M_spinless_layer_exchange C2 toy template requires one low-energy orbital per layer")
+            M12 = P12
+            M21 = P12.conj().T
+            Z = np.zeros((nQ, nQ), dtype=complex)
+            return np.block([[Z, M12], [M21, Z]])
 
         # ---- 轨道内部的 σ_x 交换（按相邻成对：0↔1, 2↔3, ...）----
         if m % 2 != 0:
@@ -1023,16 +1076,15 @@ class SymmetryGenerator:
         Z = np.zeros((m*nQ, m*nQ), dtype=complex)
         # top = np.hstack([Z,   M12])
         # bot = np.hstack([M21, Z  ])
-        # U_C2x = np.vstack([top, bot])
-        U_C2x = np.block([[Z, M12], 
-                          [M21, Z]])
+        U_C2 = np.block([[Z, M12],
+                         [M21, Z]])
 
         # （可选）数值自检：U^†U≈I, U^2≈I
-        # I_full = np.eye(U_C2x.shape[0], dtype=complex)
-        # assert np.allclose(U_C2x.conj().T @ U_C2x, I_full, atol=1e-10)
-        # assert np.allclose(U_C2x @ U_C2x, I_full, atol=1e-10)
+        # I_full = np.eye(U_C2.shape[0], dtype=complex)
+        # assert np.allclose(U_C2.conj().T @ U_C2, I_full, atol=1e-10)
+        # assert np.allclose(U_C2 @ U_C2, I_full, atol=1e-10)
 
-        return U_C2x
+        return U_C2
 
 
     def get_operator(self, name: str, params: Any) -> np.ndarray:
@@ -1049,14 +1101,18 @@ class SymmetryGenerator:
         if operator_name not in self.cached_operators:
             if name == "C3z":
                 D = self.get_C3z_operator(params)
-            elif name == "C2yT":
-                D = self.get_C2yT_operator()
-            elif name == "C2zT":
-                D = self.get_C2zT_operator()
+            elif name == "C2T":
+                D = self.get_C2T_operator()
             elif name == "TR":
                 D = self.get_time_reversal_matrix()
-            elif name == "C2x":
-                D = self.get_C2x_operator()
+            elif name == "T_eff":
+                D = self.get_time_reversal_matrix_effective()
+            elif name == "C2":
+                D = self.get_C2_operator()
+            elif name == "C2_eff":
+                D = self.get_C2_operator()
+            elif name == "C2T_eff":
+                D = self.get_C2_operator() @ self.get_time_reversal_matrix_effective()
             else:
                 raise ValueError(f"Unknown symmetry operation: {name}")
             self.cached_operators[operator_name] = D
@@ -1077,13 +1133,25 @@ class ContinuumModel:
     def __init__(self):
         self.terms: Dict[ContinuumTermKey, ContinuumTerm] = {}
     
-    def add_term(self, key: ContinuumTermKey, Y_basis: Callable[[np.ndarray], np.ndarray],
-                 tag: str = "intra", symmetry_ops: List[Dict[str, Any]] = None):
+    def add_term(
+        self,
+        key: ContinuumTermKey,
+        Y_basis: Callable[[np.ndarray], np.ndarray],
+        tag: str = "intra",
+        symmetry_ops: List[Dict[str, Any]] = None,
+        registry_metadata: Dict[str, Any] | None = None,
+    ):
         if symmetry_ops is None:
             symmetry_ops = []
         if key in self.terms:
             print(f"Warning: Term {key} already exists, overwriting.")
-        self.terms[key] = ContinuumTerm(key, Y_basis, tag=tag, symmetry_ops=symmetry_ops)
+        self.terms[key] = ContinuumTerm(
+            key,
+            Y_basis,
+            tag=tag,
+            symmetry_ops=symmetry_ops,
+            registry_metadata=dict(registry_metadata or {}),
+        )
     
     def update_term_coefficients(self, key: ContinuumTermKey, r_real: complex, r_imag: complex):
         if key not in self.terms:
@@ -1139,11 +1207,12 @@ class ContinuumModelBuilder:
     _SYMMETRIZE_COMPOSED_OP_VALIDATED = SYMMETRIZE_COMPOSED_OP_VALIDATED
     _SYMMETRIZE_ORBIT_CACHE: Dict[Tuple[int, Tuple[float, float], Tuple[Tuple[str, Any], ...]], Any] = {}
     _KZ_POW_CACHE: Dict[Tuple[int, Tuple[float, float]], np.ndarray] = {}
-    _SYMM_ANTIUNITARY_OPS = frozenset({"TR", "C2yT", "C2zT"})
-    _SYMM_UNITARY_OPS = frozenset({"C2x", "C2y"})
+    _SYMM_ANTIUNITARY_OPS = frozenset({"TR", "T_eff", "C2T", "C2T_eff"})
+    _SYMM_UNITARY_OPS = frozenset({"C2", "C2_eff"})
     _SYMM_VALIDATE_MONOMIAL = True
     _SYMM_VALIDATE_SPARSE = True
     _SYMM_USE_SPARSE_BASIS = True
+    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-6
     _SYMM_SPARSE_VALIDATED = False
     
     def __init__(self, Q_set1: np.ndarray, Q_set2: np.ndarray,
@@ -1153,7 +1222,9 @@ class ContinuumModelBuilder:
                  inter_harmonics_map: Dict[int, np.ndarray],
                  max_order: Dict[str, int],
                  symmetry_gen: SymmetryGenerator,
-                 symmetry_map: Dict[str, List[Dict[str, Any]]] = None):
+                 symmetry_map: Dict[str, List[Dict[str, Any]]] = None,
+                 term_templates: List[Dict[str, Any]] | None = None,
+                 sectors: List[Dict[str, Any]] | None = None):
         self.Q_set1 = Q_set1
         self.Q_set2 = Q_set2
         self.n_orb1 = n_orb1
@@ -1164,17 +1235,57 @@ class ContinuumModelBuilder:
         self.inter_harmonics_map = inter_harmonics_map
         self.max_order = max_order
         self.symmetry_gen = symmetry_gen
+        self.term_templates = list(term_templates or [])
+        self.sectors = list(sectors or [
+            {"name": "L1", "qset": "qset1", "n_orb": int(n_orb1)},
+            {"name": "L2", "qset": "qset2", "n_orb": int(n_orb2)},
+        ])
+        self._sector_name_to_slot = self._build_sector_name_to_slot(self.sectors)
         # 如果没有传入 symmetry_map，则使用默认设置
-        self.symmetry_map = symmetry_map if symmetry_map is not None else {
-            "Onsite": [{"name": "C3z", "params": 1}],
-            "Kinect": [{"name": "C3z", "params": 1}, {"name": "C3z", "params": 2},
-                       {"name": "C2yT"}, {"name": "C2zT"}],
-            "intra":  [{"name": "C3z", "params": 1}, {"name": "C3z", "params": 2},
-                       {"name": "C2yT"}, {"name": "C2zT"}],
-            "inter":  [{"name": "C3z", "params": 1}, {"name": "C3z", "params": 2},
-                       {"name": "C2yT"}, {"name": "C2zT"}]
-        }
+        self.symmetry_map = symmetry_map if symmetry_map is not None else {"Onsite": [], "Kinect": [], "intra": [], "inter": []}
         self.model = ContinuumModel()
+
+    @staticmethod
+    def _build_sector_name_to_slot(sectors: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
+        mapping: Dict[str, int] = {}
+        for sector in sectors:
+            name = str(sector.get("name"))
+            qset = str(sector.get("qset", ""))
+            if qset == "qset1":
+                mapping[name] = 1
+            elif qset == "qset2":
+                mapping[name] = 2
+            else:
+                raise ValueError(f"Unsupported sector qset {qset!r}; expected qset1 or qset2")
+        return mapping
+
+    @staticmethod
+    def _normalised_sector_map(raw: Any, sector_names: Sequence[str] | None = None) -> dict[str, str]:
+        if isinstance(raw, Mapping):
+            return {str(k): str(v) for k, v in raw.items()}
+        if isinstance(raw, str):
+            if raw == "layer_exchange":
+                if sector_names and len(sector_names) == 2:
+                    return {str(sector_names[0]): str(sector_names[1]), str(sector_names[1]): str(sector_names[0])}
+                return {"L1": "L2", "L2": "L1"}
+            if raw == "identity":
+                return {}
+        return {}
+
+    @staticmethod
+    def _uses_full_bilayer_block(sym_ops: Sequence[Mapping[str, Any]], sector_names: Sequence[str] | None = None) -> bool:
+        for sym in sym_ops:
+            if not isinstance(sym, Mapping):
+                continue
+            name = str(sym.get("name", ""))
+            antiunitary = bool(sym.get("antiunitary", name in {"TR", "C2T", "C2T_eff"}))
+            if not antiunitary:
+                continue
+            sector_map = ContinuumModelBuilder._normalised_sector_map(sym.get("sector_map", "identity"), sector_names)
+            names = list(sector_names or ["L1", "L2"])
+            if len(names) == 2 and sector_map.get(names[0]) == names[1] and sector_map.get(names[1]) == names[0]:
+                return True
+        return False
     
     @staticmethod
     def make_Y_basis_function_(key: ContinuumTermKey,
@@ -1363,26 +1474,38 @@ class ContinuumModelBuilder:
             raise ValueError("Layer must be 1 or 2.")
 
     @staticmethod
-    def _extract_monomial_matrix(op_matrix: np.ndarray, tol: float = 1e-12) -> tuple[np.ndarray, np.ndarray] | None:
+    def _extract_monomial_matrix(op_matrix: np.ndarray, tol: float | None = None) -> tuple[np.ndarray, np.ndarray] | None:
         """
         若 op_matrix 为 monomial matrix（每行/每列仅一个非零元），返回 (perm, vals)：
         - perm[i] = 第 i 行非零元所在列
         - vals[i] = op_matrix[i, perm[i]]
-        否则返回 None（自动回退到稠密乘法，保证结果正确）。
+        TAPW/kp 投影后的矩阵可能带很小的数值泄漏。只有当矩阵相对 Frobenius
+        残差足够接近 monomial 时才 snap 到 monomial 快路径；真正 dense 的表示
+        会返回 None 并回退到稠密乘法。
         """
+        if tol is None:
+            tol = ContinuumModelBuilder._SYMM_MONOMIAL_CLEANUP_TOL
         if op_matrix.ndim != 2 or op_matrix.shape[0] != op_matrix.shape[1]:
             return None
         n = op_matrix.shape[0]
         abs_op = np.abs(op_matrix)
-        mask = abs_op > tol
-        if not np.all(np.sum(mask, axis=1) == 1) or not np.all(np.sum(mask, axis=0) == 1):
-            return None
         perm = np.argmax(abs_op, axis=1).astype(int)
+        if len(set(int(index) for index in perm)) != n:
+            return None
         vals = op_matrix[np.arange(n), perm]
+        if np.any(np.abs(vals) <= tol):
+            return None
+        snapped = np.zeros_like(op_matrix)
+        snapped[np.arange(n), perm] = vals
+        denom = float(np.linalg.norm(op_matrix))
+        if denom == 0.0:
+            return None
+        if float(np.linalg.norm(op_matrix - snapped) / denom) > tol:
+            return None
         return perm, vals
 
     @staticmethod
-    def _get_monomial_op(symmetry_gen: Any, op_name: str, param: Any, tol: float = 1e-12) -> tuple[np.ndarray, np.ndarray] | None:
+    def _get_monomial_op(symmetry_gen: Any, op_name: str, param: Any, tol: float | None = None) -> tuple[np.ndarray, np.ndarray] | None:
         cache_key = (id(symmetry_gen), op_name, param)
         cache = ContinuumModelBuilder._SYMMETRIZE_MONOMIAL_OP_CACHE
         if cache_key in cache:
@@ -1423,7 +1546,7 @@ class ContinuumModelBuilder:
             fast = vals[:, None] * Y0[perm, :]
             fast = fast[:, perm] * np.conjugate(vals)[None, :]
 
-        ok = np.allclose(fast, dense, atol=1e-10, rtol=0.0)
+        ok = np.allclose(fast, dense, atol=max(1.0e-10, 20.0 * ContinuumModelBuilder._SYMM_MONOMIAL_CLEANUP_TOL), rtol=0.0)
         if not ok:
             ContinuumModelBuilder._SYMMETRIZE_MONOMIAL_OP_CACHE[validate_key] = None
         validated.add(validate_key)
@@ -1551,28 +1674,38 @@ class ContinuumModelBuilder:
         Y_fast = vals[:, None] * Y_fast[perm, :]
         Y_fast = Y_fast[:, perm] * inv_vals[None, :]
 
-        ok = np.allclose(Y_fast, Y_seq, atol=1e-10, rtol=0.0)
+        ok = np.allclose(Y_fast, Y_seq, atol=max(1.0e-10, 20.0 * ContinuumModelBuilder._SYMM_MONOMIAL_CLEANUP_TOL), rtol=0.0)
         if not ok:
             ContinuumModelBuilder._SYMMETRIZE_COMPOSED_OP_CACHE[validate_key] = None
         return ok
 
     @staticmethod
-    def _generate_symmetry_orbit(base_k: np.ndarray, sym_ops: List[Dict[str, Any]]) -> Tuple[List[np.ndarray], List[List[Tuple[str, Any]]]]:
-        def rot2d(kvec, theta_deg):
-            theta = np.deg2rad(theta_deg)
-            return np.array([np.cos(theta) * kvec[0] - np.sin(theta) * kvec[1],
-                             np.sin(theta) * kvec[0] + np.cos(theta) * kvec[1]])
+    def _apply_k_map_to_vector(kvec: np.ndarray, operation: Mapping[str, Any], *, power: int | None = None) -> np.ndarray:
+        name = str(operation.get("name", ""))
+        k_map = operation.get("k_map")
+        if not isinstance(k_map, Mapping):
+            raise ValueError(f"Operation {name!r} requires explicit k_map metadata")
+        map_type = str(k_map.get("type", "")).lower()
+        if map_type == "rotation":
+            angle = float(k_map.get("angle_deg", 0.0))
+            step = 1 if power is None else int(power)
+            return rot(np.asarray(kvec, dtype=float), -angle * step)
+        if map_type == "reflection":
+            axis_deg = float(k_map.get("axis_deg", 0.0))
+            theta = np.deg2rad(axis_deg)
+            axis = np.array([np.cos(theta), np.sin(theta)], dtype=float)
+            vec = np.asarray(kvec, dtype=float)
+            return 2.0 * axis * float(np.dot(axis, vec)) - vec
+        if map_type == "negation":
+            return -np.asarray(kvec, dtype=float)
+        if map_type == "identity":
+            return np.asarray(kvec, dtype=float)
+        raise ValueError(f"Unsupported k_map.type {k_map.get('type')!r} for operation {name!r}")
 
+    @staticmethod
+    def _generate_symmetry_orbit(base_k: np.ndarray, sym_ops: List[Dict[str, Any]]) -> Tuple[List[np.ndarray], List[List[Tuple[str, Any]]]]:
         points = [base_k.copy()]
         op_seqs: List[List[Tuple[str, Any]]] = [[]]
-
-        op_actions = {
-            "C3z": lambda kk, n: rot2d(kk, -120 * n),
-            "C2yT": lambda kk: np.array([kk[0], -kk[1]]),
-            "C2x": lambda kk: np.array([kk[0], -kk[1]]),
-            "C2zT": lambda kk: -kk,
-            "TR": lambda kk: -kk,
-        }
 
         for op in sym_ops:
             op_name = op["name"]
@@ -1583,10 +1716,10 @@ class ContinuumModelBuilder:
                     continue
                 if op_name == "C3z":
                     for n in (1, 2):
-                        new_pts.append(op_actions[op_name](pt, n))
+                        new_pts.append(ContinuumModelBuilder._apply_k_map_to_vector(pt, op, power=n))
                         new_ops.append(seq + [(op_name, n)])
                 else:
-                    new_pts.append(op_actions[op_name](pt))
+                    new_pts.append(ContinuumModelBuilder._apply_k_map_to_vector(pt, op))
                     new_ops.append(seq + [(op_name, None)])
             points += new_pts
             op_seqs += new_ops
@@ -1608,7 +1741,14 @@ class ContinuumModelBuilder:
         - is_anti: 该 orbit 元素对应的 antiunitary 总奇偶（用于 iY 的符号与统计）
         """
         k_key = tuple(float(x) for x in k)
-        sym_ops_key = tuple((op["name"], op.get("params", None)) for op in sym_ops)
+        sym_ops_key = tuple(
+            (
+                op["name"],
+                op.get("params", None),
+                json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
+            )
+            for op in sym_ops
+        )
         cache_key = (id(symmetry_gen), k_key, sym_ops_key)
         cached = ContinuumModelBuilder._SYMMETRIZE_ORBIT_CACHE.get(cache_key)
         if cached is not None:
@@ -1663,7 +1803,14 @@ class ContinuumModelBuilder:
         if use_cache:
             Y_id = get_function_hash(Y_basis)
             k_key = tuple(float(x) for x in k)
-            sym_ops_key = tuple((op["name"], op.get("params", None)) for op in sym_ops)
+            sym_ops_key = tuple(
+                (
+                    op["name"],
+                    op.get("params", None),
+                    json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
+                )
+                for op in sym_ops
+            )
             term_key = None
             if isinstance(term, ContinuumTerm) and term.key is not None:
                 term_key = (
@@ -1761,7 +1908,14 @@ class ContinuumModelBuilder:
         if use_cache:
             Y_id = get_function_hash(Y_basis)
             k_key = tuple(float(x) for x in k)
-            sym_ops_key = tuple((op["name"], op.get("params", None)) for op in sym_ops)
+            sym_ops_key = tuple(
+                (
+                    op["name"],
+                    op.get("params", None),
+                    json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
+                )
+                for op in sym_ops
+            )
             term_key = None
             if isinstance(term, ContinuumTerm) and term.key is not None:
                 term_key = (
@@ -2066,9 +2220,8 @@ class ContinuumModelBuilder:
             # 定义各对称操作对应的 k 变换
             op_actions = {
                 'C3z': lambda k, n: rot(k, -120*n),
-                'C2yT': lambda k: np.array([k[0], -k[1]]),
-                'C2x': lambda k: np.array([-k[0], k[1]]),
-                'C2zT': lambda k: -k,
+                'C2T': lambda k: np.array([k[0], -k[1]]),
+                'C2': lambda k: np.array([-k[0], k[1]]),
                 'TR': lambda k: -k
             }
             
@@ -2108,7 +2261,7 @@ class ContinuumModelBuilder:
                 if op_name == 'C3z':
                     D = sparse.csr_matrix(symmetry_gen.get_operator(op_name, param))
                     Y = D @ Y @ D.getH()
-                elif op_name in ['C2yT', 'C2zT','TR']:
+                elif op_name in ['C2T', 'TR']:
                     D = sparse.csr_matrix(symmetry_gen.get_operator(op_name, param))
                     Y = D @ Y.conjugate() @ D.getH()
                 else:
@@ -2303,7 +2456,7 @@ class ContinuumModelBuilder:
                         coeffs.append(coeffs_i)
                     
                 group_coeffs[part] = coeffs
-                print(f"Updated {part} coefficients for tag '{tag}': {coeffs}")
+                print(f"Updated {part} coefficients for tag '{tag}': {_summarize_coefficients(coeffs)}")
             coeffs_by_tag[tag] = group_coeffs
         return coeffs_by_tag
 
@@ -2338,18 +2491,17 @@ class ContinuumModelBuilder:
             Qlayer = Q_set1 if l1 == 1 else Q_set2
             # 若是 onsite 或 Kinect 项，则对每个 k 点对应的子块进行校正
             if tag in ("Kinect"): # l1 = l2 and orb1 = orb2
-                # C2yT_flag = "C2yT" in self.symmetry_map[tag]
-                # 判断是否有 C2yT 对称性
-                C2yT_flag = any(sym["name"] == "C2yT" for sym in self.symmetry_map[tag])
+                exchange_antiunitary_flag = ContinuumModelBuilder._uses_full_bilayer_block(
+                    self.symmetry_map[tag],
+                    [str(sector.get("name")) for sector in self.sectors],
+                )
 
-                # print(f"tag: {tag}, C2yT_flag: {C2yT_flag}, {self.symmetry_map[tag]}")
-                
                 for ik, _ in enumerate(k_points):
                     # 计算子块索引（这里假设每个 k 点 block 的尺寸为 block_dim）
                     # block_dim = self.Q_set1.shape[0]*self.n_orb1 + self.Q_set2.shape[0]*self.n_orb2
                     # idx_start = ik * block_dim
                     # idx_end = (ik+1) * block_dim
-                    if C2yT_flag:
+                    if exchange_antiunitary_flag:
                         idx_start = ik * H_dim
                         idx_end = (ik+1) * H_dim
                     else:
@@ -2410,10 +2562,12 @@ class ContinuumModelBuilder:
             
             # 若是 Kinect 项，则对每个 k 点对应的子块进行校正
             if tag in ("Kinect",):
-                # 判断是否有 C2yT 对称性
-                C2yT_flag = any(sym["name"] == "C2yT" for sym in self.symmetry_map[tag])
+                exchange_antiunitary_flag = ContinuumModelBuilder._uses_full_bilayer_block(
+                    self.symmetry_map[tag],
+                    [str(sector.get("name")) for sector in self.sectors],
+                )
                 for ik, _ in enumerate(k_points):
-                    # if C2yT_flag:
+                    # if exchange_antiunitary_flag:
                         # idx_start = ik * H_dim
                         # idx_end = (ik + 1) * H_dim
                     # else:
@@ -2615,7 +2769,10 @@ class ContinuumModelBuilder:
                 continue
             coeffs_print = []
             if tag == "Onsite":
-                C2yT_flag = any(sym["name"] == "C2yT" for sym in self.symmetry_map[tag])
+                exchange_antiunitary_flag = ContinuumModelBuilder._uses_full_bilayer_block(
+                    self.symmetry_map[tag],
+                    [str(sector.get("name")) for sector in self.sectors],
+                )
                 H_dim = len(Q_set1)*self.n_orb1 + len(Q_set2)*self.n_orb2
                 # 对于 onsite 项，直接使用 onsite 能量作为系数
                 coeffs = []
@@ -2628,13 +2785,13 @@ class ContinuumModelBuilder:
                     # orb1, orb2 = grp_keys[grp_idx].orbital_from, grp_keys[grp_idx].orbital_to
                     # n_orb1, n_orb2 = self.n_orb1, self.n_orb2
                     # Q_set1, Q_set2 = self.Q_set1, self.Q_set2
-                    # if C2yT_flag:
+                    # if exchange_antiunitary_flag:
                     #     idx_start = 0
                     #     idx_end = H_dim
                     # else:
                     #     idx_start = self.get_global_index(l1, 0, orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
                     #     idx_end = self.get_global_index(l1, len(Q_set1), orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
-                    block_dim = H_dim if C2yT_flag else len(Qlayer)
+                    block_dim = H_dim if exchange_antiunitary_flag else len(Qlayer)
                     # if idx_end < idx_start:
                     #     raise ValueError(f"Invalid index range: {idx_start} to {idx_end}")
                     print("sum abs of finalterms", [np.sum(np.abs(finalterm)) for finalterm in finalterms])
@@ -2665,7 +2822,7 @@ class ContinuumModelBuilder:
                     coeffs_print.append(r)
                     self.model.terms[keys[i]].r_value_real = r_real
                     self.model.terms[keys[i]].r_value_imag = r_imag
-            print(f"Updated coefficients for tag '{tag}': {coeffs_print}")
+            print(f"Updated coefficients for tag '{tag}': {_summarize_coefficients(coeffs_print)}")
             print("="*100)
             coeffs_by_tag[tag] = {"coeffs": np.array(coeffs)}
         return coeffs_by_tag
@@ -2792,7 +2949,11 @@ class ContinuumModelBuilder:
             #     continue
             symm = self.symmetry_map.get(tag, [])
             print("\n" + "="*100)
-            print(f"Processing tag '{tag}' with {len(keys)} terms of symmetry {symm}. Time: {time.strftime('%H:%M:%S', time.localtime())}")
+            print(
+                f"Processing tag '{tag}' with {len(keys)} terms, "
+                f"symmetry={_summarize_symmetry_ops(symm)}. "
+                f"Time: {time.strftime('%H:%M:%S', time.localtime())}"
+            )
             
             # 在当前 tag 组内按 (layer_from, layer_to, orbital_from, orbital_to) 分组
             subgroup_dict: Dict[Tuple[int, int, int, int], List[ContinuumTermKey]] = {}
@@ -2806,8 +2967,27 @@ class ContinuumModelBuilder:
             for subgroup, sub_keys in subgroup_dict.items():
                 print(f"  Processing subgroup {subgroup} with {len(sub_keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
                 # 获取正交化结果（同时处理 real 与 imag 部分）
-                grp_keys, initialterms, finalterms, includinglist = self.get_orthogonalized_terms_subset(sub_keys, k_points, tol=tol, tag=tag)
+                generation_modes = {
+                    str(self.model.terms[key].registry_metadata.get("generation_mode", "representation_invariant"))
+                    for key in sub_keys
+                }
+                orthogonalize_subset = self.get_orthogonalized_terms_subset
+                post_block_legacy_subset = False
+                if len(generation_modes) == 1 and generation_modes <= {"explicit_legacy", "notebook_compatibility"}:
+                    orthogonalize_subset = self.get_orthogonalized_terms_subset_old
+                    post_block_legacy_subset = True
+                grp_keys, initialterms, finalterms, includinglist = orthogonalize_subset(sub_keys, k_points, tol=tol, tag=tag)
+                if post_block_legacy_subset:
+                    initialterms = np.array(self.get_mat_blocks(list(initialterms), sub_keys[0], len(k_points)))
+                    finalterms = np.array(self.get_mat_blocks(list(finalterms), sub_keys[0], len(k_points)))
                 print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
+                if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
+                    for key in sub_keys:
+                        self.model.terms[key].r_value_real = 0.0
+                        self.model.terms[key].r_value_imag = 0.0
+                    coeffs_by_subgroup[subgroup] = np.array([], dtype=complex)
+                    print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
+                    continue
                 
                 coeffs_print = []
                 # heff_block = []
@@ -2823,7 +3003,6 @@ class ContinuumModelBuilder:
                     
                 # 对于 onsite 类型单独处理
                 if tag == "Onsite":
-                    # C2yT_flag = any(sym["name"] == "C2yT" for sym in self.symmetry_map[tag])
                     H_dim = len(self.Q_set1)*self.n_orb1 + len(self.Q_set2)*self.n_orb2
                     coeffs = []
                     Qlayer = self.Q_set1 if grp_keys[0].layer_from == 1 else self.Q_set2
@@ -2837,7 +3016,7 @@ class ContinuumModelBuilder:
                             idx_imag = includinglist.tolist().index(2*i+1)
                         except ValueError:
                             idx_imag = None
-                        # block_dim = H_dim if C2yT_flag else len(Qlayer)
+                        # block_dim = H_dim if exchange_antiunitary_flag else len(Qlayer)
                         block_dim = np.shape(heff_block)[0]
                         H_Kinect_list = []
                         for k in k_points:
@@ -2890,210 +3069,220 @@ class ContinuumModelBuilder:
                         coeffs_print.append(r)
                         self.model.terms[sub_keys[i]].r_value_real = r_real
                         self.model.terms[sub_keys[i]].r_value_imag = r_imag
-                print(f"  Updated coefficients for subgroup {subgroup}: {coeffs_print}")
+                print(f"  Updated coefficients for subgroup {subgroup}: {_summarize_coefficients(coeffs_print)}")
                 coeffs_by_subgroup[subgroup] = np.array(coeffs)
             print("="*100)
             coeffs_by_tag[tag] = coeffs_by_subgroup
         return coeffs_by_tag
 
 
+    def _default_term_templates(self) -> List[Dict[str, Any]]:
+        return [
+            {"name": "kinetic", "source": "diagonal_kp", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Kinect", 0)},
+            {"name": "intra", "source": "moire_potential", "sector_pairs": "same", "orbital_pairs": "all", "harmonics": "intra", "max_order": self.max_order.get("intra", 0)},
+            {"name": "inter", "source": "tunneling", "sector_pairs": [[2, 1], [1, 2]], "orbital_pairs": "all", "harmonics": "inter", "max_order": self.max_order.get("inter", 0)},
+        ]
+
+    def _sector_slot_from_ref(self, ref: Any) -> int:
+        if isinstance(ref, (int, np.integer)):
+            slot = int(ref)
+            if slot not in {1, 2}:
+                raise ValueError(f"sector reference must resolve to slot 1 or 2, got {slot}")
+            return slot
+        name = str(ref)
+        if name not in self._sector_name_to_slot:
+            raise ValueError(f"Unknown sector reference {name!r}; known sectors: {sorted(self._sector_name_to_slot)}")
+        return int(self._sector_name_to_slot[name])
+
+    def _sector_name_from_slot(self, slot: int) -> str:
+        for sector in self.sectors:
+            if self._sector_slot_from_ref(sector.get("name")) == int(slot):
+                return str(sector.get("name"))
+        return f"L{int(slot)}"
+
+    def _sector_pairs_from_template(self, template: Mapping[str, Any]) -> List[Tuple[int, int]]:
+        raw = template.get("sector_pairs", "same")
+        if raw == "same":
+            pairs: List[Tuple[int, int]] = []
+            seen: set[Tuple[int, int]] = set()
+            for sector in self.sectors:
+                slot = self._sector_slot_from_ref(sector.get("name"))
+                pair = (slot, slot)
+                if pair not in seen:
+                    seen.add(pair)
+                    pairs.append(pair)
+            return pairs
+        pairs = []
+        for pair in raw:
+            if len(pair) != 2:
+                raise ValueError(f"sector_pairs entries must have length 2, got {pair!r}")
+            pairs.append((self._sector_slot_from_ref(pair[0]), self._sector_slot_from_ref(pair[1])))
+        return pairs
+
+    def _orbital_pairs_from_template(self, template: Mapping[str, Any], l_from: int, l_to: int) -> List[Tuple[int, int]]:
+        n_from = self.n_orb1 if l_from == 1 else self.n_orb2
+        n_to = self.n_orb1 if l_to == 1 else self.n_orb2
+        raw = template.get("orbital_pairs", "all")
+        if raw == "diagonal":
+            return [(a, a) for a in range(1, min(n_from, n_to) + 1)]
+        if raw == "all":
+            return [(a, b) for a in range(1, n_from + 1) for b in range(1, n_to + 1)]
+        return [(int(pair[0]), int(pair[1])) for pair in raw]
+
+    def _harmonic_records_from_template(self, template: Mapping[str, Any]) -> List[Dict[str, Any]]:
+        source = str(template.get("source", ""))
+        if source in {"diagonal_kp", "onsite"}:
+            return [
+                {
+                    "id": None,
+                    "kind": "none",
+                    "vector": np.zeros(2, dtype=float),
+                    "source": "implicit_zero",
+                }
+            ]
+        raw = template.get("harmonics", "intra" if source == "moire_potential" else "inter")
+        sign = float(template.get("harmonic_sign", 1.0))
+        indices = None
+        if isinstance(raw, Mapping):
+            sign = float(raw.get("sign", sign))
+            indices = raw.get("indices")
+            raw = raw.get("kind", "intra" if source == "moire_potential" else "inter")
+        harmonic_name = str(raw)
+        mapping = self.intra_harmonics_map if harmonic_name == "intra" else self.inter_harmonics_map
+        if indices is None:
+            items = sorted(mapping.items())
+        else:
+            items = [(int(index), mapping[int(index)]) for index in indices]
+        source_label = str(template.get("harmonics_source", ""))
+        if not source_label:
+            lower_name = str(template.get("name", "")).lower()
+            if "notebook" in lower_name:
+                source_label = "legacy_notebook_explicit"
+            elif "legacy" in lower_name:
+                source_label = "explicit_legacy"
+            elif indices is None:
+                source_label = "explicit_full_mapping"
+            else:
+                source_label = "explicit_indices"
+        return [
+            {
+                "id": int(key),
+                "kind": harmonic_name,
+                "vector": sign * np.asarray(value, dtype=float),
+                "source": source_label,
+            }
+            for key, value in items
+        ]
+
+    @staticmethod
+    def _template_generation_mode(template: Mapping[str, Any] | None) -> str:
+        if template is None:
+            return "representation_invariant"
+        explicit_mode = str(template.get("generation_mode", "")).strip()
+        if explicit_mode:
+            return explicit_mode
+        lower_name = str(template.get("name", "")).lower()
+        legacy_filter = str(template.get("legacy_monomial_filter", template.get("monomial_filter", "")))
+        if legacy_filter:
+            return "notebook_compatibility"
+        if "notebook" in lower_name or "legacy" in lower_name:
+            return "explicit_legacy"
+        return "representation_invariant"
+
+    @staticmethod
+    def _monomial_constraints(template: Mapping[str, Any] | None, source: str) -> Dict[str, Any]:
+        constraints: Dict[str, Any] = {}
+        if template is None:
+            return constraints
+        raw = template.get("monomial_constraints", {})
+        if raw is None:
+            raw = {}
+        if raw and not isinstance(raw, Mapping):
+            raise ValueError(f"monomial_constraints must be a mapping, got {raw!r}")
+        constraints.update(dict(raw))
+        monomial_filter = str(template.get("legacy_monomial_filter", template.get("monomial_filter", "")))
+        if monomial_filter == "notebook_kinetic_c3_diag":
+            legacy = {
+                "exclude_m_sum_zero": True,
+                "difference_mod": 3,
+                "difference_residue": 0,
+                "require_mz_ge_mz_star": True,
+            }
+            for key, value in legacy.items():
+                constraints.setdefault(key, value)
+        if source == "diagonal_kp":
+            constraints.setdefault("exclude_m_sum_zero", True)
+        return constraints
+
+    def _monomial_orders(self, max_order: int, source: str, template: Mapping[str, Any] | None = None) -> List[Tuple[int, int]]:
+        orders: List[Tuple[int, int]] = []
+        constraints = self._monomial_constraints(template, source)
+        for M_sum in range(0, int(max_order) + 1):
+            for Mz in range(0, M_sum + 1):
+                Mz_star = M_sum - Mz
+                if constraints.get("exclude_m_sum_zero", False) and M_sum == 0:
+                    continue
+                difference_mod = constraints.get("difference_mod")
+                if difference_mod is not None:
+                    residue = int(constraints.get("difference_residue", 0))
+                    if (Mz - Mz_star) % int(difference_mod) != residue:
+                        continue
+                if bool(constraints.get("require_mz_ge_mz_star", False)) and Mz_star > Mz:
+                    continue
+                orders.append((Mz, Mz_star))
+        if source == "diagonal_kp":
+            return orders
+        return orders or [(0, 0)]
+
     def build_terms(self):
         """
-        根据输入规则生成所有 term，并允许针对不同类别指定对称操作。
+        Template-driven term generation. Material-specific orbital filters must live in
+        term_templates, not hard-coded Python branches.
         """
-        # 获取各类别对称操作设置
-        sym_ops_onsite = self.symmetry_map.get("Onsite", [])
-        sym_ops_Kinect = self.symmetry_map.get("Kinect", [])
-        sym_ops_intra  = self.symmetry_map.get("intra",  [{"name": "C3z", "params": 1}, {"name": "C3z", "params": 2},
-                                                        {"name": "C2yT"}, {"name": "C2zT"}])
-        sym_ops_inter  = self.symmetry_map.get("inter",  [{"name": "C3z", "params": 1}, {"name": "C3z", "params": 2},
-                                                        {"name": "C2yT"}, {"name": "C2zT"}])
-        
-        # Onsite 项：l1=l2, orbital相同, p=(0,0), Mz=Mz_star=0
-
-        
-        # Kinect 项：l1=l2, orbital相同, p=(0,0)
-        for M_sum in range(0, self.max_order["Kinect"]+1):
-            for Mz in range(0, M_sum+1):
-                Mz_star = M_sum - Mz
-                if Mz + Mz_star == 0 or (Mz - Mz_star) % 3 != 0 or Mz_star>Mz:
-                    continue
-                
-                for l in [1]:
-                    n_orb = self.n_orb1 if l==1 else self.n_orb2
-                    for a in range(1, n_orb+1):
-                        if a%2 == 0:
-                            continue
-                        key = ContinuumTermKey(Mz, Mz_star, l, l, a, a, (0.0, 0.0))
-                        Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                            self.n_orb1, self.n_orb2)
-                        self.model.add_term(key, Y_func, tag="Kinect", symmetry_ops=sym_ops_Kinect)
-                        # print(f"Kinect term {key} generated. symmetry_ops: {sym_ops_Kinect}")
-        print("Kinect terms generated.")
-        
-        for l in [1]:
-            n_orb = self.n_orb1 if l==1 else self.n_orb2
-            for a in range(1, n_orb+1):
-                if a%2 == 0:
-                    continue
-                key = ContinuumTermKey(0, 0, l, l, a, a, (0.0, 0.0))
-                Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                    self.n_orb1, self.n_orb2)
-                self.model.add_term(key, Y_func, tag="Onsite", symmetry_ops=sym_ops_onsite)
-        print("Onsite term generated.")
-        
-        # return
-        # intra 项：l1=l2, p由intra_harmonics_map给出，且可考虑轨道不同
-        for harmonic_order, p_val in self.intra_harmonics_map.items():
-            # continue
-            for M_sum in range(0, self.max_order["intra"]+1):
-                for Mz in range(0, M_sum+1):
-                    Mz_star = M_sum - Mz
-                    for l in [1]:
-                        n_orb = self.n_orb1 if l==1 else self.n_orb2
-                        if l == 10:
-                            for a in range(1, n_orb+1):
-                                for b in range(1, n_orb+1):
-                                    if a == b and harmonic_order==1:
-                                        continue
-                                    key = ContinuumTermKey(Mz, Mz_star, l, l, a, b, tuple(p_val))
-                                    Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                                        self.n_orb1, self.n_orb2)
-                                    self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-                        elif l == 2 or l == 1:
-                            for a in range(1, n_orb+1):
-                                for b in range(1, n_orb+1):
-                            # for a in [4,1]:
-                            #     for b in [1]:
-                                    # b = 5-a
-                                    if a%2==0 and b%2==0:
-                                        continue
-
-                                    # if a%2!=1 and b%2==1:
-                                    #     continue
-                                    # if (a==b and a == 10 and M_sum > 1) or harmonic_order > 10:
-                                    #     continue
-                                    if a <= b and harmonic_order == 1:# and (a-b)%2!=0:
-                                        continue
-                                    
-                                    if b == 2 and a in [2,4]:
-                                        continue
-                                    if (a==2 and b==3) or (a==1 and b==4):
-                                        continue
-                                    if a==3 and b==2 and harmonic_order== 1:
-                                        continue
-                                    
-                                    
-                                    # if (a-b)%2 == 1 and ( harmonic_order > 3 or (M_sum>3 and harmonic_order>1)):
-                                    #     continue
-                                    # if  harmonic_order >1 and M_sum>6:
-                                    #     continue
-                                    
-                                    key = ContinuumTermKey(Mz, Mz_star, l, l, a, b, tuple(p_val))
-                                    Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                                        self.n_orb1, self.n_orb2)
-                                    self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-                                    # if harmonic_order >1:
-                                    #     if (a==4 and b==1) or (a==2 and b==1) or (a==4 and b==3)
-                                    #         key = ContinuumTermKey(Mz, Mz_star, l, l, a, b, tuple(-p_val))
-                                    #         Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                    #                                                             self.n_orb1, self.n_orb2)
-                                    #         self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-                                    # if a!=b:
-                                    #     key = ContinuumTermKey(Mz, Mz_star, l, l, b, a, tuple(p_val))
-                                    #     Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                    #                                                         self.n_orb1, self.n_orb2)
-                                    #     self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-                                # key = ContinuumTermKey(Mz, Mz_star, l, l, a, b, tuple(-p_val))
-                                # Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                #                                                     self.n_orb1, self.n_orb2)
-                                # self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-                                    if a!=b and harmonic_order == 100:
-                                        key = ContinuumTermKey(Mz, Mz_star, l, l, b, a, (0, 0))
-                                        Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                                            self.n_orb1, self.n_orb2)
-                                        self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-                        # if n_orb > 1:
-                        #     for a in range(1, n_orb):
-                        #         for b in range(a+1, n_orb+1):
-                        #             key = ContinuumTermKey(Mz, Mz_star, l, l, a, b, (0.0, 0.0))
-                        #             Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                        #                                                                 self.n_orb1, self.n_orb2)
-                        #             self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-        for l1 in [1,2]:
-            continue
-            l2 = l1
-            n_orb = self.n_orb1 if l1==1 else self.n_orb2
-            if n_orb == 0:
-                continue
-            same_spin_diag_key_list =       generate_orb("same_spin_diag",    l1=l1, l2=l2, max_M_sum=10, max_p_order=len(self.intra_harmonics_map.items()), orb_list=[self.n_orb1,self.n_orb2], intra_harmonics_map=self.intra_harmonics_map, symm=sym_ops_intra)
-            same_spin_offdiag_key_list =    generate_orb("same_spin_offdiag", l1=l1, l2=l2, max_M_sum=8, max_p_order=len(self.intra_harmonics_map.items()), orb_list=[self.n_orb1,self.n_orb2], intra_harmonics_map=self.intra_harmonics_map, symm=sym_ops_intra)
-            diff_spin_diag_key_list =       generate_orb("diff_spin_diag",    l1=l1, l2=l2, max_M_sum=10, max_p_order=len(self.intra_harmonics_map.items()), orb_list=[self.n_orb1,self.n_orb2], intra_harmonics_map=self.intra_harmonics_map, symm=sym_ops_intra)
-            diff_spin_offdiag_key_list =    generate_orb("diff_spin_offdiag", l1=l1, l2=l2, max_M_sum=8, max_p_order=len(self.intra_harmonics_map.items()), orb_list=[self.n_orb1,self.n_orb2], intra_harmonics_map=self.intra_harmonics_map, symm=sym_ops_intra)
-            key_list = np.concatenate((same_spin_diag_key_list, same_spin_offdiag_key_list, diff_spin_diag_key_list, diff_spin_offdiag_key_list))
-            # key_list = []
-            for key in key_list:
-                Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                    self.n_orb1, self.n_orb2)
-                self.model.add_term(key, Y_func, tag="intra", symmetry_ops=sym_ops_intra)
-        print("Intra terms generated.")
-        
-        # inter 项：l1≠l2, p由 inter_harmonics_map给出
-        for harmonic_order, p_val in self.inter_harmonics_map.items():
-            for M_sum in range(0, self.max_order["inter"]+1):
-                # if harmonic_order > 1 and M_sum > 6:
-                #     continue
-                for Mz in range(0, M_sum+1):
-                    Mz_star = M_sum - Mz
-                    n_orb1, n_orb2 = self.n_orb1, self.n_orb2
-                    # for a in range(1, n_orb1+1):
-                    #     for b in range(1, n_orb2+1):
-                    
-                    # for a in [1]:
-                    #     for b in [1]:
-                    #         key = ContinuumTermKey(Mz, Mz_star, 2, 1, b, a, tuple(p_val))
-                    #         Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                    #                                                             self.n_orb1, self.n_orb2)
-                    #         self.model.add_term(key, Y_func, tag="inter", symmetry_ops=sym_ops_inter)   
-                    if M_sum > 6 and harmonic_order > 1:
-                        continue
-                    key = ContinuumTermKey(Mz, Mz_star, 2, 1, 1, 1, tuple(p_val))
-                    Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                        self.n_orb1, self.n_orb2)
-                    self.model.add_term(key, Y_func, tag="inter", symmetry_ops=sym_ops_inter)
-                    
-                    key = ContinuumTermKey(Mz, Mz_star, 2, 1, 2, 1, tuple(p_val))
-                    Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                        self.n_orb1, self.n_orb2)
-                    self.model.add_term(key, Y_func, tag="inter", symmetry_ops=sym_ops_inter)
-                    
-                    # print(f"Inter terms generated: Mz={Mz}, Mz_star={Mz_star}, l1=2, l2=1, p={p_val}, M_sum={M_sum}, harmonic_order={harmonic_order}")
-                    
-                    if harmonic_order > 1:
-                        key = ContinuumTermKey(Mz, Mz_star, 2, 1, 1, 1, tuple(-p_val))
-                        Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                                                                            self.n_orb1, self.n_orb2)
-                        self.model.add_term(key, Y_func, tag="inter", symmetry_ops=sym_ops_inter)
-                        
-                    #     key = ContinuumTermKey(Mz, Mz_star, 2, 1, 1, 2, tuple(p_val))
-                    #     Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                    #                                                         self.n_orb1, self.n_orb2)
-                    #     self.model.add_term(key, Y_func, tag="inter", symmetry_ops=sym_ops_inter)
-                        
-                    
-                    
-                        # key = ContinuumTermKey(Mz, Mz_star, 1, 2, 1, 1, tuple(p_val))
-                        # Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                        #                                                     self.n_orb1, self.n_orb2)
-                        # self.model.add_term(key, Y_func, tag="inter", symmetry_ops=sym_ops_inter)
-                    
-                    # key = ContinuumTermKey(Mz, Mz_star, 1, 2, 2, 1, tuple(-p_val))
-                    # Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2,
-                    #                                                     self.n_orb1, self.n_orb2)
-                    # self.model.add_term(key, Y_func, tag="inter", symmetry_ops=sym_ops_inter)
-                                                   
-        print("Inter terms generated.")
-        print("All terms generated.")
+        templates = self.term_templates or self._default_term_templates()
+        for template in templates:
+            source = str(template.get("source", ""))
+            tag = str(template.get("tag", "Kinect" if source == "diagonal_kp" else ("Onsite" if source == "onsite" else ("intra" if source == "moire_potential" else "inter"))))
+            sym_ops = self.symmetry_map.get(tag, [])
+            max_order = int(template.get("max_order", self.max_order.get(tag, 0)))
+            generation_mode = self._template_generation_mode(template)
+            if generation_mode == "notebook_compatibility":
+                generated_by = "notebook_compatibility"
+            elif generation_mode == "explicit_legacy":
+                generated_by = "explicit_legacy"
+            else:
+                generated_by = "representation_invariant_generator"
+            for harmonic in self._harmonic_records_from_template(template):
+                p_val = np.asarray(harmonic["vector"], dtype=float)
+                for Mz, Mz_star in self._monomial_orders(max_order, source, template):
+                    for l_from, l_to in self._sector_pairs_from_template(template):
+                        for a, b in self._orbital_pairs_from_template(template, l_from, l_to):
+                            key = ContinuumTermKey(Mz, Mz_star, l_from, l_to, a, b, tuple(p_val))
+                            Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2)
+                            registry_metadata = {
+                                "term_name": str(template.get("name", tag)),
+                                "term_kind": "kinetic" if source == "diagonal_kp" else ("onsite" if source == "onsite" else ("intra" if source == "moire_potential" else "inter")),
+                                "sector_pair": [self._sector_name_from_slot(l_from), self._sector_name_from_slot(l_to)],
+                                "orbital_pair": [int(a), int(b)],
+                                "harmonic_id": harmonic["id"],
+                                "harmonic_kind": harmonic["kind"],
+                                "harmonic_vector": np.asarray(harmonic["vector"], dtype=float).tolist(),
+                                "harmonics_source": str(harmonic["source"]),
+                                "monomial": {"Mz": int(Mz), "Mz_star": int(Mz_star)},
+                                "symmetry_orbit_id": None,
+                                "generation_mode": generation_mode,
+                                "generated_by": generated_by,
+                                "coefficient_unit": "eV",
+                                "coefficient_role": "fitted",
+                            }
+                            self.model.add_term(
+                                key,
+                                Y_func,
+                                tag=tag,
+                                symmetry_ops=sym_ops,
+                                registry_metadata=registry_metadata,
+                            )
+        print("All terms generated from term_templates.")
 
     def get_term_metadata(self, key):
         """
@@ -3549,7 +3738,8 @@ def build_model(config: MoireConfig) -> ContinuumModel:
     if len(nlow_state) != 2:
         raise ValueError(f"config.nlow_state must have length 2, got {nlow_state}.")
 
-    symmetry_gen = SymmetryGenerator(Q_set1, Q_set2, nlow_state)
+    basis_template = config.symmetry_source_metadata.get("basis_template") if isinstance(config.symmetry_source_metadata, dict) else None
+    symmetry_gen = config.symmetry_gen if config.symmetry_gen is not None else SymmetryGenerator(Q_set1, Q_set2, nlow_state, basis_template=basis_template)
     builder = ContinuumModelBuilder(
         Q_set1, Q_set2, int(config.n_orb1), int(config.n_orb2),
         np.asarray(config.bM1, dtype=float), np.asarray(config.bM2, dtype=float),
@@ -3557,6 +3747,8 @@ def build_model(config: MoireConfig) -> ContinuumModel:
         dict(config.max_order),
         symmetry_gen,
         dict(config.symmetry_map) if config.symmetry_map else None,
+        list(config.term_templates),
+        list(config.sectors),
     )
     builder.build_terms()
     model = builder.get_model()
@@ -3594,7 +3786,8 @@ def compute_coefficients(config: MoireConfig, model: ContinuumModel) -> Tuple[Co
     Q_set1 = np.asarray(config.Q_set1, dtype=float)
     Q_set2 = np.asarray(config.Q_set2, dtype=float)
     nlow_state = config.nlow_state if config.nlow_state is not None else [int(config.n_orb1), int(config.n_orb2)]
-    symmetry_gen = SymmetryGenerator(Q_set1, Q_set2, nlow_state)
+    basis_template = config.symmetry_source_metadata.get("basis_template") if isinstance(config.symmetry_source_metadata, dict) else None
+    symmetry_gen = config.symmetry_gen if config.symmetry_gen is not None else SymmetryGenerator(Q_set1, Q_set2, nlow_state, basis_template=basis_template)
     builder = ContinuumModelBuilder(
         Q_set1, Q_set2, int(config.n_orb1), int(config.n_orb2),
         np.asarray(config.bM1, dtype=float), np.asarray(config.bM2, dtype=float),
@@ -3602,6 +3795,7 @@ def compute_coefficients(config: MoireConfig, model: ContinuumModel) -> Tuple[Co
         dict(config.max_order),
         symmetry_gen,
         dict(config.symmetry_map) if config.symmetry_map else None,
+        list(config.term_templates),
     )
     builder.model = model
     heff = np.asarray(config.heff)
@@ -3616,7 +3810,8 @@ def _prepare_band_state(config: MoireConfig, model: ContinuumModel) -> _BandStat
     Q_set2 = np.asarray(config.Q_set2, dtype=float)
     _validate_Q_sets(Q_set1, Q_set2)
     nlow_state = config.nlow_state if config.nlow_state is not None else [int(config.n_orb1), int(config.n_orb2)]
-    symmetry_gen = SymmetryGenerator(Q_set1, Q_set2, nlow_state)
+    basis_template = config.symmetry_source_metadata.get("basis_template") if isinstance(config.symmetry_source_metadata, dict) else None
+    symmetry_gen = config.symmetry_gen if config.symmetry_gen is not None else SymmetryGenerator(Q_set1, Q_set2, nlow_state, basis_template=basis_template)
 
     dim_full = len(Q_set1) * int(config.n_orb1) + len(Q_set2) * int(config.n_orb2)
 
@@ -4137,10 +4332,10 @@ def example_config() -> MoireConfig:
 
         max_order = {"Kinect": 10, "intra": 4, "inter": 4}
         symmetry_map = {
-            "Kinect": [{"name": "TR"}, {"name": "C2x"}],
-            "Onsite": [{"name": "TR"}, {"name": "C2x"}],
-            "intra": [{"name": "C3z"}, {"name": "TR"}, {"name": "C2x"}],
-            "inter": [{"name": "C3z"}, {"name": "TR"}, {"name": "C2x"}],
+            "Kinect": [{"name": "TR"}, {"name": "C2"}],
+            "Onsite": [{"name": "TR"}, {"name": "C2"}],
+            "intra": [{"name": "C3z"}, {"name": "TR"}, {"name": "C2"}],
+            "inter": [{"name": "C3z"}, {"name": "TR"}, {"name": "C2"}],
         }
 
         return MoireConfig(
@@ -4192,7 +4387,8 @@ def self_test(*, k_index: int = 0) -> None:
     k0 = np.asarray(cfg.kpoints[int(k_index)], dtype=float)
     symmetry_gen = getattr(model, "_moire_symmetry_gen", None)
     if symmetry_gen is None:
-        symmetry_gen = SymmetryGenerator(np.asarray(cfg.Q_set1), np.asarray(cfg.Q_set2), [cfg.n_orb1, cfg.n_orb2])
+        basis_template = cfg.symmetry_source_metadata.get("basis_template") if isinstance(cfg.symmetry_source_metadata, dict) else None
+        symmetry_gen = SymmetryGenerator(np.asarray(cfg.Q_set1), np.asarray(cfg.Q_set2), [cfg.n_orb1, cfg.n_orb2], basis_template=basis_template)
 
     # 1) Validate `assemble_hamiltonian` path.
     H_full = model.assemble_hamiltonian(k0, symmetry_gen=symmetry_gen, use_cache=cfg.use_cache)

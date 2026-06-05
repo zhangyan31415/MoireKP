@@ -1,0 +1,345 @@
+source_config: ../../source/mgi2_3.89_Gamma.yaml
+production_level: production
+validation:
+  allow_missing_wavefunction_overlap: true
+  reason: wavefunction/projector overlap is not exported by the current Gamma configured
+    pipeline
+valley_model:
+  lattice: hexagonal
+  system: bilayer
+  valley_type: Gamma
+  mode: single_valley
+  active_valleys:
+  - Gamma
+  spin_convention: spinful
+  allowed_internal_symmetries:
+  - C3z
+  - TR
+  - C2
+  external_sewing_symmetries: []
+symmetry_source:
+  type: kp_symm_output
+  use: raw
+  matrix_kind: representation
+  production_use: exactify_to_continuum_internal_rep
+  operations:
+  - name: C3z
+    operation: C3
+    matrix_file: C3_low_representation_raw.npy
+    antiunitary: false
+    k_map:
+      type: rotation
+      angle_deg: 120.0
+    q_map:
+      type: rotation
+      angle_deg: 120.0
+    sector_map: identity
+    source_matrix_role: bare_D0_internal_rep
+    source_gauge: raw_saved_TAPW
+    target_role: continuum_internal_rep
+    gauge_correction: &id001
+      kind: none
+    production_use: exactify_to_continuum_internal_rep
+    antiunitary_convention: none
+    spin_map: from_kp_symm_output
+    valley_map: identity
+  - name: C2
+    operation: C2
+    matrix_file: C2_low_representation_raw.npy
+    antiunitary: false
+    k_map:
+      type: reflection
+      axis_deg: 150.0
+    q_map:
+      type: reflection
+      axis_deg: 150.0
+    sector_map: layer_exchange
+    source_matrix_role: bare_D0_internal_rep
+    source_gauge: raw_saved_TAPW
+    target_role: continuum_internal_rep
+    gauge_correction: *id001
+    production_use: exactify_to_continuum_internal_rep
+    antiunitary_convention: none
+    spin_map: from_kp_symm_output
+    valley_map: identity
+  - name: TR
+    operation: T
+    matrix_file: T_low_representation_raw.npy
+    antiunitary: true
+    k_map:
+      type: negation
+    q_map:
+      type: negation
+    sector_map: identity
+    source_matrix_role: bare_D0_internal_rep
+    source_gauge: raw_saved_TAPW
+    target_role: continuum_internal_rep
+    gauge_correction: *id001
+    production_use: exactify_to_continuum_internal_rep
+    antiunitary_convention: U_K
+    spin_map: from_kp_symm_output
+    valley_map: identity
+  exactification:
+    support_source: geometry
+    central_phase:
+      C3z^3: -1
+      C2^2: 1
+      TR^2: -1
+    allowed_roots:
+      C3z: sixth_roots_cube_minus_one
+    phase_classes: global
+    reject_if_off_support_rel_gt: 1.0e-05
+    reject_if_amplitude_deviation_gt: 0.05
+kpath:
+  file: ../../../../tapw/KPATH.in
+  tmat:
+  - - 60.9508659523
+    - 0.0
+    - 0.0
+  - - -30.4754329751
+    - 52.7849982976
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 50.0
+model:
+  bM:
+    infer_from_q: true
+    angle_deg: 60
+  harmonics:
+    intra:
+      1: zero
+      2: -bM1
+      3: bM1 + bM2
+      4: 2*bM1
+    inter:
+      1: zero
+      2: -bM1
+      3: bM1 + bM2
+      4: 2*bM1
+  max_order:
+    Kinect: 10
+    intra: 6
+    inter: 10
+  term_templates:
+  - name: kinetic_legacy_gamma
+    source: diagonal_kp
+    sector_pairs:
+    - - 1
+      - 1
+    orbital_pairs:
+    - - 1
+      - 1
+    max_order: 10
+  - name: onsite_legacy_gamma
+    source: onsite
+    sector_pairs:
+    - - 1
+      - 1
+    orbital_pairs:
+    - - 1
+      - 1
+    max_order: 0
+  - name: intra_zero_legacy_gamma
+    source: moire_potential
+    sector_pairs:
+    - - 1
+      - 1
+    orbital_pairs:
+    - - 2
+      - 1
+    harmonics:
+      kind: intra
+      indices:
+      - 1
+    max_order: 6
+  - name: intra_nonzero_legacy_gamma
+    source: moire_potential
+    sector_pairs:
+    - - 1
+      - 1
+    orbital_pairs:
+    - - 1
+      - 1
+    - - 1
+      - 2
+    - - 2
+      - 1
+    harmonics:
+      kind: intra
+      indices:
+      - 2
+      - 3
+      - 4
+    max_order: 6
+  - name: inter_zero_legacy_gamma
+    source: tunneling
+    sector_pairs:
+    - - 2
+      - 1
+    orbital_pairs:
+    - - 1
+      - 1
+    - - 2
+      - 1
+    harmonics:
+      kind: inter
+      indices:
+      - 1
+    max_order: 10
+  - name: inter_nonzero_legacy_gamma
+    source: tunneling
+    sector_pairs:
+    - - 2
+      - 1
+    orbital_pairs:
+    - - 1
+      - 1
+    - - 2
+      - 1
+    harmonics:
+      kind: inter
+      indices:
+      - 2
+      - 3
+      - 4
+    max_order: 6
+  - name: inter_nonzero_negative_legacy_gamma
+    source: tunneling
+    sector_pairs:
+    - - 2
+      - 1
+    orbital_pairs:
+    - - 1
+      - 1
+    harmonics:
+      kind: inter
+      indices:
+      - 2
+      - 3
+      - 4
+      sign: -1
+    max_order: 6
+  symmetry_map:
+    Kinect:
+    - name: C3z
+      antiunitary: false
+      k_map:
+        type: rotation
+        angle_deg: 120.0
+      q_map:
+        type: rotation
+        angle_deg: 120.0
+      sector_map: identity
+    - name: C2
+      antiunitary: false
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: layer_exchange
+    - name: TR
+      antiunitary: true
+      k_map:
+        type: negation
+      q_map:
+        type: negation
+      sector_map: identity
+    Onsite:
+    - name: C3z
+      antiunitary: false
+      k_map:
+        type: rotation
+        angle_deg: 120.0
+      q_map:
+        type: rotation
+        angle_deg: 120.0
+      sector_map: identity
+    - name: C2
+      antiunitary: false
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: layer_exchange
+    - name: TR
+      antiunitary: true
+      k_map:
+        type: negation
+      q_map:
+        type: negation
+      sector_map: identity
+    intra:
+    - name: C3z
+      antiunitary: false
+      k_map:
+        type: rotation
+        angle_deg: 120.0
+      q_map:
+        type: rotation
+        angle_deg: 120.0
+      sector_map: identity
+    - name: C2
+      antiunitary: false
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: layer_exchange
+    - name: TR
+      antiunitary: true
+      k_map:
+        type: negation
+      q_map:
+        type: negation
+      sector_map: identity
+    inter:
+    - name: C3z
+      antiunitary: false
+      k_map:
+        type: rotation
+        angle_deg: 120.0
+      q_map:
+        type: rotation
+        angle_deg: 120.0
+      sector_map: identity
+    - name: C2
+      antiunitary: false
+      k_map:
+        type: reflection
+        axis_deg: 0.0
+      q_map:
+        type: reflection
+        axis_deg: 0.0
+      sector_map: layer_exchange
+    - name: TR
+      antiunitary: true
+      k_map:
+        type: negation
+      q_map:
+        type: negation
+      sector_map: identity
+fit:
+  indices:
+  - 0
+  - 40
+  coeff_tol: 1.0e-06
+bands:
+  compare_to_heff: true
+  band_slice:
+  - 0
+  - 124
+  plot:
+    top_bands: 4
+    align: top
+output:
+  dir: ../../../outputs/model/production/mgi2_3.89_Gamma
+  save_coefficients: true
+  verbose: false
+  progress: true
