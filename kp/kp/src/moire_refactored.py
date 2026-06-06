@@ -354,7 +354,7 @@ def rot(vec,theta):
     rot_mat = np.array([[np.cos(theta),-np.sin(theta)],[np.sin(theta),np.cos(theta)]])
     return np.dot(rot_mat,vec)
 
-def generate_orb(classname,l1,l2, max_M_sum, max_p_order,orb_list,intra_harmonics_map, symm=[{"name":"TR"}]):
+def generate_orb(classname,l1,l2, max_M_sum, max_p_order,orb_list,intra_harmonics_map, symm=None):
     """
     classname: same_spin_diag, same_spin_offdiag, diff_spin_diag, diff_spin_offdiag
     max_M_sum: 最大 M_sum
@@ -428,46 +428,6 @@ def generate_orb(classname,l1,l2, max_M_sum, max_p_order,orb_list,intra_harmonic
             key_list.append(key)
     else:
         raise ValueError("Invalid classname. Choose from 'same_spin_diag', 'same_spin_offdiag', 'diff_spin_diag', 'diff_spin_offdiag'.")
-    
-    #根据对称性删除一些key
-    def get_opposite_spin(a):
-        return 2-(a-1)%2+(a-1)//2*2
-    for symm_op in symm:
-        if symm_op["name"] == "TR":
-
-            key_list_new = []
-            
-            spin_up_dn_list = []
-            spin_up_dn_list_diag = []
-            spin_up_dn_list_offdiag = []
-            
-            for a in range(1,orb_list[l1-1]+1):
-                for b in range(1,orb_list[l2-1]+1):
-                    if (a-b)%2 == 1:
-                        spin_up_dn_list.append((a,b))
-            for a,b in spin_up_dn_list:
-                a_, b_ = get_opposite_spin(a), get_opposite_spin(b)
-                if a_ > a or a < b:
-                    spin_up_dn_list_diag.append((a,b))
-                if a < b-1 or (b%2 !=0 and b-a ==1):
-                    spin_up_dn_list_offdiag.append((a,b))
-            
-            for key in key_list:
-                a, b, p = key.orbital_from, key.orbital_to, key.p
-                if a%2 == 0 and b%2 == 0: #spin down
-                    continue
-                elif a%2 == 1 and b%2 == 1: #spin up
-                    if a <= b and (np.sum(np.abs(np.array(p))) < 1e-5 and classname not in  ["Kinect", "Onsite"]):
-                        continue
-                elif (a-b)%2 == 1: #spin up - spin down
-                    if (a,b) in spin_up_dn_list_diag and np.sum(np.abs(np.array(p))) < 1e-5:
-                        continue
-                    if (a,b) in spin_up_dn_list_offdiag and np.sum(np.abs(np.array(p))) > 1e-5:
-                        continue
-                # print(f"a = {a}, b = {b}, p = {p}")
-                key_list_new.append(key)
-            return key_list_new
-    
     return key_list
 
 def make_hashable(obj: Any) -> Any:
@@ -2158,97 +2118,6 @@ class ContinuumModelBuilder:
 
         # 与原逻辑一致：不在此处强制 Hermitian 化（原实现是在 Y_symm/Y_symm_i 层面做 condition-allclose 再修正）
 
-    @staticmethod
-    def symmetrize_Y_basis_static_(Y_basis: Callable[[np.ndarray], np.ndarray],
-                                k: np.ndarray,
-                                sym_ops: List[Dict[str, Any]],
-                                symmetry_gen: Any = None,
-                                term=ContinuumTerm) -> np.ndarray:
-        """
-        静态版本的对称化函数（当不需要调用 symmetry_gen 时可传 None）
-        如果 symmetry_gen 不为 None，则调用 symmetry_gen.get_operator()。
-        对称平均后 Hermitian 化。
-        
-        这里所有矩阵操作均使用 scipy.sparse 中的稀疏矩阵，最后转换为 np.array 返回。
-        """
-        
-        def rot(k, theta):
-            """二维旋转"""
-            theta = np.deg2rad(theta)
-            return np.array([np.cos(theta)*k[0] - np.sin(theta)*k[1],
-                            np.sin(theta)*k[0] + np.cos(theta)*k[1]])
-        
-        def gen_symm_k(base_k: np.ndarray) -> Tuple[List[np.ndarray], List[List[Tuple[str, Any]]]]:
-            """生成对称操作后的 k 点及对应的操作序列"""
-            points = [base_k.copy()]
-            op_seqs = [[]]
-            
-            # 定义各对称操作对应的 k 变换
-            op_actions = {
-                'C3z': lambda k, n: rot(k, -120*n),
-                'C2T': lambda k: np.array([k[0], -k[1]]),
-                'C2': lambda k: np.array([-k[0], k[1]]),
-                'TR': lambda k: -k
-            }
-            
-            for op in sym_ops:
-                op_name = op["name"]
-                new_pts, new_ops = [], []
-                for pt, seq in zip(points, op_seqs):
-                    # 避免重复应用相同操作
-                    if any(s[0] == op_name for s in seq):
-                        continue
-                    if op_name == 'C3z':
-                        # 对于 C3z，生成两个旋转点（120°, 240°）
-                        for n in [1, 2]:
-                            new_pt = op_actions[op_name](pt, n)
-                            new_pts.append(new_pt)
-                            new_ops.append(seq + [(op_name, n)])
-                    else:
-                        new_pt = op_actions[op_name](pt)
-                        new_pts.append(new_pt)
-                        new_ops.append(seq + [(op_name, None)])
-                points += new_pts
-                op_seqs += new_ops
-            
-            return points, op_seqs
-        
-        def apply_symm(YY: Callable[[np.ndarray], np.ndarray], kk: np.ndarray, op_seq: List[Tuple[str, Any]]):
-            """
-            应用对称操作序列的逆操作：
-            Y_symm = (1/N)Σ_g D(g) Y(g^{-1}k) D(g)^†
-            这里所有操作均使用稀疏矩阵，D(g)^† 使用 getH()（即共轭转置）。
-            """
-            # 将 Y_basis 的结果转换为稀疏矩阵
-            Y = sparse.csr_matrix(YY(kk))
-            # 依次对逆序的操作进行变换
-            for op in reversed(op_seq):
-                op_name, param = op
-                if op_name == 'C3z':
-                    D = sparse.csr_matrix(symmetry_gen.get_operator(op_name, param))
-                    Y = D @ Y @ D.getH()
-                elif op_name in ['C2T', 'TR']:
-                    D = sparse.csr_matrix(symmetry_gen.get_operator(op_name, param))
-                    Y = D @ Y.conjugate() @ D.getH()
-                else:
-                    raise ValueError(f"Unknown symmetry operation: {op_name}")
-            return Y
-        
-        # 生成对称操作下的 k 点与对应的操作序列
-        symm_points, op_seqs = gen_symm_k(k)
-        # 累加所有对称化后的矩阵
-        Y_symm = None
-        for kk, op_seq in zip(symm_points, op_seqs):
-            Y_part = apply_symm(Y_basis, kk, op_seq)
-            if Y_symm is None:
-                Y_symm = Y_part
-            else:
-                Y_symm = Y_symm + Y_part
-        # Hermitian 化：取矩阵与其共轭转置的平均
-        Y_symm = (Y_symm + Y_symm.getH()) / 2
-        # 转换为密集数组返回
-        return Y_symm.toarray()
-
     # @timing_decorator_factory(0)
     def stack_Y_for_term(self, term: ContinuumTerm, k_points: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
         """
@@ -2426,7 +2295,54 @@ class ContinuumModelBuilder:
         # 求解线性方程组
         coeffs = np.linalg.solve(transfermat, rhs)
         return coeffs
-    
+
+    @staticmethod
+    def _matrix_support_image(operator: np.ndarray, indices: np.ndarray, *, tol: float = 1e-10) -> np.ndarray:
+        if indices.size == 0:
+            return indices
+        if sparse.issparse(operator):
+            return np.unique(operator[:, indices].nonzero()[0]).astype(int, copy=False)
+        block = np.asarray(operator)[:, indices]
+        threshold = tol * max(float(np.max(np.abs(block))) if block.size else 0.0, 1.0)
+        return np.flatnonzero(np.any(np.abs(block) > threshold, axis=1)).astype(int, copy=False)
+
+    @staticmethod
+    def _uses_physical_time_reversal_fit_block(operation: Mapping[str, Any]) -> bool:
+        k_map = operation.get("k_map", {})
+        family = str(operation.get("name", operation.get("user_name", "")))
+        physics_level = str(operation.get("operation_physics_level") or ("effective" if family.endswith("_eff") else "physical"))
+        return (
+            bool(operation.get("antiunitary", False))
+            and isinstance(k_map, Mapping)
+            and str(k_map.get("type", "")).lower() == "negation"
+            and str(operation.get("sector_map", "identity")) == "identity"
+            and physics_level == "physical"
+        )
+
+    def _symmetry_support_closure(
+        self,
+        indices: np.ndarray,
+        operations: Sequence[Mapping[str, Any]],
+        *,
+        max_iter: int = 4,
+    ) -> np.ndarray:
+        current = np.unique(indices).astype(int, copy=False)
+        if not operations or self.symmetry_gen is None:
+            return current
+        for _ in range(max_iter):
+            parts = [current]
+            for operation in operations:
+                name = operation.get("name")
+                if not name:
+                    continue
+                operator = self.symmetry_gen.get_operator(str(name), operation.get("params", None))
+                parts.append(self._matrix_support_image(operator, current))
+            expanded = np.unique(np.concatenate(parts)).astype(int, copy=False)
+            if np.array_equal(expanded, current):
+                return current
+            current = expanded
+        return current
+
     # def get_mat_blocks(self, mat_list: List[np.ndarray], subgroup: Tuple[int, int, int, int], num_kpoints: int = 1) -> List[np.ndarray]:
     def get_mat_blocks(self, mat_list: List[np.ndarray], key: ContinuumTermKey, num_kpoints: int = 1) -> List[np.ndarray]:
         """
@@ -2467,19 +2383,9 @@ class ContinuumModelBuilder:
         idy_inc = np.arange(idy_start, idy_end, dtype=int)
         # print("="*100)
         # print(f"idx_inc: {idx_inc}, idy_inc: {idy_inc}")
-        symm_ops = [sym["name"] for sym in symm]
-        if 'TR' in symm_ops:
-            # print(f"TR symmetry detected for tag '{tag}'")
-            l1_prime, l2_prime = l1, l2
-            orb1_prime, orb2_prime = 2-(orb1-1)%2+(orb1-1)//2*2, 2-(orb2-1)%2+(orb2-1)//2*2
-            idx_start_prime = self.get_global_index(l1_prime, 0, orb1_prime-1, Q_set1, Q_set2, n_orb1, n_orb2)
-            idx_end_prime   = self.get_global_index(l1_prime, len(Qlayer1), orb1_prime-1, Q_set1, Q_set2, n_orb1, n_orb2)
-            idy_start_prime = self.get_global_index(l2_prime, 0, orb2_prime-1, Q_set1, Q_set2, n_orb1, n_orb2)
-            idy_end_prime   = self.get_global_index(l2_prime, len(Qlayer2), orb2_prime-1, Q_set1, Q_set2, n_orb1, n_orb2)
-            idx_inc_prime = np.arange(idx_start_prime, idx_end_prime, dtype=int)
-            idy_inc_prime = np.arange(idy_start_prime, idy_end_prime, dtype=int)
-            idx_inc = np.concatenate((idx_inc, idx_inc_prime))
-            idy_inc = np.concatenate((idy_inc, idy_inc_prime))
+        fit_block_ops = [op for op in symm if self._uses_physical_time_reversal_fit_block(op)]
+        idx_inc = self._symmetry_support_closure(idx_inc, fit_block_ops)
+        idy_inc = self._symmetry_support_closure(idy_inc, fit_block_ops)
         idx_inc = np.sort(idx_inc)
         idy_inc = np.sort(idy_inc)
         if not np.array_equal(np.sort(idx_inc), np.sort(idy_inc)):
