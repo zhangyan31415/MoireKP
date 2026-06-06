@@ -2256,11 +2256,11 @@ class ContinuumModelBuilder:
             # print(f"shape of mat_real: {mat_real.shape}, mat_imag: {mat_imag.shape}")
         initialterms = np.array(initialterms)
         
-        subgroup_0 = (keys[0].layer_from, keys[0].layer_to, keys[0].orbital_from, keys[0].orbital_to)
+        subgroup_0 = self._fit_block_signature_for_key(keys[0])
         for key in keys:
-            subgroup = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
+            subgroup = self._fit_block_signature_for_key(key)
             if subgroup != subgroup_0:
-                raise ValueError("Different subgroups in keys.")
+                raise ValueError("Different fit block signatures in keys.")
 
         initialterms = np.array(self.get_mat_blocks(initialterms, keys[0], len(k_points)))
         
@@ -2510,18 +2510,16 @@ class ContinuumModelBuilder:
             
             keys = self._filter_duplicate_symmetry_seed_keys(keys, k_points, tol=tol)
 
-            # Fit local raw blocks after duplicate seeds have been removed by
-            # resolved matrix action.
-            subgroup_dict: Dict[Tuple[int, int, int, int], List[ContinuumTermKey]] = {}
+            subgroup_dict: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
             for key in keys:
-                subgroup = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
+                subgroup = self._fit_block_signature_for_key(key)
                 subgroup_dict.setdefault(subgroup, []).append(key)
             
             coeffs_by_subgroup = {}
             
             # 遍历每个子组
             for subgroup, sub_keys in subgroup_dict.items():
-                print(f"  Processing subgroup {subgroup} with {len(sub_keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
+                print(f"  Processing fit block with {len(sub_keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
                 raw_subgroups = {
                     (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
                     for key in sub_keys

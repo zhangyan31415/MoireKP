@@ -1050,6 +1050,57 @@ def test_physical_tr_closed_fit_group_merges_orbital_partners() -> None:
     assert len(diagnostics["Onsite"]) == 1
 
 
+def test_fit_uses_symmetry_closed_block_not_raw_subgroup(monkeypatch) -> None:
+    q = np.array([[0.0, 0.0]], dtype=float)
+    cfg = MoireConfig(
+        Q_set1=q,
+        Q_set2=q,
+        n_orb1=2,
+        n_orb2=2,
+        nlow_state=[2, 2],
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.0, 1.0]),
+        intra_harmonics_map={},
+        inter_harmonics_map={},
+        max_order={"Onsite": 0},
+        symmetry_map={"Onsite": []},
+        term_templates=[
+            {
+                "name": "onsite_bottom",
+                "source": "onsite",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "diagonal",
+                "max_order": 0,
+            }
+        ],
+    )
+    model = build_model(cfg)
+    builder = model._moire_builder
+    calls = []
+
+    def keep_all(self, keys, k_points, *, tol, max_exact_group_size=16):
+        return keys
+
+    def same_fit_block(self, key):
+        return (0, 1), (0, 1)
+
+    def empty_subset(self, sub_keys, k_points, tol=1.0e-6, tag=None):
+        calls.append(tuple((key.layer_from, key.layer_to, key.orbital_from, key.orbital_to) for key in sub_keys))
+        dim = 2
+        initial = np.zeros((2 * len(sub_keys), dim, dim), dtype=complex)
+        final = np.zeros((0,), dtype=complex)
+        return sub_keys, initial, final, np.array([], dtype=int)
+
+    monkeypatch.setattr(ContinuumModelBuilder, "_filter_duplicate_symmetry_seed_keys", keep_all)
+    monkeypatch.setattr(ContinuumModelBuilder, "_fit_block_signature_for_key", same_fit_block)
+    monkeypatch.setattr(ContinuumModelBuilder, "get_orthogonalized_terms_subset", empty_subset)
+
+    diagnostics = builder.compute_coefficients_by_tag(np.eye(4, dtype=complex), np.array([[0.0, 0.0]]))
+
+    assert calls == [((1, 1, 1, 1), (1, 1, 2, 2))]
+    assert len(diagnostics["Onsite"]) == 1
+
+
 def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
