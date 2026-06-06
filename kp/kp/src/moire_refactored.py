@@ -2153,24 +2153,39 @@ class ContinuumModelBuilder:
 
     @timing_decorator_factory(0)
     def orthogonalize_hermitian_matrices(self,matlist: List[np.ndarray], tol: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
-        print(f"orthogonalize_hermitian_matrices num of matlist new: {len(matlist)} dim: {matlist[0].shape}")
-        orthonormal_list = []
-        including_list = []
-        flattened = [mat.flatten() for mat in matlist]
-        for i, v in tqdm(enumerate(flattened)):
-            U = v.copy()
-            for w in orthonormal_list:
-                # 利用 np.vdot 计算内积（假设 w 已归一化）
-                projection = np.vdot(w, v)
-                U -= projection * w
-            norm = np.linalg.norm(U)
-            if norm > tol:
-                orthonormal_list.append(U / norm)
-                including_list.append(i)
-        # 还原形状
-        n = matlist[0].shape[0]
-        orthonormal_matrices = [v.reshape(n, n) for v in orthonormal_list]
-        return np.array(orthonormal_matrices), np.array(including_list, dtype=int)
+        mats = np.asarray(matlist)
+        print(f"orthogonalize_hermitian_matrices num of matlist new: {len(mats)} dim: {mats[0].shape}")
+        if len(mats) == 0:
+            return np.array([]), np.array([], dtype=int)
+
+        n = mats[0].shape[0]
+        if len(mats) <= 512:
+            orthonormal_list = []
+            including_list = []
+            flattened = [mat.flatten() for mat in mats]
+            for i, v in tqdm(enumerate(flattened)):
+                U = v.copy()
+                for w in orthonormal_list:
+                    U -= np.vdot(w, v) * w
+                norm = np.linalg.norm(U)
+                if norm > tol:
+                    orthonormal_list.append(U / norm)
+                    including_list.append(i)
+            orthonormal_matrices = [v.reshape(n, n) for v in orthonormal_list]
+            return np.array(orthonormal_matrices), np.array(including_list, dtype=int)
+
+        flat = mats.reshape(len(mats), -1)
+        norms = np.linalg.norm(flat, axis=1)
+        nonzero = np.flatnonzero(norms > tol)
+        if nonzero.size == 0:
+            return np.empty((0, n, n), dtype=mats.dtype), np.array([], dtype=int)
+
+        q, r, piv = scipy.linalg.qr(flat[nonzero].T, mode="economic", pivoting=True)
+        diag = np.abs(np.diag(r))
+        rank = int(np.count_nonzero(diag > tol))
+        including_list = nonzero[piv[:rank]].astype(int, copy=False)
+        orthonormal_matrices = q[:, :rank].T.reshape(rank, n, n)
+        return orthonormal_matrices, including_list
 
     @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
@@ -2248,15 +2263,9 @@ class ContinuumModelBuilder:
                 raise ValueError("Different subgroups in keys.")
 
         initialterms = np.array(self.get_mat_blocks(initialterms, keys[0], len(k_points)))
-        initialterms_copy = initialterms.copy()
         
         # 正交化
         finalterms, includinglist = self.orthogonalize_hermitian_matrices(initialterms, tol=tol)
-
-        # 如果 tag 为 "Onsite"，则不进行正交化，直接保留所有初始矩阵
-        if tag == "Onsite":
-            finalterms = initialterms_copy
-            includinglist = np.arange(len(finalterms))
         
         # 更新每个 term 的 active 标志：如果该 term 对应的两个矩阵中至少有一个被保留，则 active 为 True
         for i, key in enumerate(keys):
@@ -2343,6 +2352,80 @@ class ContinuumModelBuilder:
             current = expanded
         return current
 
+    def _fit_block_indices_for_key(self, key: ContinuumTermKey) -> tuple[np.ndarray, np.ndarray]:
+        l1, l2, orb1, orb2 = key.layer_from, key.layer_to, key.orbital_from, key.orbital_to
+        Q_set1, Q_set2 = self.Q_set1, self.Q_set2
+        n_orb1, n_orb2 = self.n_orb1, self.n_orb2
+        Qlayer1 = Q_set1 if l1 == 1 else Q_set2
+        Qlayer2 = Q_set1 if l2 == 1 else Q_set2
+
+        idx_start = self.get_global_index(l1, 0, orb1 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
+        idx_end = self.get_global_index(l1, len(Qlayer1), orb1 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
+        idy_start = self.get_global_index(l2, 0, orb2 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
+        idy_end = self.get_global_index(l2, len(Qlayer2), orb2 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
+
+        idx_inc = np.arange(idx_start, idx_end, dtype=int)
+        idy_inc = np.arange(idy_start, idy_end, dtype=int)
+        symm = self.model.terms[key].symmetry_ops
+        fit_block_ops = [op for op in symm if self._uses_physical_time_reversal_fit_block(op)]
+        idx_inc = self._symmetry_support_closure(idx_inc, fit_block_ops)
+        idy_inc = self._symmetry_support_closure(idy_inc, fit_block_ops)
+        idx_inc = np.sort(idx_inc)
+        idy_inc = np.sort(idy_inc)
+        if not np.array_equal(idx_inc, idy_inc):
+            combined = np.unique(np.concatenate((idx_inc, idy_inc)))
+            idx_inc = combined.copy()
+            idy_inc = combined.copy()
+        return idx_inc, idy_inc
+
+    def _fit_block_signature_for_key(self, key: ContinuumTermKey) -> tuple[tuple[int, ...], tuple[int, ...]]:
+        rows, cols = self._fit_block_indices_for_key(key)
+        return tuple(int(i) for i in rows), tuple(int(i) for i in cols)
+
+    def _filter_duplicate_symmetry_seed_keys(
+        self,
+        keys: List[ContinuumTermKey],
+        k_points: List[np.ndarray],
+        *,
+        tol: float,
+        max_exact_group_size: int = 16,
+    ) -> List[ContinuumTermKey]:
+        signature_groups: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
+        for key in keys:
+            signature_groups.setdefault(self._fit_block_signature_for_key(key), []).append(key)
+
+        keep: set[ContinuumTermKey] = set()
+        dropped: List[ContinuumTermKey] = []
+        for group_keys in signature_groups.values():
+            if len(group_keys) > max_exact_group_size:
+                keep.update(group_keys)
+                continue
+
+            basis: List[np.ndarray] = []
+            for key in group_keys:
+                mat_real, mat_imag = self.stack_Y_for_term(self.model.terms[key], k_points)
+                is_new_seed = False
+                for block in self.get_mat_blocks([mat_real, mat_imag], key, len(k_points)):
+                    vector = block.ravel()
+                    residual = vector.copy()
+                    for existing in basis:
+                        residual -= np.vdot(existing, vector) * existing
+                    norm = np.linalg.norm(residual)
+                    if norm > tol:
+                        basis.append(residual / norm)
+                        is_new_seed = True
+                if is_new_seed:
+                    keep.add(key)
+                else:
+                    dropped.append(key)
+                    self.model.terms[key].active = False
+                    self.model.terms[key].r_value_real = 0.0
+                    self.model.terms[key].r_value_imag = 0.0
+
+        if dropped:
+            print(f"  Dropped {len(dropped)} symmetry-duplicate seed terms before fitting.")
+        return [key for key in keys if key in keep]
+
     # def get_mat_blocks(self, mat_list: List[np.ndarray], subgroup: Tuple[int, int, int, int], num_kpoints: int = 1) -> List[np.ndarray]:
     def get_mat_blocks(self, mat_list: List[np.ndarray], key: ContinuumTermKey, num_kpoints: int = 1) -> List[np.ndarray]:
         """
@@ -2356,50 +2439,14 @@ class ContinuumModelBuilder:
         其中 A 是从 (layer_from, orbital_from) 到 (layer_to, orbital_to) 的子块，
         而 B 则是 (layer_to, orbital_to) 到 (layer_from, orbital_from) 的子块。
         """
-        # 解包 subgroup 信息
-        l1, l2, orb1, orb2 = key.layer_from, key.layer_to, key.orbital_from, key.orbital_to
-        # l1, l2, orb1, orb2 = subgroup
-        n_orb1, n_orb2 = self.n_orb1, self.n_orb2
         Q_set1, Q_set2 = self.Q_set1, self.Q_set2
-        H_dim = len(Q_set1)*n_orb1 + len(Q_set2)*n_orb2
-        
-        tag, symm = self.model.terms[key].tag, self.model.terms[key].symmetry_ops
-
+        H_dim = len(Q_set1)*self.n_orb1 + len(Q_set2)*self.n_orb2
         
         if H_dim * num_kpoints != mat_list[0].shape[0]:
             print(f"mat_list[0].shape[0]: {mat_list[0].shape[0]}, H_dim: {H_dim}, num_kpoints: {num_kpoints}")
             raise ValueError("Mismatched matrix shape and H_dim.")
 
-        # 根据层号确定 Q 集合
-        Qlayer1 = Q_set1 if l1 == 1 else Q_set2
-        Qlayer2 = Q_set1 if l2 == 1 else Q_set2
-
-        # 计算全局索引范围
-        idx_start = self.get_global_index(l1, 0, orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
-        idx_end   = self.get_global_index(l1, len(Qlayer1), orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
-        idy_start = self.get_global_index(l2, 0, orb2-1, Q_set1, Q_set2, n_orb1, n_orb2)
-        idy_end   = self.get_global_index(l2, len(Qlayer2), orb2-1, Q_set1, Q_set2, n_orb1, n_orb2)
-        idx_inc = np.arange(idx_start, idx_end, dtype=int)
-        idy_inc = np.arange(idy_start, idy_end, dtype=int)
-        # print("="*100)
-        # print(f"idx_inc: {idx_inc}, idy_inc: {idy_inc}")
-        fit_block_ops = [op for op in symm if self._uses_physical_time_reversal_fit_block(op)]
-        idx_inc = self._symmetry_support_closure(idx_inc, fit_block_ops)
-        idy_inc = self._symmetry_support_closure(idy_inc, fit_block_ops)
-        idx_inc = np.sort(idx_inc)
-        idy_inc = np.sort(idy_inc)
-        if not np.array_equal(np.sort(idx_inc), np.sort(idy_inc)):
-            # 1) 拼起来
-            combined = np.concatenate((idx_inc, idy_inc))
-            # 2) 去重并排序（也可以用 np.unique，它本身就会排序并去重）
-            combined = np.unique(combined)
-            # 3) 赋回
-            idx_inc = combined.copy()
-            idy_inc = combined.copy()
-        # if orb1 != orb2:
-        #     print("-"*100)
-        #     print(f"idx_inc: {idx_inc}, idy_inc: {idy_inc}")
-        #     print(f"symm: {symm}")
+        idx_inc, idy_inc = self._fit_block_indices_for_key(key)
         mat_blocks = []
         for mat in mat_list:
             block_list = []
@@ -2461,7 +2508,10 @@ class ContinuumModelBuilder:
                 f"Time: {time.strftime('%H:%M:%S', time.localtime())}"
             )
             
-            # 在当前 tag 组内按 (layer_from, layer_to, orbital_from, orbital_to) 分组
+            keys = self._filter_duplicate_symmetry_seed_keys(keys, k_points, tol=tol)
+
+            # Fit local raw blocks after duplicate seeds have been removed by
+            # resolved matrix action.
             subgroup_dict: Dict[Tuple[int, int, int, int], List[ContinuumTermKey]] = {}
             for key in keys:
                 subgroup = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
@@ -2472,6 +2522,11 @@ class ContinuumModelBuilder:
             # 遍历每个子组
             for subgroup, sub_keys in subgroup_dict.items():
                 print(f"  Processing subgroup {subgroup} with {len(sub_keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
+                raw_subgroups = {
+                    (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
+                    for key in sub_keys
+                }
+                diagnostics_key = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
                 # 获取正交化结果（同时处理 real 与 imag 部分）
                 grp_keys, initialterms, finalterms, includinglist = self.get_orthogonalized_terms_subset(
                     sub_keys,
@@ -2484,7 +2539,7 @@ class ContinuumModelBuilder:
                     for key in sub_keys:
                         self.model.terms[key].r_value_real = 0.0
                         self.model.terms[key].r_value_imag = 0.0
-                    coeffs_by_subgroup[subgroup] = np.array([], dtype=complex)
+                    coeffs_by_subgroup[diagnostics_key] = np.array([], dtype=complex)
                     print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
                     continue
                 
@@ -2495,47 +2550,39 @@ class ContinuumModelBuilder:
                 # heff_block = scipy.linalg.block_diag(*heff_block)
                 
                 heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
-                print("rank of initialterms[0]", np.linalg.matrix_rank(initialterms[0]),"shape of initialterms[0]", initialterms[0].shape)
-                if np.linalg.matrix_rank(initialterms[0]) < initialterms[0].shape[0]:
-                    print(f"Warning: initialterms[0] is not full rank. Rank: {np.linalg.matrix_rank(initialterms[0])}, Shape: {initialterms[0].shape}")
-                    # print(f"initialterms[0]: {initialterms[0]}")
-                    
-                # 对于 onsite 类型单独处理
                 if tag == "Onsite":
                     H_dim = len(self.Q_set1)*self.n_orb1 + len(self.Q_set2)*self.n_orb2
-                    coeffs = []
-                    Qlayer = self.Q_set1 if grp_keys[0].layer_from == 1 else self.Q_set2
+                    kinetic_blocks = []
+                    for k in k_points:
+                        H_kinetic = np.zeros((H_dim, H_dim), dtype=complex)
+                        for key, term in self.model.terms.items():
+                            if term.tag == "Kinect":
+                                self.add_symmetrized_term_to_matrix_static(
+                                    H_kinetic,
+                                    term.Y_basis,
+                                    k,
+                                    term.symmetry_ops,
+                                    term.r_value_real,
+                                    term.r_value_imag,
+                                    symmetry_gen=self.symmetry_gen,
+                                    term=term,
+                                )
+                        kinetic_blocks.append(H_kinetic)
+                    kinetic_block = scipy.linalg.block_diag(*kinetic_blocks)
+                    heff_block = heff_block - self.get_mat_blocks([kinetic_block], sub_keys[0], len(k_points))[0]
+                    coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block)
+                    coeffs = np.real(coeffs)
+
+                    included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
                     for i in tqdm(range(len(sub_keys))):
-                        # 找到对应的 real 部分在 includinglist 中的索引（若不存在，则返回 None）
-                        try:
-                            idx_real = includinglist.tolist().index(2*i)
-                        except ValueError:
-                            idx_real = None
-                        try:
-                            idx_imag = includinglist.tolist().index(2*i+1)
-                        except ValueError:
-                            idx_imag = None
-                        # block_dim = H_dim if exchange_antiunitary_flag else len(Qlayer)
-                        block_dim = np.shape(heff_block)[0]
-                        H_Kinect_list = []
-                        for k in k_points:
-                            H_Kinect=0
-                            for key, term in self.model.terms.items():
-                                if term.tag == "Kinect":
-                                    H_Kinect += term.r_value_real*self.symmetrize_Y_basis_static(term.Y_basis, k, term.symmetry_ops, self.symmetry_gen, term)
-                            H_Kinect_list.append(H_Kinect)
-                        H_Kinect_list = scipy.linalg.block_diag(*H_Kinect_list)
-                        H_Kinect_list = self.get_mat_blocks([H_Kinect_list], sub_keys[0], len(k_points))[0]
-                        heff_block = heff_block - H_Kinect_list
-                        # if block_dim != len(finalterms[idx_real]):
-                        #     raise ValueError(f"Block dimension mismatch: {block_dim} vs {len(finalterms[idx_real])}")
-                        coeffs_i = np.trace(heff_block @ finalterms[idx_real]) / (block_dim) if idx_real is not None else 0
-                        coeffs_i = np.real(coeffs_i)
-                        coeffs.append(coeffs_i)
-                        # 更新每个 term 的系数
-                        self.model.terms[sub_keys[i]].r_value_real = coeffs_i
-                        self.model.terms[sub_keys[i]].r_value_imag = 0
-                        coeffs_print.append(coeffs_i)
+                        idx_real = included.get(2 * i)
+                        idx_imag = included.get(2 * i + 1)
+                        r_real = coeffs[idx_real] if idx_real is not None else 0.0
+                        r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
+                        r = r_real + 1j * r_imag
+                        coeffs_print.append(r)
+                        self.model.terms[sub_keys[i]].r_value_real = r_real
+                        self.model.terms[sub_keys[i]].r_value_imag = r_imag
                 else:
                     # 对非 Onsite 项，构造 transfer matrix 并求解
                     print(f'    before transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
@@ -2566,7 +2613,7 @@ class ContinuumModelBuilder:
                         self.model.terms[sub_keys[i]].r_value_real = r_real
                         self.model.terms[sub_keys[i]].r_value_imag = r_imag
                 print(f"  Updated coefficients for subgroup {subgroup}: {_summarize_coefficients(coeffs_print)}")
-                coeffs_by_subgroup[subgroup] = np.array(coeffs)
+                coeffs_by_subgroup[diagnostics_key] = np.array(coeffs)
             print("="*100)
             coeffs_by_tag[tag] = coeffs_by_subgroup
         return coeffs_by_tag

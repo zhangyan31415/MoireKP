@@ -996,6 +996,60 @@ def test_compute_coefficients_skips_empty_orthogonalized_subgroup(monkeypatch) -
     assert all(term.r_value_real == 0.0 and term.r_value_imag == 0.0 for term in model.terms.values())
 
 
+def test_physical_tr_closed_fit_group_merges_orbital_partners() -> None:
+    q = np.array([[0.0, 0.0]], dtype=float)
+    tr_block = np.array([[0.0, -1.0], [1.0, 0.0]], dtype=complex)
+    tr_matrix = np.zeros((4, 4), dtype=complex)
+    tr_matrix[:2, :2] = tr_block
+    tr_matrix[2:, 2:] = tr_block
+
+    class StaticGenerator:
+        def get_operator(self, name, params=None):
+            assert name == "TR"
+            return tr_matrix
+
+    tr_op = {
+        "name": "TR",
+        "antiunitary": True,
+        "k_map": {"type": "negation"},
+        "q_map": {"type": "negation"},
+        "sector_map": "identity",
+        "operation_physics_level": "physical",
+    }
+    cfg = MoireConfig(
+        Q_set1=q,
+        Q_set2=q,
+        n_orb1=2,
+        n_orb2=2,
+        nlow_state=[2, 2],
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.0, 1.0]),
+        intra_harmonics_map={},
+        inter_harmonics_map={},
+        max_order={"Onsite": 0},
+        symmetry_map={"Onsite": [tr_op]},
+        symmetry_gen=StaticGenerator(),
+        term_templates=[
+            {
+                "name": "onsite_bottom",
+                "source": "onsite",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "diagonal",
+                "max_order": 0,
+            }
+        ],
+    )
+    model = build_model(cfg)
+    builder = model._moire_builder
+
+    diagnostics = builder.compute_coefficients_by_tag(np.diag([2.0, 2.0, 0.0, 0.0]).astype(complex), np.array([[0.0, 0.0]]))
+
+    onsite_terms = [term for term in model.terms.values() if term.tag == "Onsite"]
+    assert len(onsite_terms) == 2
+    assert sum(term.active for term in onsite_terms) == 1
+    assert len(diagnostics["Onsite"]) == 1
+
+
 def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
