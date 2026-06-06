@@ -59,22 +59,6 @@ class MatrixSymmetryGenerator:
         return matrix
 
 
-class FallbackSymmetryGenerator:
-    """Use matrix-backed operators by default, with named fallback operators from a toy generator."""
-
-    def __init__(self, primary: Any, fallback: Any, fallback_names: set[str]):
-        self.primary = primary
-        self.fallback = fallback
-        self.fallback_names = {str(name) for name in fallback_names}
-        self.metadata = getattr(primary, "metadata", {})
-        self.cached_operators: dict[str, np.ndarray] = {}
-
-    def get_operator(self, name: str, params: Any = None) -> np.ndarray:
-        if str(name) in self.fallback_names:
-            return self.fallback.get_operator(name, params)
-        return self.primary.get_operator(name, params)
-
-
 def _load_manifest(path: Path) -> dict[str, Any]:
     for name in ("manifest.json", "summary.json"):
         candidate = path / name

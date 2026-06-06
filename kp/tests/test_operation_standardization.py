@@ -11,7 +11,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kp.model.config_schema import CANONICAL_INTERNAL_NAMES, canonical_operation_name_for_valley, validate_model_config
-from kp.model.configured import ACTION_SPECS, _build_operation_registry, _is_k_single_valley_notebook_c2t
+from kp.model.configured import ACTION_SPECS, _build_operation_registry
 from kp.model.symmetry import MatrixSymmetryGenerator, load_symmetry_source
 
 
@@ -142,20 +142,6 @@ def test_operation_registry_records_canonical_names_and_source_metadata() -> Non
     assert row["source_matrix_role"] == "raw_h_sewing_action"
     assert row["antiunitary_convention"] == "U_K"
     assert not (set(LEGACY_AXIS_OPERATION_NAMES) & {str(value) for value in row.values()})
-
-
-def test_K_notebook_profile_is_explicitly_recognized_for_canonical_C2T() -> None:
-    valley_model = {"valley_type": "K", "mode": "single_valley", "spin_convention": "spin_up_only"}
-
-    assert _is_k_single_valley_notebook_c2t(
-        valley_model,
-        {"Kinect": [{"name": "C2T", "model_action_profile": "K_notebook"}]},
-    )
-    assert not _is_k_single_valley_notebook_c2t(
-        valley_model,
-        {"Kinect": [{"name": "C2" + "y" + "T", "model_action_profile": "K_notebook"}]},
-    )
-    assert not _is_k_single_valley_notebook_c2t(valley_model, {"Kinect": [{"name": "C2T"}]})
 
 
 def test_nonstandard_action_name_is_rejected(tmp_path: Path) -> None:

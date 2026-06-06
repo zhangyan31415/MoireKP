@@ -10,7 +10,7 @@ PHYSICAL_C2_NAMES = {"C2", "C2z"}
 K_SINGLE_ALLOWED_INTERNAL = {"C3z", "C2T"}
 M_SPINLESS_ALLOWED_INTERNAL = {"TR_eff", "C2_eff", "C2TR_eff"}
 CANONICAL_INTERNAL_NAMES = {"C3z", "C2", "TR", "C2T", "TR_eff", "C2_eff", "C2TR_eff"}
-ALLOWED_GENERATION_MODES = {"representation_invariant", "explicit_legacy", "notebook_compatibility"}
+ALLOWED_GENERATION_MODES = {"representation_invariant", "explicit_legacy"}
 
 
 def canonical_operation_name_for_valley(name: str, valley_model: Mapping[str, Any] | None = None) -> str:
@@ -163,6 +163,8 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
         template = symmetry_source.get("basis_template")
         if any(name in sym_names for name in {"C3z", "C2", "C2T", "TR_eff", "C2_eff", "C2TR_eff"}) and not template:
             raise ValueError("toy_generator symmetry operations require explicit basis_template")
+        if "C2T" in sym_names:
+            raise ValueError("C2T toy generator is not supported; use kp_symm_output matrices")
         if sym_names & PHYSICAL_TR_NAMES and any(int(n) % 2 for n in nlow_state):
             raise ValueError(
                 "TR toy generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
@@ -218,9 +220,8 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
         monomial_constraints = template.get("monomial_constraints")
         if monomial_constraints is not None and not isinstance(monomial_constraints, Mapping):
             raise ValueError(f"term_templates[{idx}].monomial_constraints must be a mapping")
-        legacy_filter = template.get("legacy_monomial_filter", template.get("monomial_filter"))
-        if legacy_filter == "notebook_kinetic_c3_diag":
-            raise ValueError("notebook_kinetic_c3_diag is not supported by the release model schema")
+        if "legacy_monomial_filter" in template or "monomial_filter" in template:
+            raise ValueError("monomial_filter is not supported by the release model schema; use monomial_constraints")
         generation_mode = str(template.get("generation_mode", "")).strip()
         if generation_mode:
             if generation_mode not in ALLOWED_GENERATION_MODES:
@@ -228,10 +229,10 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
                 raise ValueError(f"term_templates[{idx}].generation_mode must be one of: {allowed}; got {generation_mode!r}")
         else:
             lower_name = str(template.get("name", "")).lower()
-            if "notebook" in lower_name or "legacy" in lower_name:
+            if "legacy" in lower_name:
                 raise ValueError(
-                    f"term_templates[{idx}] uses a legacy/notebook-style name; release schema requires explicit "
-                    "generation_mode: explicit_legacy or notebook_compatibility. Prefer neutral term names plus "
+                    f"term_templates[{idx}] uses a legacy-style name; release schema requires explicit "
+                    "generation_mode: explicit_legacy. Prefer neutral term names plus "
                     "explicit generation_mode instead of relying on name-based inference."
                 )
 

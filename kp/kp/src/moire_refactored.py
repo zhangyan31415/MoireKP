@@ -780,20 +780,7 @@ class SymmetryGenerator:
         self.basis_template = basis_template
         self.Q_set = np.concatenate([Qlayer1, Qlayer2], axis=0)
 
-        # 预计算所有操作矩阵并缓存
         self.cached_operators = {}
-        # self._cache_all_operators()
-
-    def _cache_all_operators(self):
-        """
-        预计算并缓存所有的对称操作矩阵。
-        这里考虑 C3z 有参数，因此我们缓存一个字典存储不同参数的 C3z 操作矩阵。
-        """
-        # 预缓存C3z矩阵（假设params为0，1，2）
-        for params in range(3):
-            self.cached_operators[f'C3z_{params}'] = self.get_C3z_operator(params)
-        
-        self.cached_operators['C2T'] = self.get_C2T_operator()
 
     def rotation_matrix(self, theta: float) -> np.ndarray:
         """生成二维旋转矩阵"""
@@ -805,8 +792,8 @@ class SymmetryGenerator:
         生成 C3z 对称操作的投影矩阵（示例代码，维度与各层 Q 数和轨道数匹配）
         这里利用输入的 Qlayer 与 nlow_state 生成 block_diag 矩阵
         """
-        if self.basis_template not in {"Gamma_four_orbital", "K_notebook"}:
-            raise ValueError("C3z toy generator requires Gamma_four_orbital or K_notebook basis_template; use kp_symm_output for production.")
+        if self.basis_template != "Gamma_four_orbital":
+            raise ValueError("C3z toy generator requires Gamma_four_orbital basis_template; use kp_symm_output for production.")
         gamma_template_phases = [np.exp(1j * np.pi / 3)]
         q1norm = np.max(np.linalg.norm(self.Q_set, axis=1)) - np.min(np.linalg.norm(self.Q_set, axis=1))
         C3_matrix = []
@@ -970,30 +957,6 @@ class SymmetryGenerator:
 
         return scipy.linalg.block_diag(*T_blocks)
     
-    def get_C2T_operator(self) -> np.ndarray:
-        """
-        Build the single-valley antiunitary twofold action matrix.
-        """
-        Qset = self.Q_set
-        q1norm = np.min(np.linalg.norm(Qset, axis=1))
-        mat = np.zeros((len(Qset), len(Qset)), dtype=complex)
-        if self.nlow_state[0] != self.nlow_state[1] or len(self.Qlayer1) != len(self.Qlayer2) or self.nlow_state[0] != 1:
-            raise ValueError(
-                "C2T toy generator only supports the K_notebook template with equal layer Q counts "
-                "and exactly one low-energy state per layer; use kp_symm_output for production C2T."
-            )
-        
-        for i in range(2):
-            Qlayer_i = self.Qlayer1 if i == 0 else self.Qlayer2
-            for j in range(2):
-                Qlayer_j = self.Qlayer1 if j == 0 else self.Qlayer2
-                R_y = np.array([[1,0],[0,-1]])
-                for ii in range(len(Qlayer_i)):
-                    for jj in range(len(Qlayer_j)):
-                        if np.linalg.norm(Qlayer_i[ii] - R_y @ Qlayer_j[jj]) < q1norm/10:
-                            mat[ii + i*len(Qlayer_i), jj + j*len(Qlayer_j)] = 1
-        return mat.T
-
     def get_C2_operator(self, qtol: float | None = None) -> np.ndarray:
         """
         Construct a twofold layer-exchange unitary matrix.
@@ -1106,8 +1069,6 @@ class SymmetryGenerator:
         if operator_name not in self.cached_operators:
             if name == "C3z":
                 D = self.get_C3z_operator(params)
-            elif name == "C2T":
-                D = self.get_C2T_operator()
             elif name == "TR":
                 D = self.get_time_reversal_matrix()
             elif name == "TR_eff":
@@ -2680,7 +2641,7 @@ class ContinuumModelBuilder:
                 }
                 orthogonalize_subset = self.get_orthogonalized_terms_subset
                 post_block_legacy_subset = False
-                if len(generation_modes) == 1 and generation_modes <= {"explicit_legacy", "notebook_compatibility"}:
+                if generation_modes == {"explicit_legacy"}:
                     orthogonalize_subset = self.get_orthogonalized_terms_subset_old
                     post_block_legacy_subset = True
                 grp_keys, initialterms, finalterms, includinglist = orthogonalize_subset(sub_keys, k_points, tol=tol, tag=tag)
@@ -2859,15 +2820,7 @@ class ContinuumModelBuilder:
             items = [(int(index), mapping[int(index)]) for index in indices]
         source_label = str(template.get("harmonics_source", ""))
         if not source_label:
-            lower_name = str(template.get("name", "")).lower()
-            if "notebook" in lower_name:
-                source_label = "legacy_notebook_explicit"
-            elif "legacy" in lower_name:
-                source_label = "explicit_legacy"
-            elif indices is None:
-                source_label = "explicit_full_mapping"
-            else:
-                source_label = "explicit_indices"
+            source_label = "explicit_full_mapping" if indices is None else "explicit_indices"
         return [
             {
                 "id": int(key),
@@ -2885,12 +2838,6 @@ class ContinuumModelBuilder:
         explicit_mode = str(template.get("generation_mode", "")).strip()
         if explicit_mode:
             return explicit_mode
-        lower_name = str(template.get("name", "")).lower()
-        legacy_filter = str(template.get("legacy_monomial_filter", template.get("monomial_filter", "")))
-        if legacy_filter:
-            return "notebook_compatibility"
-        if "notebook" in lower_name or "legacy" in lower_name:
-            return "explicit_legacy"
         return "representation_invariant"
 
     @staticmethod
@@ -2904,16 +2851,6 @@ class ContinuumModelBuilder:
         if raw and not isinstance(raw, Mapping):
             raise ValueError(f"monomial_constraints must be a mapping, got {raw!r}")
         constraints.update(dict(raw))
-        monomial_filter = str(template.get("legacy_monomial_filter", template.get("monomial_filter", "")))
-        if monomial_filter == "notebook_kinetic_c3_diag":
-            legacy = {
-                "exclude_m_sum_zero": True,
-                "difference_mod": 3,
-                "difference_residue": 0,
-                "require_mz_ge_mz_star": True,
-            }
-            for key, value in legacy.items():
-                constraints.setdefault(key, value)
         if source == "diagonal_kp":
             constraints.setdefault("exclude_m_sum_zero", True)
         return constraints
@@ -2950,9 +2887,7 @@ class ContinuumModelBuilder:
             sym_ops = self.symmetry_map.get(tag, [])
             max_order = int(template.get("max_order", self.max_order.get(tag, 0)))
             generation_mode = self._template_generation_mode(template)
-            if generation_mode == "notebook_compatibility":
-                generated_by = "notebook_compatibility"
-            elif generation_mode == "explicit_legacy":
+            if generation_mode == "explicit_legacy":
                 generated_by = "explicit_legacy"
             else:
                 generated_by = "representation_invariant_generator"

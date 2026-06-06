@@ -203,26 +203,8 @@ model:
   symmetry_map:
     Kinect:
     - name: C2T
-      antiunitary: true
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: identity
-      model_action_profile: K_notebook
     Onsite:
     - name: C2T
-      antiunitary: true
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: identity
-      model_action_profile: K_notebook
     intra:
     - name: C3z
       antiunitary: false
@@ -234,15 +216,6 @@ model:
         angle_deg: 120.0
       sector_map: identity
     - name: C2T
-      antiunitary: true
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: identity
-      model_action_profile: K_notebook
     inter:
     - name: C3z
       antiunitary: false
@@ -254,15 +227,6 @@ model:
         angle_deg: 120.0
       sector_map: identity
     - name: C2T
-      antiunitary: true
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: identity
-      model_action_profile: K_notebook
 fit:
   indices:
   - 0

@@ -455,7 +455,7 @@ def test_T_toy_generator_rejects_spinless_nlow_state() -> None:
 def test_noncanonical_internal_operation_rejected(tmp_path: Path) -> None:
     cfg_path = _write_auto_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "K_notebook"}
+    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "Gamma_four_orbital"}
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "bad_op"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
@@ -500,7 +500,7 @@ def test_K_single_valley_rejects_T_C2(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="K single_valley cannot use physical TR/C2"):
         load_model_config(cfg_path)
 
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C3z"}, {"name": "C2T"}], "intra": [], "inter": []}
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C3z"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     cfg = load_model_config(cfg_path)
     assert cfg.valley_model["valley_type"] == "K"
@@ -553,7 +553,7 @@ def test_K_single_valley_keeps_source_operation_separate_from_canonical_name(tmp
     assert cfg.valley_model["valley_type"] == "K"
 
 
-def test_K_notebook_toy_generator_allows_C2T_template(tmp_path: Path) -> None:
+def test_K_single_valley_C2T_requires_kp_symm_output(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"] = {
@@ -566,7 +566,7 @@ def test_K_notebook_toy_generator_allows_C2T_template(tmp_path: Path) -> None:
         "allowed_internal_symmetries": ["C3z", "C2T"],
         "external_sewing_symmetries": [],
     }
-    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "K_notebook"}
+    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "Gamma_four_orbital"}
     raw["model"]["symmetry_map"] = {
         "Kinect": [{"name": "C2T"}],
         "intra": [{"name": "C3z"}, {"name": "C2T"}],
@@ -574,41 +574,8 @@ def test_K_notebook_toy_generator_allows_C2T_template(tmp_path: Path) -> None:
     }
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    cfg = load_model_config(cfg_path)
-
-    assert cfg.symmetry_source_config["basis_template"] == "K_notebook"
-
-
-def test_notebook_kinetic_monomial_filter_generates_legacy_orders() -> None:
-    q = np.array([[0.0, 0.0]], dtype=float)
-    cfg = MoireConfig(
-        Q_set1=q,
-        Q_set2=q,
-        n_orb1=1,
-        n_orb2=1,
-        nlow_state=[1, 1],
-        bM1=np.array([1.0, 0.0]),
-        bM2=np.array([0.5, 0.8660254037844386]),
-        intra_harmonics_map={1: np.array([0.0, 0.0])},
-        inter_harmonics_map={1: np.array([0.0, 0.0])},
-        max_order={"Kinect": 6, "intra": 0, "inter": 0},
-        symmetry_map={"Kinect": []},
-        term_templates=[
-            {
-                "name": "notebook_kinetic_layer1",
-                "source": "diagonal_kp",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": "diagonal",
-                "max_order": 6,
-                "monomial_filter": "notebook_kinetic_c3_diag",
-            }
-        ],
-    )
-
-    model = build_model(cfg)
-    orders = sorted((term.key.Mz, term.key.Mz_star) for term in model.terms.values())
-
-    assert orders == [(1, 1), (2, 2), (3, 0), (3, 3), (4, 1), (6, 0)]
+    with pytest.raises(ValueError, match="C2T toy generator is not supported"):
+        load_model_config(cfg_path)
 
 
 def test_generic_monomial_constraints_reproduce_legacy_kinetic_orders() -> None:
@@ -718,7 +685,7 @@ def test_Gamma_user_facing_C2_stays_standard_family(tmp_path: Path) -> None:
     assert cfg.symmetry_map["Kinect"][1]["name"] == "C2"
 
 
-def test_notebook_monomial_filter_is_forbidden_in_release_schema(tmp_path: Path) -> None:
+def test_monomial_filter_is_forbidden_in_release_schema(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["model"]["term_templates"] = [
@@ -728,7 +695,7 @@ def test_notebook_monomial_filter_is_forbidden_in_release_schema(tmp_path: Path)
             "sector_pairs": [[1, 1]],
             "orbital_pairs": [[1, 1]],
             "max_order": 4,
-            "monomial_filter": "notebook_kinetic_c3_diag",
+            "monomial_filter": "old_kinetic_filter",
         }
     ]
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -744,7 +711,7 @@ def test_release_schema_rejects_unknown_generation_mode(tmp_path: Path) -> None:
         {
             "name": "kinetic_layer1",
             "source": "diagonal_kp",
-            "generation_mode": "notebook",
+            "generation_mode": "unsupported_mode",
             "sector_pairs": [[1, 1]],
             "orbital_pairs": [[1, 1]],
             "max_order": 4,
@@ -761,7 +728,7 @@ def test_release_schema_requires_explicit_generation_mode_for_legacy_names(tmp_p
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["model"]["term_templates"] = [
         {
-            "name": "notebook_intra_layer1",
+            "name": "legacy_intra_layer1",
             "source": "moire_potential",
             "sector_pairs": [[1, 1]],
             "orbital_pairs": "all",
@@ -1617,7 +1584,7 @@ def test_production_strict_rejects_unavailable_validation_outputs(monkeypatch, t
         run_configured_model(cfg_path)
 
 
-def test_notebook_explicit_harmonics_are_marked_legacy_in_term_registry() -> None:
+def test_explicit_harmonics_use_neutral_registry_source() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     cfg = MoireConfig(
         Q_set1=q,
@@ -1633,7 +1600,7 @@ def test_notebook_explicit_harmonics_are_marked_legacy_in_term_registry() -> Non
         symmetry_map={"intra": []},
         term_templates=[
             {
-                "name": "notebook_intra_layer1_nonzero",
+                "name": "intra_layer1_nonzero",
                 "source": "moire_potential",
                 "sector_pairs": [[1, 1]],
                 "orbital_pairs": "all",
@@ -1645,5 +1612,5 @@ def test_notebook_explicit_harmonics_are_marked_legacy_in_term_registry() -> Non
 
     model = build_model(cfg)
     term = next(iter(model.terms.values()))
-    assert term.registry_metadata["harmonics_source"] == "legacy_notebook_explicit"
-    assert term.registry_metadata["generated_by"] == "explicit_legacy"
+    assert term.registry_metadata["harmonics_source"] == "explicit_indices"
+    assert term.registry_metadata["generated_by"] == "representation_invariant_generator"

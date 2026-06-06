@@ -19,7 +19,7 @@ from .config_schema import (
     validate_model_config,
 )
 from .exactify_representation import exactify_loaded_symmetry_source
-from .symmetry import FallbackSymmetryGenerator, load_symmetry_source
+from .symmetry import load_symmetry_source
 from ..src.moire_refactored import (
     ContinuumModelBuilder,
     MoireConfig,
@@ -131,17 +131,6 @@ REPRESENTATION_SEMANTICS: dict[str, Any] = {
     "valley_map": "identity",
 }
 
-# Compatibility rule for the historical single-spin K notebook C2T path.
-K_SINGLE_VALLEY_NOTEBOOK_C2T: dict[str, Any] = {
-    "valley_type": "K",
-    "mode": "single_valley",
-    "spin_conventions": {"spin_up_only", "spin_down_only"},
-    "operation_name": "C2T",
-    "model_action_profile": "K_notebook",
-    "basis_template": "K_notebook",
-}
-
-
 def _map_with_axis(base: Mapping[str, Any], axis_deg: float | None) -> dict[str, Any]:
     out = copy.deepcopy(dict(base))
     if axis_deg is not None:
@@ -169,11 +158,8 @@ def _with_sector_map(action: dict[str, Any], sector_map: Any | None) -> dict[str
     return action
 
 
-def _model_op(name: str, *, axis_deg: float | None = None, profile: str | None = None) -> dict[str, Any]:
-    out = {"name": name, **_operation_action(name, axis_deg=axis_deg)}
-    if profile:
-        out["model_action_profile"] = profile
-    return out
+def _model_op(name: str, *, axis_deg: float | None = None) -> dict[str, Any]:
+    return {"name": name, **_operation_action(name, axis_deg=axis_deg)}
 
 
 def _source_op(
@@ -333,50 +319,6 @@ def _is_m_spinless_effective_valley(valley_model: Mapping[str, Any]) -> bool:
     )
 
 
-def _has_operation_profile(
-    symmetry_map: Mapping[str, Sequence[Mapping[str, Any]]],
-    *,
-    name: str,
-    model_action_profile: str,
-) -> bool:
-    return any(
-        str(op.get("name", "")) == name
-        and str(op.get("model_action_profile", "")) == model_action_profile
-        for ops in symmetry_map.values()
-        for op in ops
-        if isinstance(op, Mapping)
-    )
-
-
-def _is_k_single_valley_notebook_c2t(
-    valley_model: Mapping[str, Any],
-    symmetry_map: Mapping[str, Sequence[Mapping[str, Any]]],
-) -> bool:
-    spec = K_SINGLE_VALLEY_NOTEBOOK_C2T
-    return (
-        str(valley_model.get("valley_type", "")) == spec["valley_type"]
-        and str(valley_model.get("mode", "")) == spec["mode"]
-        and str(valley_model.get("spin_convention", "")) in spec["spin_conventions"]
-        and _has_operation_profile(
-            symmetry_map,
-            name=str(spec["operation_name"]),
-            model_action_profile=str(spec["model_action_profile"]),
-        )
-    )
-
-
-def _uses_k_single_valley_legacy_terms(term_templates: Sequence[Mapping[str, Any]]) -> bool:
-    return (
-        len(term_templates) > 0
-        and {
-            _template_generation_mode_value(template)
-            for template in term_templates
-            if isinstance(template, Mapping)
-        }
-        <= {"explicit_legacy", "notebook_compatibility"}
-    )
-
-
 def _source_matrix_file(source_name: str, use: str, matrix_kind: str) -> str:
     suffix = "representation_" if matrix_kind in {"representation", "d0", "D0"} else ""
     return f"{source_name}_low_{suffix}{use}.npy"
@@ -462,7 +404,13 @@ def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: floa
         if not isinstance(record, Mapping):
             continue
         enriched = dict(record)
-        enriched["k_map"] = _rotate_k_map_to_model_frame(record.get("k_map"), rotation_deg=rotation_deg)
+        resolved_action = record.get("source_resolved_action")
+        if isinstance(resolved_action, Mapping):
+            for key in ("antiunitary", "k_map", "q_map", "sector_map"):
+                if key in resolved_action:
+                    enriched[key] = copy.deepcopy(resolved_action[key])
+        else:
+            enriched["k_map"] = _rotate_k_map_to_model_frame(record.get("k_map"), rotation_deg=rotation_deg)
         keys = [record.get("name"), record.get("operation")]
         for key in keys:
             if key is None:
@@ -490,9 +438,8 @@ def _enrich_symmetry_map(
             if name and name in op_index:
                 source_row = dict(op_index[name])
                 merged = dict(source_row)
-                keep_model_action = bool(row.get("model_action_profile"))
                 for key, value in row.items():
-                    if keep_model_action or key not in {"antiunitary", "k_map", "q_map", "sector_map"}:
+                    if key not in {"antiunitary", "k_map", "q_map", "sector_map"}:
                         merged[key] = value
                 if "q_map" not in merged and "k_map" in merged:
                     merged["q_map"] = dict(merged["k_map"]) if isinstance(merged["k_map"], Mapping) else merged["k_map"]
@@ -579,19 +526,6 @@ def _rotation_deg_from_config(raw: Mapping[str, Any], source_raw: Mapping[str, A
                 "Use a single coordinate_frame.rotation_deg."
             )
     return rotation
-
-
-def _template_generation_mode_value(template: Mapping[str, Any]) -> str:
-    explicit_mode = str(template.get("generation_mode", "")).strip()
-    if explicit_mode:
-        return explicit_mode
-    lower_name = str(template.get("name", "")).lower()
-    legacy_filter = str(template.get("legacy_monomial_filter", template.get("monomial_filter", "")))
-    if legacy_filter:
-        return "notebook_compatibility"
-    if "notebook" in lower_name or "legacy" in lower_name:
-        return "explicit_legacy"
-    return "representation_invariant"
 
 
 def load_model_config(path: str | Path) -> ConfiguredModel:
@@ -1204,11 +1138,7 @@ def _resolve_harmonics_maps(
             diagnostics[kind] = {
                 "kind": kind,
                 "count": len(maps[kind]),
-                "harmonics_source": (
-                    "legacy_notebook_explicit"
-                    if any(token in str(raw).lower() for token in ("notebook",))
-                    else "explicit_config"
-                ),
+                "harmonics_source": "explicit_config",
                 "selected": [
                     {
                         "index": int(index),
@@ -1353,23 +1283,6 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     )
     config.symmetry_map = enriched_symmetry_map
 
-    k_single_valley_notebook_c2t = _is_k_single_valley_notebook_c2t(config.valley_model, enriched_symmetry_map)
-    k_single_spin_legacy_terms = k_single_valley_notebook_c2t and _uses_k_single_valley_legacy_terms(
-        config.term_templates
-    )
-    if loaded_symmetry.generator is not None and k_single_valley_notebook_c2t:
-        compatibility_gen = SymmetryGenerator(
-            Q_set1,
-            Q_set2,
-            list(config.nlow_state),
-            basis_template=str(K_SINGLE_VALLEY_NOTEBOOK_C2T["basis_template"]),
-        )
-        loaded_symmetry.generator = FallbackSymmetryGenerator(
-            loaded_symmetry.generator,
-            compatibility_gen,
-            {"C2T"},
-        )
-
     moire_config = MoireConfig(
         Q_set1=Q_set1,
         Q_set2=Q_set2,
@@ -1388,14 +1301,7 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         coeff_tol=config.coeff_tol,
         output_dir=config.output_dir,
     )
-    if k_single_spin_legacy_terms:
-        moire_config.symmetry_gen = SymmetryGenerator(
-            Q_set1,
-            Q_set2,
-            list(config.nlow_state),
-            basis_template=str(K_SINGLE_VALLEY_NOTEBOOK_C2T["basis_template"]),
-        )
-    elif loaded_symmetry.generator is not None:
+    if loaded_symmetry.generator is not None:
         moire_config.symmetry_gen = loaded_symmetry.generator
     moire_config.term_templates = [dict(item) for item in config.term_templates]
     moire_config.sectors = sectors
