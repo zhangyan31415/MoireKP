@@ -135,8 +135,9 @@ model:
     intra: 4
     inter: 4
   term_templates:
-  - name: notebook_kinetic_layer1
+  - name: kinetic_layer1
     source: diagonal_kp
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
@@ -147,15 +148,17 @@ model:
       difference_mod: 3
       difference_residue: 0
       require_mz_ge_mz_star: true
-  - name: notebook_onsite_layer1
+  - name: onsite_layer1
     source: onsite
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
     orbital_pairs: diagonal
     max_order: 0
-  - name: notebook_intra_layer1_nonzero
+  - name: intra_layer1
     source: moire_potential
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
@@ -167,8 +170,9 @@ model:
       - 3
       - 4
     max_order: 4
-  - name: notebook_inter_21_positive
+  - name: inter_21_positive
     source: tunneling
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 2
       - 1
@@ -181,8 +185,9 @@ model:
       - 3
       - 4
     max_order: 4
-  - name: notebook_inter_21_negative
+  - name: inter_21_negative
     source: tunneling
+    generation_mode: explicit_legacy
     sector_pairs:
     - - 2
       - 1

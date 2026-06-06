@@ -737,6 +737,44 @@ def test_notebook_monomial_filter_is_forbidden_in_release_schema(tmp_path: Path)
         load_model_config(cfg_path)
 
 
+def test_release_schema_rejects_unknown_generation_mode(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["term_templates"] = [
+        {
+            "name": "kinetic_layer1",
+            "source": "diagonal_kp",
+            "generation_mode": "notebook",
+            "sector_pairs": [[1, 1]],
+            "orbital_pairs": [[1, 1]],
+            "max_order": 4,
+        }
+    ]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="generation_mode must be one of"):
+        load_model_config(cfg_path)
+
+
+def test_release_schema_requires_explicit_generation_mode_for_legacy_names(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["term_templates"] = [
+        {
+            "name": "notebook_intra_layer1",
+            "source": "moire_potential",
+            "sector_pairs": [[1, 1]],
+            "orbital_pairs": "all",
+            "harmonics": {"kind": "intra", "indices": [1]},
+            "max_order": 0,
+        }
+    ]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires explicit generation_mode"):
+        load_model_config(cfg_path)
+
+
 def test_M_spinless_runtime_supports_effective_symmetry_names() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     sym = SymmetryGenerator(q, q, [1, 1], basis_template="M_spinless_layer_exchange")

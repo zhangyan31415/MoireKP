@@ -72,7 +72,6 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 import numpy as np
 import scipy
 import scipy.linalg
-from joblib import Parallel, delayed
 import psutil
 from scipy import sparse
 from tqdm import tqdm
@@ -769,6 +768,9 @@ class KPath:
 class SymmetryGenerator:
     """
     根据输入的 Q 数据生成对称操作矩阵，其维度与基函数矩阵一致。
+
+    This is a toy/legacy fallback for explicit templates. Production configured
+    models should prefer matrix-backed symmetry sources from kp_symm_output.
     """
 
     def __init__(self, Qlayer1: np.ndarray, Qlayer2: np.ndarray, nlow_state: List[int], basis_template: str | None = None):
@@ -976,7 +978,10 @@ class SymmetryGenerator:
         q1norm = np.min(np.linalg.norm(Qset, axis=1))
         mat = np.zeros((len(Qset), len(Qset)), dtype=complex)
         if self.nlow_state[0] != self.nlow_state[1] or len(self.Qlayer1) != len(self.Qlayer2) or self.nlow_state[0] != 1:
-            raise ValueError("Different number of low energy states or Q points or not 1 low energy state per layer. Not supported C2T.")
+            raise ValueError(
+                "C2T toy generator only supports the K_notebook template with equal layer Q counts "
+                "and exactly one low-energy state per layer; use kp_symm_output for production C2T."
+            )
         
         for i in range(2):
             Qlayer_i = self.Qlayer1 if i == 0 else self.Qlayer2
@@ -2316,27 +2321,6 @@ class ContinuumModelBuilder:
                                                                 sym_ops=[],  # 外部调用时每个 term 自带对称操作
                                                                 symmetry_gen=self.symmetry_gen)
 
-    # 以下正交化与系数求解函数与之前类似，仅不再暴露为全局函数
-
-    @timing_decorator_factory(0)
-    def orthogonalize_hermitian_matrices_(self, matlist: List[np.ndarray], tol: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
-        print(f"orthogonalize_hermitian_matrices num of matlist old: {len(matlist)} dim: {matlist[0].shape}")
-        orthogonallist = []
-        includinglist = []
-        # mat_traceless_list = [mat - np.trace(mat)/len(mat)*np.eye(len(mat)) for mat in matlist]
-        mat_traceless_list = matlist
-        for i, M in tqdm(enumerate(mat_traceless_list)):
-            U = M.copy()
-            for Q in orthogonallist:
-                Q_dagger = np.conj(Q).T
-                projection = np.trace(Q_dagger @ M) / np.trace(Q_dagger @ Q)
-                U -= projection * Q
-            norm = np.linalg.norm(U)
-            if norm > tol:
-                orthogonallist.append(U / norm)
-                includinglist.append(i)
-        return np.array(orthogonallist), np.array(includinglist, dtype=int)
-    
     @timing_decorator_factory(0)
     def orthogonalize_hermitian_matrices(self,matlist: List[np.ndarray], tol: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
         print(f"orthogonalize_hermitian_matrices num of matlist new: {len(matlist)} dim: {matlist[0].shape}")
@@ -2357,108 +2341,6 @@ class ContinuumModelBuilder:
         n = matlist[0].shape[0]
         orthonormal_matrices = [v.reshape(n, n) for v in orthonormal_list]
         return np.array(orthonormal_matrices), np.array(including_list, dtype=int)
-
-    @timing_decorator_factory(0)
-    def get_orthogonalized_terms_subset_by_part_(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
-                                                 tol: float = 1e-8, part: str = "real", tag: str = None) -> Tuple[List[ContinuumTermKey], List[np.ndarray], np.ndarray, np.ndarray]:
-        initialterms = []
-        for key in keys:
-            mat_real, mat_imag = self.stack_Y_for_term(self.model.terms[key], k_points)
-            initialterms.append(mat_real if part=="real" else mat_imag)
-        initialterms = np.array(initialterms)
-        initalterms_copy = initialterms
-        print("sum abs of initialterms", [np.sum(np.abs(initialterm)) for initialterm in initialterms])
-        onsite_energy_list = []
-        if tag == "inter":
-            print("sum abs of initialterms", [np.trace(initialterm) for initialterm in initialterms])
-        if tag == "Onsite" or tag == "Kinect":
-            # print("tag", tag)
-            # print("trace of initialterms", [np.trace(initialterm) for initialterm in initialterms])
-            for i, key in enumerate(keys):
-                l1, l2 = key.layer_from, key.layer_to
-                orb1, orb2 = key.orbital_from, key.orbital_to
-                # index_start = self.get_global_index(l1, 0, orb1-1, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2)
-                # index_end = self.get_global_index(l2, len(self.Q_set2)-1, orb2-1, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2)
-                for idx, term in enumerate(initialterms):
-                    for ikx, kx in enumerate(k_points):
-                        index_start = self.get_global_index(l1, 0, orb1-1, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2) + ikx*(len(self.Q_set1)*self.n_orb1 + len(self.Q_set2)*self.n_orb2)
-                        index_end = self.get_global_index(l2, len(self.Q_set2), orb2-1, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2) + ikx*(len(self.Q_set1)*self.n_orb1 + len(self.Q_set2)*self.n_orb2)
-                        # print("index_start", index_start)
-                        # print("index_end", index_end)
-                        index_start = 0 + ikx*60
-                        index_end = 60 + ikx*60
-                        onsite_energy = np.trace(term[index_start:index_end, index_start:index_end])/(index_end-index_start)
-                        initialterms[idx][index_start:index_end, index_start:index_end] -= onsite_energy*np.eye(index_end-index_start)
-                        onsite_energy_list.append(onsite_energy)
-        # for idx, term in enumerate(initialterms):
-        #     for ikx, kx in enumerate(k_points):
-        #         initialterms[idx][0+ikx*60:60+ikx*60, 0+ikx*60:60+ikx*60] -= np.trace(initialterms[idx][0+ikx*60:60+ikx*60, 0+ikx*60:60+ikx*60])/(60)*np.eye(60)
-        finalterms, includinglist = self.orthogonalize_hermitian_matrices(initialterms, tol=tol)
-        if tag == "Onsite" and part == "real":
-            includinglist = np.arange(len(keys))
-            finalterms = initalterms_copy
-            print("trace of finalterms", [np.trace(finalterm) for finalterm in finalterms])
-        for i, key in enumerate(keys):
-            if not self.model.terms[key].active:
-                self.model.terms[key].active = (i in includinglist)
-        return keys, initialterms, finalterms, includinglist
-
-    def compute_coefficients_by_tag_(self, heff: np.ndarray, k_points: List[np.ndarray], tol: float = 1e-8) -> Dict[str, Dict[str, np.ndarray]]:
-        tag_groups: Dict[str, List[ContinuumTermKey]] = {}
-        for key, term in self.model.terms.items():
-            tag_groups.setdefault(term.tag, []).append(key)
-        coeffs_by_tag = {}
-        for tag, keys in tag_groups.items():
-            print(f"Processing tag '{tag}' with {len(keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
-            group_coeffs = {}
-            for part in ["real", "imag"]:
-                grp_keys, initialterms, finalterms, includinglist = self.get_orthogonalized_terms_subset_by_part(keys, k_points, tol=tol, part=part, tag=tag)
-                print(f"  {len(includinglist)} terms included for {part} part. Time: {time.strftime('%H:%M:%S', time.localtime())}")
-                if len(finalterms) == 0:
-                    group_coeffs[part] = np.array([])
-                    continue
-                transfermat = np.array([[np.trace(finalterms[i] @ initialterms[includinglist[j]])
-                                          for j in range(len(includinglist))]
-                                         for i in range(len(finalterms))])
-
-                if tag != "Onsite":
-                    rhs = np.array([np.trace(heff @ finalterm) for finalterm in finalterms])
-                    coeffs = np.linalg.inv(transfermat) @ rhs
-                    for idx, grp_idx in enumerate(includinglist):
-                        key = grp_keys[grp_idx]
-                        term = self.model.terms[key]
-                        c = coeffs[idx]
-                        # 对于 （onsite）项单独处理
-                        # if term.tag == "Onsite":
-                        #     # onsite = np.trace(heff)/len(heff)
-                        #     onsite = onsite_energy_list[idx]
-                            # c = onsite
-                        if part=="real":
-                            term.r_value_real = c
-                        else:
-                            term.r_value_imag = c
-                else:
-                    if part == "imag" and len(includinglist) > 0:
-                        raise ValueError("Onsite energy should be added to real part.")
-                    coeffs = []
-                    for idx, grp_idx in enumerate(includinglist):
-                        key = grp_keys[grp_idx]
-                        l1, l2 = key.layer_from, key.layer_to
-                        orb1, orb2 = key.orbital_from, key.orbital_to
-                        index_start = self.get_global_index(l1, 0, orb1-1, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2) 
-                        index_end = self.get_global_index(l2, len(self.Q_set2), orb2-1, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2)
-                        
-                        coeffs_i = np.trace(heff @ finalterms[idx])/((index_end-index_start)*len(k_points))
-                        print(f"onsite energy for term {key}: {coeffs_i}",np.trace(finalterms[idx]))
-                        term = self.model.terms[key]
-                        term.r_value_real = coeffs_i
-                        term.r_value_imag = 0
-                        coeffs.append(coeffs_i)
-                    
-                group_coeffs[part] = coeffs
-                print(f"Updated {part} coefficients for tag '{tag}': {_summarize_coefficients(coeffs)}")
-            coeffs_by_tag[tag] = group_coeffs
-        return coeffs_by_tag
 
     @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset_old(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
@@ -2585,11 +2467,8 @@ class ContinuumModelBuilder:
             # 返回该 key 对应的两个矩阵
             return mat_real, mat_imag
 
-        # 并行处理 keys，使用所有 CPU 核心
         time_start = time.time()
-        results = Parallel(n_jobs=1)(
-            delayed(_process_single_term)(key) for key in tqdm(keys, desc="Processing terms")
-        )
+        results = [_process_single_term(key) for key in tqdm(keys, desc="Processing terms")]
         time_end = time.time()
         print(f"Time elapsed for processing terms: {time_end - time_start:.2f} s")
         # 组合结果：每个 key 返回的两个矩阵依次放入 initialterms 列表
@@ -2599,7 +2478,6 @@ class ContinuumModelBuilder:
             initialterms.append(mat_imag)
             # print(f"shape of mat_real: {mat_real.shape}, mat_imag: {mat_imag.shape}")
         initialterms = np.array(initialterms)
-        initialterms_copy = initialterms.copy()
         
         subgroup_0 = (keys[0].layer_from, keys[0].layer_to, keys[0].orbital_from, keys[0].orbital_to)
         for key in keys:
@@ -2656,177 +2534,6 @@ class ContinuumModelBuilder:
         coeffs = np.linalg.solve(transfermat, rhs)
         return coeffs
     
-    def compute_coeffs_extreme_(self, finalterms, initialterms, includinglist, heff):
-        """
-        极致向量化实现：利用 np.einsum 一次性计算 transfermat 与 rhs。
-        
-        transfermat[i, j] = trace( finalterms[i] @ initialterms[includinglist[j]] )
-                        = sum_{p,q} finalterms[i, p, q] * initialterms[includinglist[j], q, p]
-        
-        rhs[i] = trace( heff @ finalterms[i] )
-            = sum_{p,q} heff[p,q] * finalterms[i, q, p]
-        """
-        init_terms_included = initialterms[includinglist]  # shape (k, n, n)
-        # 计算 transfermat：使用 einsum 直接得到形状 (m, k)
-        transfermat = np.einsum('ipq,jqp->ij', finalterms, init_terms_included)
-        # 计算 rhs：这里 finalterms[i] 的转置后乘以 heff
-        rhs = np.einsum('pq,iqp->i', heff, finalterms)
-        # 利用线性求解（比 np.linalg.inv 更稳定）
-        coeffs = np.linalg.solve(transfermat, rhs)
-        return coeffs
-    
-    
-    def compute_coeffs_diag_only_(self,finalterms, initialterms, includinglist, heff,
-                           reweight_diag=True, only_diag=False, use_lstsq=False):
-        """
-        reweight_diag=True: 对角权重设为 w_diag（其中 (0,0)=0.5，其余平分0.5）；
-        only_diag=False:    非对角权重=1（不改变非对角的贡献）
-        use_lstsq=False:    若方程非方阵或病态，建议设 True 用最小二乘
-        """
-        m, n, _ = finalterms.shape
-        k = len(includinglist)
-        init_included = initialterms[includinglist]          # (k,n,n)
-
-        # 1) 构造权重矩阵 W
-        # w_diag = np.full(n, 0.5/(n-1), dtype=float); w_diag[0] = 0.5
-        nq = 19
-        nk = (n//nq)//2
-        w_diag = np.eye(nq, nq)
-        w_diag[0,0] = 1e10
-        w_diag[range(1,7),range(1,7)] = 1e10
-        w_diag[range(1,4),range(1,4)] = 1e10
-        w_diag[range(7,13),range(7,13)] = 1e10
-        w_diag[range(13,19),range(13,19)] = 1e10
-        w_diag[range(13,16),range(13,16)] = 1e10
-        D_mat = np.zeros((nq,nq))
-        D_mat[range(nq),index_new]=1
-        w_diag = D_mat.T @ w_diag @ D_mat
-        # w_diag = np.kron(np.eye(2), w_diag)
-        # w_diag = np.tile(w_diag, (2,2))
-        w_diag = np.block([[w_diag,w_diag],
-                           [w_diag,w_diag]])
-        W = np.tile(w_diag, (nk,nk))          # 若只想看对角，关掉非对角
-        # print("shape of W:", W.shape, "shape of init_included:", np.array(init_included).shape,"nk = ",nk)
-        # print("nonezero:", np.count_nonzero(W),np.nonzero(W),np.count_nonzero(init_included[0]),np.nonzero(init_included[0]))
-
-        # 2) 展平
-        F   = finalterms.reshape(m, -1)                      # vec(F_i) 行堆
-        I_T = init_included.transpose(0, 2, 1).reshape(k, -1)# vec(I_j^T) 行堆
-        H_T = heff.T.ravel()                                 # vec(H^T)
-
-        # 3) 逐元素加权（关键一步）
-        w_flat = W.reshape(-1)
-        Fw = F * w_flat[None, :]                             # 对 F 的每个元素乘 w_ab
-
-        # 4) 组装并求解
-        transfermat = Fw @ I_T.T                             # (m×k)
-        rhs        = Fw @ H_T                                # (m,)
-
-        # if use_lstsq or (m != k):
-        #     coeffs, *_ = np.linalg.lstsq(transfermat, rhs, rcond=None)
-        # else:
-        coeffs = np.linalg.solve(transfermat, rhs)
-        
-        H_rec = sum(coeffs[j] * init_included[j] for j in range(k))
-        temp = np.zeros_like(heff)
-        temp[H_rec.nonzero()] = heff[H_rec.nonzero()]
-        diag = (H_rec-temp)/heff[H_rec.nonzero()]
-        resid = np.linalg.norm(diag)
-        print(np.sort(np.diag(diag).real)[:10],np.argsort(np.diag(diag).real)[:10])
-        print(f'residual: {resid}')
-        print("======compute_coeffs_diag_only_======")
-        return coeffs
-    
-    
-    
-    @timing_decorator_factory(0)
-    def compute_coefficients_by_tag_(self, heff: np.ndarray, k_points: List[np.ndarray], tol: float = 1e-8) -> Dict[str, Dict[str, np.ndarray]]:
-        """
-        对模型中不同 tag（例如 "Onsite", "Kinect", "intra", "inter"）的项分组求解系数，
-        对于每组项，采用 get_orthogonalized_terms_subset 得到初始采样矩阵和正交化后的矩阵。
-        注意：每个 term 对应两个矩阵（real 与 imag），
-        最终解出的系数向量 x 为长度为 2*N 的向量，
-        每个 term 的系数组合为 r = x[2*i] + i*x[2*i+1].
-        
-        对于 onsite 项（tag=="Onsite"）单独处理：直接使用 onsite 能量（例如取 heff 的 trace 平均）。
-        
-        返回一个字典，键为 tag，值为一个字典，包含 key "coeffs" 对应各项复数系数（按 keys 顺序）。
-        """
-        tag_groups: Dict[str, List[ContinuumTermKey]] = {}
-        for key, term in self.model.terms.items():
-            tag_groups.setdefault(term.tag, []).append(key)
-        coeffs_by_tag = {}
-        for tag, keys in tag_groups.items():
-            # print("="*100)
-            print("\n"+"="*100)
-            print(f"Processing tag '{tag}' with {len(keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
-            # 对于每组项，获取正交化结果（同时处理 real 和 imag 部分）
-            grp_keys, initialterms, finalterms, includinglist = self.get_orthogonalized_terms_subset(keys, k_points, tol=tol, tag=tag)
-            print(f"  {len(includinglist)} terms included. Time: {time.strftime('%H:%M:%S', time.localtime())}")
-            # total = len(finalterms)  # 此处应为2*N
-            if len(finalterms) == 0:
-                coeffs_by_tag[tag] = {"coeffs": np.array([])}
-                continue
-            coeffs_print = []
-            if tag == "Onsite":
-                exchange_antiunitary_flag = ContinuumModelBuilder._uses_full_bilayer_block(
-                    self.symmetry_map[tag],
-                    [str(sector.get("name")) for sector in self.sectors],
-                )
-                H_dim = len(Q_set1)*self.n_orb1 + len(Q_set2)*self.n_orb2
-                # 对于 onsite 项，直接使用 onsite 能量作为系数
-                coeffs = []
-                Qlayer = self.Q_set1 if grp_keys[0].layer_from == 1 else self.Q_set2
-                
-                for i in tqdm(range(len(keys))):
-                    idx_real = includinglist.tolist().index(2*i) if 2*i in includinglist.tolist() else None
-                    idx_imag = includinglist.tolist().index(2*i+1) if (2*i+1) in includinglist.tolist() else None
-                    # l1, l2 = grp_keys[grp_idx].layer_from, grp_keys[grp_idx].layer_to
-                    # orb1, orb2 = grp_keys[grp_idx].orbital_from, grp_keys[grp_idx].orbital_to
-                    # n_orb1, n_orb2 = self.n_orb1, self.n_orb2
-                    # Q_set1, Q_set2 = self.Q_set1, self.Q_set2
-                    # if exchange_antiunitary_flag:
-                    #     idx_start = 0
-                    #     idx_end = H_dim
-                    # else:
-                    #     idx_start = self.get_global_index(l1, 0, orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
-                    #     idx_end = self.get_global_index(l1, len(Q_set1), orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
-                    block_dim = H_dim if exchange_antiunitary_flag else len(Qlayer)
-                    # if idx_end < idx_start:
-                    #     raise ValueError(f"Invalid index range: {idx_start} to {idx_end}")
-                    print("sum abs of finalterms", [np.sum(np.abs(finalterm)) for finalterm in finalterms])
-                    coeffs_i = np.trace(heff @ finalterms[idx_real]) / (block_dim*len(k_points))
-                    coeffs.append(coeffs_i)
-                    self.model.terms[keys[i]].r_value_real = coeffs_i
-                    self.model.terms[keys[i]].r_value_imag = 0
-                    coeffs_print.append(coeffs_i)
-            else:
-                # 构造 transfer matrix T: T[i,j] = trace( finalterms[i] @ initialterms[includinglist[j]] )
-                print(f'before transfermat time: {time.strftime("%H:%M:%S", time.localtime())}')
-                # transfermat = np.array([[np.trace(finalterms[i] @ initialterms[includinglist[j]]) 
-                #                 for j in range(len(includinglist))] 
-                #             for i in range(len(finalterms))])
-                # # 构造右侧向量 b: b[i] = trace(heff @ finalterms[i])
-                # rhs = np.array([np.trace(heff @ finalterm) for finalterm in finalterms])
-                # coeffs = np.linalg.inv(transfermat) @ rhs
-                coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff)
-                print(f'after transfermat time: {time.strftime("%H:%M:%S", time.localtime())}')
-                # 对每个 term，组合其两个系数
-                
-                for i in tqdm(range(len(keys))):
-                    idx_real = includinglist.tolist().index(2*i) if 2*i in includinglist.tolist() else None
-                    idx_imag = includinglist.tolist().index(2*i+1) if (2*i+1) in includinglist.tolist() else None
-                    r_real = coeffs[idx_real] if idx_real is not None else 0
-                    r_imag = coeffs[idx_imag] if idx_imag is not None else 0
-                    r = r_real + 1j*r_imag
-                    coeffs_print.append(r)
-                    self.model.terms[keys[i]].r_value_real = r_real
-                    self.model.terms[keys[i]].r_value_imag = r_imag
-            print(f"Updated coefficients for tag '{tag}': {_summarize_coefficients(coeffs_print)}")
-            print("="*100)
-            coeffs_by_tag[tag] = {"coeffs": np.array(coeffs)}
-        return coeffs_by_tag
-
     # def get_mat_blocks(self, mat_list: List[np.ndarray], subgroup: Tuple[int, int, int, int], num_kpoints: int = 1) -> List[np.ndarray]:
     def get_mat_blocks(self, mat_list: List[np.ndarray], key: ContinuumTermKey, num_kpoints: int = 1) -> List[np.ndarray]:
         """
@@ -3043,9 +2750,6 @@ class ContinuumModelBuilder:
                     if tag == "Kinect":
                         heff_block = heff_block - np.eye(heff_block.shape[0]) * np.trace(heff_block) / heff_block.shape[0]
                         # initialterms = np.array([initialterms[i] - np.eye(initialterms[i].shape[0]) * np.trace(initialterms[i]) / initialterms[i].shape[0] for i in range(len(initialterms))])
-                    # if tag ==  "inter":
-                    #     coeffs = self.compute_coeffs_diag_only_(finalterms, initialterms, includinglist, heff_block)
-                    # else:
                     coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block)
                     
                     

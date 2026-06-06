@@ -131,6 +131,16 @@ REPRESENTATION_SEMANTICS: dict[str, Any] = {
     "valley_map": "identity",
 }
 
+# Compatibility rule for the historical single-spin K notebook C2T path.
+K_SINGLE_VALLEY_NOTEBOOK_C2T: dict[str, Any] = {
+    "valley_type": "K",
+    "mode": "single_valley",
+    "spin_conventions": {"spin_up_only", "spin_down_only"},
+    "operation_name": "C2T",
+    "model_action_profile": "K_notebook",
+    "basis_template": "K_notebook",
+}
+
 
 def _map_with_axis(base: Mapping[str, Any], axis_deg: float | None) -> dict[str, Any]:
     out = copy.deepcopy(dict(base))
@@ -320,6 +330,50 @@ def _is_m_spinless_effective_valley(valley_model: Mapping[str, Any]) -> bool:
         str(valley_model.get("valley_type", "")) == "M"
         and str(valley_model.get("mode", "")) == "single_valley"
         and str(valley_model.get("spin_convention", "")) == "spinless_effective"
+    )
+
+
+def _has_operation_profile(
+    symmetry_map: Mapping[str, Sequence[Mapping[str, Any]]],
+    *,
+    name: str,
+    model_action_profile: str,
+) -> bool:
+    return any(
+        str(op.get("name", "")) == name
+        and str(op.get("model_action_profile", "")) == model_action_profile
+        for ops in symmetry_map.values()
+        for op in ops
+        if isinstance(op, Mapping)
+    )
+
+
+def _is_k_single_valley_notebook_c2t(
+    valley_model: Mapping[str, Any],
+    symmetry_map: Mapping[str, Sequence[Mapping[str, Any]]],
+) -> bool:
+    spec = K_SINGLE_VALLEY_NOTEBOOK_C2T
+    return (
+        str(valley_model.get("valley_type", "")) == spec["valley_type"]
+        and str(valley_model.get("mode", "")) == spec["mode"]
+        and str(valley_model.get("spin_convention", "")) in spec["spin_conventions"]
+        and _has_operation_profile(
+            symmetry_map,
+            name=str(spec["operation_name"]),
+            model_action_profile=str(spec["model_action_profile"]),
+        )
+    )
+
+
+def _uses_k_single_valley_legacy_terms(term_templates: Sequence[Mapping[str, Any]]) -> bool:
+    return (
+        len(term_templates) > 0
+        and {
+            _template_generation_mode_value(template)
+            for template in term_templates
+            if isinstance(template, Mapping)
+        }
+        <= {"explicit_legacy", "notebook_compatibility"}
     )
 
 
@@ -1299,26 +1353,17 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     )
     config.symmetry_map = enriched_symmetry_map
 
-    k_single_spin_legacy_terms = (
-        str(config.valley_model.get("valley_type", "")) == "K"
-        and str(config.valley_model.get("mode", "")) == "single_valley"
-        and str(config.valley_model.get("spin_convention", "")) in {"spin_up_only", "spin_down_only"}
-        and any(str(op.get("name", "")) == "C2T" and str(op.get("model_action_profile", "")) == "K_notebook" for ops in enriched_symmetry_map.values() for op in ops if isinstance(op, Mapping))
-        and len(config.term_templates) > 0
-        and {
-            _template_generation_mode_value(template)
-            for template in config.term_templates
-            if isinstance(template, Mapping)
-        } <= {"explicit_legacy", "notebook_compatibility"}
+    k_single_valley_notebook_c2t = _is_k_single_valley_notebook_c2t(config.valley_model, enriched_symmetry_map)
+    k_single_spin_legacy_terms = k_single_valley_notebook_c2t and _uses_k_single_valley_legacy_terms(
+        config.term_templates
     )
-    if (
-        loaded_symmetry.generator is not None
-        and str(config.valley_model.get("valley_type", "")) == "K"
-        and str(config.valley_model.get("mode", "")) == "single_valley"
-        and str(config.valley_model.get("spin_convention", "")) in {"spin_up_only", "spin_down_only"}
-        and any(str(op.get("name", "")) == "C2T" and str(op.get("model_action_profile", "")) == "K_notebook" for ops in enriched_symmetry_map.values() for op in ops if isinstance(op, Mapping))
-    ):
-        compatibility_gen = SymmetryGenerator(Q_set1, Q_set2, list(config.nlow_state), basis_template="K_notebook")
+    if loaded_symmetry.generator is not None and k_single_valley_notebook_c2t:
+        compatibility_gen = SymmetryGenerator(
+            Q_set1,
+            Q_set2,
+            list(config.nlow_state),
+            basis_template=str(K_SINGLE_VALLEY_NOTEBOOK_C2T["basis_template"]),
+        )
         loaded_symmetry.generator = FallbackSymmetryGenerator(
             loaded_symmetry.generator,
             compatibility_gen,
@@ -1344,7 +1389,12 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         output_dir=config.output_dir,
     )
     if k_single_spin_legacy_terms:
-        moire_config.symmetry_gen = SymmetryGenerator(Q_set1, Q_set2, list(config.nlow_state), basis_template="K_notebook")
+        moire_config.symmetry_gen = SymmetryGenerator(
+            Q_set1,
+            Q_set2,
+            list(config.nlow_state),
+            basis_template=str(K_SINGLE_VALLEY_NOTEBOOK_C2T["basis_template"]),
+        )
     elif loaded_symmetry.generator is not None:
         moire_config.symmetry_gen = loaded_symmetry.generator
     moire_config.term_templates = [dict(item) for item in config.term_templates]
