@@ -2670,6 +2670,102 @@ class ContinuumModelBuilder:
             return [(a, b) for a in range(1, n_from + 1) for b in range(1, n_to + 1)]
         return [(int(pair[0]), int(pair[1])) for pair in raw]
 
+    @staticmethod
+    def _apply_q_map_to_vector(vector: np.ndarray, operation: Mapping[str, Any]) -> np.ndarray:
+        name = str(operation.get("name", ""))
+        q_map = operation.get("q_map", operation.get("k_map"))
+        if not isinstance(q_map, Mapping):
+            raise ValueError(f"Operation {name!r} requires explicit q_map metadata for harmonic representative selection")
+        map_type = str(q_map.get("type", "")).lower()
+        vec = np.asarray(vector, dtype=float)
+        if map_type == "identity":
+            return vec
+        if map_type == "negation":
+            return -vec
+        if map_type == "rotation":
+            return rot(vec, float(q_map.get("angle_deg", 0.0)))
+        if map_type == "reflection":
+            axis_deg = float(q_map.get("axis_deg", 0.0))
+            theta = np.deg2rad(axis_deg)
+            axis = np.array([np.cos(theta), np.sin(theta)], dtype=float)
+            return 2.0 * axis * float(np.dot(axis, vec)) - vec
+        raise ValueError(f"Unsupported q_map.type {q_map.get('type')!r} for operation {name!r}")
+
+    def _map_sector_pair(self, pair: Tuple[int, int], operation: Mapping[str, Any]) -> Tuple[int, int]:
+        names = [str(sector.get("name")) for sector in self.sectors]
+        sector_map = self._normalised_sector_map(operation.get("sector_map", "identity"), names)
+        from_name = self._sector_name_from_slot(pair[0])
+        to_name = self._sector_name_from_slot(pair[1])
+        return (
+            self._sector_slot_from_ref(sector_map.get(from_name, from_name)),
+            self._sector_slot_from_ref(sector_map.get(to_name, to_name)),
+        )
+
+    def _use_symmetry_harmonic_representatives(self, template: Mapping[str, Any]) -> bool:
+        source = str(template.get("harmonics_source", "")).lower()
+        if source in {"symmetry_representatives", "auto_symmetry_representatives"}:
+            return True
+        raw = template.get("harmonics")
+        return isinstance(raw, Mapping) and str(raw.get("representatives", "")).lower() in {"symmetry", "symmetry_representatives"}
+
+    @staticmethod
+    def _harmonic_seed_key(pair: Tuple[int, int], vector: np.ndarray, tol: float) -> Tuple[int, int, Tuple[int, int]]:
+        return int(pair[0]), int(pair[1]), tuple(np.rint(np.asarray(vector, dtype=float) / tol).astype(int).tolist())
+
+    @staticmethod
+    def _harmonic_seed_score(seed: Mapping[str, Any]) -> Tuple[int, int, float, float, float]:
+        pair = seed["sector_pair"]
+        vector = np.asarray(seed["harmonic"]["vector"], dtype=float)
+        theta = float(np.mod(np.arctan2(vector[1], vector[0]), 2.0 * np.pi))
+        return (int(pair[0]), int(pair[1]), float(np.linalg.norm(vector)), theta, float(vector[0]))
+
+    def _select_symmetry_harmonic_seed_representatives(
+        self,
+        seeds: List[Dict[str, Any]],
+        sym_ops: Sequence[Mapping[str, Any]],
+    ) -> List[Dict[str, Any]]:
+        if not seeds or not sym_ops:
+            return seeds
+        scale = max(
+            [1.0]
+            + [float(np.linalg.norm(self.bM1)), float(np.linalg.norm(self.bM2))]
+            + [float(np.linalg.norm(seed["harmonic"]["vector"])) for seed in seeds]
+        )
+        tol = max(1.0e-10, scale * 1.0e-8)
+        by_key: Dict[Tuple[int, int, Tuple[int, int]], List[int]] = {}
+        for idx, seed in enumerate(seeds):
+            key = self._harmonic_seed_key(seed["sector_pair"], seed["harmonic"]["vector"], tol)
+            by_key.setdefault(key, []).append(idx)
+
+        assigned: set[int] = set()
+        selected: List[Dict[str, Any]] = []
+        for start in range(len(seeds)):
+            if start in assigned:
+                continue
+            orbit = {start}
+            frontier = [start]
+            while frontier:
+                current = frontier.pop()
+                seed = seeds[current]
+                pair = seed["sector_pair"]
+                vector = np.asarray(seed["harmonic"]["vector"], dtype=float)
+                for op in sym_ops:
+                    mapped_pair = self._map_sector_pair(pair, op)
+                    mapped_vector = self._apply_q_map_to_vector(vector, op)
+                    mapped_key = self._harmonic_seed_key(mapped_pair, mapped_vector, tol)
+                    for mapped_idx in by_key.get(mapped_key, []):
+                        if mapped_idx not in orbit:
+                            orbit.add(mapped_idx)
+                            frontier.append(mapped_idx)
+            assigned.update(orbit)
+            representative = min((seeds[idx] for idx in orbit), key=self._harmonic_seed_score)
+            harmonic = dict(representative["harmonic"])
+            harmonic["source"] = "symmetry_representatives"
+            harmonic["orbit_size"] = len(orbit)
+            selected.append({**representative, "harmonic": harmonic})
+        selected.sort(key=self._harmonic_seed_score)
+        return selected
+
     def _harmonic_records_from_template(self, template: Mapping[str, Any]) -> List[Dict[str, Any]]:
         source = str(template.get("source", ""))
         if source in {"diagonal_kp", "onsite"}:
@@ -2706,6 +2802,16 @@ class ContinuumModelBuilder:
             }
             for key, value in items
         ]
+
+    def _term_seed_records_from_template(self, template: Mapping[str, Any], sym_ops: Sequence[Mapping[str, Any]]) -> List[Dict[str, Any]]:
+        seeds = [
+            {"sector_pair": sector_pair, "harmonic": harmonic}
+            for harmonic in self._harmonic_records_from_template(template)
+            for sector_pair in self._sector_pairs_from_template(template)
+        ]
+        if self._use_symmetry_harmonic_representatives(template):
+            return self._select_symmetry_harmonic_seed_representatives(seeds, sym_ops)
+        return seeds
 
     @staticmethod
     def _template_generation_mode(template: Mapping[str, Any] | None) -> str:
@@ -2766,36 +2872,38 @@ class ContinuumModelBuilder:
             max_order = int(template.get("max_order", self.max_order.get(tag, 0)))
             generation_mode = self._template_generation_mode(template)
             generated_by = "representation_invariant_generator"
-            for harmonic in self._harmonic_records_from_template(template):
+            for seed in self._term_seed_records_from_template(template, sym_ops):
+                harmonic = seed["harmonic"]
                 p_val = np.asarray(harmonic["vector"], dtype=float)
                 for Mz, Mz_star in self._monomial_orders(max_order, source, template):
-                    for l_from, l_to in self._sector_pairs_from_template(template):
-                        for a, b in self._orbital_pairs_from_template(template, l_from, l_to):
-                            key = ContinuumTermKey(Mz, Mz_star, l_from, l_to, a, b, tuple(p_val))
-                            Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2)
-                            registry_metadata = {
-                                "term_name": str(template.get("name", tag)),
-                                "term_kind": "kinetic" if source == "diagonal_kp" else ("onsite" if source == "onsite" else ("intra" if source == "moire_potential" else "inter")),
-                                "sector_pair": [self._sector_name_from_slot(l_from), self._sector_name_from_slot(l_to)],
-                                "orbital_pair": [int(a), int(b)],
-                                "harmonic_id": harmonic["id"],
-                                "harmonic_kind": harmonic["kind"],
-                                "harmonic_vector": np.asarray(harmonic["vector"], dtype=float).tolist(),
-                                "harmonics_source": str(harmonic["source"]),
-                                "monomial": {"Mz": int(Mz), "Mz_star": int(Mz_star)},
-                                "symmetry_orbit_id": None,
-                                "generation_mode": generation_mode,
-                                "generated_by": generated_by,
-                                "coefficient_unit": "eV",
-                                "coefficient_role": "fitted",
-                            }
-                            self.model.add_term(
-                                key,
-                                Y_func,
-                                tag=tag,
-                                symmetry_ops=sym_ops,
-                                registry_metadata=registry_metadata,
-                            )
+                    l_from, l_to = seed["sector_pair"]
+                    for a, b in self._orbital_pairs_from_template(template, l_from, l_to):
+                        key = ContinuumTermKey(Mz, Mz_star, l_from, l_to, a, b, tuple(p_val))
+                        Y_func = ContinuumModelBuilder.make_Y_basis_function(key, self.Q_set1, self.Q_set2, self.n_orb1, self.n_orb2)
+                        registry_metadata = {
+                            "term_name": str(template.get("name", tag)),
+                            "term_kind": "kinetic" if source == "diagonal_kp" else ("onsite" if source == "onsite" else ("intra" if source == "moire_potential" else "inter")),
+                            "sector_pair": [self._sector_name_from_slot(l_from), self._sector_name_from_slot(l_to)],
+                            "orbital_pair": [int(a), int(b)],
+                            "harmonic_id": harmonic["id"],
+                            "harmonic_kind": harmonic["kind"],
+                            "harmonic_vector": np.asarray(harmonic["vector"], dtype=float).tolist(),
+                            "harmonics_source": str(harmonic["source"]),
+                            "harmonic_orbit_size": int(harmonic.get("orbit_size", 1)),
+                            "monomial": {"Mz": int(Mz), "Mz_star": int(Mz_star)},
+                            "symmetry_orbit_id": None,
+                            "generation_mode": generation_mode,
+                            "generated_by": generated_by,
+                            "coefficient_unit": "eV",
+                            "coefficient_role": "fitted",
+                        }
+                        self.model.add_term(
+                            key,
+                            Y_func,
+                            tag=tag,
+                            symmetry_ops=sym_ops,
+                            registry_metadata=registry_metadata,
+                        )
         print("All terms generated from term_templates.")
 
     def get_term_metadata(self, key):

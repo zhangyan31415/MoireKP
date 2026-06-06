@@ -1733,3 +1733,85 @@ def test_explicit_harmonics_use_neutral_registry_source() -> None:
     term = next(iter(model.terms.values()))
     assert term.registry_metadata["harmonics_source"] == "explicit_indices"
     assert term.registry_metadata["generated_by"] == "representation_invariant_generator"
+
+
+def test_symmetry_representative_harmonics_do_not_double_count_orbit() -> None:
+    q = np.array([[0.0, 0.0]], dtype=float)
+    tr_op = {
+        "name": "TR",
+        "antiunitary": True,
+        "k_map": {"type": "negation"},
+        "q_map": {"type": "negation"},
+        "sector_map": "identity",
+    }
+    cfg = MoireConfig(
+        Q_set1=q,
+        Q_set2=q,
+        n_orb1=1,
+        n_orb2=1,
+        nlow_state=[1, 1],
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.5, 0.8660254037844386]),
+        intra_harmonics_map={1: np.array([1.0, 0.0]), 2: np.array([-1.0, 0.0])},
+        inter_harmonics_map={},
+        max_order={"intra": 0},
+        symmetry_map={"intra": [tr_op]},
+        term_templates=[
+            {
+                "name": "intra_reps",
+                "source": "moire_potential",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "all",
+                "harmonics": "intra",
+                "harmonics_source": "symmetry_representatives",
+                "max_order": 0,
+            }
+        ],
+    )
+
+    model = build_model(cfg)
+
+    assert len(model.terms) == 1
+    term = next(iter(model.terms.values()))
+    assert term.registry_metadata["harmonics_source"] == "symmetry_representatives"
+
+
+def test_symmetry_representative_harmonics_apply_sector_map() -> None:
+    q = np.array([[0.0, 0.0]], dtype=float)
+    c2_op = {
+        "name": "C2",
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0},
+        "q_map": {"type": "reflection", "axis_deg": 0.0},
+        "sector_map": "layer_exchange",
+    }
+    cfg = MoireConfig(
+        Q_set1=q,
+        Q_set2=q,
+        n_orb1=1,
+        n_orb2=1,
+        nlow_state=[1, 1],
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.5, 0.8660254037844386]),
+        intra_harmonics_map={},
+        inter_harmonics_map={1: np.array([0.25, 0.0])},
+        max_order={"inter": 0},
+        symmetry_map={"inter": [c2_op]},
+        term_templates=[
+            {
+                "name": "inter_reps",
+                "source": "tunneling",
+                "sector_pairs": [[2, 1], [1, 2]],
+                "orbital_pairs": "all",
+                "harmonics": "inter",
+                "harmonics_source": "symmetry_representatives",
+                "max_order": 0,
+            }
+        ],
+    )
+
+    model = build_model(cfg)
+
+    assert len(model.terms) == 1
+    term = next(iter(model.terms.values()))
+    assert term.registry_metadata["harmonic_orbit_size"] == 2
