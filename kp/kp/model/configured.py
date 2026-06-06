@@ -643,6 +643,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         sectors = []
     if not isinstance(sectors, Sequence) or isinstance(sectors, (str, bytes)):
         raise ValueError("sectors must be a list when provided")
+    _validate_sector_orbital_counts(sectors, n_orb_values)
     term_templates = model.get("term_templates", raw.get("term_templates", []))
     if term_templates is None:
         term_templates = []
@@ -854,6 +855,25 @@ def _default_sectors(config: ConfiguredModel) -> list[dict[str, Any]]:
         {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": config.n_orb[0]},
         {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": config.n_orb[1]},
     ]
+
+
+def _validate_sector_orbital_counts(
+    sectors: Sequence[Mapping[str, Any]],
+    n_orb_values: Sequence[int],
+) -> None:
+    expected_by_qset = {"qset1": int(n_orb_values[0]), "qset2": int(n_orb_values[1])}
+    for sector in sectors:
+        qset_name = str(sector.get("qset", "qset1"))
+        if qset_name not in expected_by_qset or "n_orb" not in sector:
+            continue
+        actual = int(sector["n_orb"])
+        expected = expected_by_qset[qset_name]
+        if actual != expected:
+            name = str(sector.get("name", qset_name))
+            raise ValueError(
+                f"sectors.{name}.n_orb={actual} is inconsistent with model.n_orb for {qset_name} "
+                f"({expected})"
+            )
 
 
 def _sector_qset(sector: Mapping[str, Any], Q_set1: np.ndarray, Q_set2: np.ndarray) -> np.ndarray:

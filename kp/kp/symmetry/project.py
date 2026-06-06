@@ -9,7 +9,7 @@ from typing import Any
 import numpy as np
 import yaml
 
-from ..blocks.blocks import calculate_energy_lists, get_H_block
+from ..blocks.blocks import _assemble_projectors_from_block_eigenvectors, calculate_energy_lists, get_H_block
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..io.tapw_loader import load_Q_sets, load_hamk
 
@@ -57,6 +57,18 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+_SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "T", "TR", "T_eff", "C2_eff", "C2T_eff"})
+
+
+def _validate_operation_label(label: str) -> str:
+    text = str(label)
+    if text not in _SUPPORTED_OPERATION_LABELS:
+        raise ValueError(
+            f"Unsupported symm operation {text!r}; use a standard operation family and explicit action metadata"
+        )
+    return text
 
 
 def _normalize_nlow_state_list(project_cfg: dict[str, Any]) -> list[list[int]]:
@@ -219,6 +231,27 @@ def _entry_filename(entry: dict[str, Any], valley: str, operation: str) -> str:
     return f"{valley}/{operation}.npz"
 
 
+def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitary: bool) -> dict[str, Any]:
+    if isinstance(entry.get("k_map"), dict):
+        k_map = dict(entry["k_map"])
+    elif entry.get("axis_deg") is not None:
+        k_map = {"type": "reflection", "axis_deg": float(entry["axis_deg"])}
+    elif operation in {"C3", "C3z"}:
+        k_map = {"type": "rotation", "angle_deg": 120.0}
+    elif operation in {"T", "TR", "T_eff"}:
+        k_map = {"type": "negation"}
+    else:
+        raise ValueError(f"Operation {operation!r} requires explicit k_map metadata in the TAPW symmetry manifest")
+    return {
+        "k_map": k_map,
+        "q_map": dict(entry.get("q_map", k_map)) if isinstance(entry.get("q_map", k_map), dict) else entry.get("q_map", k_map),
+        "sector_map": entry.get("sector_map", "identity"),
+        "spin_map": entry.get("spin_map", "from_kp_symm_output"),
+        "valley_map": entry.get("valley_map", "identity"),
+        "antiunitary": bool(antiunitary),
+    }
+
+
 def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         if entry.get(key):
@@ -265,8 +298,24 @@ def _load_spin_sliced_representation(
     path: Path,
     spin: str,
     full_dim: int,
+    spin_sector_sewing: str | None = None,
 ) -> RepresentationData:
-    return _slice_representation_for_spin(_load_matrix(path), spin, full_dim)
+    matrix = _load_matrix(path)
+    if spin_sector_sewing is None:
+        return _slice_representation_for_spin(matrix, spin, full_dim)
+    if str(spin_sector_sewing).lower() != "up_to_down":
+        raise ValueError(f"Unsupported spin_sector_sewing mode: {spin_sector_sewing!r}")
+    spin_lower = str(spin).lower()
+    if spin_lower != "up":
+        raise ValueError("spin_sector_sewing=up_to_down currently requires spin: up")
+    if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+        raise ValueError(f"Representation matrix must be square, got shape={matrix.shape}")
+    if matrix.shape != (2 * full_dim, 2 * full_dim):
+        raise ValueError(f"D dimension {matrix.shape} cannot be sliced to up_to_down block with full_dim {full_dim}")
+    row = slice(full_dim, 2 * full_dim)
+    col = slice(0, full_dim)
+    block = matrix[row, col].tocsr() if _is_sparse(matrix) else np.asarray(matrix[row, col], dtype=np.complex128)
+    return RepresentationData(matrix=block, from_full_spinful=True, spin_leakage=None)
 
 
 def _build_action_representation(
@@ -279,11 +328,13 @@ def _build_action_representation(
     spin: str,
     full_dim: int,
     tolerance: float,
+    spin_sector_sewing: str | None = None,
 ) -> ActionRepresentation:
     rep = _load_spin_sliced_representation(
         path=rep_root / filename,
         spin=spin,
         full_dim=full_dim,
+        spin_sector_sewing=spin_sector_sewing,
     )
     _check_spin_leakage(operation, "representation", rep, tolerance)
     if rep.matrix.shape != (full_dim, full_dim):
@@ -303,11 +354,20 @@ def _build_action_representation(
     combined_residual: float | None = None
 
     if pg_filename is not None:
-        pg_rep = _load_spin_sliced_representation(
-            path=rep_root / pg_filename,
-            spin=spin,
-            full_dim=full_dim,
-        )
+        if spin_sector_sewing is not None and str(spin_sector_sewing).lower() == "up_to_down":
+            pg_rep = _load_spin_sliced_representation(
+                path=rep_root / pg_filename,
+                spin=spin,
+                full_dim=full_dim,
+                spin_sector_sewing=None,
+            )
+        else:
+            pg_rep = _load_spin_sliced_representation(
+                path=rep_root / pg_filename,
+                spin=spin,
+                full_dim=full_dim,
+                spin_sector_sewing=spin_sector_sewing,
+            )
         _check_spin_leakage(operation, "periodic-gauge", pg_rep, tolerance)
         if pg_rep.matrix.shape != (full_dim, full_dim):
             raise ValueError(f"{operation} PG shape {pg_rep.matrix.shape} does not match U_low full dimension {full_dim}")
@@ -319,6 +379,7 @@ def _build_action_representation(
             path=rep_root / raw_h_filename,
             spin=spin,
             full_dim=full_dim,
+            spin_sector_sewing=spin_sector_sewing,
         )
         _check_spin_leakage(operation, "raw-H operator", raw_h_rep, tolerance)
         if raw_h_rep.matrix.shape != (full_dim, full_dim):
@@ -392,15 +453,30 @@ def _projectors_for_k(
         mode=mode,
     )
     include_high = method != "first_order"
-    u_low, u_high = calculate_energy_lists(
-        h_vec_blk,
-        nlow_state_list,
-        norb_fix_list,
-        q_layers,
-        orb_layers,
-        mode=mode,
-        include_high=include_high,
-    )
+    if spin == "all" and mode.lower() != "gamma":
+        q_count = int(len(q1))
+        shift = q_count * int(orb0)
+        idx_list: list[np.ndarray] = []
+        for layer in range(2):
+            for iq in range(q_count):
+                base = np.arange(iq * int(orb0), (iq + 1) * int(orb0)) + shift * layer
+                idx_list.append(np.concatenate((base, base + hamk_spin.shape[0] // 2)))
+        u_low, u_high = _assemble_projectors_from_block_eigenvectors(
+            h_vec_blk,
+            idx_list,
+            nlow_state_list,
+            include_high=include_high,
+        )
+    else:
+        u_low, u_high = calculate_energy_lists(
+            h_vec_blk,
+            nlow_state_list,
+            norb_fix_list,
+            q_layers,
+            orb_layers,
+            mode=mode,
+            include_high=include_high,
+        )
     u_low = np.asarray(u_low, dtype=np.complex128)
     u_high = None if u_high is None else np.asarray(u_high, dtype=np.complex128)
     result = downfold_from_projectors(
@@ -441,13 +517,21 @@ def _project_operation(
     states: dict[int, ProjectionState],
     pairs: list[tuple[int, int]],
     tolerance: float,
+    enforce_heff_covariance: bool = True,
+    raise_on_quality_failure: bool = True,
+    target_states: dict[int, ProjectionState] | None = None,
+    source_states: dict[int, ProjectionState] | None = None,
 ):
     raw_mats = []
     polar_mats = []
     pair_rows = []
+    if target_states is None:
+        target_states = states
+    if source_states is None:
+        source_states = states
     for target_idx, source_idx in pairs:
-        target = states[target_idx]
-        source = states[source_idx]
+        target = target_states[target_idx]
+        source = source_states[source_idx]
         u_source = source.u_low.conj() if antiunitary else source.u_low
         h_source = source.heff.conj() if antiunitary else source.heff
         image = d_full @ u_source
@@ -470,15 +554,22 @@ def _project_operation(
         raw_metrics = metrics(d_raw)
         polar_metrics = metrics(d_polar)
         sv_max_dev = float(np.max(np.abs(singular_values - 1.0))) if singular_values.size else 0.0
+        quality_warnings = []
         if sv_max_dev > tolerance:
-            raise ValueError(f"{operation} k=({target_idx},{source_idx}) singular values deviate from 1 by {sv_max_dev:.3e}")
+            message = f"singular values deviate from 1 by {sv_max_dev:.3e}"
+            if raise_on_quality_failure:
+                raise ValueError(f"{operation} k=({target_idx},{source_idx}) {message}")
+            quality_warnings.append(message)
         if raw_metrics["subspace_leakage"] > tolerance:
-            raise ValueError(f"{operation} k=({target_idx},{source_idx}) subspace leakage {raw_metrics['subspace_leakage']:.3e} exceeds tolerance")
-        if raw_metrics["heff_covariance_residual"] > tolerance:
-            raise ValueError(
-                f"{operation} k=({target_idx},{source_idx}) Heff covariance residual "
-                f"{raw_metrics['heff_covariance_residual']:.3e} exceeds tolerance"
-            )
+            message = f"subspace leakage {raw_metrics['subspace_leakage']:.3e} exceeds tolerance"
+            if raise_on_quality_failure:
+                raise ValueError(f"{operation} k=({target_idx},{source_idx}) {message}")
+            quality_warnings.append(message)
+        if enforce_heff_covariance and raw_metrics["heff_covariance_residual"] > tolerance:
+            message = f"Heff covariance residual {raw_metrics['heff_covariance_residual']:.3e} exceeds tolerance"
+            if raise_on_quality_failure:
+                raise ValueError(f"{operation} k=({target_idx},{source_idx}) {message}")
+            quality_warnings.append(message)
         raw_mats.append(d_raw)
         polar_mats.append(d_polar)
         pair_rows.append(
@@ -487,6 +578,8 @@ def _project_operation(
                 "source_k_index": int(source_idx),
                 "d_shape": list(d_raw.shape),
                 "singular_values": [float(value) for value in singular_values],
+                "singular_value_max_deviation": sv_max_dev,
+                "quality_warnings": quality_warnings,
                 "raw": raw_metrics,
                 "polar": polar_metrics,
             }
@@ -561,9 +654,11 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
 
     valley = str(symm_cfg.get("valley", "K1"))
     spin = str(symm_cfg.get("spin", material.get("spin", "all"))).lower()
-    operations = [str(op) for op in symm_cfg.get("operations", [])]
-    if not operations:
+    spin_sector_sewing = symm_cfg.get("spin_sector_sewing")
+    source_operations = [str(op) for op in symm_cfg.get("operations", [])]
+    if not source_operations:
         raise ValueError("symm.operations must not be empty")
+    operation_requests = [{"source": _validate_operation_label(operation), "output": operation} for operation in source_operations]
     tolerance = float(symm_cfg.get("tolerance", 1.0e-2))
 
     tapw_symmetry_dir = _resolve(symm_cfg.get("tapw_symmetry_dir"), cfg_dir)
@@ -603,32 +698,49 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
     operation_entries: dict[str, dict[str, Any]] = {}
     all_pairs: set[tuple[int, int]] = set()
     default_k_index = int(plot_cfg.get("hamk_index", 0))
-    for operation in operations:
+    for request in operation_requests:
+        operation = request["source"]
+        output_operation = request["output"]
         entry = _operation_entry(manifest, valley, operation)
         pairs = _pairs_from_entry(entry, nk, default_k_index=default_k_index)
         for target_idx, source_idx in pairs:
             if target_idx < 0 or target_idx >= nk or source_idx < 0 or source_idx >= nk:
-                raise IndexError(f"{operation} source/target k unavailable: target={target_idx}, source={source_idx}, nk={nk}")
+                raise IndexError(f"{output_operation} source/target k unavailable: target={target_idx}, source={source_idx}, nk={nk}")
             all_pairs.add((target_idx, source_idx))
         entry["_pairs"] = pairs
-        operation_entries[operation] = entry
+        operation_entries[output_operation] = entry
 
     required_k = sorted({idx for pair in all_pairs for idx in pair})
     if not required_k:
         raise ValueError("No source/target k points requested by symmetry operations")
-    hamk_spin_by_k = {
-        k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), spin)
-        for k_index in required_k
-    }
-    full_dim = int(hamk_spin_by_k[required_k[0]].shape[0])
+    if spin_sector_sewing is None:
+        hamk_source_by_k = {
+            k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), spin)
+            for k_index in required_k
+        }
+        hamk_target_by_k = hamk_source_by_k
+    else:
+        if str(spin_sector_sewing).lower() != "up_to_down":
+            raise ValueError(f"Unsupported spin_sector_sewing mode: {spin_sector_sewing!r}")
+        hamk_source_by_k = {
+            k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), "up")
+            for k_index in required_k
+        }
+        hamk_target_by_k = {
+            k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), "down")
+            for k_index in required_k
+        }
+    full_dim = int(hamk_source_by_k[required_k[0]].shape[0])
 
     operation_payloads: dict[str, dict[str, Any]] = {}
-    for operation in operations:
-        entry = operation_entries[operation]
+    for request in operation_requests:
+        operation = request["source"]
+        output_operation = request["output"]
+        entry = operation_entries[output_operation]
         antiunitary = _as_bool(entry.get("antiunitary", False))
         filename = _entry_filename(entry, valley, operation)
         action = _build_action_representation(
-            operation=operation,
+            operation=output_operation,
             entry=entry,
             rep_root=rep_root,
             filename=filename,
@@ -636,18 +748,19 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             spin=spin,
             full_dim=full_dim,
             tolerance=tolerance,
+            spin_sector_sewing=None if spin_sector_sewing is None else str(spin_sector_sewing),
         )
         full_pair_rows = []
         for target_idx, source_idx in entry["_pairs"]:
             full_residual = _full_space_covariance_residual(
                 d_full=action.matrix,
-                h_target=hamk_spin_by_k[target_idx],
-                h_source=hamk_spin_by_k[source_idx],
+                h_target=hamk_target_by_k[target_idx],
+                h_source=hamk_source_by_k[source_idx],
                 antiunitary=antiunitary,
             )
             if full_residual > tolerance:
                 raise ValueError(
-                    f"{operation} k=({target_idx},{source_idx}) full-space covariance residual "
+                    f"{output_operation} k=({target_idx},{source_idx}) full-space covariance residual "
                     f"{full_residual:.3e} exceeds tolerance. The TAPW representation is not "
                     "compatible with the KP input hamk/source-k rule."
                 )
@@ -658,7 +771,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
                     "full_space_covariance_residual": full_residual,
                 }
             )
-        operation_payloads[operation] = {
+        operation_payloads[output_operation] = {
             "entry": entry,
             "antiunitary": antiunitary,
             "filename": filename,
@@ -667,22 +780,57 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         }
 
     states: dict[int, ProjectionState] = {}
-    for k_index in required_k:
-        states[k_index] = _projectors_for_k(
-            hamk_spin_by_k[k_index],
-            q1,
-            q2,
-            orb0=orb0,
-            spin=spin,
-            mode=mode,
-            nlow_state_list=nlow_state_list,
-            norb_fix_list=norb_fix_list,
-            method=method,
-            e_ref=e_ref,
-            project_cfg=project_cfg,
-        )
-
-    first_state = states[required_k[0]]
+    source_states: dict[int, ProjectionState] = {}
+    target_states: dict[int, ProjectionState] = {}
+    if spin_sector_sewing is None:
+        for k_index in required_k:
+            states[k_index] = _projectors_for_k(
+                hamk_source_by_k[k_index],
+                q1,
+                q2,
+                orb0=orb0,
+                spin=spin,
+                mode=mode,
+                nlow_state_list=nlow_state_list,
+                norb_fix_list=norb_fix_list,
+                method=method,
+                e_ref=e_ref,
+                project_cfg=project_cfg,
+            )
+        source_states = states
+        target_states = states
+        first_state = states[required_k[0]]
+    else:
+        if str(spin_sector_sewing).lower() != "up_to_down":
+            raise ValueError(f"Unsupported spin_sector_sewing mode: {spin_sector_sewing!r}")
+        for k_index in required_k:
+            source_states[k_index] = _projectors_for_k(
+                hamk_source_by_k[k_index],
+                q1,
+                q2,
+                orb0=orb0,
+                spin="up",
+                mode=mode,
+                nlow_state_list=nlow_state_list,
+                norb_fix_list=norb_fix_list,
+                method=method,
+                e_ref=e_ref,
+                project_cfg=project_cfg,
+            )
+            target_states[k_index] = _projectors_for_k(
+                hamk_target_by_k[k_index],
+                q1,
+                q2,
+                orb0=orb0,
+                spin="up",
+                mode=mode,
+                nlow_state_list=nlow_state_list,
+                norb_fix_list=norb_fix_list,
+                method=method,
+                e_ref=e_ref,
+                project_cfg=project_cfg,
+            )
+        first_state = source_states[required_k[0]]
     low_dim = int(first_state.u_low.shape[1])
     output_dir = Path(_resolve(symm_cfg.get("output_dir", "symm_project"), cfg_dir) or "symm_project")
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -700,30 +848,57 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         "operations": [],
     }
 
-    for operation in operations:
-        payload = operation_payloads[operation]
+    for request in operation_requests:
+        operation = request["source"]
+        output_operation = request["output"]
+        payload = operation_payloads[output_operation]
         entry = payload["entry"]
         antiunitary = bool(payload["antiunitary"])
         filename = str(payload["filename"])
         action = payload["action"]
         rep = action.representation
+        action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
 
         raw_mats, polar_mats, pair_rows = _project_operation(
-            operation=operation,
+            operation=output_operation,
             antiunitary=antiunitary,
             d_full=action.matrix,
-            states=states,
+            states=source_states,
             pairs=entry["_pairs"],
             tolerance=tolerance,
+            target_states=target_states,
+            source_states=source_states,
+        )
+        rep_raw_mats, rep_polar_mats, rep_pair_rows = _project_operation(
+            operation=output_operation,
+            antiunitary=antiunitary,
+            d_full=rep.matrix,
+            states=source_states,
+            pairs=entry["_pairs"],
+            tolerance=tolerance,
+            enforce_heff_covariance=False,
+            raise_on_quality_failure=False,
+            target_states=target_states,
+            source_states=source_states,
         )
         for pair_row, full_pair_row in zip(pair_rows, payload["full_pair_rows"]):
             pair_row["full_space_covariance_residual"] = full_pair_row["full_space_covariance_residual"]
-        _save_matrix_stack(output_dir / f"{operation}_low_raw.npy", raw_mats)
-        _save_matrix_stack(output_dir / f"{operation}_low_polar.npy", polar_mats)
+        _save_matrix_stack(output_dir / f"{output_operation}_low_raw.npy", raw_mats)
+        _save_matrix_stack(output_dir / f"{output_operation}_low_polar.npy", polar_mats)
+        _save_matrix_stack(output_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
+        _save_matrix_stack(output_dir / f"{output_operation}_low_representation_polar.npy", rep_polar_mats)
         summary["operations"].append(
             {
-                "operation": operation,
+                "operation": output_operation,
                 "antiunitary": antiunitary,
+                "matrix_file": f"{output_operation}_low_raw.npy",
+                "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
+                **action_metadata,
+                "axis_deg": entry.get("axis_deg"),
+                "status": entry.get("status"),
+                "square_residual": entry.get("square_residual"),
+                "spglib_index": entry.get("spglib_index"),
+                "ld_source_rule": entry.get("ld_source_rule"),
                 "representation_file": str(rep_root / filename),
                 "pg_file": None if action.pg_filename is None else str(rep_root / action.pg_filename),
                 "raw_h_operator_file": None if action.raw_h_filename is None else str(rep_root / action.raw_h_filename),
@@ -733,7 +908,11 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
                 "spin_leakage": rep.spin_leakage,
                 "pg_spin_leakage": None if action.pg is None else action.pg.spin_leakage,
                 "raw_h_spin_leakage": None if action.raw_h is None else action.raw_h.spin_leakage,
+                "spin_sector_sewing": spin_sector_sewing,
+                "source_spin": spin if spin_sector_sewing is None else "up",
+                "target_spin": spin if spin_sector_sewing is None else "down",
                 "pairs": pair_rows,
+                "representation_pairs": rep_pair_rows,
             }
         )
 

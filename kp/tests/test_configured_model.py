@@ -279,6 +279,20 @@ def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> Non
     assert len(model.terms) < 30
 
 
+def test_load_model_config_rejects_sector_n_orb_mismatch(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["n_orb"] = [2, 2]
+    raw["sectors"] = [
+        {"name": "bottom", "qset": "qset1", "n_orb": 1},
+        {"name": "top", "qset": "qset2", "n_orb": 2},
+    ]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"sectors\.bottom\.n_orb=1.*model\.n_orb.*2"):
+        load_model_config(cfg_path)
+
+
 def test_model_max_order_overrides_safe_defaults(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Tuple, Literal
+from typing import Any, List, Tuple, Literal
 
 import numpy as np
 import scipy
@@ -30,6 +30,156 @@ def align_eigenstates(U_low: np.ndarray, Phi_ref: np.ndarray) -> np.ndarray:
     # Apply rotation in subspace
     U_aligned = U_low @ V
     return U_aligned, V
+
+
+def _is_reference_pair(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and not isinstance(value[0], (list, tuple))
+    )
+
+
+def _layer_reference_entries(layer_refs: Any, n_bands: int) -> list[Any]:
+    if n_bands == 1 and _is_reference_pair(layer_refs):
+        return [layer_refs]
+    if isinstance(layer_refs, (list, tuple)):
+        return list(layer_refs)
+    return [layer_refs]
+
+
+def _parse_reference_terms(reference: Any, *, context: str) -> list[tuple[int, complex]]:
+    raw_items = [reference] if _is_reference_pair(reference) else reference
+    if not isinstance(raw_items, (list, tuple)):
+        raw_items = [raw_items]
+
+    terms: list[tuple[int, complex]] = []
+    for item in raw_items:
+        if _is_reference_pair(item):
+            idxc, coef = item
+            terms.append((int(idxc), complex(coef)))
+        else:
+            terms.append((int(item), complex(1.0)))
+    if not terms:
+        raise ValueError(f"{context}: empty reference in norb_fix_list")
+    return terms
+
+
+def _resolve_reference_index(
+    idx: int,
+    *,
+    block_dim: int,
+    context: str,
+    allow_layer_global: bool = False,
+    layer: int | None = None,
+    layer_block_dim: int | None = None,
+    total_layers: int | None = None,
+) -> int:
+    if 0 <= idx < block_dim:
+        return idx
+
+    if allow_layer_global:
+        if layer is None or layer_block_dim is None or total_layers is None:
+            raise ValueError(f"{context}: layer-global reference resolution is missing layer metadata")
+        total_dim = int(layer_block_dim) * int(total_layers)
+        if 0 <= idx < total_dim:
+            owner_layer = int(idx) // int(layer_block_dim)
+            if owner_layer != int(layer):
+                raise ValueError(
+                    f"{context}: reference index {idx} belongs to layer {owner_layer}, "
+                    f"not layer {layer}"
+                )
+            local_idx = int(idx) - owner_layer * int(layer_block_dim)
+            if 0 <= local_idx < block_dim:
+                return local_idx
+        raise ValueError(
+            f"{context}: reference index {idx} is outside local block dimension {block_dim} "
+            f"and combined same-Q dimension {total_dim}"
+        )
+
+    raise ValueError(f"{context}: reference index {idx} is outside block dimension {block_dim}")
+
+
+def _reference_terms_for_layer(
+    *,
+    nlow_state_list: Any,
+    norb_fix_list: Any,
+    layer: int,
+    block_dim: int,
+    context: str,
+    allow_layer_global: bool = False,
+    layer_for_global: int | None = None,
+    layer_block_dim: int | None = None,
+    total_layers: int | None = None,
+) -> tuple[list[int], list[list[tuple[int, complex]]]]:
+    if layer >= len(nlow_state_list):
+        raise IndexError(f"{context}: missing nlow_state_list entry for layer {layer}")
+
+    bands = [int(band) for band in nlow_state_list[layer]]
+    if not bands:
+        return [], []
+    if layer >= len(norb_fix_list):
+        raise IndexError(f"{context}: missing norb_fix_list entry for layer {layer}")
+
+    ref_entries = _layer_reference_entries(norb_fix_list[layer], len(bands))
+    if len(ref_entries) != len(bands):
+        raise ValueError(
+            f"{context}: nlow_state_list layer {layer} has {len(bands)} bands but "
+            f"norb_fix_list layer {layer} has {len(ref_entries)} references"
+        )
+
+    resolved: list[list[tuple[int, complex]]] = []
+    for ref_idx, reference in enumerate(ref_entries):
+        ref_context = f"{context} reference {ref_idx}"
+        terms = []
+        for raw_idx, coef in _parse_reference_terms(reference, context=ref_context):
+            terms.append(
+                (
+                    _resolve_reference_index(
+                        int(raw_idx),
+                        block_dim=block_dim,
+                        context=ref_context,
+                        allow_layer_global=allow_layer_global,
+                        layer=layer_for_global,
+                        layer_block_dim=layer_block_dim,
+                        total_layers=total_layers,
+                    ),
+                    coef,
+                )
+            )
+        resolved.append(terms)
+    return bands, resolved
+
+
+def _align_selected_eigenstates(
+    vec: np.ndarray,
+    bands: list[int],
+    references: list[list[tuple[int, complex]]],
+    *,
+    context: str,
+) -> None:
+    if len(bands) != len(references):
+        raise ValueError(f"{context}: band/reference length mismatch")
+    if not bands:
+        return
+
+    for band in bands:
+        if band < -vec.shape[1] or band >= vec.shape[1]:
+            raise IndexError(f"{context}: low-state band index {band} outside block dimension {vec.shape[1]}")
+
+    phi_ref = np.zeros((vec.shape[0], len(bands)), dtype=complex)
+    for col_idx, terms in enumerate(references):
+        col = np.zeros(phi_ref.shape[0], dtype=complex)
+        for idxc, coef in terms:
+            col[idxc] += coef
+        norm = np.linalg.norm(col)
+        if norm <= 0.0:
+            raise ValueError(f"{context}: reference {col_idx} has zero norm after resolving norb_fix_list")
+        phi_ref[:, col_idx] = col / norm
+
+    u_low = vec[:, np.array(bands, dtype=int)]
+    u_aligned, _ = align_eigenstates(u_low, phi_ref)
+    vec[:, bands] = u_aligned
 
 
 def get_H_block(
@@ -121,102 +271,29 @@ def get_H_block(
             # print(block[10,20])
             eig, vec = np.linalg.eigh(block)
             # print(np.sort(eig)[:5],np.linalg.norm(block))
-            # Layered alignment with linear-combo references (minimal and explicit)
-            # print("nlow_state_list = ",nlow_state_list)
-            # print("norb_fix_list = ",norb_fix_list)
-            if isinstance(nlow_state_list, list) and len(nlow_state_list) >= 1 \
-               and isinstance(norb_fix_list, list) and len(norb_fix_list) >= 1:
-                # Flatten per-layer definitions into band list and per-band combos
+            if nlow_state_list and norb_fix_list:
                 bands_flat: list[int] = []
                 ref_flat: list[list[tuple[int, complex]]] = []
-                for layer in range(1):
-                    for b in nlow_state_list[layer]:
-                        bands_flat.append(int(b))
-                    for combos in norb_fix_list[layer]:
-                        parsed: list[tuple[int, complex]] = []
-                        for it in combos:
-                            if isinstance(it, (list, tuple)) and len(it) == 2:
-                                idxc, coef = it
-                                coef_c = complex(coef) if not isinstance(coef, complex) else coef
-                                parsed.append((int(idxc), coef_c))
-                            else:
-                                parsed.append((int(it), complex(1.0)))
-                        ref_flat.append(parsed)
-                # print("bands_flat :",bands_flat)
-                # ref_flat = [[(50, (1+0j))], [(142, (1+0j))], [(123, (1+0j))], [(31, (1+0j))], [(50, (1+0j))], [(142, (1+0j))], [(123, (1+0j))], [(31, (1+0j))]]
-
-                # print("ref_flat :", ref_flat)
-                if bands_flat and len(ref_flat) == len(bands_flat):
-                    # Phi_ref = np.zeros((vec.shape[0], len(bands_flat)), dtype=complex)
-                    # for j, combos in enumerate(ref_flat):
-                    #     for idxc, coef in combos:
-                    #         if 0 <= int(idxc) < Phi_ref.shape[0]:
-                    #             Phi_ref[int(idxc), j] += complex(coef)
-
-                    Phi_ref = np.zeros((vec.shape[0], len(bands_flat)), dtype=complex)
-                    for j, items in enumerate(ref_flat):
-                        col = np.zeros(Phi_ref.shape[0], dtype=complex)
-                        for idxc, coef in items:
-                            if 0 <= idxc < Phi_ref.shape[0]:
-                                col[idxc] += coef
-                        # 逐列归一，避免幅值偏置
-                        nrm = np.linalg.norm(col)
-                        if nrm > 0:
-                            col /= nrm
-                        Phi_ref[:, j] = col
-
-                    # print("none zero index and value = ",Phi_ref.nonzero(),Phi_ref[Phi_ref.nonzero()])
-                    U_low = vec[:, np.array(bands_flat, dtype=int)]
-                    U_aligned, _ = align_eigenstates(U_low, Phi_ref)
-                    # for col_j, b in enumerate(bands_flat):
-                    #     vec[:, int(b)] = U_aligned[:, col_j]
-                    vec[:, bands_flat] = U_aligned#*np.exp(-1j*7*np.pi/6)
-
-            V_0 = np.zeros((len(bands_flat), len(bands_flat)), dtype=complex)
-            comps = norb_fix_list[0]
-            for i in range(len(bands_flat)):
-                # phase = np.abs(vec[comps[i], bands_flat[i]]) / vec[comps[i], bands_flat[i]]
-                phase = np.exp(-1j * 2 * 210 * np.pi / 180)
-                V_0[i, i] = phase
-                # print("phase = ",phase)
-            # vec[:, bands_flat] = vec[:, bands_flat] @ V_0
-
-            V0 = np.eye(len(bands_flat), dtype=complex)
-            for i, b in enumerate(bands_flat):
-                a = np.vdot(Phi_ref[:, i], vec[:, b])
-                if abs(a) > 1e-14:
-                    V0[i, i] = np.conj(a) / abs(a)
-                    #  V0[i, i] =  abs(a)/ np.conj(a)
-            # print("none zero V0 = ",V0.nonzero(),V0[V0.nonzero()])
-            # vec[:, bands_flat] = vec[:, bands_flat] @ V0
-
-
-            # bands = np.array(nlow_state_list[0])
-            # comps = norb_fix_list[0]
-
-            # Phi_ref = np.zeros_like(vec[:,bands], dtype=complex)
-            # for i in range(len(nlow_state_list[0])):
-            #     # for j in comps:
-            #     Phi_ref[comps[i], i] = 1
-            # # Phi_ref[30,7] = 1
-            # # Phi_ref[31,7] = 1j
-            # # Phi_ref[248, 0] = 1
-            # # Phi_ref[35, 1] = 1
-            # # Phi_ref[319, 2] = np.sqrt(2)/2
-            # # Phi_ref[390, 2] = 1j*np.sqrt(2)/2
-            # # Phi_ref[106, 3] = np.sqrt(2)/2
-            # # Phi_ref[177, 3] = -1j*np.sqrt(2)/2
-            # U_aligned, V_1 = align_eigenstates(vec[:,bands], Phi_ref)
-            # vec[:, bands] = U_aligned
-            # # vec[:, bands] = Phi_ref wrong
-
-            # V_0 = np.zeros((len(bands), len(bands)), dtype=complex)
-            # for i in range(len(bands)):
-            #     phase = np.abs(vec[comps[i], bands[i]]) / vec[comps[i], bands[i]]
-            #     V_0[i, i] = phase
-            # vec[:, bands] = vec[:, bands] @ V_0
-
-
+                for layer in range(len(nlow_state_list)):
+                    layer_context = f"mode gamma q {iqx} layer {layer}"
+                    bands_layer, refs_layer = _reference_terms_for_layer(
+                        nlow_state_list=nlow_state_list,
+                        norb_fix_list=norb_fix_list,
+                        layer=layer,
+                        block_dim=vec.shape[0],
+                        context=layer_context,
+                    )
+                    bands_flat.extend(bands_layer)
+                    ref_flat.extend(refs_layer)
+                if bands_flat:
+                    if len(set(bands_flat)) != len(bands_flat):
+                        raise ValueError(f"mode gamma q {iqx}: duplicate low-state band indices are ambiguous")
+                    _align_selected_eigenstates(
+                        vec,
+                        bands_flat,
+                        ref_flat,
+                        context=f"mode gamma q {iqx}",
+                    )
 
             H_diag_block.append(block)
             H_GM_diag_eig.append(eig)
@@ -241,59 +318,27 @@ def get_H_block(
                     block = hamk[np.ix_(same_q_index, same_q_index)]
                     eig, vec = np.linalg.eigh(block)
 
-                    if isinstance(nlow_state_list, list) and len(nlow_state_list) >= 1 \
-                        and isinstance(norb_fix_list, list) and len(norb_fix_list) >= 1:
-                            # Flatten per-layer definitions into band list and per-band combos
-                            bands_flat: list[int] = []
-                            ref_flat: list[list[tuple[int, complex]]] = []
-                            layer = int(ilx)
-                            if layer >= len(nlow_state_list) or layer >= len(norb_fix_list):
-                                raise IndexError(
-                                    f"Missing low-state/reference config for layer {layer}: "
-                                    f"nlow_state_list has {len(nlow_state_list)} layers, "
-                                    f"norb_fix_list has {len(norb_fix_list)} layers"
-                                )
-                            for b in nlow_state_list[layer]:
-                                bands_flat.append(int(b))
-                            for combos in norb_fix_list[layer]:
-                                parsed: list[tuple[int, complex]] = []
-                                for it in combos:
-                                    if isinstance(it, (list, tuple)) and len(it) == 2:
-                                        idxc, coef = it
-                                        coef_c = complex(coef) if not isinstance(coef, complex) else coef
-                                        parsed.append((int(idxc), coef_c))
-                                    else:
-                                        parsed.append((int(it), complex(1.0)))
-                                ref_flat.append(parsed)
-                            # print("bands_flat :",bands_flat)
-                            # ref_flat = [[(50, (1+0j))], [(142, (1+0j))], [(123, (1+0j))], [(31, (1+0j))], [(50, (1+0j))], [(142, (1+0j))], [(123, (1+0j))], [(31, (1+0j))]]
-
-                            # print("ref_flat :", ref_flat)
-                            if bands_flat and len(ref_flat) == len(bands_flat):
-                                # Phi_ref = np.zeros((vec.shape[0], len(bands_flat)), dtype=complex)
-                                # for j, combos in enumerate(ref_flat):
-                                #     for idxc, coef in combos:
-                                #         if 0 <= int(idxc) < Phi_ref.shape[0]:
-                                #             Phi_ref[int(idxc), j] += complex(coef)
-
-                                Phi_ref = np.zeros((vec.shape[0], len(bands_flat)), dtype=complex)
-                                for j, items in enumerate(ref_flat):
-                                    col = np.zeros(Phi_ref.shape[0], dtype=complex)
-                                    for idxc, coef in items:
-                                        if 0 <= idxc < Phi_ref.shape[0]:
-                                            col[idxc] += coef
-                                    # 逐列归一，避免幅值偏置
-                                    nrm = np.linalg.norm(col)
-                                    if nrm > 0:
-                                        col /= nrm
-                                    Phi_ref[:, j] = col
-
-                                # print("none zero index and value = ",Phi_ref.nonzero(),Phi_ref[Phi_ref.nonzero()])
-                                U_low = vec[:, np.array(bands_flat, dtype=int)]
-                                U_aligned, _ = align_eigenstates(U_low, Phi_ref)
-                                # for col_j, b in enumerate(bands_flat):
-                                #     vec[:, int(b)] = U_aligned[:, col_j]
-                                vec[:, bands_flat] = U_aligned
+                    if nlow_state_list and norb_fix_list:
+                        layer = int(ilx)
+                        layer_for_global = int(num_layer_arr[:ilx].sum() + jj)
+                        context = f"mode {mode} layer {layer} q {iq}"
+                        bands_flat, ref_flat = _reference_terms_for_layer(
+                            nlow_state_list=nlow_state_list,
+                            norb_fix_list=norb_fix_list,
+                            layer=layer,
+                            block_dim=vec.shape[0],
+                            context=context,
+                            allow_layer_global=spin != "all" and vec.shape[0] == orb_per_layer_0,
+                            layer_for_global=layer_for_global,
+                            layer_block_dim=orb_per_layer_0,
+                            total_layers=int(num_layer_arr.sum()),
+                        )
+                        _align_selected_eigenstates(
+                            vec,
+                            bands_flat,
+                            ref_flat,
+                            context=context,
+                        )
 
 
 
@@ -483,6 +528,54 @@ def calculate_energy_lists(
 
     # return ULowEnergyList, UHighEnergyList
     return U_low_proj, U_high_proj
+
+
+def _assemble_projectors_from_block_eigenvectors(
+    H_GM_diag_eig_vec,
+    idx_list: list[np.ndarray],
+    nlow_state_list,
+    *,
+    include_high: bool,
+):
+    """Assemble block eigenvectors in the original full-Hamiltonian row order."""
+    H_vec_list = [np.asarray(v, dtype=np.complex128) for v in H_GM_diag_eig_vec.tolist()]
+    if len(H_vec_list) != len(idx_list):
+        raise ValueError(f"projector block count mismatch: {len(H_vec_list)} vectors vs {len(idx_list)} index blocks")
+    if not idx_list:
+        raise ValueError("projector assembly requires at least one index block")
+
+    full_dim = max(int(np.max(idx)) for idx in idx_list) + 1
+    q_count = len(idx_list) // len(nlow_state_list)
+    if q_count * len(nlow_state_list) != len(idx_list):
+        raise ValueError("index blocks must be ordered by layer then Q")
+
+    bands_by_layer = [[int(band) for band in layer_bands] for layer_bands in nlow_state_list]
+    low_offsets: list[int] = []
+    low_dim = 0
+    for bands in bands_by_layer:
+        low_offsets.append(low_dim)
+        low_dim += len(bands) * q_count
+    U_low = np.zeros((full_dim, low_dim), dtype=np.complex128)
+    U_high = None
+    if include_high:
+        high_dim = sum(vec.shape[1] - len(nlow_state_list[i // q_count]) for i, vec in enumerate(H_vec_list))
+        U_high = np.zeros((full_dim, high_dim), dtype=np.complex128)
+
+    high_col = 0
+    for block_idx, (vec, idx) in enumerate(zip(H_vec_list, idx_list)):
+        layer = block_idx // q_count
+        q_index = block_idx % q_count
+        bands = bands_by_layer[layer]
+        if bands:
+            for band_slot, band in enumerate(bands):
+                col = low_offsets[layer] + band_slot * q_count + q_index
+                U_low[idx, col] = vec[:, band]
+        if U_high is not None:
+            high_bands = np.delete(np.arange(vec.shape[1]), bands)
+            U_high[idx, high_col : high_col + len(high_bands)] = vec[:, high_bands]
+            high_col += len(high_bands)
+
+    return U_low, U_high
 
 
 
@@ -677,15 +770,23 @@ def project_heff_full(
     method = (downfold_method or ("fixed_schur" if second_order else "first_order")).lower()
     include_high = method != "first_order"
 
-    U_low_full,U_high_full = calculate_energy_lists(
-        H_vec_blk,
-        nlow_state_list,
-        norb_fix_list,
-        Qlayer_list,
-        num_orb_per_layer_list,
-        mode=mode_lower,
-        include_high=include_high,
-    )
+    if spin == "all" and mode_lower != "gamma":
+        U_low_full, U_high_full = _assemble_projectors_from_block_eigenvectors(
+            H_vec_blk,
+            idx_list,
+            nlow_state_list,
+            include_high=include_high,
+        )
+    else:
+        U_low_full,U_high_full = calculate_energy_lists(
+            H_vec_blk,
+            nlow_state_list,
+            norb_fix_list,
+            Qlayer_list,
+            num_orb_per_layer_list,
+            mode=mode_lower,
+            include_high=include_high,
+        )
     U_low_full = np.array(U_low_full, dtype=np.complex128)
     if U_high_full is not None:
         U_high_full = np.array(U_high_full, dtype=np.complex128)
