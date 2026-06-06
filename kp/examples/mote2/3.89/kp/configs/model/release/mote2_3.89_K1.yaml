@@ -134,7 +134,6 @@ model:
   term_templates:
   - name: kinetic_layer1
     source: diagonal_kp
-    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
@@ -147,7 +146,6 @@ model:
       require_mz_ge_mz_star: true
   - name: onsite_layer1
     source: onsite
-    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
@@ -155,7 +153,6 @@ model:
     max_order: 0
   - name: intra_layer1
     source: moire_potential
-    generation_mode: explicit_legacy
     sector_pairs:
     - - 1
       - 1
@@ -170,7 +167,6 @@ model:
     harmonics_source: explicit_count
   - name: inter_21_positive
     source: tunneling
-    generation_mode: explicit_legacy
     sector_pairs:
     - - 2
       - 1
@@ -186,7 +182,6 @@ model:
     harmonics_source: explicit_count
   - name: inter_21_negative
     source: tunneling
-    generation_mode: explicit_legacy
     sector_pairs:
     - - 2
       - 1
@@ -202,34 +197,22 @@ model:
     harmonics_source: explicit_count
   symmetry_map:
     Kinect:
+    - name: C3z
+      user_name: C3z
     - name: C2T
       user_name: C2T
     Onsite:
+    - name: C3z
+      user_name: C3z
     - name: C2T
       user_name: C2T
     intra:
     - name: C3z
-      antiunitary: false
-      k_map:
-        type: rotation
-        angle_deg: 120.0
-      q_map:
-        type: rotation
-        angle_deg: 120.0
-      sector_map: identity
       user_name: C3z
     - name: C2T
       user_name: C2T
     inter:
     - name: C3z
-      antiunitary: false
-      k_map:
-        type: rotation
-        angle_deg: 120.0
-      q_map:
-        type: rotation
-        angle_deg: 120.0
-      sector_map: identity
       user_name: C3z
     - name: C2T
       user_name: C2T

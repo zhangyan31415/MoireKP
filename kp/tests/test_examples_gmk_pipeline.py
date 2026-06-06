@@ -48,6 +48,16 @@ def test_gmk_production_configs_load() -> None:
         assert cfg.valley_model["valley_type"] in {"Gamma", "K", "M"}
 
 
+def test_gmk_production_configs_use_uniform_term_symmetry_sets() -> None:
+    for path in GMK_PRODUCTION_CONFIGS.values():
+        cfg = load_model_config(path)
+        by_tag = {
+            tag: [op["name"] for op in cfg.symmetry_map[tag]]
+            for tag in ("Kinect", "Onsite", "intra", "inter")
+        }
+        assert len({tuple(names) for names in by_tag.values()}) == 1, by_tag
+
+
 def test_gmk_reference_outputs_follow_unified_layout() -> None:
     for path in GMK_REFERENCE_OUTPUTS.values():
         assert path.exists(), path
@@ -69,7 +79,7 @@ def test_m_production_config_builds_named_sector_model() -> None:
     assert any(term.key.layer_from == 2 and term.key.layer_to == 1 for term in model.terms.values())
 
 
-def test_k1_production_example_stays_mev_scale_and_keeps_legacy_active_set(tmp_path: Path) -> None:
+def test_k1_production_example_stays_mev_scale_and_keeps_active_set(tmp_path: Path) -> None:
     src = GMK_PRODUCTION_CONFIGS["mote2_3.89_K1"]
     raw = yaml.safe_load(src.read_text(encoding="utf-8"))
     raw["source_config"] = str((src.parent / raw["source_config"]).resolve())

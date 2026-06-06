@@ -2304,74 +2304,6 @@ class ContinuumModelBuilder:
         return np.array(orthonormal_matrices), np.array(including_list, dtype=int)
 
     @timing_decorator_factory(0)
-    def get_orthogonalized_terms_subset_old(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
-                                        tol: float = 1e-8, tag: str = None) -> Tuple[List[ContinuumTermKey], List[np.ndarray], np.ndarray, np.ndarray]:
-        """
-        对模型中指定 keys 的项，在 k_points 下采样后，
-        对于每个 term同时采样 real 与 imag 两部分（分别由 stack_Y_for_term 返回），
-        将这两部分都添加到 initialterms 中（顺序为 term1_real, term1_imag, term2_real, term2_imag, ...）。
-        
-        对于 onsite 或 Kinect 类项（tag=="Onsite"或tag=="Kinect"），还会在每个 k 点下对该部分做去迹处理，
-        并将对应子矩阵的 trace 用于 onsite 能量的校正。
-        
-        返回：
-        keys: 原 keys 列表（顺序不变）
-        initialterms: 每个 term 得到的 block_diag 拼接矩阵（总数为 2*N）
-        finalterms: 经过正交化后的矩阵数组
-        includinglist: 正交化中被认为是线性独立的矩阵的原始索引数组
-        """
-        initialterms = []
-        initialterms_copy = []
-        for key in tqdm(keys):
-            mat_real, mat_imag = self.stack_Y_for_term(self.model.terms[key], k_points)
-            l1, l2 = key.layer_from, key.layer_to
-            orb1, orb2 = key.orbital_from, key.orbital_to
-            n_orb1, n_orb2 = self.n_orb1, self.n_orb2
-            Q_set1 = self.Q_set1
-            Q_set2 = self.Q_set2
-            H_dim = len(Q_set1)*self.n_orb1 + len(Q_set2)*self.n_orb2
-            
-            Qlayer = Q_set1 if l1 == 1 else Q_set2
-            # 若是 onsite 或 Kinect 项，则对每个 k 点对应的子块进行校正
-            if tag in ("Kinect"): # l1 = l2 and orb1 = orb2
-                exchange_antiunitary_flag = ContinuumModelBuilder._uses_full_bilayer_block(
-                    self.symmetry_map[tag],
-                    [str(sector.get("name")) for sector in self.sectors],
-                )
-
-                for ik, _ in enumerate(k_points):
-                    # 计算子块索引（这里假设每个 k 点 block 的尺寸为 block_dim）
-                    # block_dim = self.Q_set1.shape[0]*self.n_orb1 + self.Q_set2.shape[0]*self.n_orb2
-                    # idx_start = ik * block_dim
-                    # idx_end = (ik+1) * block_dim
-                    if exchange_antiunitary_flag:
-                        idx_start = ik * H_dim
-                        idx_end = (ik+1) * H_dim
-                    else:
-                        idx_start = ik * H_dim + self.get_global_index(l1, 0, orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
-                        idx_end = ik * H_dim + self.get_global_index(l1, len(Qlayer), orb1-1, Q_set1, Q_set2, n_orb1, n_orb2)
-                    block_dim = np.abs(idx_end - idx_start)
-                    if idx_end < idx_start:
-                        raise ValueError(f"Invalid index range: {idx_start} to {idx_end}")
-                    onsite_energy = np.trace(mat_real[idx_start:idx_end, idx_start:idx_end]) / block_dim
-                    # 去除子块的平均值
-                    mat_real[idx_start:idx_end, idx_start:idx_end] -= onsite_energy * np.eye(block_dim)
-                    # 同时记录 onsite 能量（这里可扩展存入 term 中，此处仅作示例）
-            initialterms.append(mat_real)
-            initialterms.append(mat_imag)
-        initialterms = np.array(initialterms)
-        initialterms_copy = initialterms.copy()
-        finalterms, includinglist = self.orthogonalize_hermitian_matrices(initialterms, tol=tol)
-        # 更新每个 term 的 active 标志：如果 term 对应的两个矩阵中至少有一个被保留，则该 term 保持 active
-        if tag == "Onsite":
-            finalterms = initialterms_copy
-            includinglist = np.arange(len(finalterms))
-        for i, key in enumerate(keys):
-            idx1, idx2 = 2*i, 2*i+1
-            self.model.terms[key].active = (idx1 in includinglist or idx2 in includinglist)
-        return keys, initialterms, finalterms, includinglist
-    
-    @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
                                         tol: float = 1e-8, tag: str = None) -> Tuple[List[ContinuumTermKey], List[np.ndarray], np.ndarray, np.ndarray]:
         """
@@ -2635,19 +2567,12 @@ class ContinuumModelBuilder:
             for subgroup, sub_keys in subgroup_dict.items():
                 print(f"  Processing subgroup {subgroup} with {len(sub_keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
                 # 获取正交化结果（同时处理 real 与 imag 部分）
-                generation_modes = {
-                    str(self.model.terms[key].registry_metadata.get("generation_mode", "representation_invariant"))
-                    for key in sub_keys
-                }
-                orthogonalize_subset = self.get_orthogonalized_terms_subset
-                post_block_legacy_subset = False
-                if generation_modes == {"explicit_legacy"}:
-                    orthogonalize_subset = self.get_orthogonalized_terms_subset_old
-                    post_block_legacy_subset = True
-                grp_keys, initialterms, finalterms, includinglist = orthogonalize_subset(sub_keys, k_points, tol=tol, tag=tag)
-                if post_block_legacy_subset:
-                    initialterms = np.array(self.get_mat_blocks(list(initialterms), sub_keys[0], len(k_points)))
-                    finalterms = np.array(self.get_mat_blocks(list(finalterms), sub_keys[0], len(k_points)))
+                grp_keys, initialterms, finalterms, includinglist = self.get_orthogonalized_terms_subset(
+                    sub_keys,
+                    k_points,
+                    tol=tol,
+                    tag=tag,
+                )
                 print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
                 if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
                     for key in sub_keys:
@@ -2837,6 +2762,8 @@ class ContinuumModelBuilder:
             return "representation_invariant"
         explicit_mode = str(template.get("generation_mode", "")).strip()
         if explicit_mode:
+            if explicit_mode != "representation_invariant":
+                raise ValueError(f"Unsupported term generation_mode: {explicit_mode!r}")
             return explicit_mode
         return "representation_invariant"
 
@@ -2887,10 +2814,7 @@ class ContinuumModelBuilder:
             sym_ops = self.symmetry_map.get(tag, [])
             max_order = int(template.get("max_order", self.max_order.get(tag, 0)))
             generation_mode = self._template_generation_mode(template)
-            if generation_mode == "explicit_legacy":
-                generated_by = "explicit_legacy"
-            else:
-                generated_by = "representation_invariant_generator"
+            generated_by = "representation_invariant_generator"
             for harmonic in self._harmonic_records_from_template(template):
                 p_val = np.asarray(harmonic["vector"], dtype=float)
                 for Mz, Mz_star in self._monomial_orders(max_order, source, template):

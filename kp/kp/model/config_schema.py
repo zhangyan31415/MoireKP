@@ -10,7 +10,7 @@ PHYSICAL_C2_NAMES = {"C2", "C2z"}
 K_SINGLE_ALLOWED_INTERNAL = {"C3z", "C2T"}
 M_SPINLESS_ALLOWED_INTERNAL = {"TR_eff", "C2_eff", "C2TR_eff"}
 CANONICAL_INTERNAL_NAMES = {"C3z", "C2", "TR", "C2T", "TR_eff", "C2_eff", "C2TR_eff"}
-ALLOWED_GENERATION_MODES = {"representation_invariant", "explicit_legacy"}
+ALLOWED_GENERATION_MODES = {"representation_invariant"}
 
 
 def canonical_operation_name_for_valley(name: str, valley_model: Mapping[str, Any] | None = None) -> str:
@@ -230,11 +230,7 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
         else:
             lower_name = str(template.get("name", "")).lower()
             if "legacy" in lower_name:
-                raise ValueError(
-                    f"term_templates[{idx}] uses a legacy-style name; release schema requires explicit "
-                    "generation_mode: explicit_legacy. Prefer neutral term names plus "
-                    "explicit generation_mode instead of relying on name-based inference."
-                )
+                raise ValueError(f"term_templates[{idx}] uses a legacy-style name; use a neutral release term name")
 
     bM = model.get("bM", {})
     if isinstance(bM, Mapping):

@@ -110,6 +110,7 @@ model:
     - name: TR_eff
     Onsite:
     - name: C2_eff
+    - name: TR_eff
     intra:
     - name: C2_eff
     - name: TR_eff

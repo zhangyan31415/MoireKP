@@ -723,7 +723,7 @@ def test_release_schema_rejects_unknown_generation_mode(tmp_path: Path) -> None:
         load_model_config(cfg_path)
 
 
-def test_release_schema_requires_explicit_generation_mode_for_legacy_names(tmp_path: Path) -> None:
+def test_release_schema_rejects_legacy_term_names(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["model"]["term_templates"] = [
@@ -738,7 +738,7 @@ def test_release_schema_requires_explicit_generation_mode_for_legacy_names(tmp_p
     ]
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="requires explicit generation_mode"):
+    with pytest.raises(ValueError, match="legacy-style name"):
         load_model_config(cfg_path)
 
 
