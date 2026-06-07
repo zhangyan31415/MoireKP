@@ -68,7 +68,6 @@ symmetry_source:
     reject_if_amplitude_deviation_gt: 0.02
     operations:
       C3z:
-        support_mode: monomial
         power: 3
         central_phase: -1
         phase_classes: global
@@ -83,7 +82,6 @@ symmetry_source:
             angle_deg: 120.0
           sector_map: identity
       C2T:
-        support_mode: block
         power: 2
         central_phase: 1
         action_candidates:

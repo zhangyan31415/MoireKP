@@ -21,9 +21,9 @@ from kp.model.exactify_representation import (
 )
 
 
-def _source_meta(*, antiunitary: bool = False) -> dict[str, object]:
+def _source_meta(*, antiunitary: bool = False, source_matrix_role: str = "raw_h_sewing_action") -> dict[str, object]:
     return {
-        "source_matrix_role": "raw_h_sewing_action",
+        "source_matrix_role": source_matrix_role,
         "source_gauge": "raw_saved_TAPW",
         "target_role": "continuum_internal_rep",
         "gauge_correction": {"kind": "none"},
@@ -440,7 +440,7 @@ def test_exactify_preserves_explicit_in_model_frame_reflection_axis() -> None:
     assert reports["C2T"]["resolved_action"]["sector_map"] == "layer_exchange"
 
 
-def test_block_monomial_cleanup_removes_tiny_internal_mixing() -> None:
+def test_raw_c3z_sewing_action_auto_removes_tiny_internal_mixing() -> None:
     labels, q1, q2, b1, b2, raw, expected, expected_cleanup_residual = _make_block_mixed_c3_case()
 
     exactified, reports = exactify_loaded_symmetry_source(
@@ -470,7 +470,6 @@ def test_block_monomial_cleanup_removes_tiny_internal_mixing() -> None:
             "exactification": {
                 "operations": {
                     "C3z": {
-                        "support_mode": "block_monomial",
                         "power": 3,
                         "central_phase": -1.0,
                         "action_candidates": [
@@ -496,14 +495,14 @@ def test_block_monomial_cleanup_removes_tiny_internal_mixing() -> None:
     assert "block_monomial_cleanup" in reports["C3z"]["report"]["notes"]
 
 
-def test_c3z_block_support_is_not_auto_cleaned_without_explicit_mode() -> None:
+def test_c3z_bare_representation_block_support_is_not_auto_cleaned() -> None:
     labels, q1, q2, b1, b2, raw, expected, _cleanup_residual = _make_block_mixed_c3_case()
 
     exactified, reports = exactify_loaded_symmetry_source(
         loaded_metadata={
             "operations": [
                 {
-                    **_source_meta(),
+                    **_source_meta(source_matrix_role="bare_D0_internal_rep"),
                     "name": "C3z",
                     "antiunitary": False,
                     "k_map": {"type": "rotation", "angle_deg": 120.0},

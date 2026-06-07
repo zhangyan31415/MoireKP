@@ -65,7 +65,6 @@ symmetry_source:
     reject_if_amplitude_deviation_gt: 0.02
     operations:
       C3z:
-        support_mode: block_monomial
         power: 3
         central_phase: -1
         action_candidates:
@@ -79,7 +78,6 @@ symmetry_source:
           sector_map: identity
           antiunitary: false
       C2T:
-        support_mode: block
         power: 2
         central_phase: 1
         action_candidates:

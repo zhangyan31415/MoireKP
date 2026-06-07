@@ -856,11 +856,19 @@ def _operation_exactification_config(exact_cfg: Mapping[str, Any], operation_nam
     return dict(entry)
 
 
-def _default_auto_monomial_cleanup(operation_name: str, op: OperationAction) -> bool:
+def _default_auto_monomial_cleanup(
+    operation_name: str,
+    op: OperationAction,
+    record: Mapping[str, Any],
+) -> bool:
     if op.antiunitary:
         return False
     family = op.canonical_name or operation_name
-    return family == "C2" or str(operation_name).startswith("C2_")
+    if family == "C2" or str(operation_name).startswith("C2_"):
+        return True
+    if family == "C3z":
+        return str(record.get("source_matrix_role", "")) == "raw_h_sewing_action"
+    return False
 
 
 def _central_phase_for_operation(operation_name: str, cfg: Mapping[str, Any], *, antiunitary: bool) -> tuple[int, complex]:
@@ -1039,7 +1047,7 @@ def exactify_loaded_symmetry_source(
             )
             D_exact, report = block_exact, block_report
             cleanup_required = preferred_mode == "block_monomial"
-            cleanup_allowed = bool(op_cfg.get("auto_monomial_cleanup", _default_auto_monomial_cleanup(name, op)))
+            cleanup_allowed = bool(op_cfg.get("auto_monomial_cleanup", _default_auto_monomial_cleanup(name, op, record)))
             if cleanup_required or cleanup_allowed:
                 cleanup_roots = allowed_roots or roots_of_unity_up_to(
                     int(op_cfg.get("monomial_root_order_max", exact_cfg.get("monomial_root_order_max", 12)))
