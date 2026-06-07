@@ -59,7 +59,7 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
-_SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "T", "TR", "T_eff", "C2_eff", "C2T_eff"})
+_SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "TR", "TR_eff", "C2_eff", "C2TR_eff"})
 
 
 def _validate_operation_label(label: str) -> str:
@@ -238,7 +238,7 @@ def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitar
         k_map = {"type": "reflection", "axis_deg": float(entry["axis_deg"])}
     elif operation in {"C3", "C3z"}:
         k_map = {"type": "rotation", "angle_deg": 120.0}
-    elif operation in {"T", "TR", "T_eff"}:
+    elif operation in {"TR", "TR_eff"}:
         k_map = {"type": "negation"}
     else:
         raise ValueError(f"Operation {operation!r} requires explicit k_map metadata in the TAPW symmetry manifest")

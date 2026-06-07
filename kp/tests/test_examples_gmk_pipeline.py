@@ -18,6 +18,14 @@ GMK_PRODUCTION_CONFIGS = {
     "mgi2_3.89_M1": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/production/mgi2_3.89_M1.yaml",
 }
 
+GMK_RELEASE_CONFIGS = {
+    "mote2_3.89_K1": EXAMPLES_ROOT / "mote2/3.89/kp/configs/model/release/mote2_3.89_K1.yaml",
+    "mote2_3.89_K1_spinful": EXAMPLES_ROOT / "mote2/3.89/kp/configs/model/release/mote2_3.89_K1_spinful.yaml",
+    "mgi2_3.89_Gamma": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/release/mgi2_3.89_Gamma.yaml",
+    "mgi2_3.89_M1": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/release/mgi2_3.89_M1.yaml",
+    "mgi2_3.89_M1_spinful": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/release/mgi2_3.89_M1_spinful.yaml",
+}
+
 GMK_REFERENCE_OUTPUTS = {
     "mote2_3.89_K1_toy": EXAMPLES_ROOT / "mote2/3.89/kp/outputs/model/reference/mote2_3.89_K1_toy",
     "mgi2_3.89_Gamma_toy_legacy": EXAMPLES_ROOT / "mgi2/3.89/kp/outputs/model/reference/mgi2_3.89_Gamma_toy_legacy",
@@ -38,6 +46,19 @@ def test_gmk_production_configs_follow_unified_layout() -> None:
         assert raw["source_config"].startswith("../../source/")
         assert raw["output"]["dir"] == f"../../../outputs/model/production/{case_id}"
         assert (path.parent / raw["source_config"]).resolve().exists()
+
+
+def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
+    for path in [*GMK_PRODUCTION_CONFIGS.values(), *GMK_RELEASE_CONFIGS.values()]:
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        model = raw.get("model", {})
+        assert "vectors" not in model, path
+        assert "term_templates" not in model, path
+        for kind, spec in model.get("harmonics", {}).items():
+            assert isinstance(spec, int), (path, kind, spec)
+        text = path.read_text(encoding="utf-8")
+        assert "harmonics_source" not in text
+        assert "representatives:" not in text
 
 
 def test_gmk_production_configs_load() -> None:

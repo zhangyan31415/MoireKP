@@ -46,10 +46,10 @@ symmetry_source:
     antiunitary: false
     k_map:
       type: reflection
-      axis_deg: 150.0
+      axis_deg: 0.0
     q_map:
       type: reflection
-      axis_deg: 150.0
+      axis_deg: 0.0
     sector_map: layer_exchange
     source_matrix_role: raw_h_sewing_action
     source_gauge: raw_saved_TAPW
@@ -95,57 +95,13 @@ model:
   bM:
     source: tmat
     angle_deg: 60
-  vectors:
-    q1: '[0.5 * bM_norm, 0.0]'
   harmonics:
-    intra:
-      1: bM1
-      2: bM2
-      3: -bM1 + bM2
-      4: bM1 + bM2
-      5: -2*bM1 + bM2
-      6: 2*bM1
-    inter:
-      1: q1
-      3: bM2 - q1
-      5: bM2 + q1
+    intra: 6
+    inter: 3
   max_order:
     Kinect: 10
     intra: 6
     inter: 8
-  term_templates:
-  - name: m1_kinetic_bottom
-    source: diagonal_kp
-    sector_pairs:
-    - - bottom
-      - bottom
-    orbital_pairs: diagonal
-    max_order: 10
-  - name: m1_onsite_bottom
-    source: onsite
-    sector_pairs:
-    - - bottom
-      - bottom
-    orbital_pairs: diagonal
-    max_order: 0
-  - name: m1_intra_bottom
-    source: moire_potential
-    sector_pairs:
-    - - bottom
-      - bottom
-    orbital_pairs: all
-    harmonics: intra
-    max_order: 6
-    harmonics_source: symmetry_representatives
-  - name: m1_inter_top_to_bottom
-    source: tunneling
-    sector_pairs:
-    - - top
-      - bottom
-    orbital_pairs: all
-    harmonics: inter
-    max_order: 8
-    harmonics_source: symmetry_representatives
   symmetry_map:
     Kinect:
     - name: C2_eff

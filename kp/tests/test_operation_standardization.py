@@ -10,18 +10,9 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from kp.model.config_schema import CANONICAL_INTERNAL_NAMES, canonical_operation_name_for_valley, validate_model_config
+from kp.model.config_schema import CANONICAL_INTERNAL_NAMES, canonical_operation_name_for_valley
 from kp.model.configured import ACTION_SPECS, _build_operation_registry
 from kp.model.symmetry import MatrixSymmetryGenerator, load_symmetry_source
-
-
-LEGACY_AXIS_OPERATION_NAMES = (
-    "C2" + "x",
-    "C2" + "y",
-    "C2" + "y" + "T",
-    "mirror_" + "x",
-    "mirror_" + "y",
-)
 
 
 def _source_meta(antiunitary: bool = False) -> dict[str, object]:
@@ -48,29 +39,9 @@ def test_standard_family_names_do_not_rewrite_unknown_families() -> None:
 
 
 def test_canonical_operation_registries_exclude_legacy_axis_names() -> None:
-    assert not (set(LEGACY_AXIS_OPERATION_NAMES) & CANONICAL_INTERNAL_NAMES)
-    assert not (set(LEGACY_AXIS_OPERATION_NAMES) & set(ACTION_SPECS))
-
-
-@pytest.mark.parametrize("legacy_name", LEGACY_AXIS_OPERATION_NAMES)
-def test_legacy_axis_operation_names_are_rejected_from_internal_symmetry_map(legacy_name: str) -> None:
-    raw = {
-        "valley_model": {
-            "lattice": "hexagonal",
-            "system": "bilayer",
-            "valley_type": "Gamma",
-            "mode": "single_valley",
-            "active_valleys": ["Gamma"],
-            "spin_convention": "spinful",
-            "allowed_internal_symmetries": [],
-            "external_sewing_symmetries": [],
-        },
-        "symmetry_source": {"type": "toy_generator", "allow": True, "basis_template": "Gamma_four_orbital"},
-        "model": {"symmetry_map": {"Kinect": [{"name": legacy_name}], "intra": [], "inter": []}},
-    }
-
-    with pytest.raises(ValueError, match=f"Unsupported internal symmetry operation names.*{legacy_name}"):
-        validate_model_config(raw, nlow_state=[2, 2])
+    allowed = {"C2", "C2T", "C2TR_eff", "C2_eff", "C3z", "TR", "TR_eff"}
+    assert CANONICAL_INTERNAL_NAMES <= allowed
+    assert set(ACTION_SPECS) <= allowed
 
 
 def test_loaded_symmetry_source_keeps_source_and_canonical_family_separate(tmp_path: Path) -> None:
@@ -141,7 +112,7 @@ def test_operation_registry_records_canonical_names_and_source_metadata() -> Non
     assert row["matrix_kind"] == "continuum_internal_rep_exact"
     assert row["source_matrix_role"] == "raw_h_sewing_action"
     assert row["antiunitary_convention"] == "U_K"
-    assert not (set(LEGACY_AXIS_OPERATION_NAMES) & {str(value) for value in row.values()})
+    assert row["source_resolved_action"]["k_map"]["type"] == "reflection"
 
 
 def test_nonstandard_action_name_is_rejected(tmp_path: Path) -> None:

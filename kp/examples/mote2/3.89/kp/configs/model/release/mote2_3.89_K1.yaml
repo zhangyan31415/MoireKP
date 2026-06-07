@@ -64,36 +64,12 @@ symmetry_source:
     antiunitary_convention: U_K
   exactification:
     support_source: geometry
+    central_phase:
+      C3z^3: -1
+      C2T^2: 1
+    phase_classes: global
     reject_if_off_support_rel_gt: 3.0e-06
     reject_if_amplitude_deviation_gt: 0.02
-    operations:
-      C3z:
-        power: 3
-        central_phase: -1
-        phase_classes: global
-        action_candidates:
-        - antiunitary: false
-          k_map:
-            type: rotation
-            angle_deg: 120.0
-            in_model_frame: true
-          q_map:
-            type: rotation
-            angle_deg: 120.0
-          sector_map: identity
-      C2T:
-        power: 2
-        central_phase: 1
-        action_candidates:
-        - antiunitary: true
-          k_map:
-            type: reflection
-            axis_deg: 180.0
-            in_model_frame: true
-          q_map:
-            type: reflection
-            axis_deg: 180.0
-          sector_map: layer_exchange
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/KPATH.in
   tmat:
@@ -114,87 +90,12 @@ model:
     source: tmat
     angle_deg: 60
   harmonics:
-    intra:
-      1: zero
-      2: -bM1
-      3: bM1 + bM2
-      4: 2*bM1
-    inter:
-      1: q1
-      2: -2*q1
-      3: q1 + bM2
-      4: 2*bM2 + q3
+    intra: 4
+    inter: 4
   max_order:
     Kinect: 6
     intra: 4
     inter: 4
-  term_templates:
-  - name: kinetic_layer1
-    source: diagonal_kp
-    sector_pairs:
-    - - 1
-      - 1
-    orbital_pairs: diagonal
-    max_order: 6
-    monomial_constraints:
-      exclude_m_sum_zero: true
-      difference_mod: 3
-      difference_residue: 0
-      require_mz_ge_mz_star: true
-  - name: onsite_layer1
-    source: onsite
-    sector_pairs:
-    - - 1
-      - 1
-    orbital_pairs: diagonal
-    max_order: 0
-  - name: intra_layer1
-    source: moire_potential
-    sector_pairs:
-    - - 1
-      - 1
-    orbital_pairs: all
-    harmonics:
-      kind: intra
-      indices:
-      - 2
-      - 3
-      - 4
-      representatives: symmetry
-    max_order: 4
-    harmonics_source: symmetry_representatives
-  - name: inter_21_positive
-    source: tunneling
-    sector_pairs:
-    - - 2
-      - 1
-    orbital_pairs: all
-    harmonics:
-      kind: inter
-      indices:
-      - 1
-      - 2
-      - 3
-      - 4
-      representatives: symmetry
-    max_order: 4
-    harmonics_source: symmetry_representatives
-  - name: inter_21_negative
-    source: tunneling
-    sector_pairs:
-    - - 2
-      - 1
-    orbital_pairs: all
-    harmonics:
-      kind: inter
-      indices:
-      - 2
-      - 3
-      - 4
-      sign: -1
-      representatives: symmetry
-    max_order: 4
-    harmonics_source: symmetry_representatives
   symmetry_map:
     Kinect:
     - name: C3z

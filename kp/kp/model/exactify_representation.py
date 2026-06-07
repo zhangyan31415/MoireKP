@@ -199,6 +199,12 @@ def _rotate_k_map_to_model_frame(k_map: object, *, rotation_deg: float) -> objec
     return out
 
 
+def _model_frame_k_map(k_map: object) -> object:
+    if not isinstance(k_map, Mapping):
+        return k_map
+    return {**dict(k_map), "in_model_frame": True}
+
+
 def _candidate_operation_actions(
     record: Mapping[str, Any],
     sectors: Sequence[Mapping[str, Any]],
@@ -222,9 +228,9 @@ def _candidate_operation_actions(
         raise ValueError(
             f"exactification strict mode requires explicit action_candidates for operation {record.get('name')!r}"
         )
-    rotated_record = dict(record)
-    rotated_record["k_map"] = _rotate_k_map_to_model_frame(record.get("k_map", {}), rotation_deg=rotation_deg)
-    base = _build_operation_from_record(rotated_record)
+    model_record = dict(record)
+    model_record["k_map"] = _model_frame_k_map(record.get("k_map", {}))
+    base = _build_operation_from_record(model_record)
     candidates = [base]
     sector_names = [str(sector.get("name")) for sector in sectors]
     sector_maps = [base.sector_map]
@@ -235,6 +241,7 @@ def _candidate_operation_actions(
     if len(sector_names) == 2 and identity_like:
         sector_maps.append("layer_exchange")
     k_maps = [base.k_map]
+    q_map = base.q_map if record.get("q_map") is not None else base.k_map
     if base.antiunitary and isinstance(base.k_map, Mapping) and str(base.k_map.get("type", "")).lower() == "reflection" and "axis_deg" in base.k_map:
         axis = float(base.k_map["axis_deg"])
         for shift in (-90.0, 90.0):
@@ -248,9 +255,9 @@ def _candidate_operation_actions(
                 canonical_name=base.canonical_name,
                 antiunitary=base.antiunitary,
                 k_map=k_map,
-                R=_rotation_from_k_map(k_map),
+                R=_rotation_from_k_map(q_map),
                 sector_map=sector_map,
-                q_map=k_map,
+                q_map=q_map,
                 central_phase=base.central_phase,
                 group_relations=list(base.group_relations),
                 source=base.source,
@@ -258,6 +265,7 @@ def _candidate_operation_actions(
             key = json.dumps(
                 {
                     "k_map": _jsonable(k_map),
+                    "q_map": _jsonable(q_map),
                     "sector_map": _jsonable(sector_map),
                     "antiunitary": op.antiunitary,
                     "name": op.name,

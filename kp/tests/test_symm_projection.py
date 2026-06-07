@@ -162,7 +162,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             d_full[4:, :4] = d_du
             rep_dir.mkdir(parents=True)
             np.savez(rep_dir / "T_rawH.npz", matrix=d_full)
-            np.savez(rep_dir / "T.npz", matrix=d_full)
+            np.savez(rep_dir / "TR.npz", matrix=d_full)
             np.savez(rep_dir / "T_PG.npz", matrix=np.eye(8, dtype=np.complex128))
             (symm_dir / "representations" / "manifest.json").write_text(
                 json.dumps(
@@ -170,9 +170,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                         "matrices": [
                             {
                                 "valley_label": "M1",
-                                "operation": "T",
+                                "operation": "TR",
                                 "antiunitary": True,
-                                "file": "M1/T.npz",
+                                "file": "M1/TR.npz",
                                 "pg_file": "M1/T_PG.npz",
                                 "raw_h_operator_file": "M1/T_rawH.npz",
                                 "k_pairs": [[0, 0]],
@@ -206,7 +206,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     "spin": "up",
                     "spin_sector_sewing": "up_to_down",
                     "tapw_symmetry_dir": str(symm_dir),
-                    "operations": ["T"],
+                    "operations": ["TR"],
                     "output_dir": str(out_dir),
                     "tolerance": 1.0e-8,
                 },
@@ -215,8 +215,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
             cli.main(["symm", "--config", str(cfg_path)])
 
-            raw = np.load(out_dir / "T_low_raw.npy")
-            polar = np.load(out_dir / "T_low_polar.npy")
+            raw = np.load(out_dir / "TR_low_raw.npy")
+            polar = np.load(out_dir / "TR_low_polar.npy")
             np.testing.assert_allclose(raw, np.array([[0.0, 1.0], [1.0, 0.0]]), atol=1.0e-12)
             np.testing.assert_allclose(polar, raw, atol=1.0e-12)
             summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))

@@ -950,7 +950,7 @@ def test_inter_harmonics_include_sector_offsets(tmp_path: Path) -> None:
     assert selected["support_count"] >= 1
 
 
-def test_k_inter_auto_harmonics_require_sector_offsets(tmp_path: Path) -> None:
+def test_k_inter_auto_harmonics_infers_sector_offsets(tmp_path: Path) -> None:
     cfg_path = _write_auto_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"]["valley_type"] = "K"
@@ -960,8 +960,12 @@ def test_k_inter_auto_harmonics_require_sector_offsets(tmp_path: Path) -> None:
     raw.pop("sectors", None)
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="K/M q_distance bM requires explicit sectors with q_offset|K/M inter auto harmonics require sectors with q_offset"):
-        build_moire_config_from_file(cfg_path)
+    moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
+
+    selected = model_cfg.harmonics_diagnostics["inter"]["selected"][0]
+    np.testing.assert_allclose(moire_cfg.inter_harmonics_map[1], selected["vector"], atol=1.0e-12)
+    assert model_cfg.harmonics_diagnostics["inter"]["selection_rule"] == "K_valley_inter_geometry"
+    np.testing.assert_allclose(selected["vector"], [0.0, 1.0 / np.sqrt(3.0)], atol=1.0e-12)
 
 
 def test_build_terms_no_layer1_only() -> None:

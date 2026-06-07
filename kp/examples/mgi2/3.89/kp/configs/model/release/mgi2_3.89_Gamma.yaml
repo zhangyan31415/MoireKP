@@ -46,10 +46,10 @@ symmetry_source:
     antiunitary: false
     k_map:
       type: reflection
-      axis_deg: 150.0
+      axis_deg: 0.0
     q_map:
       type: reflection
-      axis_deg: 150.0
+      axis_deg: 0.0
     sector_map: layer_exchange
     source_matrix_role: bare_D0_internal_rep
     source_gauge: raw_saved_TAPW
@@ -102,129 +102,12 @@ model:
     infer_from_q: true
     angle_deg: 60
   harmonics:
-    intra:
-      1: zero
-      2: -bM1
-      3: bM1 + bM2
-      4: 2*bM1
-    inter:
-      1: zero
-      2: -bM1
-      3: bM1 + bM2
-      4: 2*bM1
+    intra: 4
+    inter: 4
   max_order:
     Kinect: 10
     intra: 6
     inter: 10
-  term_templates:
-  - name: gamma_kinetic
-    source: diagonal_kp
-    sector_pairs:
-    - - 1
-      - 1
-    orbital_pairs:
-    - - 1
-      - 1
-    max_order: 10
-  - name: gamma_onsite
-    source: onsite
-    sector_pairs:
-    - - 1
-      - 1
-    orbital_pairs:
-    - - 1
-      - 1
-    max_order: 0
-  - name: gamma_intra_zero
-    source: moire_potential
-    sector_pairs:
-    - - 1
-      - 1
-    orbital_pairs:
-    - - 2
-      - 1
-    harmonics:
-      kind: intra
-      indices:
-      - 1
-      representatives: symmetry
-    max_order: 6
-    harmonics_source: symmetry_representatives
-  - name: gamma_intra_nonzero
-    source: moire_potential
-    sector_pairs:
-    - - 1
-      - 1
-    orbital_pairs:
-    - - 1
-      - 1
-    - - 1
-      - 2
-    - - 2
-      - 1
-    harmonics:
-      kind: intra
-      indices:
-      - 2
-      - 3
-      - 4
-      representatives: symmetry
-    max_order: 6
-    harmonics_source: symmetry_representatives
-  - name: gamma_inter_zero
-    source: tunneling
-    sector_pairs:
-    - - 2
-      - 1
-    orbital_pairs:
-    - - 1
-      - 1
-    - - 2
-      - 1
-    harmonics:
-      kind: inter
-      indices:
-      - 1
-      representatives: symmetry
-    max_order: 10
-    harmonics_source: symmetry_representatives
-  - name: gamma_inter_nonzero
-    source: tunneling
-    sector_pairs:
-    - - 2
-      - 1
-    orbital_pairs:
-    - - 1
-      - 1
-    - - 2
-      - 1
-    harmonics:
-      kind: inter
-      indices:
-      - 2
-      - 3
-      - 4
-      representatives: symmetry
-    max_order: 6
-    harmonics_source: symmetry_representatives
-  - name: gamma_inter_nonzero_negative
-    source: tunneling
-    sector_pairs:
-    - - 2
-      - 1
-    orbital_pairs:
-    - - 1
-      - 1
-    harmonics:
-      kind: inter
-      indices:
-      - 2
-      - 3
-      - 4
-      sign: -1
-      representatives: symmetry
-    max_order: 6
-    harmonics_source: symmetry_representatives
   symmetry_map:
     Kinect:
     - name: C3z

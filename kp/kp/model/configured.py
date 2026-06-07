@@ -18,7 +18,7 @@ from .config_schema import (
     canonical_source_operation_name_for_valley,
     validate_model_config,
 )
-from .exactify_representation import exactify_loaded_symmetry_source
+from .exactify_representation import exactify_loaded_symmetry_source, infer_q_offset_from_qset
 from .symmetry import load_symmetry_source
 from ..src.moire_refactored import (
     ContinuumModelBuilder,
@@ -607,6 +607,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     nlow_state = _as_int_list(model.get("nlow_state", n_orb_values), name="model.nlow_state")
     if len(nlow_state) != 2:
         raise ValueError(f"model.nlow_state must have length 2, got {nlow_state}")
+    max_order_values = {**DEFAULT_MAX_ORDER, **{str(key): int(value) for key, value in dict(model.get("max_order", {})).items()}}
 
     fit = raw.get("fit", {})
     if not isinstance(fit, Mapping):
@@ -644,11 +645,21 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     if not isinstance(sectors, Sequence) or isinstance(sectors, (str, bytes)):
         raise ValueError("sectors must be a list when provided")
     _validate_sector_orbital_counts(sectors, n_orb_values)
-    term_templates = model.get("term_templates", raw.get("term_templates", []))
+    term_templates = model.get("term_templates", raw.get("term_templates"))
     if term_templates is None:
-        term_templates = []
+        term_templates = _default_term_templates_for_model(
+            valley_model=valley_model if isinstance(valley_model, Mapping) else {},
+            n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
+            max_order=max_order_values,
+        )
     if not isinstance(term_templates, Sequence) or isinstance(term_templates, (str, bytes)):
         raise ValueError("term_templates must be a list when provided")
+    if not term_templates:
+        term_templates = _default_term_templates_for_model(
+            valley_model=valley_model if isinstance(valley_model, Mapping) else {},
+            n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
+            max_order=max_order_values,
+        )
 
     return ConfiguredModel(
         path=cfg_path,
@@ -668,7 +679,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         nlow_state=nlow_state,
         bM_config=dict(model.get("bM", {})),
         harmonics_config=dict(harmonics),
-        max_order={**DEFAULT_MAX_ORDER, **{str(key): int(value) for key, value in dict(model.get("max_order", {})).items()}},
+        max_order=max_order_values,
         symmetry_map={str(key): list(value) for key, value in dict(symmetry_map).items()},
         coeff_tol=float(fit.get("coeff_tol", 1.0e-6)),
         compare_to_heff=bool(bands.get("compare_to_heff", True)),
@@ -754,6 +765,130 @@ def _eval_ast(node: ast.AST, variables: Mapping[str, Any]) -> Any:
 
 def evaluate_vector_expression_ast(node: ast.AST, variables: Mapping[str, Any]) -> np.ndarray:
     return _as_vector(_eval_ast(node, variables))
+
+
+def _harmonic_filter(kind: str, indices: Sequence[int], *, sign: float = 1.0) -> dict[str, Any]:
+    out: dict[str, Any] = {"kind": kind, "indices": [int(index) for index in indices]}
+    if sign != 1.0:
+        out["sign"] = float(sign)
+    return out
+
+
+def _default_term_templates_for_model(
+    *,
+    valley_model: Mapping[str, Any],
+    n_orb: tuple[int, int],
+    max_order: Mapping[str, int],
+) -> list[dict[str, Any]]:
+    valley_type = str(valley_model.get("valley_type", ""))
+    if valley_type == "K":
+        return [
+            {
+                "name": "kinetic_layer1",
+                "source": "diagonal_kp",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "diagonal",
+                "max_order": int(max_order.get("Kinect", 0)),
+                "monomial_constraints": {
+                    "exclude_m_sum_zero": True,
+                    "difference_mod": 3,
+                    "difference_residue": 0,
+                    "require_mz_ge_mz_star": True,
+                },
+            },
+            {"name": "onsite_layer1", "source": "onsite", "sector_pairs": [[1, 1]], "orbital_pairs": "diagonal", "max_order": 0},
+            {
+                "name": "intra_layer1",
+                "source": "moire_potential",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "all",
+                "harmonics": _harmonic_filter("intra", [2, 3, 4]),
+                "max_order": int(max_order.get("intra", 0)),
+            },
+            {
+                "name": "inter_21_positive",
+                "source": "tunneling",
+                "sector_pairs": [[2, 1]],
+                "orbital_pairs": "all",
+                "harmonics": _harmonic_filter("inter", [1, 2, 3, 4]),
+                "max_order": int(max_order.get("inter", 0)),
+            },
+            {
+                "name": "inter_21_negative",
+                "source": "tunneling",
+                "sector_pairs": [[2, 1]],
+                "orbital_pairs": "all",
+                "harmonics": _harmonic_filter("inter", [2, 3, 4], sign=-1.0),
+                "max_order": int(max_order.get("inter", 0)),
+            },
+        ]
+    if valley_type == "Gamma" and n_orb == (2, 2):
+        return [
+            {"name": "gamma_kinetic", "source": "diagonal_kp", "sector_pairs": [[1, 1]], "orbital_pairs": [[1, 1]], "max_order": int(max_order.get("Kinect", 0))},
+            {"name": "gamma_onsite", "source": "onsite", "sector_pairs": [[1, 1]], "orbital_pairs": [[1, 1]], "max_order": 0},
+            {
+                "name": "gamma_intra_zero",
+                "source": "moire_potential",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": [[2, 1]],
+                "harmonics": _harmonic_filter("intra", [1]),
+                "max_order": int(max_order.get("intra", 0)),
+            },
+            {
+                "name": "gamma_intra_nonzero",
+                "source": "moire_potential",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": [[1, 1], [1, 2], [2, 1]],
+                "harmonics": _harmonic_filter("intra", [2, 3, 4]),
+                "max_order": int(max_order.get("intra", 0)),
+            },
+            {
+                "name": "gamma_inter_zero",
+                "source": "tunneling",
+                "sector_pairs": [[2, 1]],
+                "orbital_pairs": [[1, 1], [2, 1]],
+                "harmonics": _harmonic_filter("inter", [1]),
+                "max_order": int(max_order.get("inter", 0)),
+            },
+            {
+                "name": "gamma_inter_nonzero",
+                "source": "tunneling",
+                "sector_pairs": [[2, 1]],
+                "orbital_pairs": [[1, 1], [2, 1]],
+                "harmonics": _harmonic_filter("inter", [2, 3, 4]),
+                "max_order": int(max_order.get("intra", 0)),
+            },
+            {
+                "name": "gamma_inter_nonzero_negative",
+                "source": "tunneling",
+                "sector_pairs": [[2, 1]],
+                "orbital_pairs": [[1, 1]],
+                "harmonics": _harmonic_filter("inter", [2, 3, 4], sign=-1.0),
+                "max_order": int(max_order.get("intra", 0)),
+            },
+        ]
+    if valley_type == "M":
+        return [
+            {"name": "m1_kinetic_bottom", "source": "diagonal_kp", "sector_pairs": [[1, 1]], "orbital_pairs": "diagonal", "max_order": int(max_order.get("Kinect", 0))},
+            {"name": "m1_onsite_bottom", "source": "onsite", "sector_pairs": [[1, 1]], "orbital_pairs": "diagonal", "max_order": 0},
+            {
+                "name": "m1_intra_bottom",
+                "source": "moire_potential",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "all",
+                "harmonics": "intra",
+                "max_order": int(max_order.get("intra", 0)),
+            },
+            {
+                "name": "m1_inter_top_to_bottom",
+                "source": "tunneling",
+                "sector_pairs": [[2, 1]],
+                "orbital_pairs": "all",
+                "harmonics": "inter",
+                "max_order": int(max_order.get("inter", 0)),
+            },
+        ]
+    return []
 
 
 def _build_variables(Q_set1: np.ndarray, bM1: np.ndarray, bM2: np.ndarray, model: Mapping[str, Any]) -> dict[str, Any]:
@@ -852,8 +987,8 @@ def _default_sectors(config: ConfiguredModel) -> list[dict[str, Any]]:
     if config.sectors_config:
         return [dict(item) for item in config.sectors_config]
     return [
-        {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": config.n_orb[0]},
-        {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": config.n_orb[1]},
+        {"name": "L1", "qset": "qset1", "n_orb": config.n_orb[0]},
+        {"name": "L2", "qset": "qset2", "n_orb": config.n_orb[1]},
     ]
 
 
@@ -883,6 +1018,26 @@ def _sector_qset(sector: Mapping[str, Any], Q_set1: np.ndarray, Q_set2: np.ndarr
     if qset_name == "qset2":
         return Q_set2
     raise ValueError(f"Unsupported sector qset {qset_name!r}; expected qset1/qset2")
+
+
+def _sectors_with_q_offsets(
+    sectors: Sequence[Mapping[str, Any]],
+    *,
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    bM1: np.ndarray,
+    bM2: np.ndarray,
+) -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for sector in sectors:
+        row = dict(sector)
+        if "q_offset" not in row:
+            row["q_offset"] = infer_q_offset_from_qset(_sector_qset(row, Q_set1, Q_set2), bM1, bM2).tolist()
+            row["_q_offset_inferred"] = True
+        else:
+            row["_q_offset_inferred"] = False
+        out.append(row)
+    return out
 
 
 def _sector_offset(sector: Mapping[str, Any]) -> np.ndarray:
@@ -1110,6 +1265,51 @@ def _auto_harmonics_from_q_sets(
     return harmonic_map, {"kind": kind, "count": count, "tolerance": tol, "selected": selected_rows}
 
 
+def _auto_valley_harmonics(
+    *,
+    kind: str,
+    count: int,
+    valley_model: Mapping[str, Any] | None,
+    bM1: np.ndarray,
+    bM2: np.ndarray,
+    variables: Mapping[str, Any],
+) -> tuple[dict[int, np.ndarray], dict[str, Any]] | None:
+    valley_type = str((valley_model or {}).get("valley_type", ""))
+    if kind == "inter" and valley_type == "K":
+        q1 = np.asarray(variables.get("q1"), dtype=float)
+        q3 = np.asarray(variables.get("q3"), dtype=float)
+        candidates = [q1, -2.0 * q1, q1 + bM2, 2.0 * bM2 + q3]
+    elif kind == "inter" and valley_type == "M":
+        q1 = 0.5 * float(np.linalg.norm(bM1)) * np.array([1.0, 0.0], dtype=float)
+        candidates = [q1, bM2 - q1, bM2 + q1, bM1 + q1, bM2 - 3.0 * q1]
+    elif kind == "intra" and valley_type == "K":
+        candidates = [np.zeros(2, dtype=float), -bM1, bM1 + bM2, 2.0 * bM1]
+    elif kind == "intra" and valley_type == "M":
+        candidates = [bM1, bM2, -bM1 + bM2, bM1 + bM2, -2.0 * bM1 + bM2, 2.0 * bM1]
+    else:
+        return None
+    if count > len(candidates):
+        raise ValueError(f"{valley_type} {kind} auto harmonics supports at most {len(candidates)} shells, got {count}")
+    selected = candidates[:count]
+    harmonic_map = {idx + 1: np.asarray(vector, dtype=float) for idx, vector in enumerate(selected)}
+    return harmonic_map, {
+        "kind": kind,
+        "count": count,
+        "selection_rule": f"{valley_type}_valley_{kind}_geometry",
+        "selected": [
+            {
+                "index": idx,
+                "vector": np.asarray(vector, dtype=float).tolist(),
+                "norm": float(np.linalg.norm(vector)),
+                "pair_count": None,
+                "member_count": None,
+                "lattice_index": None,
+            }
+            for idx, vector in harmonic_map.items()
+        ],
+    }
+
+
 def _resolve_harmonics_maps(
     harmonics: Mapping[str, Any],
     variables: Mapping[str, Any],
@@ -1127,7 +1327,14 @@ def _resolve_harmonics_maps(
         raw = harmonics.get(kind, {})
         if _is_auto_harmonic_spec(raw):
             count = _auto_harmonic_count(raw, name=f"harmonics.{kind}")
-            if kind == "inter" and sectors and any(np.linalg.norm(_sector_offset(sector)) > 1.0e-12 for sector in sectors):
+            valley_type = str((valley_model or {}).get("valley_type", "Gamma"))
+            use_sector_inter = (
+                kind == "inter"
+                and bool(sectors)
+                and isinstance(raw, Mapping)
+                and raw.get("sector_pairs") is not None
+            )
+            if use_sector_inter:
                 b_norm = max(float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
                 tol = max(1.0e-8, b_norm * 1.0e-6)
                 maps[kind], diagnostics[kind] = _auto_inter_harmonics_from_sectors(
@@ -1141,17 +1348,25 @@ def _resolve_harmonics_maps(
                     tol=tol,
                 )
             else:
-                valley_type = str((valley_model or {}).get("valley_type", "Gamma"))
-                if kind == "inter" and valley_type in {"K", "M"}:
-                    raise ValueError("K/M inter auto harmonics require sectors with q_offset or explicit p vectors")
-                maps[kind], diagnostics[kind] = _auto_harmonics_from_q_sets(
+                valley_harmonics = _auto_valley_harmonics(
                     kind=kind,
                     count=count,
-                    Q_set1=Q_set1,
-                    Q_set2=Q_set2,
+                    valley_model=valley_model,
                     bM1=bM1,
                     bM2=bM2,
+                    variables=variables,
                 )
+                if valley_harmonics is not None:
+                    maps[kind], diagnostics[kind] = valley_harmonics
+                else:
+                    maps[kind], diagnostics[kind] = _auto_harmonics_from_q_sets(
+                        kind=kind,
+                        count=count,
+                        Q_set1=Q_set1,
+                        Q_set2=Q_set2,
+                        bM1=bM1,
+                        bM2=bM2,
+                    )
             diagnostics["auto_used"] = True
         else:
             maps[kind] = _harmonics_map(dict(raw), variables)
@@ -1239,7 +1454,13 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     model_section = _model_section(config.raw)
     variables = _build_variables(Q_set1, bM1, bM2, model_section)
     harmonics = config.harmonics_config
-    sectors = _default_sectors(config)
+    sectors = _sectors_with_q_offsets(
+        _default_sectors(config),
+        Q_set1=Q_set1,
+        Q_set2=Q_set2,
+        bM1=bM1,
+        bM2=bM2,
+    )
     intra, inter, harmonics_diagnostics = _resolve_harmonics_maps(
         harmonics,
         variables,
