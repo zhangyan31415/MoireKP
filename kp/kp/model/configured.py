@@ -2141,17 +2141,28 @@ def _compute_validation_outputs(
                     )
         return validations, summary
 
+    validation_hamiltonians: np.ndarray | None = None
+    hermiticity_residuals: list[float] = []
+
+    def get_validation_hamiltonians() -> np.ndarray:
+        nonlocal validation_hamiltonians, hermiticity_residuals
+        if validation_hamiltonians is not None:
+            return validation_hamiltonians
+        state = _prepare_band_state(moire_config, model)
+        h_model_list = []
+        residuals = []
+        for i, k in enumerate(np.asarray(moire_config.kpoints, dtype=float)):
+            H_model, _w, _v, _counts, _prof = _compute_one_k(i, k, state, solve_eig=False)
+            h_model_list.append(H_model)
+            denom = float(np.linalg.norm(H_model)) or 1.0
+            residuals.append(float(np.linalg.norm(H_model - H_model.conj().T) / denom))
+        validation_hamiltonians = np.asarray(h_model_list)
+        hermiticity_residuals = residuals
+        return validation_hamiltonians
+
     if model_config.compare_to_heff:
         try:
-            state = _prepare_band_state(moire_config, model)
-            h_model_list = []
-            hermiticity_residuals: list[float] = []
-            for i, k in enumerate(np.asarray(moire_config.kpoints, dtype=float)):
-                H_model, _w, _v, _counts, _prof = _compute_one_k(i, k, state)
-                h_model_list.append(H_model)
-                denom = float(np.linalg.norm(H_model)) or 1.0
-                hermiticity_residuals.append(float(np.linalg.norm(H_model - H_model.conj().T) / denom))
-            h_model = np.asarray(h_model_list)
+            h_model = get_validation_hamiltonians()
             heff_all = np.load(model_config.heff_file, mmap_mode="r")
             heff_selected = _select_rows(heff_all, model_config.band_indices)
             residual = matrix_residual(h_model, heff_selected)
@@ -2176,8 +2187,7 @@ def _compute_validation_outputs(
     operation_registry = _build_operation_registry(model_config)
     try:
         state = _prepare_band_state(moire_config, model)
-        h_model = [ _compute_one_k(i, np.asarray(moire_config.kpoints, dtype=float)[i], state)[0] for i in range(len(np.asarray(moire_config.kpoints))) ]
-        h_model = np.asarray(h_model)
+        h_model = get_validation_hamiltonians()
         kpoints = np.asarray(moire_config.kpoints, dtype=float)
         rows = []
         for operation in operation_registry:

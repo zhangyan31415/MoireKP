@@ -19,7 +19,17 @@ from kp.model.configured import (  # noqa: E402
     matrix_residual,
     run_configured_model,
 )
-from kp.src.moire_refactored import ContinuumModelBuilder, ContinuumTermKey, MoireConfig, SymmetryGenerator, build_model  # noqa: E402
+from kp.src import moire_refactored as moire_module  # noqa: E402
+from kp.src.moire_refactored import (  # noqa: E402
+    ContinuumModel,
+    ContinuumModelBuilder,
+    ContinuumTerm,
+    ContinuumTermKey,
+    MoireConfig,
+    SymmetryGenerator,
+    build_model,
+    compute_bands,
+)
 
 
 def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> dict[str, object]:
@@ -49,6 +59,38 @@ def _triangular_q_shell() -> np.ndarray:
         ],
         dtype=float,
     )
+
+
+def test_compute_bands_uses_eigvals_only_without_saved_eigenvectors(monkeypatch):
+    def fail_eigh(*_args, **_kwargs):
+        raise AssertionError("compute_bands should not compute eigenvectors when save_eigvecs=false")
+
+    monkeypatch.setattr(moire_module.scipy.linalg, "eigh", fail_eigh)
+
+    cfg = MoireConfig(
+        Q_set1=np.zeros((1, 2), dtype=float),
+        Q_set2=np.zeros((0, 2), dtype=float),
+        n_orb1=2,
+        n_orb2=0,
+        kpoints=np.array([[0.0, 0.0]], dtype=float),
+        save_eigvecs=False,
+    )
+    key = ContinuumTermKey(Mz=0, Mz_star=0, layer_from=1, layer_to=1, orbital_from=1, orbital_to=1, p=(0.0, 0.0))
+    term = ContinuumTerm(
+        key=key,
+        Y_basis=lambda _k: np.diag([1.0, 2.0]).astype(complex),
+        r_value_real=1.0,
+        r_value_imag=0.0,
+        active=True,
+        tag="Kinect",
+    )
+    model = ContinuumModel()
+    model.terms[key] = term
+
+    eigvals = compute_bands(cfg, model, cfg.kpoints)
+
+    assert eigvals.shape == (1, 2)
+    np.testing.assert_allclose(eigvals[0], [1.0, 2.0])
 
 
 def _write_auto_fixture(tmp_path: Path) -> Path:

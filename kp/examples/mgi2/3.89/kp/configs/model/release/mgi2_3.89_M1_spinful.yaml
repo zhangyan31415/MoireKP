@@ -1,8 +1,8 @@
-source_config: ../../source/mgi2_3.89_M1.yaml
+source_config: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1_spinful_symm_config.yaml
 validation:
   allow_missing_wavefunction_overlap: true
   reason: M1 pipeline is an effective-interim closure without projector-overlap export
-heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/project/mgi2_3.89_M1/heff_list.npy
+heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/project/mgi2_3.89_M1_spinful/heff_list.npy
 coordinate_frame:
   rotation_deg: 210.0
 valley_model:
@@ -12,19 +12,19 @@ valley_model:
   mode: single_valley
   active_valleys:
   - M1
-  spin_convention: spinless_effective
+  spin_convention: spinful
   allowed_internal_symmetries:
-  - TR_eff
-  - C2_eff
+  - TR
+  - C2
   external_sewing_symmetries: []
 symmetry_source:
   type: kp_symm_output
-  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1
+  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1_spinful
   use: raw
   matrix_kind: action
   operations:
-  - name: TR_eff
-    operation: TR
+  - name: TR
+    operation: T
     matrix_file: T_low_raw.npy
     antiunitary: true
     k_map:
@@ -37,10 +37,10 @@ symmetry_source:
     target_role: continuum_internal_rep
     gauge_correction:
       kind: none
+    antiunitary_convention: U_K
     spin_map: from_kp_symm_output
     valley_map: identity
-    antiunitary_convention: U_K
-  - name: C2_eff
+  - name: C2
     operation: C2
     matrix_file: C2_low_raw.npy
     antiunitary: false
@@ -50,25 +50,46 @@ symmetry_source:
     q_map:
       type: reflection
       axis_deg: 150.0
-    sector_map: layer_exchange
+    sector_map: identity
     source_matrix_role: raw_h_sewing_action
     source_gauge: raw_saved_TAPW
     target_role: continuum_internal_rep
     gauge_correction:
       kind: none
+    antiunitary_convention: none
     spin_map: from_kp_symm_output
     valley_map: identity
-    antiunitary_convention: none
-  effective_interpretation: single-spin M1 effective operators derived from TAPW TR/C2
-    sewing output
   exactification:
     support_source: geometry
-    central_phase:
-      TR_eff^2: 1
-      C2_eff^2: 1
-    phase_classes: global
     reject_if_off_support_rel_gt: 1.0e-05
     reject_if_amplitude_deviation_gt: 0.05
+    operations:
+      TR:
+        support_mode: block
+        power: 2
+        central_phase: -1
+        action_candidates:
+        - k_map:
+            type: negation
+            in_model_frame: true
+          q_map:
+            type: negation
+          sector_map: identity
+          antiunitary: true
+      C2:
+        support_mode: block
+        power: 2
+        central_phase: -1
+        action_candidates:
+        - k_map:
+            type: reflection
+            axis_deg: 0.0
+            in_model_frame: true
+          q_map:
+            type: reflection
+            axis_deg: 0.0
+          sector_map: layer_exchange
+          antiunitary: false
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/tapw/KPATH.in
   tmat:
@@ -84,14 +105,14 @@ kpath:
 sectors:
 - name: bottom
   qset: qset1
-  n_orb: 1
+  n_orb: 2
 - name: top
   qset: qset2
-  n_orb: 1
+  n_orb: 2
 model:
   n_orb:
-  - 1
-  - 1
+  - 2
+  - 2
   bM:
     source: tmat
     angle_deg: 60
@@ -148,99 +169,49 @@ model:
     harmonics_source: symmetry_representatives
   symmetry_map:
     Kinect:
-    - name: C2_eff
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
-      user_name: C2_eff
-    - name: TR_eff
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-      user_name: TR_eff
+    - name: C2
+    - name: TR
     Onsite:
-    - name: C2_eff
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
-      user_name: C2_eff
-    - name: TR_eff
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-      user_name: TR_eff
+    - name: C2
+    - name: TR
     intra:
-    - name: C2_eff
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
-      user_name: C2_eff
-    - name: TR_eff
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-      user_name: TR_eff
+    - name: C2
+    - name: TR
     inter:
-    - name: C2_eff
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
-      user_name: C2_eff
-    - name: TR_eff
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-      user_name: TR_eff
+    - name: C2
+    - name: TR
+  nlow_state:
+  - 2
+  - 2
 fit:
   indices:
-  - 20
-  - 40
+  - 0
+  - 6
+  - 12
+  - 18
+  - 24
+  - 30
+  - 36
+  - 42
+  - 48
+  - 54
+  - 60
   coeff_tol: 1.0e-06
 bands:
   compare_to_heff: true
   band_slice:
   - 0
-  - 8
+  - 16
   plot:
     bottom_bands: 8
     align: bottom
     figsize:
     - 3.0
     - 5.8
+    num_bands: 16
 output:
-  dir: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/runs/release/mgi2_3.89_M1
+  dir: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/runs/release/mgi2_3.89_M1_spinful
   save_coefficients: true
   verbose: false
   progress: true
+heff_eig_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/project/mgi2_3.89_M1_spinful/heff_eig.npy

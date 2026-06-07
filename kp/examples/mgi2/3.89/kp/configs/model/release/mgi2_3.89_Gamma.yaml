@@ -149,7 +149,9 @@ model:
       kind: intra
       indices:
       - 1
+      representatives: symmetry
     max_order: 6
+    harmonics_source: symmetry_representatives
   - name: gamma_intra_nonzero
     source: moire_potential
     sector_pairs:
@@ -168,7 +170,9 @@ model:
       - 2
       - 3
       - 4
+      representatives: symmetry
     max_order: 6
+    harmonics_source: symmetry_representatives
   - name: gamma_inter_zero
     source: tunneling
     sector_pairs:
@@ -183,7 +187,9 @@ model:
       kind: inter
       indices:
       - 1
+      representatives: symmetry
     max_order: 10
+    harmonics_source: symmetry_representatives
   - name: gamma_inter_nonzero
     source: tunneling
     sector_pairs:
@@ -200,7 +206,9 @@ model:
       - 2
       - 3
       - 4
+      representatives: symmetry
     max_order: 6
+    harmonics_source: symmetry_representatives
   - name: gamma_inter_nonzero_negative
     source: tunneling
     sector_pairs:
@@ -216,7 +224,9 @@ model:
       - 3
       - 4
       sign: -1
+      representatives: symmetry
     max_order: 6
+    harmonics_source: symmetry_representatives
   symmetry_map:
     Kinect:
     - name: C3z

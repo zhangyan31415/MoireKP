@@ -3496,17 +3496,27 @@ def compute_bands(
     eigvals_out = np.empty((nk, dim_kept), dtype=float)
     eigvecs_out = np.empty((nk, dim_kept, dim_kept), dtype=complex) if want_vecs else None
 
+    eigvals_only = not want_vecs
     for i in range(nk):
-        _H_kept, w, v, _counts, _prof = _compute_one_k(i, kpts[i], state)
+        _H_kept, w, v, _counts, _prof = _compute_one_k(i, kpts[i], state, eigvals_only=eigvals_only)
         eigvals_out[i] = w
         if want_vecs and eigvecs_out is not None:
+            if v is None:
+                raise RuntimeError("Eigenvectors were requested but eigensolver returned eigenvalues only.")
             eigvecs_out[i] = v
 
     if want_vecs and eigvecs_out is not None:
         return eigvals_out, eigvecs_out
     return eigvals_out
 
-def _compute_one_k(i: int, k: np.ndarray, state: _BandState):
+def _compute_one_k(
+    i: int,
+    k: np.ndarray,
+    state: _BandState,
+    *,
+    eigvals_only: bool = False,
+    solve_eig: bool = True,
+):
     """Internal single-k routine matching the original script logic (no parallelism)."""
     t_total_start = time.perf_counter()
     t_loop = 0.0
@@ -3547,8 +3557,16 @@ def _compute_one_k(i: int, k: np.ndarray, state: _BandState):
     t_schur = time.perf_counter() - t_schur_start
 
     t_eig_start = time.perf_counter()
-    w, v = scipy.linalg.eigh(H, check_finite=False)
-    t_eig = time.perf_counter() - t_eig_start
+    if solve_eig:
+        if eigvals_only:
+            w = scipy.linalg.eigvalsh(H, check_finite=False)
+            v = None
+        else:
+            w, v = scipy.linalg.eigh(H, check_finite=False)
+        t_eig = time.perf_counter() - t_eig_start
+    else:
+        w = np.empty(H.shape[0], dtype=float)
+        v = None
 
     t_total = time.perf_counter() - t_total_start
     counts = [len(state.active_terms), 0, 0]

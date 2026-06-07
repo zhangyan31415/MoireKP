@@ -1,11 +1,8 @@
-source_config: ../../source/mote2_3.89_K1.yaml
+source_config: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1_spinful_symm_config.yaml
 validation:
   allow_missing_wavefunction_overlap: true
-  reason: wavefunction/projector overlap is not exported by the current K1 pipeline
-heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/project/mote2_3.89_K1/heff_list.npy
-kpoints_file: null
-coordinate_frame:
-  rotation_deg: 210.0
+  reason: K1 production currently validates Hamiltonian/symmetry numerics without
+    exported projector-overlap data
 valley_model:
   lattice: hexagonal
   system: bilayer
@@ -13,14 +10,14 @@ valley_model:
   mode: single_valley
   active_valleys:
   - K1
-  spin_convention: spin_up_only
+  spin_convention: spinful
   allowed_internal_symmetries:
   - C3z
   - C2T
   external_sewing_symmetries: []
 symmetry_source:
   type: kp_symm_output
-  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1
+  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1_spinful
   use: raw
   matrix_kind: action
   operations:
@@ -40,9 +37,9 @@ symmetry_source:
     target_role: continuum_internal_rep
     gauge_correction:
       kind: none
+    antiunitary_convention: none
     spin_map: from_kp_symm_output
     valley_map: identity
-    antiunitary_convention: none
   - name: C2T
     operation: C2T
     matrix_file: C2T_low_raw.npy
@@ -59,23 +56,21 @@ symmetry_source:
     target_role: continuum_internal_rep
     gauge_correction:
       kind: none
+    antiunitary_convention: U_K
     spin_map: from_kp_symm_output
     valley_map: identity
-    antiunitary_convention: U_K
   exactification:
     support_source: geometry
     reject_if_off_support_rel_gt: 3.0e-06
     reject_if_amplitude_deviation_gt: 0.02
     operations:
       C3z:
-        support_mode: monomial
+        support_mode: block
         power: 3
         central_phase: -1
-        allowed_roots: sixth_roots_cube_minus_one
         phase_classes: global
         action_candidates:
-        - antiunitary: false
-          k_map:
+        - k_map:
             type: rotation
             angle_deg: 120.0
             in_model_frame: true
@@ -83,13 +78,13 @@ symmetry_source:
             type: rotation
             angle_deg: 120.0
           sector_map: identity
+          antiunitary: false
       C2T:
         support_mode: block
         power: 2
         central_phase: 1
         action_candidates:
-        - antiunitary: true
-          k_map:
+        - k_map:
             type: reflection
             axis_deg: 180.0
             in_model_frame: true
@@ -97,6 +92,9 @@ symmetry_source:
             type: reflection
             axis_deg: 180.0
           sector_map: layer_exchange
+          antiunitary: true
+coordinate_frame:
+  rotation_deg: 210
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/KPATH.in
   tmat:
@@ -111,11 +109,15 @@ kpath:
     - 27.0
 model:
   n_orb:
-  - 1
-  - 1
+  - 2
+  - 2
   bM:
-    source: tmat
-    angle_deg: 60
+    bM1:
+    - 0.13820712168748003
+    - 0.0
+    bM2:
+    - 0.06910356084374003
+    - 0.11969087836528494
   harmonics:
     intra:
       1: zero
@@ -201,24 +203,19 @@ model:
   symmetry_map:
     Kinect:
     - name: C3z
-      user_name: C3z
     - name: C2T
-      user_name: C2T
     Onsite:
     - name: C3z
-      user_name: C3z
     - name: C2T
-      user_name: C2T
     intra:
     - name: C3z
-      user_name: C3z
     - name: C2T
-      user_name: C2T
     inter:
     - name: C3z
-      user_name: C3z
     - name: C2T
-      user_name: C2T
+  nlow_state:
+  - 2
+  - 2
 fit:
   indices:
   - 0
@@ -226,16 +223,19 @@ fit:
 bands:
   compare_to_heff: true
   band_slice:
-  - 46
-  - 54
+  - 92
+  - 108
   plot:
     top_bands: 8
     align: top
     figsize:
     - 3.0
     - 5.8
+    num_bands: 16
 output:
-  dir: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/runs/release/mote2_3.89_K1
+  dir: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/runs/release/mote2_3.89_K1_spinful
   save_coefficients: true
   verbose: false
   progress: true
+heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/project/mote2_3.89_K1_spinful/heff_list.npy
+heff_eig_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/project/mote2_3.89_K1_spinful/heff_eig.npy
