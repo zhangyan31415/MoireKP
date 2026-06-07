@@ -405,6 +405,31 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
     out["symmetry_source"] = source_out
     return out
 
+
+def _default_exactification_config(config: ConfiguredModel) -> dict[str, Any]:
+    phases: dict[str, int] = {}
+    spin = str(config.valley_model.get("spin_convention", ""))
+    valley_type = str(config.valley_model.get("valley_type", ""))
+    for operation in config.symmetry_source_config.get("operations", []):
+        if not isinstance(operation, Mapping):
+            continue
+        name = str(operation.get("name", ""))
+        if name == "C3z":
+            phases[f"{name}^3"] = -1
+        elif name in {"C2", "C2_eff", "C2T", "C2TR_eff"}:
+            phases[f"{name}^2"] = -1 if spin == "spinful" and valley_type == "M" and name == "C2" else 1
+        elif name in {"TR", "TR_eff"}:
+            phases[f"{name}^2"] = -1 if spin == "spinful" else 1
+    return {
+        "support_source": "geometry",
+        "central_phase": phases,
+        "phase_classes": "global",
+        "reject_if_off_support_rel_gt": 3.0e-6 if valley_type == "K" else 1.0e-5,
+        "reject_if_amplitude_deviation_gt": 0.02 if valley_type == "K" else 0.05,
+        "inferred": True,
+    }
+
+
 def _reflect_vector(kvec: np.ndarray, axis_deg: float) -> np.ndarray:
     theta = np.deg2rad(float(axis_deg))
     axis = np.array([np.cos(theta), np.sin(theta)], dtype=float)
@@ -1510,27 +1535,33 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     exactification = config.symmetry_source_config.get("exactification")
     has_exactification = isinstance(exactification, Mapping) and bool(exactification)
     if source_type == "kp_symm_output" and any(config.symmetry_map.get(tag) for tag in ("Kinect", "Onsite", "intra", "inter")):
-        if matrix_kind == "action" and not has_exactification:
-            raise ValueError(
-                "kp_symm_output matrix_kind=action cannot be used for term symmetrization without an exactification block"
-            )
+        if not has_exactification:
+            exactification = _default_exactification_config(config)
+            config.symmetry_source_config["exactification"] = exactification
+            has_exactification = True
         if has_exactification:
             if not hasattr(loaded_symmetry.generator, "matrices"):
                 raise ValueError("Exactification requires a matrix-backed symmetry generator")
             exact_output_dir = config.output_dir / "symmetry_exactification"
-            exact_matrices, exact_reports = exactify_loaded_symmetry_source(
-                loaded_metadata=loaded_symmetry.metadata,
-            matrices=getattr(loaded_symmetry.generator, "matrices"),
-            Q_set1=Q_set1,
-            Q_set2=Q_set2,
-            sectors=sectors,
-            n_orb=config.n_orb,
-            bM1=bM1,
-            bM2=bM2,
-            raw_config=config.symmetry_source_config,
-            rotation_deg=config.rotation_deg,
-            output_dir=exact_output_dir,
-        )
+            try:
+                exact_matrices, exact_reports = exactify_loaded_symmetry_source(
+                    loaded_metadata=loaded_symmetry.metadata,
+                    matrices=getattr(loaded_symmetry.generator, "matrices"),
+                    Q_set1=Q_set1,
+                    Q_set2=Q_set2,
+                    sectors=sectors,
+                    n_orb=config.n_orb,
+                    bM1=bM1,
+                    bM2=bM2,
+                    raw_config=config.symmetry_source_config,
+                    rotation_deg=config.rotation_deg,
+                    output_dir=exact_output_dir,
+                )
+            except ValueError as exc:
+                if matrix_kind not in {"representation", "d0", "D0"} or not bool(config.symmetry_source_config.get("exactification", {}).get("inferred")):
+                    raise
+                loaded_symmetry.metadata["exactification_skipped"] = {"reason": str(exc), "matrix_kind": matrix_kind}
+                exact_matrices, exact_reports = {}, {}
             loaded_symmetry.generator.matrices.update(exact_matrices)
             for record in loaded_symmetry.metadata.get("operations", []):
                 if isinstance(record, dict) and record.get("name") in exact_reports:

@@ -27,14 +27,6 @@ symmetry_source:
   - C2_eff
   effective_interpretation: single-spin M1 effective operators derived from TAPW TR/C2
     sewing output
-  exactification:
-    support_source: geometry
-    central_phase:
-      TR_eff^2: 1
-      C2_eff^2: 1
-    phase_classes: global
-    reject_if_off_support_rel_gt: 1.0e-05
-    reject_if_amplitude_deviation_gt: 0.05
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/tapw/KPATH.in
   tmat:

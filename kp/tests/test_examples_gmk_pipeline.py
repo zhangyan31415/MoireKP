@@ -71,6 +71,7 @@ def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
             "k_map:",
             "q_map:",
             "sector_map:",
+            "exactification:",
         ):
             assert forbidden not in text, (path, forbidden)
 

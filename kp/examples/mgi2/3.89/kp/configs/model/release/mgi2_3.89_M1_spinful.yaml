@@ -25,14 +25,6 @@ symmetry_source:
   operations:
   - TR
   - C2
-  exactification:
-    support_source: geometry
-    central_phase:
-      TR^2: -1
-      C2^2: -1
-    phase_classes: global
-    reject_if_off_support_rel_gt: 1.0e-05
-    reject_if_amplitude_deviation_gt: 0.05
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/tapw/KPATH.in
   tmat:

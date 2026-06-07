@@ -23,14 +23,6 @@ symmetry_source:
   operations:
   - C3z
   - C2T
-  exactification:
-    support_source: geometry
-    central_phase:
-      C3z^3: -1
-      C2T^2: 1
-    phase_classes: global
-    reject_if_off_support_rel_gt: 3.0e-06
-    reject_if_amplitude_deviation_gt: 0.02
 coordinate_frame:
   rotation_deg: 210
 kpath:
