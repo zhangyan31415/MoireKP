@@ -93,6 +93,36 @@ def test_compute_bands_uses_eigvals_only_without_saved_eigenvectors(monkeypatch)
     np.testing.assert_allclose(eigvals[0], [1.0, 2.0])
 
 
+def test_monomial_extraction_tolerates_exactified_leakage():
+    matrix = np.eye(4, dtype=complex)
+    matrix[0, 1] = 3.0e-5
+
+    mono = ContinuumModelBuilder._extract_monomial_matrix(matrix)
+
+    assert mono is not None
+    perm, vals = mono
+    np.testing.assert_array_equal(perm, np.arange(4))
+    np.testing.assert_allclose(vals, np.ones(4))
+
+
+def test_monomial_extraction_rejects_dense_leakage():
+    matrix = np.eye(4, dtype=complex)
+    matrix[0, 1] = 3.0e-4
+
+    assert ContinuumModelBuilder._extract_monomial_matrix(matrix) is None
+
+
+def test_clear_symmetry_caches_clears_orbit_and_kz_caches():
+    moire_module.clear_symmetry_caches()
+    ContinuumModelBuilder._SYMMETRIZE_ORBIT_CACHE["orbit"] = object()
+    ContinuumModelBuilder._KZ_POW_CACHE["kz"] = np.ones((1, 1), dtype=complex)
+
+    moire_module.clear_symmetry_caches()
+
+    assert not ContinuumModelBuilder._SYMMETRIZE_ORBIT_CACHE
+    assert not ContinuumModelBuilder._KZ_POW_CACHE
+
+
 def _write_auto_fixture(tmp_path: Path) -> Path:
     qset = _triangular_q_shell()
     kpoints = np.array([[0.0, 0.0], [0.1, 0.0]], dtype=float)

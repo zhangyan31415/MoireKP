@@ -124,6 +124,8 @@ SYMMETRIZE_MONOMIAL_OP_CACHE: dict = {}
 SYMMETRIZE_MONOMIAL_OP_VALIDATED: set = set()
 SYMMETRIZE_COMPOSED_OP_CACHE: dict = {}
 SYMMETRIZE_COMPOSED_OP_VALIDATED: set = set()
+SYMMETRIZE_ORBIT_CACHE: dict = {}
+KZ_POW_CACHE: dict = {}
 
 def clear_symmetry_caches() -> None:
     """Clear module-level symmetrization caches."""
@@ -132,6 +134,8 @@ def clear_symmetry_caches() -> None:
     SYMMETRIZE_MONOMIAL_OP_VALIDATED.clear()
     SYMMETRIZE_COMPOSED_OP_CACHE.clear()
     SYMMETRIZE_COMPOSED_OP_VALIDATED.clear()
+    SYMMETRIZE_ORBIT_CACHE.clear()
+    KZ_POW_CACHE.clear()
 
 # =============================================================================
 # >>> SECTION: 03. Logging
@@ -1131,14 +1135,17 @@ class ContinuumModelBuilder:
     _SYMMETRIZE_MONOMIAL_OP_VALIDATED = SYMMETRIZE_MONOMIAL_OP_VALIDATED
     _SYMMETRIZE_COMPOSED_OP_CACHE = SYMMETRIZE_COMPOSED_OP_CACHE
     _SYMMETRIZE_COMPOSED_OP_VALIDATED = SYMMETRIZE_COMPOSED_OP_VALIDATED
-    _SYMMETRIZE_ORBIT_CACHE: Dict[Tuple[int, Tuple[float, float], Tuple[Tuple[str, Any], ...]], Any] = {}
-    _KZ_POW_CACHE: Dict[Tuple[int, Tuple[float, float]], np.ndarray] = {}
+    _SYMMETRIZE_ORBIT_CACHE = SYMMETRIZE_ORBIT_CACHE
+    _KZ_POW_CACHE = KZ_POW_CACHE
     _SYMM_ANTIUNITARY_OPS = frozenset({"TR", "TR_eff", "C2T", "C2TR_eff"})
     _SYMM_UNITARY_OPS = frozenset({"C2", "C2_eff"})
     _SYMM_VALIDATE_MONOMIAL = True
     _SYMM_VALIDATE_SPARSE = True
     _SYMM_USE_SPARSE_BASIS = True
-    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-6
+    # TAPW-projected exactified operations can carry ~1e-5 off-support leakage while
+    # still representing a permutation-phase action. Keep this below 1e-3 so genuinely
+    # dense representations stay on the safe dense path.
+    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-4
     _SYMM_SPARSE_VALIDATED = False
     
     def __init__(self, Q_set1: np.ndarray, Q_set2: np.ndarray,
@@ -1381,6 +1388,12 @@ class ContinuumModelBuilder:
             Y_func.eval_sparse = eval_sparse  # type: ignore[attr-defined]
             Y_func._moire_sparse_dim = dim  # type: ignore[attr-defined]
             Y_func._moire_sparse_unique = sparse_unique  # type: ignore[attr-defined]
+            Y_func._moire_sparse_rows = sparse_rows  # type: ignore[attr-defined]
+            Y_func._moire_sparse_cols = sparse_cols  # type: ignore[attr-defined]
+            Y_func._moire_sparse_row_q_idx = sparse_row_q_idx  # type: ignore[attr-defined]
+            Y_func._moire_sparse_Q_rows = Q_rows  # type: ignore[attr-defined]
+            Y_func._moire_sparse_hermitize_in_basis = hermitize_in_basis  # type: ignore[attr-defined]
+            Y_func._moire_sparse_orders = (Mz, Mz_star)  # type: ignore[attr-defined]
         else:
             Y_func._moire_sparse_dim = dim  # type: ignore[attr-defined]
         return Y_func
@@ -2117,6 +2130,87 @@ class ContinuumModelBuilder:
                     H_out += wt * Y_part.conjugate().T
 
         # 与原逻辑一致：不在此处强制 Hermitian 化（原实现是在 Y_symm/Y_symm_i 层面做 condition-allclose 再修正）
+
+    @staticmethod
+    def add_sparse_term_group_to_matrix_static(
+        H_out: np.ndarray,
+        group: Dict[str, Any],
+        k: np.ndarray,
+        symmetry_gen: Any = None,
+    ) -> None:
+        sym_ops = group["sym_ops"]
+        if sym_ops and symmetry_gen is None:
+            raise ValueError("symmetry_gen must be provided when sym_ops is non-empty.")
+
+        rows = group["rows"]
+        cols = group["cols"]
+        row_q_idx = group["row_q_idx"]
+        q_rows = group["q_rows"]
+        terms = group["terms"]
+        needs_herm_real = bool(group["needs_herm_real"])
+        needs_herm_imag = bool(group["needs_herm_imag"])
+        use_add_at = bool(group["use_add_at"])
+
+        max_order = 0
+        for mz, mz_star, _rr, _ri, _herm in terms:
+            max_order = max(max_order, int(mz), int(mz_star))
+
+        orbit_actions = (
+            ContinuumModelBuilder._get_symmetry_orbit_actions_cached(k, sym_ops, symmetry_gen)
+            if sym_ops
+            else [(k, None, tuple(), False)]
+        )
+
+        for kk, action, op_seq_applied, is_anti in orbit_actions:
+            if op_seq_applied:
+                # Rare non-monomial action fallback should stay on the scalar term path.
+                raise RuntimeError("Grouped sparse assembly requires composed monomial symmetry actions.")
+
+            diff = kk - q_rows
+            z = diff[:, 0] + 1j * diff[:, 1]
+            z_pows = np.empty((max_order + 1, z.shape[0]), dtype=complex)
+            z_pows[0] = 1.0
+            for order in range(1, max_order + 1):
+                z_pows[order] = z_pows[order - 1] * z
+
+            if action is not None:
+                perm, inv_perm, vals, inv_vals, is_anti_total = action
+                rr_idx = inv_perm[rows]
+                cc_idx = inv_perm[cols]
+                phase = vals[rr_idx] * inv_vals[cc_idx]
+            else:
+                rr_idx = rows
+                cc_idx = cols
+                phase = 1.0
+                is_anti_total = bool(is_anti)
+
+            s = -1.0 if is_anti_total else 1.0
+            combined = np.zeros(rows.shape[0], dtype=complex)
+            combined_h = np.zeros(rows.shape[0], dtype=complex) if (needs_herm_real or needs_herm_imag) else None
+            for mz, mz_star, r_value_real, r_value_imag, hermitize_in_basis in terms:
+                vals0 = z_pows[mz][row_q_idx] * np.conjugate(z_pows[mz_star][row_q_idx])
+                if hermitize_in_basis:
+                    vals0 = vals0 + np.conjugate(vals0)
+                transformed = np.conjugate(vals0) if is_anti_total else vals0
+                weight = r_value_real + (1j * s) * r_value_imag
+                combined += weight * transformed
+                if combined_h is not None:
+                    wt = (r_value_real if needs_herm_real else 0.0) + ((-1j * s) * r_value_imag if needs_herm_imag else 0.0)
+                    if wt != 0.0:
+                        combined_h += wt * np.conjugate(transformed)
+
+            vv = combined * phase
+            if use_add_at:
+                np.add.at(H_out, (rr_idx, cc_idx), vv)
+            else:
+                H_out[rr_idx, cc_idx] += vv
+
+            if combined_h is not None:
+                vv_h = combined_h * np.conjugate(phase)
+                if use_add_at:
+                    np.add.at(H_out, (cc_idx, rr_idx), vv_h)
+                else:
+                    H_out[cc_idx, rr_idx] += vv_h
 
     # @timing_decorator_factory(0)
     def stack_Y_for_term(self, term: ContinuumTerm, k_points: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
@@ -3320,6 +3414,7 @@ def select_kpoints(kpoints: np.ndarray, indices: Sequence[int]) -> np.ndarray:
 @dataclass
 class _BandState:
     active_terms: List[Tuple[ContinuumTerm, Callable[[np.ndarray], np.ndarray], List[Dict[str, Any]], float, float]]
+    term_groups: List[Dict[str, Any]]
     symmetry_gen: SymmetryGenerator
     keep: np.ndarray
     remove: np.ndarray
@@ -3425,6 +3520,109 @@ def compute_coefficients(config: MoireConfig, model: ContinuumModel) -> Tuple[Co
     diagnostics = builder.compute_coefficients_by_tag(heff, kpts, tol=float(config.coeff_tol))
     return model, diagnostics
 
+def _sym_ops_group_key(sym_ops: List[Dict[str, Any]]) -> tuple[Any, ...]:
+    return tuple(
+        (
+            op.get("name"),
+            op.get("params", None),
+            json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
+            json.dumps(op.get("q_map", {}), sort_keys=True, default=str),
+            json.dumps(op.get("sector_map", None), sort_keys=True, default=str),
+            bool(op.get("antiunitary", False)),
+        )
+        for op in sym_ops
+    )
+
+def _sym_ops_have_composed_actions(sym_ops: List[Dict[str, Any]], symmetry_gen: Any) -> bool:
+    if not sym_ops:
+        return True
+    _points, op_seqs = ContinuumModelBuilder._generate_symmetry_orbit(np.array([0.137, -0.219], dtype=float), sym_ops)
+    for op_seq in op_seqs:
+        if not op_seq:
+            continue
+        op_seq_applied = tuple(reversed(op_seq))
+        composed = ContinuumModelBuilder._get_composed_symmetry_action(symmetry_gen, op_seq_applied)
+        if composed is None or not ContinuumModelBuilder._validate_composed_symmetry_action_once(symmetry_gen, op_seq_applied, composed):
+            return False
+    return True
+
+def _build_sparse_term_groups(
+    active_terms: List[Tuple[ContinuumTerm, Callable[[np.ndarray], np.ndarray], List[Dict[str, Any]], float, float]],
+    symmetry_gen: Any,
+) -> tuple[List[Dict[str, Any]], List[Tuple[ContinuumTerm, Callable[[np.ndarray], np.ndarray], List[Dict[str, Any]], float, float]]]:
+    groups: dict[tuple[Any, ...], Dict[str, Any]] = {}
+    ungrouped: List[Tuple[ContinuumTerm, Callable[[np.ndarray], np.ndarray], List[Dict[str, Any]], float, float]] = []
+    groupable_sym_ops: dict[tuple[Any, ...], bool] = {}
+
+    for term, Y_basis, sym_ops, r_value_real, r_value_imag in active_terms:
+        sym_ops_key = _sym_ops_group_key(sym_ops)
+        if sym_ops_key not in groupable_sym_ops:
+            groupable_sym_ops[sym_ops_key] = _sym_ops_have_composed_actions(sym_ops, symmetry_gen)
+        if not groupable_sym_ops[sym_ops_key]:
+            ungrouped.append((term, Y_basis, sym_ops, r_value_real, r_value_imag))
+            continue
+
+        missing_flags = not hasattr(term, "_moire_needs_hermitize_real") or not hasattr(term, "_moire_needs_hermitize_imag")
+        inconsistent = bool(getattr(term, "_moire_hermitize_flags_inconsistent", False))
+        rows = getattr(Y_basis, "_moire_sparse_rows", None)
+        cols = getattr(Y_basis, "_moire_sparse_cols", None)
+        row_q_idx = getattr(Y_basis, "_moire_sparse_row_q_idx", None)
+        q_rows = getattr(Y_basis, "_moire_sparse_Q_rows", None)
+        orders = getattr(Y_basis, "_moire_sparse_orders", None)
+        if (
+            missing_flags
+            or inconsistent
+            or rows is None
+            or cols is None
+            or row_q_idx is None
+            or q_rows is None
+            or orders is None
+        ):
+            ungrouped.append((term, Y_basis, sym_ops, r_value_real, r_value_imag))
+            continue
+
+        rows_arr = np.asarray(rows, dtype=int)
+        cols_arr = np.asarray(cols, dtype=int)
+        row_q_idx_arr = np.asarray(row_q_idx, dtype=int)
+        key = (
+            rows_arr.tobytes(),
+            cols_arr.tobytes(),
+            row_q_idx_arr.tobytes(),
+            id(q_rows),
+            sym_ops_key,
+            bool(getattr(term, "_moire_needs_hermitize_real", False)),
+            bool(getattr(term, "_moire_needs_hermitize_imag", False)),
+            bool(getattr(Y_basis, "_moire_sparse_unique", True)),
+        )
+        group = groups.get(key)
+        if group is None:
+            group = {
+                "rows": rows_arr,
+                "cols": cols_arr,
+                "row_q_idx": row_q_idx_arr,
+                "q_rows": np.asarray(q_rows, dtype=float),
+                "sym_ops": sym_ops,
+                "needs_herm_real": bool(getattr(term, "_moire_needs_hermitize_real", False)),
+                "needs_herm_imag": bool(getattr(term, "_moire_needs_hermitize_imag", False)),
+                "use_add_at": not bool(getattr(Y_basis, "_moire_sparse_unique", True)),
+                "terms": [],
+                "original_terms": [],
+            }
+            groups[key] = group
+        mz, mz_star = orders
+        group["terms"].append(
+            (
+                int(mz),
+                int(mz_star),
+                float(r_value_real),
+                float(r_value_imag),
+                bool(getattr(Y_basis, "_moire_sparse_hermitize_in_basis", False)),
+            )
+        )
+        group["original_terms"].append((term, Y_basis, sym_ops, r_value_real, r_value_imag))
+
+    return list(groups.values()), ungrouped
+
 def _prepare_band_state(config: MoireConfig, model: ContinuumModel) -> _BandState:
     if config.Q_set1 is None or config.Q_set2 is None:
         raise ValueError("config.Q_set1 and config.Q_set2 must be provided.")
@@ -3453,7 +3651,17 @@ def _prepare_band_state(config: MoireConfig, model: ContinuumModel) -> _BandStat
             raise ValueError(f"Term {term.key} coefficients not assigned!")
         active_terms.append((term, term.Y_basis, term.symmetry_ops, float(term.r_value_real), float(term.r_value_imag)))
 
-    return _BandState(active_terms=active_terms, symmetry_gen=symmetry_gen, keep=keep, remove=remove, dim_full=dim_full, profile_light=bool(config.profile_light))
+    term_groups, ungrouped_terms = _build_sparse_term_groups(active_terms, symmetry_gen)
+
+    return _BandState(
+        active_terms=ungrouped_terms,
+        term_groups=term_groups,
+        symmetry_gen=symmetry_gen,
+        keep=keep,
+        remove=remove,
+        dim_full=dim_full,
+        profile_light=bool(config.profile_light),
+    )
 
 def compute_bands(
     config: MoireConfig,
@@ -3527,6 +3735,28 @@ def _compute_one_k(
     H_cont = np.zeros((state.dim_full, state.dim_full), dtype=complex)
 
     t_loop_start = time.perf_counter()
+    for group in state.term_groups:
+        t_symm_start = time.perf_counter()
+        try:
+            ContinuumModelBuilder.add_sparse_term_group_to_matrix_static(
+                H_cont,
+                group,
+                k,
+                symmetry_gen=state.symmetry_gen,
+            )
+        except RuntimeError:
+            for term, Y_basis, sym_ops, r_value_real, r_value_imag in group["original_terms"]:
+                ContinuumModelBuilder.add_symmetrized_term_to_matrix_static(
+                    H_cont,
+                    Y_basis,
+                    k,
+                    sym_ops,
+                    r_value_real,
+                    r_value_imag,
+                    symmetry_gen=state.symmetry_gen,
+                    term=term,
+                )
+        t_symm += time.perf_counter() - t_symm_start
     for term, Y_basis, sym_ops, r_value_real, r_value_imag in state.active_terms:
         t_symm_start = time.perf_counter()
         ContinuumModelBuilder.add_symmetrized_term_to_matrix_static(
@@ -3569,7 +3799,7 @@ def _compute_one_k(
         v = None
 
     t_total = time.perf_counter() - t_total_start
-    counts = [len(state.active_terms), 0, 0]
+    counts = [len(state.active_terms) + sum(len(group["terms"]) for group in state.term_groups), 0, 0]
     profile = None
     if state.profile_light:
         profile = {
