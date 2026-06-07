@@ -1069,5 +1069,14 @@ def test_no_raw_action_in_production_symmetrization(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="exactification"):
-        build_moire_config_from_file(cfg_path)
+    _moire_config, model_config = build_moire_config_from_file(cfg_path)
+    metadata = model_config.symmetry_source_metadata
+    record = metadata["operations"][0]
+
+    assert "source_matrix_projection_reports" in metadata
+    assert "source_matrix_projection_report" in record
+    assert "exactification_report" not in record
+    assert record["matrix_kind"] == "continuum_internal_rep_exact"
+    assert record["target_role"] == "continuum_internal_rep"
+    assert (tmp_path / "model_out" / "symmetry_source_matrix_projection").is_dir()
+    assert not (tmp_path / "model_out" / "symmetry_exactification").exists()

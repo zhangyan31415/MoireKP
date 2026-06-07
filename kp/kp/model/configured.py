@@ -406,7 +406,7 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _default_exactification_config(config: ConfiguredModel) -> dict[str, Any]:
+def _default_source_matrix_projection_config(config: ConfiguredModel) -> dict[str, Any]:
     phases: dict[str, int] = {}
     spin = str(config.valley_model.get("spin_convention", ""))
     valley_type = str(config.valley_model.get("valley_type", ""))
@@ -1532,49 +1532,44 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     loaded_symmetry = load_symmetry_source(config.symmetry_source_config, base=config.path.parent, expected_dim=expected_dim)
     source_type = str(config.symmetry_source_config.get("type", "none"))
     matrix_kind = str(config.symmetry_source_config.get("matrix_kind", config.symmetry_source_config.get("kind", "action")))
-    exactification = config.symmetry_source_config.get("exactification")
-    has_exactification = isinstance(exactification, Mapping) and bool(exactification)
     if source_type == "kp_symm_output" and any(config.symmetry_map.get(tag) for tag in ("Kinect", "Onsite", "intra", "inter")):
-        if not has_exactification:
-            exactification = _default_exactification_config(config)
-            config.symmetry_source_config["exactification"] = exactification
-            has_exactification = True
-        if has_exactification:
-            if not hasattr(loaded_symmetry.generator, "matrices"):
-                raise ValueError("Exactification requires a matrix-backed symmetry generator")
-            exact_output_dir = config.output_dir / "symmetry_exactification"
-            try:
-                exact_matrices, exact_reports = exactify_loaded_symmetry_source(
-                    loaded_metadata=loaded_symmetry.metadata,
-                    matrices=getattr(loaded_symmetry.generator, "matrices"),
-                    Q_set1=Q_set1,
-                    Q_set2=Q_set2,
-                    sectors=sectors,
-                    n_orb=config.n_orb,
-                    bM1=bM1,
-                    bM2=bM2,
-                    raw_config=config.symmetry_source_config,
-                    rotation_deg=config.rotation_deg,
-                    output_dir=exact_output_dir,
-                )
-            except ValueError as exc:
-                if matrix_kind not in {"representation", "d0", "D0"} or not bool(config.symmetry_source_config.get("exactification", {}).get("inferred")):
-                    raise
-                loaded_symmetry.metadata["exactification_skipped"] = {"reason": str(exc), "matrix_kind": matrix_kind}
-                exact_matrices, exact_reports = {}, {}
-            loaded_symmetry.generator.matrices.update(exact_matrices)
-            for record in loaded_symmetry.metadata.get("operations", []):
-                if isinstance(record, dict) and record.get("name") in exact_reports:
-                    record["exactification_report"] = exact_reports[record["name"]]
-                    record["matrix_kind"] = "continuum_internal_rep_exact"
-                    record["target_role"] = "continuum_internal_rep"
-                    resolved_action = exact_reports[record["name"]].get("resolved_action", {})
-                    if isinstance(resolved_action, dict):
-                        source_action = dict(resolved_action)
-                        if isinstance(source_action.get("k_map"), Mapping):
-                            source_action["k_map"] = {**source_action["k_map"], "in_model_frame": True}
-                        record["source_resolved_action"] = source_action
-            loaded_symmetry.metadata["exactification_reports"] = exact_reports
+        projection_config = _default_source_matrix_projection_config(config)
+        if not hasattr(loaded_symmetry.generator, "matrices"):
+            raise ValueError("Source matrix projection requires a matrix-backed symmetry generator")
+        projection_raw_config = {**config.symmetry_source_config, "exactification": projection_config}
+        projection_output_dir = config.output_dir / "symmetry_source_matrix_projection"
+        try:
+            exact_matrices, exact_reports = exactify_loaded_symmetry_source(
+                loaded_metadata=loaded_symmetry.metadata,
+                matrices=getattr(loaded_symmetry.generator, "matrices"),
+                Q_set1=Q_set1,
+                Q_set2=Q_set2,
+                sectors=sectors,
+                n_orb=config.n_orb,
+                bM1=bM1,
+                bM2=bM2,
+                raw_config=projection_raw_config,
+                rotation_deg=config.rotation_deg,
+                output_dir=projection_output_dir,
+            )
+        except ValueError as exc:
+            if matrix_kind not in {"representation", "d0", "D0"}:
+                raise
+            loaded_symmetry.metadata["source_matrix_projection_skipped"] = {"reason": str(exc), "matrix_kind": matrix_kind}
+            exact_matrices, exact_reports = {}, {}
+        loaded_symmetry.generator.matrices.update(exact_matrices)
+        for record in loaded_symmetry.metadata.get("operations", []):
+            if isinstance(record, dict) and record.get("name") in exact_reports:
+                record["source_matrix_projection_report"] = exact_reports[record["name"]]
+                record["matrix_kind"] = "continuum_internal_rep_exact"
+                record["target_role"] = "continuum_internal_rep"
+                resolved_action = exact_reports[record["name"]].get("resolved_action", {})
+                if isinstance(resolved_action, dict):
+                    source_action = dict(resolved_action)
+                    if isinstance(source_action.get("k_map"), Mapping):
+                        source_action["k_map"] = {**source_action["k_map"], "in_model_frame": True}
+                    record["source_resolved_action"] = source_action
+        loaded_symmetry.metadata["source_matrix_projection_reports"] = exact_reports
     config.symmetry_source_metadata = loaded_symmetry.metadata
     enriched_symmetry_map = _enrich_symmetry_map(
         config.symmetry_map,
@@ -2318,9 +2313,8 @@ def _operation_physics_level(model_config: ConfiguredModel, operation: Mapping[s
 def _symmetry_integrity(model_config: ConfiguredModel) -> str:
     if model_config.symmetry_source_config.get("type") == "toy_generator":
         return "toy_generator"
-    exactification = model_config.symmetry_source_config.get("exactification")
-    if isinstance(exactification, Mapping) and exactification:
-        return "exactified_from_tapw_action"
+    if model_config.symmetry_source_metadata.get("source_matrix_projection_reports"):
+        return "source_matrix_projected"
     return "matrix_backed"
 
 

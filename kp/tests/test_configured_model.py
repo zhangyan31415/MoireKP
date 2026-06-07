@@ -365,6 +365,21 @@ def test_load_model_config_rejects_sector_n_orb_mismatch(tmp_path: Path) -> None
         load_model_config(cfg_path)
 
 
+def test_load_model_config_rejects_user_exactification_knobs(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {
+        "type": "kp_symm_output",
+        "path": "symm",
+        "operations": ["C3z"],
+        "exactification": {"support_mode": "monomial"},
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source matrix projection is internal"):
+        load_model_config(cfg_path)
+
+
 def test_model_max_order_overrides_safe_defaults(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))

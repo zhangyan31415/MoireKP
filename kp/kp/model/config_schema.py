@@ -181,33 +181,10 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
     elif source_type != "none":
         raise ValueError(f"Unsupported symmetry_source.type: {source_type}")
 
-    exactification = symmetry_source.get("exactification", {})
-    if exactification is None:
-        exactification = {}
-    if exactification and not isinstance(exactification, Mapping):
-        raise ValueError("symmetry_source.exactification must be a mapping")
-    if isinstance(exactification, Mapping):
-        operations_cfg = exactification.get("operations", {})
-        if operations_cfg not in ({}, None) and not isinstance(operations_cfg, Mapping):
-            raise ValueError("symmetry_source.exactification.operations must be a mapping")
-        if isinstance(operations_cfg, Mapping):
-            for op_name, op_cfg in operations_cfg.items():
-                if not isinstance(op_cfg, Mapping):
-                    raise ValueError(f"symmetry_source.exactification.operations.{op_name} must be a mapping")
-                support_mode = op_cfg.get("support_mode")
-                if support_mode is not None and str(support_mode) not in {"auto", "monomial", "block", "block_monomial"}:
-                    raise ValueError(
-                        f"symmetry_source.exactification.operations.{op_name}.support_mode must be "
-                        "'auto', 'monomial', 'block', or 'block_monomial'"
-                    )
-                action_candidates = op_cfg.get("action_candidates")
-                if action_candidates is not None:
-                    if not isinstance(action_candidates, Sequence) or isinstance(action_candidates, (str, bytes)):
-                        raise ValueError(f"symmetry_source.exactification.operations.{op_name}.action_candidates must be a list")
-                    if not all(isinstance(item, Mapping) for item in action_candidates):
-                        raise ValueError(
-                            f"symmetry_source.exactification.operations.{op_name}.action_candidates entries must be mappings"
-                        )
+    if "exactification" in symmetry_source:
+        raise ValueError(
+            "symmetry_source source matrix projection is internal; remove symmetry_source.exactification from model config"
+        )
 
     term_templates = model.get("term_templates", raw.get("term_templates", []))
     if term_templates is None:
