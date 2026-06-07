@@ -1142,7 +1142,7 @@ class ContinuumModelBuilder:
     _SYMM_VALIDATE_MONOMIAL = True
     _SYMM_VALIDATE_SPARSE = True
     _SYMM_USE_SPARSE_BASIS = True
-    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-8
+    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-6
     _SYMM_SPARSE_VALIDATED = False
     
     def __init__(self, Q_set1: np.ndarray, Q_set2: np.ndarray,
