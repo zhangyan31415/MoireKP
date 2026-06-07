@@ -1371,12 +1371,12 @@ def test_symmetry_source_infers_operations_from_summary(tmp_path: Path) -> None:
     assert op["leakage"] == 3.4e-9
 
 
-def test_symmetry_source_loads_effective_m_ops_from_tapw_sewing_labels(tmp_path: Path) -> None:
+def test_symmetry_source_loads_effective_m_ops_from_standard_tr_labels(tmp_path: Path) -> None:
     from kp.model.symmetry import load_symmetry_source
 
     t_matrix = np.array([[0.0, 1.0], [-1.0, 0.0]], dtype=complex)
     c2_matrix = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
-    np.save(tmp_path / "T_low_raw.npy", t_matrix)
+    np.save(tmp_path / "TR_low_raw.npy", t_matrix)
     np.save(tmp_path / "C2_low_raw.npy", c2_matrix)
     (tmp_path / "summary.json").write_text(
         yaml.safe_dump(
@@ -1386,7 +1386,7 @@ def test_symmetry_source_loads_effective_m_ops_from_tapw_sewing_labels(tmp_path:
                         **_source_meta(antiunitary=True),
                         "name": "TR_eff",
                         "operation": "TR",
-                        "matrix_file": "T_low_raw.npy",
+                        "matrix_file": "TR_low_raw.npy",
                         "antiunitary": True,
                         "k_map": {"type": "negation"},
                         "q_map": {"type": "negation"},
@@ -1455,7 +1455,7 @@ def test_symmetry_source_loads_effective_m_ops_from_tapw_sewing_labels(tmp_path:
     t_op = by_name["TR_eff"]
     assert t_op["operation"] == "TR"
     assert "aliases" not in t_op
-    assert t_op["matrix_file"].endswith("T_low_raw.npy")
+    assert t_op["matrix_file"].endswith("TR_low_raw.npy")
     assert t_op["matrix_kind"] == "action"
     assert t_op["source_matrix_role"] == "raw_h_sewing_action"
     assert t_op["target_role"] == "continuum_internal_rep"

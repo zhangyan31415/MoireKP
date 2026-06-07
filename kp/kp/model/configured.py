@@ -414,8 +414,6 @@ def _default_source_operation_name(name: str) -> str:
 
 
 def _matrix_file_stem(source_operation: str) -> str:
-    if source_operation == "TR":
-        return "T"
     return source_operation
 
 

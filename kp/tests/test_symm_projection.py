@@ -25,12 +25,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Unsupported symm operation"):
             _validate_operation_label("C4")
 
-    def test_symm_reads_tapw_t_manifest_entry_for_standard_tr_request(self) -> None:
-        manifest = {"operations": {"Gamma": {"T": {"filename": "Gamma/T.npz", "antiunitary": True}}}}
+    def test_symm_reads_standard_tr_manifest_entry(self) -> None:
+        manifest = {"operations": {"Gamma": {"TR": {"filename": "Gamma/TR.npz", "antiunitary": True}}}}
 
         entry = _operation_entry(manifest, "Gamma", "TR")
 
-        self.assertEqual(entry["filename"], "Gamma/T.npz")
+        self.assertEqual(entry["filename"], "Gamma/TR.npz")
 
     def test_model_frame_action_rotates_source_reflection_axis(self) -> None:
         source = {
@@ -219,9 +219,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             d_full = np.zeros((8, 8), dtype=np.complex128)
             d_full[4:, :4] = d_du
             rep_dir.mkdir(parents=True)
-            np.savez(rep_dir / "T_rawH.npz", matrix=d_full)
             np.savez(rep_dir / "TR.npz", matrix=d_full)
-            np.savez(rep_dir / "T_PG.npz", matrix=np.eye(8, dtype=np.complex128))
+            np.savez(rep_dir / "TR_rawH.npz", matrix=d_full)
+            np.savez(rep_dir / "TR_PG.npz", matrix=np.eye(8, dtype=np.complex128))
             (symm_dir / "representations" / "manifest.json").write_text(
                 json.dumps(
                     {
@@ -231,8 +231,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "operation": "TR",
                                 "antiunitary": True,
                                 "file": "M1/TR.npz",
-                                "pg_file": "M1/T_PG.npz",
-                                "raw_h_operator_file": "M1/T_rawH.npz",
+                                "pg_file": "M1/TR_PG.npz",
+                                "raw_h_operator_file": "M1/TR_rawH.npz",
                                 "k_pairs": [[0, 0]],
                             }
                         ]
