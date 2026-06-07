@@ -1,24 +1,7 @@
 source_config: ../../source/mgi2_3.89_M1.yaml
-validation:
-  allow_missing_wavefunction_overlap: true
-  reason: M1 is currently validated as an effective-interim closure without projector-overlap
-    export
-valley_model:
-  lattice: hexagonal
-  system: bilayer
-  valley_type: M
-  mode: single_valley
-  active_valleys:
-  - M1
-  spin_convention: spinless_effective
-  allowed_internal_symmetries:
-  - TR_eff
-  - C2_eff
-  external_sewing_symmetries: []
-symmetry_source:
-  type: toy_generator
-  allow: true
-  basis_template: M_spinless_layer_exchange
+valley: M1
+spin: spinless
+symmetry_source: ../../../outputs/symm/mgi2_3.89_M1
 coordinate_frame:
   rotation_deg: 210
 sectors:
@@ -60,19 +43,6 @@ model:
     Kinect: 10
     intra: 6
     inter: 8
-  symmetry_map:
-    Kinect:
-    - C2_eff
-    - TR_eff
-    Onsite:
-    - C2_eff
-    - TR_eff
-    intra:
-    - C2_eff
-    - TR_eff
-    inter:
-    - C2_eff
-    - TR_eff
 fit:
   indices:
   - 20

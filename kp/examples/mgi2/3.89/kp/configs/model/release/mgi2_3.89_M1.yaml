@@ -1,32 +1,10 @@
 source_config: ../../source/mgi2_3.89_M1.yaml
-validation:
-  allow_missing_wavefunction_overlap: true
-  reason: M1 pipeline is an effective-interim closure without projector-overlap export
+valley: M1
+spin: spinless
 heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/project/mgi2_3.89_M1/heff_list.npy
 coordinate_frame:
   rotation_deg: 210.0
-valley_model:
-  lattice: hexagonal
-  system: bilayer
-  valley_type: M
-  mode: single_valley
-  active_valleys:
-  - M1
-  spin_convention: spinless_effective
-  allowed_internal_symmetries:
-  - TR_eff
-  - C2_eff
-  external_sewing_symmetries: []
-symmetry_source:
-  type: kp_symm_output
-  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1
-  use: raw
-  matrix_kind: action
-  operations:
-  - TR_eff
-  - C2_eff
-  effective_interpretation: single-spin M1 effective operators derived from TAPW TR/C2
-    sewing output
+symmetry_source: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/tapw/KPATH.in
   tmat:
@@ -60,19 +38,6 @@ model:
     Kinect: 10
     intra: 6
     inter: 8
-  symmetry_map:
-    Kinect:
-    - C2_eff
-    - TR_eff
-    Onsite:
-    - C2_eff
-    - TR_eff
-    intra:
-    - C2_eff
-    - TR_eff
-    inter:
-    - C2_eff
-    - TR_eff
 fit:
   indices:
   - 20

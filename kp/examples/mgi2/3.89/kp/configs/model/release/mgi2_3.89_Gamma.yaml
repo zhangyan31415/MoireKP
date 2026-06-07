@@ -1,29 +1,6 @@
 source_config: ../../source/mgi2_3.89_Gamma.yaml
-validation:
-  allow_missing_wavefunction_overlap: true
-  reason: wavefunction/projector overlap is not exported by the current Gamma configured
-    pipeline
-valley_model:
-  lattice: hexagonal
-  system: bilayer
-  valley_type: Gamma
-  mode: single_valley
-  active_valleys:
-  - Gamma
-  spin_convention: spinful
-  allowed_internal_symmetries:
-  - C3z
-  - TR
-  - C2
-  external_sewing_symmetries: []
-symmetry_source:
-  type: kp_symm_output
-  use: raw
-  matrix_kind: representation
-  operations:
-  - C3z
-  - C2
-  - TR
+valley: Gamma
+spin: spinful
 kpath:
   file: ../../../../tapw/KPATH.in
   tmat:
@@ -47,23 +24,6 @@ model:
     Kinect: 10
     intra: 6
     inter: 10
-  symmetry_map:
-    Kinect:
-    - C3z
-    - TR
-    - C2
-    Onsite:
-    - C3z
-    - TR
-    - C2
-    intra:
-    - C3z
-    - TR
-    - C2
-    inter:
-    - C3z
-    - TR
-    - C2
 fit:
   indices:
   - 0

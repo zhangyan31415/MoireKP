@@ -1,28 +1,7 @@
 source_config: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1_spinful_symm_config.yaml
-validation:
-  allow_missing_wavefunction_overlap: true
-  reason: K1 production currently validates Hamiltonian/symmetry numerics without
-    exported projector-overlap data
-valley_model:
-  lattice: hexagonal
-  system: bilayer
-  valley_type: K
-  mode: single_valley
-  active_valleys:
-  - K1
-  spin_convention: spinful
-  allowed_internal_symmetries:
-  - C3z
-  - C2T
-  external_sewing_symmetries: []
-symmetry_source:
-  type: kp_symm_output
-  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1_spinful
-  use: raw
-  matrix_kind: action
-  operations:
-  - C3z
-  - C2T
+valley: K1
+spin: spinful
+symmetry_source: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1_spinful
 coordinate_frame:
   rotation_deg: 210
 kpath:
@@ -55,19 +34,6 @@ model:
     Kinect: 6
     intra: 4
     inter: 4
-  symmetry_map:
-    Kinect:
-    - C3z
-    - C2T
-    Onsite:
-    - C3z
-    - C2T
-    intra:
-    - C3z
-    - C2T
-    inter:
-    - C3z
-    - C2T
   nlow_state:
   - 2
   - 2

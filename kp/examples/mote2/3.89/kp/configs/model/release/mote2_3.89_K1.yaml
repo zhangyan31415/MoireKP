@@ -1,31 +1,11 @@
 source_config: ../../source/mote2_3.89_K1.yaml
-validation:
-  allow_missing_wavefunction_overlap: true
-  reason: wavefunction/projector overlap is not exported by the current K1 pipeline
+valley: K1
+spin: spinless
 heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/project/mote2_3.89_K1/heff_list.npy
 kpoints_file: null
 coordinate_frame:
   rotation_deg: 210.0
-valley_model:
-  lattice: hexagonal
-  system: bilayer
-  valley_type: K
-  mode: single_valley
-  active_valleys:
-  - K1
-  spin_convention: spin_up_only
-  allowed_internal_symmetries:
-  - C3z
-  - C2T
-  external_sewing_symmetries: []
-symmetry_source:
-  type: kp_symm_output
-  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1
-  use: raw
-  matrix_kind: action
-  operations:
-  - C3z
-  - C2T
+symmetry_source: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/KPATH.in
   tmat:
@@ -52,19 +32,6 @@ model:
     Kinect: 6
     intra: 4
     inter: 4
-  symmetry_map:
-    Kinect:
-    - C3z
-    - C2T
-    Onsite:
-    - C3z
-    - C2T
-    intra:
-    - C3z
-    - C2T
-    inter:
-    - C3z
-    - C2T
 fit:
   indices:
   - 0

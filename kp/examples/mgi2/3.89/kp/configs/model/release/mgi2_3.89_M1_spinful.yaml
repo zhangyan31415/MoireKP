@@ -1,30 +1,10 @@
 source_config: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1_spinful_symm_config.yaml
-validation:
-  allow_missing_wavefunction_overlap: true
-  reason: M1 pipeline is an effective-interim closure without projector-overlap export
+valley: M1
+spin: spinful
 heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/project/mgi2_3.89_M1_spinful/heff_list.npy
 coordinate_frame:
   rotation_deg: 210.0
-valley_model:
-  lattice: hexagonal
-  system: bilayer
-  valley_type: M
-  mode: single_valley
-  active_valleys:
-  - M1
-  spin_convention: spinful
-  allowed_internal_symmetries:
-  - TR
-  - C2
-  external_sewing_symmetries: []
-symmetry_source:
-  type: kp_symm_output
-  path: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1_spinful
-  use: raw
-  matrix_kind: action
-  operations:
-  - TR
-  - C2
+symmetry_source: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1_spinful
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/tapw/KPATH.in
   tmat:
@@ -58,19 +38,6 @@ model:
     Kinect: 10
     intra: 6
     inter: 8
-  symmetry_map:
-    Kinect:
-    - C2
-    - TR
-    Onsite:
-    - C2
-    - TR
-    intra:
-    - C2
-    - TR
-    inter:
-    - C2
-    - TR
   nlow_state:
   - 2
   - 2

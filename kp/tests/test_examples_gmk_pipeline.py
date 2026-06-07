@@ -51,6 +51,8 @@ def test_gmk_production_configs_follow_unified_layout() -> None:
 def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
     for path in [*GMK_PRODUCTION_CONFIGS.values(), *GMK_RELEASE_CONFIGS.values()]:
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        assert "valley" in raw, path
+        assert "spin" in raw, path
         model = raw.get("model", {})
         assert "vectors" not in model, path
         assert "term_templates" not in model, path
@@ -60,6 +62,11 @@ def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
         assert "harmonics_source" not in text
         assert "representatives:" not in text
         for forbidden in (
+            "validation:",
+            "valley_model:",
+            "external_sewing_symmetries",
+            "type: kp_symm_output",
+            "symmetry_map:",
             "source_matrix_role",
             "source_gauge",
             "target_role",
@@ -120,7 +127,7 @@ def test_k1_production_example_stays_mev_scale_and_keeps_active_set(tmp_path: Pa
     raw = yaml.safe_load(src.read_text(encoding="utf-8"))
     raw["source_config"] = str((src.parent / raw["source_config"]).resolve())
     raw["kpath"]["file"] = str((src.parent / raw["kpath"]["file"]).resolve())
-    raw["symmetry_source"]["path"] = str((src.parent / raw["symmetry_source"]["path"]).resolve())
+    raw["symmetry_source"] = str((src.parent / raw["symmetry_source"]).resolve())
     raw["output"]["dir"] = str((tmp_path / "k1_regression").resolve())
     cfg_path = tmp_path / "mote2_3.89_K1_regression.yaml"
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")

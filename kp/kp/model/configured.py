@@ -243,6 +243,75 @@ def _default_symmetry_map_from_valley_model(valley_model: Mapping[str, Any]) -> 
     return {"Kinect": list(ops), "Onsite": list(ops), "intra": list(ops), "inter": list(ops)}
 
 
+def _valley_type_from_label(label: str) -> str:
+    if label == "Gamma":
+        return "Gamma"
+    if label.startswith("K"):
+        return "K"
+    if label.startswith("M"):
+        return "M"
+    raise ValueError(f"Unsupported valley label {label!r}; expected Gamma, K*, or M*")
+
+
+def _spin_convention_from_short(spin: str, valley_type: str) -> str:
+    if spin in {"spinful", "all"}:
+        return "spinful"
+    if spin in {"spinless", "up"}:
+        if valley_type == "K":
+            return "spin_up_only"
+        if valley_type == "M":
+            return "spinless_effective"
+        return "spinless"
+    raise ValueError(f"Unsupported spin value {spin!r}; expected spinless or spinful")
+
+
+def _default_internal_symmetries(valley_type: str, spin_convention: str) -> list[str]:
+    if valley_type == "Gamma":
+        return ["C3z", "TR", "C2"] if spin_convention == "spinful" else ["C3z", "C2"]
+    if valley_type == "K":
+        return ["C3z", "C2T"]
+    if valley_type == "M":
+        return ["TR", "C2"] if spin_convention == "spinful" else ["TR_eff", "C2_eff"]
+    raise ValueError(f"Unsupported valley_type {valley_type!r}")
+
+
+def _default_matrix_kind(valley_type: str, source: Mapping[str, Any]) -> str:
+    if source.get("matrix_kind") or source.get("kind"):
+        return str(source.get("matrix_kind", source.get("kind")))
+    return "representation" if valley_type == "Gamma" else "action"
+
+
+def _normalize_short_model_config(raw: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(raw)
+
+    short_valley = out.get("valley")
+    valley_model = out.get("valley_model")
+    if short_valley is not None:
+        valley_label = str(short_valley)
+        valley_type = _valley_type_from_label(valley_label)
+        spin = str(out.get("spin", "spinful" if valley_type == "Gamma" else "spinless"))
+        spin_convention = _spin_convention_from_short(spin, valley_type)
+        out["valley_model"] = {
+            "lattice": "hexagonal",
+            "system": "bilayer",
+            "valley_type": valley_type,
+            "mode": "single_valley",
+            "active_valleys": [valley_label],
+            "spin_convention": spin_convention,
+            "allowed_internal_symmetries": _default_internal_symmetries(valley_type, spin_convention),
+            "external_sewing_symmetries": [],
+        }
+    elif not isinstance(valley_model, Mapping):
+        out["valley_model"] = {}
+
+    model = out.get("model", {})
+    if isinstance(model, Mapping) and "symmetry_map" not in model:
+        model_out = dict(model)
+        model_out["symmetry_map"] = _default_symmetry_map_from_valley_model(out.get("valley_model", {}))
+        out["model"] = model_out
+    return out
+
+
 def _normalize_user_symmetry_names(raw: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(raw)
     valley_model = out.get("valley_model", {})
@@ -299,15 +368,33 @@ def _default_symmetry_source(
     source = raw.get("symmetry_source", {})
     if source is None:
         source = {}
-    if not isinstance(source, Mapping):
-        raise ValueError("symmetry_source must be a mapping when provided")
-    out = dict(source)
+    if isinstance(source, (str, Path)):
+        out: dict[str, Any] = {"path": str(source)}
+    elif isinstance(source, Mapping):
+        out = dict(source)
+    else:
+        raise ValueError("symmetry_source must be a path string or mapping when provided")
+
+    if out.get("path") and not out.get("type"):
+        out["type"] = "kp_symm_output"
+    if not out.get("type") and out.get("source") == "toy":
+        out["type"] = "toy_generator"
+    if not out.get("type") and not out.get("path"):
+        symm = source_raw.get("symm", {})
+        if isinstance(symm, Mapping) and symm.get("output_dir"):
+            out["type"] = "kp_symm_output"
     if out.get("type") == "kp_symm_output" and not out.get("path"):
         symm = source_raw.get("symm", {})
         if isinstance(symm, Mapping) and symm.get("output_dir"):
             resolved = _resolve_path(symm.get("output_dir"), source_base)
             if resolved is not None:
                 out["path"] = str(resolved)
+    if out.get("type") == "kp_symm_output":
+        valley_model = raw.get("valley_model", {})
+        valley_type = str(valley_model.get("valley_type", ""))
+        out.setdefault("use", "raw")
+        out["matrix_kind"] = _default_matrix_kind(valley_type, out)
+        out.setdefault("operations", list(valley_model.get("allowed_internal_symmetries", [])))
     return out
 
 
@@ -608,6 +695,8 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     qset2_file = _resolve_path(material.get("qset2_file"), source_base)
     if qset1_file is None or qset2_file is None:
         raise ValueError("source_config material must provide qset1_file and qset2_file")
+
+    raw = _normalize_short_model_config(raw)
 
     heff_file = _resolve_path(_get_path_value(raw, "heff_file"), base)
     if heff_file is None:
