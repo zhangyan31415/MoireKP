@@ -2,8 +2,6 @@ source_config: ../../source/mgi2_3.89_M1.yaml
 valley: M1
 spin: spinless
 heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/project/mgi2_3.89_M1/heff_list.npy
-coordinate_frame:
-  rotation_deg: 210.0
 symmetry_source: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/kp/outputs/symm/mgi2_3.89_M1
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mgi2/3.89/tapw/KPATH.in
@@ -30,7 +28,6 @@ model:
   - 1
   bM:
     source: tmat
-    angle_deg: 60
   harmonics:
     intra: 6
     inter: 3

@@ -3,8 +3,6 @@ valley: K1
 spin: spinless
 heff_file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/project/mote2_3.89_K1/heff_list.npy
 kpoints_file: null
-coordinate_frame:
-  rotation_deg: 210.0
 symmetry_source: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/KPATH.in
@@ -24,7 +22,6 @@ model:
   - 1
   bM:
     source: tmat
-    angle_deg: 60
   harmonics:
     intra: 4
     inter: 4

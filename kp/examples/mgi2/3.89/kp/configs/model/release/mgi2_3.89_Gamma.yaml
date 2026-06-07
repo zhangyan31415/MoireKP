@@ -16,7 +16,6 @@ kpath:
 model:
   bM:
     infer_from_q: true
-    angle_deg: 60
   harmonics:
     intra: 4
     inter: 4

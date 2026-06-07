@@ -64,6 +64,8 @@ def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
         for forbidden in (
             "validation:",
             "valley_model:",
+            "coordinate_frame:",
+            "angle_deg:",
             "external_sewing_symmetries",
             "type: kp_symm_output",
             "symmetry_map:",

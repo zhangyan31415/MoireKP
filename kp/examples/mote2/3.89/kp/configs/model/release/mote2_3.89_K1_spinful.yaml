@@ -2,8 +2,6 @@ source_config: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89
 valley: K1
 spin: spinful
 symmetry_source: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1_spinful
-coordinate_frame:
-  rotation_deg: 210
 kpath:
   file: /data/work/zy/software/1.tapw_code/moirekp/kp/examples/mote2/3.89/tapw/KPATH.in
   tmat:

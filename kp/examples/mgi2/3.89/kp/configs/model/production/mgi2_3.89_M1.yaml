@@ -2,8 +2,6 @@ source_config: ../../source/mgi2_3.89_M1.yaml
 valley: M1
 spin: spinless
 symmetry_source: ../../../outputs/symm/mgi2_3.89_M1
-coordinate_frame:
-  rotation_deg: 210
 sectors:
 - name: bottom
   qset: qset1
@@ -35,7 +33,6 @@ model:
   - 1
   bM:
     source: tmat
-    angle_deg: 60
   harmonics:
     intra: 6
     inter: 5

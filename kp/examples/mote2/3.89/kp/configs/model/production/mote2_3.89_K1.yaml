@@ -2,8 +2,6 @@ source_config: ../../source/mote2_3.89_K1.yaml
 valley: K1
 spin: spinless
 symmetry_source: ../../../outputs/symm/mote2_3.89_K1
-coordinate_frame:
-  rotation_deg: 210
 kpath:
   file: ../../../../tapw/KPATH.in
   tmat:
