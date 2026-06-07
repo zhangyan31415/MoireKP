@@ -24,44 +24,8 @@ symmetry_source:
   use: raw
   matrix_kind: action
   operations:
-  - name: C3z
-    operation: C3
-    matrix_file: C3_low_raw.npy
-    antiunitary: false
-    k_map:
-      type: rotation
-      angle_deg: 120.0
-    q_map:
-      type: rotation
-      angle_deg: 120.0
-    sector_map: identity
-    source_matrix_role: raw_h_sewing_action
-    source_gauge: raw_saved_TAPW
-    target_role: continuum_internal_rep
-    gauge_correction:
-      kind: none
-    spin_map: from_kp_symm_output
-    valley_map: identity
-    antiunitary_convention: none
-  - name: C2T
-    operation: C2T
-    matrix_file: C2T_low_raw.npy
-    antiunitary: true
-    k_map:
-      type: reflection
-      axis_deg: 180.0
-    q_map:
-      type: reflection
-      axis_deg: 180.0
-    sector_map: layer_exchange
-    source_matrix_role: raw_h_sewing_action
-    source_gauge: raw_saved_TAPW
-    target_role: continuum_internal_rep
-    gauge_correction:
-      kind: none
-    spin_map: from_kp_symm_output
-    valley_map: identity
-    antiunitary_convention: U_K
+  - C3z
+  - C2T
   exactification:
     support_source: geometry
     central_phase:
@@ -98,25 +62,17 @@ model:
     inter: 4
   symmetry_map:
     Kinect:
-    - name: C3z
-      user_name: C3z
-    - name: C2T
-      user_name: C2T
+    - C3z
+    - C2T
     Onsite:
-    - name: C3z
-      user_name: C3z
-    - name: C2T
-      user_name: C2T
+    - C3z
+    - C2T
     intra:
-    - name: C3z
-      user_name: C3z
-    - name: C2T
-      user_name: C2T
+    - C3z
+    - C2T
     inter:
-    - name: C3z
-      user_name: C3z
-    - name: C2T
-      user_name: C2T
+    - C3z
+    - C2T
 fit:
   indices:
   - 0

@@ -311,71 +311,99 @@ def _default_symmetry_source(
     return out
 
 
-def _is_m_spinless_effective_valley(valley_model: Mapping[str, Any]) -> bool:
-    return (
-        str(valley_model.get("valley_type", "")) == "M"
-        and str(valley_model.get("mode", "")) == "single_valley"
-        and str(valley_model.get("spin_convention", "")) == "spinless_effective"
-    )
-
-
 def _source_matrix_file(source_name: str, use: str, matrix_kind: str) -> str:
     suffix = "representation_" if matrix_kind in {"representation", "d0", "D0"} else ""
     return f"{source_name}_low_{suffix}{use}.npy"
 
 
-def _effective_m_source_operation_entry(operation: Any, valley_model: Mapping[str, Any], *, use: str, matrix_kind: str) -> dict[str, Any]:
-    if isinstance(operation, Mapping):
-        row = dict(operation)
-        source_name = str(row.get("operation", row.get("name", "")))
-    else:
-        row = {}
-        source_name = str(operation)
-    canonical = canonical_source_operation_name_for_valley(source_name, valley_model)
-    if canonical == "TR_eff":
-        source = source_name or "TR"
-        compiled = _source_op("TR_eff", source, _source_matrix_file(source, use, matrix_kind))
-    elif canonical == "C2_eff":
-        source = source_name or "C2"
-        compiled = _source_op("C2_eff", source, _source_matrix_file(source, use, matrix_kind), axis_deg=150.0)
-    else:
-        compiled = dict(row)
-        compiled.setdefault("name", source_name)
-    compiled.update(row)
-    return compiled
+def _default_source_operation_name(name: str) -> str:
+    if name in {"C3z"}:
+        return "C3"
+    if name in {"TR", "TR_eff"}:
+        return "TR"
+    if name in {"C2_eff"}:
+        return "C2"
+    return name
 
 
-def _normalize_effective_m_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
+def _matrix_file_stem(source_operation: str) -> str:
+    if source_operation == "TR":
+        return "T"
+    return source_operation
+
+
+def _resolved_action_for_source_operation(name: str, valley_model: Mapping[str, Any]) -> dict[str, Any]:
+    valley_type = str(valley_model.get("valley_type", ""))
+    mode = str(valley_model.get("mode", ""))
+    spin = str(valley_model.get("spin_convention", ""))
+    if name == "C2T" and valley_type == "K" and mode == "single_valley":
+        return _with_sector_map(_operation_action("C2T", axis_deg=180.0), "layer_exchange")
+    if name in {"C2", "C2_eff"}:
+        return _with_sector_map(_operation_action(name, axis_deg=0.0), "layer_exchange")
+    if name in ACTION_SPECS:
+        return _operation_action(name)
+    if spin == "spinless_effective":
+        canonical = canonical_source_operation_name_for_valley(name, valley_model)
+        if canonical in ACTION_SPECS:
+            return _resolved_action_for_source_operation(canonical, valley_model)
+    raise ValueError(f"Cannot infer resolved action for symmetry operation {name!r}")
+
+
+def _complete_kp_symm_operation_entry(
+    operation: Any,
+    valley_model: Mapping[str, Any],
+    *,
+    use: str,
+    matrix_kind: str,
+) -> dict[str, Any]:
+    row = dict(operation) if isinstance(operation, Mapping) else {"name": str(operation)}
+    name = canonical_source_operation_name_for_valley(str(row.get("name", row.get("operation", ""))), valley_model)
+    source_operation = str(row.get("operation", _default_source_operation_name(name)))
+    action = _resolved_action_for_source_operation(name, valley_model)
+    semantics = REPRESENTATION_SEMANTICS if matrix_kind in {"representation", "d0", "D0"} else SOURCE_SEMANTICS
+    completed = {
+        "name": name,
+        "operation": source_operation,
+        "matrix_file": _source_matrix_file(_matrix_file_stem(source_operation), use, matrix_kind),
+        **copy.deepcopy(action),
+        **copy.deepcopy(dict(semantics)),
+    }
+    completed["antiunitary_convention"] = "U_K" if completed["antiunitary"] else "none"
+    completed.update(row)
+    completed["name"] = name
+    completed.setdefault("operation", source_operation)
+    if "q_map" not in completed and "k_map" in completed:
+        completed["q_map"] = copy.deepcopy(completed["k_map"])
+    return completed
+
+
+def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(raw)
     valley_model = out.get("valley_model", {})
-    if not isinstance(valley_model, Mapping) or not _is_m_spinless_effective_valley(valley_model):
-        return out
     symmetry_source = out.get("symmetry_source", {})
-    if not isinstance(symmetry_source, Mapping) or str(symmetry_source.get("type", "none")) != "kp_symm_output":
+    if not isinstance(valley_model, Mapping) or not isinstance(symmetry_source, Mapping):
         return out
-
+    if str(symmetry_source.get("type", "none")) != "kp_symm_output":
+        return out
     source_out = dict(symmetry_source)
     operations = source_out.get("operations")
     if operations is None:
         operations = valley_model.get("allowed_internal_symmetries", [])
     if isinstance(operations, Mapping):
-        iterable: list[Any] = []
-        for key, value in operations.items():
-            row = dict(value) if isinstance(value, Mapping) else {}
-            row.setdefault("name", str(key))
-            iterable.append(row)
-        operations = iterable
+        operations = [
+            {**(dict(value) if isinstance(value, Mapping) else {}), "name": str(key)}
+            for key, value in operations.items()
+        ]
     if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
         raise ValueError("symmetry_source.operations must be a list or mapping when provided")
-
     use = str(source_out.get("use", "raw"))
     matrix_kind = str(source_out.get("matrix_kind", source_out.get("kind", "action")))
     source_out["operations"] = [
-        _effective_m_source_operation_entry(operation, valley_model, use=use, matrix_kind=matrix_kind) for operation in operations
+        _complete_kp_symm_operation_entry(operation, valley_model, use=use, matrix_kind=matrix_kind)
+        for operation in operations
     ]
     out["symmetry_source"] = source_out
     return out
-
 
 def _reflect_vector(kvec: np.ndarray, axis_deg: float) -> np.ndarray:
     theta = np.deg2rad(float(axis_deg))
@@ -592,7 +620,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         model_raw["max_order"] = dict(DEFAULT_MAX_ORDER)
     raw["model"] = model_raw
     raw = _normalize_user_symmetry_names(raw)
-    raw = _normalize_effective_m_kp_symm_source(raw)
+    raw = _normalize_kp_symm_source(raw)
 
     model = _model_section(raw)
     if "n_orb" in model:

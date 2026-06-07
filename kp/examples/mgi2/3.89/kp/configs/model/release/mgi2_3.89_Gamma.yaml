@@ -21,61 +21,9 @@ symmetry_source:
   use: raw
   matrix_kind: representation
   operations:
-  - name: C3z
-    operation: C3
-    matrix_file: C3_low_representation_raw.npy
-    antiunitary: false
-    k_map:
-      type: rotation
-      angle_deg: 120.0
-    q_map:
-      type: rotation
-      angle_deg: 120.0
-    sector_map: identity
-    source_matrix_role: bare_D0_internal_rep
-    source_gauge: raw_saved_TAPW
-    target_role: continuum_internal_rep
-    gauge_correction:
-      kind: none
-    antiunitary_convention: none
-    spin_map: from_kp_symm_output
-    valley_map: identity
-  - name: C2
-    operation: C2
-    matrix_file: C2_low_representation_raw.npy
-    antiunitary: false
-    k_map:
-      type: reflection
-      axis_deg: 0.0
-    q_map:
-      type: reflection
-      axis_deg: 0.0
-    sector_map: layer_exchange
-    source_matrix_role: bare_D0_internal_rep
-    source_gauge: raw_saved_TAPW
-    target_role: continuum_internal_rep
-    gauge_correction:
-      kind: none
-    antiunitary_convention: none
-    spin_map: from_kp_symm_output
-    valley_map: identity
-  - name: TR
-    operation: TR
-    matrix_file: T_low_representation_raw.npy
-    antiunitary: true
-    k_map:
-      type: negation
-    q_map:
-      type: negation
-    sector_map: identity
-    source_matrix_role: bare_D0_internal_rep
-    source_gauge: raw_saved_TAPW
-    target_role: continuum_internal_rep
-    gauge_correction:
-      kind: none
-    antiunitary_convention: U_K
-    spin_map: from_kp_symm_output
-    valley_map: identity
+  - C3z
+  - C2
+  - TR
   exactification:
     support_source: geometry
     central_phase:
@@ -110,109 +58,21 @@ model:
     inter: 10
   symmetry_map:
     Kinect:
-    - name: C3z
-      antiunitary: false
-      k_map:
-        type: rotation
-        angle_deg: 120.0
-      q_map:
-        type: rotation
-        angle_deg: 120.0
-      sector_map: identity
-    - name: TR
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-    - name: C2
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
+    - C3z
+    - TR
+    - C2
     Onsite:
-    - name: C3z
-      antiunitary: false
-      k_map:
-        type: rotation
-        angle_deg: 120.0
-      q_map:
-        type: rotation
-        angle_deg: 120.0
-      sector_map: identity
-    - name: TR
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-    - name: C2
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
+    - C3z
+    - TR
+    - C2
     intra:
-    - name: C3z
-      antiunitary: false
-      k_map:
-        type: rotation
-        angle_deg: 120.0
-      q_map:
-        type: rotation
-        angle_deg: 120.0
-      sector_map: identity
-    - name: TR
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-    - name: C2
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
+    - C3z
+    - TR
+    - C2
     inter:
-    - name: C3z
-      antiunitary: false
-      k_map:
-        type: rotation
-        angle_deg: 120.0
-      q_map:
-        type: rotation
-        angle_deg: 120.0
-      sector_map: identity
-    - name: TR
-      antiunitary: true
-      k_map:
-        type: negation
-      q_map:
-        type: negation
-      sector_map: identity
-    - name: C2
-      antiunitary: false
-      k_map:
-        type: reflection
-        axis_deg: 0.0
-      q_map:
-        type: reflection
-        axis_deg: 0.0
-      sector_map: layer_exchange
+    - C3z
+    - TR
+    - C2
 fit:
   indices:
   - 0

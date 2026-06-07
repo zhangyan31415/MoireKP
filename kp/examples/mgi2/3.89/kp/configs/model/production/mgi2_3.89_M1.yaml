@@ -62,17 +62,17 @@ model:
     inter: 8
   symmetry_map:
     Kinect:
-    - name: C2_eff
-    - name: TR_eff
+    - C2_eff
+    - TR_eff
     Onsite:
-    - name: C2_eff
-    - name: TR_eff
+    - C2_eff
+    - TR_eff
     intra:
-    - name: C2_eff
-    - name: TR_eff
+    - C2_eff
+    - TR_eff
     inter:
-    - name: C2_eff
-    - name: TR_eff
+    - C2_eff
+    - TR_eff
 fit:
   indices:
   - 20

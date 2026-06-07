@@ -59,6 +59,20 @@ def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
         text = path.read_text(encoding="utf-8")
         assert "harmonics_source" not in text
         assert "representatives:" not in text
+        for forbidden in (
+            "source_matrix_role",
+            "source_gauge",
+            "target_role",
+            "gauge_correction",
+            "antiunitary_convention",
+            "spin_map",
+            "valley_map",
+            "matrix_file",
+            "k_map:",
+            "q_map:",
+            "sector_map:",
+        ):
+            assert forbidden not in text, (path, forbidden)
 
 
 def test_gmk_production_configs_load() -> None:
