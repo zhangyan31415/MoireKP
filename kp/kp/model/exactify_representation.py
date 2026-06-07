@@ -587,15 +587,15 @@ def exactify_1d_monomial_phases(
 ) -> tuple[np.ndarray, ExactificationReport]:
     arr = np.asarray(D_num, dtype=complex)
     perm_arr = np.asarray(perm, dtype=int)
-    report = analyze_monomial_support(arr, perm_arr)
-    if report.support_mismatch_count:
-        raise ValueError(f"{operation_name} exactification failed: support mismatch count={report.support_mismatch_count}")
-    if report.off_support_rel > reject_if_off_support_rel_gt:
+    input_report = analyze_monomial_support(arr, perm_arr)
+    if input_report.support_mismatch_count:
+        raise ValueError(f"{operation_name} exactification failed: support mismatch count={input_report.support_mismatch_count}")
+    if input_report.off_support_rel > reject_if_off_support_rel_gt:
         raise ValueError(
-            f"{operation_name} exactification failed: off-support pollution {report.off_support_rel:.3e} exceeds "
+            f"{operation_name} exactification failed: off-support pollution {input_report.off_support_rel:.3e} exceeds "
             f"{reject_if_off_support_rel_gt:.3e}"
         )
-    amp_dev = max(abs(report.amplitude_min - 1.0), abs(report.amplitude_max - 1.0))
+    amp_dev = max(abs(input_report.amplitude_min - 1.0), abs(input_report.amplitude_max - 1.0))
     if amp_dev > reject_if_amplitude_deviation_gt:
         raise ValueError(
             f"{operation_name} exactification failed: amplitude deviation {amp_dev:.3e} exceeds "
@@ -627,20 +627,25 @@ def exactify_1d_monomial_phases(
     alpha = np.vdot(exact, arr) / np.vdot(exact, exact)
     alpha = alpha / abs(alpha)
     distance = float(np.linalg.norm(arr - alpha * exact) / max(np.linalg.norm(exact), 1.0))
+    final_report = analyze_monomial_support(exact, perm_arr)
     report = ExactificationReport(
         status="exactified",
-        off_support_rel=report.off_support_rel,
-        off_support_max=report.off_support_max,
-        support_mismatch_count=report.support_mismatch_count,
-        amplitude_min=report.amplitude_min,
-        amplitude_max=report.amplitude_max,
-        amplitude_mean=report.amplitude_mean,
-        amplitude_std=report.amplitude_std,
-        phase_mean_deg=report.phase_mean_deg,
-        phase_std_deg=report.phase_std_deg,
+        off_support_rel=final_report.off_support_rel,
+        off_support_max=final_report.off_support_max,
+        support_mismatch_count=final_report.support_mismatch_count,
+        amplitude_min=final_report.amplitude_min,
+        amplitude_max=final_report.amplitude_max,
+        amplitude_mean=final_report.amplitude_mean,
+        amplitude_std=final_report.amplitude_std,
+        phase_mean_deg=final_report.phase_mean_deg,
+        phase_std_deg=final_report.phase_std_deg,
         selected_roots=selected_roots,
         distance_mod_global_phase=distance,
         group_residuals={"power": power_residual},
+        joint_group_residuals={
+            "input_off_support_rel": float(input_report.off_support_rel),
+            "input_off_support_max": float(input_report.off_support_max),
+        },
     )
     return exact, report
 
@@ -719,13 +724,13 @@ def exactify_block_monomial_representation(
     reject_if_amplitude_deviation_gt: float = 2.0e-2,
 ) -> tuple[np.ndarray, ExactificationReport]:
     arr = np.asarray(D_num, dtype=complex)
-    report = analyze_block_support(arr, groups)
-    if report.off_support_rel > reject_if_off_support_rel_gt:
+    input_report = analyze_block_support(arr, groups)
+    if input_report.off_support_rel > reject_if_off_support_rel_gt:
         raise ValueError(
-            f"{operation_name} block exactification failed: off-support pollution {report.off_support_rel:.3e} exceeds "
+            f"{operation_name} block exactification failed: off-support pollution {input_report.off_support_rel:.3e} exceeds "
             f"{reject_if_off_support_rel_gt:.3e}"
         )
-    amp_dev = max(abs(report.amplitude_min - 1.0), abs(report.amplitude_max - 1.0))
+    amp_dev = max(abs(input_report.amplitude_min - 1.0), abs(input_report.amplitude_max - 1.0))
     if amp_dev > reject_if_amplitude_deviation_gt:
         raise ValueError(
             f"{operation_name} block exactification failed: amplitude deviation {amp_dev:.3e} exceeds "
@@ -753,17 +758,22 @@ def exactify_block_monomial_representation(
     alpha = np.vdot(exact, arr) / np.vdot(exact, exact)
     alpha = alpha / abs(alpha)
     distance = float(np.linalg.norm(arr - alpha * exact) / max(np.linalg.norm(exact), 1.0))
+    final_report = analyze_block_support(exact, groups)
     exact_report = ExactificationReport(
         status="exactified",
-        off_support_rel=report.off_support_rel,
-        off_support_max=report.off_support_max,
+        off_support_rel=final_report.off_support_rel,
+        off_support_max=final_report.off_support_max,
         support_mismatch_count=0,
-        amplitude_min=report.amplitude_min,
-        amplitude_max=report.amplitude_max,
-        amplitude_mean=report.amplitude_mean,
-        amplitude_std=report.amplitude_std,
+        amplitude_min=final_report.amplitude_min,
+        amplitude_max=final_report.amplitude_max,
+        amplitude_mean=final_report.amplitude_mean,
+        amplitude_std=final_report.amplitude_std,
         distance_mod_global_phase=distance,
         group_residuals={"power": power_residual},
+        joint_group_residuals={
+            "input_off_support_rel": float(input_report.off_support_rel),
+            "input_off_support_max": float(input_report.off_support_max),
+        },
         notes=["block_exactification"],
     )
     return exact, exact_report
@@ -844,6 +854,13 @@ def _operation_exactification_config(exact_cfg: Mapping[str, Any], operation_nam
     if not isinstance(entry, Mapping):
         raise ValueError(f"exactification.operations.{operation_name} must be a mapping")
     return dict(entry)
+
+
+def _default_auto_monomial_cleanup(operation_name: str, op: OperationAction) -> bool:
+    if op.antiunitary:
+        return False
+    family = op.canonical_name or operation_name
+    return family == "C2" or str(operation_name).startswith("C2_")
 
 
 def _central_phase_for_operation(operation_name: str, cfg: Mapping[str, Any], *, antiunitary: bool) -> tuple[int, complex]:
@@ -992,8 +1009,7 @@ def exactify_loaded_symmetry_source(
         reject_off = float(op_cfg.get("reject_if_off_support_rel_gt", exact_cfg.get("reject_if_off_support_rel_gt", 1.0e-6)))
         reject_amp = float(op_cfg.get("reject_if_amplitude_deviation_gt", exact_cfg.get("reject_if_amplitude_deviation_gt", 2.0e-2)))
         if preferred_mode == "monomial":
-            if not allowed_roots:
-                raise ValueError(f"{name} exactification requires allowed_roots for monomial mode")
+            allowed_roots = allowed_roots or _roots_for_power_phase(power, central_phase)
             D_exact, report = exactify_1d_monomial_phases(
                 D_num,
                 label_action.perm,
@@ -1022,41 +1038,50 @@ def exactify_loaded_symmetry_source(
                 reject_if_amplitude_deviation_gt=reject_amp,
             )
             D_exact, report = block_exact, block_report
-            if preferred_mode == "block_monomial":
-                if not allowed_roots:
-                    allowed_roots = roots_of_unity_up_to(int(op_cfg.get("monomial_root_order_max", 12)))
+            cleanup_required = preferred_mode == "block_monomial"
+            cleanup_allowed = bool(op_cfg.get("auto_monomial_cleanup", _default_auto_monomial_cleanup(name, op)))
+            if cleanup_required or cleanup_allowed:
+                cleanup_roots = allowed_roots or roots_of_unity_up_to(
+                    int(op_cfg.get("monomial_root_order_max", exact_cfg.get("monomial_root_order_max", 12)))
+                )
                 cleanup_tol = float(
-                    op_cfg.get("monomial_cleanup_tol", exact_cfg.get("monomial_cleanup_tol", reject_off))
+                    op_cfg.get("monomial_cleanup_tol", exact_cfg.get("monomial_cleanup_tol", 1.0e-4))
                 )
-                cleanup_perm, cleanup_support_report = infer_monomial_perm_from_blocks(
-                    block_exact,
-                    groups,
-                    operation_name=name,
-                    reject_if_off_support_rel_gt=cleanup_tol,
-                    reject_if_amplitude_deviation_gt=reject_amp,
-                )
-                D_exact, cleanup_report = exactify_1d_monomial_phases(
-                    block_exact,
-                    cleanup_perm,
-                    labels=labels,
-                    phase_classes=op_cfg.get("monomial_phase_classes", "matrix_element"),
-                    allowed_roots=allowed_roots,
-                    operation_name=name,
-                    power=power,
-                    central_phase=central_phase,
-                    antiunitary=op.antiunitary,
-                    reject_if_off_support_rel_gt=cleanup_tol,
-                    reject_if_amplitude_deviation_gt=reject_amp,
-                )
-                inferred_note = "inferred_monomial_support"
-                cleanup_report.notes = [*block_report.notes, inferred_note, "block_monomial_cleanup"]
-                cleanup_report.joint_group_residuals = {
-                    "block_power": float(block_report.group_residuals.get("power", 0.0)),
-                    "cleanup_power": float(cleanup_report.group_residuals.get("power", 0.0)),
-                    "cleanup_input_off_support_rel": float(cleanup_support_report.off_support_rel),
-                    "cleanup_input_off_support_max": float(cleanup_support_report.off_support_max),
-                }
-                report = cleanup_report
+                try:
+                    cleanup_perm, cleanup_support_report = infer_monomial_perm_from_blocks(
+                        block_exact,
+                        groups,
+                        operation_name=name,
+                        reject_if_off_support_rel_gt=cleanup_tol,
+                        reject_if_amplitude_deviation_gt=reject_amp,
+                    )
+                    D_exact, cleanup_report = exactify_1d_monomial_phases(
+                        block_exact,
+                        cleanup_perm,
+                        labels=labels,
+                        phase_classes=op_cfg.get("monomial_phase_classes", "matrix_element"),
+                        allowed_roots=cleanup_roots,
+                        operation_name=name,
+                        power=power,
+                        central_phase=central_phase,
+                        antiunitary=op.antiunitary,
+                        reject_if_off_support_rel_gt=cleanup_tol,
+                        reject_if_amplitude_deviation_gt=reject_amp,
+                    )
+                except ValueError:
+                    if cleanup_required:
+                        raise
+                else:
+                    preferred_mode = "block_monomial"
+                    inferred_note = "inferred_monomial_support"
+                    cleanup_report.notes = [*block_report.notes, inferred_note, "block_monomial_cleanup"]
+                    cleanup_report.joint_group_residuals = {
+                        "block_power": float(block_report.group_residuals.get("power", 0.0)),
+                        "cleanup_power": float(cleanup_report.group_residuals.get("power", 0.0)),
+                        "cleanup_input_off_support_rel": float(cleanup_support_report.off_support_rel),
+                        "cleanup_input_off_support_max": float(cleanup_support_report.off_support_max),
+                    }
+                    report = cleanup_report
         out[name] = D_exact
         reports[name] = {
             "input_matrix_file": record.get("matrix_file"),

@@ -68,9 +68,6 @@ symmetry_source:
         support_mode: block_monomial
         power: 3
         central_phase: -1
-        allowed_roots: sixth_roots_cube_minus_one
-        phase_classes: orbital
-        monomial_cleanup_tol: 0.0001
         action_candidates:
         - k_map:
             type: rotation
