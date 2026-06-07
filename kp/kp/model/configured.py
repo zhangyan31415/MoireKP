@@ -544,7 +544,9 @@ def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: floa
         if not isinstance(record, Mapping):
             continue
         enriched = dict(record)
-        resolved_action = record.get("source_resolved_action")
+        resolved_action = record.get("model_action")
+        if not isinstance(resolved_action, Mapping):
+            resolved_action = record.get("source_resolved_action")
         if isinstance(resolved_action, Mapping):
             for key in ("antiunitary", "k_map", "q_map", "sector_map"):
                 if key in resolved_action:

@@ -12,13 +12,31 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.cli as cli
-from kp.symmetry.project import _validate_operation_label
+from kp.symmetry.project import _model_frame_action_metadata, _validate_operation_label
 
 
 class SymmetryProjectionCliTests(unittest.TestCase):
     def test_symm_rejects_nonstandard_operation_label(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported symm operation"):
             _validate_operation_label("C4")
+
+    def test_model_frame_action_rotates_source_reflection_axis(self) -> None:
+        source = {
+            "antiunitary": True,
+            "k_map": {"type": "reflection", "axis_deg": 180.0},
+            "q_map": {"type": "reflection", "axis_deg": 180.0},
+            "sector_map": "layer_exchange",
+            "spin_map": "from_kp_symm_output",
+            "valley_map": "identity",
+        }
+
+        model = _model_frame_action_metadata(source, rotation_deg=30.0)
+
+        self.assertEqual(source["k_map"]["axis_deg"], 180.0)
+        self.assertEqual(model["k_map"]["axis_deg"], 210.0)
+        self.assertEqual(model["q_map"]["axis_deg"], 210.0)
+        self.assertTrue(model["k_map"]["in_model_frame"])
+        self.assertTrue(model["q_map"]["in_model_frame"])
 
     def test_symm_projects_spin_up_antiunitary_representation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -90,7 +108,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     "num_layers": 2,
                     "num_orb_per_layer": [2, 2],
                 },
-                "plot": {"hamk_index": 0},
+                "plot": {"hamk_index": 0, "q_rotation_deg": 30.0},
                 "project": {
                     "enable": True,
                     "mode": "K1",
@@ -121,9 +139,19 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             np.testing.assert_allclose(c3_raw, np.eye(2), atol=1e-12)
 
             summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["frame"], summary["frame"])
+            self.assertEqual(summary["frame"]["q_transform"]["formula"], "q_model = R(rotation_deg) @ (layer_mean - q_source)")
+            self.assertEqual(summary["frame"]["q_transform"]["rotation_deg"], 30.0)
+            self.assertEqual(summary["q_model"]["files"]["layer1"], "q_model_layer1.npy")
+            self.assertEqual(summary["q_model"]["files"]["layer2"], "q_model_layer2.npy")
+            np.testing.assert_allclose(np.load(out_dir / "q_model_layer1.npy"), [[0.0, 0.0]], atol=1.0e-12)
             by_name = {op["operation"]: op for op in summary["operations"]}
             self.assertFalse(by_name["C3"]["antiunitary"])
             self.assertTrue(by_name["C2T"]["antiunitary"])
+            self.assertEqual(by_name["C2T"]["source_action"]["k_map"]["axis_deg"], 180.0)
+            self.assertEqual(by_name["C2T"]["model_action"]["k_map"]["axis_deg"], 210.0)
+            self.assertTrue(by_name["C2T"]["k_map"]["in_model_frame"])
             self.assertLess(by_name["C3"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["subspace_leakage"], 1.0e-12)

@@ -229,7 +229,12 @@ def _candidate_operation_actions(
             f"exactification strict mode requires explicit action_candidates for operation {record.get('name')!r}"
         )
     model_record = dict(record)
-    model_record["k_map"] = _model_frame_k_map(record.get("k_map", {}))
+    model_action = record.get("model_action")
+    if isinstance(model_action, Mapping):
+        for key in ("antiunitary", "k_map", "q_map", "sector_map"):
+            if key in model_action:
+                model_record[key] = model_action[key]
+    model_record["k_map"] = _model_frame_k_map(model_record.get("k_map", {}))
     base = _build_operation_from_record(model_record)
     candidates = [base]
     sector_names = [str(sector.get("name")) for sector in sectors]

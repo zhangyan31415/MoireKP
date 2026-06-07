@@ -252,6 +252,61 @@ def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitar
     }
 
 
+def _rotation_matrix_2d(angle_deg: float) -> list[list[float]]:
+    theta = np.deg2rad(float(angle_deg))
+    c = float(np.cos(theta))
+    s = float(np.sin(theta))
+    return [[c, -s], [s, c]]
+
+
+def _frame_metadata(*, rotation_deg: float) -> dict[str, Any]:
+    rotation = _rotation_matrix_2d(rotation_deg)
+    return {
+        "source": "tapw_q_lists",
+        "model": "continuum_model_q_basis",
+        "k_transform": {
+            "formula": "k_model = R(rotation_deg) @ k_source",
+            "rotation_deg": float(rotation_deg),
+            "linear_matrix": rotation,
+        },
+        "q_transform": {
+            "formula": "q_model = R(rotation_deg) @ (layer_mean - q_source)",
+            "rotation_deg": float(rotation_deg),
+            "center": "layer_mean",
+            "linear_matrix": [[-value for value in row] for row in rotation],
+        },
+    }
+
+
+def _model_q_sets(q1: np.ndarray, q2: np.ndarray, *, rotation_deg: float) -> tuple[np.ndarray, np.ndarray]:
+    q1_arr = np.asarray(q1, dtype=float)
+    q2_arr = np.asarray(q2, dtype=float)
+    theta = np.deg2rad(float(rotation_deg))
+    rotation = np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]], dtype=float)
+    center1 = np.mean(q1_arr, axis=0)
+    center2 = np.mean(q2_arr, axis=0)
+    return (center1 - q1_arr) @ rotation.T, (center2 - q2_arr) @ rotation.T
+
+
+def _model_frame_map(raw: Any, *, rotation_deg: float) -> Any:
+    if not isinstance(raw, dict):
+        return raw
+    out = dict(raw)
+    if bool(out.get("in_model_frame", False)):
+        return out
+    if str(out.get("type", "")).lower() == "reflection" and "axis_deg" in out:
+        out["axis_deg"] = float(out["axis_deg"]) + float(rotation_deg)
+    out["in_model_frame"] = True
+    return out
+
+
+def _model_frame_action_metadata(source_action: dict[str, Any], *, rotation_deg: float) -> dict[str, Any]:
+    model_action = dict(source_action)
+    model_action["k_map"] = _model_frame_map(source_action.get("k_map"), rotation_deg=rotation_deg)
+    model_action["q_map"] = _model_frame_map(source_action.get("q_map", source_action.get("k_map")), rotation_deg=rotation_deg)
+    return model_action
+
+
 def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         if entry.get(key):
@@ -655,6 +710,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
     valley = str(symm_cfg.get("valley", "K1"))
     spin = str(symm_cfg.get("spin", material.get("spin", "all"))).lower()
     spin_sector_sewing = symm_cfg.get("spin_sector_sewing")
+    q_rotation_deg = float(plot_cfg.get("q_rotation_deg", symm_cfg.get("q_rotation_deg", 0.0)))
     source_operations = [str(op) for op in symm_cfg.get("operations", [])]
     if not source_operations:
         raise ValueError("symm.operations must not be empty")
@@ -834,6 +890,9 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
     low_dim = int(first_state.u_low.shape[1])
     output_dir = Path(_resolve(symm_cfg.get("output_dir", "symm_project"), cfg_dir) or "symm_project")
     output_dir.mkdir(parents=True, exist_ok=True)
+    q_model1, q_model2 = _model_q_sets(q1, q2, rotation_deg=q_rotation_deg)
+    np.save(output_dir / "q_model_layer1.npy", q_model1)
+    np.save(output_dir / "q_model_layer2.npy", q_model2)
 
     summary = {
         "config": cfg_path,
@@ -845,6 +904,12 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         "orbital_block_dim": orb0,
         "full_dim": full_dim,
         "low_dim": low_dim,
+        "frame": _frame_metadata(rotation_deg=q_rotation_deg),
+        "q_model": {
+            "files": {"layer1": "q_model_layer1.npy", "layer2": "q_model_layer2.npy"},
+            "source_files": {"layer1": str(qset1_file), "layer2": str(qset2_file)},
+            "formula": "q_model = R(rotation_deg) @ (layer_mean - q_source)",
+        },
         "operations": [],
     }
 
@@ -857,7 +922,8 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         filename = str(payload["filename"])
         action = payload["action"]
         rep = action.representation
-        action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
+        source_action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
+        model_action_metadata = _model_frame_action_metadata(source_action_metadata, rotation_deg=q_rotation_deg)
 
         raw_mats, polar_mats, pair_rows = _project_operation(
             operation=output_operation,
@@ -893,7 +959,9 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
                 "antiunitary": antiunitary,
                 "matrix_file": f"{output_operation}_low_raw.npy",
                 "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
-                **action_metadata,
+                **model_action_metadata,
+                "source_action": source_action_metadata,
+                "model_action": model_action_metadata,
                 "axis_deg": entry.get("axis_deg"),
                 "status": entry.get("status"),
                 "square_residual": entry.get("square_residual"),
@@ -916,6 +984,8 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             }
         )
 
-    (output_dir / "summary.json").write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
+    (output_dir / "manifest.json").write_text(payload, encoding="utf-8")
+    (output_dir / "summary.json").write_text(payload, encoding="utf-8")
     _write_summary_md(output_dir / "summary.md", summary)
     return summary

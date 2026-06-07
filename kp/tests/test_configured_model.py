@@ -1615,6 +1615,55 @@ def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: P
     assert op["k_map"]["axis_deg"] == pytest.approx(180.0)
 
 
+def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["coordinate_frame"] = {"rotation_deg": 30.0}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "representation"}
+    raw["model"]["symmetry_map"] = {
+        "Kinect": [{"name": "C2"}],
+        "Onsite": [],
+        "intra": [],
+        "inter": [],
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir()
+    np.save(symm_dir / "C2_low_representation_raw.npy", np.eye(4, dtype=complex))
+    (symm_dir / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "operations": [
+                    {
+                        **_source_meta(representation=True),
+                        "name": "C2",
+                        "matrix_file": "C2_low_representation_raw.npy",
+                        "k_map": {"type": "reflection", "axis_deg": 150.0},
+                        "q_map": {"type": "reflection", "axis_deg": 150.0},
+                        "model_action": {
+                            "antiunitary": False,
+                            "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                            "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                            "sector_map": "identity",
+                        },
+                        "antiunitary": False,
+                        "sector_map": "identity",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    moire_cfg, _model_cfg = build_moire_config_from_file(cfg_path)
+
+    op = moire_cfg.symmetry_map["Kinect"][0]
+    assert op["k_map"]["axis_deg"] == pytest.approx(180.0)
+    assert op["q_map"]["axis_deg"] == pytest.approx(180.0)
+    assert op["k_map"]["in_model_frame"] is True
+
+
 def test_float_p_key_canonicalization() -> None:
     from kp.model.config_schema import canonical_vector_key
 
