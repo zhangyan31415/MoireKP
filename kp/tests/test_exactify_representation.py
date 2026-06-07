@@ -68,6 +68,36 @@ def _k_basis_labels() -> list[BasisLabel]:
     return labels
 
 
+def _k_basis_labels_two_orbital() -> list[BasisLabel]:
+    b1, b2 = _hex_bm()
+    qshell = [
+        (0, 0),
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, -1),
+        (-1, 1),
+    ]
+    labels: list[BasisLabel] = []
+    idx = 0
+    for sector in ("L1", "L2"):
+        for orbital in (1, 2):
+            for n1, n2 in qshell:
+                labels.append(
+                    BasisLabel(
+                        index=idx,
+                        sector=sector,
+                        q_integer=(n1, n2),
+                        q_vector=n1 * b1 + n2 * b2,
+                        orbital=orbital,
+                        internal_label=None,
+                    )
+                )
+                idx += 1
+    return labels
+
+
 def _c3_action() -> OperationAction:
     theta = 2.0 * np.pi / 3.0
     return OperationAction(
@@ -365,6 +395,91 @@ def test_exactify_preserves_explicit_in_model_frame_reflection_axis() -> None:
     np.testing.assert_allclose(exactified["C2T"], exact, atol=1.0e-12)
     assert reports["C2T"]["resolved_action"]["k_map"]["axis_deg"] == pytest.approx(180.0)
     assert reports["C2T"]["resolved_action"]["sector_map"] == "layer_exchange"
+
+
+def test_block_monomial_cleanup_removes_tiny_internal_mixing() -> None:
+    labels = _k_basis_labels_two_orbital()
+    q1 = np.array(
+        [label.q_vector for label in labels if label.sector == "L1" and label.orbital == 1],
+        dtype=float,
+    )
+    q2 = np.array(
+        [label.q_vector for label in labels if label.sector == "L2" and label.orbital == 1],
+        dtype=float,
+    )
+    b1, b2 = _hex_bm()
+    action = _c3_action()
+    label_action = build_label_action(labels, action, b1, b2, {"L1": np.zeros(2), "L2": np.zeros(2)}, tol=1.0e-8)
+
+    eps = 3.5e-5
+    rot = np.array([[np.cos(eps), -np.sin(eps)], [np.sin(eps), np.cos(eps)]], dtype=complex)
+    roots = np.diag([-1.0 + 0.0j, np.exp(-1j * np.pi / 3.0)])
+    block = rot @ roots @ rot.conj().T
+    expected_cleanup_residual = float(np.linalg.norm(block - np.diag(np.diag(block))) / np.linalg.norm(block))
+    raw = np.zeros((len(labels), len(labels)), dtype=complex)
+    expected = np.zeros_like(raw)
+    groups: dict[tuple[str, tuple[int, int]], list[BasisLabel]] = {}
+    for label in labels:
+        groups.setdefault((label.sector, label.q_integer), []).append(label)
+    for group in groups.values():
+        group.sort(key=lambda item: item.orbital)
+        cols = np.asarray([label.index for label in group], dtype=int)
+        rows = np.asarray([label_action.perm[col] for col in cols], dtype=int)
+        raw[np.ix_(rows, cols)] = block
+        expected[rows[0], cols[0]] = -1.0 + 0.0j
+        expected[rows[1], cols[1]] = np.exp(-1j * np.pi / 3.0)
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(),
+                    "name": "C3z",
+                    "antiunitary": False,
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                }
+            ]
+        },
+        matrices={"C3z": raw},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 2},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 2},
+        ],
+        n_orb=(2, 2),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "operations": {
+                    "C3z": {
+                        "support_mode": "block_monomial",
+                        "power": 3,
+                        "central_phase": -1.0,
+                        "allowed_roots": "sixth_roots_cube_minus_one",
+                        "phase_classes": "orbital",
+                        "monomial_cleanup_tol": 1.0e-4,
+                        "action_candidates": [
+                            {
+                                "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                "sector_map": "identity",
+                                "antiunitary": False,
+                            }
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    np.testing.assert_allclose(exactified["C3z"], expected, atol=1.0e-12)
+    assert reports["C3z"]["preferred_mode"] == "block_monomial"
+    assert reports["C3z"]["report"]["off_support_rel"] == pytest.approx(expected_cleanup_residual)
+    assert "block_monomial_cleanup" in reports["C3z"]["report"]["notes"]
 
 
 def test_exactify_layer_exchange_supports_bottom_top_sector_labels() -> None:

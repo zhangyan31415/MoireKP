@@ -891,8 +891,10 @@ def exactify_loaded_symmetry_source(
         preferred_mode = candidate["preferred_mode"]
         if support_mode == "monomial":
             preferred_mode = "monomial"
-        elif support_mode in {"block", "block_monomial"}:
+        elif support_mode == "block":
             preferred_mode = "block"
+        elif support_mode == "block_monomial":
+            preferred_mode = "block_monomial"
         support_report = candidate["monomial_report"] if preferred_mode == "monomial" else candidate["block_report"]
         group_relation_inferred = False
         if "power" in op_cfg or "central_phase" in op_cfg:
@@ -950,6 +952,31 @@ def exactify_loaded_symmetry_source(
                 reject_if_amplitude_deviation_gt=reject_amp,
             )
             D_exact, report = block_exact, block_report
+            if preferred_mode == "block_monomial":
+                if not allowed_roots:
+                    raise ValueError(f"{name} block_monomial exactification requires allowed_roots")
+                cleanup_tol = float(
+                    op_cfg.get("monomial_cleanup_tol", exact_cfg.get("monomial_cleanup_tol", reject_off))
+                )
+                D_exact, cleanup_report = exactify_1d_monomial_phases(
+                    block_exact,
+                    label_action.perm,
+                    labels=labels,
+                    phase_classes=phase_classes,
+                    allowed_roots=allowed_roots,
+                    operation_name=name,
+                    power=power,
+                    central_phase=central_phase,
+                    antiunitary=op.antiunitary,
+                    reject_if_off_support_rel_gt=cleanup_tol,
+                    reject_if_amplitude_deviation_gt=reject_amp,
+                )
+                cleanup_report.notes = [*block_report.notes, "block_monomial_cleanup"]
+                cleanup_report.joint_group_residuals = {
+                    "block_power": float(block_report.group_residuals.get("power", 0.0)),
+                    "cleanup_power": float(cleanup_report.group_residuals.get("power", 0.0)),
+                }
+                report = cleanup_report
         out[name] = D_exact
         reports[name] = {
             "input_matrix_file": record.get("matrix_file"),

@@ -93,9 +93,9 @@ def test_compute_bands_uses_eigvals_only_without_saved_eigenvectors(monkeypatch)
     np.testing.assert_allclose(eigvals[0], [1.0, 2.0])
 
 
-def test_monomial_extraction_tolerates_exactified_leakage():
+def test_monomial_extraction_tolerates_roundoff_leakage():
     matrix = np.eye(4, dtype=complex)
-    matrix[0, 1] = 3.0e-5
+    matrix[0, 1] = 3.0e-9
 
     mono = ContinuumModelBuilder._extract_monomial_matrix(matrix)
 
@@ -107,7 +107,7 @@ def test_monomial_extraction_tolerates_exactified_leakage():
 
 def test_monomial_extraction_rejects_dense_leakage():
     matrix = np.eye(4, dtype=complex)
-    matrix[0, 1] = 3.0e-4
+    matrix[0, 1] = 3.0e-5
 
     assert ContinuumModelBuilder._extract_monomial_matrix(matrix) is None
 

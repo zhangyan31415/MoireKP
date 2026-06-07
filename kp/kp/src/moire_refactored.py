@@ -1142,10 +1142,7 @@ class ContinuumModelBuilder:
     _SYMM_VALIDATE_MONOMIAL = True
     _SYMM_VALIDATE_SPARSE = True
     _SYMM_USE_SPARSE_BASIS = True
-    # TAPW-projected exactified operations can carry ~1e-5 off-support leakage while
-    # still representing a permutation-phase action. Keep this below 1e-3 so genuinely
-    # dense representations stay on the safe dense path.
-    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-4
+    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-8
     _SYMM_SPARSE_VALIDATED = False
     
     def __init__(self, Q_set1: np.ndarray, Q_set2: np.ndarray,

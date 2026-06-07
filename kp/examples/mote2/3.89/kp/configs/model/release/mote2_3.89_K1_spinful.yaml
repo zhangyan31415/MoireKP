@@ -65,10 +65,12 @@ symmetry_source:
     reject_if_amplitude_deviation_gt: 0.02
     operations:
       C3z:
-        support_mode: block
+        support_mode: block_monomial
         power: 3
         central_phase: -1
-        phase_classes: global
+        allowed_roots: sixth_roots_cube_minus_one
+        phase_classes: orbital
+        monomial_cleanup_tol: 0.0001
         action_candidates:
         - k_map:
             type: rotation
