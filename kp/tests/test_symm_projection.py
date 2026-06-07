@@ -12,13 +12,25 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.cli as cli
-from kp.symmetry.project import _model_frame_action_metadata, _validate_operation_label
+from kp.symmetry.project import (
+    _model_action_metadata,
+    _model_frame_action_metadata,
+    _operation_entry,
+    _validate_operation_label,
+)
 
 
 class SymmetryProjectionCliTests(unittest.TestCase):
     def test_symm_rejects_nonstandard_operation_label(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported symm operation"):
             _validate_operation_label("C4")
+
+    def test_symm_reads_tapw_t_manifest_entry_for_standard_tr_request(self) -> None:
+        manifest = {"operations": {"Gamma": {"T": {"filename": "Gamma/T.npz", "antiunitary": True}}}}
+
+        entry = _operation_entry(manifest, "Gamma", "TR")
+
+        self.assertEqual(entry["filename"], "Gamma/T.npz")
 
     def test_model_frame_action_rotates_source_reflection_axis(self) -> None:
         source = {
@@ -37,6 +49,23 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertEqual(model["q_map"]["axis_deg"], 210.0)
         self.assertTrue(model["k_map"]["in_model_frame"])
         self.assertTrue(model["q_map"]["in_model_frame"])
+
+    def test_k_single_valley_c2t_model_action_is_internal_support(self) -> None:
+        source = {
+            "antiunitary": True,
+            "k_map": {"type": "reflection", "axis_deg": 60.0},
+            "q_map": {"type": "reflection", "axis_deg": 60.0},
+            "sector_map": "identity",
+            "spin_map": "from_kp_symm_output",
+            "valley_map": "identity",
+        }
+
+        model = _model_action_metadata(source, valley="K1", operation="C2T", rotation_deg=210.0)
+
+        self.assertEqual(source["sector_map"], "identity")
+        self.assertEqual(model["sector_map"], "layer_exchange")
+        self.assertEqual(model["k_map"], {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True})
+        self.assertEqual(model["q_map"], {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True})
 
     def test_symm_projects_spin_up_antiunitary_representation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -150,7 +179,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertFalse(by_name["C3"]["antiunitary"])
             self.assertTrue(by_name["C2T"]["antiunitary"])
             self.assertEqual(by_name["C2T"]["source_action"]["k_map"]["axis_deg"], 180.0)
-            self.assertEqual(by_name["C2T"]["model_action"]["k_map"]["axis_deg"], 210.0)
+            self.assertEqual(by_name["C2T"]["model_action"]["k_map"]["axis_deg"], 180.0)
+            self.assertEqual(by_name["C2T"]["model_action"]["sector_map"], "layer_exchange")
             self.assertTrue(by_name["C2T"]["k_map"]["in_model_frame"])
             self.assertLess(by_name["C3"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)

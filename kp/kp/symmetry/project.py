@@ -185,25 +185,31 @@ def _slice_representation_for_spin(matrix: np.ndarray, spin: str, target_dim: in
 
 
 def _operation_entry(manifest: dict[str, Any], valley: str, operation: str) -> dict[str, Any]:
+    source_operations = (operation, "T") if operation == "TR" else (operation,)
+
     def _matches(entry: dict[str, Any]) -> bool:
         entry_operation = str(entry.get("operation", entry.get("name", "")))
         entry_valley = str(entry.get("valley_label", entry.get("valley", valley)))
-        return entry_operation == operation and entry_valley == valley
+        return entry_operation in source_operations and entry_valley == valley
 
     operations = manifest.get("operations")
     if isinstance(operations, dict):
         if valley in operations:
             valley_ops = operations[valley]
-            if isinstance(valley_ops, dict) and operation in valley_ops:
-                entry = valley_ops[operation]
+            if isinstance(valley_ops, dict):
+                for source_operation in source_operations:
+                    if source_operation in valley_ops:
+                        entry = valley_ops[source_operation]
+                        return dict(entry) if isinstance(entry, dict) else {"filename": entry}
+                if isinstance(valley_ops.get("operations"), dict):
+                    for source_operation in source_operations:
+                        entry = valley_ops["operations"].get(source_operation)
+                        if entry is not None:
+                            return dict(entry) if isinstance(entry, dict) else {"filename": entry}
+        for source_operation in source_operations:
+            if source_operation in operations:
+                entry = operations[source_operation]
                 return dict(entry) if isinstance(entry, dict) else {"filename": entry}
-            if isinstance(valley_ops, dict) and isinstance(valley_ops.get("operations"), dict):
-                entry = valley_ops["operations"].get(operation)
-                if entry is not None:
-                    return dict(entry) if isinstance(entry, dict) else {"filename": entry}
-        if operation in operations:
-            entry = operations[operation]
-            return dict(entry) if isinstance(entry, dict) else {"filename": entry}
     if isinstance(operations, list):
         for entry in operations:
             if not isinstance(entry, dict):
@@ -218,9 +224,10 @@ def _operation_entry(manifest: dict[str, Any], valley: str, operation: str) -> d
     valleys = manifest.get("valleys")
     if isinstance(valleys, dict) and valley in valleys:
         valley_ops = valleys[valley].get("operations", {}) if isinstance(valleys[valley], dict) else {}
-        if operation in valley_ops:
-            entry = valley_ops[operation]
-            return dict(entry) if isinstance(entry, dict) else {"filename": entry}
+        for source_operation in source_operations:
+            if source_operation in valley_ops:
+                entry = valley_ops[source_operation]
+                return dict(entry) if isinstance(entry, dict) else {"filename": entry}
     raise KeyError(f"manifest missing operation {valley}/{operation}")
 
 
@@ -305,6 +312,22 @@ def _model_frame_action_metadata(source_action: dict[str, Any], *, rotation_deg:
     model_action["k_map"] = _model_frame_map(source_action.get("k_map"), rotation_deg=rotation_deg)
     model_action["q_map"] = _model_frame_map(source_action.get("q_map", source_action.get("k_map")), rotation_deg=rotation_deg)
     return model_action
+
+
+def _model_action_metadata(
+    source_action: dict[str, Any],
+    *,
+    valley: str,
+    operation: str,
+    rotation_deg: float,
+) -> dict[str, Any]:
+    if operation == "C2T" and valley.startswith("K"):
+        action = dict(source_action)
+        action["k_map"] = {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True}
+        action["q_map"] = {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True}
+        action["sector_map"] = "layer_exchange"
+        return action
+    return _model_frame_action_metadata(source_action, rotation_deg=rotation_deg)
 
 
 def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
@@ -923,7 +946,12 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         action = payload["action"]
         rep = action.representation
         source_action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
-        model_action_metadata = _model_frame_action_metadata(source_action_metadata, rotation_deg=q_rotation_deg)
+        model_action_metadata = _model_action_metadata(
+            source_action_metadata,
+            valley=valley,
+            operation=output_operation,
+            rotation_deg=q_rotation_deg,
+        )
 
         raw_mats, polar_mats, pair_rows = _project_operation(
             operation=output_operation,

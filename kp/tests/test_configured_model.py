@@ -380,6 +380,36 @@ def test_load_model_config_rejects_user_exactification_knobs(tmp_path: Path) -> 
         load_model_config(cfg_path)
 
 
+def test_build_moire_config_reads_model_q_sets_from_symmetry_artifact(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["coordinate_frame"] = {"rotation_deg": 90.0}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "representation"}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    q1_model = np.array([[10.0, 0.0], [11.0, 0.0], [12.0, 0.0]], dtype=float)
+    q2_model = np.array([[20.0, 0.0], [21.0, 0.0], [22.0, 0.0]], dtype=float)
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir()
+    np.save(symm_dir / "q_model_layer1.npy", q1_model)
+    np.save(symm_dir / "q_model_layer2.npy", q2_model)
+    (symm_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "frame": {"q_transform": {"rotation_deg": 90.0}},
+                "q_model": {"files": {"layer1": "q_model_layer1.npy", "layer2": "q_model_layer2.npy"}},
+                "operations": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    moire_cfg, _model_cfg = build_moire_config_from_file(cfg_path)
+
+    np.testing.assert_allclose(moire_cfg.Q_set1, q1_model)
+    np.testing.assert_allclose(moire_cfg.Q_set2, q2_model)
+
+
 def test_model_max_order_overrides_safe_defaults(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))

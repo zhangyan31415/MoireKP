@@ -1584,14 +1584,67 @@ def _block_diag_heff(heff_list: np.ndarray, indices: Sequence[int]) -> np.ndarra
     return scipy.linalg.block_diag(*blocks)
 
 
-def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, ConfiguredModel]:
-    config = load_model_config(path)
-    heff_list = np.load(config.heff_file, mmap_mode="r")
-    Q_set1, Q_set2 = load_Q_sets_from_gvec_files(
+def _symmetry_artifact_path(config: ConfiguredModel) -> Path | None:
+    if config.symmetry_source_config.get("type") != "kp_symm_output":
+        return None
+    raw_path = config.symmetry_source_config.get("path")
+    if raw_path is None:
+        return None
+    path = Path(str(raw_path))
+    return path if path.is_absolute() else (config.path.parent / path).resolve()
+
+
+def _load_symmetry_artifact_manifest(path: Path) -> dict[str, Any]:
+    for name in ("manifest.json", "summary.json"):
+        candidate = path / name
+        if candidate.exists():
+            with candidate.open("r", encoding="utf-8") as handle:
+                data = yaml.safe_load(handle) or {}
+            return data if isinstance(data, dict) else {}
+    return {}
+
+
+def _load_q_sets_from_symmetry_artifact(config: ConfiguredModel) -> tuple[np.ndarray, np.ndarray] | None:
+    artifact_path = _symmetry_artifact_path(config)
+    if artifact_path is None:
+        return None
+    manifest = _load_symmetry_artifact_manifest(artifact_path)
+    q_model = manifest.get("q_model", {})
+    if not isinstance(q_model, Mapping):
+        return None
+    files = q_model.get("files", {})
+    if not isinstance(files, Mapping):
+        return None
+    layer1 = files.get("layer1")
+    layer2 = files.get("layer2")
+    if layer1 is None or layer2 is None:
+        return None
+    q1_path = Path(str(layer1))
+    q2_path = Path(str(layer2))
+    if not q1_path.is_absolute():
+        q1_path = artifact_path / q1_path
+    if not q2_path.is_absolute():
+        q2_path = artifact_path / q2_path
+    if not q1_path.exists() or not q2_path.exists():
+        return None
+    return np.load(q1_path), np.load(q2_path)
+
+
+def _load_model_q_sets(config: ConfiguredModel) -> tuple[np.ndarray, np.ndarray]:
+    artifact_q_sets = _load_q_sets_from_symmetry_artifact(config)
+    if artifact_q_sets is not None:
+        return artifact_q_sets
+    return load_Q_sets_from_gvec_files(
         config.qset1_file,
         config.qset2_file,
         rotation_deg=config.rotation_deg,
     )
+
+
+def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, ConfiguredModel]:
+    config = load_model_config(path)
+    heff_list = np.load(config.heff_file, mmap_mode="r")
+    Q_set1, Q_set2 = _load_model_q_sets(config)
 
     bM1, bM2, bM_diagnostics = _build_bM_vectors(Q_set1, Q_set2, config)
     config.bM_diagnostics = bM_diagnostics
