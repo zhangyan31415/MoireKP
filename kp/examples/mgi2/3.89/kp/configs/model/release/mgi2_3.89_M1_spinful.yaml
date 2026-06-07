@@ -77,9 +77,12 @@ symmetry_source:
           sector_map: identity
           antiunitary: true
       C2:
-        support_mode: block
+        support_mode: block_monomial
         power: 2
         central_phase: -1
+        allowed_roots: sixth_roots
+        monomial_phase_classes: matrix_element
+        monomial_cleanup_tol: 1.0e-5
         action_candidates:
         - k_map:
             type: reflection

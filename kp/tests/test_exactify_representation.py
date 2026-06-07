@@ -482,6 +482,98 @@ def test_block_monomial_cleanup_removes_tiny_internal_mixing() -> None:
     assert "block_monomial_cleanup" in reports["C3z"]["report"]["notes"]
 
 
+def test_block_monomial_cleanup_allows_internal_orbital_exchange() -> None:
+    labels = _k_basis_labels_two_orbital()
+    q1 = np.array(
+        [label.q_vector for label in labels if label.sector == "L1" and label.orbital == 1],
+        dtype=float,
+    )
+    q2 = np.array(
+        [label.q_vector for label in labels if label.sector == "L2" and label.orbital == 1],
+        dtype=float,
+    )
+    b1, b2 = _hex_bm()
+    action = OperationAction(
+        name="C2",
+        canonical_name="C2",
+        antiunitary=False,
+        k_map={"type": "identity"},
+        R=np.eye(2, dtype=float),
+        sector_map="layer_exchange",
+        q_map={"type": "identity"},
+        central_phase=-1.0 + 0.0j,
+        group_relations=[{"type": "power", "power": 2, "phase": -1.0, "name": "C2^2"}],
+        source="test",
+    )
+    label_action = build_label_action(labels, action, b1, b2, {"L1": np.zeros(2), "L2": np.zeros(2)}, tol=1.0e-8)
+
+    block = np.array([[0.0, 1.0j], [1.0j, 0.0]], dtype=complex)
+    raw = np.zeros((len(labels), len(labels)), dtype=complex)
+    expected = np.zeros_like(raw)
+    groups: dict[tuple[str, tuple[int, int]], list[BasisLabel]] = {}
+    for label in labels:
+        groups.setdefault((label.sector, label.q_integer), []).append(label)
+    for group in groups.values():
+        group.sort(key=lambda item: item.orbital)
+        cols = np.asarray([label.index for label in group], dtype=int)
+        rows = np.asarray([label_action.perm[col] for col in cols], dtype=int)
+        raw[np.ix_(rows, cols)] = block
+        expected[rows[0], cols[1]] = 1.0j
+        expected[rows[1], cols[0]] = 1.0j
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(),
+                    "name": "C2",
+                    "antiunitary": False,
+                    "k_map": {"type": "identity"},
+                    "sector_map": "layer_exchange",
+                    "q_map": {"type": "identity"},
+                }
+            ]
+        },
+        matrices={"C2": raw},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 2},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 2},
+        ],
+        n_orb=(2, 2),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "operations": {
+                    "C2": {
+                        "support_mode": "block_monomial",
+                        "power": 2,
+                        "central_phase": -1.0,
+                        "allowed_roots": [[0.0, 1.0], [0.0, -1.0]],
+                        "phase_classes": "global",
+                        "monomial_cleanup_tol": 1.0e-8,
+                        "action_candidates": [
+                            {
+                                "k_map": {"type": "identity"},
+                                "q_map": {"type": "identity"},
+                                "sector_map": "layer_exchange",
+                                "antiunitary": False,
+                            }
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    np.testing.assert_allclose(exactified["C2"], expected, atol=1.0e-12)
+    assert reports["C2"]["preferred_mode"] == "block_monomial"
+    assert reports["C2"]["report"]["off_support_rel"] == pytest.approx(0.0)
+    assert reports["C2"]["report"]["group_residuals"]["power"] < 1.0e-14
+
+
 def test_exactify_layer_exchange_supports_bottom_top_sector_labels() -> None:
     b1, b2 = _hex_bm()
     q_bottom = np.array([b2], dtype=float)

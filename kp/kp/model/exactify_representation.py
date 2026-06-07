@@ -559,6 +559,18 @@ def _phase_class_key(label: BasisLabel, phase_classes: object) -> str:
     return "global"
 
 
+def _phase_class_key_for_mapping(
+    label: BasisLabel,
+    phase_classes: object,
+    *,
+    src_idx: int,
+    tgt_idx: int,
+) -> str:
+    if isinstance(phase_classes, str) and phase_classes in {"entry", "matrix_element"}:
+        return f"entry:{int(tgt_idx)}:{int(src_idx)}"
+    return _phase_class_key(label, phase_classes)
+
+
 def exactify_1d_monomial_phases(
     D_num: np.ndarray,
     perm: Sequence[int],
@@ -593,7 +605,7 @@ def exactify_1d_monomial_phases(
     by_class: dict[str, list[complex]] = {}
     class_members: dict[str, list[tuple[int, int]]] = {}
     for src_idx, tgt_idx in enumerate(perm_arr):
-        key = _phase_class_key(labels[src_idx], phase_classes)
+        key = _phase_class_key_for_mapping(labels[src_idx], phase_classes, src_idx=src_idx, tgt_idx=int(tgt_idx))
         by_class.setdefault(key, []).append(arr[tgt_idx, src_idx] / abs(arr[tgt_idx, src_idx]))
         class_members.setdefault(key, []).append((tgt_idx, src_idx))
 
@@ -631,6 +643,56 @@ def exactify_1d_monomial_phases(
         group_residuals={"power": power_residual},
     )
     return exact, report
+
+
+def roots_of_unity_up_to(max_order: int) -> list[complex]:
+    roots: list[complex] = []
+    seen: set[tuple[int, int]] = set()
+    for order in range(1, int(max_order) + 1):
+        for power in range(order):
+            root = root_of_unity(order, power)
+            key = (int(round(root.real * 10**12)), int(round(root.imag * 10**12)))
+            if key not in seen:
+                seen.add(key)
+                roots.append(root)
+    return roots
+
+
+def infer_monomial_perm_from_blocks(
+    D_num: np.ndarray,
+    groups: Sequence[tuple[np.ndarray, np.ndarray]],
+    *,
+    operation_name: str,
+    reject_if_off_support_rel_gt: float,
+    reject_if_amplitude_deviation_gt: float,
+) -> tuple[np.ndarray, ExactificationReport]:
+    arr = np.asarray(D_num, dtype=complex)
+    perm = np.full(arr.shape[1], -1, dtype=int)
+    for rows, cols in groups:
+        block = arr[np.ix_(rows, cols)]
+        if block.shape[0] != block.shape[1]:
+            raise ValueError(f"{operation_name} block_monomial cleanup requires square support blocks")
+        local_rows = np.argmax(np.abs(block), axis=0)
+        if len(set(int(row) for row in local_rows)) != len(local_rows):
+            raise ValueError(f"{operation_name} block_monomial cleanup found non-bijective internal support")
+        for local_col, local_row in enumerate(local_rows):
+            perm[int(cols[local_col])] = int(rows[int(local_row)])
+
+    report = analyze_monomial_support(arr, perm)
+    if report.support_mismatch_count:
+        raise ValueError(f"{operation_name} block_monomial cleanup failed: support mismatch count={report.support_mismatch_count}")
+    if report.off_support_rel > reject_if_off_support_rel_gt:
+        raise ValueError(
+            f"{operation_name} block_monomial cleanup failed: inferred off-support {report.off_support_rel:.3e} exceeds "
+            f"{reject_if_off_support_rel_gt:.3e}"
+        )
+    amp_dev = max(abs(report.amplitude_min - 1.0), abs(report.amplitude_max - 1.0))
+    if amp_dev > reject_if_amplitude_deviation_gt:
+        raise ValueError(
+            f"{operation_name} block_monomial cleanup failed: amplitude deviation {amp_dev:.3e} exceeds "
+            f"{reject_if_amplitude_deviation_gt:.3e}"
+        )
+    return perm, report
 
 
 def _polar_unitary(block: np.ndarray) -> np.ndarray:
@@ -753,6 +815,14 @@ def _parse_allowed_roots(spec: object) -> list[complex]:
             return [complex(np.exp(1j * (np.pi + 2.0 * np.pi * m) / 3.0)) for m in range(3)]
         if spec == "third_roots":
             return [root_of_unity(3, m) for m in range(3)]
+        if spec == "fourth_roots":
+            return [root_of_unity(4, m) for m in range(4)]
+        if spec == "sixth_roots":
+            return [root_of_unity(6, m) for m in range(6)]
+        if spec == "twelfth_roots":
+            return [root_of_unity(12, m) for m in range(12)]
+        if spec.startswith("roots_up_to_"):
+            return roots_of_unity_up_to(int(spec.removeprefix("roots_up_to_")))
     if isinstance(spec, Sequence) and not isinstance(spec, (str, bytes)):
         out: list[complex] = []
         for item in spec:
@@ -954,15 +1024,22 @@ def exactify_loaded_symmetry_source(
             D_exact, report = block_exact, block_report
             if preferred_mode == "block_monomial":
                 if not allowed_roots:
-                    raise ValueError(f"{name} block_monomial exactification requires allowed_roots")
+                    allowed_roots = roots_of_unity_up_to(int(op_cfg.get("monomial_root_order_max", 12)))
                 cleanup_tol = float(
                     op_cfg.get("monomial_cleanup_tol", exact_cfg.get("monomial_cleanup_tol", reject_off))
                 )
+                cleanup_perm, cleanup_support_report = infer_monomial_perm_from_blocks(
+                    block_exact,
+                    groups,
+                    operation_name=name,
+                    reject_if_off_support_rel_gt=cleanup_tol,
+                    reject_if_amplitude_deviation_gt=reject_amp,
+                )
                 D_exact, cleanup_report = exactify_1d_monomial_phases(
                     block_exact,
-                    label_action.perm,
+                    cleanup_perm,
                     labels=labels,
-                    phase_classes=phase_classes,
+                    phase_classes=op_cfg.get("monomial_phase_classes", "matrix_element"),
                     allowed_roots=allowed_roots,
                     operation_name=name,
                     power=power,
@@ -971,10 +1048,13 @@ def exactify_loaded_symmetry_source(
                     reject_if_off_support_rel_gt=cleanup_tol,
                     reject_if_amplitude_deviation_gt=reject_amp,
                 )
-                cleanup_report.notes = [*block_report.notes, "block_monomial_cleanup"]
+                inferred_note = "inferred_monomial_support"
+                cleanup_report.notes = [*block_report.notes, inferred_note, "block_monomial_cleanup"]
                 cleanup_report.joint_group_residuals = {
                     "block_power": float(block_report.group_residuals.get("power", 0.0)),
                     "cleanup_power": float(cleanup_report.group_residuals.get("power", 0.0)),
+                    "cleanup_input_off_support_rel": float(cleanup_support_report.off_support_rel),
+                    "cleanup_input_off_support_max": float(cleanup_support_report.off_support_max),
                 }
                 report = cleanup_report
         out[name] = D_exact

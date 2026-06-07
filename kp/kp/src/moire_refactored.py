@@ -1142,7 +1142,7 @@ class ContinuumModelBuilder:
     _SYMM_VALIDATE_MONOMIAL = True
     _SYMM_VALIDATE_SPARSE = True
     _SYMM_USE_SPARSE_BASIS = True
-    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-6
+    _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-8
     _SYMM_SPARSE_VALIDATED = False
     
     def __init__(self, Q_set1: np.ndarray, Q_set2: np.ndarray,
@@ -2271,11 +2271,27 @@ class ContinuumModelBuilder:
         if nonzero.size == 0:
             return np.empty((0, n, n), dtype=mats.dtype), np.array([], dtype=int)
 
-        q, r, piv = scipy.linalg.qr(flat[nonzero].T, mode="economic", pivoting=True)
+        max_abs = float(np.max(np.abs(flat[nonzero]))) if nonzero.size else 0.0
+        support_tol = max(np.finfo(float).eps * max(max_abs, 1.0) * 100.0, float(tol) * 1.0e-4)
+        support = np.any(np.abs(flat[nonzero]) > support_tol, axis=0)
+        support_idx = np.flatnonzero(support)
+        if support_idx.size == 0:
+            return np.empty((0, n, n), dtype=mats.dtype), np.array([], dtype=int)
+
+        qr_input = np.asfortranarray(flat[np.ix_(nonzero, support_idx)].T)
+        q, r, piv = scipy.linalg.qr(
+            qr_input,
+            mode="economic",
+            pivoting=True,
+            overwrite_a=True,
+            check_finite=False,
+        )
         diag = np.abs(np.diag(r))
         rank = int(np.count_nonzero(diag > tol))
         including_list = nonzero[piv[:rank]].astype(int, copy=False)
-        orthonormal_matrices = q[:, :rank].T.reshape(rank, n, n)
+        orthonormal_flat = np.zeros((rank, flat.shape[1]), dtype=mats.dtype)
+        orthonormal_flat[:, support_idx] = q[:, :rank].T
+        orthonormal_matrices = orthonormal_flat.reshape(rank, n, n)
         return orthonormal_matrices, including_list
 
     @timing_decorator_factory(0)
@@ -2392,8 +2408,11 @@ class ContinuumModelBuilder:
         # 计算 rhs：heff 部分先转置后展平
         H_T = heff.T.ravel()
         rhs = F @ H_T
-        # 求解线性方程组
-        coeffs = np.linalg.solve(transfermat, rhs)
+        # 求解线性方程组；rank selection 已经保证独立，fallback 只处理极端病态数值。
+        try:
+            coeffs = scipy.linalg.solve(transfermat, rhs, check_finite=False)
+        except scipy.linalg.LinAlgError:
+            coeffs = np.linalg.lstsq(transfermat, rhs, rcond=None)[0]
         return coeffs
 
     @staticmethod
