@@ -50,7 +50,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertTrue(model["k_map"]["in_model_frame"])
         self.assertTrue(model["q_map"]["in_model_frame"])
 
-    def test_k_single_valley_c2t_model_action_is_internal_support(self) -> None:
+    def test_k_single_valley_c2t_model_action_uses_frame_conjugation(self) -> None:
         source = {
             "antiunitary": True,
             "k_map": {"type": "reflection", "axis_deg": 60.0},
@@ -63,9 +63,10 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         model = _model_action_metadata(source, valley="K1", operation="C2T", rotation_deg=210.0)
 
         self.assertEqual(source["sector_map"], "identity")
-        self.assertEqual(model["sector_map"], "layer_exchange")
-        self.assertEqual(model["k_map"], {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True})
-        self.assertEqual(model["q_map"], {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True})
+        self.assertEqual(model["sector_map"], "identity")
+        self.assertEqual(model["k_map"], {"type": "reflection", "axis_deg": 270.0, "in_model_frame": True})
+        self.assertEqual(model["q_map"], {"type": "reflection", "axis_deg": 270.0, "in_model_frame": True})
+        self.assertEqual(model["action_source"], "derived_by_frame_conjugation")
 
     def test_symm_projects_spin_up_antiunitary_representation(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -179,8 +180,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertFalse(by_name["C3"]["antiunitary"])
             self.assertTrue(by_name["C2T"]["antiunitary"])
             self.assertEqual(by_name["C2T"]["source_action"]["k_map"]["axis_deg"], 180.0)
-            self.assertEqual(by_name["C2T"]["model_action"]["k_map"]["axis_deg"], 180.0)
+            self.assertEqual(by_name["C2T"]["model_action"]["k_map"]["axis_deg"], 210.0)
             self.assertEqual(by_name["C2T"]["model_action"]["sector_map"], "layer_exchange")
+            self.assertFalse(by_name["C2T"]["allow_support_discovery"])
             self.assertTrue(by_name["C2T"]["k_map"]["in_model_frame"])
             self.assertLess(by_name["C3"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)

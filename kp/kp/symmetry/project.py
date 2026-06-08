@@ -301,11 +301,32 @@ def _model_frame_map(raw: Any, *, rotation_deg: float) -> Any:
     return out
 
 
-def _model_frame_action_metadata(source_action: dict[str, Any], *, rotation_deg: float) -> dict[str, Any]:
+def normalize_reflection_axis_deg(axis_deg: float) -> float:
+    return float(axis_deg) % 180.0
+
+
+def reflection_axis_equiv(lhs: float, rhs: float, *, tol: float = 1.0e-8) -> bool:
+    delta = (normalize_reflection_axis_deg(lhs) - normalize_reflection_axis_deg(rhs) + 90.0) % 180.0 - 90.0
+    return abs(delta) <= float(tol)
+
+
+def _conjugate_action_to_model_frame(source_action: dict[str, Any], *, rotation_deg: float) -> dict[str, Any]:
     model_action = dict(source_action)
     model_action["k_map"] = _model_frame_map(source_action.get("k_map"), rotation_deg=rotation_deg)
     model_action["q_map"] = _model_frame_map(source_action.get("q_map", source_action.get("k_map")), rotation_deg=rotation_deg)
+    model_action["action_source"] = "derived_by_frame_conjugation"
+    model_action["derivation"] = {
+        "formula": "A_model = R(rotation_deg) @ A_source @ R(-rotation_deg)",
+        "rotation_deg": float(rotation_deg),
+        "reflection_axis_convention": "mirror_axis_deg",
+        "q_transform": "q_model = R(rotation_deg) @ (sector_center - q_source)",
+        "q_affine_offset_ignored_for_linear_action": True,
+    }
     return model_action
+
+
+def _model_frame_action_metadata(source_action: dict[str, Any], *, rotation_deg: float) -> dict[str, Any]:
+    return _conjugate_action_to_model_frame(source_action, rotation_deg=rotation_deg)
 
 
 def _model_action_metadata(
@@ -315,13 +336,7 @@ def _model_action_metadata(
     operation: str,
     rotation_deg: float,
 ) -> dict[str, Any]:
-    if operation == "C2T" and valley.startswith("K"):
-        action = dict(source_action)
-        action["k_map"] = {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True}
-        action["q_map"] = {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True}
-        action["sector_map"] = "layer_exchange"
-        return action
-    return _model_frame_action_metadata(source_action, rotation_deg=rotation_deg)
+    return _conjugate_action_to_model_frame(source_action, rotation_deg=rotation_deg)
 
 
 def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
@@ -981,6 +996,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
                 "antiunitary": antiunitary,
                 "matrix_file": f"{output_operation}_low_raw.npy",
                 "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
+                "allow_support_discovery": action.action_source == "raw_h_operator_file",
                 **model_action_metadata,
                 "source_action": source_action_metadata,
                 "model_action": model_action_metadata,

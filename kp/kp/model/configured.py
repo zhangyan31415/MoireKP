@@ -418,11 +418,7 @@ def _matrix_file_stem(source_operation: str) -> str:
 
 
 def _resolved_action_for_source_operation(name: str, valley_model: Mapping[str, Any]) -> dict[str, Any]:
-    valley_type = str(valley_model.get("valley_type", ""))
-    mode = str(valley_model.get("mode", ""))
     spin = str(valley_model.get("spin_convention", ""))
-    if name == "C2T" and valley_type == "K" and mode == "single_valley":
-        return _with_sector_map(_operation_action("C2T", axis_deg=180.0), "layer_exchange")
     if name in {"C2", "C2_eff"}:
         return _with_sector_map(_operation_action(name, axis_deg=0.0), "layer_exchange")
     if name in ACTION_SPECS:
@@ -542,9 +538,9 @@ def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: floa
         if not isinstance(record, Mapping):
             continue
         enriched = dict(record)
-        resolved_action = record.get("model_action")
+        resolved_action = record.get("internal_resolved_action")
         if not isinstance(resolved_action, Mapping):
-            resolved_action = record.get("source_resolved_action")
+            resolved_action = record.get("model_action")
         if isinstance(resolved_action, Mapping):
             for key in ("antiunitary", "k_map", "q_map", "sector_map"):
                 if key in resolved_action:
@@ -1707,10 +1703,10 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
                 record["target_role"] = "continuum_internal_rep"
                 resolved_action = exact_reports[record["name"]].get("resolved_action", {})
                 if isinstance(resolved_action, dict):
-                    source_action = dict(resolved_action)
-                    if isinstance(source_action.get("k_map"), Mapping):
-                        source_action["k_map"] = {**source_action["k_map"], "in_model_frame": True}
-                    record["source_resolved_action"] = source_action
+                    internal_action = dict(resolved_action)
+                    if isinstance(internal_action.get("k_map"), Mapping):
+                        internal_action["k_map"] = {**internal_action["k_map"], "in_model_frame": True}
+                    record["internal_resolved_action"] = internal_action
         loaded_symmetry.metadata["source_matrix_projection_reports"] = exact_reports
     config.symmetry_source_metadata = loaded_symmetry.metadata
     enriched_symmetry_map = _enrich_symmetry_map(
@@ -2497,7 +2493,7 @@ def _build_operation_registry(model_config: ConfiguredModel) -> list[dict[str, A
                     "q_map": _json_safe(resolved_q_map),
                     "sector_map": _json_safe(resolved_sector_map),
                     "source_operation": operation.get("operation", source_record.get("operation", canonical_name)),
-                    "source_resolved_action": _json_safe(operation.get("source_resolved_action")),
+                    "internal_resolved_action": _json_safe(operation.get("internal_resolved_action")),
                     "matrix_kind": operation.get("matrix_kind", source_record.get("matrix_kind", model_config.symmetry_source_config.get("matrix_kind"))),
                     **{
                         key: _json_safe(operation.get(key, source_record.get(key)))

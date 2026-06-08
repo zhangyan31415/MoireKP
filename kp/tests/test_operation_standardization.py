@@ -11,8 +11,14 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kp.model.config_schema import CANONICAL_INTERNAL_NAMES, canonical_operation_name_for_valley
-from kp.model.configured import ACTION_SPECS, _build_operation_registry
+from kp.model.configured import (
+    ACTION_SPECS,
+    _build_operation_registry,
+    _resolved_action_for_source_operation,
+    _symmetry_operation_index,
+)
 from kp.model.symmetry import MatrixSymmetryGenerator, load_symmetry_source
+from kp.symmetry.project import _model_action_metadata, reflection_axis_equiv
 
 
 def _source_meta(antiunitary: bool = False) -> dict[str, object]:
@@ -85,7 +91,7 @@ def test_operation_registry_records_canonical_names_and_source_metadata() -> Non
         "k_map": {"type": "reflection", "axis_deg": 0.0},
         "q_map": {"type": "reflection", "axis_deg": 0.0},
         "sector_map": "identity",
-        "source_resolved_action": {"k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True}},
+        "internal_resolved_action": {"k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True}},
         "matrix_kind": "continuum_internal_rep_exact",
     }
     model_config = SimpleNamespace(
@@ -112,7 +118,36 @@ def test_operation_registry_records_canonical_names_and_source_metadata() -> Non
     assert row["matrix_kind"] == "continuum_internal_rep_exact"
     assert row["source_matrix_role"] == "raw_h_sewing_action"
     assert row["antiunitary_convention"] == "U_K"
-    assert row["source_resolved_action"]["k_map"]["type"] == "reflection"
+    assert row["internal_resolved_action"]["k_map"]["type"] == "reflection"
+
+
+def test_internal_resolved_action_precedes_manifest_model_action() -> None:
+    metadata = {
+        "operations": [
+            {
+                "name": "C2T",
+                "operation": "C2T",
+                "antiunitary": True,
+                "model_action": {
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "sector_map": "identity",
+                },
+                "internal_resolved_action": {
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "sector_map": "layer_exchange",
+                },
+            }
+        ]
+    }
+
+    index = _symmetry_operation_index(metadata, rotation_deg=210.0)
+
+    assert index["C2T"]["k_map"]["axis_deg"] == pytest.approx(180.0)
+    assert index["C2T"]["sector_map"] == "layer_exchange"
 
 
 def test_nonstandard_action_name_is_rejected(tmp_path: Path) -> None:
@@ -146,3 +181,96 @@ def test_matrix_generator_rejects_axis_encoded_operation_name() -> None:
 
     with pytest.raises(ValueError, match="not loaded"):
         generator.get_operator("C4", None)
+
+
+def _reflection_matrix(axis_deg: float) -> np.ndarray:
+    theta = np.deg2rad(float(axis_deg))
+    axis = np.array([np.cos(theta), np.sin(theta)], dtype=float)
+    return 2.0 * np.outer(axis, axis) - np.eye(2)
+
+
+def _rotation_matrix(angle_deg: float) -> np.ndarray:
+    theta = np.deg2rad(float(angle_deg))
+    return np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]], dtype=float)
+
+
+def test_reflection_action_frame_conjugation_preserves_sector_identity() -> None:
+    source_action = {
+        "antiunitary": True,
+        "k_map": {"type": "reflection", "axis_deg": 60.0},
+        "q_map": {"type": "reflection", "axis_deg": 60.0},
+        "sector_map": "identity",
+    }
+
+    model_action = _model_action_metadata(source_action, valley="K1", operation="C2T", rotation_deg=210.0)
+
+    assert reflection_axis_equiv(model_action["k_map"]["axis_deg"], 90.0)
+    assert reflection_axis_equiv(model_action["q_map"]["axis_deg"], 90.0)
+    assert model_action["sector_map"] == "identity"
+    assert model_action["antiunitary"] is True
+    assert model_action["action_source"] == "derived_by_frame_conjugation"
+
+
+def test_k_c2t_model_action_does_not_use_notebook_support_hardcode() -> None:
+    source_action = {
+        "antiunitary": True,
+        "k_map": {"type": "reflection", "axis_deg": 60.0},
+        "q_map": {"type": "reflection", "axis_deg": 60.0},
+        "sector_map": "identity",
+    }
+
+    model_action = _model_action_metadata(source_action, valley="K1", operation="C2T", rotation_deg=210.0)
+
+    assert not reflection_axis_equiv(model_action["k_map"]["axis_deg"], 180.0)
+    assert model_action["sector_map"] != "layer_exchange"
+    assert reflection_axis_equiv(model_action["k_map"]["axis_deg"], 90.0)
+    assert model_action["sector_map"] == "identity"
+
+
+def test_q_model_center_minus_q_source_does_not_change_reflection_linear_part() -> None:
+    phi = 210.0
+    source_axis = 60.0
+    center_before = np.array([1.3, -0.7])
+    center_after = np.array([-0.2, 0.4])
+    affine_offset = np.array([0.6, -0.3])
+    R = _rotation_matrix(phi)
+    A_source = _reflection_matrix(source_axis)
+    expected_linear = R @ A_source @ R.T
+    wrong_linear = _reflection_matrix(180.0)
+
+    q_model_points = np.array([[0.0, 0.0], [1.0, 0.2], [-0.3, 0.8], [0.4, -1.1]], dtype=float)
+    transformed = []
+    for q_model in q_model_points:
+        q_source = center_before - R.T @ q_model
+        q_source_prime = A_source @ q_source + affine_offset
+        q_model_prime = R @ (center_after - q_source_prime)
+        transformed.append(q_model_prime)
+    transformed = np.asarray(transformed)
+    design = np.column_stack([q_model_points, np.ones(len(q_model_points))])
+    fit, *_ = np.linalg.lstsq(design, transformed, rcond=None)
+    linear = fit[:2, :].T
+
+    np.testing.assert_allclose(linear, expected_linear, atol=1.0e-12)
+    np.testing.assert_allclose(linear, _reflection_matrix(90.0), atol=1.0e-12)
+    assert np.linalg.norm(linear - wrong_linear) > 1.0
+
+
+def test_sector_identity_conjugation_stays_identity_under_relabel() -> None:
+    tau = {"L1": "L2", "L2": "L1"}
+    source_identity = {"L1": "L1", "L2": "L2"}
+    tau_inv = {value: key for key, value in tau.items()}
+    conjugated = {sector: tau[source_identity[tau_inv[sector]]] for sector in tau}
+
+    assert conjugated == {"L1": "L1", "L2": "L2"}
+    assert conjugated != {"L1": "L2", "L2": "L1"}
+
+
+def test_k_single_valley_c2t_fallback_does_not_guess_notebook_support() -> None:
+    action = _resolved_action_for_source_operation(
+        "C2T",
+        {"valley_type": "K", "mode": "single_valley", "spin_convention": "spin_up_only"},
+    )
+
+    assert action["sector_map"] == "identity"
+    assert reflection_axis_equiv(action["k_map"]["axis_deg"], ACTION_SPECS["C2T"]["k_map"]["axis_deg"])
+    assert float(action["k_map"]["axis_deg"]) == float(ACTION_SPECS["C2T"]["k_map"]["axis_deg"])

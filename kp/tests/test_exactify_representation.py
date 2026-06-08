@@ -380,7 +380,7 @@ def test_exactify_preserves_explicit_in_model_frame_reflection_axis() -> None:
         k_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
         R=np.array([[1.0, 0.0], [0.0, -1.0]], dtype=float),
         sector_map="layer_exchange",
-        q_map={"type": "reflection", "axis_deg": 180.0},
+        q_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
         central_phase=1.0 + 0.0j,
         group_relations=[],
         source="test",
@@ -421,11 +421,11 @@ def test_exactify_preserves_explicit_in_model_frame_reflection_axis() -> None:
                         "power": 2,
                         "central_phase": 1.0,
                         "action_candidates": [
-                            {
-                                "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
-                                "q_map": {"type": "reflection", "axis_deg": 180.0},
-                                "sector_map": "layer_exchange",
-                                "antiunitary": True,
+                                {
+                                    "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                                    "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                                    "sector_map": "layer_exchange",
+                                    "antiunitary": True,
                             }
                         ],
                     }
@@ -438,6 +438,181 @@ def test_exactify_preserves_explicit_in_model_frame_reflection_axis() -> None:
     np.testing.assert_allclose(exactified["C2T"], exact, atol=1.0e-12)
     assert reports["C2T"]["resolved_action"]["k_map"]["axis_deg"] == pytest.approx(180.0)
     assert reports["C2T"]["resolved_action"]["sector_map"] == "layer_exchange"
+
+
+def test_exactify_default_does_not_discover_exchange_or_shifted_reflection_candidates() -> None:
+    labels = _k_basis_labels()
+    q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
+    q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
+    b1, b2 = _hex_bm()
+    manifest_action = OperationAction(
+        name="C2T",
+        canonical_name="C2T",
+        antiunitary=True,
+        k_map={"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+        R=np.array([[-1.0, 0.0], [0.0, 1.0]], dtype=float),
+        sector_map="identity",
+        q_map={"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+        central_phase=1.0 + 0.0j,
+        group_relations=[],
+        source="test",
+    )
+    label_action = build_label_action(labels, manifest_action, b1, b2, {"L1": np.zeros(2), "L2": np.zeros(2)}, tol=1.0e-8)
+    exact = np.zeros((len(labels), len(labels)), dtype=complex)
+    for source, target in enumerate(label_action.perm):
+        exact[target, source] = 1.0 + 0.0j
+
+    _exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "C2T",
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "sector_map": "identity",
+                }
+            ]
+        },
+        matrices={"C2T": exact},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={"exactification": {"operations": {"C2T": {"support_mode": "monomial", "power": 2}}}},
+    )
+
+    resolution = reports["C2T"]["support_resolution"]
+    assert resolution["discover_action_candidates"] is False
+    assert resolution["action_mismatch"] is False
+    assert len(resolution["candidate_support_residuals"]) == 1
+    only_action = resolution["candidate_support_residuals"][0]["action"]
+    assert only_action["sector_map"] == "identity"
+    assert only_action["k_map"]["axis_deg"] == pytest.approx(90.0)
+
+
+def test_exactify_discovery_reports_selected_support_action_mismatch() -> None:
+    labels = _k_basis_labels()
+    q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
+    q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
+    b1, b2 = _hex_bm()
+    support_action = OperationAction(
+        name="C2T",
+        canonical_name="C2T",
+        antiunitary=True,
+        k_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        R=np.array([[1.0, 0.0], [0.0, -1.0]], dtype=float),
+        sector_map="layer_exchange",
+        q_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        central_phase=1.0 + 0.0j,
+        group_relations=[],
+        source="test",
+    )
+    label_action = build_label_action(labels, support_action, b1, b2, {"L1": np.zeros(2), "L2": np.zeros(2)}, tol=1.0e-8)
+    exact = np.zeros((len(labels), len(labels)), dtype=complex)
+    for source, target in enumerate(label_action.perm):
+        exact[target, source] = 1.0 + 0.0j
+
+    _exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "C2T",
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "sector_map": "identity",
+                }
+            ]
+        },
+        matrices={"C2T": exact},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "discover_action_candidates": True,
+                "operations": {"C2T": {"support_mode": "monomial", "power": 2}},
+            }
+        },
+    )
+
+    resolution = reports["C2T"]["support_resolution"]
+    assert resolution["discover_action_candidates"] is True
+    assert resolution["action_mismatch"] is True
+    assert reports["C2T"]["manifest_model_action"]["sector_map"] == "identity"
+    assert reports["C2T"]["support_resolved_action"]["sector_map"] == "layer_exchange"
+    axis = float(reports["C2T"]["support_resolved_action"]["k_map"]["axis_deg"])
+    assert min(abs(axis - 180.0), abs(axis)) < 1.0e-8
+    assert len(resolution["candidate_support_residuals"]) > 1
+
+
+def test_exactify_allows_support_discovery_from_operation_record() -> None:
+    labels = _k_basis_labels()
+    q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
+    q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
+    b1, b2 = _hex_bm()
+    support_action = OperationAction(
+        name="C2T",
+        canonical_name="C2T",
+        antiunitary=True,
+        k_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        R=np.array([[1.0, 0.0], [0.0, -1.0]], dtype=float),
+        sector_map="layer_exchange",
+        q_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        central_phase=1.0 + 0.0j,
+        group_relations=[],
+        source="test",
+    )
+    label_action = build_label_action(labels, support_action, b1, b2, {"L1": np.zeros(2), "L2": np.zeros(2)}, tol=1.0e-8)
+    exact = np.zeros((len(labels), len(labels)), dtype=complex)
+    for source, target in enumerate(label_action.perm):
+        exact[target, source] = 1.0 + 0.0j
+
+    _exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "C2T",
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "sector_map": "identity",
+                    "allow_support_discovery": True,
+                }
+            ]
+        },
+        matrices={"C2T": exact},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={"exactification": {"operations": {"C2T": {"support_mode": "monomial", "power": 2}}}},
+    )
+
+    resolution = reports["C2T"]["support_resolution"]
+    assert resolution["discover_action_candidates"] is True
+    assert resolution["action_mismatch"] is True
+    assert reports["C2T"]["support_resolved_action"]["sector_map"] == "layer_exchange"
 
 
 def test_raw_c3z_sewing_action_auto_removes_tiny_internal_mixing() -> None:

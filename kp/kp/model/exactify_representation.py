@@ -205,6 +205,28 @@ def _model_frame_k_map(k_map: object) -> object:
     return {**dict(k_map), "in_model_frame": True}
 
 
+def _action_candidate_summary(operation: OperationAction) -> dict[str, Any]:
+    return {
+        "k_map": _jsonable(operation.k_map),
+        "q_map": _jsonable(operation.q_map),
+        "sector_map": _jsonable(operation.sector_map),
+        "antiunitary": bool(operation.antiunitary),
+    }
+
+
+def _action_summaries_equal(lhs: Mapping[str, Any], rhs: Mapping[str, Any]) -> bool:
+    return json.dumps(_jsonable(lhs), sort_keys=True) == json.dumps(_jsonable(rhs), sort_keys=True)
+
+
+def _shift_reflection_map(raw: object, shift_deg: float) -> object:
+    if not isinstance(raw, Mapping):
+        return raw
+    out = dict(raw)
+    if str(out.get("type", "")).lower() == "reflection" and "axis_deg" in out:
+        out["axis_deg"] = float(out["axis_deg"]) + float(shift_deg)
+    return out
+
+
 def _candidate_operation_actions(
     record: Mapping[str, Any],
     sectors: Sequence[Mapping[str, Any]],
@@ -212,6 +234,7 @@ def _candidate_operation_actions(
     rotation_deg: float,
     explicit_candidates: Sequence[Mapping[str, Any]] | None = None,
     require_explicit_action_candidates: bool = False,
+    discover_action_candidates: bool = False,
 ) -> list[OperationAction]:
     if explicit_candidates:
         out: list[OperationAction] = []
@@ -220,8 +243,12 @@ def _candidate_operation_actions(
                 raise ValueError(f"exactification.action_candidates entries must be mappings, got {candidate!r}")
             merged = dict(record)
             merged.update(candidate)
+            if "k_map" in candidate and "q_map" not in candidate:
+                merged["q_map"] = candidate["k_map"]
             if "k_map" in merged:
                 merged["k_map"] = _rotate_k_map_to_model_frame(merged.get("k_map", {}), rotation_deg=rotation_deg)
+            if "q_map" in merged:
+                merged["q_map"] = _rotate_k_map_to_model_frame(merged.get("q_map", {}), rotation_deg=rotation_deg)
             out.append(_build_operation_from_record(merged))
         return out
     if require_explicit_action_candidates:
@@ -236,7 +263,8 @@ def _candidate_operation_actions(
                 model_record[key] = model_action[key]
     model_record["k_map"] = _model_frame_k_map(model_record.get("k_map", {}))
     base = _build_operation_from_record(model_record)
-    candidates = [base]
+    if not discover_action_candidates:
+        return [base]
     sector_names = [str(sector.get("name")) for sector in sectors]
     sector_maps = [base.sector_map]
     identity_like = _normalize_sector_map(base.sector_map, sector_names=sector_names) in (
@@ -246,15 +274,15 @@ def _candidate_operation_actions(
     if len(sector_names) == 2 and identity_like:
         sector_maps.append("layer_exchange")
     k_maps = [base.k_map]
-    q_map = base.q_map if record.get("q_map") is not None else base.k_map
+    q_maps = [base.q_map]
     if base.antiunitary and isinstance(base.k_map, Mapping) and str(base.k_map.get("type", "")).lower() == "reflection" and "axis_deg" in base.k_map:
-        axis = float(base.k_map["axis_deg"])
         for shift in (-90.0, 90.0):
-            k_maps.append({"type": "reflection", "axis_deg": axis + shift})
+            k_maps.append(_shift_reflection_map(base.k_map, shift))
+            q_maps.append(_shift_reflection_map(base.q_map, shift))
     out: list[OperationAction] = []
     seen: set[str] = set()
     for sector_map in sector_maps:
-        for k_map in k_maps:
+        for k_map, q_map in zip(k_maps, q_maps):
             op = OperationAction(
                 name=base.name,
                 canonical_name=base.canonical_name,
@@ -424,6 +452,43 @@ def _choose_best_action_candidate(
     if best is None:
         raise ValueError("No valid operation action candidate produced a complete geometry support")
     return best[2]
+
+
+def _candidate_support_residuals(
+    D_num: np.ndarray,
+    candidates: Sequence[OperationAction],
+    basis_labels: Sequence[BasisLabel],
+    bM1: np.ndarray,
+    bM2: np.ndarray,
+    q_offsets: Mapping[str, np.ndarray],
+    tol: float,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for operation in candidates:
+        row: dict[str, Any] = {"action": _action_candidate_summary(operation)}
+        try:
+            label_action = build_label_action(basis_labels, operation, bM1, bM2, q_offsets, tol)
+            row["perm_complete"] = bool(label_action.diagnostics["perm_complete"])
+            row["missing_count"] = int(label_action.diagnostics["missing_count"])
+            if not label_action.missing:
+                mono_report = analyze_monomial_support(np.asarray(D_num, dtype=complex), label_action.perm)
+                row["monomial_off_support_rel"] = float(mono_report.off_support_rel)
+                row["monomial_amplitude_deviation"] = float(
+                    max(abs(mono_report.amplitude_min - 1.0), abs(mono_report.amplitude_max - 1.0))
+                )
+                try:
+                    block_groups = build_block_groups(basis_labels, operation, bM1, bM2, q_offsets, tol)
+                    block_report = analyze_block_support(np.asarray(D_num, dtype=complex), block_groups)
+                    row["block_off_support_rel"] = float(block_report.off_support_rel)
+                    row["block_amplitude_deviation"] = float(
+                        max(abs(block_report.amplitude_min - 1.0), abs(block_report.amplitude_max - 1.0))
+                    )
+                except Exception as exc:
+                    row["block_error"] = str(exc)
+        except Exception as exc:
+            row["error"] = str(exc)
+        rows.append(row)
+    return rows
 
 
 def analyze_monomial_support(D_num: np.ndarray, perm: Sequence[int], block_dims: Any = None) -> ExactificationReport:
@@ -974,14 +1039,29 @@ def exactify_loaded_symmetry_source(
             continue
         name = str(record.get("name"))
         op_cfg = _operation_exactification_config(exact_cfg, name)
+        discover_action_candidates = bool(
+            op_cfg.get("discover_action_candidates", exact_cfg.get("discover_action_candidates", False))
+            or op_cfg.get("allow_support_discovery", False)
+            or record.get("allow_support_discovery", False)
+        )
         candidates = _candidate_operation_actions(
             record,
             sectors,
             rotation_deg=rotation_deg,
             explicit_candidates=op_cfg.get("action_candidates") if isinstance(op_cfg.get("action_candidates"), Sequence) and not isinstance(op_cfg.get("action_candidates"), (str, bytes)) else None,
             require_explicit_action_candidates=require_explicit_action_candidates,
+            discover_action_candidates=discover_action_candidates,
         )
         D_num = np.asarray(matrices[name], dtype=complex)
+        candidate_support_residuals = _candidate_support_residuals(
+            D_num,
+            candidates,
+            labels,
+            np.asarray(bM1),
+            np.asarray(bM2),
+            q_offsets,
+            max(tol, 1.0e-8),
+        )
         candidate = _choose_best_action_candidate(
             D_num,
             candidates,
@@ -992,6 +1072,13 @@ def exactify_loaded_symmetry_source(
             max(tol, 1.0e-8),
         )
         op = candidate["operation"]
+        manifest_action = _action_candidate_summary(candidates[0])
+        selected_action = _action_candidate_summary(op)
+        action_mismatch = not _action_summaries_equal(manifest_action, selected_action)
+        if strict and action_mismatch:
+            raise ValueError(
+                f"{name} exactification selected a support action that differs from manifest model_action in strict mode"
+            )
         label_action = candidate["label_action"]
         support_mode = str(op_cfg.get("support_mode", "auto")).lower()
         if support_mode not in {"auto", "monomial", "block", "block_monomial"}:
@@ -1115,11 +1202,13 @@ def exactify_loaded_symmetry_source(
                 "q_map": _jsonable(op.q_map),
                 "antiunitary": op.antiunitary,
             },
-            "selected_action_candidate": {
-                "k_map": _jsonable(op.k_map),
-                "sector_map": _jsonable(op.sector_map),
-                "q_map": _jsonable(op.q_map),
-                "antiunitary": op.antiunitary,
+            "manifest_model_action": manifest_action,
+            "selected_action_candidate": selected_action,
+            "support_resolved_action": selected_action if action_mismatch else None,
+            "support_resolution": {
+                "action_mismatch": bool(action_mismatch),
+                "discover_action_candidates": bool(discover_action_candidates),
+                "candidate_support_residuals": candidate_support_residuals,
             },
             "preferred_mode": preferred_mode,
             "label_action": {
