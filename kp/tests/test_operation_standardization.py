@@ -42,12 +42,17 @@ def test_standard_family_names_do_not_rewrite_unknown_families() -> None:
     assert canonical_operation_name_for_valley("C4", gamma) == "C4"
     assert canonical_operation_name_for_valley("C4T", k_single) == "C4T"
     assert canonical_operation_name_for_valley("C4_eff", m_effective) == "C4_eff"
+    assert canonical_operation_name_for_valley("TR_eff", m_effective) == "TR"
+    assert canonical_operation_name_for_valley("C2_eff", m_effective) == "C2"
+    assert canonical_operation_name_for_valley("C2TR_eff", m_effective) == "C2T"
 
 
 def test_canonical_operation_registries_exclude_legacy_axis_names() -> None:
-    allowed = {"C2", "C2T", "C2TR_eff", "C2_eff", "C3z", "TR", "TR_eff"}
+    allowed = {"C2", "C2T", "C3z", "TR"}
     assert CANONICAL_INTERNAL_NAMES <= allowed
     assert set(ACTION_SPECS) <= allowed
+    assert {"TR_eff", "C2_eff", "C2TR_eff"}.isdisjoint(CANONICAL_INTERNAL_NAMES)
+    assert {"TR_eff", "C2_eff", "C2TR_eff"}.isdisjoint(ACTION_SPECS)
 
 
 def test_loaded_symmetry_source_keeps_source_and_canonical_family_separate(tmp_path: Path) -> None:
@@ -78,6 +83,97 @@ def test_loaded_symmetry_source_keeps_source_and_canonical_family_separate(tmp_p
     assert op["operation"] == "C2"
     assert op["name"] == "C2"
     assert op["k_map"] == {"type": "reflection", "axis_deg": 150.0}
+
+
+def test_kp_symm_manifest_action_wins_over_default_operation_row(tmp_path: Path) -> None:
+    np.save(tmp_path / "C2_low_raw.npy", np.eye(2, dtype=complex))
+    (tmp_path / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "operation": "C2",
+                        "name": "C2",
+                        "matrix_file": "C2_low_raw.npy",
+                        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                        "sector_map": "identity",
+                        "antiunitary": False,
+                        "model_action": {
+                            "antiunitary": False,
+                            "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                            "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                            "sector_map": "identity",
+                        },
+                        "pairs": [{"raw": {"heff_covariance_residual": 0.0, "subspace_leakage": 0.0}}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source = load_symmetry_source(
+        {
+            "type": "kp_symm_output",
+            "path": str(tmp_path),
+            "use": "raw",
+            "operations": [
+                {
+                    **_source_meta(),
+                    "operation": "C2",
+                    "name": "C2",
+                    "matrix_file": "C2_low_raw.npy",
+                    "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                    "sector_map": "layer_exchange",
+                    "antiunitary": False,
+                }
+            ],
+        },
+        base=tmp_path,
+        expected_dim=2,
+    )
+
+    op = source.metadata["operations"][0]
+    assert op["sector_map"] == "identity"
+    assert op["model_action"]["sector_map"] == "identity"
+
+
+def test_kp_symm_representation_matrix_kind_loads_representation_file(tmp_path: Path) -> None:
+    np.save(tmp_path / "C2_low_raw.npy", np.zeros((2, 2), dtype=complex))
+    np.save(tmp_path / "C2_low_representation_raw.npy", np.eye(2, dtype=complex))
+    (tmp_path / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "operation": "C2",
+                        "name": "C2",
+                        "matrix_file": "C2_low_raw.npy",
+                        "representation_matrix_file": "C2_low_representation_raw.npy",
+                        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                        "sector_map": "identity",
+                        "antiunitary": False,
+                        "representation_pairs": [{"raw": {"heff_covariance_residual": 0.0, "subspace_leakage": 0.0}}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source = load_symmetry_source(
+        {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
+        base=tmp_path,
+        expected_dim=2,
+    )
+
+    np.testing.assert_allclose(source.generator.matrices["C2"], np.eye(2, dtype=complex))
+    assert source.metadata["operations"][0]["matrix_file"].endswith("C2_low_representation_raw.npy")
 
 
 def test_operation_registry_records_canonical_names_and_source_metadata() -> None:
@@ -121,7 +217,7 @@ def test_operation_registry_records_canonical_names_and_source_metadata() -> Non
     assert row["internal_resolved_action"]["k_map"]["type"] == "reflection"
 
 
-def test_internal_resolved_action_precedes_manifest_model_action() -> None:
+def test_internal_resolved_action_without_provenance_does_not_override_manifest_model_action() -> None:
     metadata = {
         "operations": [
             {
@@ -139,6 +235,40 @@ def test_internal_resolved_action_precedes_manifest_model_action() -> None:
                     "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
                     "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
                     "sector_map": "layer_exchange",
+                },
+            }
+        ]
+    }
+
+    index = _symmetry_operation_index(metadata, rotation_deg=210.0)
+
+    assert index["C2T"]["k_map"]["axis_deg"] == pytest.approx(90.0)
+    assert index["C2T"]["sector_map"] == "identity"
+
+
+def test_internal_resolved_action_with_provenance_can_override_manifest_model_action() -> None:
+    metadata = {
+        "operations": [
+            {
+                "name": "C2T",
+                "operation": "C2T",
+                "antiunitary": True,
+                "model_action": {
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "sector_map": "identity",
+                },
+                "internal_resolved_action": {
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "sector_map": "layer_exchange",
+                    "provenance": {
+                        "source": "exactification_support_report",
+                        "action_mismatch": True,
+                        "accepted_by": "explicit_accept_support_resolved_action",
+                    },
                 },
             }
         ]

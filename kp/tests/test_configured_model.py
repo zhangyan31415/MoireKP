@@ -11,6 +11,12 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kp.model.configured import (  # noqa: E402
+    _auto_harmonics_from_q_sets,
+    _auto_harmonics_from_support,
+    _default_source_matrix_projection_config,
+    _default_term_templates_for_model,
+    _symmetry_operation_index,
+    ConfiguredModel,
     build_moire_config_from_file,
     compare_bands,
     compare_bands_for_plot,
@@ -433,6 +439,167 @@ def test_evaluate_vector_expression_supports_bM_symbols() -> None:
     np.testing.assert_allclose(evaluate_vector_expression([3.0, 4.0], variables), [3.0, 4.0])
 
 
+def test_default_term_templates_are_profile_driven_and_preserve_k_gamma_m_behavior() -> None:
+    max_order = {"Kinect": 10, "intra": 4, "inter": 3}
+
+    k_templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "K"},
+        n_orb=(1, 1),
+        max_order=max_order,
+    )
+    assert [row["name"] for row in k_templates] == [
+        "kinetic_layer1",
+        "onsite_layer1",
+        "intra_layer1",
+        "inter_21_positive",
+        "inter_21_negative",
+    ]
+    assert k_templates[0]["max_order"] == 10
+    assert k_templates[2]["harmonics"] == {"kind": "intra", "indices": [2, 3, 4]}
+    assert k_templates[4]["harmonics"] == {"kind": "inter", "indices": [2, 3, 4], "sign": -1.0}
+
+    gamma_templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        max_order=max_order,
+    )
+    assert [row["name"] for row in gamma_templates][-2:] == [
+        "gamma_inter_nonzero",
+        "gamma_inter_nonzero_negative",
+    ]
+    assert gamma_templates[-2]["max_order"] == 4
+    assert gamma_templates[-1]["max_order"] == 4
+
+    m_templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "M"},
+        n_orb=(1, 1),
+        max_order=max_order,
+    )
+    assert [row["name"] for row in m_templates] == [
+        "m1_kinetic_bottom",
+        "m1_onsite_bottom",
+        "m1_intra_bottom",
+        "m1_inter_top_to_bottom",
+    ]
+    assert m_templates[-1]["harmonics"] == "inter"
+
+
+def test_default_term_templates_clamp_profile_harmonics_to_requested_count() -> None:
+    max_order = {"Kinect": 6, "intra": 4, "inter": 4}
+
+    k_templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "K"},
+        n_orb=(1, 1),
+        max_order=max_order,
+        harmonic_counts={"intra": 3, "inter": 2},
+    )
+
+    assert k_templates[2]["harmonics"] == {"kind": "intra", "indices": [2, 3]}
+    assert k_templates[3]["harmonics"] == {"kind": "inter", "indices": [1, 2]}
+    assert k_templates[4]["harmonics"] == {"kind": "inter", "indices": [2], "sign": -1.0}
+
+
+def test_auto_harmonics_are_generated_from_qset_symmetry_orbits() -> None:
+    bM1 = np.array([1.0, 0.0], dtype=float)
+    bM2 = np.array([0.5, np.sqrt(3.0) / 2.0], dtype=float)
+    qset = _triangular_q_shell()
+
+    intra, intra_diag = _auto_harmonics_from_q_sets(
+        kind="intra",
+        count=4,
+        Q_set1=qset,
+        Q_set2=qset,
+        bM1=bM1,
+        bM2=bM2,
+    )
+    assert intra_diag["generation"] == "symmetry_orbit"
+    assert intra_diag["orbit_generators"] == ["HermitianPair"]
+    assert intra_diag["selected"][1]["orbit_size"] > 1
+    np.testing.assert_allclose(intra[1], [0.0, 0.0], atol=1.0e-12)
+
+    sectors = [
+        {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0]},
+        {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0]},
+    ]
+    c3_op = {
+        "name": "C3z",
+        "antiunitary": False,
+        "k_map": {"type": "rotation", "angle_deg": 120.0},
+        "q_map": {"type": "rotation", "angle_deg": 120.0},
+        "sector_map": "identity",
+    }
+    intra_with_c3, intra_c3_diag = _auto_harmonics_from_support(
+        raw=4,
+        kind="intra",
+        count=4,
+        sectors=sectors,
+        Q_set1=qset,
+        Q_set2=qset,
+        bM1=bM1,
+        bM2=bM2,
+        symmetry_operations=[c3_op],
+    )
+    assert intra_c3_diag["generation"] == "qset_support_symmetry_orbit"
+    assert intra_c3_diag["orbit_generators"] == ["HermitianPair", "C3z"]
+    assert intra_c3_diag["selected"][1]["orbit_size"] > intra_diag["selected"][1]["orbit_size"]
+    np.testing.assert_allclose(intra_with_c3[1], [0.0, 0.0], atol=1.0e-12)
+
+
+def test_symmetry_operation_index_rotates_q_map_when_model_action_absent() -> None:
+    metadata = {
+        "operations": [
+            {
+                "name": "C2T",
+                "operation": "C2T",
+                "antiunitary": True,
+                "k_map": {"type": "reflection", "axis_deg": 60.0},
+                "q_map": {"type": "reflection", "axis_deg": 60.0},
+                "sector_map": "identity",
+            }
+        ]
+    }
+
+    index = _symmetry_operation_index(metadata, rotation_deg=210.0)
+
+    assert index["C2T"]["k_map"]["axis_deg"] == pytest.approx(270.0)
+    assert index["C2T"]["q_map"]["axis_deg"] == pytest.approx(270.0)
+    assert index["C2T"]["sector_map"] == "identity"
+
+
+def test_source_matrix_projection_discovers_support_actions_internally() -> None:
+    cfg = ConfiguredModel(
+        path=Path("model.yaml"),
+        raw={},
+        source_config=Path("source.yaml"),
+        source_raw={},
+        qset1_file=Path("q1.npy"),
+        qset2_file=Path("q2.npy"),
+        kpoints_file=None,
+        heff_file=Path("heff.npy"),
+        heff_eig_file=None,
+        output_dir=Path("run"),
+        rotation_deg=0.0,
+        fit_indices=[0],
+        band_indices=None,
+        n_orb=(2, 2),
+        nlow_state=[2, 2],
+        bM_config={},
+        harmonics_config={},
+        max_order={},
+        symmetry_map={},
+        coeff_tol=1.0e-6,
+        compare_to_heff=False,
+        valley_model={"valley_type": "M", "spin_convention": "spinful"},
+        symmetry_source_config={"operations": [{"name": "TR"}, {"name": "C2"}]},
+    )
+
+    exact_cfg = _default_source_matrix_projection_config(cfg)
+
+    assert exact_cfg["discover_action_candidates"] is True
+    assert exact_cfg["accept_support_resolved_action"] is True
+    assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
+
+
 def test_build_moire_config_loads_fit_block_and_band_kpoints(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
 
@@ -455,7 +622,7 @@ def test_build_moire_config_auto_harmonics_selects_q_shell_stars(tmp_path: Path)
     moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
 
     b = float(np.linalg.norm(moire_cfg.bM1))
-    expected_norms = np.array([0.0, b, np.sqrt(3.0) * b, 2.0 * b])
+    expected_norms = np.array([0.0, b, b, b])
     intra_norms = np.array([np.linalg.norm(moire_cfg.intra_harmonics_map[i]) for i in range(1, 5)])
     inter_norms = np.array([np.linalg.norm(moire_cfg.inter_harmonics_map[i]) for i in range(1, 5)])
     np.testing.assert_allclose(intra_norms, expected_norms, atol=1.0e-8)
@@ -746,7 +913,7 @@ def test_generic_monomial_constraints_reproduce_legacy_kinetic_orders() -> None:
     assert orders == [(1, 1), (2, 2), (3, 0), (3, 3), (4, 1), (6, 0)]
 
 
-def test_M_spinless_uses_effective_T_name(tmp_path: Path) -> None:
+def test_M_spinless_uses_physical_T_with_effective_metadata(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"] = {
@@ -763,16 +930,15 @@ def test_M_spinless_uses_effective_T_name(tmp_path: Path) -> None:
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "TR"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="M single_valley spinless_effective must use TR_eff"):
-        load_model_config(cfg_path)
-
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "TR_eff"}], "intra": [], "inter": []}
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     cfg = load_model_config(cfg_path)
     assert cfg.valley_model["spin_convention"] == "spinless_effective"
+    assert cfg.valley_model["allowed_internal_symmetries"] == ["TR", "C2", "C2T"]
+    assert cfg.symmetry_map["Kinect"][0]["name"] == "TR"
+    assert cfg.symmetry_map["Kinect"][0]["representation_level"] == "effective_single_spin"
+    assert cfg.symmetry_map["Kinect"][0]["effective_name"] == "TR_eff"
 
 
-def test_M_spinless_requires_effective_C2_internal_name(tmp_path: Path) -> None:
+def test_M_spinless_legacy_effective_C2_alias_normalizes_to_physical_name(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"] = {
@@ -789,15 +955,13 @@ def test_M_spinless_requires_effective_C2_internal_name(tmp_path: Path) -> None:
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2"}, {"name": "TR_eff"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="must be effective names"):
-        load_model_config(cfg_path)
-
-    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2_eff"}, {"name": "TR_eff"}], "intra": [], "inter": []}
-    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     cfg = load_model_config(cfg_path)
 
-    assert cfg.valley_model["allowed_internal_symmetries"] == ["TR_eff", "C2_eff"]
-    assert cfg.symmetry_map["Kinect"][0]["name"] == "C2_eff"
+    assert cfg.valley_model["allowed_internal_symmetries"] == ["TR", "C2"]
+    assert cfg.symmetry_map["Kinect"][0]["name"] == "C2"
+    assert cfg.symmetry_map["Kinect"][0]["effective_name"] == "C2_eff"
+    assert cfg.symmetry_map["Kinect"][1]["name"] == "TR"
+    assert cfg.symmetry_map["Kinect"][1]["operation_alias"] == "TR_eff"
 
 
 def test_Gamma_user_facing_C2_stays_standard_family(tmp_path: Path) -> None:
@@ -816,7 +980,7 @@ def test_Gamma_user_facing_C2_stays_standard_family(tmp_path: Path) -> None:
     assert cfg.symmetry_map["Kinect"][1]["name"] == "C2"
 
 
-def test_monomial_filter_is_forbidden_in_release_schema(tmp_path: Path) -> None:
+def test_monomial_filter_is_forbidden_in_model_schema(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["model"]["term_templates"] = [
@@ -831,11 +995,11 @@ def test_monomial_filter_is_forbidden_in_release_schema(tmp_path: Path) -> None:
     ]
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="not supported by the release model schema"):
+    with pytest.raises(ValueError, match="not supported by the model schema"):
         load_model_config(cfg_path)
 
 
-def test_release_schema_rejects_unknown_generation_mode(tmp_path: Path) -> None:
+def test_model_schema_rejects_unknown_generation_mode(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["model"]["term_templates"] = [
@@ -854,7 +1018,7 @@ def test_release_schema_rejects_unknown_generation_mode(tmp_path: Path) -> None:
         load_model_config(cfg_path)
 
 
-def test_release_schema_rejects_legacy_term_names(tmp_path: Path) -> None:
+def test_model_schema_rejects_legacy_term_names(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["model"]["term_templates"] = [
@@ -873,13 +1037,13 @@ def test_release_schema_rejects_legacy_term_names(tmp_path: Path) -> None:
         load_model_config(cfg_path)
 
 
-def test_M_spinless_runtime_supports_effective_symmetry_names() -> None:
+def test_M_spinless_runtime_supports_physical_names_for_effective_representation() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     sym = SymmetryGenerator(q, q, [1, 1], basis_template="M_spinless_layer_exchange")
 
-    t_eff = sym.get_operator("TR_eff", None)
-    c2_eff = sym.get_operator("C2_eff", None)
-    c2t_eff = sym.get_operator("C2TR_eff", None)
+    t_eff = sym.get_operator("TR", None)
+    c2_eff = sym.get_operator("C2", None)
+    c2t_eff = sym.get_operator("C2T", None)
 
     assert t_eff.shape == (2, 2)
     assert c2_eff.shape == (2, 2)
@@ -887,19 +1051,19 @@ def test_M_spinless_runtime_supports_effective_symmetry_names() -> None:
     np.testing.assert_allclose(t_eff @ t_eff.conj(), np.eye(2), atol=1.0e-12)
 
 
-def test_M_spinless_effective_symmetry_names_have_k_actions() -> None:
+def test_M_spinless_effective_representation_uses_physical_k_actions() -> None:
     k = np.array([0.25, -0.5], dtype=float)
 
     np.testing.assert_allclose(
-        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "TR_eff", "k_map": {"type": "negation"}}),
+        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "TR", "k_map": {"type": "negation"}}),
         np.array([-0.25, 0.5]),
     )
     np.testing.assert_allclose(
-        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "C2_eff", "k_map": {"type": "reflection", "axis_deg": 0.0}}),
+        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "C2", "k_map": {"type": "reflection", "axis_deg": 0.0}}),
         np.array([0.25, 0.5]),
     )
     np.testing.assert_allclose(
-        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "C2TR_eff", "k_map": {"type": "reflection", "axis_deg": 90.0}}),
+        ContinuumModelBuilder._apply_k_map_to_vector(k, {"name": "C2T", "k_map": {"type": "reflection", "axis_deg": 90.0}}),
         np.array([-0.25, -0.5]),
     )
 
@@ -1009,8 +1173,7 @@ def test_k_inter_auto_harmonics_infers_sector_offsets(tmp_path: Path) -> None:
 
     selected = model_cfg.harmonics_diagnostics["inter"]["selected"][0]
     np.testing.assert_allclose(moire_cfg.inter_harmonics_map[1], selected["vector"], atol=1.0e-12)
-    assert model_cfg.harmonics_diagnostics["inter"]["selection_rule"] == "K_valley_inter_geometry"
-    np.testing.assert_allclose(selected["vector"], [0.0, 1.0 / np.sqrt(3.0)], atol=1.0e-12)
+    assert model_cfg.harmonics_diagnostics["inter"]["generation"] == "valley_geometry_orbit"
 
 
 def test_build_terms_no_layer1_only() -> None:
@@ -1371,7 +1534,7 @@ def test_symmetry_source_infers_operations_from_summary(tmp_path: Path) -> None:
     assert op["leakage"] == 3.4e-9
 
 
-def test_symmetry_source_loads_effective_m_ops_from_standard_tr_labels(tmp_path: Path) -> None:
+def test_symmetry_source_loads_m_effective_aliases_under_physical_keys(tmp_path: Path) -> None:
     from kp.model.symmetry import load_symmetry_source
 
     t_matrix = np.array([[0.0, 1.0], [-1.0, 0.0]], dtype=complex)
@@ -1444,17 +1607,21 @@ def test_symmetry_source_loads_effective_m_ops_from_standard_tr_labels(tmp_path:
         expected_dim=2,
     )
 
-    np.testing.assert_allclose(source.generator.get_operator("TR_eff"), t_matrix)
+    np.testing.assert_allclose(source.generator.get_operator("TR"), t_matrix)
     with pytest.raises(ValueError, match="not loaded"):
-        source.generator.get_operator("TR")
-    np.testing.assert_allclose(source.generator.get_operator("C2_eff"), c2_matrix)
+        source.generator.get_operator("TR_eff")
+    np.testing.assert_allclose(source.generator.get_operator("C2"), c2_matrix)
     with pytest.raises(ValueError, match="not loaded"):
-        source.generator.get_operator("C2")
+        source.generator.get_operator("C2_eff")
     by_name = {op["name"]: op for op in source.metadata["operations"]}
 
-    t_op = by_name["TR_eff"]
+    t_op = by_name["TR"]
     assert t_op["operation"] == "TR"
-    assert "aliases" not in t_op
+    assert t_op["operation_alias"] == "TR_eff"
+    assert t_op["canonical_physical_operation"] == "TR"
+    assert t_op["representation_level"] == "effective_single_spin"
+    assert t_op["effective_name"] == "TR_eff"
+    assert t_op["approximation"] == {"kind": "spin_SU2_effective_block"}
     assert t_op["matrix_file"].endswith("TR_low_raw.npy")
     assert t_op["matrix_kind"] == "action"
     assert t_op["source_matrix_role"] == "raw_h_sewing_action"
@@ -1462,9 +1629,12 @@ def test_symmetry_source_loads_effective_m_ops_from_standard_tr_labels(tmp_path:
     assert t_op["antiunitary_convention"] == "U_K"
     assert "production" + "_use" not in t_op
 
-    c2_op = by_name["C2_eff"]
+    c2_op = by_name["C2"]
     assert c2_op["operation"] == "C2"
-    assert "aliases" not in c2_op
+    assert c2_op["operation_alias"] == "C2_eff"
+    assert c2_op["canonical_physical_operation"] == "C2"
+    assert c2_op["representation_level"] == "effective_single_spin"
+    assert c2_op["effective_name"] == "C2_eff"
     assert c2_op["matrix_file"].endswith("C2_low_raw.npy")
     assert c2_op["source_matrix_role"] == "D0_times_PG_action"
     assert c2_op["gauge_correction"] == {"kind": "periodic_atomic_bloch_PG", "file": "representations/M1/C2_PG.npz"}
@@ -1694,6 +1864,96 @@ def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_pa
     assert op["k_map"]["in_model_frame"] is True
 
 
+def test_build_moire_config_records_projection_report_without_action_mismatch(monkeypatch, tmp_path: Path) -> None:
+    import kp.model.configured as configured_module
+
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
+    raw["model"]["symmetry_map"] = {
+        "Kinect": [{"name": "C2T"}],
+        "Onsite": [],
+        "intra": [],
+        "inter": [],
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    manifest_action = {
+        "antiunitary": True,
+        "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        "sector_map": "layer_exchange",
+    }
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir()
+    np.save(symm_dir / "C2T_low_raw.npy", np.eye(4, dtype=complex))
+    (symm_dir / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "operations": [
+                    {
+                        **_source_meta(antiunitary=True),
+                        "name": "C2T",
+                        "matrix_file": "C2T_low_raw.npy",
+                        "k_map": {"type": "reflection", "axis_deg": 60.0},
+                        "q_map": {"type": "reflection", "axis_deg": 60.0},
+                        "sector_map": "identity",
+                        "model_action": manifest_action,
+                        "model_basis_action": {
+                            "complete": True,
+                            "sector_map": "layer_exchange",
+                            "items": [
+                                {
+                                    "source_sector": "L1",
+                                    "source_q_index": 0,
+                                    "target_sector": "L2",
+                                    "target_q_index": 0,
+                                    "q_residual": 0.0,
+                                }
+                            ],
+                        },
+                        "antiunitary": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_exactify_loaded_symmetry_source(**kwargs):
+        exact_cfg = kwargs["raw_config"]["exactification"]
+        assert exact_cfg["discover_action_candidates"] is True
+        assert exact_cfg["accept_support_resolved_action"] is True
+        return (
+            {"C2T": np.eye(4, dtype=complex)},
+            {
+                "C2T": {
+                    "resolved_action": dict(manifest_action),
+                    "manifest_model_action": dict(manifest_action),
+                    "support_resolved_action": None,
+                    "support_resolution": {
+                        "action_mismatch": False,
+                        "discover_action_candidates": True,
+                        "accept_support_resolved_action": True,
+                        "candidate_source": "manifest_model_action",
+                    },
+                }
+            },
+        )
+
+    monkeypatch.setattr(configured_module, "exactify_loaded_symmetry_source", fake_exactify_loaded_symmetry_source)
+
+    moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
+
+    operation = model_cfg.symmetry_source_metadata["operations"][0]
+    report = operation["source_matrix_projection_report"]
+    assert report["support_resolution"]["action_mismatch"] is False
+    assert operation["internal_resolved_action"]["sector_map"] == "layer_exchange"
+    assert "provenance" not in operation["internal_resolved_action"]
+    assert model_cfg.symmetry_map["Kinect"][0]["sector_map"] == "layer_exchange"
+    assert moire_cfg.symmetry_map["Kinect"][0]["k_map"]["in_model_frame"] is True
+
+
 def test_float_p_key_canonicalization() -> None:
     from kp.model.config_schema import canonical_vector_key
 
@@ -1820,7 +2080,7 @@ def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_pat
     assert results["configured_model"].band_plot_config["ylim"] == [0.0, 0.16]
 
 
-def test_M_spinless_kp_symm_output_physical_source_ops_are_relabelled_effective(tmp_path: Path) -> None:
+def test_M_spinless_kp_symm_output_physical_source_ops_stay_physical_with_effective_metadata(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     symm_dir = tmp_path / "symm"
     symm_dir.mkdir()
@@ -1852,12 +2112,13 @@ def test_M_spinless_kp_symm_output_physical_source_ops_are_relabelled_effective(
 
     cfg = load_model_config(cfg_path)
 
-    assert [op["name"] for op in cfg.symmetry_source_config["operations"]] == ["TR_eff", "C2_eff"]
-    assert all("aliases" not in op for op in cfg.symmetry_source_config["operations"])
-    assert [op["name"] for op in cfg.symmetry_map["Kinect"]] == ["C2_eff", "TR_eff"]
+    assert [op["name"] for op in cfg.symmetry_source_config["operations"]] == ["TR", "C2"]
+    assert [op["effective_name"] for op in cfg.symmetry_source_config["operations"]] == ["TR_eff", "C2_eff"]
+    assert [op["name"] for op in cfg.symmetry_map["Kinect"]] == ["C2", "TR"]
+    assert [op["effective_name"] for op in cfg.symmetry_map["Kinect"]] == ["C2_eff", "TR_eff"]
 
 
-def test_production_strict_rejects_unavailable_validation_outputs(monkeypatch, tmp_path: Path) -> None:
+def test_validation_strict_rejects_unavailable_validation_outputs(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["validation"] = {"strict": True}

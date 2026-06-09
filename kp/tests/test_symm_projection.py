@@ -12,15 +12,150 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.cli as cli
+from kp.model.symmetry import load_symmetry_source
 from kp.symmetry.project import (
     _model_action_metadata,
     _model_frame_action_metadata,
     _operation_entry,
+    _resolve_projected_model_action,
     _validate_operation_label,
 )
 
 
 class SymmetryProjectionCliTests(unittest.TestCase):
+    def test_action_resolution_infers_sector_orbitals_from_low_dim_for_single_nlow_list(self) -> None:
+        q = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+        action = {
+            "antiunitary": False,
+            "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+            "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+            "sector_map": "identity",
+        }
+        dim = 8  # 2 sectors * 2 q points * 2 orbitals per sector.
+        raw_action = np.roll(np.eye(dim, dtype=np.complex128), shift=1, axis=0)
+        representation = np.zeros((dim, dim), dtype=np.complex128)
+        representation[4:, :4] = np.eye(4, dtype=np.complex128)
+        representation[:4, 4:] = np.eye(4, dtype=np.complex128)
+
+        resolved, basis_action = _resolve_projected_model_action(
+            D_low=raw_action,
+            support_matrices=[("raw_action", raw_action), ("representation", representation)],
+            model_action=action,
+            q_model1=q,
+            q_model2=q.copy(),
+            nlow_state_list=[[10, 11, 12, 13]],
+            tol=1.0e-8,
+        )
+
+        self.assertEqual(resolved["sector_map"], "layer_exchange")
+        self.assertTrue(basis_action["complete"])
+        self.assertTrue(basis_action["support_resolution"]["action_mismatch"])
+        self.assertEqual(basis_action["support_resolution"]["support_matrix_source"], "representation")
+
+    def _run_minimal_two_layer_projection(
+        self,
+        tmp: Path,
+        *,
+        valley: str,
+        operation: str,
+        d_up: np.ndarray,
+        manifest_entry: dict,
+        q_rotation_deg: float = 0.0,
+    ) -> Path:
+        q1_file = tmp / f"{operation}_q1.npy"
+        q2_file = tmp / f"{operation}_q2.npy"
+        hamk_file = tmp / f"{operation}_hamk.npy"
+        symm_dir = tmp / f"{operation}_symmetry_analysis"
+        rep_dir = symm_dir / "representations" / valley
+        out_dir = tmp / f"{operation}_symm_project"
+        cfg_path = tmp / f"{operation}_symm.yaml"
+
+        np.save(q1_file, np.array([[0.0, 0.0]], dtype=float))
+        np.save(q2_file, np.array([[0.0, 0.0]], dtype=float))
+
+        h_up = np.diag([1.0, 5.0, 1.0, 5.0]).astype(np.complex128)
+        hamk = np.zeros((1, 8, 8), dtype=np.complex128)
+        hamk[0, :4, :4] = h_up
+        hamk[0, 4:, 4:] = h_up
+        np.save(hamk_file, hamk)
+
+        d_full = np.zeros((8, 8), dtype=np.complex128)
+        d_full[:4, :4] = d_up
+        d_full[4:, 4:] = d_up
+        rep_dir.mkdir(parents=True)
+        np.savez(rep_dir / f"{operation}.npz", matrix=d_full)
+
+        entry = {
+            "antiunitary": False,
+            "filename": f"{valley}/{operation}.npz",
+            "k_pairs": [[0, 0]],
+            **manifest_entry,
+        }
+        (symm_dir / "representations" / "manifest.json").write_text(
+            json.dumps({"operations": {valley: {operation: entry}}}),
+            encoding="utf-8",
+        )
+
+        cfg = {
+            "material": {
+                "hamk_file": str(hamk_file),
+                "qset1_file": str(q1_file),
+                "qset2_file": str(q2_file),
+                "spin": "up",
+                "num_layers": 2,
+                "num_orb_per_layer": [2, 2],
+            },
+            "plot": {"hamk_index": 0, "q_rotation_deg": q_rotation_deg},
+            "project": {
+                "enable": True,
+                "mode": valley,
+                "downfold_method": "first_order",
+                "nlow_state_list": [[0], [0]],
+                "norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+            },
+            "symm": {
+                "enable": True,
+                "valley": valley,
+                "spin": "up",
+                "tapw_symmetry_dir": str(symm_dir),
+                "operations": [operation],
+                "output_dir": str(out_dir),
+                "tolerance": 1.0e-8,
+            },
+        }
+        cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+        cli.main(["symm", "--config", str(cfg_path)])
+        return out_dir
+
+    def _reader_operation_row(
+        self,
+        *,
+        name: str,
+        operation: str,
+        matrix_file: str,
+        antiunitary: bool,
+        k_map: dict,
+        sector_map: str,
+    ) -> dict:
+        return {
+            "name": name,
+            "operation": operation,
+            "matrix_file": matrix_file,
+            "antiunitary": antiunitary,
+            "k_map": dict(k_map),
+            "q_map": dict(k_map),
+            "sector_map": sector_map,
+            "spin_map": "from_kp_symm_output",
+            "valley_map": "identity",
+            "matrix_kind": "action",
+            "source_matrix_role": "raw_h_sewing_action",
+            "source_gauge": "raw_saved_TAPW",
+            "target_role": "continuum_internal_rep",
+            "gauge_correction": {"kind": "none"},
+            "antiunitary_convention": "U_K" if antiunitary else "none",
+        }
+
     def test_symm_rejects_nonstandard_operation_label(self) -> None:
         with self.assertRaisesRegex(ValueError, "Unsupported symm operation"):
             _validate_operation_label("C4")
@@ -187,6 +322,193 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertLess(by_name["C3"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["subspace_leakage"], 1.0e-12)
+
+    def test_symm_records_model_basis_action_from_projected_matrix_support(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            q1_file = tmp / "q1.npy"
+            q2_file = tmp / "q2.npy"
+            hamk_file = tmp / "hamk.npy"
+            symm_dir = tmp / "symmetry_analysis_test"
+            rep_dir = symm_dir / "representations" / "K1"
+            out_dir = tmp / "symm_project"
+            cfg_path = tmp / "k1.yaml"
+
+            np.save(q1_file, np.array([[0.0, 0.0]], dtype=float))
+            np.save(q2_file, np.array([[0.0, 0.0]], dtype=float))
+
+            h_up = np.diag([1.0, 5.0, 1.0, 5.0]).astype(np.complex128)
+            h_down = h_up.copy()
+            hamk = np.zeros((1, 8, 8), dtype=np.complex128)
+            hamk[0, :4, :4] = h_up
+            hamk[0, 4:, 4:] = h_down
+            np.save(hamk_file, hamk)
+
+            d_swap_layers = np.array(
+                [
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                ],
+                dtype=np.complex128,
+            )
+            d_full = np.zeros((8, 8), dtype=np.complex128)
+            d_full[:4, :4] = d_swap_layers
+            d_full[4:, 4:] = d_swap_layers
+            rep_dir.mkdir(parents=True)
+            np.savez(rep_dir / "C2.npz", matrix=d_full)
+            np.savez(rep_dir / "C3.npz", matrix=np.eye(8, dtype=np.complex128))
+            (symm_dir / "representations" / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "operations": {
+                            "K1": {
+                                "C3": {
+                                    "antiunitary": False,
+                                    "filename": "K1/C3.npz",
+                                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                    "sector_map": "identity",
+                                    "k_pairs": [[0, 0]],
+                                },
+                                "C2": {
+                                    "antiunitary": False,
+                                    "filename": "K1/C2.npz",
+                                    "k_map": {"type": "reflection", "axis_deg": 0.0},
+                                    "q_map": {"type": "reflection", "axis_deg": 0.0},
+                                    "sector_map": "identity",
+                                    "k_pairs": [[0, 0]],
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            cfg = {
+                "material": {
+                    "hamk_file": str(hamk_file),
+                    "qset1_file": str(q1_file),
+                    "qset2_file": str(q2_file),
+                    "spin": "up",
+                    "num_layers": 2,
+                    "num_orb_per_layer": [2, 2],
+                },
+                "plot": {"hamk_index": 0},
+                "project": {
+                    "enable": True,
+                    "mode": "K1",
+                    "downfold_method": "first_order",
+                    "nlow_state_list": [[0], [0]],
+                    "norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+                },
+                "symm": {
+                    "enable": True,
+                    "valley": "K1",
+                    "spin": "up",
+                    "tapw_symmetry_dir": str(symm_dir),
+                    "operations": ["C3", "C2"],
+                    "output_dir": str(out_dir),
+                    "tolerance": 1.0e-8,
+                },
+            }
+            cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+            cli.main(["symm", "--config", str(cfg_path)])
+
+            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest, summary)
+            rows = {operation["operation"]: operation for operation in summary["operations"]}
+            manifest_rows = {operation["operation"]: operation for operation in manifest["operations"]}
+            c3 = rows["C3"]
+            self.assertEqual(c3["declared_model_action"]["sector_map"], "identity")
+            self.assertEqual(c3["model_action"]["sector_map"], "identity")
+            self.assertEqual(c3["sector_map"], "identity")
+            self.assertTrue(c3["model_basis_action"]["complete"])
+            self.assertEqual(c3["model_basis_action"]["sector_map"], "identity")
+            self.assertFalse(c3["model_basis_action"]["support_resolution"]["action_mismatch"])
+            self.assertEqual(manifest_rows["C3"]["model_basis_action"], c3["model_basis_action"])
+
+            row = rows["C2"]
+            self.assertEqual(row["source_action"]["sector_map"], "identity")
+            self.assertEqual(row["declared_model_action"]["sector_map"], "identity")
+            self.assertEqual(row["model_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(row["sector_map"], "layer_exchange")
+            self.assertTrue(row["model_basis_action"]["complete"])
+            self.assertEqual(row["model_basis_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(manifest_rows["C2"]["model_basis_action"], row["model_basis_action"])
+            self.assertTrue(row["model_basis_action"]["support_resolution"]["action_mismatch"])
+            self.assertEqual(
+                row["model_basis_action"]["support_resolution"]["declared_model_action"]["sector_map"],
+                "identity",
+            )
+            self.assertEqual(
+                row["model_basis_action"]["support_resolution"]["selected_model_action"]["sector_map"],
+                "layer_exchange",
+            )
+            self.assertEqual(
+                [(item["source_sector"], item["target_sector"]) for item in row["model_basis_action"]["items"]],
+                [("L1", "L2"), ("L2", "L1")],
+            )
+            self.assertEqual(
+                [(item["source_q_index"], item["target_q_index"]) for item in row["model_basis_action"]["items"]],
+                [(0, 0), (0, 0)],
+            )
+
+            loaded = load_symmetry_source(
+                {
+                    "type": "kp_symm_output",
+                    "path": str(out_dir),
+                    "operations": [
+                        self._reader_operation_row(
+                            name="C2",
+                            operation="C2",
+                            matrix_file="C2_low_raw.npy",
+                            antiunitary=False,
+                            k_map={"type": "reflection", "axis_deg": 0.0},
+                            sector_map="identity",
+                        )
+                    ],
+                },
+                base=tmp,
+                expected_dim=2,
+            )
+            loaded_row = loaded.metadata["operations"][0]
+            self.assertEqual(loaded_row["model_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(loaded_row["model_basis_action"]["items"], row["model_basis_action"]["items"])
+            np.testing.assert_allclose(
+                loaded.generator.get_operator("C2"),
+                np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128),
+                atol=1.0e-12,
+            )
+
+    def test_symm_keeps_identity_action_when_matrix_support_is_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+            out_dir = self._run_minimal_two_layer_projection(
+                tmp,
+                valley="K1",
+                operation="C2",
+                d_up=np.eye(4, dtype=np.complex128),
+                manifest_entry={
+                    "k_map": {"type": "reflection", "axis_deg": 0.0},
+                    "q_map": {"type": "reflection", "axis_deg": 0.0},
+                    "sector_map": "identity",
+                },
+            )
+
+            row = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["operations"][0]
+            self.assertEqual(row["declared_model_action"]["sector_map"], "identity")
+            self.assertEqual(row["model_action"]["sector_map"], "identity")
+            self.assertEqual(row["model_basis_action"]["sector_map"], "identity")
+            self.assertFalse(row["model_basis_action"]["support_resolution"]["action_mismatch"])
+            self.assertEqual(
+                [(item["source_sector"], item["target_sector"]) for item in row["model_basis_action"]["items"]],
+                [("L1", "L1"), ("L2", "L2")],
+            )
 
     def test_symm_can_export_up_to_down_spin_sewing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

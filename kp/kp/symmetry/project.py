@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 import numpy as np
 import yaml
@@ -12,6 +12,7 @@ import yaml
 from ..blocks.blocks import _assemble_projectors_from_block_eigenvectors, calculate_energy_lists, get_H_block
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..io.tapw_loader import load_Q_sets, load_hamk
+from ..model.config_schema import M_EFFECTIVE_OPERATION_ALIASES
 
 try:
     import scipy.sparse as _sparse
@@ -59,11 +60,13 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
-_SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "TR", "TR_eff", "C2_eff", "C2TR_eff"})
+_SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "TR"})
 
 
 def _validate_operation_label(label: str) -> str:
     text = str(label)
+    if text in M_EFFECTIVE_OPERATION_ALIASES:
+        text = str(M_EFFECTIVE_OPERATION_ALIASES[text]["canonical"])
     if text not in _SUPPORTED_OPERATION_LABELS:
         raise ValueError(
             f"Unsupported symm operation {text!r}; use a standard operation family and explicit action metadata"
@@ -239,7 +242,7 @@ def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitar
         k_map = {"type": "reflection", "axis_deg": float(entry["axis_deg"])}
     elif operation in {"C3", "C3z"}:
         k_map = {"type": "rotation", "angle_deg": 120.0}
-    elif operation in {"TR", "TR_eff"}:
+    elif operation == "TR":
         k_map = {"type": "negation"}
     else:
         raise ValueError(f"Operation {operation!r} requires explicit k_map metadata in the TAPW symmetry manifest")
@@ -337,6 +340,282 @@ def _model_action_metadata(
     rotation_deg: float,
 ) -> dict[str, Any]:
     return _conjugate_action_to_model_frame(source_action, rotation_deg=rotation_deg)
+
+
+def _rotation_from_action_map(action_map: Any) -> np.ndarray:
+    if not isinstance(action_map, dict):
+        return np.eye(2, dtype=float)
+    map_type = str(action_map.get("type", "")).lower()
+    if map_type == "rotation":
+        theta = np.deg2rad(float(action_map.get("angle_deg", 0.0)))
+        return np.array([[np.cos(theta), -np.sin(theta)], [np.sin(theta), np.cos(theta)]], dtype=float)
+    if map_type == "reflection":
+        theta = np.deg2rad(float(action_map.get("axis_deg", 0.0)))
+        axis = np.array([np.cos(theta), np.sin(theta)], dtype=float)
+        return 2.0 * np.outer(axis, axis) - np.eye(2, dtype=float)
+    if map_type == "negation":
+        return -np.eye(2, dtype=float)
+    return np.eye(2, dtype=float)
+
+
+def _shift_reflection_axis(action_map: Any, shift_deg: float) -> Any:
+    if not isinstance(action_map, dict):
+        return action_map
+    out = dict(action_map)
+    if str(out.get("type", "")).lower() == "reflection" and "axis_deg" in out:
+        out["axis_deg"] = float(out["axis_deg"]) + float(shift_deg)
+    return out
+
+
+def _sector_target(sector: str, sector_map: Any) -> str:
+    if isinstance(sector_map, dict):
+        return str(sector_map.get(sector, sector))
+    if str(sector_map) == "layer_exchange":
+        return {"L1": "L2", "L2": "L1"}.get(sector, sector)
+    return sector
+
+
+def _action_candidates_from_model_action(model_action: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = [dict(model_action)]
+    sector_map = model_action.get("sector_map", "identity")
+    if sector_map in {"identity", None}:
+        swapped = dict(model_action)
+        swapped["sector_map"] = "layer_exchange"
+        candidates.append(swapped)
+    if (
+        bool(model_action.get("antiunitary", False))
+        and isinstance(model_action.get("q_map"), dict)
+        and str(model_action["q_map"].get("type", "")).lower() == "reflection"
+    ):
+        for shift in (-90.0, 90.0):
+            for base in list(candidates):
+                shifted = dict(base)
+                shifted["k_map"] = _shift_reflection_axis(base.get("k_map"), shift)
+                shifted["q_map"] = _shift_reflection_axis(base.get("q_map"), shift)
+                candidates.append(shifted)
+    out: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = json.dumps(candidate, sort_keys=True)
+        if key not in seen:
+            seen.add(key)
+            out.append(candidate)
+    return out
+
+
+def _sector_orbital_counts(
+    q_model1: np.ndarray,
+    q_model2: np.ndarray,
+    nlow_state_list: list[list[int]],
+    *,
+    low_dim: int | None,
+) -> tuple[int, int]:
+    if len(nlow_state_list) >= 2:
+        return len(nlow_state_list[0]), len(nlow_state_list[1])
+    if low_dim is not None:
+        q_total = int(len(q_model1) + len(q_model2))
+        if q_total > 0 and int(low_dim) % q_total == 0:
+            per_sector = int(low_dim) // q_total
+            return per_sector, per_sector
+    if nlow_state_list:
+        count = len(nlow_state_list[0])
+        if count % 2 == 0 and len(q_model1) == len(q_model2):
+            return count // 2, count // 2
+        return count, 0
+    return 0, 0
+
+
+def _model_basis_labels(
+    q_model1: np.ndarray,
+    q_model2: np.ndarray,
+    nlow_state_list: list[list[int]],
+    *,
+    low_dim: int | None = None,
+) -> list[dict[str, Any]]:
+    labels: list[dict[str, Any]] = []
+    n_orb1, n_orb2 = _sector_orbital_counts(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    for sector, qset, bands in (
+        ("L1", np.asarray(q_model1, dtype=float), range(n_orb1)),
+        ("L2", np.asarray(q_model2, dtype=float), range(n_orb2)),
+    ):
+        for orbital_slot, _band in enumerate(bands):
+            for q_index, q_vector in enumerate(qset):
+                labels.append(
+                    {
+                        "sector": sector,
+                        "q_index": int(q_index),
+                        "orbital": int(orbital_slot),
+                        "q_vector": np.asarray(q_vector, dtype=float),
+                    }
+                )
+    return labels
+
+
+def _basis_action_for_candidate(
+    *,
+    action: dict[str, Any],
+    q_model1: np.ndarray,
+    q_model2: np.ndarray,
+    nlow_state_list: list[list[int]],
+    low_dim: int | None,
+    tol: float,
+) -> dict[str, Any]:
+    qsets = {"L1": np.asarray(q_model1, dtype=float), "L2": np.asarray(q_model2, dtype=float)}
+    labels = _model_basis_labels(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    target_index = {
+        (str(label["sector"]), int(label["q_index"]), int(label["orbital"])): idx
+        for idx, label in enumerate(labels)
+    }
+    q_action_items: list[dict[str, Any]] = []
+    q_action_seen: set[tuple[str, int]] = set()
+    perm = np.full(len(labels), -1, dtype=int)
+    missing: list[dict[str, Any]] = []
+    R = _rotation_from_action_map(action.get("q_map", action.get("k_map")))
+    for src_idx, label in enumerate(labels):
+        source_sector = str(label["sector"])
+        target_sector = _sector_target(source_sector, action.get("sector_map", "identity"))
+        target_qset = qsets.get(target_sector)
+        if target_qset is None or target_qset.size == 0:
+            missing.append({"source_index": int(src_idx), "reason": "missing_target_sector"})
+            continue
+        mapped = R @ np.asarray(label["q_vector"], dtype=float)
+        distances = np.linalg.norm(target_qset - mapped, axis=1)
+        target_q_index = int(np.argmin(distances))
+        residual = float(distances[target_q_index])
+        if residual > float(tol):
+            missing.append(
+                {
+                    "source_index": int(src_idx),
+                    "source_sector": source_sector,
+                    "target_sector": target_sector,
+                    "q_residual": residual,
+                }
+            )
+            continue
+        key = (target_sector, target_q_index, int(label["orbital"]))
+        if key not in target_index:
+            missing.append({"source_index": int(src_idx), "reason": "missing_target_orbital"})
+            continue
+        perm[src_idx] = int(target_index[key])
+        q_key = (source_sector, int(label["q_index"]))
+        if q_key not in q_action_seen:
+            q_action_seen.add(q_key)
+            q_action_items.append(
+                {
+                    "source_sector": source_sector,
+                    "source_q_index": int(label["q_index"]),
+                    "target_sector": target_sector,
+                    "target_q_index": target_q_index,
+                    "q_residual": residual,
+                }
+            )
+    return {
+        "complete": bool(np.all(perm >= 0)),
+        "perm": perm,
+        "items": q_action_items,
+        "missing": missing,
+        "sector_map": action.get("sector_map", "identity"),
+    }
+
+
+def _block_support_residual(D: np.ndarray, labels: list[dict[str, Any]], perm: np.ndarray) -> float:
+    arr = np.asarray(D, dtype=np.complex128)
+    if arr.ndim == 3:
+        arr = arr[0]
+    mask = np.zeros(arr.shape, dtype=bool)
+    target_groups: dict[tuple[str, int], list[int]] = {}
+    for idx, label in enumerate(labels):
+        target_groups.setdefault((str(label["sector"]), int(label["q_index"])), []).append(idx)
+    for src_idx, target_idx in enumerate(perm):
+        if target_idx < 0:
+            continue
+        src_label = labels[src_idx]
+        tgt_label = labels[int(target_idx)]
+        src_cols = target_groups[(str(src_label["sector"]), int(src_label["q_index"]))]
+        tgt_rows = target_groups[(str(tgt_label["sector"]), int(tgt_label["q_index"]))]
+        mask[np.ix_(tgt_rows, src_cols)] = True
+    off = arr.copy()
+    off[mask] = 0.0
+    denom = float(np.linalg.norm(arr))
+    if denom == 0.0:
+        denom = 1.0
+    return float(np.linalg.norm(off) / denom)
+
+
+def _resolve_projected_model_action(
+    *,
+    D_low: np.ndarray,
+    support_matrices: Sequence[tuple[str, np.ndarray]] | None = None,
+    model_action: dict[str, Any],
+    q_model1: np.ndarray,
+    q_model2: np.ndarray,
+    nlow_state_list: list[list[int]],
+    tol: float,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    matrix_options = list(support_matrices or [("raw", D_low)])
+    low_dim = int(np.asarray(matrix_options[0][1]).shape[-1])
+    labels = _model_basis_labels(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    best: tuple[float, str, dict[str, Any], dict[str, Any]] | None = None
+    diagnostics: list[dict[str, Any]] = []
+    for candidate in _action_candidates_from_model_action(model_action):
+        basis_action = _basis_action_for_candidate(
+            action=candidate,
+            q_model1=q_model1,
+            q_model2=q_model2,
+            nlow_state_list=nlow_state_list,
+            low_dim=low_dim,
+            tol=tol,
+        )
+        residuals: list[dict[str, Any]] = []
+        if basis_action["complete"]:
+            for matrix_label, matrix in matrix_options:
+                residual = _block_support_residual(matrix, labels, np.asarray(basis_action["perm"], dtype=int))
+                residuals.append({"matrix": matrix_label, "block_off_support_rel": residual})
+                if best is None or residual < best[0]:
+                    best = (residual, matrix_label, candidate, basis_action)
+        diagnostics.append(
+            {
+                "action": {
+                    "k_map": candidate.get("k_map"),
+                    "q_map": candidate.get("q_map"),
+                    "sector_map": candidate.get("sector_map"),
+                    "antiunitary": candidate.get("antiunitary"),
+                },
+                "complete": bool(basis_action["complete"]),
+                "missing_count": int(len(basis_action["missing"])),
+                "support_residuals": residuals,
+                "block_off_support_rel": min((row["block_off_support_rel"] for row in residuals), default=None),
+            }
+        )
+    if best is None:
+        basis_action = _basis_action_for_candidate(
+            action=model_action,
+            q_model1=q_model1,
+            q_model2=q_model2,
+            nlow_state_list=nlow_state_list,
+            low_dim=low_dim,
+            tol=tol,
+        )
+        selected_action = dict(model_action)
+        support_matrix_source = None
+        residual = None
+    else:
+        residual, support_matrix_source, selected_action, basis_action = best
+    basis_action_out = {
+        "complete": bool(basis_action["complete"]),
+        "sector_map": basis_action["sector_map"],
+        "items": basis_action["items"],
+        "missing": basis_action["missing"],
+        "support_resolution": {
+            "block_off_support_rel": residual,
+            "support_matrix_source": support_matrix_source,
+            "action_mismatch": json.dumps(selected_action, sort_keys=True) != json.dumps(model_action, sort_keys=True),
+            "declared_model_action": model_action,
+            "selected_model_action": selected_action,
+            "candidates": diagnostics,
+        },
+    }
+    return dict(selected_action), basis_action_out
 
 
 def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
@@ -986,6 +1265,18 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         )
         for pair_row, full_pair_row in zip(pair_rows, payload["full_pair_rows"]):
             pair_row["full_space_covariance_residual"] = full_pair_row["full_space_covariance_residual"]
+        resolved_model_action, model_basis_action = _resolve_projected_model_action(
+            D_low=np.asarray(raw_mats[0], dtype=np.complex128),
+            support_matrices=[
+                ("raw_action", np.asarray(raw_mats[0], dtype=np.complex128)),
+                ("representation", np.asarray(rep_raw_mats[0], dtype=np.complex128)),
+            ],
+            model_action=model_action_metadata,
+            q_model1=q_model1,
+            q_model2=q_model2,
+            nlow_state_list=nlow_state_list,
+            tol=max(float(tolerance), 1.0e-8),
+        )
         _save_matrix_stack(output_dir / f"{output_operation}_low_raw.npy", raw_mats)
         _save_matrix_stack(output_dir / f"{output_operation}_low_polar.npy", polar_mats)
         _save_matrix_stack(output_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
@@ -997,9 +1288,11 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
                 "matrix_file": f"{output_operation}_low_raw.npy",
                 "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
                 "allow_support_discovery": action.action_source == "raw_h_operator_file",
-                **model_action_metadata,
+                **resolved_model_action,
                 "source_action": source_action_metadata,
-                "model_action": model_action_metadata,
+                "model_action": resolved_model_action,
+                "declared_model_action": model_action_metadata,
+                "model_basis_action": model_basis_action,
                 "axis_deg": entry.get("axis_deg"),
                 "status": entry.get("status"),
                 "square_residual": entry.get("square_residual"),

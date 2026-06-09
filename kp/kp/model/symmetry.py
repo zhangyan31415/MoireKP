@@ -8,6 +8,8 @@ from typing import Any, Mapping
 import numpy as np
 import yaml
 
+from .config_schema import M_EFFECTIVE_OPERATION_ALIASES
+
 
 _REQUIRED_METADATA = {
     "name",
@@ -24,9 +26,32 @@ _REQUIRED_METADATA = {
     "gauge_correction",
     "antiunitary_convention",
 }
-_CANONICAL_OPERATION_NAMES = {"C3z", "C2", "TR", "C2T", "TR_eff", "C2_eff", "C2TR_eff"}
+_CANONICAL_OPERATION_NAMES = {"C3z", "C2", "TR", "C2T"}
 _ACTION_MAP_TYPES = {"rotation", "reflection", "identity", "negation"}
 _REPRESENTATION_MATRIX_KINDS = {"representation", "d0", "D0"}
+_MANIFEST_AUTHORED_OPERATION_FIELDS = {
+    "antiunitary",
+    "k_map",
+    "q_map",
+    "sector_map",
+    "matrix_file",
+    "matrix_kind",
+    "kind",
+    "source_matrix_role",
+    "source_gauge",
+    "target_role",
+    "gauge_correction",
+    "antiunitary_convention",
+    "spin_map",
+    "valley_map",
+    "model_action",
+    "declared_model_action",
+    "model_basis_action",
+    "support_resolution",
+    "pairs",
+    "representation_pairs",
+    "combined_raw_h_residual",
+}
 
 
 @dataclass
@@ -140,8 +165,16 @@ def _operation_records(raw_operations: Any, manifest: Mapping[str, Any]) -> list
                 continue
             merged = dict(matched)
             merged.setdefault("operation", source_key)
+            for key, value in row.items():
+                if key in {"name", "user_name"}:
+                    merged[key] = value
+                elif key == "operation":
+                    merged.setdefault("operation", value)
+                elif key in _MANIFEST_AUTHORED_OPERATION_FIELDS and key in matched:
+                    continue
+                elif key not in matched:
+                    merged[key] = value
             merged["name"] = str(requested)
-            merged.update(row)
             records.append(merged)
         else:
             raise ValueError(f"Unsupported symmetry operation metadata: {item!r}")
@@ -192,6 +225,18 @@ def _metric_from_pairs(record: Mapping[str, Any], use: str, key: str, matrix_kin
 
 def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[str, Any]:
     out = dict(record)
+    raw_name = str(out.get("name", ""))
+    alias = M_EFFECTIVE_OPERATION_ALIASES.get(raw_name)
+    if alias is not None:
+        out.setdefault("operation_alias", raw_name)
+        out.setdefault("effective_name", str(alias["effective_name"]))
+        out.setdefault("representation_level", "effective_single_spin")
+        out.setdefault("canonical_physical_operation", str(alias["canonical"]))
+        out.setdefault("physical_parent", str(alias["canonical"]))
+        out.setdefault("approximation", {"kind": "spin_SU2_effective_block"})
+        if "derived_from" in alias:
+            out.setdefault("derived_from", list(alias["derived_from"]))
+        out["name"] = str(alias["canonical"])
     canonical_name = str(out.get("name", ""))
     if canonical_name not in _CANONICAL_OPERATION_NAMES:
         raise ValueError(f"Unsupported canonical operation {canonical_name!r}")
@@ -250,7 +295,9 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     matrix_kind = str(raw.get("matrix_kind", raw.get("kind", "action")))
     for record in records:
         record = dict(record)
-        record.setdefault("matrix_kind", matrix_kind)
+        record["matrix_kind"] = matrix_kind if matrix_kind else str(record.get("matrix_kind", record.get("kind", "action")))
+        if record["matrix_kind"] in _REPRESENTATION_MATRIX_KINDS and record.get("representation_matrix_file"):
+            record["matrix_file"] = record["representation_matrix_file"]
         record = _complete_operation_record(record, use=use)
         if (
             record.get("matrix_kind") in _REPRESENTATION_MATRIX_KINDS
