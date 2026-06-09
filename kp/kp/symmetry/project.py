@@ -767,6 +767,11 @@ def _build_action_representation(
         "full_space_action_file",
         "action_operator_file",
     )
+    if raw_h_filename is None:
+        raise ValueError(
+            f"{operation} source manifest must provide raw_h_operator_file; "
+            "bare representation_file or representation_file+pg_file is not a valid action source"
+        )
     pg_rep: RepresentationData | None = None
     raw_h_rep: RepresentationData | None = None
     combined: np.ndarray | None = None
@@ -793,55 +798,31 @@ def _build_action_representation(
         pg_for_raw_h = pg_rep.matrix.conj() if antiunitary else pg_rep.matrix
         combined = rep.matrix @ pg_for_raw_h
 
-    if raw_h_filename is not None:
-        raw_h_rep = _load_spin_sliced_representation(
-            path=rep_root / raw_h_filename,
-            spin=spin,
-            full_dim=full_dim,
-            spin_sector_sewing=spin_sector_sewing,
-        )
-        _check_spin_leakage(operation, "raw-H operator", raw_h_rep, tolerance)
-        if raw_h_rep.matrix.shape != (full_dim, full_dim):
-            raise ValueError(f"{operation} raw-H operator shape {raw_h_rep.matrix.shape} does not match U_low full dimension {full_dim}")
-        if combined is not None:
-            combined_residual = _fro_relative(raw_h_rep.matrix, combined, raw_h_rep.matrix)
-            if combined_residual > tolerance:
-                raise ValueError(
-                    f"{operation} manifest raw-H operator disagrees with D_g^(0)+PG by "
-                    f"{combined_residual:.3e}"
-                )
-        return ActionRepresentation(
-            matrix=raw_h_rep.matrix,
-            representation=rep,
-            pg=pg_rep,
-            raw_h=raw_h_rep,
-            pg_filename=pg_filename,
-            raw_h_filename=raw_h_filename,
-            action_source="raw_h_operator_file",
-            combined_raw_h_residual=combined_residual,
-        )
-
+    raw_h_rep = _load_spin_sliced_representation(
+        path=rep_root / raw_h_filename,
+        spin=spin,
+        full_dim=full_dim,
+        spin_sector_sewing=spin_sector_sewing,
+    )
+    _check_spin_leakage(operation, "raw-H operator", raw_h_rep, tolerance)
+    if raw_h_rep.matrix.shape != (full_dim, full_dim):
+        raise ValueError(f"{operation} raw-H operator shape {raw_h_rep.matrix.shape} does not match U_low full dimension {full_dim}")
     if combined is not None:
-        return ActionRepresentation(
-            matrix=combined,
-            representation=rep,
-            pg=pg_rep,
-            raw_h=None,
-            pg_filename=pg_filename,
-            raw_h_filename=None,
-            action_source="representation_file+pg_file",
-            combined_raw_h_residual=None,
-        )
-
+        combined_residual = _fro_relative(raw_h_rep.matrix, combined, raw_h_rep.matrix)
+        if combined_residual > tolerance:
+            raise ValueError(
+                f"{operation} manifest raw-H operator disagrees with D_g^(0)+PG by "
+                f"{combined_residual:.3e}"
+            )
     return ActionRepresentation(
-        matrix=rep.matrix,
+        matrix=raw_h_rep.matrix,
         representation=rep,
-        pg=None,
-        raw_h=None,
-        pg_filename=None,
-        raw_h_filename=None,
-        action_source="representation_file",
-        combined_raw_h_residual=None,
+        pg=pg_rep,
+        raw_h=raw_h_rep,
+        pg_filename=pg_filename,
+        raw_h_filename=raw_h_filename,
+        action_source="raw_h_operator_file",
+        combined_raw_h_residual=combined_residual,
     )
 
 

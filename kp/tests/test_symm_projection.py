@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import kp.cli as cli
 from kp.model.symmetry import load_symmetry_source
 from kp.symmetry.project import (
+    _build_action_representation,
     _model_action_metadata,
     _model_frame_action_metadata,
     _operation_entry,
@@ -84,10 +85,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         d_full[4:, 4:] = d_up
         rep_dir.mkdir(parents=True)
         np.savez(rep_dir / f"{operation}.npz", matrix=d_full)
+        np.savez(rep_dir / f"{operation}_rawH.npz", matrix=d_full)
 
         entry = {
             "antiunitary": False,
             "filename": f"{valley}/{operation}.npz",
+            "raw_h_operator_file": f"{valley}/{operation}_rawH.npz",
             "k_pairs": [[0, 0]],
             **manifest_entry,
         }
@@ -167,6 +170,23 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
         self.assertEqual(entry["filename"], "Gamma/TR.npz")
 
+    def test_source_manifest_requires_unique_raw_h_action_operator(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            rep_root = Path(tmpdir)
+            np.savez(rep_root / "C3.npz", matrix=np.eye(2, dtype=np.complex128))
+
+            with self.assertRaisesRegex(ValueError, "must provide raw_h_operator_file"):
+                _build_action_representation(
+                    operation="C3",
+                    entry={"filename": "C3.npz"},
+                    rep_root=rep_root,
+                    filename="C3.npz",
+                    antiunitary=False,
+                    spin="up",
+                    full_dim=2,
+                    tolerance=1.0e-8,
+                )
+
     def test_model_frame_action_rotates_source_reflection_axis(self) -> None:
         source = {
             "antiunitary": True,
@@ -238,7 +258,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             d_full[4:, 4:] = d_up
             rep_dir.mkdir(parents=True)
             np.savez(rep_dir / "C2T.npz", matrix=d_full)
+            np.savez(rep_dir / "C2T_rawH.npz", matrix=d_full)
             np.savez(rep_dir / "C3.npz", matrix=np.eye(8, dtype=np.complex128))
+            np.savez(rep_dir / "C3_rawH.npz", matrix=np.eye(8, dtype=np.complex128))
             (symm_dir / "representations" / "manifest.json").write_text(
                 json.dumps(
                     {
@@ -247,11 +269,13 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "C3": {
                                     "antiunitary": False,
                                     "filename": "K1/C3.npz",
+                                    "raw_h_operator_file": "K1/C3_rawH.npz",
                                     "k_pairs": [[0, 0]],
                                 },
                                 "C2T": {
                                     "antiunitary": True,
                                     "filename": "K1/C2T.npz",
+                                    "raw_h_operator_file": "K1/C2T_rawH.npz",
                                     "k_map": {"type": "reflection", "axis_deg": 180.0},
                                     "q_map": {"type": "reflection", "axis_deg": 180.0},
                                     "sector_map": "layer_exchange",
@@ -359,7 +383,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             d_full[4:, 4:] = d_swap_layers
             rep_dir.mkdir(parents=True)
             np.savez(rep_dir / "C2.npz", matrix=d_full)
+            np.savez(rep_dir / "C2_rawH.npz", matrix=d_full)
             np.savez(rep_dir / "C3.npz", matrix=np.eye(8, dtype=np.complex128))
+            np.savez(rep_dir / "C3_rawH.npz", matrix=np.eye(8, dtype=np.complex128))
             (symm_dir / "representations" / "manifest.json").write_text(
                 json.dumps(
                     {
@@ -368,6 +394,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "C3": {
                                     "antiunitary": False,
                                     "filename": "K1/C3.npz",
+                                    "raw_h_operator_file": "K1/C3_rawH.npz",
                                     "k_map": {"type": "rotation", "angle_deg": 120.0},
                                     "q_map": {"type": "rotation", "angle_deg": 120.0},
                                     "sector_map": "identity",
@@ -376,6 +403,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "C2": {
                                     "antiunitary": False,
                                     "filename": "K1/C2.npz",
+                                    "raw_h_operator_file": "K1/C2_rawH.npz",
                                     "k_map": {"type": "reflection", "axis_deg": 0.0},
                                     "q_map": {"type": "reflection", "axis_deg": 0.0},
                                     "sector_map": "identity",
@@ -640,6 +668,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             d_full[4:, 4:] = d_swap
             rep_dir.mkdir(parents=True)
             np.savez(rep_dir / "C3.npz", matrix=d_full)
+            np.savez(rep_dir / "C3_rawH.npz", matrix=d_full)
             (symm_dir / "representations" / "manifest.json").write_text(
                 json.dumps(
                     {
@@ -648,6 +677,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "C3": {
                                     "antiunitary": False,
                                     "filename": "K1/C3.npz",
+                                    "raw_h_operator_file": "K1/C3_rawH.npz",
                                     "k_pairs": [[0, 0]],
                                 }
                             }
