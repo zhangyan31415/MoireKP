@@ -538,7 +538,7 @@ def test_exactify_ignores_discovery_switch_and_rejects_wrong_manifest_action() -
     for source, target in enumerate(label_action.perm):
         exact[target, source] = 1.0 + 0.0j
 
-    with pytest.raises(ValueError, match="off-support pollution"):
+    with pytest.raises(ValueError, match="set accept_support_resolved_action=true"):
         exactify_loaded_symmetry_source(
             loaded_metadata={
                 "operations": [
@@ -695,7 +695,7 @@ def test_exactify_ignores_operation_record_support_discovery_flag() -> None:
         )
 
 
-def test_exactify_ignores_accept_support_resolved_action() -> None:
+def test_accept_support_resolved_action_writes_provenance() -> None:
     labels = _k_basis_labels()
     q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
     q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
@@ -717,38 +717,60 @@ def test_exactify_ignores_accept_support_resolved_action() -> None:
     for source, target in enumerate(label_action.perm):
         exact[target, source] = 1.0 + 0.0j
 
-    with pytest.raises(ValueError, match="off-support pollution"):
-        exactify_loaded_symmetry_source(
-            loaded_metadata={
-                "operations": [
-                    {
-                        **_source_meta(antiunitary=True),
-                        "name": "C2T",
-                        "antiunitary": True,
-                        "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
-                        "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
-                        "sector_map": "identity",
-                    }
-                ]
-            },
-            matrices={"C2T": exact},
-            Q_set1=q1,
-            Q_set2=q2,
-            sectors=[
-                {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
-                {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
-            ],
-            n_orb=(1, 1),
-            bM1=b1,
-            bM2=b2,
-            raw_config={
-                "exactification": {
-                    "discover_action_candidates": True,
-                    "accept_support_resolved_action": True,
-                    "operations": {"C2T": {"support_mode": "monomial", "power": 2}},
+    _exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "C2T",
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "sector_map": "identity",
                 }
-            },
-        )
+            ]
+        },
+        matrices={"C2T": exact},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "discover_action_candidates": True,
+                "accept_support_resolved_action": True,
+                "operations": {
+                    "C2T": {
+                        "support_mode": "monomial",
+                        "power": 2,
+                        "action_candidates": [
+                            {
+                                "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                                "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                                "sector_map": "identity",
+                            },
+                            {
+                                "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                                "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                                "sector_map": "layer_exchange",
+                            },
+                        ],
+                    }
+                },
+            }
+        },
+    )
+
+    report = reports["C2T"]
+    assert report["support_resolution"]["action_mismatch"] is True
+    assert report["resolved_action"]["sector_map"] == "layer_exchange"
+    assert report["resolved_action"]["provenance"]["accepted_by_user"] is True
+    assert report["support_resolution"]["provenance"]["source"] == "support_exactification"
 
 
 def test_exactify_strict_rejects_support_discovery_mismatch_even_when_accept_enabled() -> None:
@@ -770,7 +792,7 @@ def test_exactify_strict_rejects_support_discovery_mismatch_even_when_accept_ena
     )
     exact = _make_matrix_for_action(labels, support_action, b1, b2)
 
-    with pytest.raises(ValueError, match="off-support pollution"):
+    with pytest.raises(ValueError, match="differs from manifest model_action in strict mode"):
         exactify_loaded_symmetry_source(
             loaded_metadata={
                 "operations": [

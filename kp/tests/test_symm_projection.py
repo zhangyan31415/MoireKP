@@ -15,6 +15,7 @@ import kp.cli as cli
 from kp.model.symmetry import load_symmetry_source
 from kp.symmetry.project import (
     _build_action_representation,
+    _gamma_c2_action_audit,
     _model_action_metadata,
     _model_frame_action_metadata,
     _operation_entry,
@@ -96,6 +97,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             "k_pairs": [[0, 0]],
             **manifest_entry,
         }
+        nlow_state_list = [[0], [1]] if valley.lower() == "gamma" else [[0], [0]]
+        norb_fix_list = [[[[0, 1.0]]], [[[1 if valley.lower() == "gamma" else 0, 1.0]]]]
         (symm_dir / "representations" / "manifest.json").write_text(
             json.dumps({"operations": {valley: {operation: entry}}}),
             encoding="utf-8",
@@ -115,8 +118,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 "enable": True,
                 "mode": valley,
                 "downfold_method": "first_order",
-                "nlow_state_list": [[0], [0]],
-                "norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+                "nlow_state_list": nlow_state_list,
+                "norb_fix_list": norb_fix_list,
             },
             "symm": {
                 "enable": True,
@@ -545,6 +548,45 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 [(item["source_sector"], item["target_sector"]) for item in row["model_basis_action"]["items"]],
                 [("L1", "L1"), ("L2", "L2")],
             )
+
+    def test_gamma_c2_action_audit_report_exists(self) -> None:
+        declared_model_action = {
+            "antiunitary": False,
+            "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+            "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+            "sector_map": "identity",
+        }
+        audit = _gamma_c2_action_audit(
+            mode="gamma",
+            operation="C2",
+            matrix_kind="action",
+            matrix_selection={"representation_projection_diagnostic": {"status": "not_selected"}},
+            model_basis_action={
+                "support_resolution": {
+                    "declared_support_residual": 0.0,
+                    "declared_support_residuals": [
+                        {"matrix": "raw_action", "block_off_support_rel": 0.0},
+                        {"matrix": "representation", "block_off_support_rel": 1.0e-7},
+                    ],
+                }
+            },
+            raw_matrix=np.eye(2, dtype=np.complex128),
+            representation_matrix=np.eye(2, dtype=np.complex128),
+            pair_rows=[{"full_space_covariance_residual": 0.0}],
+            representation_pair_rows=[],
+            declared_model_action=declared_model_action,
+            combined_raw_h_residual=0.0,
+        )
+
+        assert audit is not None
+        assert audit["matrix_kind"] == "action"
+        assert audit["matrix_source"] == "raw_h_action_projection"
+        assert audit["D_low_action_support_residual"] == 0.0
+        assert audit["D_low_rep_support_residual"] == 1.0e-7
+        assert audit["D_low_action_vs_rep_norm"] == 0.0
+        assert audit["declared_model_action"]["sector_map"] == "identity"
+        assert audit["sector_map"] == "identity"
+        assert audit["q_map"]["type"] == "reflection"
 
     def test_symm_can_export_up_to_down_spin_sewing(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

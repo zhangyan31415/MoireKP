@@ -2100,12 +2100,27 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
                 record["source_matrix_projection_report"] = exact_reports[record["name"]]
                 record["matrix_kind"] = "continuum_internal_rep_exact"
                 record["target_role"] = "continuum_internal_rep"
-                resolved_action = exact_reports[record["name"]].get("resolved_action", {})
+                report = exact_reports[record["name"]]
+                resolved_action = report.get("resolved_action", {})
+                support_resolution = report.get("support_resolution", {})
+                action_mismatch = bool(support_resolution.get("action_mismatch")) if isinstance(support_resolution, Mapping) else False
                 if isinstance(resolved_action, dict):
                     internal_action = dict(resolved_action)
-                    if isinstance(internal_action.get("k_map"), Mapping):
-                        internal_action["k_map"] = {**internal_action["k_map"], "in_model_frame": True}
-                    record["internal_resolved_action"] = internal_action
+                    if (
+                        action_mismatch
+                        and isinstance(support_resolution, Mapping)
+                        and isinstance(support_resolution.get("provenance"), Mapping)
+                        and bool(support_resolution["provenance"].get("accepted_by_user"))
+                        and not isinstance(internal_action.get("provenance"), Mapping)
+                    ):
+                        internal_action["provenance"] = copy.deepcopy(support_resolution["provenance"])
+                    provenance = internal_action.get("provenance")
+                    accepted_mismatch = isinstance(provenance, Mapping) and bool(provenance.get("accepted_by_user"))
+                    if not action_mismatch or accepted_mismatch:
+                        for map_key in ("k_map", "q_map"):
+                            if isinstance(internal_action.get(map_key), Mapping):
+                                internal_action[map_key] = {**internal_action[map_key], "in_model_frame": True}
+                        record["internal_resolved_action"] = internal_action
         loaded_symmetry.metadata["source_matrix_projection_reports"] = exact_reports
     config.symmetry_source_metadata = loaded_symmetry.metadata
     enriched_symmetry_map = _enrich_symmetry_map(

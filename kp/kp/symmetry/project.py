@@ -685,6 +685,7 @@ def _resolve_projected_model_action(
             "selected_model_action": selected_report,
             "selected_action_candidate": selected_report,
             "declared_support_residual": min((row["block_off_support_rel"] for row in declared_residuals), default=None),
+            "declared_support_residuals": declared_residuals,
             "selected_support_residual": selected_report_residual,
             "candidates": diagnostics,
         },
@@ -719,6 +720,61 @@ def _select_operation_matrix_kind(
             else [],
             "representation_support_cleaner_than_raw_action": support_source == "representation",
         },
+    }
+
+
+def _gamma_c2_action_audit(
+    *,
+    mode: str,
+    operation: str,
+    matrix_kind: str,
+    matrix_selection: Mapping[str, Any],
+    model_basis_action: Mapping[str, Any],
+    raw_matrix: np.ndarray,
+    representation_matrix: np.ndarray,
+    pair_rows: Sequence[Mapping[str, Any]],
+    representation_pair_rows: Sequence[Mapping[str, Any]],
+    declared_model_action: Mapping[str, Any],
+    combined_raw_h_residual: float | None,
+) -> dict[str, Any] | None:
+    if str(mode).lower() != "gamma" or operation != "C2":
+        return None
+    support_resolution = model_basis_action.get("support_resolution", {})
+    residuals = support_resolution.get("declared_support_residuals", []) if isinstance(support_resolution, Mapping) else []
+    by_matrix = {
+        str(row.get("matrix")): row.get("block_off_support_rel")
+        for row in residuals
+        if isinstance(row, Mapping)
+    }
+    raw = np.asarray(raw_matrix, dtype=np.complex128)
+    rep = np.asarray(representation_matrix, dtype=np.complex128)
+    denom = max(float(np.linalg.norm(raw)), 1.0)
+    rep_diag = matrix_selection.get("representation_projection_diagnostic", {}) if isinstance(matrix_selection, Mapping) else {}
+    return {
+        "matrix_kind": matrix_kind,
+        "matrix_source": "raw_h_action_projection",
+        "D_low_action_support_residual": by_matrix.get("raw_action", support_resolution.get("declared_support_residual") if isinstance(support_resolution, Mapping) else None),
+        "D_low_rep_support_residual": by_matrix.get("representation"),
+        "D_low_action_vs_rep_norm": float(np.linalg.norm(raw - rep) / denom),
+        "rawH_full_space_covariance_residual": (
+            pair_rows[0].get("full_space_covariance_residual")
+            if pair_rows and isinstance(pair_rows[0], Mapping)
+            else None
+        ),
+        "combined_raw_h_residual": combined_raw_h_residual,
+        "declared_model_action": dict(declared_model_action),
+        "sector_map": declared_model_action.get("sector_map"),
+        "q_map": declared_model_action.get("q_map"),
+        "group_relation_residuals_action": {},
+        "exactification_status": rep_diag.get("status", "not_run_in_kp_symm_projection") if isinstance(rep_diag, Mapping) else "not_run_in_kp_symm_projection",
+        "representation_projection_equivalent": bool(float(np.linalg.norm(raw - rep) / denom) < 1.0e-10),
+        "representation_projection_diagnostic": rep_diag,
+        "representation_projection_warnings": [
+            str(item)
+            for row in representation_pair_rows
+            if isinstance(row, Mapping)
+            for item in row.get("quality_warnings", [])
+        ],
     }
 
 
@@ -1370,45 +1426,59 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             model_basis_action,
             representation_pair_rows=rep_pair_rows,
         )
-        summary["operations"].append(
-            {
-                "operation": output_operation,
-                "antiunitary": antiunitary,
-                "matrix_file": f"{output_operation}_low_raw.npy",
-                "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
-                "matrix_kind": matrix_kind,
-                "source_matrix_role": "bare_D0_internal_rep" if matrix_kind == "representation" else "raw_h_sewing_action",
-                "source_gauge": "raw_saved_TAPW",
-                "target_role": "continuum_internal_rep",
-                "gauge_correction": {"kind": "none"},
-                "antiunitary_convention": "U_K" if antiunitary else "none",
-                **resolved_model_action,
-                "source_action": source_action_metadata,
-                "model_action": resolved_model_action,
-                "declared_model_action": model_action_metadata,
-                "model_basis_action": model_basis_action,
-                "matrix_selection": matrix_selection,
-                "axis_deg": entry.get("axis_deg"),
-                "status": entry.get("status"),
-                "square_residual": entry.get("square_residual"),
-                "spglib_index": entry.get("spglib_index"),
-                "ld_source_rule": entry.get("ld_source_rule"),
-                "representation_file": str(rep_root / filename),
-                "pg_file": None if action.pg_filename is None else str(rep_root / action.pg_filename),
-                "raw_h_operator_file": None if action.raw_h_filename is None else str(rep_root / action.raw_h_filename),
-                "action_source": action.action_source,
-                "combined_raw_h_residual": action.combined_raw_h_residual,
-                "from_full_spinful": rep.from_full_spinful,
-                "spin_leakage": rep.spin_leakage,
-                "pg_spin_leakage": None if action.pg is None else action.pg.spin_leakage,
-                "raw_h_spin_leakage": None if action.raw_h is None else action.raw_h.spin_leakage,
-                "spin_sector_sewing": spin_sector_sewing,
-                "source_spin": spin if spin_sector_sewing is None else "up",
-                "target_spin": spin if spin_sector_sewing is None else "down",
-                "pairs": pair_rows,
-                "representation_pairs": rep_pair_rows,
-            }
+        operation_summary = {
+            "operation": output_operation,
+            "antiunitary": antiunitary,
+            "matrix_file": f"{output_operation}_low_raw.npy",
+            "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
+            "matrix_kind": matrix_kind,
+            "source_matrix_role": "bare_D0_internal_rep" if matrix_kind == "representation" else "raw_h_sewing_action",
+            "source_gauge": "raw_saved_TAPW",
+            "target_role": "continuum_internal_rep",
+            "gauge_correction": {"kind": "none"},
+            "antiunitary_convention": "U_K" if antiunitary else "none",
+            **resolved_model_action,
+            "source_action": source_action_metadata,
+            "model_action": resolved_model_action,
+            "declared_model_action": model_action_metadata,
+            "model_basis_action": model_basis_action,
+            "matrix_selection": matrix_selection,
+            "axis_deg": entry.get("axis_deg"),
+            "status": entry.get("status"),
+            "square_residual": entry.get("square_residual"),
+            "spglib_index": entry.get("spglib_index"),
+            "ld_source_rule": entry.get("ld_source_rule"),
+            "representation_file": str(rep_root / filename),
+            "pg_file": None if action.pg_filename is None else str(rep_root / action.pg_filename),
+            "raw_h_operator_file": None if action.raw_h_filename is None else str(rep_root / action.raw_h_filename),
+            "action_source": action.action_source,
+            "combined_raw_h_residual": action.combined_raw_h_residual,
+            "from_full_spinful": rep.from_full_spinful,
+            "spin_leakage": rep.spin_leakage,
+            "pg_spin_leakage": None if action.pg is None else action.pg.spin_leakage,
+            "raw_h_spin_leakage": None if action.raw_h is None else action.raw_h.spin_leakage,
+            "spin_sector_sewing": spin_sector_sewing,
+            "source_spin": spin if spin_sector_sewing is None else "up",
+            "target_spin": spin if spin_sector_sewing is None else "down",
+            "pairs": pair_rows,
+            "representation_pairs": rep_pair_rows,
+        }
+        gamma_c2_audit = _gamma_c2_action_audit(
+            mode=mode,
+            operation=output_operation,
+            matrix_kind=matrix_kind,
+            matrix_selection=matrix_selection,
+            model_basis_action=model_basis_action,
+            raw_matrix=np.asarray(raw_mats[0], dtype=np.complex128),
+            representation_matrix=np.asarray(rep_raw_mats[0], dtype=np.complex128),
+            pair_rows=pair_rows,
+            representation_pair_rows=rep_pair_rows,
+            declared_model_action=model_action_metadata,
+            combined_raw_h_residual=action.combined_raw_h_residual,
         )
+        if gamma_c2_audit is not None:
+            operation_summary["gamma_C2_action_audit"] = gamma_c2_audit
+        summary["operations"].append(operation_summary)
 
     payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
     (output_dir / "manifest.json").write_text(payload, encoding="utf-8")

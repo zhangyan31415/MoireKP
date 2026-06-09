@@ -2021,6 +2021,168 @@ def test_build_moire_config_records_projection_report_without_action_mismatch(mo
     assert moire_cfg.symmetry_map["Kinect"][0]["k_map"]["in_model_frame"] is True
 
 
+def test_action_mismatch_default_does_not_write_internal_resolved_action(monkeypatch, tmp_path: Path) -> None:
+    import kp.model.configured as configured_module
+
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2"}], "Onsite": [], "intra": [], "inter": []}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    declared = {
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "sector_map": "identity",
+    }
+    selected = {
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "sector_map": "layer_exchange",
+    }
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir()
+    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
+    (symm_dir / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "name": "C2",
+                        "matrix_file": "C2_low_raw.npy",
+                        "k_map": declared["k_map"],
+                        "q_map": declared["q_map"],
+                        "model_action": declared,
+                        "antiunitary": False,
+                        "sector_map": "identity",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_exactify_loaded_symmetry_source(**kwargs):
+        return (
+            {"C2": np.eye(4, dtype=complex)},
+            {
+                "C2": {
+                    "resolved_action": dict(declared),
+                    "manifest_model_action": dict(declared),
+                    "selected_action_candidate": dict(selected),
+                    "support_resolution": {
+                        "action_mismatch": True,
+                        "candidate_source": "support_discovery",
+                        "declared_model_action": dict(declared),
+                        "selected_action_candidate": dict(selected),
+                        "declared_support_residual": 0.5,
+                        "selected_support_residual": 0.0,
+                    },
+                }
+            },
+        )
+
+    monkeypatch.setattr(configured_module, "exactify_loaded_symmetry_source", fake_exactify_loaded_symmetry_source)
+
+    moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
+
+    operation = model_cfg.symmetry_source_metadata["operations"][0]
+    assert operation["source_matrix_projection_report"]["support_resolution"]["action_mismatch"] is True
+    assert "internal_resolved_action" not in operation
+    assert model_cfg.symmetry_map["Kinect"][0]["sector_map"] == "identity"
+    assert moire_cfg.symmetry_map["Kinect"][0]["sector_map"] == "identity"
+
+
+def test_action_mismatch_explicit_accept_writes_internal_resolved_action_with_provenance(monkeypatch, tmp_path: Path) -> None:
+    import kp.model.configured as configured_module
+
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2"}], "Onsite": [], "intra": [], "inter": []}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    declared = {
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "sector_map": "identity",
+    }
+    selected = {
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "sector_map": "layer_exchange",
+        "provenance": {
+            "source": "support_exactification",
+            "accepted_by_user": True,
+            "declared_model_action": declared,
+            "selected_action_candidate": {
+                "antiunitary": False,
+                "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                "sector_map": "layer_exchange",
+            },
+            "declared_support_residual": 0.5,
+            "selected_support_residual": 0.0,
+        },
+    }
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir()
+    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
+    (symm_dir / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "name": "C2",
+                        "matrix_file": "C2_low_raw.npy",
+                        "k_map": declared["k_map"],
+                        "q_map": declared["q_map"],
+                        "model_action": declared,
+                        "antiunitary": False,
+                        "sector_map": "identity",
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def fake_exactify_loaded_symmetry_source(**kwargs):
+        return (
+            {"C2": np.eye(4, dtype=complex)},
+            {
+                "C2": {
+                    "resolved_action": dict(selected),
+                    "manifest_model_action": dict(declared),
+                    "selected_action_candidate": dict(selected),
+                    "support_resolution": {
+                        "action_mismatch": True,
+                        "candidate_source": "support_discovery",
+                        "declared_model_action": dict(declared),
+                        "selected_action_candidate": dict(selected),
+                        "declared_support_residual": 0.5,
+                        "selected_support_residual": 0.0,
+                        "provenance": dict(selected["provenance"]),
+                    },
+                }
+            },
+        )
+
+    monkeypatch.setattr(configured_module, "exactify_loaded_symmetry_source", fake_exactify_loaded_symmetry_source)
+
+    _moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
+
+    operation = model_cfg.symmetry_source_metadata["operations"][0]
+    assert operation["internal_resolved_action"]["sector_map"] == "layer_exchange"
+    assert operation["internal_resolved_action"]["provenance"]["accepted_by_user"] is True
+
+
 def test_float_p_key_canonicalization() -> None:
     from kp.model.config_schema import canonical_vector_key
 

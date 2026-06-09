@@ -226,6 +226,7 @@ def _candidate_operation_actions(
     rotation_deg: float,
     explicit_candidates: Sequence[Mapping[str, Any]] | None = None,
     require_explicit_action_candidates: bool = False,
+    discover_action_candidates: bool = False,
 ) -> list[OperationAction]:
     if explicit_candidates:
         out: list[OperationAction] = []
@@ -253,7 +254,15 @@ def _candidate_operation_actions(
             if key in model_action:
                 model_record[key] = model_action[key]
     model_record["k_map"] = _model_frame_k_map(model_record.get("k_map", {}))
-    return [_build_operation_from_record(model_record)]
+    out = [_build_operation_from_record(model_record)]
+    if discover_action_candidates:
+        for sector_map in ("identity", "layer_exchange"):
+            if sector_map == model_record.get("sector_map"):
+                continue
+            candidate_record = dict(model_record)
+            candidate_record["sector_map"] = sector_map
+            out.append(_build_operation_from_record(candidate_record))
+    return out
 
 
 def build_basis_labels(
@@ -982,12 +991,19 @@ def exactify_loaded_symmetry_source(
             continue
         name = str(record.get("name"))
         op_cfg = _operation_exactification_config(exact_cfg, name)
+        discover_action_candidates = bool(
+            op_cfg.get("discover_action_candidates", exact_cfg.get("discover_action_candidates", False))
+        )
+        accept_support_resolved_action = bool(
+            op_cfg.get("accept_support_resolved_action", exact_cfg.get("accept_support_resolved_action", False))
+        )
         candidates = _candidate_operation_actions(
             record,
             sectors,
             rotation_deg=rotation_deg,
             explicit_candidates=op_cfg.get("action_candidates") if isinstance(op_cfg.get("action_candidates"), Sequence) and not isinstance(op_cfg.get("action_candidates"), (str, bytes)) else None,
             require_explicit_action_candidates=require_explicit_action_candidates,
+            discover_action_candidates=discover_action_candidates,
         )
         D_num = np.asarray(matrices[name], dtype=complex)
         candidate_support_residuals = _candidate_support_residuals(
@@ -1060,7 +1076,39 @@ def exactify_loaded_symmetry_source(
         manifest_action = _action_candidate_summary(candidates[0])
         selected_action = _action_candidate_summary(op)
         action_mismatch = not _action_summaries_equal(manifest_action, selected_action)
-        resolved_action = copy.deepcopy(manifest_action)
+        if action_mismatch and not accept_support_resolved_action:
+            raise ValueError(
+                f"{name} exactification selected a support action that differs from manifest model_action; "
+                "set accept_support_resolved_action=true only after auditing the mismatch"
+            )
+        resolved_action = copy.deepcopy(selected_action if (action_mismatch and accept_support_resolved_action) else manifest_action)
+        provenance = None
+        if action_mismatch and accept_support_resolved_action:
+            declared_support_residual = next(
+                (
+                    row.get("monomial_off_support_rel", row.get("block_off_support_rel"))
+                    for row in candidate_support_residuals
+                    if _action_summaries_equal(row.get("action", {}), manifest_action)
+                ),
+                None,
+            )
+            selected_support_residual = next(
+                (
+                    row.get("monomial_off_support_rel", row.get("block_off_support_rel"))
+                    for row in candidate_support_residuals
+                    if _action_summaries_equal(row.get("action", {}), selected_action)
+                ),
+                None,
+            )
+            provenance = {
+                "source": "support_exactification",
+                "accepted_by_user": True,
+                "declared_model_action": manifest_action,
+                "selected_action_candidate": selected_action,
+                "declared_support_residual": declared_support_residual,
+                "selected_support_residual": selected_support_residual,
+            }
+            resolved_action["provenance"] = provenance
         if strict and action_mismatch:
             raise ValueError(
                 f"{name} exactification selected a support action that differs from manifest model_action in strict mode"
@@ -1201,6 +1249,10 @@ def exactify_loaded_symmetry_source(
                 ),
                 "declared_model_action": manifest_action,
                 "selected_action_candidate": selected_action,
+                "declared_support_residual": None if provenance is None else provenance["declared_support_residual"],
+                "selected_support_residual": None if provenance is None else provenance["selected_support_residual"],
+                "matrix_kind": "action",
+                "matrix_source": "raw_h_action_projection",
                 "candidate_support_residuals": candidate_support_residuals,
             },
             "preferred_mode": preferred_mode,
@@ -1214,6 +1266,8 @@ def exactify_loaded_symmetry_source(
             "inferred_q_offsets": dict(inferred_q_offsets),
             "inference_used": bool(any(inferred_q_offsets.values()) or group_relation_inferred or not op_cfg.get("action_candidates")),
         }
+        if provenance is not None:
+            reports[name]["support_resolution"]["provenance"] = provenance
         if output_dir is not None:
             output_dir.mkdir(parents=True, exist_ok=True)
             np.save(output_dir / f"exactified_{name}.npy", D_exact)
