@@ -29,6 +29,18 @@ _REQUIRED_METADATA = {
 _CANONICAL_OPERATION_NAMES = {"C3z", "C2", "TR", "C2T"}
 _ACTION_MAP_TYPES = {"rotation", "reflection", "identity", "negation"}
 _REPRESENTATION_MATRIX_KINDS = {"representation", "d0", "D0"}
+_ACTION_MATRIX_SEMANTICS = {
+    "source_matrix_role": "raw_h_sewing_action",
+    "source_gauge": "raw_saved_TAPW",
+    "target_role": "continuum_internal_rep",
+    "gauge_correction": {"kind": "none"},
+}
+_REPRESENTATION_MATRIX_SEMANTICS = {
+    "source_matrix_role": "bare_D0_internal_rep",
+    "source_gauge": "raw_saved_TAPW",
+    "target_role": "continuum_internal_rep",
+    "gauge_correction": {"kind": "none"},
+}
 _MANIFEST_AUTHORED_OPERATION_FIELDS = {
     "antiunitary",
     "k_map",
@@ -52,6 +64,14 @@ _MANIFEST_AUTHORED_OPERATION_FIELDS = {
     "representation_pairs",
     "combined_raw_h_residual",
 }
+
+
+def _canonical_manifest_operation_name(name: str) -> str:
+    if name == "C3":
+        return "C3z"
+    if name == "T":
+        return "TR"
+    return name
 
 
 @dataclass
@@ -122,16 +142,27 @@ def _manifest_operations(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
         manifest_ops = flattened
     elif not isinstance(manifest_ops, list):
         manifest_ops = []
-    return [dict(op) for op in manifest_ops if isinstance(op, Mapping)]
+    out: list[dict[str, Any]] = []
+    for op in manifest_ops:
+        if not isinstance(op, Mapping):
+            continue
+        row = dict(op)
+        operation_name = row.get("operation", row.get("name"))
+        if row.get("name") is None and operation_name is not None:
+            row["name"] = _canonical_manifest_operation_name(str(operation_name))
+        out.append(row)
+    return out
 
 
 def _operation_records(raw_operations: Any, manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
     manifest_ops = _manifest_operations(manifest)
-    manifest_index = {
-        str(op.get("operation", op.get("name", ""))): dict(op)
-        for op in manifest_ops
-        if op.get("operation", op.get("name")) is not None
-    }
+    manifest_index: dict[str, dict[str, Any]] = {}
+    for op in manifest_ops:
+        for key in (op.get("operation"), op.get("name")):
+            if key is None:
+                continue
+            manifest_index[str(key)] = dict(op)
+            manifest_index[_canonical_manifest_operation_name(str(key))] = dict(op)
     if raw_operations is None:
         raw_operations = []
     if isinstance(raw_operations, Mapping):
@@ -223,6 +254,33 @@ def _metric_from_pairs(record: Mapping[str, Any], use: str, key: str, matrix_kin
     return None
 
 
+def _manifest_matrix_kind(record: Mapping[str, Any]) -> str:
+    raw = record.get("matrix_kind", record.get("kind"))
+    if raw:
+        return str(raw)
+    support_resolution = record.get("support_resolution")
+    if not isinstance(support_resolution, Mapping):
+        model_basis_action = record.get("model_basis_action")
+        if isinstance(model_basis_action, Mapping):
+            support_resolution = model_basis_action.get("support_resolution")
+    if isinstance(support_resolution, Mapping):
+        support_matrix_source = str(support_resolution.get("support_matrix_source", ""))
+        if support_matrix_source == "representation":
+            return "representation"
+        if support_matrix_source == "raw_action":
+            return "action"
+    return "action"
+
+
+def _manifest_default_matrix_kind(manifest: Mapping[str, Any]) -> tuple[str | None, bool]:
+    raw = manifest.get("default_matrix_kind", manifest.get("matrix_kind"))
+    if raw:
+        return str(raw), False
+    if str(manifest.get("mode", "")).lower() == "gamma":
+        return "representation", True
+    return None, False
+
+
 def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[str, Any]:
     out = dict(record)
     raw_name = str(out.get("name", ""))
@@ -244,12 +302,23 @@ def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[s
         raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit k_map metadata")
     if "sector_map" not in out:
         raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit sector_map metadata")
+    out["antiunitary"] = bool(out["antiunitary"])
+    matrix_kind = _manifest_matrix_kind(out)
+    out["matrix_kind"] = matrix_kind
+    semantics = _REPRESENTATION_MATRIX_SEMANTICS if matrix_kind in _REPRESENTATION_MATRIX_KINDS else _ACTION_MATRIX_SEMANTICS
+    defaulted_metadata: list[str] = []
+    for key, value in semantics.items():
+        if key not in out:
+            out[key] = value
+            defaulted_metadata.append(key)
+    if "antiunitary_convention" not in out:
+        out["antiunitary_convention"] = "U_K" if out["antiunitary"] else "none"
+        defaulted_metadata.append("antiunitary_convention")
+    if defaulted_metadata:
+        out["manifest_defaulted_metadata"] = sorted(defaulted_metadata)
     missing = sorted(_REQUIRED_METADATA - set(out))
     if missing:
         raise ValueError(f"kp_symm_output metadata for operation {canonical_name!r} is incomplete; missing {missing}")
-    out["antiunitary"] = bool(out["antiunitary"])
-    matrix_kind = str(out.get("matrix_kind", out.get("kind", "action")))
-    out["matrix_kind"] = matrix_kind
     out["k_map"] = _validate_map(out["k_map"], field="k_map")
     if "q_map" in out:
         out["q_map"] = _validate_map(out["q_map"], field="q_map")
@@ -292,10 +361,17 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     matrices: dict[str, np.ndarray] = {}
     metadata_records: list[dict[str, Any]] = []
     use = str(raw.get("use", "raw"))
-    matrix_kind = str(raw.get("matrix_kind", raw.get("kind", "action")))
+    manifest_matrix_kind, legacy_matrix_kind = _manifest_default_matrix_kind(manifest)
+    matrix_kind_raw = raw.get("matrix_kind", raw.get("kind", manifest_matrix_kind))
     for record in records:
         record = dict(record)
-        record["matrix_kind"] = matrix_kind if matrix_kind else str(record.get("matrix_kind", record.get("kind", "action")))
+        record_had_matrix_kind = bool(record.get("matrix_kind", record.get("kind")))
+        record["matrix_kind"] = str(matrix_kind_raw) if matrix_kind_raw else _manifest_matrix_kind(record)
+        if legacy_matrix_kind and not raw.get("matrix_kind") and not raw.get("kind") and not record_had_matrix_kind:
+            record["legacy_matrix_kind_inference"] = {
+                "matrix_kind": str(matrix_kind_raw),
+                "reason": "legacy kp_symm manifest lacks default_matrix_kind",
+            }
         if record["matrix_kind"] in _REPRESENTATION_MATRIX_KINDS and record.get("representation_matrix_file"):
             record["matrix_file"] = record["representation_matrix_file"]
         record = _complete_operation_record(record, use=use)

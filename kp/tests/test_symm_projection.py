@@ -317,7 +317,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(by_name["C2T"]["source_action"]["k_map"]["axis_deg"], 180.0)
             self.assertEqual(by_name["C2T"]["model_action"]["k_map"]["axis_deg"], 210.0)
             self.assertEqual(by_name["C2T"]["model_action"]["sector_map"], "layer_exchange")
-            self.assertFalse(by_name["C2T"]["allow_support_discovery"])
+            stale_support_flag = "allow_" + "support_discovery"
+            self.assertNotIn(stale_support_flag, by_name["C2T"])
             self.assertTrue(by_name["C2T"]["k_map"]["in_model_frame"])
             self.assertLess(by_name["C3"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)

@@ -1205,11 +1205,13 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
     np.save(output_dir / "q_model_layer1.npy", q_model1)
     np.save(output_dir / "q_model_layer2.npy", q_model2)
 
+    default_matrix_kind = "representation" if str(mode).lower() == "gamma" else "action"
     summary = {
         "config": cfg_path,
         "valley": valley,
         "spin": spin,
         "mode": mode,
+        "default_matrix_kind": default_matrix_kind,
         "tolerance": tolerance,
         "q_count": q_count,
         "orbital_block_dim": orb0,
@@ -1281,13 +1283,19 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         _save_matrix_stack(output_dir / f"{output_operation}_low_polar.npy", polar_mats)
         _save_matrix_stack(output_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
         _save_matrix_stack(output_dir / f"{output_operation}_low_representation_polar.npy", rep_polar_mats)
+        matrix_kind = default_matrix_kind
         summary["operations"].append(
             {
                 "operation": output_operation,
                 "antiunitary": antiunitary,
                 "matrix_file": f"{output_operation}_low_raw.npy",
                 "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
-                "allow_support_discovery": action.action_source == "raw_h_operator_file",
+                "matrix_kind": matrix_kind,
+                "source_matrix_role": "bare_D0_internal_rep" if matrix_kind == "representation" else "raw_h_sewing_action",
+                "source_gauge": "raw_saved_TAPW",
+                "target_role": "continuum_internal_rep",
+                "gauge_correction": {"kind": "none"},
+                "antiunitary_convention": "U_K" if antiunitary else "none",
                 **resolved_model_action,
                 "source_action": source_action_metadata,
                 "model_action": resolved_model_action,

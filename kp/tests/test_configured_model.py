@@ -416,6 +416,24 @@ def test_build_moire_config_reads_model_q_sets_from_symmetry_artifact(tmp_path: 
     np.testing.assert_allclose(moire_cfg.Q_set2, q2_model)
 
 
+def test_short_kp_symm_source_does_not_infer_matrix_kind_from_valley(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = "symm"
+    raw["valley_model"]["valley_type"] = "Gamma"
+    raw["valley_model"]["active_valleys"] = ["Gamma"]
+    raw["valley_model"]["allowed_internal_symmetries"] = ["C2"]
+    raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2"}], "intra": [], "inter": []}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert "matrix_kind" not in cfg.symmetry_source_config
+    assert cfg.symmetry_source_config["operations"][0]["name"] == "C2"
+    assert "matrix_kind" not in cfg.symmetry_source_config["operations"][0]
+    assert "matrix_file" not in cfg.symmetry_source_config["operations"][0]
+
+
 def test_model_max_order_overrides_safe_defaults(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -597,6 +615,70 @@ def test_source_matrix_projection_uses_manifest_actions_without_model_discovery(
 
     assert not exact_cfg.get("discover_action_candidates", False)
     assert not exact_cfg.get("accept_support_resolved_action", False)
+    assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
+
+
+def test_spinful_gamma_source_matrix_projection_uses_spinful_C2_square() -> None:
+    cfg = ConfiguredModel(
+        path=Path("model.yaml"),
+        raw={},
+        source_config=Path("source.yaml"),
+        source_raw={},
+        qset1_file=Path("q1.npy"),
+        qset2_file=Path("q2.npy"),
+        kpoints_file=None,
+        heff_file=Path("heff.npy"),
+        heff_eig_file=None,
+        output_dir=Path("run"),
+        rotation_deg=0.0,
+        fit_indices=[0],
+        band_indices=None,
+        n_orb=(2, 2),
+        nlow_state=[2, 2],
+        bM_config={},
+        harmonics_config={},
+        max_order={},
+        symmetry_map={},
+        coeff_tol=1.0e-6,
+        compare_to_heff=False,
+        valley_model={"valley_type": "Gamma", "spin_convention": "spinful"},
+        symmetry_source_config={"operations": [{"name": "TR"}, {"name": "C2"}]},
+    )
+
+    exact_cfg = _default_source_matrix_projection_config(cfg)
+
+    assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
+
+
+def test_source_matrix_projection_accepts_string_operation_entries() -> None:
+    cfg = ConfiguredModel(
+        path=Path("model.yaml"),
+        raw={},
+        source_config=Path("source.yaml"),
+        source_raw={},
+        qset1_file=Path("q1.npy"),
+        qset2_file=Path("q2.npy"),
+        kpoints_file=None,
+        heff_file=Path("heff.npy"),
+        heff_eig_file=None,
+        output_dir=Path("run"),
+        rotation_deg=0.0,
+        fit_indices=[0],
+        band_indices=None,
+        n_orb=(2, 2),
+        nlow_state=[2, 2],
+        bM_config={},
+        harmonics_config={},
+        max_order={},
+        symmetry_map={},
+        coeff_tol=1.0e-6,
+        compare_to_heff=False,
+        valley_model={"valley_type": "Gamma", "spin_convention": "spinful"},
+        symmetry_source_config={"operations": ["TR", "C2"]},
+    )
+
+    exact_cfg = _default_source_matrix_projection_config(cfg)
+
     assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
 
 

@@ -273,12 +273,6 @@ def _default_internal_symmetries(valley_type: str, spin_convention: str) -> list
     raise ValueError(f"Unsupported valley_type {valley_type!r}")
 
 
-def _default_matrix_kind(valley_type: str, source: Mapping[str, Any]) -> str:
-    if source.get("matrix_kind") or source.get("kind"):
-        return str(source.get("matrix_kind", source.get("kind")))
-    return "representation" if valley_type == "Gamma" else "action"
-
-
 def _normalize_short_model_config(raw: Mapping[str, Any]) -> dict[str, Any]:
     out = dict(raw)
 
@@ -392,9 +386,7 @@ def _default_symmetry_source(
                 out["path"] = str(resolved)
     if out.get("type") == "kp_symm_output":
         valley_model = raw.get("valley_model", {})
-        valley_type = str(valley_model.get("valley_type", ""))
         out.setdefault("use", "raw")
-        out["matrix_kind"] = _default_matrix_kind(valley_type, out)
         out.setdefault("operations", list(valley_model.get("allowed_internal_symmetries", [])))
     return out
 
@@ -479,11 +471,32 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
     if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
         raise ValueError("symmetry_source.operations must be a list or mapping when provided")
     use = str(source_out.get("use", "raw"))
-    matrix_kind = str(source_out.get("matrix_kind", source_out.get("kind", "action")))
-    source_out["operations"] = [
-        _complete_kp_symm_operation_entry(operation, valley_model, use=use, matrix_kind=matrix_kind)
-        for operation in operations
-    ]
+    matrix_kind_raw = source_out.get("matrix_kind", source_out.get("kind"))
+    if matrix_kind_raw is None:
+        normalized_operations: list[Any] = []
+        for operation in operations:
+            if isinstance(operation, Mapping):
+                row = dict(operation)
+                user_name = str(row.get("name", row.get("operation", "")))
+                if user_name:
+                    row["name"] = canonical_source_operation_name_for_valley(user_name, valley_model)
+                    row.update(effective_operation_metadata_for_valley(user_name, valley_model))
+                normalized_operations.append(row)
+            else:
+                user_name = str(operation)
+                normalized_operations.append(
+                    {
+                        "name": canonical_source_operation_name_for_valley(user_name, valley_model),
+                        **effective_operation_metadata_for_valley(user_name, valley_model),
+                    }
+                )
+        source_out["operations"] = normalized_operations
+    else:
+        matrix_kind = str(matrix_kind_raw)
+        source_out["operations"] = [
+            _complete_kp_symm_operation_entry(operation, valley_model, use=use, matrix_kind=matrix_kind)
+            for operation in operations
+        ]
     out["symmetry_source"] = source_out
     return out
 
@@ -493,13 +506,16 @@ def _default_source_matrix_projection_config(config: ConfiguredModel) -> dict[st
     spin = str(config.valley_model.get("spin_convention", ""))
     valley_type = str(config.valley_model.get("valley_type", ""))
     for operation in config.symmetry_source_config.get("operations", []):
-        if not isinstance(operation, Mapping):
-            continue
-        name = str(operation.get("name", ""))
+        if isinstance(operation, Mapping):
+            name = str(operation.get("name", ""))
+        else:
+            name = str(operation)
         if name == "C3z":
             phases[f"{name}^3"] = -1
-        elif name in {"C2", "C2T"}:
-            phases[f"{name}^2"] = -1 if spin == "spinful" and valley_type == "M" and name == "C2" else 1
+        elif name == "C2":
+            phases[f"{name}^2"] = -1 if spin == "spinful" else 1
+        elif name == "C2T":
+            phases[f"{name}^2"] = 1
         elif name in {"TR"}:
             phases[f"{name}^2"] = -1 if spin == "spinful" else 1
     return {
