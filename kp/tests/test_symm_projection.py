@@ -46,6 +46,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             q_model2=q.copy(),
             nlow_state_list=[[10, 11, 12, 13]],
             tol=1.0e-8,
+            discover_action_candidates=True,
+            accept_support_resolved_action=True,
         )
 
         self.assertEqual(resolved["sector_map"], "layer_exchange")
@@ -139,6 +141,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         matrix_file: str,
         antiunitary: bool,
         k_map: dict,
+        q_map: dict,
         sector_map: str,
     ) -> dict:
         return {
@@ -147,7 +150,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             "matrix_file": matrix_file,
             "antiunitary": antiunitary,
             "k_map": dict(k_map),
-            "q_map": dict(k_map),
+            "q_map": dict(q_map),
             "sector_map": sector_map,
             "spin_map": "from_kp_symm_output",
             "valley_map": "identity",
@@ -270,6 +273,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                     "antiunitary": False,
                                     "filename": "K1/C3.npz",
                                     "raw_h_operator_file": "K1/C3_rawH.npz",
+                                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                    "sector_map": "identity",
                                     "k_pairs": [[0, 0]],
                                 },
                                 "C2T": {
@@ -464,23 +470,23 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             row = rows["C2"]
             self.assertEqual(row["source_action"]["sector_map"], "identity")
             self.assertEqual(row["declared_model_action"]["sector_map"], "identity")
-            self.assertEqual(row["model_action"]["sector_map"], "layer_exchange")
-            self.assertEqual(row["sector_map"], "layer_exchange")
+            self.assertEqual(row["model_action"]["sector_map"], "identity")
+            self.assertEqual(row["sector_map"], "identity")
             self.assertTrue(row["model_basis_action"]["complete"])
-            self.assertEqual(row["model_basis_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(row["model_basis_action"]["sector_map"], "identity")
             self.assertEqual(manifest_rows["C2"]["model_basis_action"], row["model_basis_action"])
-            self.assertTrue(row["model_basis_action"]["support_resolution"]["action_mismatch"])
+            self.assertFalse(row["model_basis_action"]["support_resolution"]["action_mismatch"])
             self.assertEqual(
                 row["model_basis_action"]["support_resolution"]["declared_model_action"]["sector_map"],
                 "identity",
             )
             self.assertEqual(
                 row["model_basis_action"]["support_resolution"]["selected_model_action"]["sector_map"],
-                "layer_exchange",
+                "identity",
             )
             self.assertEqual(
                 [(item["source_sector"], item["target_sector"]) for item in row["model_basis_action"]["items"]],
-                [("L1", "L2"), ("L2", "L1")],
+                [("L1", "L1"), ("L2", "L2")],
             )
             self.assertEqual(
                 [(item["source_q_index"], item["target_q_index"]) for item in row["model_basis_action"]["items"]],
@@ -498,6 +504,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                             matrix_file="C2_low_raw.npy",
                             antiunitary=False,
                             k_map={"type": "reflection", "axis_deg": 0.0},
+                            q_map={"type": "reflection", "axis_deg": 0.0},
                             sector_map="identity",
                         )
                     ],
@@ -506,7 +513,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 expected_dim=2,
             )
             loaded_row = loaded.metadata["operations"][0]
-            self.assertEqual(loaded_row["model_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(loaded_row["model_action"]["sector_map"], "identity")
             self.assertEqual(loaded_row["model_basis_action"]["items"], row["model_basis_action"]["items"])
             np.testing.assert_allclose(
                 loaded.generator.get_operator("C2"),
@@ -586,6 +593,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "file": "M1/TR.npz",
                                 "pg_file": "M1/TR_PG.npz",
                                 "raw_h_operator_file": "M1/TR_rawH.npz",
+                                "k_map": {"type": "negation"},
+                                "q_map": {"type": "negation"},
+                                "sector_map": "identity",
                                 "k_pairs": [[0, 0]],
                             }
                         ]
@@ -678,6 +688,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                     "antiunitary": False,
                                     "filename": "K1/C3.npz",
                                     "raw_h_operator_file": "K1/C3_rawH.npz",
+                                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                    "sector_map": "identity",
                                     "k_pairs": [[0, 0]],
                                 }
                             }
@@ -768,6 +781,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "file": "K1/C3.npz",
                                 "pg_file": "K1/C3_PG.npz",
                                 "raw_h_operator_file": "K1/C3_rawH.npz",
+                                "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                "sector_map": "identity",
                                 "k_pairs": [[0, 0]],
                             }
                         ]

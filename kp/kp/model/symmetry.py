@@ -258,17 +258,6 @@ def _manifest_matrix_kind(record: Mapping[str, Any]) -> str:
     raw = record.get("matrix_kind", record.get("kind"))
     if raw:
         return str(raw)
-    support_resolution = record.get("support_resolution")
-    if not isinstance(support_resolution, Mapping):
-        model_basis_action = record.get("model_basis_action")
-        if isinstance(model_basis_action, Mapping):
-            support_resolution = model_basis_action.get("support_resolution")
-    if isinstance(support_resolution, Mapping):
-        support_matrix_source = str(support_resolution.get("support_matrix_source", ""))
-        if support_matrix_source == "representation":
-            return "representation"
-        if support_matrix_source == "raw_action":
-            return "action"
     return "action"
 
 
@@ -302,6 +291,8 @@ def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[s
         raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit sector_map metadata")
     out["antiunitary"] = bool(out["antiunitary"])
     matrix_kind = _manifest_matrix_kind(out)
+    if matrix_kind in _REPRESENTATION_MATRIX_KINDS:
+        raise ValueError("production symmetry matrices must use matrix_kind='action'; representation projections are diagnostic only")
     out["matrix_kind"] = matrix_kind
     semantics = _REPRESENTATION_MATRIX_SEMANTICS if matrix_kind in _REPRESENTATION_MATRIX_KINDS else _ACTION_MATRIX_SEMANTICS
     defaulted_metadata: list[str] = []
@@ -320,6 +311,26 @@ def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[s
     out["k_map"] = _validate_map(out["k_map"], field="k_map")
     if "q_map" in out:
         out["q_map"] = _validate_map(out["q_map"], field="q_map")
+    if "q_map" not in out:
+        raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit q_map metadata")
+    support_resolution = out.get("support_resolution")
+    if not isinstance(support_resolution, Mapping):
+        model_basis_action = out.get("model_basis_action")
+        if isinstance(model_basis_action, Mapping):
+            support_resolution = model_basis_action.get("support_resolution")
+    support_matrix_source = None
+    if isinstance(support_resolution, Mapping):
+        support_matrix_source = support_resolution.get("support_matrix_source")
+    if support_matrix_source == "representation":
+        out.setdefault(
+            "representation_projection_diagnostic",
+            {
+                "status": "raw_action_exactification_problem",
+                "support_matrix_source": "representation",
+                "representation_support_cleaner_than_raw_action": True,
+                "projection_warnings": _quality_warnings_from_pairs(out, "representation"),
+            },
+        )
     quality_warnings = _quality_warnings_from_pairs(out, matrix_kind)
     if quality_warnings:
         out["projection_quality_warnings"] = quality_warnings
@@ -361,11 +372,11 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     use = str(raw.get("use", "raw"))
     manifest_matrix_kind = _manifest_default_matrix_kind(manifest)
     matrix_kind_raw = raw.get("matrix_kind", raw.get("kind", manifest_matrix_kind))
+    if matrix_kind_raw is not None and str(matrix_kind_raw) in _REPRESENTATION_MATRIX_KINDS:
+        raise ValueError("production symmetry matrices must use matrix_kind='action'; representation projections are diagnostic only")
     for record in records:
         record = dict(record)
         record["matrix_kind"] = str(matrix_kind_raw) if matrix_kind_raw else _manifest_matrix_kind(record)
-        if record["matrix_kind"] in _REPRESENTATION_MATRIX_KINDS and record.get("representation_matrix_file"):
-            record["matrix_file"] = record["representation_matrix_file"]
         record = _complete_operation_record(record, use=use)
         if (
             record.get("matrix_kind") in _REPRESENTATION_MATRIX_KINDS

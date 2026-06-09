@@ -172,17 +172,15 @@ def test_kp_symm_representation_matrix_kind_loads_representation_file(tmp_path: 
         encoding="utf-8",
     )
 
-    source = load_symmetry_source(
-        {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
-        base=tmp_path,
-        expected_dim=2,
-    )
-
-    np.testing.assert_allclose(source.generator.matrices["C2"], np.eye(2, dtype=complex))
-    assert source.metadata["operations"][0]["matrix_file"].endswith("C2_low_representation_raw.npy")
+    with pytest.raises(ValueError, match="production symmetry matrices must use matrix_kind='action'"):
+        load_symmetry_source(
+            {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
+            base=tmp_path,
+            expected_dim=2,
+        )
 
 
-def test_kp_symm_matrix_kind_is_operation_local_not_gamma_global(tmp_path: Path) -> None:
+def test_rawh_action_is_only_production_matrix_source_even_if_rep_support_cleaner(tmp_path: Path) -> None:
     np.save(tmp_path / "C3_low_raw.npy", 2.0 * np.eye(2, dtype=complex))
     np.save(tmp_path / "C3_low_representation_raw.npy", 3.0 * np.eye(2, dtype=complex))
     np.save(tmp_path / "C2_low_raw.npy", 4.0 * np.eye(2, dtype=complex))
@@ -227,22 +225,51 @@ def test_kp_symm_matrix_kind_is_operation_local_not_gamma_global(tmp_path: Path)
     source = load_symmetry_source({"type": "kp_symm_output", "path": str(tmp_path), "use": "raw"}, base=tmp_path, expected_dim=2)
 
     np.testing.assert_allclose(source.generator.matrices["C3z"], 2.0 * np.eye(2, dtype=complex))
-    np.testing.assert_allclose(source.generator.matrices["C2"], 5.0 * np.eye(2, dtype=complex))
+    np.testing.assert_allclose(source.generator.matrices["C2"], 4.0 * np.eye(2, dtype=complex))
     by_name = {row["name"]: row for row in source.metadata["operations"]}
     assert by_name["C3z"]["matrix_kind"] == "action"
-    assert by_name["C2"]["matrix_kind"] == "representation"
+    assert by_name["C2"]["matrix_kind"] == "action"
+    assert by_name["C2"]["representation_projection_diagnostic"]["support_matrix_source"] == "representation"
+    assert by_name["C2"]["representation_projection_diagnostic"]["representation_support_cleaner_than_raw_action"] is True
 
 
-def test_missing_sector_map_is_inferred_not_treated_as_identity_mismatch() -> None:
+def test_sector_map_auto_rejected_for_production_manifest() -> None:
+    with pytest.raises(ValueError, match="requires explicit sector_map"):
+        _operation_action_metadata(
+            {"axis_deg": 0.0, "q_map": {"type": "reflection", "axis_deg": 0.0}},
+            operation="C2",
+            antiunitary=False,
+        )
+
+
+def test_q_map_inferred_from_k_map_is_reported_in_compat_mode() -> None:
     source = _operation_action_metadata(
-        {"axis_deg": 0.0},
+        {"axis_deg": 0.0, "sector_map": "identity"},
+        operation="C2",
+        antiunitary=False,
+        strict=False,
+    )
+
+    assert source["q_map_inferred_from_k_map"] is True
+    assert source["q_map"] == source["k_map"]
+
+
+def test_support_discovery_default_off() -> None:
+    source = _operation_action_metadata(
+        {
+            "axis_deg": 0.0,
+            "q_map": {"type": "reflection", "axis_deg": 0.0},
+            "sector_map": "identity",
+        },
         operation="C2",
         antiunitary=False,
     )
     model_action = _model_action_metadata(source, valley="M", operation="C2", rotation_deg=0.0)
     q1 = np.array([[0.0, 0.0], [1.0, 0.0]])
     q2 = np.array([[0.0, 0.0], [1.0, 0.0]])
-    matrix = np.eye(4, dtype=complex)
+    matrix = np.zeros((4, 4), dtype=complex)
+    matrix[2:, :2] = np.eye(2)
+    matrix[:2, 2:] = np.eye(2)
 
     resolved, basis_action = _resolve_projected_model_action(
         D_low=matrix,
@@ -254,22 +281,50 @@ def test_missing_sector_map_is_inferred_not_treated_as_identity_mismatch() -> No
         tol=1.0e-8,
     )
 
-    assert source["sector_map"] == "auto"
-    assert resolved["sector_map"] in {"identity", "layer_exchange"}
+    assert resolved["sector_map"] == "identity"
+    assert basis_action["sector_map"] == "identity"
     assert basis_action["support_resolution"]["action_mismatch"] is False
-    assert resolved["sector_map_source"] == "inferred_from_q_support"
+    assert basis_action["support_resolution"]["selected_action_candidate"]["sector_map"] == "identity"
+    assert basis_action["support_resolution"]["candidate_source"] == "manifest_model_action"
 
 
-def test_representation_matrix_kind_requires_clean_projection_quality() -> None:
+def test_exactification_mismatch_reports_without_overwriting_by_default() -> None:
+    action = {
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "sector_map": "identity",
+    }
+    q = np.array([[0.0, 0.0]])
+    matrix = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=complex)
+
+    resolved, basis_action = _resolve_projected_model_action(
+        D_low=matrix,
+        support_matrices=[("raw_action", matrix)],
+        model_action=action,
+        q_model1=q,
+        q_model2=q.copy(),
+        nlow_state_list=[[0], [0]],
+        tol=1.0e-8,
+        discover_action_candidates=True,
+    )
+
+    assert resolved["sector_map"] == "identity"
+    assert basis_action["support_resolution"]["action_mismatch"] is True
+    assert basis_action["support_resolution"]["selected_action_candidate"]["sector_map"] == "layer_exchange"
+
+
+def test_rep_projection_is_diagnostic_only() -> None:
     model_basis_action = {"support_resolution": {"support_matrix_source": "representation"}}
 
     kind, report = _select_operation_matrix_kind(
         model_basis_action,
-        representation_pair_rows=[{"quality_warnings": ["subspace leakage"]}],
+        representation_pair_rows=[],
     )
 
     assert kind == "action"
-    assert report["reason"] == "representation_quality_warnings"
+    assert report["kind"] == "action"
+    assert report["representation_projection_diagnostic"]["status"] == "raw_action_exactification_problem"
 
 
 def test_operation_registry_records_canonical_names_and_source_metadata() -> None:

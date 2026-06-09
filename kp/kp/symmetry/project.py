@@ -235,7 +235,7 @@ def _entry_filename(entry: dict[str, Any], valley: str, operation: str) -> str:
     return f"{valley}/{operation}.npz"
 
 
-def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitary: bool) -> dict[str, Any]:
+def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitary: bool, *, strict: bool = True) -> dict[str, Any]:
     if isinstance(entry.get("k_map"), dict):
         k_map = dict(entry["k_map"])
     elif entry.get("axis_deg") is not None:
@@ -246,16 +246,30 @@ def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitar
         k_map = {"type": "negation"}
     else:
         raise ValueError(f"Operation {operation!r} requires explicit k_map metadata in the TAPW symmetry manifest")
+    if strict and "q_map" not in entry:
+        raise ValueError(f"Operation {operation!r} requires explicit q_map metadata in the TAPW symmetry manifest")
+    q_map_inferred = "q_map" not in entry
+    q_map_raw = entry.get("q_map", k_map)
+    if strict and ("sector_map" not in entry or entry.get("sector_map") == "auto"):
+        raise ValueError(f"Operation {operation!r} requires explicit sector_map metadata in the TAPW symmetry manifest")
     has_sector_map = "sector_map" in entry
-    return {
+    sector_map = entry["sector_map"] if has_sector_map else "auto"
+    out = {
         "k_map": k_map,
-        "q_map": dict(entry.get("q_map", k_map)) if isinstance(entry.get("q_map", k_map), dict) else entry.get("q_map", k_map),
-        "sector_map": entry["sector_map"] if has_sector_map else "auto",
-        "sector_map_source": "manifest" if has_sector_map else "inferred_from_q_support",
+        "q_map": dict(q_map_raw) if isinstance(q_map_raw, dict) else q_map_raw,
+        "sector_map": sector_map,
+        "sector_map_source": "manifest" if has_sector_map else "diagnostic_qset_closure",
         "spin_map": entry.get("spin_map", "from_kp_symm_output"),
         "valley_map": entry.get("valley_map", "identity"),
         "antiunitary": bool(antiunitary),
     }
+    if q_map_inferred:
+        out["q_map_inferred_from_k_map"] = True
+    if sector_map == "auto":
+        out["sector_map_candidates"] = ["identity", "layer_exchange"]
+        out["candidate_source"] = "diagnostic_qset_closure"
+        out["not_canonical"] = True
+    return out
 
 
 def _rotation_matrix_2d(angle_deg: float) -> list[list[float]]:
@@ -575,13 +589,30 @@ def _resolve_projected_model_action(
     q_model2: np.ndarray,
     nlow_state_list: list[list[int]],
     tol: float,
+    discover_action_candidates: bool = False,
+    accept_support_resolved_action: bool = False,
+    strict: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     matrix_options = list(support_matrices or [("raw", D_low)])
     low_dim = int(np.asarray(matrix_options[0][1]).shape[-1])
     labels = _model_basis_labels(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    declared_basis_action = _basis_action_for_candidate(
+        action=model_action,
+        q_model1=q_model1,
+        q_model2=q_model2,
+        nlow_state_list=nlow_state_list,
+        low_dim=low_dim,
+        tol=tol,
+    )
+    declared_residuals: list[dict[str, Any]] = []
+    if declared_basis_action["complete"]:
+        for matrix_label, matrix in matrix_options:
+            residual = _block_support_residual(matrix, labels, np.asarray(declared_basis_action["perm"], dtype=int))
+            declared_residuals.append({"matrix": matrix_label, "block_off_support_rel": residual})
     best: tuple[float, str, dict[str, Any], dict[str, Any]] | None = None
     diagnostics: list[dict[str, Any]] = []
-    for candidate in _action_candidates_from_model_action(model_action):
+    candidate_actions = _action_candidates_from_model_action(model_action) if discover_action_candidates else [dict(model_action)]
+    for candidate in candidate_actions:
         basis_action = _basis_action_for_candidate(
             action=candidate,
             q_model1=q_model1,
@@ -611,20 +642,33 @@ def _resolve_projected_model_action(
                 "block_off_support_rel": min((row["block_off_support_rel"] for row in residuals), default=None),
             }
         )
+    selected_candidate = dict(model_action)
+    selected_basis_action = declared_basis_action
     if best is None:
-        basis_action = _basis_action_for_candidate(
-            action=model_action,
-            q_model1=q_model1,
-            q_model2=q_model2,
-            nlow_state_list=nlow_state_list,
-            low_dim=low_dim,
-            tol=tol,
-        )
-        selected_action = dict(model_action)
         support_matrix_source = None
-        residual = None
+        selected_residual = None
     else:
-        residual, support_matrix_source, selected_action, basis_action = best
+        selected_residual, support_matrix_source, selected_candidate, selected_basis_action = best
+    action_mismatch = _action_key_for_mismatch(selected_candidate) != _action_key_for_mismatch(model_action)
+    if strict and action_mismatch:
+        raise ValueError("support discovery selected an action that differs from declared model_action in strict mode")
+    use_selected = bool(accept_support_resolved_action and action_mismatch)
+    resolved_action = dict(selected_candidate if use_selected else model_action)
+    basis_action = selected_basis_action if use_selected else declared_basis_action
+    residual = selected_residual if use_selected else min((row["block_off_support_rel"] for row in declared_residuals), default=None)
+    selected_report = selected_candidate if discover_action_candidates else dict(model_action)
+    selected_report_residual = selected_residual if discover_action_candidates else residual
+    provenance = None
+    if use_selected:
+        provenance = {
+            "source": "support_exactification",
+            "accepted_by_user": True,
+            "declared_model_action": model_action,
+            "selected_action_candidate": selected_candidate,
+            "declared_support_residual": min((row["block_off_support_rel"] for row in declared_residuals), default=None),
+            "selected_support_residual": selected_residual,
+        }
+        resolved_action["provenance"] = provenance
     basis_action_out = {
         "complete": bool(basis_action["complete"]),
         "sector_map": basis_action["sector_map"],
@@ -633,16 +677,21 @@ def _resolve_projected_model_action(
         "support_resolution": {
             "block_off_support_rel": residual,
             "support_matrix_source": support_matrix_source,
-            "action_mismatch": (
-                _has_explicit_sector_map(model_action)
-                and _action_key_for_mismatch(selected_action) != _action_key_for_mismatch(model_action)
-            ),
+            "matrix_kind": "action",
+            "matrix_source": "raw_h_action_projection",
+            "action_mismatch": bool(action_mismatch),
+            "candidate_source": "support_discovery" if discover_action_candidates else "manifest_model_action",
             "declared_model_action": model_action,
-            "selected_model_action": selected_action,
+            "selected_model_action": selected_report,
+            "selected_action_candidate": selected_report,
+            "declared_support_residual": min((row["block_off_support_rel"] for row in declared_residuals), default=None),
+            "selected_support_residual": selected_report_residual,
             "candidates": diagnostics,
         },
     }
-    return dict(selected_action), basis_action_out
+    if provenance is not None:
+        basis_action_out["support_resolution"]["provenance"] = provenance
+    return resolved_action, basis_action_out
 
 
 def _has_projection_quality_warnings(pair_rows: Sequence[Mapping[str, Any]]) -> bool:
@@ -656,18 +705,20 @@ def _select_operation_matrix_kind(
 ) -> tuple[str, dict[str, Any]]:
     support_source = (model_basis_action.get("support_resolution") or {}).get("support_matrix_source")
     representation_invalid = _has_projection_quality_warnings(representation_pair_rows)
-    if support_source == "representation" and not representation_invalid:
-        return "representation", {
-            "kind": "representation",
-            "reason": "support_source_selected_representation",
-            "support_matrix_source": support_source,
-            "representation_quality_warnings": False,
-        }
     return "action", {
         "kind": "action",
-        "reason": "representation_quality_warnings" if support_source == "representation" else "support_source_selected_action",
+        "matrix_source": "raw_h_action_projection",
+        "reason": "representation_projection_diagnostic_only" if support_source == "representation" else "support_source_selected_action",
         "support_matrix_source": support_source,
         "representation_quality_warnings": representation_invalid,
+        "representation_projection_diagnostic": {
+            "status": "raw_action_exactification_problem" if support_source == "representation" else "not_selected",
+            "support_matrix_source": support_source,
+            "projection_warnings": [str(item) for row in representation_pair_rows for item in row.get("quality_warnings", [])]
+            if representation_pair_rows
+            else [],
+            "representation_support_cleaner_than_raw_action": support_source == "representation",
+        },
     }
 
 

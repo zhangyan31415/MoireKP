@@ -390,7 +390,7 @@ def test_build_moire_config_reads_model_q_sets_from_symmetry_artifact(tmp_path: 
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["coordinate_frame"] = {"rotation_deg": 90.0}
-    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "representation"}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     q1_model = np.array([[10.0, 0.0], [11.0, 0.0], [12.0, 0.0]], dtype=float)
@@ -1554,6 +1554,7 @@ def test_symmetry_from_kp_symm_output(tmp_path: Path) -> None:
                         "matrix_file": "C3_low_raw.npy",
                         "antiunitary": False,
                         "k_map": {"type": "rotation", "angle_deg": 120},
+                        "q_map": {"type": "rotation", "angle_deg": 120},
                         "sector_map": "identity",
                         "spin_map": "identity",
                         "valley_map": "identity",
@@ -1757,7 +1758,7 @@ def test_symmetry_source_requires_explicit_k_map_instead_of_axis_deg(tmp_path: P
         load_symmetry_source({"type": "kp_symm_output", "path": str(tmp_path), "use": "raw"}, base=tmp_path, expected_dim=2)
 
 
-def test_symmetry_source_can_load_representation_low_matrix(tmp_path: Path) -> None:
+def test_symmetry_source_rejects_representation_low_matrix_as_production_source(tmp_path: Path) -> None:
     from kp.model.symmetry import load_symmetry_source
 
     action_matrix = np.eye(2, dtype=complex)
@@ -1786,17 +1787,12 @@ def test_symmetry_source_can_load_representation_low_matrix(tmp_path: Path) -> N
         encoding="utf-8",
     )
 
-    source = load_symmetry_source(
-        {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
-        base=tmp_path,
-        expected_dim=2,
-    )
-
-    np.testing.assert_allclose(source.generator.get_operator("C2"), representation_matrix)
-    op = source.metadata["operations"][0]
-    assert op["matrix_kind"] == "representation"
-    assert op["source_matrix_role"] == "bare_D0_internal_rep"
-    assert op["target_role"] == "continuum_internal_rep"
+    with pytest.raises(ValueError, match="production symmetry matrices must use matrix_kind='action'"):
+        load_symmetry_source(
+            {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
+            base=tmp_path,
+            expected_dim=2,
+        )
 
 
 def test_symmetry_source_rejects_invalid_representation_by_default(tmp_path: Path) -> None:
@@ -1833,33 +1829,19 @@ def test_symmetry_source_rejects_invalid_representation_by_default(tmp_path: Pat
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="projection quality warnings"):
+    with pytest.raises(ValueError, match="production symmetry matrices must use matrix_kind='action'"):
         load_symmetry_source(
             {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
             base=tmp_path,
             expected_dim=2,
         )
 
-    source = load_symmetry_source(
-        {
-            "type": "kp_symm_output",
-            "path": str(tmp_path),
-            "use": "raw",
-            "matrix_kind": "representation",
-            "allow_invalid_representation": True,
-        },
-        base=tmp_path,
-        expected_dim=2,
-    )
-
-    assert source.metadata["operations"][0]["projection_quality_warnings"]
-
 
 def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["coordinate_frame"] = {"rotation_deg": 30.0}
-    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "representation"}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
     raw["model"]["symmetry_map"] = {
         "Kinect": [{"name": "C2"}],
         "Onsite": [],
@@ -1867,10 +1849,13 @@ def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: P
         "inter": [],
     }
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    v = np.array([np.sqrt(3.0) / 2.0, -0.5], dtype=float)
+    np.save(tmp_path / "q1.npy", np.array([-v, v], dtype=float))
+    np.save(tmp_path / "q2.npy", np.array([-v, v], dtype=float))
 
     symm_dir = tmp_path / "symm"
     symm_dir.mkdir()
-    np.save(symm_dir / "C2_low_representation_raw.npy", np.eye(4, dtype=complex))
+    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
     (symm_dir / "manifest.json").write_text(
         yaml.safe_dump(
             {
@@ -1878,7 +1863,7 @@ def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: P
                         {
                             **_source_meta(representation=True),
                             "name": "C2",
-                            "matrix_file": "C2_low_representation_raw.npy",
+                            "matrix_file": "C2_low_raw.npy",
                             "k_map": {"type": "reflection", "axis_deg": 150.0},
                             "q_map": {"type": "reflection", "axis_deg": 150.0},
                             "antiunitary": False,
@@ -1901,7 +1886,7 @@ def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_pa
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["coordinate_frame"] = {"rotation_deg": 30.0}
-    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "representation"}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
     raw["model"]["symmetry_map"] = {
         "Kinect": [{"name": "C2"}],
         "Onsite": [],
@@ -1909,10 +1894,13 @@ def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_pa
         "inter": [],
     }
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    v = np.array([np.sqrt(3.0) / 2.0, -0.5], dtype=float)
+    np.save(tmp_path / "q1.npy", np.array([-v, v], dtype=float))
+    np.save(tmp_path / "q2.npy", np.array([-v, v], dtype=float))
 
     symm_dir = tmp_path / "symm"
     symm_dir.mkdir()
-    np.save(symm_dir / "C2_low_representation_raw.npy", np.eye(4, dtype=complex))
+    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
     (symm_dir / "manifest.json").write_text(
         yaml.safe_dump(
             {
@@ -1920,7 +1908,7 @@ def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_pa
                     {
                         **_source_meta(representation=True),
                         "name": "C2",
-                        "matrix_file": "C2_low_representation_raw.npy",
+                        "matrix_file": "C2_low_raw.npy",
                         "k_map": {"type": "reflection", "axis_deg": 150.0},
                         "q_map": {"type": "reflection", "axis_deg": 150.0},
                         "model_action": {
