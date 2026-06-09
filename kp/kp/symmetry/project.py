@@ -4,7 +4,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 import yaml
@@ -246,10 +246,12 @@ def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitar
         k_map = {"type": "negation"}
     else:
         raise ValueError(f"Operation {operation!r} requires explicit k_map metadata in the TAPW symmetry manifest")
+    has_sector_map = "sector_map" in entry
     return {
         "k_map": k_map,
         "q_map": dict(entry.get("q_map", k_map)) if isinstance(entry.get("q_map", k_map), dict) else entry.get("q_map", k_map),
-        "sector_map": entry.get("sector_map", "identity"),
+        "sector_map": entry["sector_map"] if has_sector_map else "auto",
+        "sector_map_source": "manifest" if has_sector_map else "inferred_from_q_support",
         "spin_map": entry.get("spin_map", "from_kp_symm_output"),
         "valley_map": entry.get("valley_map", "identity"),
         "antiunitary": bool(antiunitary),
@@ -375,13 +377,35 @@ def _sector_target(sector: str, sector_map: Any) -> str:
     return sector
 
 
+def _action_key_for_mismatch(action: dict[str, Any]) -> str:
+    comparable = {
+        key: value
+        for key, value in action.items()
+        if key not in {"sector_map_source", "action_source", "derivation"}
+    }
+    return json.dumps(comparable, sort_keys=True)
+
+
+def _has_explicit_sector_map(action: dict[str, Any]) -> bool:
+    return action.get("sector_map") not in {"auto", None}
+
+
 def _action_candidates_from_model_action(model_action: dict[str, Any]) -> list[dict[str, Any]]:
-    candidates = [dict(model_action)]
+    candidates: list[dict[str, Any]]
     sector_map = model_action.get("sector_map", "identity")
-    if sector_map in {"identity", None}:
-        swapped = dict(model_action)
-        swapped["sector_map"] = "layer_exchange"
-        candidates.append(swapped)
+    if sector_map in {"auto", None}:
+        candidates = []
+        for value in ("identity", "layer_exchange"):
+            candidate = dict(model_action)
+            candidate["sector_map"] = value
+            candidate["sector_map_source"] = "inferred_from_q_support"
+            candidates.append(candidate)
+    else:
+        candidates = [dict(model_action)]
+        if sector_map == "identity":
+            swapped = dict(model_action)
+            swapped["sector_map"] = "layer_exchange"
+            candidates.append(swapped)
     if (
         bool(model_action.get("antiunitary", False))
         and isinstance(model_action.get("q_map"), dict)
@@ -609,13 +633,42 @@ def _resolve_projected_model_action(
         "support_resolution": {
             "block_off_support_rel": residual,
             "support_matrix_source": support_matrix_source,
-            "action_mismatch": json.dumps(selected_action, sort_keys=True) != json.dumps(model_action, sort_keys=True),
+            "action_mismatch": (
+                _has_explicit_sector_map(model_action)
+                and _action_key_for_mismatch(selected_action) != _action_key_for_mismatch(model_action)
+            ),
             "declared_model_action": model_action,
             "selected_model_action": selected_action,
             "candidates": diagnostics,
         },
     }
     return dict(selected_action), basis_action_out
+
+
+def _has_projection_quality_warnings(pair_rows: Sequence[Mapping[str, Any]]) -> bool:
+    return any(bool(row.get("quality_warnings")) for row in pair_rows if isinstance(row, Mapping))
+
+
+def _select_operation_matrix_kind(
+    model_basis_action: Mapping[str, Any],
+    *,
+    representation_pair_rows: Sequence[Mapping[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    support_source = (model_basis_action.get("support_resolution") or {}).get("support_matrix_source")
+    representation_invalid = _has_projection_quality_warnings(representation_pair_rows)
+    if support_source == "representation" and not representation_invalid:
+        return "representation", {
+            "kind": "representation",
+            "reason": "support_source_selected_representation",
+            "support_matrix_source": support_source,
+            "representation_quality_warnings": False,
+        }
+    return "action", {
+        "kind": "action",
+        "reason": "representation_quality_warnings" if support_source == "representation" else "support_source_selected_action",
+        "support_matrix_source": support_source,
+        "representation_quality_warnings": representation_invalid,
+    }
 
 
 def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
@@ -1205,13 +1258,11 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
     np.save(output_dir / "q_model_layer1.npy", q_model1)
     np.save(output_dir / "q_model_layer2.npy", q_model2)
 
-    default_matrix_kind = "representation" if str(mode).lower() == "gamma" else "action"
     summary = {
         "config": cfg_path,
         "valley": valley,
         "spin": spin,
         "mode": mode,
-        "default_matrix_kind": default_matrix_kind,
         "tolerance": tolerance,
         "q_count": q_count,
         "orbital_block_dim": orb0,
@@ -1283,7 +1334,10 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         _save_matrix_stack(output_dir / f"{output_operation}_low_polar.npy", polar_mats)
         _save_matrix_stack(output_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
         _save_matrix_stack(output_dir / f"{output_operation}_low_representation_polar.npy", rep_polar_mats)
-        matrix_kind = default_matrix_kind
+        matrix_kind, matrix_selection = _select_operation_matrix_kind(
+            model_basis_action,
+            representation_pair_rows=rep_pair_rows,
+        )
         summary["operations"].append(
             {
                 "operation": output_operation,
@@ -1301,6 +1355,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
                 "model_action": resolved_model_action,
                 "declared_model_action": model_action_metadata,
                 "model_basis_action": model_basis_action,
+                "matrix_selection": matrix_selection,
                 "axis_deg": entry.get("axis_deg"),
                 "status": entry.get("status"),
                 "square_residual": entry.get("square_residual"),

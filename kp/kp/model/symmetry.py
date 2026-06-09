@@ -272,13 +272,11 @@ def _manifest_matrix_kind(record: Mapping[str, Any]) -> str:
     return "action"
 
 
-def _manifest_default_matrix_kind(manifest: Mapping[str, Any]) -> tuple[str | None, bool]:
+def _manifest_default_matrix_kind(manifest: Mapping[str, Any]) -> str | None:
     raw = manifest.get("default_matrix_kind", manifest.get("matrix_kind"))
     if raw:
-        return str(raw), False
-    if str(manifest.get("mode", "")).lower() == "gamma":
-        return "representation", True
-    return None, False
+        return str(raw)
+    return None
 
 
 def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[str, Any]:
@@ -361,17 +359,11 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     matrices: dict[str, np.ndarray] = {}
     metadata_records: list[dict[str, Any]] = []
     use = str(raw.get("use", "raw"))
-    manifest_matrix_kind, legacy_matrix_kind = _manifest_default_matrix_kind(manifest)
+    manifest_matrix_kind = _manifest_default_matrix_kind(manifest)
     matrix_kind_raw = raw.get("matrix_kind", raw.get("kind", manifest_matrix_kind))
     for record in records:
         record = dict(record)
-        record_had_matrix_kind = bool(record.get("matrix_kind", record.get("kind")))
         record["matrix_kind"] = str(matrix_kind_raw) if matrix_kind_raw else _manifest_matrix_kind(record)
-        if legacy_matrix_kind and not raw.get("matrix_kind") and not raw.get("kind") and not record_had_matrix_kind:
-            record["legacy_matrix_kind_inference"] = {
-                "matrix_kind": str(matrix_kind_raw),
-                "reason": "legacy kp_symm manifest lacks default_matrix_kind",
-            }
         if record["matrix_kind"] in _REPRESENTATION_MATRIX_KINDS and record.get("representation_matrix_file"):
             record["matrix_file"] = record["representation_matrix_file"]
         record = _complete_operation_record(record, use=use)

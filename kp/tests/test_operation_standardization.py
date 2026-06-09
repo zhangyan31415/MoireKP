@@ -18,7 +18,13 @@ from kp.model.configured import (
     _symmetry_operation_index,
 )
 from kp.model.symmetry import MatrixSymmetryGenerator, load_symmetry_source
-from kp.symmetry.project import _model_action_metadata, reflection_axis_equiv
+from kp.symmetry.project import (
+    _model_action_metadata,
+    _operation_action_metadata,
+    _resolve_projected_model_action,
+    _select_operation_matrix_kind,
+    reflection_axis_equiv,
+)
 
 
 def _source_meta(antiunitary: bool = False) -> dict[str, object]:
@@ -174,6 +180,96 @@ def test_kp_symm_representation_matrix_kind_loads_representation_file(tmp_path: 
 
     np.testing.assert_allclose(source.generator.matrices["C2"], np.eye(2, dtype=complex))
     assert source.metadata["operations"][0]["matrix_file"].endswith("C2_low_representation_raw.npy")
+
+
+def test_kp_symm_matrix_kind_is_operation_local_not_gamma_global(tmp_path: Path) -> None:
+    np.save(tmp_path / "C3_low_raw.npy", 2.0 * np.eye(2, dtype=complex))
+    np.save(tmp_path / "C3_low_representation_raw.npy", 3.0 * np.eye(2, dtype=complex))
+    np.save(tmp_path / "C2_low_raw.npy", 4.0 * np.eye(2, dtype=complex))
+    np.save(tmp_path / "C2_low_representation_raw.npy", 5.0 * np.eye(2, dtype=complex))
+    (tmp_path / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "mode": "gamma",
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "operation": "C3",
+                        "name": "C3z",
+                        "matrix_file": "C3_low_raw.npy",
+                        "representation_matrix_file": "C3_low_representation_raw.npy",
+                        "k_map": {"type": "rotation", "angle_deg": 120.0, "in_model_frame": True},
+                        "q_map": {"type": "rotation", "angle_deg": 120.0, "in_model_frame": True},
+                        "sector_map": "identity",
+                        "antiunitary": False,
+                        "model_basis_action": {"support_resolution": {"support_matrix_source": "raw_action"}},
+                        "pairs": [{"raw": {"heff_covariance_residual": 0.0, "subspace_leakage": 0.0}}],
+                    },
+                    {
+                        **_source_meta(),
+                        "operation": "C2",
+                        "name": "C2",
+                        "matrix_file": "C2_low_raw.npy",
+                        "representation_matrix_file": "C2_low_representation_raw.npy",
+                        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+                        "sector_map": "layer_exchange",
+                        "antiunitary": False,
+                        "model_basis_action": {"support_resolution": {"support_matrix_source": "representation"}},
+                        "representation_pairs": [{"raw": {"heff_covariance_residual": 0.0, "subspace_leakage": 0.0}}],
+                    },
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    source = load_symmetry_source({"type": "kp_symm_output", "path": str(tmp_path), "use": "raw"}, base=tmp_path, expected_dim=2)
+
+    np.testing.assert_allclose(source.generator.matrices["C3z"], 2.0 * np.eye(2, dtype=complex))
+    np.testing.assert_allclose(source.generator.matrices["C2"], 5.0 * np.eye(2, dtype=complex))
+    by_name = {row["name"]: row for row in source.metadata["operations"]}
+    assert by_name["C3z"]["matrix_kind"] == "action"
+    assert by_name["C2"]["matrix_kind"] == "representation"
+
+
+def test_missing_sector_map_is_inferred_not_treated_as_identity_mismatch() -> None:
+    source = _operation_action_metadata(
+        {"axis_deg": 0.0},
+        operation="C2",
+        antiunitary=False,
+    )
+    model_action = _model_action_metadata(source, valley="M", operation="C2", rotation_deg=0.0)
+    q1 = np.array([[0.0, 0.0], [1.0, 0.0]])
+    q2 = np.array([[0.0, 0.0], [1.0, 0.0]])
+    matrix = np.eye(4, dtype=complex)
+
+    resolved, basis_action = _resolve_projected_model_action(
+        D_low=matrix,
+        support_matrices=[("raw_action", matrix)],
+        model_action=model_action,
+        q_model1=q1,
+        q_model2=q2,
+        nlow_state_list=[[0], [0]],
+        tol=1.0e-8,
+    )
+
+    assert source["sector_map"] == "auto"
+    assert resolved["sector_map"] in {"identity", "layer_exchange"}
+    assert basis_action["support_resolution"]["action_mismatch"] is False
+    assert resolved["sector_map_source"] == "inferred_from_q_support"
+
+
+def test_representation_matrix_kind_requires_clean_projection_quality() -> None:
+    model_basis_action = {"support_resolution": {"support_matrix_source": "representation"}}
+
+    kind, report = _select_operation_matrix_kind(
+        model_basis_action,
+        representation_pair_rows=[{"quality_warnings": ["subspace leakage"]}],
+    )
+
+    assert kind == "action"
+    assert report["reason"] == "representation_quality_warnings"
 
 
 def test_operation_registry_records_canonical_names_and_source_metadata() -> None:
