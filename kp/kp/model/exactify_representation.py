@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -218,15 +219,6 @@ def _action_summaries_equal(lhs: Mapping[str, Any], rhs: Mapping[str, Any]) -> b
     return json.dumps(_jsonable(lhs), sort_keys=True) == json.dumps(_jsonable(rhs), sort_keys=True)
 
 
-def _shift_reflection_map(raw: object, shift_deg: float) -> object:
-    if not isinstance(raw, Mapping):
-        return raw
-    out = dict(raw)
-    if str(out.get("type", "")).lower() == "reflection" and "axis_deg" in out:
-        out["axis_deg"] = float(out["axis_deg"]) + float(shift_deg)
-    return out
-
-
 def _candidate_operation_actions(
     record: Mapping[str, Any],
     sectors: Sequence[Mapping[str, Any]],
@@ -234,7 +226,6 @@ def _candidate_operation_actions(
     rotation_deg: float,
     explicit_candidates: Sequence[Mapping[str, Any]] | None = None,
     require_explicit_action_candidates: bool = False,
-    discover_action_candidates: bool = False,
 ) -> list[OperationAction]:
     if explicit_candidates:
         out: list[OperationAction] = []
@@ -262,53 +253,7 @@ def _candidate_operation_actions(
             if key in model_action:
                 model_record[key] = model_action[key]
     model_record["k_map"] = _model_frame_k_map(model_record.get("k_map", {}))
-    base = _build_operation_from_record(model_record)
-    if not discover_action_candidates:
-        return [base]
-    sector_names = [str(sector.get("name")) for sector in sectors]
-    sector_maps = [base.sector_map]
-    identity_like = _normalize_sector_map(base.sector_map, sector_names=sector_names) in (
-        {},
-        {name: name for name in sector_names},
-    )
-    if len(sector_names) == 2 and identity_like:
-        sector_maps.append("layer_exchange")
-    k_maps = [base.k_map]
-    q_maps = [base.q_map]
-    if base.antiunitary and isinstance(base.k_map, Mapping) and str(base.k_map.get("type", "")).lower() == "reflection" and "axis_deg" in base.k_map:
-        for shift in (-90.0, 90.0):
-            k_maps.append(_shift_reflection_map(base.k_map, shift))
-            q_maps.append(_shift_reflection_map(base.q_map, shift))
-    out: list[OperationAction] = []
-    seen: set[str] = set()
-    for sector_map in sector_maps:
-        for k_map, q_map in zip(k_maps, q_maps):
-            op = OperationAction(
-                name=base.name,
-                canonical_name=base.canonical_name,
-                antiunitary=base.antiunitary,
-                k_map=k_map,
-                R=_rotation_from_k_map(q_map),
-                sector_map=sector_map,
-                q_map=q_map,
-                central_phase=base.central_phase,
-                group_relations=list(base.group_relations),
-                source=base.source,
-            )
-            key = json.dumps(
-                {
-                    "k_map": _jsonable(k_map),
-                    "q_map": _jsonable(q_map),
-                    "sector_map": _jsonable(sector_map),
-                    "antiunitary": op.antiunitary,
-                    "name": op.name,
-                },
-                sort_keys=True,
-            )
-            if key not in seen:
-                seen.add(key)
-                out.append(op)
-    return out
+    return [_build_operation_from_record(model_record)]
 
 
 def build_basis_labels(
@@ -421,7 +366,7 @@ def _choose_best_action_candidate(
     bM2: np.ndarray,
     q_offsets: Mapping[str, np.ndarray],
     tol: float,
-) -> dict[str, Any]:
+) -> dict[str, Any] | None:
     best: tuple[float, float, dict[str, Any]] | None = None
     for operation in candidates:
         label_action = build_label_action(basis_labels, operation, bM1, bM2, q_offsets, tol)
@@ -449,9 +394,7 @@ def _choose_best_action_candidate(
         }
         if best is None or (score[0], score[1]) < (best[0], best[1]):
             best = (score[0], score[1], payload)
-    if best is None:
-        raise ValueError("No valid operation action candidate produced a complete geometry support")
-    return best[2]
+    return None if best is None else best[2]
 
 
 def _candidate_support_residuals(
@@ -1039,18 +982,12 @@ def exactify_loaded_symmetry_source(
             continue
         name = str(record.get("name"))
         op_cfg = _operation_exactification_config(exact_cfg, name)
-        discover_action_candidates = bool(
-            op_cfg.get("discover_action_candidates", exact_cfg.get("discover_action_candidates", False))
-            or op_cfg.get("allow_support_discovery", False)
-            or record.get("allow_support_discovery", False)
-        )
         candidates = _candidate_operation_actions(
             record,
             sectors,
             rotation_deg=rotation_deg,
             explicit_candidates=op_cfg.get("action_candidates") if isinstance(op_cfg.get("action_candidates"), Sequence) and not isinstance(op_cfg.get("action_candidates"), (str, bytes)) else None,
             require_explicit_action_candidates=require_explicit_action_candidates,
-            discover_action_candidates=discover_action_candidates,
         )
         D_num = np.asarray(matrices[name], dtype=complex)
         candidate_support_residuals = _candidate_support_residuals(
@@ -1071,10 +1008,59 @@ def exactify_loaded_symmetry_source(
             q_offsets,
             max(tol, 1.0e-8),
         )
+        if candidate is None:
+            manifest_op = candidates[0]
+            manifest_label_action = build_label_action(
+                labels,
+                manifest_op,
+                np.asarray(bM1),
+                np.asarray(bM2),
+                q_offsets,
+                max(tol, 1.0e-8),
+            )
+            manifest_action = _action_candidate_summary(manifest_op)
+            reports[name] = {
+                "input_matrix_file": record.get("matrix_file"),
+                "operation_alias": record.get("operation_alias"),
+                "canonical_physical_operation": record.get("canonical_physical_operation", name),
+                "physical_parent": record.get("physical_parent", record.get("canonical_physical_operation", name)),
+                "representation_level": record.get("representation_level"),
+                "effective_name": record.get("effective_name"),
+                "approximation": copy.deepcopy(record.get("approximation")),
+                "derived_from": copy.deepcopy(record.get("derived_from")),
+                "source_matrix_role": record["source_matrix_role"],
+                "source_gauge": record["source_gauge"],
+                "target_role": record["target_role"],
+                "resolved_action": manifest_action,
+                "manifest_model_action": manifest_action,
+                "selected_action_candidate": None,
+                "support_resolution": {
+                    "action_mismatch": False,
+                    "candidate_source": "no_complete_support_candidate",
+                    "declared_model_action": manifest_action,
+                    "selected_action_candidate": None,
+                    "candidate_support_residuals": candidate_support_residuals,
+                },
+                "preferred_mode": "skipped",
+                "label_action": {
+                    "perm_complete": manifest_label_action.diagnostics["perm_complete"],
+                    "missing_count": manifest_label_action.diagnostics["missing_count"],
+                },
+                "report": {
+                    "status": "skipped_no_complete_support_candidate",
+                    "reason": "No candidate produced complete geometry support; keeping loaded matrix and manifest action.",
+                },
+                "q_offsets": {sector_name: value.tolist() for sector_name, value in q_offsets.items()},
+                "inferred_q_offsets": dict(inferred_q_offsets),
+                "inference_used": bool(any(inferred_q_offsets.values()) or not op_cfg.get("action_candidates")),
+            }
+            out[name] = D_num
+            continue
         op = candidate["operation"]
         manifest_action = _action_candidate_summary(candidates[0])
         selected_action = _action_candidate_summary(op)
         action_mismatch = not _action_summaries_equal(manifest_action, selected_action)
+        resolved_action = copy.deepcopy(manifest_action)
         if strict and action_mismatch:
             raise ValueError(
                 f"{name} exactification selected a support action that differs from manifest model_action in strict mode"
@@ -1193,21 +1179,28 @@ def exactify_loaded_symmetry_source(
         out[name] = D_exact
         reports[name] = {
             "input_matrix_file": record.get("matrix_file"),
+            "operation_alias": record.get("operation_alias"),
+            "canonical_physical_operation": record.get("canonical_physical_operation", name),
+            "physical_parent": record.get("physical_parent", record.get("canonical_physical_operation", name)),
+            "representation_level": record.get("representation_level"),
+            "effective_name": record.get("effective_name"),
+            "approximation": copy.deepcopy(record.get("approximation")),
+            "derived_from": copy.deepcopy(record.get("derived_from")),
             "source_matrix_role": record["source_matrix_role"],
             "source_gauge": record["source_gauge"],
             "target_role": record["target_role"],
-            "resolved_action": {
-                "k_map": _jsonable(op.k_map),
-                "sector_map": _jsonable(op.sector_map),
-                "q_map": _jsonable(op.q_map),
-                "antiunitary": op.antiunitary,
-            },
+            "resolved_action": resolved_action,
             "manifest_model_action": manifest_action,
             "selected_action_candidate": selected_action,
-            "support_resolved_action": selected_action if action_mismatch else None,
             "support_resolution": {
                 "action_mismatch": bool(action_mismatch),
-                "discover_action_candidates": bool(discover_action_candidates),
+                "candidate_source": (
+                    "explicit_action_candidates_report"
+                    if action_mismatch
+                    else "manifest_model_action"
+                ),
+                "declared_model_action": manifest_action,
+                "selected_action_candidate": selected_action,
                 "candidate_support_residuals": candidate_support_residuals,
             },
             "preferred_mode": preferred_mode,

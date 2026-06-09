@@ -566,7 +566,7 @@ def test_symmetry_operation_index_rotates_q_map_when_model_action_absent() -> No
     assert index["C2T"]["sector_map"] == "identity"
 
 
-def test_source_matrix_projection_discovers_support_actions_internally() -> None:
+def test_source_matrix_projection_uses_manifest_actions_without_model_discovery() -> None:
     cfg = ConfiguredModel(
         path=Path("model.yaml"),
         raw={},
@@ -595,8 +595,8 @@ def test_source_matrix_projection_discovers_support_actions_internally() -> None
 
     exact_cfg = _default_source_matrix_projection_config(cfg)
 
-    assert exact_cfg["discover_action_candidates"] is True
-    assert exact_cfg["accept_support_resolved_action"] is True
+    assert not exact_cfg.get("discover_action_candidates", False)
+    assert not exact_cfg.get("accept_support_resolved_action", False)
     assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
 
 
@@ -1922,19 +1922,16 @@ def test_build_moire_config_records_projection_report_without_action_mismatch(mo
 
     def fake_exactify_loaded_symmetry_source(**kwargs):
         exact_cfg = kwargs["raw_config"]["exactification"]
-        assert exact_cfg["discover_action_candidates"] is True
-        assert exact_cfg["accept_support_resolved_action"] is True
+        assert not exact_cfg.get("discover_action_candidates", False)
+        assert not exact_cfg.get("accept_support_resolved_action", False)
         return (
             {"C2T": np.eye(4, dtype=complex)},
             {
                 "C2T": {
                     "resolved_action": dict(manifest_action),
                     "manifest_model_action": dict(manifest_action),
-                    "support_resolved_action": None,
                     "support_resolution": {
                         "action_mismatch": False,
-                        "discover_action_candidates": True,
-                        "accept_support_resolved_action": True,
                         "candidate_source": "manifest_model_action",
                     },
                 }

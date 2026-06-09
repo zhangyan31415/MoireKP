@@ -16,6 +16,7 @@ import yaml
 from .config_schema import (
     canonical_operation_name_for_valley,
     canonical_source_operation_name_for_valley,
+    effective_operation_metadata_for_valley,
     validate_model_config,
 )
 from .exactify_representation import exactify_loaded_symmetry_source, infer_q_offset_from_qset
@@ -108,9 +109,6 @@ ACTION_SPECS: dict[str, dict[str, Any]] = {
     "TR": {"antiunitary": True, "k_map": {"type": "negation"}, "sector_map": "identity"},
     "C2": {"antiunitary": False, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "layer_exchange"},
     "C2T": {"antiunitary": True, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "identity"},
-    "TR_eff": {"antiunitary": True, "k_map": {"type": "negation"}, "sector_map": "identity"},
-    "C2_eff": {"antiunitary": False, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "layer_exchange"},
-    "C2TR_eff": {"antiunitary": True, "k_map": {"type": "reflection", "axis_deg": 90.0}, "sector_map": "layer_exchange"},
 }
 
 SOURCE_SEMANTICS: dict[str, Any] = {
@@ -271,7 +269,7 @@ def _default_internal_symmetries(valley_type: str, spin_convention: str) -> list
     if valley_type == "K":
         return ["C3z", "C2T"]
     if valley_type == "M":
-        return ["TR", "C2"] if spin_convention == "spinful" else ["TR_eff", "C2_eff"]
+        return ["TR", "C2"]
     raise ValueError(f"Unsupported valley_type {valley_type!r}")
 
 
@@ -342,15 +340,18 @@ def _normalize_user_symmetry_names(raw: Mapping[str, Any]) -> dict[str, Any]:
                         if "name" in row:
                             user_name = str(row["name"])
                             canonical_name = canonical_operation_name_for_valley(user_name, valley_model_out)
-                            row.setdefault("user_name", canonical_name)
+                            row.setdefault("user_name", user_name)
                             row["name"] = canonical_name
+                            row.update(effective_operation_metadata_for_valley(user_name, valley_model_out))
                         rows.append(row)
                     else:
                         user_name = str(operation)
+                        canonical_name = canonical_operation_name_for_valley(user_name, valley_model_out)
                         rows.append(
                             {
-                                "user_name": canonical_operation_name_for_valley(user_name, valley_model_out),
-                                "name": canonical_operation_name_for_valley(user_name, valley_model_out),
+                                "user_name": user_name,
+                                "name": canonical_name,
+                                **effective_operation_metadata_for_valley(user_name, valley_model_out),
                             }
                         )
             normalized_map[str(tag)] = rows
@@ -406,10 +407,8 @@ def _source_matrix_file(source_name: str, use: str, matrix_kind: str) -> str:
 def _default_source_operation_name(name: str) -> str:
     if name in {"C3z"}:
         return "C3"
-    if name in {"TR", "TR_eff"}:
+    if name in {"TR"}:
         return "TR"
-    if name in {"C2_eff"}:
-        return "C2"
     return name
 
 
@@ -419,7 +418,7 @@ def _matrix_file_stem(source_operation: str) -> str:
 
 def _resolved_action_for_source_operation(name: str, valley_model: Mapping[str, Any]) -> dict[str, Any]:
     spin = str(valley_model.get("spin_convention", ""))
-    if name in {"C2", "C2_eff"}:
+    if name in {"C2"}:
         return _with_sector_map(_operation_action(name, axis_deg=0.0), "layer_exchange")
     if name in ACTION_SPECS:
         return _operation_action(name)
@@ -438,7 +437,8 @@ def _complete_kp_symm_operation_entry(
     matrix_kind: str,
 ) -> dict[str, Any]:
     row = dict(operation) if isinstance(operation, Mapping) else {"name": str(operation)}
-    name = canonical_source_operation_name_for_valley(str(row.get("name", row.get("operation", ""))), valley_model)
+    user_name = str(row.get("name", row.get("operation", "")))
+    name = canonical_source_operation_name_for_valley(user_name, valley_model)
     source_operation = str(row.get("operation", _default_source_operation_name(name)))
     action = _resolved_action_for_source_operation(name, valley_model)
     semantics = REPRESENTATION_SEMANTICS if matrix_kind in {"representation", "d0", "D0"} else SOURCE_SEMANTICS
@@ -447,6 +447,7 @@ def _complete_kp_symm_operation_entry(
         "operation": source_operation,
         "matrix_file": _source_matrix_file(_matrix_file_stem(source_operation), use, matrix_kind),
         **copy.deepcopy(action),
+        **effective_operation_metadata_for_valley(user_name, valley_model),
         **copy.deepcopy(dict(semantics)),
     }
     completed["antiunitary_convention"] = "U_K" if completed["antiunitary"] else "none"
@@ -497,9 +498,9 @@ def _default_source_matrix_projection_config(config: ConfiguredModel) -> dict[st
         name = str(operation.get("name", ""))
         if name == "C3z":
             phases[f"{name}^3"] = -1
-        elif name in {"C2", "C2_eff", "C2T", "C2TR_eff"}:
+        elif name in {"C2", "C2T"}:
             phases[f"{name}^2"] = -1 if spin == "spinful" and valley_type == "M" and name == "C2" else 1
-        elif name in {"TR", "TR_eff"}:
+        elif name in {"TR"}:
             phases[f"{name}^2"] = -1 if spin == "spinful" else 1
     return {
         "support_source": "geometry",
@@ -539,6 +540,8 @@ def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: floa
             continue
         enriched = dict(record)
         resolved_action = record.get("internal_resolved_action")
+        if isinstance(resolved_action, Mapping) and not isinstance(resolved_action.get("provenance"), Mapping):
+            resolved_action = None
         if not isinstance(resolved_action, Mapping):
             resolved_action = record.get("model_action")
         if isinstance(resolved_action, Mapping):
@@ -547,6 +550,10 @@ def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: floa
                     enriched[key] = copy.deepcopy(resolved_action[key])
         else:
             enriched["k_map"] = _rotate_k_map_to_model_frame(record.get("k_map"), rotation_deg=rotation_deg)
+            if "q_map" in record:
+                enriched["q_map"] = _rotate_k_map_to_model_frame(record.get("q_map"), rotation_deg=rotation_deg)
+            elif "k_map" in enriched:
+                enriched["q_map"] = copy.deepcopy(enriched["k_map"])
         keys = [record.get("name"), record.get("operation")]
         for key in keys:
             if key is None:
@@ -769,6 +776,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     harmonics = model.get("harmonics", {})
     if not isinstance(harmonics, Mapping):
         raise ValueError("model.harmonics must be a mapping")
+    harmonic_count_limits = _harmonic_count_limits(harmonics)
     symmetry_map = model.get("symmetry_map", {})
     if not isinstance(symmetry_map, Mapping):
         raise ValueError("model.symmetry_map must be a mapping")
@@ -789,6 +797,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             valley_model=valley_model if isinstance(valley_model, Mapping) else {},
             n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
             max_order=max_order_values,
+            harmonic_counts=harmonic_count_limits,
         )
     if not isinstance(term_templates, Sequence) or isinstance(term_templates, (str, bytes)):
         raise ValueError("term_templates must be a list when provided")
@@ -797,6 +806,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             valley_model=valley_model if isinstance(valley_model, Mapping) else {},
             n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
             max_order=max_order_values,
+            harmonic_counts=harmonic_count_limits,
         )
 
     return ConfiguredModel(
@@ -912,119 +922,232 @@ def _harmonic_filter(kind: str, indices: Sequence[int], *, sign: float = 1.0) ->
     return out
 
 
-def _default_term_templates_for_model(
+def _harmonic_count_limits(harmonics: Mapping[str, Any]) -> dict[str, int]:
+    limits: dict[str, int] = {}
+    for kind in ("intra", "inter"):
+        raw = harmonics.get(kind)
+        if _is_auto_harmonic_spec(raw):
+            limits[kind] = _auto_harmonic_count(raw, name=f"model.harmonics.{kind}")
+    return limits
+
+
+@dataclass(frozen=True)
+class _TermTemplateProfile:
+    valley_type: str
+    templates: tuple[Mapping[str, Any], ...]
+    n_orb: tuple[int, int] | None = None
+
+
+def _term_template_row(
+    name: str,
+    source: str,
+    sector_pairs: Sequence[Sequence[int]],
+    orbital_pairs: Any,
     *,
-    valley_model: Mapping[str, Any],
-    n_orb: tuple[int, int],
-    max_order: Mapping[str, int],
-) -> list[dict[str, Any]]:
-    valley_type = str(valley_model.get("valley_type", ""))
-    if valley_type == "K":
-        return [
-            {
-                "name": "kinetic_layer1",
-                "source": "diagonal_kp",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": "diagonal",
-                "max_order": int(max_order.get("Kinect", 0)),
-                "monomial_constraints": {
+    max_order: int | None = None,
+    max_order_from: str | None = None,
+    harmonics: Any | None = None,
+    harmonic_filter: Mapping[str, Any] | None = None,
+    monomial_constraints: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    if max_order is not None and max_order_from is not None:
+        raise ValueError(f"{name}: use either max_order or max_order_from, not both")
+    if harmonics is not None and harmonic_filter is not None:
+        raise ValueError(f"{name}: use either harmonics or harmonic_filter, not both")
+    row: dict[str, Any] = {
+        "name": name,
+        "source": source,
+        "sector_pairs": [[int(i), int(j)] for i, j in sector_pairs],
+        "orbital_pairs": copy.deepcopy(orbital_pairs),
+    }
+    if max_order is not None:
+        row["max_order"] = int(max_order)
+    if max_order_from is not None:
+        row["max_order_from"] = str(max_order_from)
+    if harmonics is not None:
+        row["harmonics"] = copy.deepcopy(harmonics)
+    if harmonic_filter is not None:
+        row["harmonic_filter"] = copy.deepcopy(dict(harmonic_filter))
+    if monomial_constraints is not None:
+        row["monomial_constraints"] = copy.deepcopy(dict(monomial_constraints))
+    return row
+
+
+_TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
+    _TermTemplateProfile(
+        valley_type="K",
+        templates=(
+            _term_template_row(
+                "kinetic_layer1",
+                "diagonal_kp",
+                [[1, 1]],
+                "diagonal",
+                max_order_from="Kinect",
+                monomial_constraints={
                     "exclude_m_sum_zero": True,
                     "difference_mod": 3,
                     "difference_residue": 0,
                     "require_mz_ge_mz_star": True,
                 },
-            },
-            {"name": "onsite_layer1", "source": "onsite", "sector_pairs": [[1, 1]], "orbital_pairs": "diagonal", "max_order": 0},
-            {
-                "name": "intra_layer1",
-                "source": "moire_potential",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": "all",
-                "harmonics": _harmonic_filter("intra", [2, 3, 4]),
-                "max_order": int(max_order.get("intra", 0)),
-            },
-            {
-                "name": "inter_21_positive",
-                "source": "tunneling",
-                "sector_pairs": [[2, 1]],
-                "orbital_pairs": "all",
-                "harmonics": _harmonic_filter("inter", [1, 2, 3, 4]),
-                "max_order": int(max_order.get("inter", 0)),
-            },
-            {
-                "name": "inter_21_negative",
-                "source": "tunneling",
-                "sector_pairs": [[2, 1]],
-                "orbital_pairs": "all",
-                "harmonics": _harmonic_filter("inter", [2, 3, 4], sign=-1.0),
-                "max_order": int(max_order.get("inter", 0)),
-            },
-        ]
-    if valley_type == "Gamma" and n_orb == (2, 2):
+            ),
+            _term_template_row("onsite_layer1", "onsite", [[1, 1]], "diagonal", max_order=0),
+            _term_template_row(
+                "intra_layer1",
+                "moire_potential",
+                [[1, 1]],
+                "all",
+                harmonic_filter=_harmonic_filter("intra", [2, 3, 4]),
+                max_order_from="intra",
+            ),
+            _term_template_row(
+                "inter_21_positive",
+                "tunneling",
+                [[2, 1]],
+                "all",
+                harmonic_filter=_harmonic_filter("inter", [1, 2, 3, 4]),
+                max_order_from="inter",
+            ),
+            _term_template_row(
+                "inter_21_negative",
+                "tunneling",
+                [[2, 1]],
+                "all",
+                harmonic_filter=_harmonic_filter("inter", [2, 3, 4], sign=-1.0),
+                max_order_from="inter",
+            ),
+        ),
+    ),
+    _TermTemplateProfile(
+        valley_type="Gamma",
+        n_orb=(2, 2),
+        templates=(
+            _term_template_row("gamma_kinetic", "diagonal_kp", [[1, 1]], [[1, 1]], max_order_from="Kinect"),
+            _term_template_row("gamma_onsite", "onsite", [[1, 1]], [[1, 1]], max_order=0),
+            _term_template_row(
+                "gamma_intra_zero",
+                "moire_potential",
+                [[1, 1]],
+                [[2, 1]],
+                harmonic_filter=_harmonic_filter("intra", [1]),
+                max_order_from="intra",
+            ),
+            _term_template_row(
+                "gamma_intra_nonzero",
+                "moire_potential",
+                [[1, 1]],
+                [[1, 1], [1, 2], [2, 1]],
+                harmonic_filter=_harmonic_filter("intra", [2, 3, 4]),
+                max_order_from="intra",
+            ),
+            _term_template_row(
+                "gamma_inter_zero",
+                "tunneling",
+                [[2, 1]],
+                [[1, 1], [2, 1]],
+                harmonic_filter=_harmonic_filter("inter", [1]),
+                max_order_from="inter",
+            ),
+            _term_template_row(
+                "gamma_inter_nonzero",
+                "tunneling",
+                [[2, 1]],
+                [[1, 1], [2, 1]],
+                harmonic_filter=_harmonic_filter("inter", [2, 3, 4]),
+                max_order_from="intra",
+            ),
+            _term_template_row(
+                "gamma_inter_nonzero_negative",
+                "tunneling",
+                [[2, 1]],
+                [[1, 1]],
+                harmonic_filter=_harmonic_filter("inter", [2, 3, 4], sign=-1.0),
+                max_order_from="intra",
+            ),
+        ),
+    ),
+    _TermTemplateProfile(
+        valley_type="M",
+        templates=(
+            _term_template_row("m1_kinetic_bottom", "diagonal_kp", [[1, 1]], "diagonal", max_order_from="Kinect"),
+            _term_template_row("m1_onsite_bottom", "onsite", [[1, 1]], "diagonal", max_order=0),
+            _term_template_row(
+                "m1_intra_bottom",
+                "moire_potential",
+                [[1, 1]],
+                "all",
+                harmonics="intra",
+                max_order_from="intra",
+            ),
+            _term_template_row(
+                "m1_inter_top_to_bottom",
+                "tunneling",
+                [[2, 1]],
+                "all",
+                harmonics="inter",
+                max_order_from="inter",
+            ),
+        ),
+    ),
+)
+
+
+def _clamp_harmonic_filter(filter_spec: Mapping[str, Any], harmonic_counts: Mapping[str, int] | None) -> dict[str, Any]:
+    out = copy.deepcopy(dict(filter_spec))
+    kind = str(out["kind"])
+    if harmonic_counts and kind in harmonic_counts:
+        count = int(harmonic_counts[kind])
+        out["indices"] = [int(index) for index in out.get("indices", []) if int(index) <= count]
+    return out
+
+
+def _expand_term_template_profile(
+    template: Mapping[str, Any],
+    max_order: Mapping[str, int],
+    *,
+    harmonic_counts: Mapping[str, int] | None = None,
+) -> dict[str, Any]:
+    row = copy.deepcopy(dict(template))
+    max_order_key = row.pop("max_order_from", None)
+    if max_order_key is not None:
+        row["max_order"] = int(max_order.get(str(max_order_key), 0))
+    harmonic_filter = row.pop("harmonic_filter", None)
+    if harmonic_filter is not None:
+        if not isinstance(harmonic_filter, Mapping):
+            raise ValueError(f"harmonic_filter profile must be a mapping, got {harmonic_filter!r}")
+        harmonic_filter = _clamp_harmonic_filter(harmonic_filter, harmonic_counts)
+        row["harmonics"] = _harmonic_filter(
+            str(harmonic_filter["kind"]),
+            harmonic_filter.get("indices", []),
+            sign=float(harmonic_filter.get("sign", 1.0)),
+        )
+    return row
+
+
+def _term_template_profile_for(valley_type: str, n_orb: tuple[int, int]) -> tuple[_TermTemplateProfile, ...]:
+    matches: list[_TermTemplateProfile] = []
+    for profile in _TERM_TEMPLATE_PROFILES:
+        if profile.valley_type != str(valley_type):
+            continue
+        if profile.n_orb is not None and profile.n_orb != tuple(n_orb):
+            continue
+        matches.append(profile)
+    return tuple(matches)
+
+
+def _default_term_templates_for_model(
+    *,
+    valley_model: Mapping[str, Any],
+    n_orb: tuple[int, int],
+    max_order: Mapping[str, int],
+    harmonic_counts: Mapping[str, int] | None = None,
+) -> list[dict[str, Any]]:
+    valley_type = str(valley_model.get("valley_type", ""))
+    profiles = _term_template_profile_for(valley_type, n_orb)
+    if profiles:
         return [
-            {"name": "gamma_kinetic", "source": "diagonal_kp", "sector_pairs": [[1, 1]], "orbital_pairs": [[1, 1]], "max_order": int(max_order.get("Kinect", 0))},
-            {"name": "gamma_onsite", "source": "onsite", "sector_pairs": [[1, 1]], "orbital_pairs": [[1, 1]], "max_order": 0},
-            {
-                "name": "gamma_intra_zero",
-                "source": "moire_potential",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": [[2, 1]],
-                "harmonics": _harmonic_filter("intra", [1]),
-                "max_order": int(max_order.get("intra", 0)),
-            },
-            {
-                "name": "gamma_intra_nonzero",
-                "source": "moire_potential",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": [[1, 1], [1, 2], [2, 1]],
-                "harmonics": _harmonic_filter("intra", [2, 3, 4]),
-                "max_order": int(max_order.get("intra", 0)),
-            },
-            {
-                "name": "gamma_inter_zero",
-                "source": "tunneling",
-                "sector_pairs": [[2, 1]],
-                "orbital_pairs": [[1, 1], [2, 1]],
-                "harmonics": _harmonic_filter("inter", [1]),
-                "max_order": int(max_order.get("inter", 0)),
-            },
-            {
-                "name": "gamma_inter_nonzero",
-                "source": "tunneling",
-                "sector_pairs": [[2, 1]],
-                "orbital_pairs": [[1, 1], [2, 1]],
-                "harmonics": _harmonic_filter("inter", [2, 3, 4]),
-                "max_order": int(max_order.get("intra", 0)),
-            },
-            {
-                "name": "gamma_inter_nonzero_negative",
-                "source": "tunneling",
-                "sector_pairs": [[2, 1]],
-                "orbital_pairs": [[1, 1]],
-                "harmonics": _harmonic_filter("inter", [2, 3, 4], sign=-1.0),
-                "max_order": int(max_order.get("intra", 0)),
-            },
-        ]
-    if valley_type == "M":
-        return [
-            {"name": "m1_kinetic_bottom", "source": "diagonal_kp", "sector_pairs": [[1, 1]], "orbital_pairs": "diagonal", "max_order": int(max_order.get("Kinect", 0))},
-            {"name": "m1_onsite_bottom", "source": "onsite", "sector_pairs": [[1, 1]], "orbital_pairs": "diagonal", "max_order": 0},
-            {
-                "name": "m1_intra_bottom",
-                "source": "moire_potential",
-                "sector_pairs": [[1, 1]],
-                "orbital_pairs": "all",
-                "harmonics": "intra",
-                "max_order": int(max_order.get("intra", 0)),
-            },
-            {
-                "name": "m1_inter_top_to_bottom",
-                "source": "tunneling",
-                "sector_pairs": [[2, 1]],
-                "orbital_pairs": "all",
-                "harmonics": "inter",
-                "max_order": int(max_order.get("inter", 0)),
-            },
+            _expand_term_template_profile(template, max_order, harmonic_counts=harmonic_counts)
+            for profile in profiles
+            for template in profile.templates
         ]
     return []
 
@@ -1182,8 +1305,17 @@ def _sector_offset(sector: Mapping[str, Any]) -> np.ndarray:
     return np.asarray(sector.get("q_offset", [0.0, 0.0]), dtype=float)
 
 
-def _orbit_member_indices(records: list[dict[str, Any]], seed: np.ndarray, *, tol: float) -> list[int]:
-    targets = _c3_orbit_vectors(seed)
+_HERMITIAN_HARMONIC_ACTION: dict[str, Any] = {"name": "HermitianPair", "type": "negation"}
+
+
+def _orbit_member_indices(
+    records: list[dict[str, Any]],
+    seed: np.ndarray,
+    *,
+    tol: float,
+    actions: Sequence[Mapping[str, Any]] = (_HERMITIAN_HARMONIC_ACTION,),
+) -> list[int]:
+    targets = _harmonic_orbit_vectors(seed, actions, tol=20.0 * tol)
     indices: list[int] = []
     for idx, record in enumerate(records):
         vector = record["vector"]
@@ -1217,17 +1349,6 @@ def _candidate_vectors(kind: str, Q_set1: np.ndarray, Q_set2: np.ndarray) -> lis
     raise ValueError(f"Unsupported harmonic kind: {kind}")
 
 
-def _lattice_shell_candidates(bM1: np.ndarray, bM2: np.ndarray, *, max_index: int = 2) -> list[tuple[tuple[int, int], np.ndarray, int]]:
-    out: list[tuple[tuple[int, int], np.ndarray, int]] = []
-    for n1 in range(-max_index, max_index + 1):
-        for n2 in range(-max_index, max_index + 1):
-            vector = n1 * np.asarray(bM1, dtype=float) + n2 * np.asarray(bM2, dtype=float)
-            shell = max(abs(n1), abs(n2), abs(n1 + n2))
-            out.append(((n1, n2), vector, shell))
-    out.sort(key=lambda item: (item[2], float(np.linalg.norm(item[1])), item[0]))
-    return out
-
-
 def _support_count_for_sector_pair(
     *,
     sector_from: Mapping[str, Any],
@@ -1249,61 +1370,205 @@ def _support_count_for_sector_pair(
     return count
 
 
-def _auto_inter_harmonics_from_sectors(
+def _harmonic_action_key(action: Mapping[str, Any]) -> tuple[Any, ...]:
+    return (
+        str(action.get("type", "")),
+        round(float(action.get("angle_deg", 0.0)), 12),
+        round(float(action.get("axis_deg", 0.0)), 12),
+        json.dumps(_json_safe(action.get("sector_map")), sort_keys=True),
+    )
+
+
+def _operation_to_harmonic_action(operation: Mapping[str, Any]) -> dict[str, Any] | None:
+    q_map = operation.get("q_map", operation.get("k_map"))
+    if not isinstance(q_map, Mapping):
+        return None
+    map_type = str(q_map.get("type", "")).lower()
+    if map_type not in {"identity", "negation", "rotation", "reflection", "mirror"}:
+        return None
+    action = {"name": str(operation.get("name", map_type)), "type": map_type}
+    for key in ("angle_deg", "axis_deg"):
+        if key in q_map:
+            action[key] = float(q_map[key])
+    if "sector_map" in operation:
+        action["sector_map"] = copy.deepcopy(operation["sector_map"])
+    return action
+
+
+def _harmonic_actions_from_operations(operations: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    actions: list[dict[str, Any]] = [dict(_HERMITIAN_HARMONIC_ACTION)]
+    seen = {_harmonic_action_key(actions[0])}
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            continue
+        action = _operation_to_harmonic_action(operation)
+        if action is None:
+            continue
+        key = _harmonic_action_key(action)
+        if key not in seen:
+            actions.append(action)
+            seen.add(key)
+    return actions
+
+
+def _sector_pair_specs(raw: Any, kind: str, sectors: Sequence[Mapping[str, Any]]) -> list[tuple[Mapping[str, Any], Mapping[str, Any]]]:
+    by_name = {str(sector["name"]): sector for sector in sectors}
+    raw_pairs = raw.get("sector_pairs") if isinstance(raw, Mapping) else None
+    if raw_pairs is not None:
+        pairs: list[tuple[Mapping[str, Any], Mapping[str, Any]]] = []
+        for pair in raw_pairs:
+            if not isinstance(pair, Sequence) or isinstance(pair, (str, bytes)) or len(pair) != 2:
+                raise ValueError(f"{kind} sector_pairs entries must be [from, to], got {pair!r}")
+            pairs.append((by_name[str(pair[0])], by_name[str(pair[1])]))
+        return pairs
+    if kind == "intra":
+        return [(sector, sector) for sector in sectors]
+    if kind == "inter":
+        if len(sectors) < 2:
+            raise ValueError("inter auto harmonics require at least two sectors")
+        return [(sectors[1], sectors[0])]
+    raise ValueError(f"Unsupported harmonic kind: {kind}")
+
+
+def _support_harmonic_records(
     *,
     raw: Any,
-    count: int,
-    sectors: list[dict[str, Any]],
+    kind: str,
+    sectors: Sequence[Mapping[str, Any]],
     Q_set1: np.ndarray,
     Q_set2: np.ndarray,
     bM1: np.ndarray,
     bM2: np.ndarray,
     tol: float,
-) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
-    by_name = {str(sector["name"]): sector for sector in sectors}
-    raw_pairs = raw.get("sector_pairs") if isinstance(raw, Mapping) else None
-    if raw_pairs is None:
-        if len(sectors) < 2:
-            raise ValueError("inter auto harmonics require at least two sectors")
-        raw_pairs = [[sectors[1]["name"], sectors[0]["name"]]]
+) -> list[dict[str, Any]]:
+    basis = np.column_stack([bM1, bM2])
+    grouped: dict[tuple[int, int], dict[str, Any]] = {}
+    for sector_from, sector_to in _sector_pair_specs(raw, kind, sectors):
+        q_from = _sector_qset(sector_from, Q_set1, Q_set2) + _sector_offset(sector_from)
+        q_to = _sector_qset(sector_to, Q_set1, Q_set2) + _sector_offset(sector_to)
+        pair_label = [str(sector_from["name"]), str(sector_to["name"])]
+        for qf in q_from:
+            for qt in q_to:
+                vector = np.asarray(qf - qt, dtype=float)
+                key = _vector_key(vector, tol)
+                entry = grouped.setdefault(
+                    key,
+                    {"sum": np.zeros(2, dtype=float), "pair_count": 0, "support_count": 0, "sector_pairs": []},
+                )
+                entry["sum"] += vector
+                entry["pair_count"] += 1
+                entry["support_count"] += _support_count_for_sector_pair(
+                    sector_from=sector_from,
+                    sector_to=sector_to,
+                    p_vector=vector,
+                    Q_set1=Q_set1,
+                    Q_set2=Q_set2,
+                    tol=tol,
+                )
+                if pair_label not in entry["sector_pairs"]:
+                    entry["sector_pairs"].append(pair_label)
+
     records: list[dict[str, Any]] = []
-    for pair in raw_pairs:
-        if not isinstance(pair, Sequence) or isinstance(pair, (str, bytes)) or len(pair) != 2:
-            raise ValueError(f"inter sector_pairs entries must be [from, to], got {pair!r}")
-        sector_from = by_name[str(pair[0])]
-        sector_to = by_name[str(pair[1])]
-        offset = _sector_offset(sector_from) - _sector_offset(sector_to)
-        for integer_coords, G, shell in _lattice_shell_candidates(bM1, bM2, max_index=2):
-            p_vector = offset + G
-            support_count = _support_count_for_sector_pair(
-                sector_from=sector_from,
-                sector_to=sector_to,
-                p_vector=p_vector,
-                Q_set1=Q_set1,
-                Q_set2=Q_set2,
-                tol=tol,
-            )
-            records.append(
-                {
-                    "sector_pair": [str(pair[0]), str(pair[1])],
-                    "vector": p_vector,
-                    "norm": float(np.linalg.norm(p_vector)),
-                    "q_offset_from": _sector_offset(sector_from).tolist(),
-                    "q_offset_to": _sector_offset(sector_to).tolist(),
-                    "G_M": np.asarray(G, dtype=float).tolist(),
-                    "p_label": f"{int(integer_coords[0])}*bM1 + {int(integer_coords[1])}*bM2",
-                    "integer_coords": [int(integer_coords[0]), int(integer_coords[1])],
-                    "shell": int(shell),
-                    "support_count": int(support_count),
-                    "support_weight_norm": None,
-                    "chosen": False,
-                    "rejected_reason": None,
-                }
-            )
-    records.sort(key=lambda item: (-int(item["support_count"]), int(item["shell"]), float(item["norm"]), item["sector_pair"], item["integer_coords"]))
-    selected = records[:count]
-    for item in selected:
-        item["chosen"] = True
+    for entry in grouped.values():
+        vector = entry["sum"] / float(entry["pair_count"])
+        lattice_index = None
+        shell = None
+        try:
+            coeff = np.linalg.solve(basis, vector)
+            rounded = np.rint(coeff).astype(int)
+            if np.linalg.norm(vector - basis @ rounded) <= 10.0 * tol:
+                lattice_index = [int(rounded[0]), int(rounded[1])]
+                shell = int(max(abs(rounded[0]), abs(rounded[1]), abs(rounded[0] + rounded[1])))
+        except np.linalg.LinAlgError:
+            pass
+        records.append(
+            {
+                "vector": vector,
+                "norm": float(np.linalg.norm(vector)),
+                "pair_count": int(entry["pair_count"]),
+                "support_count": int(entry["support_count"]),
+                "lattice_index": lattice_index,
+                "shell": shell,
+                "sector_pairs": entry["sector_pairs"],
+            }
+        )
+    records.sort(key=lambda item: (round(float(item["norm"]) / tol), _representative_score(item["vector"])))
+    return records
+
+
+def _harmonic_orbit_record_indices(
+    records: Sequence[Mapping[str, Any]],
+    seed: np.ndarray,
+    *,
+    actions: Sequence[Mapping[str, Any]],
+    tol: float,
+) -> list[int]:
+    targets = _harmonic_orbit_vectors(seed, actions, tol=20.0 * tol)
+    return [
+        idx
+        for idx, record in enumerate(records)
+        if any(np.linalg.norm(np.asarray(record["vector"], dtype=float) - target) <= 20.0 * tol for target in targets)
+    ]
+
+
+def _auto_harmonics_from_support(
+    *,
+    raw: Any,
+    kind: str,
+    count: int,
+    sectors: Sequence[Mapping[str, Any]],
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    bM1: np.ndarray,
+    bM2: np.ndarray,
+    symmetry_operations: Sequence[Mapping[str, Any]],
+) -> tuple[dict[int, np.ndarray], dict[str, Any]]:
+    if count == 0:
+        return {}, {"kind": kind, "selected": [], "count": 0}
+    b_norm = max(float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
+    tol = max(1.0e-8, b_norm * 1.0e-6)
+    records = _support_harmonic_records(
+        raw=raw,
+        kind=kind,
+        sectors=sectors,
+        Q_set1=Q_set1,
+        Q_set2=Q_set2,
+        bM1=bM1,
+        bM2=bM2,
+        tol=tol,
+    )
+    actions = _harmonic_actions_from_operations(symmetry_operations)
+    assigned: set[int] = set()
+    candidates: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for idx, record in enumerate(records):
+        if idx in assigned:
+            continue
+        member_indices = _harmonic_orbit_record_indices(records, record["vector"], actions=actions, tol=tol)
+        assigned.update(member_indices)
+        rep_idx = _select_star_representative(records, member_indices)
+        rep = dict(records[rep_idx])
+        rep["member_count"] = int(len(member_indices))
+        rep["orbit_vectors"] = [np.asarray(records[i]["vector"], dtype=float) for i in member_indices]
+        rep["pair_count"] = int(sum(records[i]["pair_count"] for i in member_indices))
+        rep["support_count"] = int(sum(records[i]["support_count"] for i in member_indices))
+        rep["orbit_generators"] = [str(action["name"]) for action in actions]
+        candidates.append(rep)
+        for member_idx in member_indices:
+            if member_idx != rep_idx:
+                rejected.append(
+                    {
+                        "vector": np.asarray(records[member_idx]["vector"], dtype=float).tolist(),
+                        "reason": "duplicate_symmetry_orbit",
+                        "representative": np.asarray(rep["vector"], dtype=float).tolist(),
+                        "orbit_generators": list(rep["orbit_generators"]),
+                    }
+                )
+    candidates.sort(key=lambda item: (round(float(item["norm"]) / tol), _representative_score(item["vector"])))
+    if count > len(candidates):
+        raise ValueError(f"Requested {count} {kind} harmonics but only found {len(candidates)} support orbits")
+
+    selected = candidates[:count]
     harmonic_map = {idx + 1: np.asarray(item["vector"], dtype=float) for idx, item in enumerate(selected)}
     selected_rows = []
     for idx, item in enumerate(selected, start=1):
@@ -1312,37 +1577,27 @@ def _auto_inter_harmonics_from_sectors(
                 "index": idx,
                 "vector": np.asarray(item["vector"], dtype=float).tolist(),
                 "norm": float(item["norm"]),
-                "pair_count": int(item["support_count"]),
-                "member_count": None,
-                "lattice_index": item["integer_coords"],
-                "integer_coords": item["integer_coords"],
-                "sector_pair": item["sector_pair"],
-                "shell": int(item["shell"]),
-                "C3_orbit_id": None,
-                "T_or_Hermitian_orbit_id": None,
+                "pair_count": int(item["pair_count"]),
+                "member_count": int(item["member_count"]),
+                "orbit_size": int(item["member_count"]),
+                "orbit_generators": list(item["orbit_generators"]),
+                "orbit_vectors": [np.asarray(vector, dtype=float).tolist() for vector in item["orbit_vectors"]],
+                "lattice_index": item["lattice_index"],
+                "shell": item["shell"],
+                "sector_pair": item["sector_pairs"][0] if len(item["sector_pairs"]) == 1 else None,
+                "sector_pairs": item["sector_pairs"],
                 "support_count": int(item["support_count"]),
-                "support_weight_norm": None,
-                "q_offset_from": item["q_offset_from"],
-                "q_offset_to": item["q_offset_to"],
-                "G_M": item["G_M"],
-                "p_label": item["p_label"],
-                "chosen": True,
-                "rejected_reason": None,
             }
         )
     return harmonic_map, {
-        "kind": "inter",
+        "kind": kind,
         "count": count,
+        "generation": "qset_support_symmetry_orbit",
+        "selection_rule": "qset_support_plus_operation_action_orbits",
+        "orbit_generators": [str(action["name"]) for action in actions],
         "tolerance": tol,
-        "selection_rule": "sector_offset_plus_bM_lattice",
         "selected": selected_rows,
-        "candidates": [
-            {
-                **{key: value for key, value in item.items() if key != "vector"},
-                "vector": np.asarray(item["vector"], dtype=float).tolist(),
-            }
-            for item in records
-        ],
+        "rejected": rejected,
     }
 
 
@@ -1379,6 +1634,7 @@ def _auto_harmonics_from_q_sets(
                 "pair_count": int(sum(records[i]["pair_count"] for i in member_indices)),
                 "member_count": int(len(member_indices)),
                 "lattice_index": rep["lattice_index"],
+                "orbit_generators": [str(_HERMITIAN_HARMONIC_ACTION["name"])],
             }
         )
 
@@ -1397,10 +1653,120 @@ def _auto_harmonics_from_q_sets(
                 "norm": float(item["norm"]),
                 "pair_count": int(item["pair_count"]),
                 "member_count": int(item["member_count"]),
+                "orbit_size": int(item["member_count"]),
+                "orbit_generators": list(item["orbit_generators"]),
                 "lattice_index": item["lattice_index"],
             }
         )
-    return harmonic_map, {"kind": kind, "count": count, "tolerance": tol, "selected": selected_rows}
+    return harmonic_map, {
+        "kind": kind,
+        "count": count,
+        "generation": "symmetry_orbit",
+        "orbit_generators": [str(_HERMITIAN_HARMONIC_ACTION["name"])],
+        "tolerance": tol,
+        "selected": selected_rows,
+    }
+
+
+def _apply_harmonic_action(vector: np.ndarray, action: Mapping[str, Any]) -> np.ndarray:
+    action_type = str(action.get("type", "")).lower()
+    if action_type == "identity":
+        return np.asarray(vector, dtype=float)
+    if action_type == "negation":
+        return -np.asarray(vector, dtype=float)
+    if action_type == "rotation":
+        return rot(np.asarray(vector, dtype=float), float(action.get("angle_deg", 0.0)))
+    if action_type in {"reflection", "mirror"}:
+        return _reflect_vector(np.asarray(vector, dtype=float), float(action.get("axis_deg", 0.0)))
+    raise ValueError(f"Unsupported harmonic orbit action: {action!r}")
+
+
+def _harmonic_orbit_vectors(seed: np.ndarray, actions: Sequence[Mapping[str, Any]], *, tol: float) -> list[np.ndarray]:
+    orbit: list[np.ndarray] = []
+    pending = [np.asarray(seed, dtype=float)]
+    while pending:
+        vector = pending.pop()
+        if any(np.linalg.norm(vector - existing) <= tol for existing in orbit):
+            continue
+        orbit.append(vector)
+        for action in actions:
+            pending.append(_apply_harmonic_action(vector, action))
+    orbit.sort(key=_representative_score)
+    return orbit
+
+
+_AUTO_VALLEY_HARMONIC_PROFILES: dict[tuple[str, str], dict[str, Any]] = {
+    ("K", "inter"): {
+        "selection_rule": "K_inter_geometry",
+        "orbit_generators": [{"name": "C3z", "type": "rotation", "angle_deg": 120.0}],
+        "seeds": ["q1", "-2.0 * q1", "q1 + bM2", "2.0 * bM2 + q3"],
+    },
+    ("M", "inter"): {
+        "selection_rule": "M_inter_geometry",
+        "variables": {"m_q1": "0.5 * norm(bM1) * [1.0, 0.0]"},
+        "orbit_generators": [{"name": "C2", "type": "reflection", "axis_deg": 0.0}],
+        "seeds": ["m_q1", "bM2 - m_q1", "bM2 + m_q1", "bM1 + m_q1", "bM2 - 3.0 * m_q1"],
+    },
+    ("K", "intra"): {
+        "selection_rule": "K_intra_geometry",
+        "orbit_generators": [{"name": "C3z", "type": "rotation", "angle_deg": 120.0}],
+        "seeds": ["[0.0, 0.0]", "-bM1", "bM1 + bM2", "2.0 * bM1"],
+    },
+    ("M", "intra"): {
+        "selection_rule": "M_intra_geometry",
+        "orbit_generators": [{"name": "C2", "type": "reflection", "axis_deg": 0.0}],
+        "seeds": ["bM1", "bM2", "-bM1 + bM2", "bM1 + bM2", "-2.0 * bM1 + bM2", "2.0 * bM1"],
+    },
+}
+
+
+def _variables_for_valley_harmonic_profile(profile: Mapping[str, Any], variables: Mapping[str, Any]) -> dict[str, Any]:
+    out = dict(variables)
+    extra_variables = profile.get("variables", {})
+    if extra_variables is None:
+        return out
+    if not isinstance(extra_variables, Mapping):
+        raise ValueError(f"valley harmonic profile variables must be a mapping, got {extra_variables!r}")
+    for key, expr in extra_variables.items():
+        out[str(key)] = evaluate_vector_expression(expr, out)
+    return out
+
+
+def _candidate_orbits_from_valley_profile(
+    profile: Mapping[str, Any],
+    variables: Mapping[str, Any],
+    *,
+    tol: float,
+) -> list[dict[str, Any]]:
+    seed_exprs = profile.get("seeds", [])
+    if not isinstance(seed_exprs, Sequence) or isinstance(seed_exprs, (str, bytes)):
+        raise ValueError(f"valley harmonic profile seeds must be a list, got {seed_exprs!r}")
+    raw_actions = profile.get("orbit_generators", [])
+    if not isinstance(raw_actions, Sequence) or isinstance(raw_actions, (str, bytes)):
+        raise ValueError(f"valley harmonic profile orbit_generators must be a list, got {raw_actions!r}")
+    actions = [dict(action) for action in raw_actions if isinstance(action, Mapping)]
+    if len(actions) != len(raw_actions):
+        raise ValueError(f"valley harmonic profile orbit_generators must contain mappings, got {raw_actions!r}")
+    scoped_variables = _variables_for_valley_harmonic_profile(profile, variables)
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[tuple[int, int], ...]] = set()
+    for expr in seed_exprs:
+        seed = evaluate_vector_expression(expr, scoped_variables)
+        orbit = _harmonic_orbit_vectors(seed, actions, tol=tol)
+        orbit_key = tuple(sorted(_vector_key(np.asarray(vector, dtype=float), tol) for vector in orbit))
+        duplicate = orbit_key in seen
+        if not duplicate:
+            seen.add(orbit_key)
+        rows.append(
+            {
+                "seed_expr": expr,
+                "representative": np.asarray(seed, dtype=float),
+                "orbit": orbit,
+                "duplicate": duplicate,
+                "orbit_generators": [str(action.get("name", action.get("type", ""))) for action in actions],
+            }
+        )
+    return rows
 
 
 def _auto_valley_harmonics(
@@ -1413,34 +1779,34 @@ def _auto_valley_harmonics(
     variables: Mapping[str, Any],
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]] | None:
     valley_type = str((valley_model or {}).get("valley_type", ""))
-    if kind == "inter" and valley_type == "K":
-        q1 = np.asarray(variables.get("q1"), dtype=float)
-        q3 = np.asarray(variables.get("q3"), dtype=float)
-        candidates = [q1, -2.0 * q1, q1 + bM2, 2.0 * bM2 + q3]
-    elif kind == "inter" and valley_type == "M":
-        q1 = 0.5 * float(np.linalg.norm(bM1)) * np.array([1.0, 0.0], dtype=float)
-        candidates = [q1, bM2 - q1, bM2 + q1, bM1 + q1, bM2 - 3.0 * q1]
-    elif kind == "intra" and valley_type == "K":
-        candidates = [np.zeros(2, dtype=float), -bM1, bM1 + bM2, 2.0 * bM1]
-    elif kind == "intra" and valley_type == "M":
-        candidates = [bM1, bM2, -bM1 + bM2, bM1 + bM2, -2.0 * bM1 + bM2, 2.0 * bM1]
-    else:
+    profile = _AUTO_VALLEY_HARMONIC_PROFILES.get((valley_type, kind))
+    if profile is None:
         return None
+    profile_variables = {**dict(variables), "bM1": np.asarray(bM1, dtype=float), "bM2": np.asarray(bM2, dtype=float)}
+    b_norm = max(float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
+    tol = max(1.0e-8, b_norm * 1.0e-8)
+    candidate_rows = _candidate_orbits_from_valley_profile(profile, profile_variables, tol=tol)
+    candidates = [row for row in candidate_rows if not bool(row["duplicate"])]
     if count > len(candidates):
-        raise ValueError(f"{valley_type} {kind} auto harmonics supports at most {len(candidates)} shells, got {count}")
+        raise ValueError(f"{valley_type} {kind} auto harmonics found only {len(candidates)} unique geometry orbits, got {count}")
     selected = candidates[:count]
-    harmonic_map = {idx + 1: np.asarray(vector, dtype=float) for idx, vector in enumerate(selected)}
+    harmonic_map = {idx + 1: np.asarray(row["representative"], dtype=float) for idx, row in enumerate(selected)}
     return harmonic_map, {
         "kind": kind,
         "count": count,
-        "selection_rule": f"{valley_type}_valley_{kind}_geometry",
+        "generation": "valley_geometry_orbit",
+        "selection_rule": str(profile.get("selection_rule", f"{valley_type}_{kind}_geometry")),
         "selected": [
             {
                 "index": idx,
                 "vector": np.asarray(vector, dtype=float).tolist(),
                 "norm": float(np.linalg.norm(vector)),
                 "pair_count": None,
-                "member_count": None,
+                "member_count": int(len(selected[idx - 1]["orbit"])),
+                "orbit_size": int(len(selected[idx - 1]["orbit"])),
+                "orbit_generators": list(selected[idx - 1]["orbit_generators"]),
+                "orbit_vectors": [np.asarray(item, dtype=float).tolist() for item in selected[idx - 1]["orbit"]],
+                "seed": str(selected[idx - 1]["seed_expr"]),
                 "lattice_index": None,
             }
             for idx, vector in harmonic_map.items()
@@ -1458,6 +1824,7 @@ def _resolve_harmonics_maps(
     bM2: np.ndarray,
     sectors: list[dict[str, Any]] | None = None,
     valley_model: Mapping[str, Any] | None = None,
+    symmetry_map: Mapping[str, Sequence[Mapping[str, Any]]] | None = None,
 ) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray], dict[str, Any]]:
     diagnostics: dict[str, Any] = {"auto_used": False}
     maps: dict[str, dict[int, np.ndarray]] = {}
@@ -1465,25 +1832,23 @@ def _resolve_harmonics_maps(
         raw = harmonics.get(kind, {})
         if _is_auto_harmonic_spec(raw):
             count = _auto_harmonic_count(raw, name=f"harmonics.{kind}")
-            valley_type = str((valley_model or {}).get("valley_type", "Gamma"))
-            use_sector_inter = (
+            use_explicit_sector_pairs = (
                 kind == "inter"
                 and bool(sectors)
                 and isinstance(raw, Mapping)
                 and raw.get("sector_pairs") is not None
             )
-            if use_sector_inter:
-                b_norm = max(float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
-                tol = max(1.0e-8, b_norm * 1.0e-6)
-                maps[kind], diagnostics[kind] = _auto_inter_harmonics_from_sectors(
+            if use_explicit_sector_pairs:
+                maps[kind], diagnostics[kind] = _auto_harmonics_from_support(
                     raw=raw,
+                    kind=kind,
                     count=count,
                     sectors=sectors,
                     Q_set1=Q_set1,
                     Q_set2=Q_set2,
                     bM1=bM1,
                     bM2=bM2,
-                    tol=tol,
+                    symmetry_operations=list((symmetry_map or {}).get(kind, [])),
                 )
             else:
                 valley_harmonics = _auto_valley_harmonics(
@@ -1496,6 +1861,18 @@ def _resolve_harmonics_maps(
                 )
                 if valley_harmonics is not None:
                     maps[kind], diagnostics[kind] = valley_harmonics
+                elif sectors:
+                    maps[kind], diagnostics[kind] = _auto_harmonics_from_support(
+                        raw=raw,
+                        kind=kind,
+                        count=count,
+                        sectors=sectors,
+                        Q_set1=Q_set1,
+                        Q_set2=Q_set2,
+                        bM1=bM1,
+                        bM2=bM2,
+                        symmetry_operations=list((symmetry_map or {}).get(kind, [])),
+                    )
                 else:
                     maps[kind], diagnostics[kind] = _auto_harmonics_from_q_sets(
                         kind=kind,
@@ -1652,6 +2029,11 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         bM1=bM1,
         bM2=bM2,
     )
+    preliminary_symmetry_map = _enrich_symmetry_map(
+        config.symmetry_map,
+        {},
+        rotation_deg=config.rotation_deg,
+    )
     intra, inter, harmonics_diagnostics = _resolve_harmonics_maps(
         harmonics,
         variables,
@@ -1661,6 +2043,7 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         bM2=bM2,
         sectors=sectors,
         valley_model=config.valley_model,
+        symmetry_map=preliminary_symmetry_map,
     )
     config.harmonics_diagnostics = harmonics_diagnostics
     kpoints_all = _load_kpoints(config)
@@ -2440,11 +2823,12 @@ def _term_to_dict(term: Any) -> dict[str, Any]:
 
 
 def _operation_physics_level(model_config: ConfiguredModel, operation: Mapping[str, Any]) -> str:
+    representation_level = str(operation.get("representation_level", ""))
+    if representation_level:
+        return representation_level
     name = str(operation.get("name", ""))
     if model_config.symmetry_source_config.get("type") == "toy_generator":
-        return "effective" if name.endswith("_eff") or name == "TR_eff" else "toy"
-    if name.endswith("_eff") or name == "TR_eff":
-        return "effective"
+        return "toy"
     return "physical"
 
 
@@ -2484,6 +2868,16 @@ def _build_operation_registry(model_config: ConfiguredModel) -> list[dict[str, A
                 {
                     "user_operation": user_name,
                     "canonical_operation": canonical_name,
+                    "operation_alias": operation.get("operation_alias", source_record.get("operation_alias")),
+                    "canonical_physical_operation": operation.get(
+                        "canonical_physical_operation",
+                        source_record.get("canonical_physical_operation", canonical_name),
+                    ),
+                    "representation_level": operation.get("representation_level", source_record.get("representation_level")),
+                    "effective_name": operation.get("effective_name", source_record.get("effective_name")),
+                    "physical_parent": operation.get("physical_parent", source_record.get("physical_parent")),
+                    "approximation": _json_safe(operation.get("approximation", source_record.get("approximation"))),
+                    "derived_from": _json_safe(operation.get("derived_from", source_record.get("derived_from"))),
                     "valley_type": str(model_config.valley_model.get("valley_type", "")),
                     "valley_mode": str(model_config.valley_model.get("mode", "")),
                     "spin_convention": str(model_config.valley_model.get("spin_convention", "")),
