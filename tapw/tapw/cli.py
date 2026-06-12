@@ -80,6 +80,8 @@ def build_calc_parser(prog: str = None):
                        help='0-based chunk id for job-array sharding (overrides config file)')
     parser.add_argument('--kpoint_chunk_count', type=int,
                        help='Total chunk count for job-array sharding (overrides config file)')
+    parser.add_argument('--developer-outputs', action='store_true',
+                       help='Write developer-only symmetry intermediate matrices under diagnostics/')
     return parser
 
 
@@ -184,6 +186,8 @@ def run_calc(args):
         config.compute.kpoint_chunk_id = args.kpoint_chunk_id
     if args.kpoint_chunk_count is not None:
         config.compute.kpoint_chunk_count = args.kpoint_chunk_count
+    if args.developer_outputs:
+        config.symmetry_analysis.developer_outputs = True
 
     # Re-check constraints after applying CLI overrides.
     config.validate()

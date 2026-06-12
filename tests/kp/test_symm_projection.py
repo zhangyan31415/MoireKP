@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 import json
+import io
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stdout
 from pathlib import Path
 
 import numpy as np
@@ -27,6 +29,14 @@ from kp.symmetry.projection import (
 
 
 class SymmetryProjectionCliTests(unittest.TestCase):
+    def test_kp_symm_help_lists_developer_outputs(self) -> None:
+        stream = io.StringIO()
+        with self.assertRaises(SystemExit) as exc, redirect_stdout(stream):
+            cli.main(["symm", "--help"])
+
+        self.assertEqual(exc.exception.code, 0)
+        self.assertIn("--developer-outputs", stream.getvalue())
+
     def test_action_resolution_infers_sector_orbitals_from_low_dim_for_single_nlow_list(self) -> None:
         q = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
         action = {
@@ -102,6 +112,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         manifest_entry: dict,
         q_rotation_deg: float | None = 0.0,
         include_default_k_pairs: bool = True,
+        include_representation_file: bool = True,
     ) -> Path:
         q1_file = tmp / f"{operation}_q1.npy"
         q2_file = tmp / f"{operation}_q2.npy"
@@ -124,15 +135,17 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         d_full[:4, :4] = d_up
         d_full[4:, 4:] = d_up
         rep_dir.mkdir(parents=True)
-        np.savez(rep_dir / f"{operation}.npz", matrix=d_full)
+        if include_representation_file:
+            np.savez(rep_dir / f"{operation}.npz", matrix=d_full)
         np.savez(rep_dir / f"{operation}_rawH.npz", matrix=d_full)
 
         entry = {
             "antiunitary": False,
-            "filename": f"{valley}/{operation}.npz",
             "raw_h_operator_file": f"{valley}/{operation}_rawH.npz",
             **manifest_entry,
         }
+        if include_representation_file:
+            entry["filename"] = f"{valley}/{operation}.npz"
         if include_default_k_pairs and "k_pairs" not in entry:
             entry["k_pairs"] = [[0, 0]]
         nlow_state_list = [[0], [1]] if valley.lower() == "gamma" else [[0], [0]]
@@ -176,6 +189,28 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
         cli.main(["symm", "--config", str(cfg_path)])
         return out_dir
+
+    def test_symm_accepts_release_manifest_with_rawh_only(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            out_dir = self._run_minimal_two_layer_projection(
+                tmp,
+                valley="K1",
+                operation="C3",
+                d_up=np.eye(4, dtype=np.complex128),
+                manifest_entry={
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                },
+                include_representation_file=False,
+            )
+
+            row = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["operations"][0]
+            self.assertEqual(row["matrix_file"], "exactified_C3z.npy")
+            self.assertEqual(row["matrix_source"], "kp_symm_exactified_action")
+            self.assertNotIn("representation_file", row)
+            self.assertFalse((out_dir / "diagnostics" / "C3_low_representation_raw.npy").exists())
 
     def test_symm_auto_frame_uses_reflection_axis_when_rotation_is_not_configured(self):
         with tempfile.TemporaryDirectory() as td:
@@ -808,7 +843,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(row["source_matrix_projection_report"]["report"]["status"], "exactified")
             self.assertLess(row["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
 
-    def test_symm_projection_diagnostics_explicitly_save_polar_and_representation_files(self) -> None:
+    def test_symm_developer_outputs_save_polar_and_representation_files_under_diagnostics(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
             d = np.eye(4, dtype=np.complex128)
@@ -826,17 +861,45 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             )
             cfg_path = tmp / "C3_symm.yaml"
             cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-            cfg["symm"]["diagnostics"] = {"projection_matrices": True}
+            cfg["symm"]["developer_outputs"] = True
             cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
             cli.main(["symm", "--config", str(cfg_path)])
 
-            self.assertTrue((out_dir / "C3_low_polar.npy").exists())
-            self.assertTrue((out_dir / "C3_low_representation_raw.npy").exists())
+            self.assertFalse((out_dir / "C3_low_polar.npy").exists())
+            self.assertFalse((out_dir / "C3_low_representation_raw.npy").exists())
+            self.assertTrue((out_dir / "diagnostics" / "C3_low_polar.npy").exists())
+            self.assertTrue((out_dir / "diagnostics" / "C3_low_representation_raw.npy").exists())
+            self.assertTrue((out_dir / "diagnostics" / "C3_low_representation_polar.npy").exists())
             summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
             row = summary["operations"][0]
-            self.assertEqual(row["representation_matrix_file"], "C3_low_representation_raw.npy")
+            self.assertEqual(row["developer_outputs"]["representation_matrix_file"], "diagnostics/C3_low_representation_raw.npy")
+            self.assertEqual(row["developer_outputs"]["polar_matrix_file"], "diagnostics/C3_low_polar.npy")
             self.assertIn("polar", row["pairs"][0])
+
+    def test_symm_rejects_legacy_projection_matrices_diagnostics_config(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            d = np.eye(4, dtype=np.complex128)
+            self._run_minimal_two_layer_projection(
+                tmp,
+                valley="K1",
+                operation="C3",
+                d_up=d,
+                manifest_entry={
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                },
+                q_rotation_deg=0.0,
+            )
+            cfg_path = tmp / "C3_symm.yaml"
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+            cfg["symm"]["diagnostics"] = {"projection_matrices": True}
+            cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "symm.diagnostics.projection_matrices is no longer supported"):
+                cli.main(["symm", "--config", str(cfg_path)])
 
     def test_symm_fails_when_full_space_representation_does_not_covary_hamk(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

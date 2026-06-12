@@ -1229,6 +1229,7 @@ def build_argparser() -> argparse.ArgumentParser:
 
     p_symm = sub.add_parser("symm", help="Project TAPW symmetry representations into the KP basis")
     p_symm.add_argument("-c", "--config", required=True, help="YAML config path")
+    p_symm.add_argument("--developer-outputs", action="store_true", help="Write developer-only projection matrices under diagnostics/")
 
     p_model = sub.add_parser("model", help="Build/fit a configured continuum model and compare to Heff")
     p_model.add_argument("-c", "--config", required=True, help="YAML model config path")
@@ -1264,7 +1265,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         }
         cmd_sweep_from_config(args.config, overrides)
     elif args.cmd == "symm":
-        run_symmetry_projection_from_config(args.config)
+        run_symmetry_projection_from_config(
+            args.config,
+            developer_outputs=True if args.developer_outputs else None,
+        )
     elif args.cmd == "model":
         from .model.pipeline import run_configured_model
 

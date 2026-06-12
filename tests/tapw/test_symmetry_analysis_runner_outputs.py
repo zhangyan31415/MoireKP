@@ -142,7 +142,7 @@ def test_runner_writes_summary_markdown_json_and_details_csv(tmp_path):
     assert not (output_dir / "debug.json").exists()
 
 
-def test_runner_writes_minimal_representation_matrices_and_manifest(tmp_path):
+def test_runner_writes_release_rawh_representation_and_manifest_by_default(tmp_path):
     runner = _make_runner(tmp_path)
     matrix = scipy.sparse.csr_matrix(
         np.array(
@@ -203,22 +203,14 @@ def test_runner_writes_minimal_representation_matrices_and_manifest(tmp_path):
     pg_path = output_dir / "representations" / "K1" / "C2T_PG.npz"
     raw_h_path = output_dir / "representations" / "K1" / "C2T_rawH.npz"
     manifest_path = output_dir / "representations" / "manifest.json"
-    assert matrix_path.is_file()
-    assert pin_path.is_file()
-    assert pg_path.is_file()
+    assert not matrix_path.exists()
+    assert not pin_path.exists()
+    assert not pg_path.exists()
+    assert not (output_dir / "diagnostics").exists()
     assert raw_h_path.is_file()
     assert manifest_path.is_file()
-    loaded = scipy.sparse.load_npz(matrix_path)
-    loaded_pin = scipy.sparse.load_npz(pin_path)
-    loaded_pg = scipy.sparse.load_npz(pg_path)
     loaded_raw_h = scipy.sparse.load_npz(raw_h_path)
-    assert scipy.sparse.isspmatrix_csr(loaded)
-    assert scipy.sparse.isspmatrix_csr(loaded_pin)
-    assert scipy.sparse.isspmatrix_csr(loaded_pg)
     assert scipy.sparse.isspmatrix_csr(loaded_raw_h)
-    assert np.allclose(loaded.toarray(), matrix.toarray())
-    assert np.allclose(loaded_pin.toarray(), pin_matrix.toarray())
-    assert np.allclose(loaded_pg.toarray(), pg_matrix.toarray())
     assert np.allclose(loaded_raw_h.toarray(), raw_h_matrix.toarray())
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -229,24 +221,14 @@ def test_runner_writes_minimal_representation_matrices_and_manifest(tmp_path):
             "valley": 1,
             "valley_label": "K1",
             "operation": "C2T",
-            "file": "K1/C2T.npz",
-            "matrix_role": "D_g^(0)",
             "antiunitary": True,
             "spglib_index": 17,
             "axis_deg": 3.7,
-            "shape": [2, 2],
-            "nnz": 2,
             "dtype": "complex128",
             "pin_supported": True,
-            "pin_file": "K1/C2T_Pin.npz",
             "pin_reason": "",
-            "pin_shape": [2, 2],
-            "pin_nnz": 2,
             "pin_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
-            "pg_file": "K1/C2T_PG.npz",
             "pg_reason": "",
-            "pg_shape": [2, 2],
-            "pg_nnz": 2,
             "pg_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
             "pg_phase_convention": "P_G^atomic=diag(exp(-i DeltaG_group dot r_atom)); P_G^TAPW=g P_G^atomic g^dagger",
             "raw_h_operator_file": "K1/C2T_rawH.npz",
@@ -263,6 +245,68 @@ def test_runner_writes_minimal_representation_matrices_and_manifest(tmp_path):
             "square_residual": 4.0e-9,
         }
     ]
+
+
+def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_path):
+    runner = _make_runner(tmp_path)
+    runner.config.symmetry_analysis.developer_outputs = True
+    matrix = scipy.sparse.csr_matrix(np.array([[0.0, 1.0], [-1.0, 0.0]], dtype=np.complex128))
+    pin_matrix = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    pg_matrix = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    raw_h_matrix = matrix @ pg_matrix
+    payload = {
+        "summary": {"valleys": [1], "tolerance": 1.0e-2, "operations": {"K1": []}},
+        "details": [],
+        "representations": [
+            {
+                "valley": 1,
+                "valley_label": "K1",
+                "operation": "C2T",
+                "antiunitary": True,
+                "spglib_index": 17,
+                "axis_angle_deg": 3.7,
+                "basis_hash": "basis-test-hash",
+                "residual_H_raw": 1.0e-5,
+                "status": "approximate/provisional",
+                "g_perm_max_delta": 2.0e-12,
+                "nonzero_reciprocal_shift_count": 0,
+                "square_residual": 4.0e-9,
+                "matrix": matrix,
+                "matrix_role": "D_g^(0)",
+                "pin_supported": True,
+                "pin_matrix": pin_matrix,
+                "pin_reason": "",
+                "pin_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
+                "source_form": "ordinary_with_pin",
+                "ld_source_rule": "q_lambda = R_eff^{-1}(k + K_target(lambda)) - K_lambda",
+                "pg_matrix": pg_matrix,
+                "pg_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
+                "pg_phase_convention": "P_G^atomic=diag(exp(-i DeltaG_group dot r_atom)); P_G^TAPW=g P_G^atomic g^dagger",
+                "raw_h_matrix": raw_h_matrix,
+                "raw_h_action_rule": "unitary: D_raw H D_raw^dagger; antiunitary: D_raw H^* D_raw^dagger",
+            }
+        ],
+    }
+    runner._analyze = MethodType(lambda self: payload, runner)
+
+    runner.run()
+
+    output_dir = Path(runner.output_dir)
+    assert (output_dir / "representations" / "K1" / "C2T_rawH.npz").is_file()
+    diag_dir = output_dir / "representations" / "diagnostics" / "K1"
+    assert (diag_dir / "C2T.npz").is_file()
+    assert (diag_dir / "C2T_Pin.npz").is_file()
+    assert (diag_dir / "C2T_PG.npz").is_file()
+    assert not (diag_dir / "C2T_rawH.npz").exists()
+
+    manifest = json.loads((output_dir / "representations" / "manifest.json").read_text(encoding="utf-8"))
+    row = manifest["matrices"][0]
+    assert row["raw_h_operator_file"] == "K1/C2T_rawH.npz"
+    assert row["developer_outputs"] == {
+        "file": "diagnostics/K1/C2T.npz",
+        "pin_file": "diagnostics/K1/C2T_Pin.npz",
+        "pg_file": "diagnostics/K1/C2T_PG.npz",
+    }
 
 
 def test_analyze_collects_only_minimal_supported_representation_generators(tmp_path, monkeypatch):
@@ -365,7 +409,7 @@ def test_runner_writes_debug_json_only_when_debug_enabled(tmp_path):
     runner.run()
 
     output_dir = Path(runner.output_dir)
-    debug = json.loads((output_dir / "debug.json").read_text(encoding="utf-8"))
+    debug = json.loads((output_dir / "diagnostics" / "debug.json").read_text(encoding="utf-8"))
     assert debug["details"][0]["debug"]["center_convention"] == "group_k_centers"
     assert debug["details"][0]["debug"]["phase_side"] == "left_target_rows"
 

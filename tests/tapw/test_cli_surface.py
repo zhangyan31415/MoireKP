@@ -52,6 +52,16 @@ def test_unified_tapw_dispatches_calc_without_rewriting_algorithm(monkeypatch):
     assert calls == ["config.yaml"]
 
 
+def test_tapw_run_help_lists_developer_outputs(capsys):
+    from tapw import cli
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["run", "--help"])
+
+    assert excinfo.value.code == 0
+    assert "--developer-outputs" in capsys.readouterr().out
+
+
 def test_unified_tapw_dispatches_orbital_commands(monkeypatch):
     from tapw import cli
     from tapw import orbital_analysis_tool

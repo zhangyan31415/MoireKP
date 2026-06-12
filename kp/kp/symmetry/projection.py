@@ -43,7 +43,7 @@ class RepresentationData:
 @dataclass
 class ActionRepresentation:
     matrix: Any
-    representation: RepresentationData
+    representation: RepresentationData | None
     pg: RepresentationData | None
     raw_h: RepresentationData | None
     pg_filename: str | None
@@ -297,6 +297,10 @@ def _entry_filename(entry: dict[str, Any], valley: str, operation: str) -> str:
         if entry.get(key):
             return str(entry[key])
     return f"{valley}/{operation}.npz"
+
+
+def _optional_representation_filename(entry: dict[str, Any]) -> str | None:
+    return _optional_entry_filename(entry, "filename", "file", "path", "representation_filename")
 
 
 def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitary: bool, *, strict: bool = True) -> dict[str, Any]:
@@ -987,22 +991,24 @@ def _build_action_representation(
     operation: str,
     entry: dict[str, Any],
     rep_root: Path,
-    filename: str,
+    filename: str | None,
     antiunitary: bool,
     spin: str,
     full_dim: int,
     tolerance: float,
     spin_sector_sewing: str | None = None,
 ) -> ActionRepresentation:
-    rep = _load_spin_sliced_representation(
-        path=rep_root / filename,
-        spin=spin,
-        full_dim=full_dim,
-        spin_sector_sewing=spin_sector_sewing,
-    )
-    _check_spin_leakage(operation, "representation", rep, tolerance)
-    if rep.matrix.shape != (full_dim, full_dim):
-        raise ValueError(f"{operation} D shape {rep.matrix.shape} does not match U_low full dimension {full_dim}")
+    rep: RepresentationData | None = None
+    if filename is not None:
+        rep = _load_spin_sliced_representation(
+            path=rep_root / filename,
+            spin=spin,
+            full_dim=full_dim,
+            spin_sector_sewing=spin_sector_sewing,
+        )
+        _check_spin_leakage(operation, "representation", rep, tolerance)
+        if rep.matrix.shape != (full_dim, full_dim):
+            raise ValueError(f"{operation} D shape {rep.matrix.shape} does not match U_low full dimension {full_dim}")
 
     pg_filename = _optional_entry_filename(entry, "pg_file", "periodic_gauge_file", "source_pg_file")
     raw_h_filename = _optional_entry_filename(
@@ -1022,7 +1028,7 @@ def _build_action_representation(
     combined: np.ndarray | None = None
     combined_residual: float | None = None
 
-    if pg_filename is not None:
+    if pg_filename is not None and rep is not None:
         if spin_sector_sewing is not None and str(spin_sector_sewing).lower() == "up_to_down":
             pg_rep = _load_spin_sliced_representation(
                 path=rep_root / pg_filename,
@@ -1267,7 +1273,11 @@ def _write_summary_md(path: Path, summary: dict[str, Any]) -> None:
         lines.append(f"### {op['operation']}")
         lines.append("")
         lines.append(f"- antiunitary: {op['antiunitary']}")
-        lines.append(f"- representation_file: `{op['representation_file']}`")
+        if op.get("representation_file"):
+            lines.append(f"- representation_file: `{op['representation_file']}`")
+        developer_outputs = op.get("developer_outputs")
+        if isinstance(developer_outputs, Mapping) and developer_outputs.get("representation_file"):
+            lines.append(f"- representation_file: `{developer_outputs['representation_file']}`")
         lines.append(f"- action_source: {op.get('action_source', 'representation_file')}")
         if op.get("pg_file") is not None:
             lines.append(f"- pg_file: `{op['pg_file']}`")
@@ -1296,7 +1306,7 @@ def _write_summary_md(path: Path, summary: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
+def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: bool | None = None) -> dict[str, Any]:
     cfg_path = os.path.abspath(cfg_path)
     cfg_dir = os.path.dirname(cfg_path)
     with open(cfg_path, "r", encoding="utf-8") as handle:
@@ -1307,11 +1317,15 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
     project_cfg = cfg.get("project", {})
     symm_cfg = cfg.get("symm", {})
     diagnostics_cfg = symm_cfg.get("diagnostics", {})
-    if diagnostics_cfg is None:
-        diagnostics_cfg = {}
-    if not isinstance(diagnostics_cfg, Mapping):
-        raise ValueError("symm.diagnostics must be a mapping when provided")
-    save_projection_diagnostics = _as_bool(diagnostics_cfg.get("projection_matrices", False))
+    if isinstance(diagnostics_cfg, Mapping) and "projection_matrices" in diagnostics_cfg:
+        raise ValueError("symm.diagnostics.projection_matrices is no longer supported; use symm.developer_outputs")
+    if diagnostics_cfg not in ({}, None):
+        raise ValueError("symm.diagnostics is no longer supported; use symm.developer_outputs")
+    save_projection_diagnostics = (
+        bool(developer_outputs)
+        if developer_outputs is not None
+        else _as_bool(symm_cfg.get("developer_outputs", False))
+    )
     if not _as_bool(symm_cfg.get("enable", True)):
         raise ValueError("symm.enable is false")
 
@@ -1411,7 +1425,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         output_operation = request["output"]
         entry = operation_entries[output_operation]
         antiunitary = _as_bool(entry.get("antiunitary", False))
-        filename = _entry_filename(entry, valley, operation)
+        filename = _optional_representation_filename(entry)
         action = _build_action_representation(
             operation=output_operation,
             entry=entry,
@@ -1542,7 +1556,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         payload = operation_payloads[output_operation]
         entry = payload["entry"]
         antiunitary = bool(payload["antiunitary"])
-        filename = str(payload["filename"])
+        filename = None if payload["filename"] is None else str(payload["filename"])
         action = payload["action"]
         rep = action.representation
         source_action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
@@ -1565,8 +1579,9 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             source_states=source_states,
         )
         rep_raw_mats: list[np.ndarray] = []
+        rep_polar_mats: list[np.ndarray] = []
         rep_pair_rows: list[dict[str, Any]] = []
-        if save_projection_diagnostics:
+        if save_projection_diagnostics and rep is not None:
             rep_raw_mats, rep_polar_mats, rep_pair_rows = _project_operation(
                 operation=output_operation,
                 antiunitary=antiunitary,
@@ -1595,10 +1610,20 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             tol=max(float(tolerance), 1.0e-8),
         )
         _save_matrix_stack(output_dir / f"{output_operation}_low_raw.npy", raw_mats)
+        diagnostics_dir = output_dir / "diagnostics"
+        for stale in (
+            output_dir / f"{output_operation}_low_polar.npy",
+            output_dir / f"{output_operation}_low_representation_raw.npy",
+            output_dir / f"{output_operation}_low_representation_polar.npy",
+        ):
+            if stale.exists():
+                stale.unlink()
         if save_projection_diagnostics:
-            _save_matrix_stack(output_dir / f"{output_operation}_low_polar.npy", polar_mats)
-            _save_matrix_stack(output_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
-            _save_matrix_stack(output_dir / f"{output_operation}_low_representation_polar.npy", rep_polar_mats)
+            diagnostics_dir.mkdir(parents=True, exist_ok=True)
+            _save_matrix_stack(diagnostics_dir / f"{output_operation}_low_polar.npy", polar_mats)
+            if rep_raw_mats:
+                _save_matrix_stack(diagnostics_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
+                _save_matrix_stack(diagnostics_dir / f"{output_operation}_low_representation_polar.npy", rep_polar_mats)
         matrix_kind, matrix_selection = _select_operation_matrix_kind(
             model_basis_action,
             representation_pair_rows=rep_pair_rows,
@@ -1631,13 +1656,12 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             "square_residual": entry.get("square_residual"),
             "spglib_index": entry.get("spglib_index"),
             "ld_source_rule": entry.get("ld_source_rule"),
-            "representation_file": str(rep_root / filename),
             "pg_file": None if action.pg_filename is None else str(rep_root / action.pg_filename),
             "raw_h_operator_file": None if action.raw_h_filename is None else str(rep_root / action.raw_h_filename),
             "action_source": action.action_source,
             "combined_raw_h_residual": action.combined_raw_h_residual,
-            "from_full_spinful": rep.from_full_spinful,
-            "spin_leakage": rep.spin_leakage,
+            "from_full_spinful": None if rep is None else rep.from_full_spinful,
+            "spin_leakage": None if rep is None else rep.spin_leakage,
             "pg_spin_leakage": None if action.pg is None else action.pg.spin_leakage,
             "raw_h_spin_leakage": None if action.raw_h is None else action.raw_h.spin_leakage,
             "spin_sector_sewing": spin_sector_sewing,
@@ -1649,8 +1673,18 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             ],
         }
         if save_projection_diagnostics:
-            operation_summary["representation_matrix_file"] = f"{output_operation}_low_representation_raw.npy"
-            operation_summary["representation_pairs"] = rep_pair_rows
+            developer_output_files = {
+                "polar_matrix_file": f"diagnostics/{output_operation}_low_polar.npy",
+            }
+            if filename is not None:
+                developer_output_files["representation_file"] = str(rep_root / filename)
+            if rep_raw_mats:
+                developer_output_files["representation_matrix_file"] = f"diagnostics/{output_operation}_low_representation_raw.npy"
+                developer_output_files["representation_polar_matrix_file"] = (
+                    f"diagnostics/{output_operation}_low_representation_polar.npy"
+                )
+                operation_summary["representation_pairs"] = rep_pair_rows
+            operation_summary["developer_outputs"] = developer_output_files
         raw_low_matrices[canonical_name] = np.asarray(raw_mats[0], dtype=np.complex128)
         if entry.get("k_pairs_inferred_from_default_k_index"):
             operation_summary["k_pairs_inferred_from_default_k_index"] = True

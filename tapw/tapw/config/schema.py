@@ -114,6 +114,7 @@ class SymmetryAnalysisConfig:
     tolerance: float = 1.0e-2
     output_dir: str = "symmetry_analysis"
     debug: bool = False
+    developer_outputs: bool = False
 
 @dataclass
 class ComputeConfig:

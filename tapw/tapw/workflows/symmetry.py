@@ -3827,7 +3827,9 @@ class SymmetryAnalysisRunner:
         path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def _write_debug_json(self, summary: dict[str, Any], details: list[dict[str, Any]], output_dir: Path) -> None:
-        path = output_dir / "debug.json"
+        diagnostics_dir = output_dir / "diagnostics"
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        path = diagnostics_dir / "debug.json"
         debug_details = []
         for row in details:
             debug_details.append(
@@ -3862,7 +3864,13 @@ class SymmetryAnalysisRunner:
                 payload = {column: row.get(column, "") for column in DETAIL_COLUMNS}
                 writer.writerow(payload)
 
-    def _write_representations(self, representations: list[dict[str, Any]], output_dir: Path) -> None:
+    def _write_representations(
+        self,
+        representations: list[dict[str, Any]],
+        output_dir: Path,
+        *,
+        developer_outputs: bool = False,
+    ) -> None:
         representations_dir = output_dir / "representations"
         representations_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
@@ -3881,38 +3889,49 @@ class SymmetryAnalysisRunner:
             valley_label = _safe_path_component(record.get("valley_label", record.get("valley", "unknown")))
             operation = representation_operation_name(record.get("operation", "unknown"))
             operation_file = _safe_path_component(operation) + ".npz"
-            relative_path = Path(valley_label) / operation_file
             matrix_dir = representations_dir / valley_label
             matrix_dir.mkdir(parents=True, exist_ok=True)
-            scipy.sparse.save_npz(representations_dir / relative_path, matrix)
+            diagnostics_dir = representations_dir / "diagnostics" / valley_label
+            developer_files: dict[str, str] = {}
+            for old_name in (operation_file, _safe_path_component(operation) + "_Pin.npz", _safe_path_component(operation) + "_PG.npz"):
+                old_path = matrix_dir / old_name
+                if old_path.exists():
+                    old_path.unlink()
+            if developer_outputs:
+                diagnostics_dir.mkdir(parents=True, exist_ok=True)
+                relative_path = Path("diagnostics") / valley_label / operation_file
+                scipy.sparse.save_npz(representations_dir / relative_path, matrix)
+                developer_files["file"] = relative_path.as_posix()
 
             pin_matrix = record.get("pin_matrix")
-            pin_relative_path = None
             pin_shape = None
             pin_nnz = None
             if pin_matrix is not None:
                 if not scipy.sparse.issparse(pin_matrix):
                     raise TypeError("Saved source-shift P_in matrices must be scipy sparse matrices.")
                 pin_matrix = pin_matrix.tocsr()
-                pin_file = _safe_path_component(operation) + "_Pin.npz"
-                pin_relative_path = Path(valley_label) / pin_file
-                scipy.sparse.save_npz(representations_dir / pin_relative_path, pin_matrix)
                 pin_shape = [int(pin_matrix.shape[0]), int(pin_matrix.shape[1])]
                 pin_nnz = int(pin_matrix.nnz)
+                if developer_outputs:
+                    pin_file = _safe_path_component(operation) + "_Pin.npz"
+                    pin_relative_path = Path("diagnostics") / valley_label / pin_file
+                    scipy.sparse.save_npz(representations_dir / pin_relative_path, pin_matrix)
+                    developer_files["pin_file"] = pin_relative_path.as_posix()
 
             pg_matrix = record.get("pg_matrix")
-            pg_relative_path = None
             pg_shape = None
             pg_nnz = None
             if pg_matrix is not None:
                 if not scipy.sparse.issparse(pg_matrix):
                     raise TypeError("Saved periodic-gauge P_G matrices must be scipy sparse matrices.")
                 pg_matrix = pg_matrix.tocsr()
-                pg_file = _safe_path_component(operation) + "_PG.npz"
-                pg_relative_path = Path(valley_label) / pg_file
-                scipy.sparse.save_npz(representations_dir / pg_relative_path, pg_matrix)
                 pg_shape = [int(pg_matrix.shape[0]), int(pg_matrix.shape[1])]
                 pg_nnz = int(pg_matrix.nnz)
+                if developer_outputs:
+                    pg_file = _safe_path_component(operation) + "_PG.npz"
+                    pg_relative_path = Path("diagnostics") / valley_label / pg_file
+                    scipy.sparse.save_npz(representations_dir / pg_relative_path, pg_matrix)
+                    developer_files["pg_file"] = pg_relative_path.as_posix()
 
             raw_h_matrix = record.get("raw_h_matrix")
             raw_h_relative_path = None
@@ -3928,45 +3947,36 @@ class SymmetryAnalysisRunner:
                 raw_h_shape = [int(raw_h_matrix.shape[0]), int(raw_h_matrix.shape[1])]
                 raw_h_nnz = int(raw_h_matrix.nnz)
 
-            manifest["matrices"].append(
-                {
-                    "valley": int(record.get("valley")),
-                    "valley_label": str(record.get("valley_label", "")),
-                    "operation": operation,
-                    "file": relative_path.as_posix(),
-                    "matrix_role": str(record.get("matrix_role", "D_g^(0)")),
-                    "antiunitary": bool(record.get("antiunitary", False)),
-                    "spglib_index": _json_optional_int(record.get("spglib_index", "")),
-                    "axis_deg": _json_optional_float(record.get("axis_angle_deg")),
-                    "shape": [int(matrix.shape[0]), int(matrix.shape[1])],
-                    "nnz": int(matrix.nnz),
-                    "dtype": str(matrix.dtype),
-                    "pin_supported": bool(record.get("pin_supported", False)),
-                    "pin_file": None if pin_relative_path is None else pin_relative_path.as_posix(),
-                    "pin_reason": str(record.get("pin_reason", "")),
-                    "pin_shape": pin_shape,
-                    "pin_nnz": pin_nnz,
-                    "pin_shift_by_group_coeffs": _json_int_vector_dict(record.get("pin_shift_by_group_coeffs")),
-                    "pg_file": None if pg_relative_path is None else pg_relative_path.as_posix(),
-                    "pg_reason": str(record.get("pg_reason", "")),
-                    "pg_shape": pg_shape,
-                    "pg_nnz": pg_nnz,
-                    "pg_shift_by_group_coeffs": _json_int_vector_dict(record.get("pg_shift_by_group_coeffs")),
-                    "pg_phase_convention": str(record.get("pg_phase_convention", PG_PHASE_CONVENTION)),
-                    "raw_h_operator_file": None if raw_h_relative_path is None else raw_h_relative_path.as_posix(),
-                    "raw_h_operator_shape": raw_h_shape,
-                    "raw_h_operator_nnz": raw_h_nnz,
-                    "raw_h_action_rule": str(record.get("raw_h_action_rule", RAW_H_ACTION_RULE)),
-                    "source_form": str(record.get("source_form", "ld_source_rule")),
-                    "ld_source_rule": str(record.get("ld_source_rule", "")),
-                    "basis_hash": str(record.get("basis_hash", "")),
-                    "residual_H_raw": _json_optional_float(record.get("residual_H_raw")),
-                    "status": record.get("status", ""),
-                    "g_perm_max_delta": _json_optional_float(record.get("g_perm_max_delta")),
-                    "nonzero_reciprocal_shift_count": _json_optional_int(record.get("nonzero_reciprocal_shift_count", "")),
-                    "square_residual": _json_optional_float(record.get("square_residual")),
-                }
-            )
+            manifest_row = {
+                "valley": int(record.get("valley")),
+                "valley_label": str(record.get("valley_label", "")),
+                "operation": operation,
+                "antiunitary": bool(record.get("antiunitary", False)),
+                "spglib_index": _json_optional_int(record.get("spglib_index", "")),
+                "axis_deg": _json_optional_float(record.get("axis_angle_deg")),
+                "dtype": str(raw_h_matrix.dtype if raw_h_matrix is not None else matrix.dtype),
+                "pin_supported": bool(record.get("pin_supported", False)),
+                "pin_reason": str(record.get("pin_reason", "")),
+                "pin_shift_by_group_coeffs": _json_int_vector_dict(record.get("pin_shift_by_group_coeffs")),
+                "pg_reason": str(record.get("pg_reason", "")),
+                "pg_shift_by_group_coeffs": _json_int_vector_dict(record.get("pg_shift_by_group_coeffs")),
+                "pg_phase_convention": str(record.get("pg_phase_convention", PG_PHASE_CONVENTION)),
+                "raw_h_operator_file": None if raw_h_relative_path is None else raw_h_relative_path.as_posix(),
+                "raw_h_operator_shape": raw_h_shape,
+                "raw_h_operator_nnz": raw_h_nnz,
+                "raw_h_action_rule": str(record.get("raw_h_action_rule", RAW_H_ACTION_RULE)),
+                "source_form": str(record.get("source_form", "ld_source_rule")),
+                "ld_source_rule": str(record.get("ld_source_rule", "")),
+                "basis_hash": str(record.get("basis_hash", "")),
+                "residual_H_raw": _json_optional_float(record.get("residual_H_raw")),
+                "status": record.get("status", ""),
+                "g_perm_max_delta": _json_optional_float(record.get("g_perm_max_delta")),
+                "nonzero_reciprocal_shift_count": _json_optional_int(record.get("nonzero_reciprocal_shift_count", "")),
+                "square_residual": _json_optional_float(record.get("square_residual")),
+            }
+            if developer_files:
+                manifest_row["developer_outputs"] = developer_files
+            manifest["matrices"].append(manifest_row)
 
         manifest_path = representations_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
@@ -3982,13 +3992,20 @@ class SymmetryAnalysisRunner:
         self._write_summary_markdown(summary, output_dir)
         self._write_summary_json(summary, output_dir)
         self._write_details_csv(details, output_dir)
-        self._write_representations(representations, output_dir)
+        self._write_representations(
+            representations,
+            output_dir,
+            developer_outputs=bool(getattr(self.config.symmetry_analysis, "developer_outputs", False)),
+        )
+        debug_path = output_dir / "debug.json"
+        if debug_path.exists():
+            debug_path.unlink()
         if bool(getattr(self.config.symmetry_analysis, "debug", False)):
             self._write_debug_json(summary, details, output_dir)
         else:
-            debug_path = output_dir / "debug.json"
-            if debug_path.exists():
-                debug_path.unlink()
+            diagnostics_debug_path = output_dir / "diagnostics" / "debug.json"
+            if diagnostics_debug_path.exists():
+                diagnostics_debug_path.unlink()
 
         if self.logger is not None:
             self.logger.info("Wrote symmetry-analysis outputs to %s", output_dir)
