@@ -5,6 +5,7 @@ import numpy as np
 import scipy.linalg
 import time
 import sys
+import os
 from functools import wraps
 from datetime import datetime
 import psutil
@@ -12,12 +13,17 @@ import psutil
 # Constants
 HARTREE = 27.211386245988
 
+
+def _timing_enabled() -> bool:
+    value = os.environ.get("TAPW_ENABLE_TIMING", "")
+    return value.lower() in {"1", "true", "yes", "on"}
+
 def timing_decorator_factory(process_id):
     """Factory function to create timing decorators"""
     def timing_decorator(func):
         @wraps(func)
         def wrapper(*args, **kwargs):
-            if process_id == 0:
+            if process_id == 0 and _timing_enabled():
                 start_time = time.time()
                 process = psutil.Process()
                 mem_before = process.memory_info().rss / (1024 * 1024 * 1024)  # Convert to GB

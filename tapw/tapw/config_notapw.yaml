@@ -1,0 +1,75 @@
+# Twisted Material Configuration File
+
+# Twist parameters
+twist:
+  twist_index_m: 3          # Twist index m, determines the twist angle
+  num_layers: 2             # Total number of layers in the structure
+  type_structure: [2, 2]    # Structure type for each layer: 1 for graphene-like, 2 for TMD-like
+  twist_layer: [1, 1]       # Which layers are twisted relative to each other
+  spin: true               # Whether to include spin in calculations
+
+# File paths and IO configuration
+paths:
+  H_file: "H.dat"   # Hamiltonian file, can be .dat or .npz
+  S_file: "S.dat"   # Overlap file, can be .dat or .npz
+  input_file: "openmx.dat"   # Input structure file name
+  output_dir: "output"   # Output directory for results (will be created if it doesn't exist)
+  kpath_in: "KPATH_GMKG.in"   # K-path input file for band structure calculation
+  kpath_out: "KPATH_GMKG.out"   # K-path output file
+
+# Computation parameters
+compute:
+  # Valley configuration
+  valleys: [1]    # List of valleys to calculate
+                          # Available valleys:
+                          # 1: K1 valley
+                          # 2: K2 valley
+                          # 11: K1_120 valley
+                          # 12: K1_240 valley
+                          # 5: Gamma valley
+                          # 31: M1 valley
+                          # 32: M2 valley
+                          # 33: M3 valley
+  
+  # Calculation mode
+  mode: "band"            # Calculation mode: "band" for band structure, "chern" for Chern number, "slab" for slab/ribbon calculation
+  
+  # Energy parameters
+  efermi: -4.6           # Fermi energy level, unit: eV
+  n_g: 3                  # Harmonic of G vectors
+  
+  # Band structure calculation parameters
+  num_processes: 61       # Number of parallel processes
+  num_bands_cal: 2000      # Number of bands to calculate
+  num_chern: 40          # Number of k-points for Chern number calculation (grid size will be num_chern x num_chern)
+  
+  # Hardware acceleration
+  gpu: false             # Whether to use GPU acceleration
+  gpu_index: [0, 1]      # GPU device indices to use
+  delay_time: 0          # Delay time between GPU operations
+  
+  # Calculation flags
+  hamk_save: true       # Whether to save Hamiltonian matrices
+  TAPW: false            # Use TAPW method
+  eigensolver: "scipy"   # non-TAPW generalized solver: "scipy" or "slepc"
+  eigsh_cal: true       # Use eigsh for eigenvalue calculation
+  C3_H: true           # Apply C3 symmetry to Hamiltonian
+  ge: true             # Use generalized eigenvalue solver
+  eig_vec_cal: true     # Calculate eigenvectors 
+
+  # Electric field parameters
+  Electric_field_in_eVpA: 0.0  # Electric field strength in eV/Å
+  zero_potential_layers: [1]     # Layers with zero potential
+  Inner_symmetrical_Electric_Field: false  # Whether to use inner symmetrical electric field
+
+  orthogonal_basis: false
+
+# Slab calculation parameters (only used when mode: "slab")
+slab:
+  nslab: 7                    # Number of layers in the slab
+  ijmax: 1                    # Maximum interlayer distance (for twisted materials)
+  slab_direction: [0,1,0]     # Slab normal direction (010 cut)
+  analyze_surface: false       # Whether to analyze surface character
+  surface_threshold: 0.5      # Threshold for identifying surface states
+  kpath_slab_in: "KPATH_SLAB.in"   # Slab k-path input file
+  kpath_slab_out: "KPATH_SLAB.out" # Slab k-path output file

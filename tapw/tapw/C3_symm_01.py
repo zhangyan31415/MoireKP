@@ -8,6 +8,30 @@ sigma_x = np.array([[0, 1], [1, 0]])
 sigma_y = np.array([[0, -1j], [1j, 0]])
 sigma_z = np.array([[1, 0], [0, -1]])
 
+
+def single_valley_c3_incompatibility_reason(bravais, valley):
+    bravais = (bravais or "hex").lower()
+    if bravais != "hex":
+        return (
+            f"C3_H requires a hex Bravais setting in this code path; got bravais={bravais!r}."
+        )
+    if valley in {31, 32, 33}:
+        return (
+            f"M valleys {valley} are rotated into each other by C3, so they do not admit "
+            "single-valley C3_H in the current basis."
+        )
+    if valley in {3, 41, 42}:
+        return (
+            f"Valley {valley} is not a single-valley C3 fixed point in this code path."
+        )
+    if valley not in {1, 2, 11, 12, 5}:
+        return f"Unsupported valley={valley} for single-valley C3_H."
+    return None
+
+
+def supports_single_valley_c3(bravais, valley):
+    return single_valley_c3_incompatibility_reason(bravais, valley) is None
+
 def get_g_vec_perlayer(m_g_vec,twisted_index_m):
     # K1 = twisted_index_m*m_g_vec[0] + 1/3*m_g_vec[0] + 1/3*m_g_vec[1]
     # K2 = twisted_index_m*m_g_vec[0] + 2/3*m_g_vec[0] - 1/3*m_g_vec[1]
@@ -65,58 +89,20 @@ def rot_matrix(theta):
     return rot
 
 def C3_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,m_g_vec,twisted_index_m,valley):
+    reason = single_valley_c3_incompatibility_reason("hex", valley)
+    if reason is not None:
+        raise ValueError(f"{reason} Disable single-valley C3_H for this valley.")
+
     num_gn = len(g_vec_list_K1_1layer)
     C3 = np.zeros((num_gn+num_gn,num_gn+num_gn),dtype=np.complex128)
     C3_1layer = np.zeros((num_gn,num_gn),dtype=np.complex128)
     C3_2layer = np.zeros((num_gn,num_gn),dtype=np.complex128)
 
-    g_vec_1l,g_vec_2l = get_g_vec_perlayer(m_g_vec,twisted_index_m)
-    # m_K1 = 1/3*m_g_vec[0] + 1/3*m_g_vec[1]
-    # m_K2 = 2/3*m_g_vec[0] - 1/3*m_g_vec[1]
-    # m_K3 = 1/3*m_g_vec[0] - 2/3*m_g_vec[1]
-    # m_K4 = -m_K1
-    # m_K5 = -m_K2
-    # m_K6 = -m_K3
-    K1_1layer = rot(1/3*g_vec_1l[0]+1/3*g_vec_1l[1],120) #+ m_K1[:2]
-    K1_2layer = rot(1/3*g_vec_2l[0]+1/3*g_vec_2l[1],120) #+ m_K1[:2]
-    K2_1layer = -rot(1/3*g_vec_1l[0]+1/3*g_vec_1l[1],120) #+ m_K1[:2]
-    K2_2layer = -rot(1/3*g_vec_2l[0]+1/3*g_vec_2l[1],120) #+ m_K1[:2]
-    
-    m_g1 = m_g_vec[0][:2]
-    m_g2 = m_g_vec[1][:2]
-    if twisted_index_m % 2 == 1:
-        offset_1 = (twisted_index_m + 1) * (m_g1 + m_g2) / 2
-        offset_2 = rot(offset_1, 120)
-        offset_3 = rot(offset_1, 240)
-        m_M1 = -1/2 * m_g1
-        m_M2 = -1/2 * m_g2
-        m_M3 = rot(m_M2, 120)
-    else:
-        offset_1 = twisted_index_m * (m_g1 + m_g2) / 2
-        offset_2 = rot(offset_1, 120)
-        offset_3 = rot(offset_1, 240)
-        m_M1 = 1/2 * m_g1
-        m_M2 = 1/2 * m_g2
-        m_M3 = rot(m_M2, 120)
-
-    if valley == 1:
-        K_1layer = K1_1layer
-        K_2layer = K1_2layer
-
-    elif valley == 2:
-        K_1layer = K2_1layer
-        K_2layer = K2_2layer
-    elif valley == 11:
-        K_1layer = rot(K1_1layer,120)
-        K_2layer = rot(K1_2layer,120)
-    elif valley == 12:
-        K_1layer = rot(K1_1layer,240)
-        K_2layer = rot(K1_2layer,240)
-    elif valley == 5:
-        K_1layer = np.zeros(2)
-        K_2layer = np.zeros(2)
-    else:
-        raise ValueError("valley should be 1 or 2")
+    K_1layer, K_2layer = legacy_single_valley_c3_layer_centers(
+        m_g_vec=m_g_vec,
+        twisted_index_m=twisted_index_m,
+        valley=valley,
+    )
     print("valley = ",valley)
     print("K_1layer = ",K_1layer)
     print("K_2layer = ",K_2layer)
@@ -137,6 +123,30 @@ def C3_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,m_g_vec,twisted_index_
                 # print("i = ",i+num_gn,"j = ",j+num_gn)
     print(" abs(C3 G matrix) = ",np.abs(C3).sum())
     return C3_1layer,C3_2layer
+
+
+def legacy_single_valley_c3_layer_centers(m_g_vec, twisted_index_m, valley):
+    reason = single_valley_c3_incompatibility_reason("hex", valley)
+    if reason is not None:
+        raise ValueError(f"{reason} Disable single-valley C3_H for this valley.")
+
+    g_vec_1l, g_vec_2l = get_g_vec_perlayer(m_g_vec, twisted_index_m)
+    K1_1layer = rot(1 / 3 * g_vec_1l[0] + 1 / 3 * g_vec_1l[1], 120)
+    K1_2layer = rot(1 / 3 * g_vec_2l[0] + 1 / 3 * g_vec_2l[1], 120)
+    K2_1layer = -rot(1 / 3 * g_vec_1l[0] + 1 / 3 * g_vec_1l[1], 120)
+    K2_2layer = -rot(1 / 3 * g_vec_2l[0] + 1 / 3 * g_vec_2l[1], 120)
+
+    if valley == 1:
+        return K1_1layer, K1_2layer
+    if valley == 2:
+        return K2_1layer, K2_2layer
+    if valley == 11:
+        return rot(K1_1layer, 120), rot(K1_2layer, 120)
+    if valley == 12:
+        return rot(K1_1layer, 240), rot(K1_2layer, 240)
+    if valley == 5:
+        return np.zeros(2), np.zeros(2)
+    raise ValueError(f"Unsupported valley={valley} for legacy single-valley C3 layer centers.")
 
 def generate_direct_sum_params(orbitals, orbital_mapping):
     params = []
@@ -227,18 +237,32 @@ def spin_reps(prep):
                                [(-1j*l + m)*np.sin(phi/2.), np.cos(phi/2.) + 1j*n*np.sin(phi/2.)]])
 
     #print "prep\n", prep
+    def _axis_from_eigenvalue(matrix, target_eval):
+        eigenvalues, eigenvectors = np.linalg.eig(matrix)
+        index = int(np.argmin(np.abs(eigenvalues - target_eval)))
+        if np.abs(eigenvalues[index] - target_eval) > 1.0e-5:
+            raise ValueError(
+                f"Could not find an eigenvector close to eigenvalue {target_eval} for rotation axis extraction. "
+                + f"Closest eigenvalue is {eigenvalues[index]!r}."
+            )
+        axis = np.real_if_close(eigenvectors[:, index], tol=1000)
+        axis = np.asarray(axis, dtype=np.float64)
+        norm = np.linalg.norm(axis)
+        if norm < 1.0e-12:
+            raise ValueError("Rotation-axis eigenvector has near-zero norm.")
+        return axis / norm
+
     n = np.zeros(3)
     tr = np.trace(prep)
     det = np.round(np.linalg.det(prep),5)
     if  det == 1.: #rotations
-        theta = np.arccos(0.5*(tr-1.))
+        theta = np.arccos(np.clip(0.5*(tr-1.), -1.0, 1.0))
         if theta != 0:
             n[0] = prep[2,1]-prep[1,2]
             n[1] = prep[0,2]-prep[2,0]
             n[2] = prep[1,0]-prep[0,1]               
             if np.round(np.linalg.norm(n),5) == 0.: # theta = pi, that is C2 rotations
-                e,v = np.linalg.eig(prep)
-                n = v[:,list(np.round(e,10)).index(1.)]
+                n = _axis_from_eigenvalue(prep, 1.0)
                 spin=np.round(D12(n[0],n[1],n[2],np.pi),15)
             else:
                 n /= np.linalg.norm(n)
@@ -246,14 +270,13 @@ def spin_reps(prep):
         else: # case of unitiy
             spin=D12(0,0,0,0)
     elif det == -1.: #improper rotations and reflections
-        theta = np.arccos(0.5*(tr+1.)) 
+        theta = np.arccos(np.clip(0.5*(tr+1.), -1.0, 1.0)) 
         if np.round(theta,5) != np.round(np.pi,5):                 
             n[0] = prep[2,1]-prep[1,2]
             n[1] = prep[0,2]-prep[2,0]
             n[2] = prep[1,0]-prep[0,1]                
             if np.round(np.linalg.norm(n),5)== 0.: # theta = 0 (reflection)
-                e,v = np.linalg.eig(prep)
-                n = v[:,list(np.round(e,10)).index(-1.)] # normal vector is eigenvector to eigenvalue -1
+                n = _axis_from_eigenvalue(prep, -1.0) # normal vector is eigenvector to eigenvalue -1
                 spin=np.round(D12(n[0],n[1],n[2],np.pi),15) #spin is a pseudovector!
             else:
                 n /= np.linalg.norm(n)

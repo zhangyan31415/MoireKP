@@ -1,7 +1,29 @@
 #!/usr/bin/env python3
 """
-TAPW轨道成分分析工具
-独立的命令行工具，用于分析TAPW计算结果的轨道成分
+TAPW 轨道成分分析工具
+
+用法示例（建议使用模块方式运行）:
+
+- 基本用法（指定结果目录与配置文件）
+  python -m tapw.orbital_analysis_tool /path/to/result --config /path/to/config.yaml
+
+- 指定谷与能带类型（CBM 或 VBM）
+  python -m tapw.orbital_analysis_tool /path/to/result --config /path/to/config.yaml --valley Gamma --band cbm
+  python -m tapw.orbital_analysis_tool /path/to/result --config /path/to/config.yaml --valley M1 --band vbm
+
+- 静默模式与输出目录
+  python -m tapw.orbital_analysis_tool /path/to/result --config config.yaml --band CBM --output out_dir -q
+
+文件命名与自动检测:
+- 新版文件结构（推荐）: 结果目录包含子目录 band/
+  band/band_{CBM|VBM}_{Valley}_valley.txt
+  band/vec_{CBM|VBM}_{Valley}_valley.npy
+  例如: band/band_CBM_Gamma_valley.txt, band/vec_VBM_M1_valley.npy
+
+- 旧版兼容: 也会尝试在 result_dir 或 result_dir/band_data 下匹配旧式文件名
+
+输出:
+- 结果保存在 --output 目录下，命名为 orbital_data_{CBM|VBM}_{Valley}.json
 """
 import argparse
 import os
@@ -10,14 +32,14 @@ import numpy as np
 import json
 import time
 import re
-from typing import Dict, List, Tuple, Any, Optional
+from typing import Dict, List, Tuple, Any, Optional, cast
 from dataclasses import dataclass, field
 from json import JSONEncoder
 from tqdm import tqdm
 
 # 导入TAPW模块
 from .config import ComputeConfig, Config
-from .read_pos_01 import StructureProcessor, OpenMXFile, LayeredLatticeAnalyzer
+from .read_pos_01 import OpenMXFile, StructureProcessorSpglib
 
 
 @dataclass
@@ -27,6 +49,7 @@ class OrbitalAnalysisConfig:
     result_dir: str  # TAPW计算结果目录
     output_dir: str = "orbital_analysis"  # 输出目录
     valley: str = "auto"  # 谷标识，auto表示自动检测
+    band_type: str = "CBM"  # 能带类型: CBM 或 VBM
     spin_polarized: bool = True  # 是否为自旋极化计算
     verbose: bool = True  # 详细输出
 
@@ -85,65 +108,139 @@ class OrbitalAnalyzer:
         self.compute_config = None
         self.valley_flag = None
         self._first_analysis = True  # 用于控制详细信息的输出
+        # 规范化 band_type
+        self.band_type = (config.band_type or "CBM").upper()
+
+        # 关键：将 result_dir 规范化为绝对路径。
+        # 否则当用户在 band/ 目录里用默认 result_dir="." 运行时，
+        # os.path.dirname(".") == ""，会导致上级目录（例如 Q_shell_4/）中的 g_vec_list*.npy 无法被找到。
+        self.config.result_dir = os.path.abspath(self.config.result_dir)
         
         # 检查输入目录
-        if not os.path.exists(config.result_dir):
-            raise FileNotFoundError(f"结果目录不存在: {config.result_dir}")
+        if not os.path.exists(self.config.result_dir):
+            raise FileNotFoundError(f"结果目录不存在: {self.config.result_dir}")
         
         # 创建输出目录
         os.makedirs(config.output_dir, exist_ok=True)
         
         if self.config.verbose:
             print(f"轨道分析器初始化完成")
-            print(f"输入目录: {config.result_dir}")
+            print(f"输入目录: {self.config.result_dir}")
             print(f"输出目录: {config.output_dir}")
     
     def detect_valleys_and_files(self) -> Dict[str, Dict[str, str]]:
-        """检测可用的谷和相关文件"""
-        valleys = {}
-        
-        # 检查band_data子目录
-        band_data_dir = os.path.join(self.config.result_dir, "band_data")
-        if os.path.exists(band_data_dir):
-            # 在band_data子目录中寻找能带数据文件
-            for file in os.listdir(band_data_dir):
-                if file.startswith("band_data_") and file.endswith(".txt"):
-                    # 提取谷信息
-                    parts = file.replace("band_data_", "").replace(".txt", "").split("_")
-                    valley = parts[0]
-                    
-                    # 检查是否有对应的特征向量文件（在父目录）
-                    vec_file = file.replace("band_data_", "vec_").replace(".txt", ".npy")
-                    vec_path = os.path.join(self.config.result_dir, vec_file)
-                    
-                    if os.path.exists(vec_path):
-                        valleys[valley] = {
-                            "band_file": os.path.join(band_data_dir, file),
-                            "vec_file": vec_path,
-                            "valley_flag": valley
-                        }
-        
-        # 也检查根目录（向后兼容）
-        for file in os.listdir(self.config.result_dir):
-            if file.startswith("band_data_") and file.endswith(".txt"):
-                # 提取谷信息
-                parts = file.replace("band_data_", "").replace(".txt", "").split("_")
-                valley = parts[0]
-                
-                # 检查是否有对应的特征向量文件
-                vec_file = file.replace("band_data_", "vec_").replace(".txt", ".npy")
-                vec_path = os.path.join(self.config.result_dir, vec_file)
-                
-                if os.path.exists(vec_path):
-                    valleys[valley] = {
-                        "band_file": os.path.join(self.config.result_dir, file),
+        """检测可用的谷和相关文件（支持新版 band/ 目录和旧版命名）"""
+        valleys: Dict[str, Dict[str, str]] = {}
+
+        # 优先扫描新版 band/ 目录
+        band_dir = os.path.join(self.config.result_dir, "band")
+        if os.path.isdir(band_dir):
+            for file in os.listdir(band_dir):
+                if not (file.startswith("band_") and file.endswith(".txt")):
+                    continue
+                # 期望格式: band_{CBM|VBM}_{Valley}_valley.txt
+                m = re.match(rf"band_({self.band_type})_([A-Za-z0-9']+)(?:_valley)?\.txt", file)
+                if not m:
+                    # 若 band_type 不匹配则跳过
+                    continue
+                band_type, valley_name = m.group(1), m.group(2)
+                band_path = os.path.join(band_dir, file)
+                # 对应 vec 文件
+                vec_candidate_names = [
+                    f"vec_{band_type}_{valley_name}_valley.npy",
+                    f"vec_{band_type}_{valley_name}.npy",
+                ]
+                vec_path = None
+                for vc in vec_candidate_names:
+                    p = os.path.join(band_dir, vc)
+                    if os.path.exists(p):
+                        vec_path = p
+                        break
+                if vec_path:
+                    valleys[valley_name] = {
+                        "band_file": band_path,
                         "vec_file": vec_path,
-                        "valley_flag": valley
+                        "valley_flag": valley_name,
                     }
-        
+
+        # 兼容旧版：band_data 子目录
+        if not valleys:
+            band_data_dir = os.path.join(self.config.result_dir, "band_data")
+            if os.path.isdir(band_data_dir):
+                for file in os.listdir(band_data_dir):
+                    if not (file.startswith("band_") and file.endswith(".txt")):
+                        continue
+                    band_path = os.path.join(band_data_dir, file)
+                    # 优先解析新格式：band_{CBM|VBM}_{Valley}(_valley).txt
+                    m = re.match(r"band_(CBM|VBM)_([A-Za-z0-9']+)(?:_valley)?\.txt", file)
+                    if m:
+                        bt, valley_name = m.group(1), m.group(2)
+                        if bt != self.band_type:
+                            continue
+                        vec_candidate_names = [
+                            f"vec_{bt}_{valley_name}_valley.npy",
+                            f"vec_{bt}_{valley_name}.npy",
+                        ]
+                        vec_path = None
+                        for vc in vec_candidate_names:
+                            p = os.path.join(band_data_dir, vc)
+                            if os.path.exists(p):
+                                vec_path = p
+                                break
+                        if vec_path:
+                            valleys[valley_name] = {
+                                "band_file": band_path,
+                                "vec_file": vec_path,
+                                "valley_flag": valley_name,
+                            }
+                        continue
+
+                    # 旧版兜底：无 band_type 前缀
+                    valley_name = file.replace("band_", "").replace("_valley.txt", "").replace(".txt", "")
+                    vec_file = file.replace("band_", "vec_").replace(".txt", ".npy")
+                    vec_path = os.path.join(self.config.result_dir, vec_file)
+                    if os.path.exists(vec_path):
+                        valleys[valley_name] = {"band_file": band_path, "vec_file": vec_path, "valley_flag": valley_name}
+
+        # 兼容旧版：直接在根目录
+        if not valleys:
+            for file in os.listdir(self.config.result_dir):
+                if not (file.startswith("band_") and file.endswith(".txt")):
+                    continue
+                band_path = os.path.join(self.config.result_dir, file)
+
+                # 优先解析新格式：band_{CBM|VBM}_{Valley}(_valley).txt
+                m = re.match(r"band_(CBM|VBM)_([A-Za-z0-9']+)(?:_valley)?\.txt", file)
+                if m:
+                    bt, valley_name = m.group(1), m.group(2)
+                    if bt != self.band_type:
+                        continue
+                    vec_candidate_names = [
+                        f"vec_{bt}_{valley_name}_valley.npy",
+                        f"vec_{bt}_{valley_name}.npy",
+                    ]
+                    vec_path = None
+                    for vc in vec_candidate_names:
+                        p = os.path.join(self.config.result_dir, vc)
+                        if os.path.exists(p):
+                            vec_path = p
+                            break
+                    if vec_path:
+                        valleys[valley_name] = {"band_file": band_path, "vec_file": vec_path, "valley_flag": valley_name}
+                    continue
+
+                # 旧版兜底：无 band_type 前缀
+                valley_name = file.replace("band_", "").replace("_valley.txt", "").replace(".txt", "")
+                vec_file = file.replace("band_", "vec_").replace(".txt", ".npy")
+                vec_path = os.path.join(self.config.result_dir, vec_file)
+                if os.path.exists(vec_path):
+                    valleys[valley_name] = {"band_file": band_path, "vec_file": vec_path, "valley_flag": valley_name}
+
+        if self.config.verbose and valleys:
+            print(f"已检测到 {len(valleys)} 个谷: {sorted(list(valleys.keys()))}")
         return valleys
     
-    def load_structure_from_existing_files(self) -> 'StructureProcessor':
+    def load_structure_from_existing_files(self) -> 'StructureProcessorSpglib':
         """从现有文件中加载并处理结构信息"""
         # 加载TAPW配置文件
         if not os.path.exists(self.config.config_file):
@@ -151,8 +248,9 @@ class OrbitalAnalyzer:
             
         tapw_config = Config.from_yaml(self.config.config_file)
         
-        # 获取band_type信息
-        self.band_type = getattr(tapw_config.compute, 'band_type', 'CBM')
+        # 获取 band_type 信息（命令行优先，其次配置文件）
+        if not self.band_type:
+            self.band_type = getattr(tapw_config.compute, 'band_type', 'CBM').upper()
         
         if self.config.verbose:
             print(f"加载TAPW配置文件: {self.config.config_file}")
@@ -179,21 +277,11 @@ class OrbitalAnalyzer:
             twist_index=tapw_config.twist.twist_index_m,
             spin=tapw_config.twist.spin
         )
-        
-        # 初始化LayeredLatticeAnalyzer
-        analyzer = LayeredLatticeAnalyzer(
+
+        # 与主流程保持一致：使用 spglib 版本的结构处理器（type_structure 已废弃）
+        processor = StructureProcessorSpglib(
             input_data=openmx_structure.sorted_species_coordinates,
             num_layers=tapw_config.twist.num_layers,
-            type_structure=tapw_config.twist.type_structure,
-            twist_layer=tapw_config.twist.twist_layer
-        )
-        analyzer.process()
-        
-        # 初始化StructureProcessor
-        processor = StructureProcessor(
-            input_data=analyzer.input_data,
-            num_layers=tapw_config.twist.num_layers,
-            monolayer_reciprocal_list=analyzer.reciprocal_vectors,
             twist_layer=tapw_config.twist.twist_layer,
             layer_eps=tapw_config.cluster.layer_eps,
             layer_min_samples=tapw_config.cluster.layer_min_samples,
@@ -203,7 +291,7 @@ class OrbitalAnalyzer:
             atom_min_samples=tapw_config.cluster.atom_min_samples,
             period=tapw_config.cluster.period,
             k_max=tapw_config.cluster.k_max,
-            spin=tapw_config.twist.spin,
+            spin=openmx_structure.spin,
             twist_index=tapw_config.twist.twist_index_m,
             Tmat=openmx_structure.Tmat,
             reciprocal_Tmat=openmx_structure.reciprocal_Tmat,
@@ -213,13 +301,15 @@ class OrbitalAnalyzer:
         processor.process()
         
         if self.config.verbose:
+            if processor.df is None:
+                raise RuntimeError("结构处理完成但 processor.df 为空（StructureProcessorSpglib.process 失败）")
             print(f"成功加载并处理结构: {len(processor.df)} 个原子")
             print(f"层数: {tapw_config.twist.num_layers}")
             print(f"扭转层: {tapw_config.twist.twist_layer}")
         
         return processor
 
-    def extract_structure_info_from_processor(self, processor: 'StructureProcessor') -> Dict:
+    def extract_structure_info_from_processor(self, processor: 'StructureProcessorSpglib') -> Dict:
         """从StructureProcessor对象提取结构信息用于轨道分析"""
         if processor is None:
             raise ValueError("StructureProcessor对象为空，无法提取结构信息")
@@ -229,6 +319,9 @@ class OrbitalAnalyzer:
         
         # 使用StructureProcessor的df，这已经包含了正确的层和子层信息
         df = processor.df
+        if df is None:
+            raise RuntimeError("processor.df 为空：结构处理未成功完成")
+        df = cast(Any, df)
         
         if self.config.verbose:
             print(f"DataFrame列: {df.columns.tolist()}")
@@ -371,9 +464,12 @@ class OrbitalAnalyzer:
         
         return final_result
     
-    def _build_orbital_mapping_cache(self, processor: 'StructureProcessor', structure_info: Dict) -> Dict:
+    def _build_orbital_mapping_cache(self, processor: 'StructureProcessorSpglib', structure_info: Dict) -> Dict:
         """构建轨道映射缓存，避免重复计算"""
         df = processor.df
+        if df is None:
+            raise RuntimeError("processor.df 为空：无法构建轨道映射缓存")
+        df = cast(Any, df)
         mapping_cache = {}
         
         if self.config.verbose:
@@ -458,7 +554,7 @@ class OrbitalAnalyzer:
         self.save_results(result, valley_flag)
     
     def perform_orbital_analysis(self, band_data: np.ndarray, vec_data: np.ndarray, 
-                                structure_info: Dict, valley_flag: str, processor: 'StructureProcessor') -> Dict:
+                                structure_info: Dict, valley_flag: str, processor: 'StructureProcessorSpglib') -> Dict:
         """执行轨道成分分析"""
         nk, nbands = band_data.shape
         
@@ -530,7 +626,43 @@ class OrbitalAnalyzer:
         
         return result
     
-    def _get_gvector_count(self, norb_per_spin: int, valley_flag: str = None) -> Optional[int]:
+    def _normalize_valley_for_gvec(self, valley_flag: Optional[str]) -> Optional[str]:
+        """将 valley_flag 归一化为 g_vec_list 文件使用的 valley 名称。
+        
+        常见情况：
+        - band 文件名在旧扫描逻辑下可能给出 "VBM_K2"/"CBM_Gamma"
+        - g_vec_list 文件通常使用 "K2"/"Gamma"（不带 CBM/VBM 前缀）
+        """
+        if not valley_flag:
+            return None
+        v = str(valley_flag)
+        for prefix in ("CBM_", "VBM_"):
+            if v.startswith(prefix):
+                v = v[len(prefix):]
+                break
+        return v
+
+    def _infer_gvector_count_from_dimensions(self, norb_per_spin: int, structure_info: Dict) -> Optional[int]:
+        """在没有 g_vec_list 文件时，用维度自洽推断 n_gvec。
+        
+        TAPW 的系数组织满足：
+          norb_per_spin == n_gvec * sum_layer( sum_sublayer( len(orbs) ) )
+        """
+        try:
+            total_orbs_per_gvec_all_layers = 0
+            for layer_info in structure_info.get("layers", []):
+                for sub in layer_info.get("sublayers", []):
+                    total_orbs_per_gvec_all_layers += len(sub.get("orbs", []))
+            if total_orbs_per_gvec_all_layers <= 0:
+                return None
+            if norb_per_spin % total_orbs_per_gvec_all_layers != 0:
+                return None
+            n_gvec = norb_per_spin // total_orbs_per_gvec_all_layers
+            return int(n_gvec) if n_gvec > 0 else None
+        except Exception:
+            return None
+
+    def _get_gvector_count(self, norb_per_spin: int, valley_flag: Optional[str] = None) -> Optional[int]:
         """从G向量文件中读取G向量数量
         
         Args:
@@ -543,33 +675,40 @@ class OrbitalAnalyzer:
         try:
             # 尝试从结果目录中查找对应valley的G向量文件
             import glob
+
+            result_dir = os.path.abspath(self.config.result_dir)
+            parent_dir = os.path.dirname(result_dir)
+            grandparent_dir = os.path.dirname(parent_dir)
+            search_roots = []
+            for d in (result_dir, parent_dir, grandparent_dir):
+                if d and d not in search_roots:
+                    search_roots.append(d)
+
+            v = self._normalize_valley_for_gvec(valley_flag)
             
             # 构建匹配特定valley的文件模式
-            if valley_flag:
-                patterns = [
-                    os.path.join(self.config.result_dir, f"g_vec_list_*_{self.band_type}_{valley_flag}_1layer.npy"),
-                    os.path.join(self.config.result_dir, f"**/g_vec_list_*_{self.band_type}_{valley_flag}_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), f"g_vec_list_*_{self.band_type}_{valley_flag}_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), f"**/g_vec_list_*_{self.band_type}_{valley_flag}_1layer.npy"),
-                    # 为了兼容性，也尝试旧格式
-                    os.path.join(self.config.result_dir, f"g_vec_list_*_{valley_flag}_1layer.npy"),
-                    os.path.join(self.config.result_dir, f"**/g_vec_list_*_{valley_flag}_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), f"g_vec_list_*_{valley_flag}_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), f"**/g_vec_list_*_{valley_flag}_1layer.npy")
-                ]
+            if v:
+                patterns = []
+                for root in search_roots:
+                    # 新/旧格式兼容：有些版本会带 band_type，有些不带
+                    patterns.extend(
+                        [
+                            os.path.join(root, f"g_vec_list_*_{self.band_type}_{v}_1layer.npy"),
+                            os.path.join(root, f"**/g_vec_list_*_{self.band_type}_{v}_1layer.npy"),
+                            os.path.join(root, f"g_vec_list_*_{v}_1layer.npy"),
+                            os.path.join(root, f"**/g_vec_list_*_{v}_1layer.npy"),
+                        ]
+                    )
             else:
                 # 回退到通用模式
-                patterns = [
-                    os.path.join(self.config.result_dir, f"g_vec_list_*_{self.band_type}_*_1layer.npy"),
-                    os.path.join(self.config.result_dir, f"**/g_vec_list_*_{self.band_type}_*_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), f"g_vec_list_*_{self.band_type}_*_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), f"**/g_vec_list_*_{self.band_type}_*_1layer.npy"),
-                    # 为了兼容性，也尝试旧格式
-                    os.path.join(self.config.result_dir, "g_vec_list_*_1layer.npy"),
-                    os.path.join(self.config.result_dir, "**/g_vec_list_*_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), "g_vec_list_*_1layer.npy"),
-                    os.path.join(os.path.dirname(self.config.result_dir), "**/g_vec_list_*_1layer.npy")
-                ]
+                patterns = []
+                for root in search_roots:
+                    patterns.extend(
+                        [
+                            os.path.join(root, "g_vec_list_*_1layer.npy"),
+                            os.path.join(root, "**/g_vec_list_*_1layer.npy"),
+                        ]
+                    )
             
             gvec_file = None
             for pattern in patterns:
@@ -588,25 +727,10 @@ class OrbitalAnalyzer:
                 
                 return n_gvec
             else:
-                # 回退到估算方法
-                total_atom_orbs = 0
-                if hasattr(self, '_structure_info_cache'):
-                    structure_info = self._structure_info_cache
-                    for layer_info in structure_info["layers"]:
-                        for sublayer_info in layer_info["sublayers"]:
-                            atom_count = sublayer_info["count"]
-                            orb_count = len(sublayer_info["orbs"])
-                            total_atom_orbs += atom_count * orb_count
-                    
-                    if total_atom_orbs > 0:
-                        n_gvec = norb_per_spin // total_atom_orbs
-                        if norb_per_spin % total_atom_orbs == 0 and n_gvec > 0:
-                            if self.config.verbose and self._first_analysis:
-                                print(f"估算G向量数: {n_gvec} (norb_per_spin={norb_per_spin}, atom_orbs={total_atom_orbs})")
-                            return n_gvec
-                
+                # 不在这里做“按原子数估算”的旧逻辑（对 TAPW 平面波组织并不可靠）；
+                # 更稳健的兜底推断在 analyze_orbital_composition() 里完成。
                 if self.config.verbose and self._first_analysis:
-                    print(f"无法确定G向量数，未找到valley {valley_flag}的G向量文件")
+                    print(f"无法确定G向量数，未找到valley {v or valley_flag}的G向量文件")
                 return None
                 
         except Exception as e:
@@ -614,7 +738,7 @@ class OrbitalAnalyzer:
                 print(f"读取G向量数时出错: {e}")
             return None
 
-    def analyze_orbital_composition(self, orbital_weights: np.ndarray, structure_info: Dict, processor: 'StructureProcessor', valley_flag: str = None) -> Dict:
+    def analyze_orbital_composition(self, orbital_weights: np.ndarray, structure_info: Dict, processor: 'StructureProcessorSpglib', valley_flag: Optional[str] = None) -> Dict:
         """分析单个特征向量的轨道成分 - 基于正确的TAPW平面波基矢理解"""
         composition = {}
         total_norb = len(orbital_weights)
@@ -653,8 +777,17 @@ class OrbitalAnalyzer:
         # 获取G向量数量
         n_gvec = self._get_gvector_count(norb_per_spin, valley_flag)
         if n_gvec is None:
-            print("警告: 无法确定G向量数量，使用简化分析")
-            raise
+            inferred = self._infer_gvector_count_from_dimensions(norb_per_spin, structure_info)
+            if inferred is not None:
+                n_gvec = inferred
+                if self.config.verbose:
+                    print(f"未找到 g_vec_list 文件，按维度推断 n_gvec={n_gvec}")
+            else:
+                v = self._normalize_valley_for_gvec(valley_flag) or valley_flag
+                raise RuntimeError(
+                    f"无法确定G向量数量：未找到 g_vec_list_*_{v}_1layer.npy，且维度推断失败。"
+                    f"（result_dir={self.config.result_dir}）"
+                )
 
         # 初始化composition字典结构
         for layer_info in structure_info["layers"]:
@@ -706,6 +839,7 @@ class OrbitalAnalyzer:
             layer_idx = layer_info['layer']  # 直接使用layer值，因为已经是0基索引
             layer_name = f"L{layer_info['layer']}"
             
+            layer_start = 0
             try:
                 # 计算该层的起始位置
                 layer_start = sum(orbs_per_layer[i] for i in range(layer_idx))
@@ -734,6 +868,7 @@ class OrbitalAnalyzer:
                             # 累加这个G向量下该子层的轨道权重
                             orb_weights_up += up_weights[sublayer_start:sublayer_end]
                             if orb_weights_dn is not None:
+                                assert dn_weights is not None
                                 orb_weights_dn += dn_weights[sublayer_start:sublayer_end]
                         else:
                             if self.config.verbose:
@@ -742,6 +877,7 @@ class OrbitalAnalyzer:
                     # 更新结果
                     if self.config.spin_polarized:
                         sublayer_comp["up"] = orb_weights_up.round(4).tolist()
+                        assert orb_weights_dn is not None
                         sublayer_comp["dn"] = orb_weights_dn.round(4).tolist()
                         sublayer_comp["tot"] = round(float(np.sum(orb_weights_up) + np.sum(orb_weights_dn)), 4)
                     else:
@@ -831,6 +967,8 @@ def main():
                        help='输出目录 (默认: orbital_analysis)')
     parser.add_argument('--valley', type=str, default='auto',
                         help='要分析的谷 (默认: auto，分析所有可用的谷)')
+    parser.add_argument('--band', '--band-type', dest='band', type=str, default='CBM',
+                        help='能带类型: CBM 或 VBM (默认: CBM)')
     parser.add_argument('--spin', action='store_true', default=True,
                         help='是否为自旋极化计算 (默认: True)')
     parser.add_argument('--no-spin', action='store_false', dest='spin',
@@ -845,6 +983,7 @@ def main():
         result_dir=args.result_dir,
         output_dir=args.output,
         valley=args.valley,
+        band_type=(args.band or 'CBM').upper(),
         spin_polarized=args.spin,
         verbose=not args.quiet
     )

@@ -3,9 +3,14 @@
 # Twist parameters
 twist:
   twist_index_m: 3          # Twist index m, determines the twist angle
-  num_layers: 2             # Total number of layers in the structure
-  type_structure: [2, 2]    # Structure type for each layer: 1 for graphene-like, 2 for TMD-like
-  twist_layer: [1, 1]       # Which layers are twisted relative to each other
+  bravais: "hex"           # Bravais lattice type: "hex" or "square"
+  num_layers: 2             # Total number of physical layers (must equal sum(twist_layer))
+  twist_layer: [1, 1]       # Twist group layer counts (twist_layer_counts): number of physical layers per twist group
+                            # Example: [1, 1] = bilayer (A-B)
+                            # Example: [1, 2, 1] = A-AA-A (4 physical layers, 3 twist groups)
+                            # Example: [2, 1, 1] = AA-A-A (4 physical layers, 3 twist groups)
+                            # Must satisfy: sum(twist_layer) == num_layers
+  # type_structure: [1, 1]  # DEPRECATED: No longer used. Structure types are determined automatically via spglib.
   spin: true               # Whether to include spin in calculations
 
 # File paths and IO configuration
@@ -14,8 +19,8 @@ paths:
   S_file: "S.dat"   # Overlap file, can be .dat or .npz
   input_file: "openmx.dat"   # Input structure file name
   output_dir: "output"   # Output directory for results (will be created if it doesn't exist)
-  kpath_in: "/data/work/zy/software/1.tapw_code/tapw/tapw/KPATH_GMKG.in"   # K-path input file for band structure calculation
-  kpath_out: "/data/work/zy/software/1.tapw_code/tapw/tapw/KPATH_GMKG.out"   # K-path output file
+  kpath_in: "KPATH_GMKG.in"   # K-path input file for band structure calculation
+  kpath_out: "KPATH_GMKG.out"   # K-path output file
 
 # Computation parameters
 compute:
@@ -30,6 +35,9 @@ compute:
                           # 31: M1 valley
                           # 32: M2 valley
                           # 33: M3 valley
+                          # 3: M (square/rect)
+                          # 41: X (square/rect)
+                          # 42: Y (square/rect)
   
   # Calculation mode
   mode: "band"            # Calculation mode: "band" for band structure, "chern" for Chern number, "slab" for slab/ribbon calculation
@@ -39,9 +47,10 @@ compute:
   n_g: 3                  # Harmonic of G vectors
   
   # Band structure calculation parameters
-  num_processes: 61       # Number of parallel processes
-  num_bands_cal: 40      # Number of bands to calculate
-  num_chern: 40          # Number of k-points for Chern number calculation (grid size will be num_chern x num_chern)
+  num_processes: 61       # Number of k-point worker processes
+  blas_threads: 4         # BLAS/OpenMP threads per worker; increase carefully to avoid oversubscription
+  num_bands_cal: 100      # Number of bands to calculate
+  num_chern: [31, 31]    # Chern/Wilson-loop grid in fractional coordinates; supports either a scalar (square grid) or [num_k1, num_k2]
   
   # Hardware acceleration
   gpu: false             # Whether to use GPU acceleration
@@ -49,26 +58,27 @@ compute:
   delay_time: 0          # Delay time between GPU operations
   
   # Calculation flags
-  hamk_save: true       # Whether to save Hamiltonian matrices
+  hamk_save: false       # Whether to save Hamiltonian matrices
   TAPW: true            # Use TAPW method
   eigsh_cal: true       # Use eigsh for eigenvalue calculation
-  C3_H: false           # Apply C3 symmetry to Hamiltonian
+  C3_H: true           # Apply C3 symmetry to Hamiltonian
   ge: false             # Use generalized eigenvalue solver
-  eig_vec_cal: true     # Calculate eigenvectors 
+  eigensolver: "slepc"  # "scipy" or "slepc"; SLEPc currently requires joblib+loky and eig_vec_cal=false
+  eig_vec_cal: false     # Calculate eigenvectors 
 
   # Electric field parameters
-  Electric_field_in_eVpA: 0.000  # Electric field strength in eV/Å
+  Electric_field_in_eVpA: 0.00  # Electric field strength in eV/Å
   zero_potential_layers: [1]     # Layers with zero potential
   Inner_symmetrical_Electric_Field: false  # Whether to use inner symmetrical electric field
 
   orthogonal_basis: false
 
 # Slab calculation parameters (only used when mode: "slab")
-slab:
-  nslab: 7                    # Number of layers in the slab
-  ijmax: 1                    # Maximum interlayer distance (for twisted materials)
-  slab_direction: [0,1,0]     # Slab normal direction (010 cut)
-  analyze_surface: false       # Whether to analyze surface character
-  surface_threshold: 0.5      # Threshold for identifying surface states
-  kpath_slab_in: "KPATH_SLAB.in"   # Slab k-path input file
-  kpath_slab_out: "KPATH_SLAB.out" # Slab k-path output file
+# slab:
+#   nslab: 7                    # Number of layers in the slab
+#   ijmax: 1                    # Maximum interlayer distance (for twisted materials)
+#   slab_direction: [0,1,0]     # Slab normal direction (010 cut)
+#   analyze_surface: false       # Whether to analyze surface character
+#   surface_threshold: 0.5      # Threshold for identifying surface states
+#   kpath_slab_in: "KPATH_SLAB.in"   # Slab k-path input file
+#   kpath_slab_out: "KPATH_SLAB.out" # Slab k-path output file

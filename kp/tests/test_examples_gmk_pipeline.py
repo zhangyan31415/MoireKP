@@ -10,6 +10,9 @@ from kp.model.configured import build_moire_config_from_file, load_model_config,
 from kp.src.moire_refactored import build_model
 
 
+pytestmark = pytest.mark.external_data
+
+
 EXAMPLES_ROOT = Path(__file__).resolve().parents[1] / "examples"
 
 GMK_BASE_MODEL_CONFIGS = {

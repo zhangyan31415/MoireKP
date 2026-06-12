@@ -1,17 +1,60 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional
+from typing import List, Dict, Optional, Sequence, Tuple, Union
 import os
 import yaml
 from pathlib import Path
+
+
+_GridLike = Union[int, Sequence[int]]
+
+
+def _coerce_legacy_num_chern(num_chern: _GridLike) -> Tuple[int, int]:
+    """Normalize legacy `num_chern` input to an explicit `(num_k1, num_k2)` pair."""
+    if isinstance(num_chern, (list, tuple)):
+        if len(num_chern) != 2:
+            raise ValueError("num_chern as a list/tuple must contain exactly two integers, e.g. [30, 50]")
+        return int(num_chern[0]), int(num_chern[1])
+    return int(num_chern), int(num_chern)
+
+
+def resolve_chern_grid_shape(num_chern: _GridLike, num_k1: Optional[int] = None, num_k2: Optional[int] = None) -> tuple:
+    """Resolve the fractional Chern/Wilson-loop vertex grid dimensions.
+
+    `num_chern` accepts the legacy scalar square-grid form (`40`) and also a
+    two-entry list/tuple (`[30, 50]`). Explicit `num_k1`/`num_k2` still take
+    precedence when present.
+    """
+    legacy_k1, legacy_k2 = _coerce_legacy_num_chern(num_chern)
+    k1 = int(num_k1 if num_k1 is not None else legacy_k1)
+    k2 = int(num_k2 if num_k2 is not None else legacy_k2)
+    if k1 < 2 or k2 < 2:
+        raise ValueError("Chern/Wilson-loop grids require num_k1 >= 2 and num_k2 >= 2")
+    return k1, k2
+
+
+def format_chern_grid_suffix(num_k1: int, num_k2: int) -> str:
+    """Return a stable output suffix for a Chern-mode grid."""
+    num_k1 = int(num_k1)
+    num_k2 = int(num_k2)
+    if num_k1 == num_k2:
+        return "_2d_{0}".format(num_k1)
+    return "_2d_{0}x{1}".format(num_k1, num_k2)
+
 
 @dataclass
 class TwistConfig:
     """Configuration for twisted materials"""
     twist_index_m: int
+    bravais: str = "hex"  # Bravais lattice type: "hex", "square", or "rect"
     num_layers: int = 2
     type_structure: List[int] = field(default_factory=lambda: [2, 2])
     twist_layer: List[int] = field(default_factory=lambda: [1, 1])
     spin: bool = True
+
+    def __post_init__(self):
+        allowed = {"hex", "square", "rect"}
+        if self.bravais not in allowed:
+            raise ValueError(f"Invalid bravais lattice type: {self.bravais}. Must be one of {sorted(allowed)}")
 
 @dataclass
 class PathConfig:
@@ -94,6 +137,16 @@ class ClusterConfig:
         pass
 
 @dataclass
+class SymmetryAnalysisConfig:
+    """Configuration for the optional TAPW symmetry-analysis mode."""
+
+    enable: bool = False
+    valleys: Optional[List[int]] = None
+    tolerance: float = 1.0e-2
+    output_dir: str = "symmetry_analysis"
+    debug: bool = False
+
+@dataclass
 class ComputeConfig:
     """Configuration for computation parameters"""
     valleys: List[int] = field(default_factory=lambda: [31, 32, 33])  # List of valleys to calculate
@@ -101,16 +154,40 @@ class ComputeConfig:
     efermi: float = -0.17
     n_g: int = 6
     num_processes: int = 50
+    blas_threads: int = 1  # BLAS/OpenMP threads per worker; 0 leaves thread pools unrestricted.
+    parallel_impl: str = "joblib"  # "joblib" or "mp"
+    parallel_backend: str = "loky"  # joblib backend: "loky" (spawn) or "multiprocessing" (fork on Linux)
+    tapw_auto_fork: bool = False  # Opt-in: for TAPW on POSIX, upgrade default joblib/loky k-loop to mp/fork.
+    vec_store: str = "memory"  # "memory" or "memmap" (recommended for large k-mesh + wavefunctions)
+    memmap_dir: Optional[str] = None  # If set, store memmap outputs here; otherwise use output path
+    kpoint_chunk_id: int = 0  # For job-array sharding: 0-based chunk index
+    kpoint_chunk_count: int = 1  # For job-array sharding: total number of chunks
+    fast_getk: bool = True  # Faster CSR build in Getk_super_gauge_sparse (recommended)
+    use_sparse_dot_mkl: bool = False  # Use sparse_dot_mkl for g@H@g^H (can help or hurt depending on sizes/threads)
+    eigensolver: str = "scipy"  # non-TAPW generalized solver: "scipy" or "slepc" (SLEPc tuning is internal)
+    slepc_eps_type: str = "krylovschur"  # e.g. "krylovschur", "jd", "lapack" (small problems)
+    slepc_st_type: str = "sinvert"  # spectral transform: "sinvert" is typical for interior eigenvalues
+    slepc_ksp_type: str = "preonly"  # linear solver for ST; "preonly" + "lu" is robust but memory-heavy
+    slepc_pc_type: str = "lu"  # preconditioner: "lu" / "ilu" / "gamg" etc.
+    slepc_factor_mat_solver_type: str = ""  # e.g. "mumps", "superlu_dist"
+    slepc_tol: float = 1e-8
+    slepc_max_it: int = 5000
+    slepc_comm: str = "self"  # "self" (COMM_SELF, k-point workers) or "world" (COMM_WORLD, MPI parallel per k-point)
+    slepc_make_hermitian: bool = True  # symmetrize H(k),S(k) as (A+A^H)/2 to satisfy GHEP assumptions
+    slepc_spd_shift: float = 0.0  # optional diagonal shift added to S(k) to improve definiteness (e.g. 1e-10)
     num_bands_cal: int = 50
-    num_chern: int = 40
-    band_type: str = "CBM"  # Band type to analyze: "CBM" for conduction band minimum, "VBM" for valence band maximum
+    num_chern: _GridLike = 40  # Legacy scalar square-grid size, or a 2-entry list like [num_k1, num_k2].
+    num_k1: Optional[int] = None  # Fractional reciprocal-grid points along kappa1 (falls back to num_chern).
+    num_k2: Optional[int] = None  # Fractional reciprocal-grid points along kappa2 (falls back to num_chern).
+    band_type: str = "BOTH"  # Band subset to save: "CBM", "VBM", or "BOTH"
     gpu: bool = False
     gpu_index: List[int] = field(default_factory=lambda: [0, 1])
-    delay_time: int = 4
+    delay_time: int = 0  # seconds; stagger start a little to reduce I/O spikes (max delay is ~(workers-1)*delay_time)
     hamk_save: bool = False
     TAPW: bool = True
     eigsh_cal: bool = True
     C3_H: bool = False
+    M_valley_D3_H: bool = False  # For hex TAPW M valleys, add the single-M C2 projection after the C3 orbit average.
     ge: bool = False
     eig_vec_cal: bool = True
     valley: int = field(init=False)  # Current valley being calculated
@@ -123,12 +200,98 @@ class ComputeConfig:
     zero_potential_layers: Optional[List[int]] = None  # 选择的层数（用于确定零势能面）
     Inner_symmetrical_Electric_Field: bool = False  # 是否加内对称电场
     orthogonal_basis: bool = False  # 是否使用正交基底，正交时S矩阵可以省略
+
+    def validate(self) -> None:
+        """Validate runtime-related options that may be overridden after YAML load."""
+        allowed_modes = {"band", "chern", "slab", "symmetry"}
+        if self.mode not in allowed_modes:
+            raise ValueError(
+                f"Invalid mode={self.mode!r}. Must be one of {sorted(allowed_modes)}"
+            )
+
+        allowed_parallel_impl = {"joblib", "mp"}
+        if self.parallel_impl not in allowed_parallel_impl:
+            raise ValueError(
+                f"Invalid parallel_impl={self.parallel_impl!r}. Must be one of {sorted(allowed_parallel_impl)}"
+            )
+        allowed_backend = {"loky", "multiprocessing"}
+        if self.parallel_backend not in allowed_backend:
+            raise ValueError(
+                f"Invalid parallel_backend={self.parallel_backend!r}. Must be one of {sorted(allowed_backend)}"
+            )
+        allowed_vec_store = {"memory", "memmap"}
+        if self.vec_store not in allowed_vec_store:
+            raise ValueError(
+                f"Invalid vec_store={self.vec_store!r}. Must be one of {sorted(allowed_vec_store)}"
+            )
+        if self.kpoint_chunk_count < 1:
+            raise ValueError("kpoint_chunk_count must be >= 1")
+        if not (0 <= self.kpoint_chunk_id < self.kpoint_chunk_count):
+            raise ValueError(
+                f"kpoint_chunk_id must be in [0, {self.kpoint_chunk_count - 1}], got {self.kpoint_chunk_id}"
+            )
+        if self.num_processes < 1:
+            raise ValueError("num_processes must be >= 1")
+        if self.blas_threads < 0:
+            raise ValueError("blas_threads must be >= 0")
+        self.get_chern_grid_shape()
+
+        allowed_eigensolver = {"scipy", "slepc"}
+        if self.eigensolver not in allowed_eigensolver:
+            raise ValueError(
+                f"Invalid eigensolver={self.eigensolver!r}. Must be one of {sorted(allowed_eigensolver)}"
+            )
+        if not self.TAPW:
+            if self.eigensolver == "slepc":
+                allowed_slepc_comm = {"self", "world"}
+                if self.slepc_comm not in allowed_slepc_comm:
+                    raise ValueError(
+                        f"Invalid slepc_comm={self.slepc_comm!r}. Must be one of {sorted(allowed_slepc_comm)}"
+                    )
+
+                # SLEPc is MPI-based; mixing it with forked Python workers is unsafe.
+                # We only support joblib+loky (spawn) for now.
+                if self.parallel_impl != "joblib" or self.parallel_backend != "loky":
+                    raise ValueError(
+                        "eigensolver='slepc' requires parallel_impl='joblib' and parallel_backend='loky' "
+                        "(spawn). Do not use multiprocessing/fork with MPI libraries."
+                    )
+                if self.eig_vec_cal:
+                    raise ValueError("eigensolver='slepc' currently supports eig_vec_cal=false only.")
+
+                if self.slepc_comm == "world":
+                    # In COMM_WORLD mode we expect the user to launch with MPI (srun/mpiexec -n N).
+                    # Do not also spawn local workers or do k-point chunking; it can deadlock or duplicate work.
+                    if self.num_processes != 1:
+                        raise ValueError("slepc_comm='world' requires num_processes=1 (no k-point multiprocessing).")
+                    if self.kpoint_chunk_count != 1 or self.kpoint_chunk_id != 0:
+                        raise ValueError("slepc_comm='world' requires kpoint_chunk_count=1 and kpoint_chunk_id=0.")
+
+    def get_chern_grid_shape(self) -> tuple:
+        """Return the explicit fractional Chern-grid shape `(num_k1, num_k2)`."""
+        return resolve_chern_grid_shape(
+            num_chern=self.num_chern,
+            num_k1=self.num_k1,
+            num_k2=self.num_k2,
+        )
+
+    def get_chern_grid_suffix(self) -> str:
+        """Return the filename suffix used for Chern-mode raw/final outputs."""
+        num_k1, num_k2 = self.get_chern_grid_shape()
+        return format_chern_grid_suffix(num_k1, num_k2)
+
     def __post_init__(self):
+        self.validate()
+
         # Valley mapping
         valley_flag = {
-            1: "K1", 2: "K2", 
-            11: "K1_120", 12: "K1_240", 
+            1: "K1", 2: "K2",
+            11: "K1_120", 12: "K1_240",
+            # Square/rect high-symmetry points
             5: "Gamma",
+            3: "M",
+            41: "X",
+            42: "Y",
             31: "M1", 32: "M2", 33: "M3"
         }
         # Solver mapping
@@ -163,6 +326,7 @@ class Config:
     twist: TwistConfig
     paths: PathConfig
     compute: ComputeConfig
+    symmetry_analysis: SymmetryAnalysisConfig = field(default_factory=SymmetryAnalysisConfig)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
     slab: Optional[SlabConfig] = None  # Slab configuration (only used when mode="slab")
 
@@ -175,6 +339,7 @@ class Config:
         twist_config = TwistConfig(**config_dict.get('twist', {}))
         paths_config = PathConfig(**config_dict.get('paths', {}))
         compute_config = ComputeConfig(**config_dict.get('compute', {}))
+        symmetry_analysis_config = SymmetryAnalysisConfig(**config_dict.get('symmetry_analysis', {}))
         # Use default cluster config if not provided
         cluster_config = ClusterConfig(**config_dict.get('cluster', {})) if 'cluster' in config_dict else ClusterConfig()
         
@@ -187,9 +352,12 @@ class Config:
             twist=twist_config,
             paths=paths_config,
             compute=compute_config,
+            symmetry_analysis=symmetry_analysis_config,
             cluster=cluster_config,
             slab=slab_config
         )
+        # Propagate twist bravais to compute for downstream logic
+        config_obj.compute.bravais = config_obj.twist.bravais
         # 如果config.yaml没有n_g字段，则自动调用update_ng
         if 'n_g' not in config_dict.get('compute', {}):
             config_obj.update_ng()
@@ -200,7 +368,8 @@ class Config:
         config_dict = {
             'twist': self.twist.__dict__,
             'paths': {k: v for k, v in self.paths.__dict__.items() if not k.startswith('_')},
-            'compute': {k: v for k, v in self.compute.__dict__.items() if k != 'valley'}
+            'compute': {k: v for k, v in self.compute.__dict__.items() if k != 'valley'},
+            'symmetry_analysis': self.symmetry_analysis.__dict__,
             # Don't save cluster config as it uses fixed values
         }
         

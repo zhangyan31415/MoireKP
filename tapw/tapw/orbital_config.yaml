@@ -1,0 +1,7 @@
+# TAPW轨道成分分析工具
+# 简化版本，只保留最基本的功能
+
+# 使用方法：
+# tapw-orbital /path/to/your/results
+# tapw-orbital /path/to/your/results --valley K1
+# tapw-orbital /path/to/your/results --output my_analysis 

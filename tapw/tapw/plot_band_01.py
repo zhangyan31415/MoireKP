@@ -184,25 +184,47 @@ def plot_bands(config: PlotConfig):
         if config.fermi_energy is not None:
             data = data - config.fermi_energy
         band_all.append(data)
-    band_all = np.concatenate(band_all, axis=0)
-    print(band_all.shape)
-    print(f"config.fermi_energy: {config.fermi_energy}")
-    print(f"np.max(band_all): {np.max(band_all)+config.fermi_energy}, np.min(band_all): {np.min(band_all)+config.fermi_energy}")
     ymin = None
     ymax = None
     efermi_shift = 0
-    if np.abs(np.max(band_all)) < np.abs(np.min(band_all)):
-        if np.abs(np.max(band_all)) < 0.5:
-            efermi_shift = np.max(band_all)
-            band_all = band_all - np.max(band_all)
-            ymin = np.min(band_all[:,-10])
+    band_max = np.max([np.max(band) for band in band_all])
+    band_min = np.min([np.min(band) for band in band_all])
+    print(f"efermi_shift: {config.fermi_energy}")
+    print(f"band_max + efermi_shift: {band_max + config.fermi_energy}, band_min + efermi_shift: {band_min + config.fermi_energy}")
+    if abs(band_max) < abs(band_min):
+        if abs(band_max) < 0.5:
+            efermi_shift = band_max
+            band_all = [band - band_max for band in band_all]
+            ymin = np.min([band[:,-6] for band in band_all])
             ymax = - ymin/6
+
     else:
-        if np.abs(np.min(band_all)) < 0.5:
-            efermi_shift = np.min(band_all)
-            band_all = band_all - np.min(band_all)
-            ymax = np.max(band_all[:,10])
+        if abs(band_min) < 0.5:
+            efermi_shift = band_min
+            band_all = [band - band_min for band in band_all]
+            ymax = np.max([band[:,6] for band in band_all])
             ymin = -ymax/6
+            
+    # band_all = np.concatenate(band_all, axis=0)
+    # print(band_all.shape)
+    # print(f"config.fermi_energy: {config.fermi_energy}")
+    # print(f"np.max(band_all): {np.max(band_all)+config.fermi_energy}, np.min(band_all): {np.min(band_all)+config.fermi_energy}")
+    # ymin = None
+    # ymax = None
+    # efermi_shift = 0
+    # if np.abs(np.max(band_all)) < np.abs(np.min(band_all)):
+    #     if np.abs(np.max(band_all)) < 0.5:
+    #         efermi_shift = np.max(band_all)
+    #         band_all = band_all - np.max(band_all)
+    #         ymin = np.min(band_all[:,-10])
+    #         ymax = - ymin/6
+    # else:
+    #     if np.abs(np.min(band_all)) < 0.5:
+    #         efermi_shift = np.min(band_all)
+    #         band_all = band_all - np.min(band_all)
+    #         ymax = np.max(band_all[:,10])
+    #         ymin = -ymax/6
+    
     # if np.abs(np.max(band_all)) < 0.3:
     #     efermi_shift = np.max(band_all)
     #     band_all = band_all - np.max(band_all)
@@ -213,7 +235,7 @@ def plot_bands(config: PlotConfig):
     #     band_all = band_all - np.min(band_all)
     #     ymax = np.max(band_all[:,6])
     #     ymin = -ymax/6
-    print(f"efermi_shift: {efermi_shift}, ymin: {ymin}, ymax: {ymax}, np.abs(np.max(band_all)): {np.abs(np.max(band_all))}, np.abs(np.min(band_all)): {np.abs(np.min(band_all))}")
+    # print(f"efermi_shift: {efermi_shift}, ymin: {ymin}, ymax: {ymax}, np.abs(np.max(band_all)): {np.abs(np.max(band_all))}, np.abs(np.min(band_all)): {np.abs(np.min(band_all))}")
     
     data_list = []
     for i, band in enumerate(config.bands):
@@ -232,7 +254,7 @@ def plot_bands(config: PlotConfig):
     #         shift = data_list[index][0,0] - data_list[min_index][0,0]
     #         print(f"index: {index}, shift: {shift}")
     #         data_list[index] = data_list[index] - shift
-    data_list = np.array(data_list)
+    # data_list = np.array(data_list)
     for i, band in enumerate(config.bands):
         # data = read_band_data(band.file)  # data shape: (n_kpoints, n_bands)
         data = data_list[i]
@@ -241,14 +263,14 @@ def plot_bands(config: PlotConfig):
             data = data - config.fermi_energy - efermi_shift
         ymin = None
         ymax = None
-        if np.abs(np.max(data)) < 10.2:
+        if np.abs(np.max(data)) < 0.2:
             data = data - np.max(data)
             ymin = np.min(data[:,-6])
             ymax = - ymin/6
-        # if np.abs(np.min(data)) < 0.2:
-        #     data = data - np.min(data)
-        #     ymax = np.max(data[:,10])
-        #     ymin = -ymax/6
+        if np.abs(np.min(data)) < 0.2:
+            data = data - np.min(data)
+            ymax = np.max(data[:,6])
+            ymin = -ymax/6
             
         color = band.color or DEFAULT_COLORS[i % len(DEFAULT_COLORS)]
         

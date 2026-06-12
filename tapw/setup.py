@@ -14,9 +14,9 @@ setup(
         "joblib>=1.0.0",
         "tqdm>=4.60.0",
         "psutil>=5.8.0",
-        "memory_profiler>=0.58.0",
-        "numba>=0.59.0",
         "sympy>=1.13.0",
+        "ase>=3.22.0",
+        "spglib>=2.0.0",
     ],
     entry_points={
         'console_scripts': [
@@ -28,12 +28,12 @@ setup(
             'tapw-plot-orbital=tapw.plot_orbital_tool:main',
         ],
     },
-    author="Your Name",
-    author_email="your.email@example.com",
+    author="MoireKP developers",
+    author_email="",
     description="Twisted Angle Band Structure Calculator",
     long_description=open("README.md").read(),
     long_description_content_type="text/markdown",
-    url="https://github.com/yourusername/tapw",
+    url="",
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

@@ -1,7 +1,30 @@
 #!/usr/bin/env python3
 """
-TAPW轨道成分能带绘图工具
-支持交互式选择原子、轨道，绘制fatband图
+TAPW 轨道成分能带绘图工具
+支持交互式选择原子、轨道，绘制 fatband 图。
+
+用法示例（建议使用模块方式运行）:
+
+- 基本用法（指定结果目录、谷与能带类型）
+  python -m tapw.plot_orbital_tool /path/to/result --valley Gamma --band CBM
+
+- 指定轨道数据目录与输出目录
+  python -m tapw.plot_orbital_tool /path/to/result --valley M1 --band vbm \
+         --orbital-dir orbital_analysis --output-dir orbital_plots
+
+- 指定 K 路径文件（可选）
+  python -m tapw.plot_orbital_tool /path/to/result --valley Gamma --band CBM \
+         --kpath-in KPATH.in --kpath-out KPATH.out
+
+文件命名与自动检测:
+- 新版文件结构（推荐）: 结果目录包含子目录 band/
+  band/band_{CBM|VBM}_{Valley}_valley.txt
+  band/vec_{CBM|VBM}_{Valley}_valley.npy
+
+- 轨道成分 JSON 输出来自 orbital_analysis_tool:
+  {result_dir}/{orbital_dir}/orbital_data_{CBM|VBM}_{Valley}.json
+
+- 旧版文件名也会尽量兼容自动检测
 """
 
 import json
@@ -156,6 +179,7 @@ class PlotOrbitalConfig:
     orbital_dir: str = "orbital_analysis"
     output_dir: str = "orbital_plots"
     valley: str = "Gamma"
+    band_type: str = "CBM"
     energy_window: Tuple[float, float] = (-2.0, 2.0)  # eV相对费米能级
     figsize: Tuple[int, int] = (12, 8)
     dpi: int = 300
@@ -192,25 +216,41 @@ class OrbitalPlotter:
         """加载能带和轨道数据"""
         print("Loading data...")
         
-        # Load band structure data
-        band_file = os.path.join(self.config.result_dir, "band_data", f"band_data_{self.config.valley}_valley.txt")
-        if not os.path.exists(band_file):
-            band_file = os.path.join(self.config.result_dir, "band_data", f"band_data_{self.config.valley}.txt")
-        if not os.path.exists(band_file):
-            band_file = os.path.join(self.config.result_dir, f"band_data_{self.config.valley}.txt")
+        # Load band structure data (new structure preferred)
+        band_dir = os.path.join(self.config.result_dir, "band")
+        band_file_candidates = []
+        if os.path.isdir(band_dir):
+            bt = (self.config.band_type or "CBM").upper()
+            band_file_candidates.extend([
+                os.path.join(band_dir, f"band_{bt}_{self.config.valley}_valley.txt"),
+                os.path.join(band_dir, f"band_{bt}_{self.config.valley}.txt"),
+            ])
+        # Fallbacks for old naming
+        band_file_candidates.extend([
+            os.path.join(self.config.result_dir, "band_data", f"band_data_{self.config.valley}_valley.txt"),
+            os.path.join(self.config.result_dir, "band_data", f"band_data_{self.config.valley}.txt"),
+            os.path.join(self.config.result_dir, f"band_data_{self.config.valley}.txt"),
+        ])
+        band_file = next((p for p in band_file_candidates if os.path.exists(p)), None)
         
-        if not os.path.exists(band_file):
-            raise FileNotFoundError(f"Band structure file not found: {band_file}")
+        if not band_file or not os.path.exists(band_file):
+            raise FileNotFoundError(f"Band structure file not found. Tried: {band_file_candidates}")
         
         self.band_data = np.loadtxt(band_file)
         print(f"✓ Loaded band data: {self.band_data.shape}")
         
         # Load orbital composition data
-        orbital_file = os.path.join(self.config.result_dir, self.config.orbital_dir, 
-                                   f"orbital_data_{self.config.valley}.json")
+        bt = (self.config.band_type or "CBM").upper()
+        orbital_dir = os.path.join(self.config.result_dir, self.config.orbital_dir)
+        orbital_file_candidates = [
+            os.path.join(orbital_dir, f"orbital_data_{bt}_{self.config.valley}.json"),
+            # legacy fallback without band type
+            os.path.join(orbital_dir, f"orbital_data_{self.config.valley}.json"),
+        ]
+        orbital_file = next((p for p in orbital_file_candidates if os.path.exists(p)), None)
         
-        if not os.path.exists(orbital_file):
-            raise FileNotFoundError(f"Orbital composition file not found: {orbital_file}")
+        if not orbital_file or not os.path.exists(orbital_file):
+            raise FileNotFoundError(f"Orbital composition file not found. Tried: {orbital_file_candidates}")
         
         with open(orbital_file, 'r') as f:
             self.orbital_data = json.load(f)
@@ -1669,6 +1709,8 @@ def main():
     parser.add_argument("result_dir", nargs="?", default=".", help="结果目录路径")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--valley", default="Gamma", help="谷标识 (default: Gamma)")
+    parser.add_argument("--band", "--band-type", dest="band", default="CBM", choices=["CBM","VBM","cbm","vbm"],
+                       help="能带类型 (CBM 或 VBM，default: CBM)")
     parser.add_argument("--orbital-dir", default="orbital_analysis", help="轨道分析结果目录")
     parser.add_argument("--output-dir", default="orbital_plots", help="输出目录")
     parser.add_argument("--energy-window", nargs=2, type=float, default=[-2.0, 2.0], 
@@ -1677,7 +1719,7 @@ def main():
                        help="图片尺寸，格式: width height (default: 12 8)")
     parser.add_argument("--dpi", type=int, default=300, help="图片分辨率 (default: 300)")
     parser.add_argument("--format", default="pdf", choices=["png", "pdf", "svg"], 
-                       help="输出格式 (default: png)")
+                       help="输出格式 (default: pdf)")
     parser.add_argument("--interactive", action="store_true", help="交互式选择模式")
     parser.add_argument("--detailed", action="store_true", help="详细模式：生成所有图表")
     
@@ -1698,6 +1740,7 @@ def main():
         orbital_dir=args.orbital_dir,
         output_dir=args.output_dir,
         valley=args.valley,
+        band_type=(args.band or 'CBM').upper(),
         energy_window=energy_window,
         figsize=figsize,
         dpi=args.dpi,

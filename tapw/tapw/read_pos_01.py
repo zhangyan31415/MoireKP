@@ -1,26 +1,63 @@
 import numpy as np
 import re
 from collections import defaultdict
+import os
 
 
 import pandas as pd
 import scipy.linalg
 from sklearn.cluster import DBSCAN
 from sklearn.cluster import KMeans
-import matplotlib.pyplot as plt
-import matplotlib
 import scipy.sparse as sp
 import scipy
 import pandas as pd
 from scipy.spatial import cKDTree
-from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+# Plotting is optional for non-plot workflows; keep matplotlib import failure from breaking core logic.
+try:
+    import matplotlib.pyplot as plt
+    import matplotlib
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+except Exception as _matplotlib_import_error:  # pragma: no cover
+    plt = None
+    matplotlib = None
+    inset_axes = None
+
+
+def reciprocal_from_Tmat(Tmat: np.ndarray) -> np.ndarray:
+    """
+    Compute reciprocal lattice matrix from a real-space lattice matrix.
+
+    Convention in this codebase:
+    - `Tmat` is a (3,3) matrix whose *row vectors* are real-space lattice vectors a1,a2,a3.
+    - A fractional coordinate `r_frac` is converted to Cartesian by `r_cart = Tmat.T @ r_frac`.
+
+    We return `B_row` as a (3,3) matrix whose *row vectors* are reciprocal vectors b1,b2,b3,
+    satisfying b_i · a_j = 2π δ_ij.
+    """
+    Tmat = np.asarray(Tmat, dtype=np.float64)
+    if Tmat.shape != (3, 3):
+        raise ValueError(f"Tmat must be shape (3,3), got {Tmat.shape}")
+
+    # Convert to column-vector convention, compute reciprocal, then convert back.
+    # A_col has columns a1,a2,a3; B_col has columns b1,b2,b3.
+    A_col = Tmat.T
+    B_col = 2 * np.pi * np.linalg.inv(A_col).T
+    B_row = B_col.T
+    return B_row
 
 
 class OpenMXFile:
     def __init__(self, file_path, twist_index, spin):
         self.file_path = file_path
         self.twist_index = twist_index
-        self.twist_angle = None
+        # Bravais lattice of the moiré supercell. Default is "hex" to preserve legacy behaviour.
+        # The square moiré workflow relies on automatic detection from supercell (a1,a2) as fallback.
+        self.bravais = "hex"
+        self._bravais_forced = False
+
+        self.twist_angle = None  # degrees (float)
+        self.twist_angle_deg = None  # degrees (float), explicit name for downstream consistency
         self.num_unit_cell = None
         self.spin = spin
 
@@ -38,30 +75,101 @@ class OpenMXFile:
         self.unit_cell_atom_orb = {} # 
         self.df = None
 
+        # Optional override from env var (cannot rely on main.py passing parameters).
+        bravais_env = os.environ.get("TAPW_BRAVAIS")
+        if bravais_env:
+            self.set_bravais(bravais_env)
+
         self.calc_twist_angle()
         self.calc_num_unit_cell()
         self.parse_file()
+
+        # Fallback automatic detection from the parsed moiré supercell lattice.
+        prev_bravais = self.bravais
+        self._auto_detect_bravais_from_Tmat()
+        if self.bravais != prev_bravais:
+            self.calc_twist_angle()
+            self.calc_num_unit_cell()
+
+        # Propagate detected bravais for other components (e.g. LayeredLatticeAnalyzer) without
+        # changing main.py call signatures.
+        os.environ.setdefault("TAPW_BRAVAIS", self.bravais)
+
         self.sort_atoms_by_z()
-        self.compute_permutation_matrix()
+        # self.compute_permutation_matrix()
         self.count_species()
         self.count_orbitals()
         self.get_dataframe()
 
 
+    def set_bravais(self, bravais: str):
+        """Public setter for bravais lattice type ("hex" or "square")."""
+        if bravais is None:
+            return
+        bravais_norm = str(bravais).strip().lower()
+        if bravais_norm in {"hex", "hexagonal"}:
+            self.bravais = "hex"
+        elif bravais_norm in {"square", "sq"}:
+            self.bravais = "square"
+        else:
+            raise ValueError(f"Unsupported bravais='{bravais}'. Expected 'hex' or 'square'.")
+        self._bravais_forced = True
+
+    def _auto_detect_bravais_from_Tmat(self):
+        """
+        Fallback automatic detection (only when bravais is not forced by user/env).
+
+        Rule:
+        - Use supercell in-plane vectors a1,a2 from Tmat (row vectors).
+        - If a1 ⟂ a2 and |a1|==|a2| within 1e-3 relative tolerance -> square.
+        """
+        if self._bravais_forced:
+            return
+        if not isinstance(self.Tmat, np.ndarray) or self.Tmat.shape != (3, 3):
+            return
+        a1 = np.asarray(self.Tmat[0, :2], dtype=np.float64)
+        a2 = np.asarray(self.Tmat[1, :2], dtype=np.float64)
+        n1 = float(np.linalg.norm(a1))
+        n2 = float(np.linalg.norm(a2))
+        if n1 == 0.0 or n2 == 0.0:
+            return
+        cos_abs = float(np.abs(np.dot(a1, a2)) / (n1 * n2))
+        rel_len = float(np.abs(n1 - n2) / n1)
+        if cos_abs < 1.0e-3 and rel_len < 1.0e-3:
+            self.bravais = "square"
+
     def calc_twist_angle(self):
         """
         计算扭转角度。
         """
-        i = self.twist_index
-        cos_ang = (3 * i ** 2 + 3 * i + 0.5) / (3 * i ** 2 + 3 * i + 1)
-        self.twist_angle = np.arccos(cos_ang) * 180 / np.pi
+        m = int(self.twist_index)
+        if m < 1:
+            raise ValueError(f"twist_index must be >= 1, got {self.twist_index}")
+
+        if getattr(self, "bravais", "hex") == "square":
+            # (m, m+1) family for square moiré:
+            #   theta = 2 * arctan( 1 / (2*m + 1) )   [radians]
+            theta_rad = 2.0 * np.arctan(1.0 / (2.0 * m + 1.0))
+            theta_deg = float(np.degrees(theta_rad))
+        else:
+            # Legacy (hex) commensurate family
+            cos_ang = (3 * m ** 2 + 3 * m + 0.5) / (3 * m ** 2 + 3 * m + 1)
+            cos_ang = float(np.clip(cos_ang, -1.0, 1.0))
+            theta_deg = float(np.degrees(np.arccos(cos_ang)))
+
+        self.twist_angle_deg = theta_deg
+        self.twist_angle = theta_deg
 
     def calc_num_unit_cell(self):
         """
         计算单位晶胞的数量。
         """
-        i = self.twist_index
-        self.num_unit_cell = int(3 * i ** 2 + 3 * i + 1)
+        m = int(self.twist_index)
+        if getattr(self, "bravais", "hex") == "square":
+            # Square coincidence lattice index for tan(theta/2)=1/(2m+1): Σ = (2m+1)^2 + 1
+            self.num_unit_cell = int((2 * m + 1) ** 2 + 1)
+        else:
+            self.num_unit_cell = int(3 * m ** 2 + 3 * m + 1)
 
     def parse_file(self):
         with open(self.file_path, 'r') as file:
@@ -155,7 +263,7 @@ class OpenMXFile:
         # 转换单位向量为 numpy 数组
         if self.Tmat:
             self.Tmat = np.array(self.Tmat)
-            self.reciprocal_Tmat = 2 * np.pi * np.linalg.inv(self.Tmat).T
+            self.reciprocal_Tmat = reciprocal_from_Tmat(self.Tmat)
 
         # 转换坐标为直角坐标
         if self.species_coordinates_unit[0].upper() == 'F':
@@ -223,10 +331,11 @@ class OpenMXFile:
         """
         orbitals_count = {}
         for species, definition in self.atom_basis.items():
-            # 示例定义: Te7.0-s3p2d2f1 或 Mo7.0-s3p2d1 或 Mo7.0-s3 等
+            # 示例定义: Te7.0-s3p2d2f1 或 Mo7.0-s3p2d1 或 Mo7.0-s3 或 Cu6.0H-s2p2d1 或 Cu6.0S-s2p1d1 等
             # 正则表达式匹配 s、p、d、f 轨道的数量，p、d、f 为可选
+            # 注意：元素符号后可能包含字母后缀（如 H、S 等）
             match = re.match(
-                r'^[A-Za-z]+[\d\.]+(?:-s(?P<s>\d+))?(?:p(?P<p>\d+))?(?:d(?P<d>\d+))?(?:f(?P<f>\d+))?$',
+                r'^[A-Za-z]+[\d\.]+[A-Za-z]*(?:-s(?P<s>\d+))?(?:p(?P<p>\d+))?(?:d(?P<d>\d+))?(?:f(?P<f>\d+))?$',
                 definition
             )
 
@@ -284,24 +393,42 @@ class OpenMXFile:
         """
         打印所有的属性。
         """
-        print("=== 扭转角度 ===")
-        print(self.twist_angle)
+        print("=== Bravais (moiré supercell) ===")
+        print(self.bravais)
+        print("=== 扭转角度 (理论值，基于 twist_index_m) ===")
+        print(f"{self.twist_angle:.6f}°")
         # print("\n=== 单位晶胞数量 ===")
         # print(self.num_unit_cell)
         print("\n=== 单位向量 (Angstrom) ===")
         print(self.Tmat)
         print("\n=== 逆格矢 (1/Angstrom) ===")
         print(self.reciprocal_Tmat)
+        if self.bravais == "square":
+            b1 = np.asarray(self.reciprocal_Tmat[0][:2], dtype=np.float64)
+            b2 = np.asarray(self.reciprocal_Tmat[1][:2], dtype=np.float64)
+            print("\n=== [square] Reciprocal self-check (moiré) ===")
+            print(f"b1·b2 = {float(np.dot(b1, b2)):.6e}")
+            print(f"|b1|-|b2| = {float(np.linalg.norm(b1) - np.linalg.norm(b2)):.6e}")
+
+            print("\n=== [square] Moiré BZ high-symmetry points (1/Angstrom) ===")
+            Gamma = np.array([0.0, 0.0])
+            X = 0.5 * b1
+            Y = 0.5 * b2
+            M = 0.5 * (b1 + b2)
+            print(f"Gamma = {Gamma}")
+            print(f"X     = {X}")
+            print(f"Y     = {Y}")
+            print(f"M     = {M}")
         print("\n=== 原子总数 ===")
         print(self.atoms_number)
-        # print("\n=== 原子坐标单位 ===")
-        # print(self.species_coordinates_unit)
+        print("\n=== 原子坐标单位 ===")
+        print(self.species_coordinates_unit)
         # print("\n=== 按 z 轴排序前的前5个原子 ===")
-        for atom in self.species_coordinates[:5]:
-            print(atom)
+        # for atom in self.species_coordinates[:5]:
+        #     print(atom)
         # print("\n=== 按 z 轴排序后的前5个原子 ===")
-        for atom in self.sorted_species_coordinates[:5]:
-            print(atom)
+        # for atom in self.sorted_species_coordinates[:5]:
+        #     print(atom)
         print("\n=== 种类统计 ===")
         print(self.species_count)
         print("\n=== 轨道统计 ===")
@@ -332,15 +459,20 @@ class LayeredLatticeAnalyzer:
         self.twist_layer = twist_layer
         self.layer_nearest_vectors = {}  # {layer: [nearest_vectors]}
         self.layer_all_basis_vectors = {}  # {layer: [a1,a2,a3,...]}
+        # Bravais lattice type hook (read from env var to avoid changing main.py signatures).
+        bravais_env = os.environ.get("TAPW_BRAVAIS", "hex")
+        bravais_norm = str(bravais_env).strip().lower()
+        self.bravais = "square" if bravais_norm in {"square", "sq"} else "hex"
         
 
-    def process(self):
+    def process(self,TAPW=True):
         """
         Runs the processing workflow to derive lattice vectors and reciprocal lattice vectors.
         """
         self.load_data()
-        self.separate_layers()
-        self.compute_lattice_vectors()
+        if TAPW:
+            self.separate_layers()
+            self.compute_lattice_vectors()
 
     def load_data(self):
         """
@@ -450,7 +582,10 @@ class LayeredLatticeAnalyzer:
             # if len(layer_atoms) < 2:
             #     print(f"Layer {layer}: Not enough atoms to determine lattice vectors.")
             #     continue
-            a1, a2 = self._determine_lattice_vectors(layer)
+            if getattr(self, "bravais", "hex") == "square":
+                a1, a2 = self._determine_lattice_vectors_square(layer)
+            else:
+                a1, a2 = self._determine_lattice_vectors(layer)
             self.lattice_vectors[layer] = [a1, a2]
             twist_angle_list.append(np.degrees(np.arctan2(a1[1],a1[0])))
 
@@ -463,19 +598,15 @@ class LayeredLatticeAnalyzer:
             b1 = (2 * np.pi / area) * np.array([a2[1], -a2[0]])
             b2 = (2 * np.pi / area) * np.array([-a1[1], a1[0]])
             self.reciprocal_vectors[layer] = [b1, b2]
-#             === 单位向量 (Angstrom) ===
-# [[ 5.19331510e+01 -8.49476211e-06 -1.68220479e-04]
-#  [-2.59665803e+01  4.49754428e+01  3.67932044e-04]
-#  [-8.11777142e-05  1.55556143e-04  2.49634086e+01]]
 
-# === 逆格矢 (1/Angstrom) ===
-# [[ 1.20986033e-01  6.98513087e-02 -4.18384592e-08]
-#  [ 2.28484853e-08  1.39702591e-01 -8.70537941e-07]
-#  [ 8.15286097e-07 -1.58835037e-06  2.51695808e-01]]
             print(f"\n=======      Layer {layer}: Lattice vectors (Angstrom)          ===== ")
             print(np.array([a1, a2]))
             print(f"\n======= Layer {layer}: Reciprocal lattice vectors (1/Angstrom) ===== ")
             print(np.array([b1, b2]))
+            if getattr(self, "bravais", "hex") == "square":
+                print("\n======= [square] a1/a2 self-check (monolayer) ===== ")
+                print(f"a1·a2 = {float(np.dot(a1, a2)):.6e}")
+                print(f"|a1|-|a2| = {float(np.linalg.norm(a1) - np.linalg.norm(a2)):.6e}")
             # print(f"Layer {layer}: Reciprocal lattice vectors computed.")
 
             # print(f"Layer {layer}: Lattice vectors computed.")
@@ -868,7 +999,174 @@ class LayeredLatticeAnalyzer:
                 raise ValueError("Please provide a save_path to save the plot.")
             plt.savefig(save_path + '/nearest_vectors_phase.pdf', dpi=300, bbox_inches='tight')
         plt.show()
-            
+	            
+
+    def _determine_lattice_vectors_square(
+        self,
+        layer,
+        neighbor_k: int = 12,
+        round_tol: float = 1e-3,
+        match_tol: float = 1e-2,
+        score_threshold: float = 0.5,
+    ):
+        """
+        Determine two in-plane translation vectors (a1,a2) for a square Bravais lattice.
+
+        This branch is intentionally free of hex-specific assumptions (no 60°/C3 hard-coding).
+        It searches short neighbour vectors and scores each candidate by translation invariance:
+        shifting points by the candidate should map most points onto other points.
+
+        Side effects (for plotting/debug compatibility):
+        - Populates `self.layer_nearest_vectors[layer]` and `self.layer_all_basis_vectors[layer]`.
+        """
+        if self.df is None:
+            raise ValueError("DataFrame is empty. Please load data first.")
+
+        layer_df = self.df[self.df["layer"] == layer]
+        if layer_df.empty:
+            raise ValueError(f"Layer {layer}: no atoms found.")
+
+        # Use the dominant species to reduce basis interference; fallback to all atoms if too few.
+        species_counts = layer_df["species"].value_counts()
+        dominant_species = species_counts.index[0]
+        coords = layer_df[layer_df["species"] == dominant_species][["x", "y"]].values
+        if coords.shape[0] < 4:
+            coords = layer_df[["x", "y"]].values
+        coords = np.asarray(coords, dtype=np.float64)
+        if coords.shape[0] < 4:
+            raise ValueError(f"Layer {layer}: not enough atoms to determine lattice vectors.")
+
+        tree = cKDTree(coords)
+
+        k = min(int(neighbor_k) + 1, coords.shape[0])
+        _, idxs = tree.query(coords, k=k)
+
+        # Candidate neighbour vectors (2D).
+        neigh = coords[idxs[:, 1:].reshape(-1)]
+        origin = np.repeat(coords, k - 1, axis=0)
+        cand = neigh - origin
+        cand = np.vstack([cand, -cand])
+
+        lengths = np.linalg.norm(cand, axis=1)
+        valid = lengths > 1e-6
+        cand = cand[valid]
+        lengths = lengths[valid]
+        if cand.shape[0] == 0:
+            raise ValueError(f"Layer {layer}: failed to build neighbour vectors.")
+
+        # Store for plotting/debug.
+        self.layer_nearest_vectors[layer] = cand
+
+        # Deduplicate candidates by rounding (avoids scoring identical vectors many times).
+        round_tol = float(round_tol) if round_tol and round_tol > 0 else 1e-3
+        keys = np.round(cand / round_tol).astype(int)
+        uniq = {}
+        for v, l, kvec in zip(cand, lengths, keys):
+            key = (int(kvec[0]), int(kvec[1]))
+            if key == (0, 0):
+                continue
+            prev = uniq.get(key)
+            if prev is None or l < prev[1]:
+                uniq[key] = (v, l)
+
+        if not uniq:
+            raise ValueError(f"Layer {layer}: failed to deduplicate neighbour vectors.")
+
+        unique_vectors = np.asarray([item[0] for item in uniq.values()], dtype=np.float64)
+        unique_lengths = np.asarray([item[1] for item in uniq.values()], dtype=np.float64)
+        sort_idx = np.argsort(unique_lengths)
+        unique_vectors = unique_vectors[sort_idx]
+        unique_lengths = unique_lengths[sort_idx]
+
+        match_tol = float(match_tol) if match_tol and match_tol > 0 else 1e-2
+
+        def match_score(v: np.ndarray) -> float:
+            shifted = coords + v
+            d, _ = tree.query(shifted, k=1)
+            return float(np.mean(d < match_tol))
+
+        # Pick a1: shortest vector with good translation-invariance score.
+        score_threshold = float(score_threshold)
+        max_scan = min(200, unique_vectors.shape[0])
+        a1 = None
+        a1_score = -1.0
+        for v in unique_vectors[:max_scan]:
+            s = match_score(v)
+            if s > a1_score:
+                a1_score = s
+                a1 = v
+            if s >= score_threshold:
+                a1_score = s
+                a1 = v
+                break
+        if a1 is None:
+            raise ValueError(f"Layer {layer}: failed to pick a1 for square bravais.")
+
+        # Pick a2: linearly independent vector (prefer ~90°) with good score.
+        n1 = float(np.linalg.norm(a1))
+        max_scan2 = min(400, unique_vectors.shape[0])
+        a2 = None
+        a2_score = -1.0
+        best_cos = 1.0
+        for v in unique_vectors[:max_scan2]:
+            n = float(np.linalg.norm(v))
+            if n == 0.0:
+                continue
+            cos = abs(float(np.dot(v, a1)) / (n * n1))
+            if cos > 0.95:
+                continue
+            s = match_score(v)
+            if (s > a2_score) or (np.isclose(s, a2_score) and cos < best_cos):
+                a2_score = s
+                a2 = v
+                best_cos = cos
+            if s >= score_threshold and cos < 0.2:
+                a2_score = s
+                a2 = v
+                best_cos = cos
+                break
+        if a2 is None:
+            raise ValueError(f"Layer {layer}: failed to pick a2 for square bravais.")
+
+        a1 = np.asarray(a1, dtype=np.float64)
+        a2 = np.asarray(a2, dtype=np.float64)
+        
+        theta = 45 if self.type_structure[layer] == 1 else 0
+        scale = np.sqrt(2) if self.type_structure[layer] == 1 else 1
+        a1 = self.rot_z(a1,np.radians(theta))*scale
+        a2 = self.rot_z(a2,np.radians(theta))*scale
+        
+
+        # Ensure right-handed orientation in xy plane.
+        area = a1[0] * a2[1] - a1[1] * a2[0]
+        if area < 0:
+            a2 = -a2
+            area = -area
+        if area == 0:
+            raise ValueError(f"Layer {layer}: a1/a2 are collinear after selection.")
+        # --- force a1 angle into [0, 90) by rotating (a1,a2) together by 90° multiples ---
+        ang = (np.degrees(np.arctan2(a1[1], a1[0])) + 360.0) % 360.0
+        k = int(ang // 90.0)          # 0,1,2,3
+        k = (-k) & 3                  # rotate by -90*k (mod 4), now k in 0..3
+
+        if k:
+            def rot90_xy(v, k):
+                x, y = v[0], v[1]
+                if k == 1:  v[0], v[1] = -y, x
+                elif k == 2: v[0], v[1] = -x, -y
+                elif k == 3: v[0], v[1] = y, -x
+
+            a1 = a1.copy(); a2 = a2.copy()
+            rot90_xy(a1, k)
+            rot90_xy(a2, k)
+
+        # For plotting: show four symmetry-related basis vectors.
+        self.layer_all_basis_vectors[layer] = np.array([a1, a2, -a1, -a2], dtype=np.float64)
+
+        print(f"\n======= Layer {layer}: [square] translation match scores ===== ")
+        print(f"a1_score = {a1_score:.3f}, a2_score = {a2_score:.3f}")
+
+        return a1, a2
 
     def _determine_lattice_vectors_old(self, layer, factor=1.1, tolerance=10):
         """
@@ -1564,6 +1862,412 @@ class LayeredLatticeAnalyzer:
         return self.lattice_vectors[layer]
 
 
+class LayeredLatticeAnalyzerSpglib:
+    """
+    A simplified LayeredLatticeAnalyzer using spglib for automatic primitive cell detection.
+    
+    This class separates atoms into layers and uses spglib to identify the lattice vectors
+    for each layer, avoiding complex DBSCAN-based geometric analysis.
+    
+    Key simplifications:
+    - No manual bravais type specification (spglib detects automatically)
+    - No type_structure for graphene-like vs MoTe2-like (spglib handles)
+    - No candidate vector storage (DBSCAN-specific)
+    """
+    
+    def __init__(self, input_data, num_layers, twist_layer, Tmat=None):
+        """
+        Initializes the LayeredLatticeAnalyzerSpglib with input data and number of layers.
+
+        Args:
+            input_data (list of dicts): Each dict should have 'original_index', 'species', and coordinates.
+            num_layers (int): Number of layers to separate the atoms into based on z-coordinate.
+            twist_layer (list of int): Layer grouping, e.g. [1, 3] means 1 bottom layer + 3 top layers.
+            Tmat (np.ndarray): Initial moiré supercell lattice matrix (3,3) for reference.
+        """
+        self.input_data = input_data
+        self.num_layers = num_layers
+        self.twist_layer = twist_layer
+        self.Tmat = Tmat if Tmat is not None else np.eye(3)
+        
+        # Core data structures
+        self.df = None
+        self.lattice_vectors = {}      # {layer: [a1, a2]}
+        self.reciprocal_vectors = {}   # {layer: [b1, b2]}
+        
+    def process(self, TAPW=True):
+        """
+        Runs the processing workflow to derive lattice vectors and reciprocal lattice vectors.
+        """
+        self.load_data()
+        if TAPW:
+            self.separate_layers()
+            self.compute_lattice_vectors_spglib()
+    
+    def load_data(self):
+        """
+        Loads input data into a pandas DataFrame.
+        """
+        data = []
+        for item in self.input_data:
+            index = item['original_index']
+            species = item['species']
+            x, y, z = item['x'], item['y'], item['z']
+            orb_num = item['orb_num']
+            orb_name = item['orb_name']
+            orb_global_index = item['orb_global_index']
+            data.append({
+                'original_index': index, 'species': species, 
+                'x': x, 'y': y, 'z': z, 
+                'orb_num': orb_num, 'orb_name': orb_name, 
+                'orb_global_index': orb_global_index
+            })
+        self.df = pd.DataFrame(data)
+        print(f"[Spglib] Loaded {len(self.df)} atoms into DataFrame.")
+    
+    def separate_layers(self):
+        """
+        Separates atoms into the specified number of layers based on their z-coordinate using K-Means clustering.
+        """
+        def assign_twist_groups(layer_indices, twist_layer):
+            """Assign layers to twist groups."""
+            group_labels = []
+            for group, count in enumerate(twist_layer):
+                for _ in range(count):
+                    group_labels.append(group)
+            return {layer: group_labels[i] for i, layer in enumerate(layer_indices)}
+        
+        if self.df is None:
+            raise ValueError("DataFrame is empty. Please load data first.")
+        
+        # Extract z coordinates and reshape for clustering
+        z_coords = self.df['z'].values.reshape(-1, 1)
+        
+        # Initialize K-Means with the desired number of clusters (layers)
+        kmeans = KMeans(n_clusters=self.num_layers, random_state=0, n_init='auto')
+        
+        # Fit K-Means and predict cluster labels
+        labels = kmeans.fit_predict(z_coords)
+        self.df['layer'] = labels
+        
+        # Sort layers by mean z-coordinate
+        layer_means = self.df.groupby('layer')['z'].mean().sort_values().index.tolist()
+        label_mapping = {old_label: new_label for new_label, old_label in enumerate(layer_means)}
+        self.df['layer'] = self.df['layer'].map(label_mapping)
+        
+        # Assign twist groups
+        group_mapping = assign_twist_groups(sorted(label_mapping.values()), self.twist_layer)
+        self.df['layer'] = self.df['layer'].map(group_mapping)
+        
+        # Update input_data
+        for i, item in enumerate(self.input_data):
+            self.input_data[i]['layer'] = self.df.loc[i, 'layer']
+        
+        print(f"[Spglib] Separated into {len(self.twist_layer)} twist groups with {self.df.shape[0]} atoms.")
+        for i in range(len(self.twist_layer)):
+            num_atoms = self.df[self.df['layer'] == i].shape[0]
+            print(f"[Spglib] Layer {i}: {num_atoms} atoms.")
+    
+    def compute_lattice_vectors_spglib(self, symprec=4e-1):
+        """
+        Computes lattice vectors for each layer using spglib's primitive cell detection.
+        
+        Args:
+            symprec (float): Symmetry precision for spglib (default: 1e-1 Å)
+        """
+        try:
+            import spglib
+        except ImportError:
+            raise ImportError("spglib is required for LayeredLatticeAnalyzerSpglib. Install with: pip install spglib")
+        
+        if 'layer' not in self.df.columns:
+            raise ValueError("Layers are not separated. Please run separate_layers() first.")
+        
+        # Create element to atomic number mapping
+        from ase.data import chemical_symbols, atomic_numbers
+        symbol_to_Z = {sym: Z for Z, sym in enumerate(chemical_symbols)}
+        
+        twist_angle_list = []
+        
+        for layer in range(len(self.twist_layer)):
+            layer_df = self.df[self.df['layer'] == layer]
+            
+            if layer_df.empty:
+                raise ValueError(f"Layer {layer}: no atoms found.")
+            
+            # Build supercell for this layer
+            # Use moiré supercell lattice as initial guess
+            latS = self.Tmat.copy()
+            latS[2, 2] = 50.0  # Large z-direction for 2D material
+            
+            # Get atom positions and convert to fractional coordinates
+            posS_cart = layer_df[['x', 'y', 'z']].values
+            posS_frac = np.linalg.solve(latS.T, posS_cart.T).T
+            
+            # Get atomic numbers
+            species_list = layer_df['species'].values
+            numS = np.array([symbol_to_Z.get(s, atomic_numbers.get(s, 0)) for s in species_list])
+            
+            # Call spglib to find primitive cell
+            cellS = (latS, posS_frac, numS)
+            # Print summary only (not full cellS with all atom positions)
+            print(f"[Spglib] Layer {layer}: {len(numS)} atoms, lattice shape {latS.shape}, positions shape {posS_frac.shape}")
+            prim = spglib.standardize_cell(
+                cellS, 
+                to_primitive=True, 
+                no_idealize=True, 
+                symprec=symprec
+            )
+            
+            if prim is None:
+                print(f"[Spglib] Warning: Layer {layer} primitive cell detection failed with symprec={symprec}")
+                print(f"[Spglib] Attempting with larger symprec=0.5...")
+                prim = spglib.standardize_cell(cellS, to_primitive=True, no_idealize=True, symprec=0.5)
+                
+                if prim is None:
+                    raise RuntimeError(
+                        f"Layer {layer}: spglib failed to identify primitive cell.\n"
+                        f"Try adjusting symprec or use the original LayeredLatticeAnalyzer."
+                    )
+            
+            latP, posP, numP = prim
+            
+            # Extract 2D lattice vectors (in-plane only)
+            a1 = latP[0, :2]
+            a2 = latP[1, :2]
+            
+            self.lattice_vectors[layer] = [a1, a2]
+            twist_angle_list.append(np.degrees(np.arctan2(a1[1], a1[0])))
+            
+            # Compute reciprocal lattice vectors
+            area = a1[0] * a2[1] - a1[1] * a2[0]
+            if area == 0:
+                raise ValueError(f"Layer {layer}: Lattice vectors are collinear. Cannot compute reciprocal vectors.")
+            
+            b1 = (2 * np.pi / area) * np.array([a2[1], -a2[0]])
+            b2 = (2 * np.pi / area) * np.array([-a1[1], a1[0]])
+            self.reciprocal_vectors[layer] = [b1, b2]
+            
+            # Print results
+            print(f"\n[Spglib] ======= Layer {layer}: Lattice vectors (Angstrom) =====")
+            print(np.array([a1, a2]))
+            print(f"[Spglib] ======= Layer {layer}: Reciprocal lattice vectors (1/Angstrom) =====")
+            print(np.array([b1, b2]))
+            
+            # Self-check (useful for any lattice type)
+            print(f"[Spglib] ======= Lattice self-check =====")
+            print(f"a1·a2 = {float(np.dot(a1, a2)):.6e}  (0 = orthogonal)")
+            print(f"|a1| = {float(np.linalg.norm(a1)):.6f} Å")
+            print(f"|a2| = {float(np.linalg.norm(a2)):.6f} Å")
+            print(f"|a1|/|a2| = {float(np.linalg.norm(a1)/np.linalg.norm(a2)):.6f}")
+            print(f"[Spglib] Primitive cell: {len(numP)} atoms (from {len(numS)} in supercell layer)")
+        
+        # Calculate twist angles
+        twist_angle_list = np.diff(twist_angle_list)
+        print("\n[Spglib] ======================= Calculated twist angle ========================")
+        for i in range(len(twist_angle_list)):
+            print(f"[Spglib] The twist angle between layer {i} and layer {i+1} is {twist_angle_list[i]:.4f}°")
+        print(f"[Spglib] ======================= End lattice_vectors computation ========================\n")
+    
+    def plot_lattice(self, layer=None, xlim=None, ylim=None, distance_threshold=None, save_path=None, save=False):
+        """
+        Plots the atomic distribution and lattice vectors for a specified layer.
+        Shows all periodic repetitions of the primitive cell within the supercell.
+        """
+        if plt is None:
+            raise ImportError("matplotlib is required for plotting.")
+        
+        layers_to_plot = [layer] if layer is not None else sorted(self.lattice_vectors.keys())
+        num_layers = len(layers_to_plot)
+        
+        rows = (num_layers + 1) // 2
+        cols = 2 if num_layers > 1 else 1
+        fig, axes = plt.subplots(rows, cols, figsize=(6 * cols, 4 * rows))
+        axes = np.array(axes).reshape(-1)
+        
+        for idx, layer in enumerate(layers_to_plot):
+            ax = axes[idx]
+            
+            if layer not in self.lattice_vectors:
+                raise ValueError(f"Lattice vectors for layer {layer} not found.")
+            
+            layer_df = self.df[self.df['layer'] == layer]
+            layer_atoms = layer_df[['x', 'y']].values
+            a1, a2 = self.lattice_vectors[layer]
+            
+            # Draw moiré supercell boundary (from Tmat)
+            # Tmat rows are lattice vectors: [a1_super, a2_super, a3_super]
+            a1_super = self.Tmat[0, :2]  # In-plane x,y components
+            a2_super = self.Tmat[1, :2]
+            
+            # Draw supercell as a parallelogram
+            supercell_corners = np.array([
+                [0, 0],
+                a1_super,
+                a1_super + a2_super,
+                a2_super,
+                [0, 0]  # Close the loop
+            ])
+            ax.plot(supercell_corners[:, 0], supercell_corners[:, 1], 
+                   'k-', linewidth=2.5, label='Moiré Supercell', zorder=1)  # Lower zorder to stay below legend
+            
+            # Plot atoms by species with different colors
+            # Use z-coordinate to vary point size for overlapping xy positions
+            species_list = layer_df['species'].unique()
+            colors = plt.get_cmap('tab10')
+            
+            # Get z-range for this layer to normalize sizes
+            z_min, z_max = layer_df['z'].min(), layer_df['z'].max()
+            z_range = z_max - z_min if z_max > z_min else 1.0
+            
+            for i, species in enumerate(species_list):
+                species_mask = layer_df['species'] == species
+                species_data = layer_df[species_mask]
+                species_atoms = species_data[['x', 'y']].values
+                species_z = species_data['z'].values
+                
+                # Vary size based on z: higher z → larger points
+                if z_range > 0.01:  # If there's significant z variation
+                    z_normalized = (species_z - z_min) / z_range  # 0 to 1
+                    sizes = 15 + 25 * z_normalized  # Size from 15 to 40
+                    alphas = 0.5 + 0.4 * z_normalized  # Alpha from 0.5 to 0.9
+                    
+                    # Plot with size/alpha encoding z
+                    for j, (x, y, s, a) in enumerate(zip(species_atoms[:, 0], species_atoms[:, 1], sizes, alphas)):
+                        ax.scatter(x, y, s=s, color=colors(i % 10), alpha=a, 
+                                 edgecolors='black', linewidths=0.5,
+                                 label=species if j == 0 else None)  # Only label first point
+                else:
+                    # No z variation, use uniform size
+                    ax.scatter(species_atoms[:, 0], species_atoms[:, 1], 
+                             s=20, color=colors(i % 10), alpha=0.7, 
+                             label=species, edgecolors='black', linewidths=0.5)
+            
+            # Determine threshold for plotting periodic cells
+            if distance_threshold is None:
+                distance_threshold = np.max(np.linalg.norm(layer_atoms, axis=1)) * 1.3
+            
+            # Calculate how many periods to show
+            max_i = int(np.ceil(distance_threshold / np.linalg.norm(a1))) + 1
+            max_j = int(np.ceil(distance_threshold / np.linalg.norm(a2))) + 1
+            
+            # Generate periodic lattice vectors using KDTree for filtering
+            i_values = np.arange(-max_i, max_i + 1)
+            j_values = np.arange(-max_j, max_j + 1)
+            ii, jj = np.meshgrid(i_values, j_values)
+            
+            # All possible translation vectors
+            translation_vectors = ii.flatten()[:, np.newaxis] * a1 + jj.flatten()[:, np.newaxis] * a2
+            
+            # Use KDTree to find translations close to atoms
+            tree = cKDTree(layer_atoms)
+            distances, _ = tree.query(translation_vectors, k=1)
+            
+            # Select translations near atoms (within a threshold)
+            mask = distances < 3.5  # Same threshold as original
+            selected_translations = translation_vectors[mask]
+            
+            # Prepare vector arrays for batch plotting
+            U_a1 = np.tile(a1[0], len(selected_translations))
+            V_a1 = np.tile(a1[1], len(selected_translations))
+            U_a2 = np.tile(a2[0], len(selected_translations))
+            V_a2 = np.tile(a2[1], len(selected_translations))
+            
+            # Plot all a1 vectors (red) - only label the first one
+            if len(selected_translations) > 0:
+                # Plot first vector with label
+                ax.quiver(
+                    selected_translations[0, 0], selected_translations[0, 1],
+                    a1[0], a1[1],
+                    angles='xy', scale_units='xy', scale=1,
+                    color='r', alpha=0.5, width=0.003,
+                    label='a1'
+                )
+                # Plot rest without label
+                if len(selected_translations) > 1:
+                    ax.quiver(
+                        selected_translations[1:, 0], selected_translations[1:, 1],
+                        U_a1[1:], V_a1[1:],
+                        angles='xy', scale_units='xy', scale=1,
+                        color='r', alpha=0.3, width=0.002
+                    )
+            
+            # Plot all a2 vectors (blue) - only label the first one
+            if len(selected_translations) > 0:
+                # Plot first vector with label
+                ax.quiver(
+                    selected_translations[0, 0], selected_translations[0, 1],
+                    a2[0], a2[1],
+                    angles='xy', scale_units='xy', scale=1,
+                    color='b', alpha=0.5, width=0.003,
+                    label='a2'
+                )
+                # Plot rest without label
+                if len(selected_translations) > 1:
+                    ax.quiver(
+                        selected_translations[1:, 0], selected_translations[1:, 1],
+                        U_a2[1:], V_a2[1:],
+                        angles='xy', scale_units='xy', scale=1,
+                        color='b', alpha=0.3, width=0.002
+                    )
+            
+            # Set limits
+            if xlim is None:
+                xlim_layer = [np.min(layer_atoms[:, 0]) - 5, np.max(layer_atoms[:, 0]) + 5]
+            else:
+                xlim_layer = xlim
+            
+            if ylim is None:
+                ylim_layer = [np.min(layer_atoms[:, 1]) - 5, np.max(layer_atoms[:, 1]) + 5]
+            else:
+                ylim_layer = ylim
+            
+            ax.set_xlim(xlim_layer)
+            ax.set_ylim(ylim_layer)
+            ax.set_aspect('equal')
+            ax.set_xlabel('X (Å)')
+            ax.set_ylabel('Y (Å)')
+            
+            # Count atoms in this layer
+            n_atoms_layer = len(layer_df)
+            ax.set_title(f'Layer {layer} ({n_atoms_layer} atoms)')
+            
+            # Legend with solid white background to avoid overlap
+            legend = ax.legend(loc='upper right', fontsize=8, framealpha=0.8, ncol=2, 
+                             fancybox=True, shadow=False, frameon=True)
+            legend.set_zorder(100)  # Put legend on top of everything
+        
+        # Hide extra subplots
+        for extra_ax in axes[num_layers:]:
+            extra_ax.axis('off')
+        
+        plt.tight_layout()
+        
+        if save:
+            if save_path is None:
+                raise ValueError("Please provide a save_path to save the plot.")
+            plt.savefig(f'{save_path}/lattice.pdf', dpi=300, bbox_inches='tight')
+        
+        plt.show()
+    
+    def plot_nearest_vectors_phase(self, **kwargs):
+        """Placeholder for compatibility - not implemented in spglib version."""
+        print("[Spglib] plot_nearest_vectors_phase is not implemented in spglib version.")
+        print("[Spglib] Use the original LayeredLatticeAnalyzer if this functionality is needed.")
+    
+    def get_reciprocal_vectors(self, layer):
+        """Retrieves the reciprocal lattice vectors for a specified layer."""
+        if layer not in self.reciprocal_vectors:
+            raise ValueError(f"Reciprocal vectors for layer {layer} not found.")
+        return self.reciprocal_vectors[layer]
+    
+    def get_lattice_vectors(self, layer):
+        """Retrieves the real-space lattice vectors for a specified layer."""
+        if layer not in self.lattice_vectors:
+            raise ValueError(f"Lattice vectors for layer {layer} not found.")
+        return self.lattice_vectors[layer]
+
+
 class StructureProcessor:
     """
     A class to process atomic structures by clustering atoms into layers, sublayers, and atom types,
@@ -1630,6 +2334,9 @@ class StructureProcessor:
         self.twist_index = twist_index
         self.Tmat = Tmat
         self.reciprocal_Tmat = reciprocal_Tmat
+        
+        self.load_data()
+        print("Data loaded.")
 
     def load_data(self):
         """
@@ -1646,7 +2353,10 @@ class StructureProcessor:
             orb_num = item['orb_num']
             orb_name = item['orb_name']
             global_orb_index = item['orb_global_index']
-            layer_index = item['layer']
+            try:
+                layer_index = item['layer']
+            except:
+                layer_index = 0
             
             
             data.append({'original_index': index, 'species': species, 'x': x, 'y': y, 'z': z, 'orb_num': orb_num, 'orb_name': orb_name, 'orb_global_index': global_orb_index, 'layer': layer_index})
@@ -2088,8 +2798,8 @@ class StructureProcessor:
         Executes the full processing workflow: loading data, separating layers, clustering sublayers,
         clustering atom types, aligning coordinates, and printing essential information.
         """
-        self.load_data()
-        print("Data loaded.")
+        # self.load_data()
+        # print("Data loaded.")
         self.separate_layers()
         print("Layers separated.")
         self.cluster_sublayers()
@@ -2146,3 +2856,671 @@ class StructureProcessor:
                         label = f"Atom Type {atom_type}"
                     print(f"    {label} ({species}): {count} atoms")
         print("--- End of Summary ---\n")
+
+
+class StructureProcessorSpglib:
+    """
+    StructureProcessor variant that uses spglib to:
+    - determine per-(twist)layer in-plane lattice vectors and reciprocal vectors
+    - assign a spglib-derived `basis_id` (mapping_to_primitive) for each atom
+    - derive `atom_type` from (layer, sublayer, basis_id) while preserving `sublayer`
+
+    Notes:
+    - `pos_frac` is *not* wrapped; it is passed to spglib as-is.
+    - A sanity check enforces that each `basis_id` maps to exactly one chemical species
+      inside the same layer group.
+    """
+
+    def __init__(
+        self,
+        input_data,
+        num_layers,
+        twist_layer,
+        layer_eps=0.5,
+        layer_min_samples=1,
+        sublayer_eps=0.5,
+        sublayer_min_samples=1,
+        atom_eps=0.3,
+        atom_min_samples=5,
+        period=2 * np.pi,
+        k_max=2,
+        spin=None,
+        twist_index=None,
+        Tmat=None,
+        reciprocal_Tmat=None,
+        symprec: float = 10e-1,
+        spglib_z_lattice: float = 50.0,
+    ):
+        self.input_data = input_data
+        self.num_layers = num_layers
+        self.monolayer_reciprocal_list = {}
+        self.twist_layer = twist_layer
+        self.layer_eps = layer_eps
+        self.layer_min_samples = layer_min_samples
+        self.sublayer_eps = sublayer_eps
+        self.sublayer_min_samples = sublayer_min_samples
+        self.atom_eps = atom_eps
+        self.atom_min_samples = atom_min_samples
+        self.period = period
+        self.k_max = k_max
+        self.df = None
+        self.phase1 = None
+        self.phase2 = None
+        self.transformed_index_matrix = None
+
+        self.spin = spin
+        self.twist_index = twist_index
+        self.Tmat = Tmat
+        self.reciprocal_Tmat = reciprocal_Tmat
+
+        self.symprec = float(symprec)
+        self.spglib_z_lattice = float(spglib_z_lattice)
+        self.layer_lattice_vectors = {}  # {layer: [a1, a2]}
+
+        self.load_data()
+        print("Data loaded.")
+
+    def load_data(self):
+        """
+        Loads input data into a pandas DataFrame.
+
+        Returns:
+            pd.DataFrame: DataFrame containing 'original_index', 'species', 'x', 'y', 'z'.
+        """
+        data = []
+        for item in self.input_data:
+            index = item['original_index']
+            species = item['species']
+            x, y, z = item['x'], item['y'], item['z']
+            orb_num = item['orb_num']
+            orb_name = item['orb_name']
+            global_orb_index = item['orb_global_index']
+            try:
+                layer_index = item['layer']
+            except Exception:
+                layer_index = 0
+
+            data.append({
+                'original_index': index,
+                'species': species,
+                'x': x,
+                'y': y,
+                'z': z,
+                'orb_num': orb_num,
+                'orb_name': orb_name,
+                'orb_global_index': global_orb_index,
+                'layer': layer_index,
+            })
+
+        self.df = pd.DataFrame(data)
+        print(f"Loaded {len(self.df)} atoms into DataFrame.")
+
+    def separate_layers(self):
+        """
+        Separates atoms into physical layers (phys_layer) and assigns twist groups (twist_group).
+        
+        Physical layers (phys_layer): 0..N-1, ordered from bottom to top by z-coordinate.
+        Twist groups (twist_group): 0..G-1, where G = len(twist_layer_counts).
+        Each twist_group contains twist_layer_counts[gid] physical layers.
+        
+        Adds:
+            'phys_layer': Physical layer index (0..N-1)
+            'twist_group': Twist group index (0..G-1)
+            'layer': Alias for phys_layer (for backward compatibility)
+        """
+        if self.df is None:
+            raise ValueError("DataFrame is empty. Please load data first.")
+        
+        # Validate twist_layer_counts
+        twist_layer_counts = self.twist_layer
+        if sum(twist_layer_counts) != self.num_layers:
+            raise ValueError(
+                f"sum(twist_layer_counts)={sum(twist_layer_counts)} != num_layers={self.num_layers}. "
+                f"twist_layer_counts={twist_layer_counts} must sum to num_layers."
+            )
+        
+        # Extract z coordinates and reshape for clustering
+        z_coords = self.df['z'].values.reshape(-1, 1)
+        
+        # Initialize K-Means with the desired number of clusters (physical layers)
+        kmeans = KMeans(n_clusters=self.num_layers, random_state=0, n_init='auto')
+        
+        # Fit K-Means and predict cluster labels
+        labels = kmeans.fit_predict(z_coords)
+        self.df['phys_layer'] = labels
+        
+        # Calculate the mean z-coordinate for each layer to sort layers from bottom to top
+        layer_means = self.df.groupby('phys_layer')['z'].mean().sort_values().index.tolist()
+        
+        # Create a mapping from old labels to new labels sorted by mean z-coordinate
+        label_mapping = {old_label: new_label for new_label, old_label in enumerate(layer_means)}
+        
+        # Apply the mapping to ensure layers are ordered from bottom to top
+        self.df['phys_layer'] = self.df['phys_layer'].map(label_mapping)
+        
+        # Validate phys_layer covers 0..N-1
+        unique_phys_layers = sorted(self.df['phys_layer'].unique())
+        if unique_phys_layers != list(range(self.num_layers)):
+            raise ValueError(
+                f"phys_layer must cover 0..{self.num_layers-1}, got {unique_phys_layers}"
+            )
+        
+        # Assign twist groups based on twist_layer_counts
+        # group0 covers phys_layer 0..(count0-1)
+        # group1 covers phys_layer count0..(count0+count1-1)
+        # etc.
+        self.df['twist_group'] = -1
+        phys_layer_to_group = {}
+        phys_layer_idx = 0
+        for group_id, count in enumerate(twist_layer_counts):
+            for _ in range(count):
+                phys_layer_to_group[phys_layer_idx] = group_id
+                phys_layer_idx += 1
+        
+        self.df['twist_group'] = self.df['phys_layer'].map(phys_layer_to_group)
+        
+        # Validate twist_group covers 0..G-1
+        n_groups = len(twist_layer_counts)
+        unique_groups = sorted(self.df['twist_group'].unique())
+        if unique_groups != list(range(n_groups)):
+            raise ValueError(
+                f"twist_group must cover 0..{n_groups-1}, got {unique_groups}"
+            )
+        
+        # Set 'layer' = 'phys_layer' for backward compatibility
+        self.df['layer'] = self.df['phys_layer']
+        
+        # Propagate labels to input_data for downstream compatibility
+        for i, _item in enumerate(self.input_data):
+            self.input_data[i]['phys_layer'] = int(self.df.loc[i, 'phys_layer'])
+            self.input_data[i]['twist_group'] = int(self.df.loc[i, 'twist_group'])
+            self.input_data[i]['layer'] = int(self.df.loc[i, 'layer'])  # = phys_layer
+        
+        # Print summary
+        print(f"Separated into {self.num_layers} physical layers and {n_groups} twist groups with {self.df.shape[0]} atoms.")
+        print(f"twist_layer_counts = {twist_layer_counts}")
+        for phys_layer in range(self.num_layers):
+            num_atoms = len(self.df[self.df['phys_layer'] == phys_layer])
+            group_id = phys_layer_to_group[phys_layer]
+            print(f"  phys_layer={phys_layer} (twist_group={group_id}): {num_atoms} atoms")
+        for group_id in range(n_groups):
+            num_atoms = len(self.df[self.df['twist_group'] == group_id])
+            print(f"  twist_group={group_id}: {num_atoms} atoms")
+
+    def cluster_sublayers(self):
+        """
+        Clusters atoms within each layer into sublayers using DBSCAN based on z-coordinate.
+
+        Adds:
+            'sublayer' column to self.df.
+        """
+        self.df = self.df.copy()
+        self.df['sublayer'] = -1  # Initialize with -1
+        layers = self.df['layer'].unique()
+        for layer in layers:
+            layer_mask = self.df['layer'] == layer
+            z = self.df.loc[layer_mask, 'z'].values.reshape(-1, 1)
+            db = DBSCAN(eps=self.sublayer_eps, min_samples=self.sublayer_min_samples)
+            labels = db.fit_predict(z)
+            self.df.loc[layer_mask, 'sublayer'] = labels
+            num_atoms = len(labels)
+            num_sublayers = len(set(labels)) - (1 if -1 in labels else 0)
+            print(f"Layer {layer}: {num_atoms} atoms clustered into {num_sublayers} sublayers.")
+
+    def compute_phase(self):
+        """
+        Computes phase1 and phase2 based on reciprocal lattice vectors and atom positions.
+        
+        Uses twist_group's reciprocal vectors (shared by all physical layers in the group),
+        but computes phase for each physical layer separately.
+        """
+        self.phase1 = np.zeros(self.df.shape[0])
+        self.phase2 = np.zeros(self.df.shape[0])
+        n_groups = len(self.twist_layer)
+        for twist_group in range(n_groups):
+            # Get reciprocal vectors for this twist_group (shared by all phys_layers in the group)
+            b1, b2 = self.monolayer_reciprocal_list[twist_group]
+            # Compute phase for all atoms in this twist_group (all physical layers)
+            mask = self.df['twist_group'] == twist_group
+            self.phase1[mask] = (self.df.loc[mask, 'x'] * b1[0] + self.df.loc[mask, 'y'] * b1[1]) % self.period
+            self.phase2[mask] = (self.df.loc[mask, 'x'] * b2[0] + self.df.loc[mask, 'y'] * b2[1]) % self.period
+        self.df['phase1'] = self.phase1
+        self.df['phase2'] = self.phase2
+
+    def align_coordinates(self):
+        """
+        Aligns atom coordinates based on their atom_type and reciprocal lattice vectors.
+
+        Adds:
+            'delta_tau_x', 'delta_tau_y', 'shifted_x', 'shifted_y' columns to self.df.
+        """
+        self.df = self.df.copy()
+        self.df['delta_tau_x'] = 0.0
+        self.df['delta_tau_y'] = 0.0
+        self.df['shifted_x'] = self.df['x']
+        self.df['shifted_y'] = self.df['y']
+        phase1 = self.df['phase1'].values
+        phase2 = self.df['phase2'].values
+
+        atom_types = self.df['atom_type'].unique()
+        for atom_type in atom_types:
+            if atom_type == -1:
+                continue
+            mask = self.df['atom_type'] == atom_type
+            if mask.sum() == 0:
+                continue
+
+            # Use twist_group to get reciprocal vectors (shared by all phys_layers in the group)
+            twist_group = self.df.loc[mask, 'twist_group'].values[0]
+            b1, b2 = self.monolayer_reciprocal_list[twist_group]
+            A = np.array([b1, b2])  # Shape: (2, 2)
+            try:
+                A_inv = np.linalg.inv(A)
+            except np.linalg.LinAlgError:
+                raise ValueError(
+                    f"Reciprocal lattice vectors for layer {layer_index} are linearly dependent and cannot be inverted."
+                )
+
+            phase1_avg = np.arctan2(np.mean(np.sin(phase1[mask])), np.mean(np.cos(phase1[mask]))) % self.period
+            phase2_avg = np.arctan2(np.mean(np.sin(phase2[mask])), np.mean(np.cos(phase2[mask]))) % self.period
+
+            indices = self.df[mask].index
+            phase1_subset = phase1[mask]
+            phase2_subset = phase2[mask]
+
+            c1 = (phase1_avg - phase1_subset) % self.period
+            c2 = (phase2_avg - phase2_subset) % self.period
+            c = np.vstack([c1, c2])  # Shape: (2, n_atoms)
+
+            delta_tau0 = A_inv @ c  # Shape: (2, n_atoms)
+
+            for i, idx in enumerate(indices):
+                delta_tau_initial = delta_tau0[:, i]
+
+                min_norm = np.inf
+                best_shift = None
+                for k1 in range(-self.k_max, self.k_max + 1):
+                    for k2 in range(-self.k_max, self.k_max + 1):
+                        k = np.array([k1, k2])
+                        delta = delta_tau_initial + A_inv @ (self.period * k)
+                        norm = np.linalg.norm(delta)
+                        if norm < min_norm:
+                            min_norm = norm
+                            best_shift = delta
+
+                self.df.at[idx, 'delta_tau_x'] = best_shift[0]
+                self.df.at[idx, 'delta_tau_y'] = best_shift[1]
+
+                self.df.at[idx, 'shifted_x'] = self.df.at[idx, 'x'] + best_shift[0]
+                self.df.at[idx, 'shifted_y'] = self.df.at[idx, 'y'] + best_shift[1]
+
+    def calculate_transformed_matrix(self):
+        """
+        Calculates the transformed index matrix based on the shifted coordinates.
+        """
+        sorted_indices = self.df['orb_global_index'].explode().astype(int).tolist()
+        sorted_indices = np.array(sorted_indices)
+        df_original = self.df.copy()
+        df_original = df_original.sort_values(by='original_index')
+        original_indices = df_original['orb_global_index'].explode().astype(int).tolist()
+        original_indices = np.array(original_indices)
+
+        num_wann = len(sorted_indices)
+        if self.spin:
+            self.transformed_index_matrix = sp.csr_matrix(
+                (
+                    np.ones(num_wann * 2),
+                    (
+                        np.concatenate([original_indices, original_indices + num_wann]),
+                        np.concatenate([sorted_indices, sorted_indices + num_wann]),
+                    ),
+                ),
+                shape=(num_wann * 2, num_wann * 2),
+            )
+        else:
+            self.transformed_index_matrix = sp.csr_matrix(
+                (np.ones(num_wann), (original_indices, sorted_indices)), shape=(num_wann, num_wann)
+            )
+        self.transformed_index_matrix = sp.csr_matrix(self.transformed_index_matrix)
+        print("=================== calculated transformed index matrix ===================")
+        print(
+            f"================== new orb_global_index = transformed_index_matrix{np.shape(self.transformed_index_matrix)} * old orb_global_index ==============="
+        )
+        print("==================    new ord : atom_type   ===============================")
+
+    def plot_clusters_loc(self, save_path=None, save=False):
+        """
+        Plots the clustering results in real space (shifted and original coordinates).
+        """
+        if plt is None:
+            raise ImportError("matplotlib is required for plotting.")
+
+        fig, ax = plt.subplots(1, 2, figsize=(15, 4))
+        unique_labels = sorted(self.df['atom_type'].unique())
+        colors = plt.get_cmap('tab10', len(unique_labels))
+
+        for _i, label in enumerate(unique_labels):
+            mask = self.df['atom_type'] == label
+            if label == -1:
+                ax[0].scatter(self.df.loc[mask, 'shifted_x'], self.df.loc[mask, 'shifted_y'], color='k', label='Noise', s=5)
+                ax[1].scatter(self.df.loc[mask, 'x'], self.df.loc[mask, 'y'], color='k', label='Noise', s=5)
+            else:
+                species = self.df.loc[mask, 'species'].values[0]
+                layer = self.df.loc[mask, 'layer'].values[0]
+                sublayer = self.df.loc[mask, 'sublayer'].values[0]
+                ax[0].scatter(
+                    self.df.loc[mask, 'shifted_x'],
+                    self.df.loc[mask, 'shifted_y'],
+                    color=colors(label % 10),
+                    label=f'Atom Type {label} ({species}) Layer {layer} Sublayer {sublayer}',
+                    s=5,
+                )
+                ax[1].scatter(
+                    self.df.loc[mask, 'x'],
+                    self.df.loc[mask, 'y'],
+                    color=colors(label % 10),
+                    label=f'Atom Type {label} ({species}) Layer {layer} Sublayer {sublayer}',
+                    s=5,
+                )
+
+        for i in range(2):
+            ax[i].set_aspect('equal')
+            ax[i].set_xlabel('X (Å)')
+            ax[i].set_ylabel('Y (Å)')
+            ax[i].legend(fontsize='8', loc='upper right')
+        ax[0].set_title('Shifted Coordinates')
+        ax[1].set_title('Original Coordinates')
+
+        plt.tight_layout()
+        if save:
+            if save_path is None:
+                raise ValueError("Please provide a save path for the plot.")
+            plt.savefig(save_path + '/culster_loc.pdf', dpi=300)
+        plt.show()
+
+    def plot_clusters_phase(self, save_path=None, save=False):
+        """
+        Plots the clustering results in phase space.
+        """
+        if plt is None or matplotlib is None:
+            raise ImportError("matplotlib is required for plotting.")
+
+        phase1_deg = (self.df.phase1.values * 180 / np.pi) % 360
+        phase2_deg = (self.df.phase2.values * 180 / np.pi) % 360
+        period_deg = (self.period * 180 / np.pi) % 360
+
+        # Phase plots should always have 2 subplots (b1 and b2), not based on twist_group count
+        fig, ax = plt.subplots(1, 2, figsize=(15, 4))
+        unique_labels = sorted(self.df['atom_type'].unique())
+        colors = plt.get_cmap('tab10', len(unique_labels))
+
+        kx = np.arange(self.df.shape[0])
+        for _i, label in enumerate(unique_labels):
+            mask = self.df['atom_type'] == label
+            if label == -1:
+                ax[0].scatter(kx[mask], phase1_deg[mask], color='k', label='Noise', s=5)
+                ax[1].scatter(kx[mask], phase2_deg[mask], color='k', label='Noise', s=5)
+            else:
+                species = self.df.loc[mask, 'species'].values[0]
+                layer = self.df.loc[mask, 'layer'].values[0]
+                sublayer = self.df.loc[mask, 'sublayer'].values[0]
+                ax[0].scatter(
+                    kx[mask],
+                    phase1_deg[mask],
+                    color=colors(label % 10),
+                    label=f'Atom Type {label} ({species}) Layer {layer} Sublayer {sublayer}',
+                    s=5,
+                )
+                ax[1].scatter(
+                    kx[mask],
+                    phase2_deg[mask],
+                    color=colors(label % 10),
+                    label=f'Atom Type {label} ({species}) Layer {layer} Sublayer {sublayer}',
+                    s=5,
+                )
+
+        for i in range(2):
+            ax[i].axhline(0, color='black', linestyle='--')
+            ax[i].axhline(period_deg, color='black', linestyle='--')
+            ax[i].set_xlabel('Atom Index (sorted by z-coordinate)')
+            ax[i].set_ylabel('Phase (Degrees)')
+            ax[i].set_title(f'Phase Clustering Results b{i+1}')
+            ax[i].legend(fontsize='8', loc='upper right')
+            ax[i].grid(True)
+            ax[i].yaxis.set_major_locator(plt.MultipleLocator(60))
+            ax[i].set_ylim(-10, 370)
+
+        plt.tight_layout()
+        if save:
+            if save_path is None:
+                raise ValueError("Please provide a save path for the plot.")
+            plt.savefig(save_path + '/culster_phase.pdf', dpi=300)
+        plt.show()
+
+    def print_summary(self):
+        """
+        Prints a summary of the clustering results, including the number of layers, sublayers,
+        atom types, and atom counts.
+        """
+        print("\n--- Clustering Summary ---")
+        total_layers = self.df['layer'].nunique()
+        print(f"Total Layers: {total_layers}")
+        for layer in sorted(self.df['layer'].unique()):
+            layer_df = self.df[self.df['layer'] == layer]
+            num_sublayers = layer_df['sublayer'].nunique()
+            print(f"\nLayer {layer}: {num_sublayers} Sublayers")
+            for sublayer in sorted(layer_df['sublayer'].unique()):
+                sublayer_df = layer_df[layer_df['sublayer'] == sublayer]
+                atom_types = sublayer_df['atom_type'].unique()
+                print(f"  Sublayer {sublayer}:")
+                for atom_type in sorted(atom_types):
+                    count = (sublayer_df['atom_type'] == atom_type).sum()
+                    species = sublayer_df.loc[sublayer_df['atom_type'] == atom_type, 'species'].values
+                    species = species[0] if len(species) > 0 else "Unknown"
+                    label = "Noise" if atom_type == -1 else f"Atom Type {atom_type}"
+                    print(f"    {label} ({species}): {count} atoms")
+        print("--- End of Summary ---\n")
+
+    @staticmethod
+    def _get_mapping_to_primitive(dataset):
+        # Prefer attribute interface; dict interface is deprecated in newer spglib.
+        mapping = getattr(dataset, "mapping_to_primitive", None)
+        if mapping is None:
+            mapping = getattr(dataset, "std_mapping_to_primitive", None)
+        if mapping is None:
+            raise KeyError("spglib symmetry dataset missing mapping_to_primitive/std_mapping_to_primitive")
+        return np.asarray(mapping, dtype=int)
+
+    @staticmethod
+    def _species_to_atomic_numbers(species_list):
+        try:
+            from ase.data import atomic_numbers
+        except Exception as exc:
+            raise ImportError("ase is required for spglib-based structure processing.") from exc
+
+        nums = []
+        unknown = set()
+        for s in species_list:
+            sym = str(s).strip()
+            Z = atomic_numbers.get(sym, 0)
+            if Z == 0:
+                unknown.add(sym)
+            nums.append(Z)
+        if unknown:
+            raise ValueError(f"Unknown chemical symbols for spglib/ase mapping: {sorted(unknown)}")
+        return np.asarray(nums, dtype=int)
+
+    def _compute_layer_lattice_and_basis_spglib(self, twist_group: int):
+        """
+        Compute lattice vectors and basis_id for a twist_group using spglib.
+        
+        All physical layers in the same twist_group share the same lattice vectors.
+        This method aggregates all atoms from all physical layers in the given twist_group.
+        
+        Args:
+            twist_group: Twist group index (0..G-1)
+        """
+        try:
+            import spglib
+        except Exception as exc:
+            raise ImportError("spglib is required for StructureProcessorSpglib. Install with: pip install spglib") from exc
+
+        if self.Tmat is None:
+            raise ValueError("Tmat is required for spglib processing (moiré supercell lattice).")
+
+        # Aggregate all atoms from all physical layers in this twist_group
+        group_df = self.df[self.df["twist_group"] == twist_group]
+        if group_df.empty:
+            raise ValueError(f"Twist group {twist_group}: no atoms found.")
+
+        latS = np.asarray(self.Tmat, dtype=np.float64).copy()
+        if latS.shape != (3, 3):
+            raise ValueError(f"Tmat must be shape (3,3), got {latS.shape}")
+
+        # Enforce a large out-of-plane lattice constant for quasi-2D materials.
+        latS[2, 2] = max(self.spglib_z_lattice, float(latS[2, 2]))
+
+        pos_cart = group_df[["x", "y", "z"]].values.astype(np.float64, copy=False)
+        pos_frac = np.linalg.solve(latS.T, pos_cart.T).T  # no wrap on purpose
+        numS = self._species_to_atomic_numbers(group_df["species"].values)
+
+        cellS = (latS, pos_frac, numS)
+        # Print summary only (not full cellS with all atom positions)
+        print(f"[Spglib] Twist group {twist_group}: {len(numS)} atoms, lattice shape {latS.shape}, positions shape {pos_frac.shape}")
+        dataset = spglib.get_symmetry_dataset(cellS, symprec=self.symprec)
+        if dataset is None:
+            raise RuntimeError(
+                f"Twist group {twist_group}: spglib.get_symmetry_dataset failed with symprec={self.symprec}. "
+                f"Try adjusting symprec."
+            )
+
+        mapping = self._get_mapping_to_primitive(dataset)
+        if mapping.shape[0] != numS.shape[0]:
+            raise RuntimeError(
+                f"Twist group {twist_group}: mapping_to_primitive length mismatch "
+                f"({mapping.shape[0]} vs {numS.shape[0]})."
+            )
+
+        # Sanity check: each basis_id should correspond to a single atomic number.
+        for basis_id in np.unique(mapping):
+            zs = np.unique(numS[mapping == basis_id])
+            if zs.size != 1:
+                bad_species = [group_df["species"].values[i] for i in np.where(mapping == basis_id)[0]]
+                raise ValueError(
+                    f"Twist group {twist_group}: basis_id={basis_id} maps to multiple species {zs.tolist()} "
+                    f"({sorted(set(map(str, bad_species)))}) — try smaller symprec."
+                )
+
+        # Write back using original indices to avoid accidental reordering bugs.
+        idx = group_df.index.to_numpy()
+        if "basis_id" not in self.df.columns:
+            self.df["basis_id"] = -1
+        self.df.loc[idx, "basis_id"] = mapping
+
+        # Primitive lattice for reciprocal vectors.
+        prim = spglib.standardize_cell(cellS, to_primitive=True, no_idealize=True, symprec=self.symprec)
+        if prim is None:
+            # Fallback tries: progressively relax symprec.
+            for symprec_try in (max(self.symprec * 2.0, 5e-2), 1e-1, 5e-1):
+                prim = spglib.standardize_cell(cellS, to_primitive=True, no_idealize=True, symprec=symprec_try)
+                if prim is not None:
+                    break
+        if prim is None:
+            raise RuntimeError(
+                f"Twist group {twist_group}: spglib.standardize_cell(to_primitive=True) failed. "
+                f"Try adjusting symprec (current {self.symprec})."
+            )
+
+        latP, _, _ = prim
+        a1 = np.asarray(latP[0, :2], dtype=np.float64)
+        a2 = np.asarray(latP[1, :2], dtype=np.float64)
+        
+        # Store lattice vectors for this twist_group (shared by all physical layers in the group)
+        self.layer_lattice_vectors[twist_group] = [a1, a2]
+        print(f"[Spglib] Twist group {twist_group}: lattice vectors (Angstrom) =====")
+        print(np.array([a1, a2]))
+
+        area = float(a1[0] * a2[1] - a1[1] * a2[0])
+        if area == 0.0:
+            raise ValueError(f"Twist group {twist_group}: lattice vectors are collinear; cannot compute reciprocal vectors.")
+        b1 = (2 * np.pi / area) * np.array([a2[1], -a2[0]], dtype=np.float64)
+        b2 = (2 * np.pi / area) * np.array([-a1[1], a1[0]], dtype=np.float64)
+        
+        # Store reciprocal vectors for this twist_group (shared by all physical layers in the group)
+        self.monolayer_reciprocal_list[twist_group] = [b1, b2]
+
+        print(f"\n[Spglib] ======= Twist group {twist_group}: lattice vectors (Angstrom) =====")
+        print(np.array([a1, a2]))
+        print(f"[Spglib] ======= Twist group {twist_group}: reciprocal vectors (1/Angstrom) =====")
+        print(np.array([b1, b2]))
+        
+        # Also store for each physical layer in this group (for backward compatibility)
+        phys_layers_in_group = sorted(group_df['phys_layer'].unique())
+        for phys_layer in phys_layers_in_group:
+            self.layer_lattice_vectors[phys_layer] = [a1, a2]
+            self.monolayer_reciprocal_list[phys_layer] = [b1, b2]
+
+    def _assign_atom_types_from_basis(self):
+        if "basis_id" not in self.df.columns:
+            raise ValueError("basis_id not found; run spglib basis assignment first.")
+        if "sublayer" not in self.df.columns:
+            raise ValueError("sublayer not found; run cluster_sublayers() first.")
+
+        key_df = self.df[["layer", "sublayer", "basis_id"]].astype(int)
+        atom_type = pd.factorize(pd.MultiIndex.from_frame(key_df))[0]
+        self.df = self.df.copy()
+        self.df["atom_type"] = atom_type
+
+        # Sanity check: each atom_type should correspond to a single species.
+        for at in np.unique(atom_type):
+            species = self.df.loc[self.df["atom_type"] == at, "species"].unique()
+            if len(species) != 1:
+                raise ValueError(f"atom_type {at} corresponds to multiple species: {species}")
+
+        # Match legacy behaviour: sort by phys_layer/sublayer/atom_type (layer=phys_layer for compatibility)
+        self.df = self.df.sort_values(by=["phys_layer", "sublayer", "atom_type"]).reset_index(drop=True)
+
+    def process(self):
+        """
+        Full workflow using spglib for lattice and basis assignment.
+        """
+        self.separate_layers()
+        print("Layers separated.")
+        self.cluster_sublayers()
+        print("Sublayers clustered.")
+
+        # spglib: per-twist_group lattice + basis_id mapping
+        # All physical layers in the same twist_group share the same lattice vectors
+        n_groups = len(self.twist_layer)
+        for twist_group in range(n_groups):
+            self._compute_layer_lattice_and_basis_spglib(twist_group)
+        
+        # Calculate and print twist angles between twist_groups
+        if n_groups >= 2:
+            twist_angle_list = []
+            for twist_group in range(n_groups):
+                a1, a2 = self.layer_lattice_vectors[twist_group]
+                # Use a1 direction as the orientation angle
+                angle = np.degrees(np.arctan2(a1[1], a1[0]))
+                twist_angle_list.append(angle)
+            
+            # Calculate relative twist angles between adjacent groups
+            twist_angle_diffs = np.diff(twist_angle_list)
+            # Normalize to [-180, 180] range
+            twist_angle_diffs = np.mod(twist_angle_diffs + 180, 360) - 180
+            
+            print("\n[Spglib] ======================= Twist angles between groups ========================")
+            for i in range(len(twist_angle_diffs)):
+                print(f"[Spglib] Twist angle between group {i} and group {i+1}: {twist_angle_diffs[i]:.4f}°")
+            print(f"[Spglib] ======================= End twist angle calculation ========================\n")
+
+        self._assign_atom_types_from_basis()
+        print("Atom types assigned (layer, sublayer, basis_id).")
+
+        self.compute_phase()
+        print("Phase data computed.")
+        self.align_coordinates()
+        print("Coordinates aligned.")
+        self.calculate_transformed_matrix()
+        print("Transformed index matrix calculated.")
+        self.print_summary()

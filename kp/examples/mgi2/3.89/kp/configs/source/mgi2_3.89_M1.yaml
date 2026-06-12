@@ -8,7 +8,6 @@ material:
   band_file: ../../../tapw/Q_shell_7/band/band_CBM_M1_valley.txt
   # Explicit Fermi level in eV (overrides vbm_file)
   efermi: -4.168612
-  # vbm_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89/tapw/Q_shell_6/band/band_VBM_Gamma_valley.txt"
   spin: "up"
   num_layers: 2
   # Optional: provide per-layer orbitals; otherwise inferred
