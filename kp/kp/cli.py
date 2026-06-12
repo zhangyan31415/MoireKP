@@ -1266,7 +1266,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.cmd == "symm":
         run_symmetry_projection_from_config(args.config)
     elif args.cmd == "model":
-        from .model.configured import run_configured_model
+        from .model.pipeline import run_configured_model
 
         results = run_configured_model(args.config)
         model_cfg = results.get("configured_model")

@@ -12,7 +12,7 @@ import yaml
 from ..blocks.blocks import _assemble_projectors_from_block_eigenvectors, calculate_energy_lists, get_H_block
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..io.tapw_loader import load_Q_sets, load_hamk
-from ..model.config_schema import M_EFFECTIVE_OPERATION_ALIASES
+from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
 from .exactify_representation import exactify_loaded_symmetry_source
 from .geometry import (
     bM_candidates_from_q_distances,

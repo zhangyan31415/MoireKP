@@ -13,7 +13,7 @@
 ### Task 1: Configuration Loader
 
 **Files:**
-- Create: `kp/kp/model/configured.py`
+- Create: `kp/kp/model/pipeline.py`
 - Test: `kp/tests/test_configured_model.py`
 
 **Steps:**
@@ -25,7 +25,7 @@
 ### Task 2: Pipeline API
 
 **Files:**
-- Modify: `kp/kp/model/configured.py`
+- Modify: `kp/kp/model/pipeline.py`
 - Test: `kp/tests/test_configured_model.py`
 
 **Steps:**

@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from kp.model.configured import build_moire_config_from_file, load_model_config, run_configured_model
+from kp.model.pipeline import build_moire_config_from_file, load_model_config, run_configured_model
 from kp.model.core import build_model
 
 

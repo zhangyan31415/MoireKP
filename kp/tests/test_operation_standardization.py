@@ -10,8 +10,8 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from kp.model.config_schema import CANONICAL_INTERNAL_NAMES, canonical_operation_name_for_valley
-from kp.model.configured import (
+from kp.model.schema import CANONICAL_INTERNAL_NAMES, canonical_operation_name_for_valley
+from kp.model.pipeline import (
     _build_operation_registry,
     _enrich_symmetry_map,
     _symmetry_operation_index,

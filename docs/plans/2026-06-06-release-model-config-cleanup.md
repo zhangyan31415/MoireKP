@@ -4,7 +4,7 @@
 
 **Goal:** Remove release-facing release-only compatibility scaffolding from the model configuration layer and unify time-reversal operation naming.
 
-**Architecture:** `configured.py` should load one explicit release model schema instead of compiling short-form examples through case-specific branches. Symmetry actions remain explicit metadata (`k_map`, `q_map`, `sector_map`), while the time-reversal family uses `TR` consistently (`TR` for physical time reversal, `TR_eff` for effective M-valley time reversal).
+**Architecture:** `pipeline.py` should load one explicit release model schema instead of compiling short-form examples through case-specific branches. Symmetry actions remain explicit metadata (`k_map`, `q_map`, `sector_map`), while the time-reversal family uses `TR` consistently (`TR` for physical time reversal, `TR_eff` for effective M-valley time reversal).
 
 **Tech Stack:** Python, YAML, NumPy, pytest, existing `kp.cli model` regression examples.
 
@@ -13,8 +13,8 @@
 ### Task 1: Normalize Time-Reversal Names
 
 **Files:**
-- Modify: `kp/kp/model/config_schema.py`
-- Modify: `kp/kp/model/configured.py`
+- Modify: `kp/kp/model/schema.py`
+- Modify: `kp/kp/model/pipeline.py`
 - Modify: `kp/kp/model/symmetry.py`
 - Modify: `kp/kp/model/exactify_representation.py`
 - Modify: `kp/kp/model/core.py`
@@ -32,7 +32,7 @@
 ### Task 2: Remove Public Config Compiler
 
 **Files:**
-- Modify: `kp/kp/model/configured.py`
+- Modify: `kp/kp/model/pipeline.py`
 - Modify: example YAML configs.
 
 **Steps:**
@@ -44,8 +44,8 @@
 ### Task 3: Remove Production/Legacy Release Semantics
 
 **Files:**
-- Modify: `kp/kp/model/config_schema.py`
-- Modify: `kp/kp/model/configured.py`
+- Modify: `kp/kp/model/schema.py`
+- Modify: `kp/kp/model/pipeline.py`
 - Modify: `kp/kp/model/symmetry.py`
 - Modify: `kp/kp/model/exactify_representation.py`
 - Modify: tests/configs.

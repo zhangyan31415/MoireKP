@@ -13,7 +13,7 @@ import numpy as np
 import scipy.linalg
 import yaml
 
-from .config_schema import (
+from .schema import (
     canonical_operation_name_for_valley,
     canonical_source_operation_name_for_valley,
     effective_operation_metadata_for_valley,

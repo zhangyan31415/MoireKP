@@ -8,7 +8,7 @@ from typing import Any, Mapping
 import numpy as np
 import yaml
 
-from .config_schema import M_EFFECTIVE_OPERATION_ALIASES
+from .schema import M_EFFECTIVE_OPERATION_ALIASES
 
 
 _REQUIRED_METADATA = {

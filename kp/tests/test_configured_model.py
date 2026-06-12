@@ -10,7 +10,7 @@ import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from kp.model.configured import (  # noqa: E402
+from kp.model.pipeline import (  # noqa: E402
     _auto_harmonics_from_q_sets,
     _auto_harmonics_from_support,
     _build_operation_registry,
@@ -216,7 +216,7 @@ def _write_symm_frame_manifest(tmp_path: Path, *, rotation_deg: float, path_name
 
 def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: Path) -> None:
     import kp.cli as cli
-    import kp.model.configured as configured
+    import kp.model.pipeline as configured
 
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
@@ -235,7 +235,7 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
 
 def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path, capsys) -> None:
     import kp.cli as cli
-    import kp.model.configured as configured
+    import kp.model.pipeline as configured
 
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
@@ -1672,7 +1672,7 @@ def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> 
             "model": type("Model", (), {"terms": {key: type("Term", (), {"key": key, "tag": "Kinect", "active": True, "r_value_real": 1.0, "r_value_imag": 0.0, "symmetry_ops": []})()}})(),
         }
 
-    monkeypatch.setattr("kp.model.configured._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
 
     run_configured_model(cfg_path)
 
@@ -1706,9 +1706,9 @@ def test_run_configured_model_quiet_writes_detailed_log(monkeypatch, capsys, tmp
         print("very noisy coefficient dump")
         return expected_eigvals
 
-    monkeypatch.setattr("kp.model.configured.build_model", fake_build_model)
-    monkeypatch.setattr("kp.model.configured.compute_coefficients", fake_compute_coefficients)
-    monkeypatch.setattr("kp.model.configured.compute_bands", fake_compute_bands)
+    monkeypatch.setattr("kp.model.pipeline.build_model", fake_build_model)
+    monkeypatch.setattr("kp.model.pipeline.compute_coefficients", fake_compute_coefficients)
+    monkeypatch.setattr("kp.model.pipeline.compute_bands", fake_compute_bands)
 
     results = run_configured_model(cfg_path)
     captured = capsys.readouterr()
@@ -2460,7 +2460,7 @@ def test_action_mismatch_explicit_accept_writes_internal_resolved_action_with_pr
 
 
 def test_float_p_key_canonicalization() -> None:
-    from kp.model.config_schema import canonical_vector_key
+    from kp.model.schema import canonical_vector_key
 
     assert canonical_vector_key([0.1 + 0.2, 0.0], tol=1.0e-9) == canonical_vector_key([0.3, 0.0], tol=1.0e-9)
     assert ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.1 + 0.2, 0.0)) == ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.3, 0.0))
@@ -2509,7 +2509,7 @@ def test_run_configured_model_saves_auto_harmonics_diagnostic_plot(monkeypatch, 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}
 
-    monkeypatch.setattr("kp.model.configured._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
 
     run_configured_model(cfg_path)
 
@@ -2525,7 +2525,7 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
         assert moire_config.output_dir is None
         return {"eigvals": expected_eigvals, "diagnostics": {("tuple", "key"): 1}}
 
-    monkeypatch.setattr("kp.model.configured._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
 
     results = run_configured_model(cfg_path)
 
@@ -2579,7 +2579,7 @@ def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_pat
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}
 
-    monkeypatch.setattr("kp.model.configured._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
     results = run_configured_model(cfg_path)
 
     assert results["configured_model"].band_plot_config["ylim"] == [0.0, 0.16]
@@ -2648,7 +2648,7 @@ def test_validation_strict_rejects_unavailable_validation_outputs(monkeypatch, t
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}
 
-    monkeypatch.setattr("kp.model.configured._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
 
     with pytest.raises(ValueError, match="validation.strict=true requires"):
         run_configured_model(cfg_path)

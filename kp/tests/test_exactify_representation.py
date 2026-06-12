@@ -7,7 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
-from kp.model.configured import build_moire_config_from_file
+from kp.model.pipeline import build_moire_config_from_file
 from kp.symmetry.exactify_representation import (
     BasisLabel,
     OperationAction,
