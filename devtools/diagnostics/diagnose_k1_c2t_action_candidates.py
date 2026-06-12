@@ -150,7 +150,7 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--artifact-dir",
-        default="kp/examples/mote2/3.89/kp/outputs/symm/mote2_3.89_K1",
+        default="examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1",
         help="K1 kp symm output directory containing C2T_low_raw.npy and q_model_layer*.npy",
     )
     parser.add_argument("--output", default=None, help="Optional JSON output path")

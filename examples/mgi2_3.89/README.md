@@ -9,12 +9,12 @@
 Main commands:
 
 ```bash
-PYTHONPATH=kp python -m kp.cli plot --config kp/examples/mgi2/3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
-PYTHONPATH=kp python -m kp.cli project --config kp/examples/mgi2/3.89/kp/configs/source/mgi2_3.89_M1.yaml
-PYTHONPATH=kp python -m kp.cli project --config kp/examples/mgi2/3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
-PYTHONPATH=kp python -m kp.cli model --config kp/examples/mgi2/3.89/kp/configs/model/mgi2_3.89_Gamma.yaml
-PYTHONPATH=kp python -m kp.cli model --config kp/examples/mgi2/3.89/kp/configs/model/mgi2_3.89_M1.yaml
-PYTHONPATH=kp python -m kp.cli model --config kp/examples/mgi2/3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml
+kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
+kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml
+kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml
 ```
 
 Production status on 2026-06-03:

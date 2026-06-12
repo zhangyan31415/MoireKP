@@ -9,11 +9,11 @@
 Main commands:
 
 ```bash
-PYTHONPATH=kp python -m kp.cli plot --config kp/examples/mote2/3.89/kp/configs/source/mote2_3.89_K1.yaml
-PYTHONPATH=kp python -m kp.cli project --config kp/examples/mote2/3.89/kp/configs/source/mote2_3.89_K1.yaml
-PYTHONPATH=kp python -m kp.cli project --config kp/examples/mote2/3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml
-PYTHONPATH=kp python -m kp.cli model --config kp/examples/mote2/3.89/kp/configs/model/mote2_3.89_K1.yaml
-PYTHONPATH=kp python -m kp.cli model --config kp/examples/mote2/3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml
+kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml
+kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml
+kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml
 ```
 
 Production status on 2026-06-03:

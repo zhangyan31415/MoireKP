@@ -1,7 +1,6 @@
 import os
 import shutil
 import argparse
-from importlib.resources import files
 import yaml
 import re
 import subprocess
@@ -26,11 +25,9 @@ yaml.add_representer(list, list_presenter)
 
 def get_default_config_path():
     """Get the path to the default config files in the package."""
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+    current_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
     config_yaml = os.path.join(current_dir, 'config.yaml')
     bands_yaml = os.path.join(current_dir, 'bands.yaml')
-    # config_yaml = str(files('tapw').joinpath('config.yaml'))
-    # bands_yaml = str(files('tapw').joinpath('bands.yaml'))
     return config_yaml, bands_yaml
 
 def read_yaml_with_comments(file_path):
@@ -168,7 +165,7 @@ def generate_config(output_dir='.', use_logical_path=True):
         f.write(bands_content)
     
     # 复制 KPATH 文件，但使用新的名字
-    current_dir = os.path.dirname(os.path.abspath(__file__))
+    current_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
     kpath_in = os.path.join(current_dir, 'KPATH.in')
     shutil.copy2(kpath_in, os.path.join(output_dir, 'KPATH.in'))
     
@@ -187,9 +184,9 @@ def main():
                       help='Output directory for configuration files (default: current directory)')
     parser.add_argument('-P', '--physical-path', action='store_true',
                       help='Use physical path (resolve symlinks) instead of logical path')
-    
+
     args = parser.parse_args()
     generate_config(args.output, not args.physical_path)
 
 if __name__ == '__main__':
-    main() 
+    main()

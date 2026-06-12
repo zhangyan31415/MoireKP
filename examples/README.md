@@ -1,11 +1,13 @@
-# kp examples
+# MoireKP Examples
 
-当前 `examples` 只维护一套统一的 GMK 示例结构，面向用户的配置名保持尽量简单。
+This directory contains release-facing examples. Examples are grouped by
+material and twist angle so the TAPW inputs/outputs and downstream KP configs
+stay together.
 
 ## Canonical Layout
 
 ```text
-kp/examples/<material>/<angle>/
+examples/<material>_<angle>/
   openmx/
   tapw/
   kp/
@@ -48,18 +50,24 @@ kp/examples/<material>/<angle>/
 ## Active GMK Cases
 
 - K:
-  - `kp/examples/mote2/3.89/kp/configs/source/mote2_3.89_K1.yaml`
-  - `kp/examples/mote2/3.89/kp/configs/model/mote2_3.89_K1.yaml`
-  - `kp/examples/mote2/3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml`
-  - `kp/examples/mote2/3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml`
+  - `examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml`
+  - `examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml`
+  - `examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml`
+  - `examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml`
 - Gamma:
-  - `kp/examples/mgi2/3.89/kp/configs/source/mgi2_3.89_Gamma.yaml`
-  - `kp/examples/mgi2/3.89/kp/configs/model/mgi2_3.89_Gamma.yaml`
+  - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml`
+  - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml`
 - M:
-  - `kp/examples/mgi2/3.89/kp/configs/source/mgi2_3.89_M1.yaml`
-  - `kp/examples/mgi2/3.89/kp/configs/model/mgi2_3.89_M1.yaml`
-  - `kp/examples/mgi2/3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml`
-  - `kp/examples/mgi2/3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml`
+  - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml`
+  - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml`
+  - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml`
+  - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml`
+
+## TAPW Templates
+
+- `examples/tapw/basic/`: additional TAPW example configs.
+- `examples/tapw/kpaths/`: alternative K-path inputs.
+- `tapw-config` uses package templates from `tapw/tapw/templates/`; those are not user examples.
 
 ## Cleanup Policy
 
@@ -67,7 +75,7 @@ kp/examples/<material>/<angle>/
 - 失败实验、旧命名、过时输出、重复配置，统一移到：
 
 ```text
-kp/examples/garbage/<material>/<stamp>/...
+examples/garbage/<material>/<stamp>/...
 ```
 
 - 不在主树里保留：
@@ -80,7 +88,7 @@ kp/examples/garbage/<material>/<stamp>/...
 
 ## Notes
 
-- `kp/tests/test_examples_gmk_pipeline.py` 负责检查这套目录和配置约定。
+- `tests/kp/test_examples_gmk_pipeline.py` 负责检查这套目录和配置约定。
 - K、Gamma、M 和 spinful 示例当前都有 canonical saved model output，可通过 `run_summary.json` 做数值回归。
 - 用户面配置只写标准 family name，例如 `C3z`、`TR`、`C2`、`C2T`。
 - 几何 action、sector map 和精确化后的 continuum representation 来自 `kp symm` manifest，不在 model YAML 中手写。

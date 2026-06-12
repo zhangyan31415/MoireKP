@@ -73,24 +73,21 @@ kp_examples_*.tar.gz
 kp_examples_*.tar.zst
 kp/kp.tar.gz
 
-# Generated example outputs; keep configs under kp/examples tracked.
-kp/examples/**/outputs/
-kp/examples/**/runs/
-kp/examples/garbage/
-kp/examples/**/kp/configs/model/reference/
+# Generated example outputs; keep configs under examples tracked.
+examples/**/outputs/
+examples/**/runs/
+examples/garbage/
+examples/**/kp/configs/model/reference/
 kp/.tmp_*/
 
 # Scratch notebooks and external notebook data dumps
 kp/model_*.ipynb
 kp/test_*.ipynb
 kp/*_K_*.ipynb
-kp/test/charge_density/
 
-# Root-level external examples only
-/examples/
 kp/configs/
 Mote_DFT_gen/
 *.npy
 *.npz
-!kp/tests/fixtures/**/*.npy
-!kp/tests/fixtures/**/*.npz
+!tests/fixtures/**/*.npy
+!tests/fixtures/**/*.npz

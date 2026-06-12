@@ -1,45 +1,25 @@
-# kp
+# kp package
 
-Utilities for building moire k.p models from TAPW Hamiltonians.
+Python package for projecting TAPW Hamiltonians and fitting moire k.p continuum models.
 
 ## Install
 
-From this directory:
+Install from the repository root:
 
 ```bash
 pip install -e .
 ```
 
-If the `kp` command is not installed, run the CLI as:
-
-```bash
-PYTHONPATH=. python -m kp.cli
-```
-
 ## Examples
 
-Runnable examples are under `examples/`. Start with:
+Release examples are under the repository-level `examples/` directory. Start with:
 
 ```bash
-kp plot -c examples/mgi2/mgi2_8_gamma.yaml
-kp project -c examples/mgi2/mgi2_8_gamma.yaml
-
-kp plot -c examples/mote2/mote2_8_K.yaml
-kp project -c examples/mote2/mote2_8_K.yaml
-```
-
-After `kp project` generates `heff_list.npy` and `heff_eig.npy`, run the matching notebook:
-
-```text
-examples/mgi2/model_mgi2_G.ipynb
-examples/mote2/model_mote2_K.ipynb
+kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml
 ```
 
 See `examples/README.md` for the full input/output workflow and the meaning of `nlow_state_list` and `norb_fix_list`.
-
-## Local Scratch Configs
-
-`configs/` is treated as a local scratch area for experiments and generated plots. It is ignored by git and should not be uploaded to GitHub. Share reproducible examples through `examples/` instead.
 
 ## Package Layout
 

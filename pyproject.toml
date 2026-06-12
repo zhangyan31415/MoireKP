@@ -37,4 +37,4 @@ where = ["kp", "tapw"]
 include = ["kp*", "tapw*"]
 
 [tool.setuptools.package-data]
-tapw = ["*.yaml", "*.in"]
+tapw = ["templates/*.yaml", "templates/*.in"]

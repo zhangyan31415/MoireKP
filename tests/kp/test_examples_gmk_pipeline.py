@@ -13,42 +13,44 @@ from kp.model.core import build_model
 pytestmark = pytest.mark.external_data
 
 
-EXAMPLES_ROOT = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES_ROOT = Path(__file__).resolve().parents[2] / "examples"
+MOTE2_ROOT = EXAMPLES_ROOT / "mote2_3.89"
+MGI2_ROOT = EXAMPLES_ROOT / "mgi2_3.89"
 
 GMK_BASE_MODEL_CONFIGS = {
-    "mote2_3.89_K1": EXAMPLES_ROOT / "mote2/3.89/kp/configs/model/mote2_3.89_K1.yaml",
-    "mgi2_3.89_Gamma": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/mgi2_3.89_Gamma.yaml",
-    "mgi2_3.89_M1": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/mgi2_3.89_M1.yaml",
+    "mote2_3.89_K1": MOTE2_ROOT / "kp/configs/model/mote2_3.89_K1.yaml",
+    "mgi2_3.89_Gamma": MGI2_ROOT / "kp/configs/model/mgi2_3.89_Gamma.yaml",
+    "mgi2_3.89_M1": MGI2_ROOT / "kp/configs/model/mgi2_3.89_M1.yaml",
 }
 
 GMK_EXTENDED_MODEL_CONFIGS = {
-    "mote2_3.89_K1": EXAMPLES_ROOT / "mote2/3.89/kp/configs/model/mote2_3.89_K1.yaml",
-    "mote2_3.89_K1_spinful": EXAMPLES_ROOT / "mote2/3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml",
-    "mgi2_3.89_Gamma": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/mgi2_3.89_Gamma.yaml",
-    "mgi2_3.89_M1": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/mgi2_3.89_M1.yaml",
-    "mgi2_3.89_M1_spinful": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml",
+    "mote2_3.89_K1": MOTE2_ROOT / "kp/configs/model/mote2_3.89_K1.yaml",
+    "mote2_3.89_K1_spinful": MOTE2_ROOT / "kp/configs/model/mote2_3.89_K1_spinful.yaml",
+    "mgi2_3.89_Gamma": MGI2_ROOT / "kp/configs/model/mgi2_3.89_Gamma.yaml",
+    "mgi2_3.89_M1": MGI2_ROOT / "kp/configs/model/mgi2_3.89_M1.yaml",
+    "mgi2_3.89_M1_spinful": MGI2_ROOT / "kp/configs/model/mgi2_3.89_M1_spinful.yaml",
 }
 
 GMK_ACTIVE_SOURCE_CONFIGS = {
-    "mote2_3.89_K1": EXAMPLES_ROOT / "mote2/3.89/kp/configs/source/mote2_3.89_K1.yaml",
-    "mote2_3.89_K1_spinful": EXAMPLES_ROOT / "mote2/3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml",
-    "mgi2_3.89_Gamma": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/source/mgi2_3.89_Gamma.yaml",
-    "mgi2_3.89_M1": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/source/mgi2_3.89_M1.yaml",
-    "mgi2_3.89_M1_spinful": EXAMPLES_ROOT / "mgi2/3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml",
+    "mote2_3.89_K1": MOTE2_ROOT / "kp/configs/source/mote2_3.89_K1.yaml",
+    "mote2_3.89_K1_spinful": MOTE2_ROOT / "kp/configs/source/mote2_3.89_K1_spinful.yaml",
+    "mgi2_3.89_Gamma": MGI2_ROOT / "kp/configs/source/mgi2_3.89_Gamma.yaml",
+    "mgi2_3.89_M1": MGI2_ROOT / "kp/configs/source/mgi2_3.89_M1.yaml",
+    "mgi2_3.89_M1_spinful": MGI2_ROOT / "kp/configs/source/mgi2_3.89_M1_spinful.yaml",
 }
 
 GMK_REFERENCE_OUTPUTS = {
-    "mote2_3.89_K1_toy": EXAMPLES_ROOT / "mote2/3.89/kp/outputs/model/reference/mote2_3.89_K1_toy",
-    "mgi2_3.89_Gamma_toy_legacy": EXAMPLES_ROOT / "mgi2/3.89/kp/outputs/model/reference/mgi2_3.89_Gamma_toy_legacy",
-    "mgi2_3.89_M1_q7": EXAMPLES_ROOT / "mgi2/3.89/kp/outputs/model/reference/mgi2_3.89_M1_q7",
+    "mote2_3.89_K1_toy": MOTE2_ROOT / "kp/outputs/model/reference/mote2_3.89_K1_toy",
+    "mgi2_3.89_Gamma_toy_legacy": MGI2_ROOT / "kp/outputs/model/reference/mgi2_3.89_Gamma_toy_legacy",
+    "mgi2_3.89_M1_q7": MGI2_ROOT / "kp/outputs/model/reference/mgi2_3.89_M1_q7",
 }
 
 GMK_SAVED_MODEL_OUTPUTS = {
-    "mote2_3.89_K1": EXAMPLES_ROOT / "mote2/3.89/kp/outputs/model/mote2_3.89_K1",
-    "mote2_3.89_K1_spinful": EXAMPLES_ROOT / "mote2/3.89/kp/outputs/model/mote2_3.89_K1_spinful",
-    "mgi2_3.89_Gamma": EXAMPLES_ROOT / "mgi2/3.89/kp/outputs/model/mgi2_3.89_Gamma",
-    "mgi2_3.89_M1": EXAMPLES_ROOT / "mgi2/3.89/kp/outputs/model/mgi2_3.89_M1",
-    "mgi2_3.89_M1_spinful": EXAMPLES_ROOT / "mgi2/3.89/kp/outputs/model/mgi2_3.89_M1_spinful",
+    "mote2_3.89_K1": MOTE2_ROOT / "kp/outputs/model/mote2_3.89_K1",
+    "mote2_3.89_K1_spinful": MOTE2_ROOT / "kp/outputs/model/mote2_3.89_K1_spinful",
+    "mgi2_3.89_Gamma": MGI2_ROOT / "kp/outputs/model/mgi2_3.89_Gamma",
+    "mgi2_3.89_M1": MGI2_ROOT / "kp/outputs/model/mgi2_3.89_M1",
+    "mgi2_3.89_M1_spinful": MGI2_ROOT / "kp/outputs/model/mgi2_3.89_M1_spinful",
 }
 
 GMK_SAVED_OUTPUT_EXPECTATIONS = {
@@ -84,8 +86,8 @@ GMK_SAVED_OUTPUT_EXPECTATIONS = {
 
 GMK_READMES = [
     EXAMPLES_ROOT / "README.md",
-    EXAMPLES_ROOT / "mgi2/3.89/README.md",
-    EXAMPLES_ROOT / "mote2/3.89/README.md",
+    MGI2_ROOT / "README.md",
+    MOTE2_ROOT / "README.md",
 ]
 
 
@@ -278,7 +280,7 @@ def test_gmk_saved_model_outputs_match_recorded_quality_thresholds() -> None:
 
 def test_gamma_c2_rawh_action_matches_declared_model_support() -> None:
     symm_dir = _require_example_artifact(
-        EXAMPLES_ROOT / "mgi2/3.89/kp/outputs/symm/mgi2_3.89_Gamma_formal"
+        MGI2_ROOT / "kp/outputs/symm/mgi2_3.89_Gamma_formal"
     )
     manifest = json.loads((symm_dir / "manifest.json").read_text(encoding="utf-8"))
     c2 = next(row for row in manifest["operations"] if row.get("operation") == "C2")

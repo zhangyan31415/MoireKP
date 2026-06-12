@@ -14,7 +14,7 @@
 
 **Files:**
 - Create: `kp/kp/model/pipeline.py`
-- Test: `kp/tests/test_configured_model.py`
+- Test: `tests/kp/test_configured_model.py`
 
 **Steps:**
 1. Write failing tests for resolving a model YAML relative to its own path.
@@ -26,7 +26,7 @@
 
 **Files:**
 - Modify: `kp/kp/model/pipeline.py`
-- Test: `kp/tests/test_configured_model.py`
+- Test: `tests/kp/test_configured_model.py`
 
 **Steps:**
 1. Write failing tests for producing a `MoireConfig`, block-diagonal fitting heff, and band comparison metrics.
@@ -36,7 +36,7 @@
 ### Task 3: MgI2 Gamma Example
 
 **Files:**
-- Create: `kp/examples/mgi2/3.89/kp/configs/mgi2_3.89_Gamma_model.yaml`
+- Create: `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml`
 
 **Steps:**
 1. Encode the current notebook Gamma settings: formal project output, 2+2 orbitals, Gamma harmonics, `C3z/TR/C2` symmetry map, fit indices `[0, 40]`.
