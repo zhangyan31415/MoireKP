@@ -88,7 +88,7 @@ the small release checkout unless they are listed in `examples/data-manifest.yam
 - `examples/tapw/kpaths/`: alternative K-path inputs.
 - `examples/tapw/mote2_9.43/`: MoTe2 rigid-OpenMX example; TAPW K1 and direct diagonalization configs.
 - `examples/tapw/mgi2_9.43/`: MgI2 rigid-OpenMX example; TAPW M1/Gamma and direct diagonalization configs.
-- `tapw-config` uses package templates from `tapw/tapw/templates/`; those are not user examples.
+- `tapw init` uses package templates from `tapw/tapw/templates/`; those are not user examples.
 
 ## Cleanup Policy
 

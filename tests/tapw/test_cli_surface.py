@@ -9,11 +9,13 @@ def test_unified_tapw_help_lists_subcommands(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "config" in out
-    assert "calc" in out
+    assert "init" in out
+    assert "run" in out
     assert "plot" in out
-    assert "chern-post" in out
+    assert "topo" in out
     assert "orbital" in out
+    assert "fatband" in out
+    assert "chern-post" not in out
 
 
 def test_unified_tapw_dispatches_to_tool_mains(monkeypatch):
@@ -24,18 +26,18 @@ def test_unified_tapw_dispatches_to_tool_mains(monkeypatch):
 
     calls = []
 
-    monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("config", argv)))
+    monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("init", argv)))
     monkeypatch.setattr(plot_band_01, "main", lambda argv=None, **_kwargs: calls.append(("plot", argv)))
-    monkeypatch.setattr(chern_post, "main", lambda argv=None, **_kwargs: calls.append(("chern-post", argv)))
+    monkeypatch.setattr(chern_post, "main", lambda argv=None, **_kwargs: calls.append(("topo", argv)))
 
-    cli.main(["config", "-o", "cfg"])
+    cli.main(["init", "-o", "cfg"])
     cli.main(["plot", "--config", "bands.yaml"])
-    cli.main(["chern-post", "--config", "config.yaml", "-b", "-1", "-2"])
+    cli.main(["topo", "--config", "config.yaml", "-b", "-1", "-2"])
 
     assert calls == [
-        ("config", ["-o", "cfg"]),
+        ("init", ["-o", "cfg"]),
         ("plot", ["--config", "bands.yaml"]),
-        ("chern-post", ["--config", "config.yaml", "-b", "-1", "-2"]),
+        ("topo", ["--config", "config.yaml", "-b", "-1", "-2"]),
     ]
 
 
@@ -45,26 +47,55 @@ def test_unified_tapw_dispatches_calc_without_rewriting_algorithm(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(args.config))
 
-    cli.main(["calc", "--config", "config.yaml"])
+    cli.main(["run", "--config", "config.yaml"])
 
     assert calls == ["config.yaml"]
 
 
-def test_unified_tapw_dispatches_orbital_subcommands(monkeypatch):
+def test_unified_tapw_dispatches_orbital_commands(monkeypatch):
     from tapw import cli
     from tapw import orbital_analysis_tool
     from tapw import plot_orbital_tool
 
     calls = []
-    monkeypatch.setattr(orbital_analysis_tool, "main", lambda argv=None, **_kwargs: calls.append(("analyze", argv)))
-    monkeypatch.setattr(plot_orbital_tool, "main", lambda argv=None, **_kwargs: calls.append(("plot", argv)))
+    monkeypatch.setattr(orbital_analysis_tool, "main", lambda argv=None, **_kwargs: calls.append(("orbital", argv)))
+    monkeypatch.setattr(plot_orbital_tool, "main", lambda argv=None, **_kwargs: calls.append(("fatband", argv)))
 
+    cli.main(["orbital", ".", "--config", "config.yaml"])
+    cli.main(["fatband", ".", "--valley", "Gamma"])
+
+    assert calls == [
+        ("orbital", [".", "--config", "config.yaml"]),
+        ("fatband", [".", "--valley", "Gamma"]),
+    ]
+
+
+def test_legacy_tapw_subcommands_still_dispatch(monkeypatch):
+    from tapw import chern_post
+    from tapw import cli
+    from tapw import config_generator
+    from tapw import orbital_analysis_tool
+    from tapw import plot_orbital_tool
+
+    calls = []
+    monkeypatch.setattr(cli, "main_calc", lambda argv=None, **_kwargs: calls.append(("calc", argv)))
+    monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("config", argv)))
+    monkeypatch.setattr(chern_post, "main", lambda argv=None, **_kwargs: calls.append(("chern-post", argv)))
+    monkeypatch.setattr(orbital_analysis_tool, "main", lambda argv=None, **_kwargs: calls.append(("orbital-analyze", argv)))
+    monkeypatch.setattr(plot_orbital_tool, "main", lambda argv=None, **_kwargs: calls.append(("orbital-plot", argv)))
+
+    cli.main(["config", "-o", "cfg"])
+    cli.main(["calc", "--config", "config.yaml"])
+    cli.main(["chern-post", "--config", "config.yaml", "-b", "-1"])
     cli.main(["orbital", "analyze", ".", "--config", "config.yaml"])
     cli.main(["orbital", "plot", ".", "--valley", "Gamma"])
 
     assert calls == [
-        ("analyze", [".", "--config", "config.yaml"]),
-        ("plot", [".", "--valley", "Gamma"]),
+        ("config", ["-o", "cfg"]),
+        ("calc", ["--config", "config.yaml"]),
+        ("chern-post", ["--config", "config.yaml", "-b", "-1"]),
+        ("orbital-analyze", [".", "--config", "config.yaml"]),
+        ("orbital-plot", [".", "--valley", "Gamma"]),
     ]
 
 
@@ -79,12 +110,12 @@ def test_legacy_aliases_dispatch_through_unified_main(monkeypatch):
     from tapw import plot_orbital_tool
 
     calls = []
-    monkeypatch.setattr(cli, "main_calc", lambda argv=None: calls.append(("calc", argv)))
-    monkeypatch.setattr(config_generator, "main", lambda argv=None: calls.append(("config", argv)))
-    monkeypatch.setattr(plot_band_01, "main", lambda argv=None: calls.append(("plot", argv)))
-    monkeypatch.setattr(chern_post, "main", lambda argv=None: calls.append(("chern-post", argv)))
-    monkeypatch.setattr(orbital_analysis_tool, "main", lambda argv=None: calls.append(("orbital", argv)))
-    monkeypatch.setattr(plot_orbital_tool, "main", lambda argv=None: calls.append(("plot-orbital", argv)))
+    monkeypatch.setattr(cli, "main_calc", lambda argv=None, **_kwargs: calls.append(("calc", argv)))
+    monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("config", argv)))
+    monkeypatch.setattr(plot_band_01, "main", lambda argv=None, **_kwargs: calls.append(("plot", argv)))
+    monkeypatch.setattr(chern_post, "main", lambda argv=None, **_kwargs: calls.append(("chern-post", argv)))
+    monkeypatch.setattr(orbital_analysis_tool, "main", lambda argv=None, **_kwargs: calls.append(("orbital", argv)))
+    monkeypatch.setattr(plot_orbital_tool, "main", lambda argv=None, **_kwargs: calls.append(("plot-orbital", argv)))
 
     for alias in [
         "tapw-calc",

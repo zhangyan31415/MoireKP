@@ -386,9 +386,9 @@ def run_calc(args):
     exit_cli(0)
 
 
-def main_calc(argv=None):
+def main_calc(argv=None, *, prog="tapw run"):
     """Run the TAPW calculator entry point."""
-    return run_calc(build_calc_parser(prog="tapw calc").parse_args(argv))
+    return run_calc(build_calc_parser(prog=prog).parse_args(argv))
 
 
 def build_main_parser():
@@ -398,36 +398,27 @@ def build_main_parser():
         description="Unified TAPW command line interface",
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
-    subparsers.add_parser("config", help="Generate TAPW configuration files")
-    subparsers.add_parser("calc", help="Run TAPW band, Chern, or symmetry calculations")
+    subparsers.add_parser("init", help="Generate TAPW configuration files")
+    subparsers.add_parser("run", help="Run TAPW band, Chern, or symmetry calculations")
     subparsers.add_parser("plot", help="Plot TAPW band structures")
-    subparsers.add_parser("chern-post", help="Post-process TAPW Chern/Wilson-loop outputs")
-    orbital = subparsers.add_parser("orbital", help="Analyze or plot TAPW orbital weights")
-    orbital_subparsers = orbital.add_subparsers(dest="orbital_command", metavar="command")
-    orbital_subparsers.add_parser("analyze", help="Analyze orbital weights")
-    orbital_subparsers.add_parser("plot", help="Plot orbital-weighted bands")
+    subparsers.add_parser("topo", help="Post-process TAPW Chern/Wilson-loop outputs")
+    subparsers.add_parser("orbital", help="Analyze TAPW orbital weights")
+    subparsers.add_parser("fatband", help="Plot orbital-weighted bands")
     return parser
 
 
 def _main_orbital(argv):
-    if not argv or argv[0] in ("-h", "--help"):
-        parser = build_main_parser()
-        parser.parse_args(["orbital"] + list(argv))
-        return 0
-
-    command, rest = argv[0], argv[1:]
-    if command == "analyze":
+    if argv and argv[0] == "analyze":
         from . import orbital_analysis_tool
 
-        return orbital_analysis_tool.main(rest, prog="tapw orbital analyze")
-    if command == "plot":
+        return orbital_analysis_tool.main(argv[1:], prog="tapw orbital")
+    if argv and argv[0] == "plot":
         from . import plot_orbital_tool
 
-        return plot_orbital_tool.main(rest, prog="tapw orbital plot")
+        return plot_orbital_tool.main(argv[1:], prog="tapw fatband")
+    from . import orbital_analysis_tool
 
-    parser = build_main_parser()
-    parser.parse_args(["orbital"] + list(argv))
-    return None
+    return orbital_analysis_tool.main(argv, prog="tapw orbital")
 
 
 def main(argv=None):
@@ -436,7 +427,7 @@ def main(argv=None):
     program = Path(sys.argv[0]).name
 
     if program == "tapw-calc":
-        return main_calc(argv)
+        return main_calc(argv, prog="tapw-calc")
     if program == "tapw-config":
         from . import config_generator
 
@@ -466,22 +457,26 @@ def main(argv=None):
         build_main_parser().parse_args(argv)
 
     command, rest = argv[0], argv[1:]
-    if command == "config":
+    if command in {"init", "config"}:
         from . import config_generator
 
-        return config_generator.main(rest, prog="tapw config")
-    if command == "calc":
-        return main_calc(rest)
+        return config_generator.main(rest, prog="tapw init")
+    if command in {"run", "calc"}:
+        return main_calc(rest, prog="tapw run")
     if command == "plot":
         from . import plot_band_01
 
         return plot_band_01.main(rest, prog="tapw plot")
-    if command == "chern-post":
+    if command in {"topo", "chern-post"}:
         from . import chern_post
 
-        return chern_post.main(rest, prog="tapw chern-post")
+        return chern_post.main(rest, prog="tapw topo")
     if command == "orbital":
         return _main_orbital(rest)
+    if command == "fatband":
+        from . import plot_orbital_tool
+
+        return plot_orbital_tool.main(rest, prog="tapw fatband")
 
     build_main_parser().parse_args(argv)
     return None
