@@ -6,8 +6,8 @@ import pandas as pd
 import pytest
 import scipy.sparse
 
-import tapw.symmetry_analysis as symmetry_analysis
-from tapw.C3_symm_01 import C3_G_matrix
+import tapw.workflows.symmetry as symmetry_analysis
+from tapw.symmetry.representations import C3_G_matrix
 
 
 def test_transport_cache_key_distinguishes_valley_and_q_source(monkeypatch):

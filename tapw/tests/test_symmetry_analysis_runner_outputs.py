@@ -6,7 +6,7 @@ import numpy as np
 import pandas as pd
 import scipy.sparse
 
-import tapw.symmetry_analysis as symmetry_analysis
+import tapw.workflows.symmetry as symmetry_analysis
 
 
 class _FakeLogger:

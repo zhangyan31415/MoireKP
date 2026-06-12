@@ -25,7 +25,7 @@ dependencies = [
 
 [project.scripts]
 kp = "kp.cli:main"
-tapw-calc = "tapw.main:main"
+tapw-calc = "tapw.cli:main"
 tapw-plot = "tapw.plot_band_01:main"
 tapw-config = "tapw.config_generator:main"
 tapw-chernpost = "tapw.chern_post:main"

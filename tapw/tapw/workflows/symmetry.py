@@ -14,7 +14,7 @@ import scipy.linalg
 import scipy.sparse
 from scipy.spatial import cKDTree
 
-from .C3_symm_01 import (
+from ..symmetry.representations import (
     direct_sum,
     generate_direct_sum_params,
     get_g_vec_perlayer,
@@ -25,7 +25,7 @@ from .C3_symm_01 import (
     spin_reps,
     supports_single_valley_c3,
 )
-from .cal_ham_01 import (
+from .band import (
     BandStructureCalculator,
     TAPW_parameters,
     _build_group_orbital_transport_between_groups,

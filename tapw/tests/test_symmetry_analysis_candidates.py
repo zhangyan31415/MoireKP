@@ -1,7 +1,7 @@
 import numpy as np
 from types import SimpleNamespace
 
-import tapw.symmetry_analysis as symmetry_analysis
+import tapw.workflows.symmetry as symmetry_analysis
 
 
 def test_each_spatial_operation_yields_independent_unitary_and_antiunitary_candidates():

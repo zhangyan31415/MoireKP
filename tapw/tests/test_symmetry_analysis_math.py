@@ -1,6 +1,6 @@
 import numpy as np
 
-import tapw.symmetry_analysis as symmetry_analysis
+import tapw.workflows.symmetry as symmetry_analysis
 
 
 def test_frobenius_relative_residual_is_zero_for_identical_matrices():

@@ -39,7 +39,7 @@ from tqdm import tqdm
 
 # 导入TAPW模块
 from .config import ComputeConfig, Config
-from .read_pos_01 import OpenMXFile, StructureProcessorSpglib
+from .io.structure import OpenMXFile, StructureProcessorSpglib
 
 
 @dataclass

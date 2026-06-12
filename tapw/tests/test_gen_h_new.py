@@ -1,7 +1,7 @@
 import numpy as np
 import scipy.linalg
 
-from tapw.cal_ham_01 import BandStructureCalculator
+from tapw.workflows.band import BandStructureCalculator
 
 
 def _reference_transform(hamk: np.ndarray, samk: np.ndarray) -> np.ndarray:

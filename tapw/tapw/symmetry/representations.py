@@ -1,7 +1,7 @@
 import numpy as np
 import scipy
 
-from .geometry.rotations import get_any_rot_orb_twostep
+from ..geometry.rotations import get_any_rot_orb_twostep
 
 
 sigma_x = np.array([[0, 1], [1, 0]])

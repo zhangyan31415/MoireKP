@@ -6,7 +6,7 @@ from typing import Optional
 
 import numpy as np
 
-from .cal_ham_01 import open_memmap, _ensure_memmap_file
+from .workflows.band import open_memmap, _ensure_memmap_file
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
 
 

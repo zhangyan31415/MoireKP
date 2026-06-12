@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import numpy as np
 
-import tapw.main as main_mod
+import tapw.cli as main_mod
 
 
 class _FakeCompute(SimpleNamespace):

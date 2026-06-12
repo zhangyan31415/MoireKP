@@ -9,7 +9,7 @@ import os
 import re
 from typing import Dict, List, Tuple, Any, Optional
 from .config import ComputeConfig
-from .read_pos_01 import StructureProcessor
+from .io.structure import StructureProcessor
 
 
 class OrbitalAnalyzer:

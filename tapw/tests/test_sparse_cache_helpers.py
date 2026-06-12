@@ -2,11 +2,11 @@ import numpy as np
 import scipy.sparse
 from types import SimpleNamespace
 
-import tapw.cal_ham_01 as cal_ham_01
+import tapw.workflows.band as band_workflow
 
 
 def test_realspace_block_cache_reuses_preprocessed_metadata():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     helper = getattr(calculator_cls, "_get_or_build_realspace_block_cache", None)
@@ -51,7 +51,7 @@ def test_realspace_block_cache_reuses_preprocessed_metadata():
 
 
 def test_make_cached_projector_term_stores_projector_and_conjugate_transpose():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     helper = getattr(calculator_cls, "_make_cached_projector_term", None)
@@ -79,7 +79,7 @@ def test_make_cached_projector_term_stores_projector_and_conjugate_transpose():
 
 
 def test_getk_super_gauge_sparse_fast_path_matches_reference_with_duplicate_entries():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     fake = calculator_cls.__new__(calculator_cls)
@@ -118,7 +118,7 @@ def test_getk_super_gauge_sparse_fast_path_matches_reference_with_duplicate_entr
 
 
 def test_block_cache_can_compress_raw_data_into_csr_with_duplicate_entries():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     fake = calculator_cls.__new__(calculator_cls)
@@ -157,7 +157,7 @@ def test_block_cache_can_compress_raw_data_into_csr_with_duplicate_entries():
 
 
 def test_block_cache_can_compress_raw_data_into_csr_without_duplicates():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     fake = calculator_cls.__new__(calculator_cls)

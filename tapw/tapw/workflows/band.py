@@ -20,7 +20,7 @@ from types import SimpleNamespace
 from numpy.lib.format import open_memmap
 from joblib import Parallel, delayed
 import joblib.parallel as joblib_parallel
-from .C3_symm_01 import (
+from ..symmetry.representations import (
     C3_MoTe2_all,
     C3_G_matrix,
     direct_sum,
@@ -32,11 +32,11 @@ from .C3_symm_01 import (
     rotate_mat,
 )
 from tqdm import tqdm
-from .config import ComputeConfig
-from .read_pos_01 import StructureProcessorSpglib
-from .io.kpath import KPathGenerator
-from .geometry.rotations import get_any_rot_orb_twostep
-from .utils import (
+from ..config import ComputeConfig
+from ..io.structure import StructureProcessorSpglib
+from ..io.kpath import KPathGenerator
+from ..geometry.rotations import get_any_rot_orb_twostep
+from ..utils import (
     timing_decorator_factory, rotate_vector, unique_sorted, 
     check_hermitian, is_positive_definite, print_sparse_matrix_info, 
     check_sparsity, HARTREE
@@ -2178,8 +2178,8 @@ class TAPW_parameters:
         )
 
         # Helpers for orbital representation (only needed for multi-group)
-        from .C3_symm_01 import direct_sum, rot_matrix
-        from .geometry.rotations import get_any_rot_orb_twostep
+        from ..symmetry.representations import direct_sum, rot_matrix
+        from ..geometry.rotations import get_any_rot_orb_twostep
 
         C3_rot_matrix = rot_matrix(120)
         sigma_z = np.array([[1, 0], [0, -1]])
@@ -2207,8 +2207,7 @@ class TAPW_parameters:
                 raise ValueError(f"Cannot parse orbitals from orb_name='{orb_name}'")
             return orbitals
 
-        # Use the original generate_direct_sum_params from C3_symm_01 to ensure exact compatibility
-        from .C3_symm_01 import generate_direct_sum_params
+        from ..symmetry.representations import generate_direct_sum_params
         
         # Determine per-group atom-type ordering consistent with generate_gr_matrix_cpu:
         # atom_type_list is sorted unique over the whole df.

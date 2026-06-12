@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from tapw.cal_ham_01 import BandStructureCalculator
-from tapw.main import (
+from tapw.workflows.band import BandStructureCalculator
+from tapw.cli import (
     can_reuse_m_valley_c3_band_outputs,
     copy_reused_m_valley_band_outputs,
     resolve_qshell_dir_name,

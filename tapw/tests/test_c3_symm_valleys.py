@@ -3,8 +3,8 @@ import pandas as pd
 import pytest
 from types import MethodType, SimpleNamespace
 
-import tapw.cal_ham_01 as cal_ham_01
-from tapw.C3_symm_01 import C3_G_matrix, rot
+import tapw.workflows.band as band_workflow
+from tapw.symmetry.representations import C3_G_matrix, rot
 from tapw.config import ComputeConfig
 
 
@@ -41,7 +41,7 @@ def _c3_orbit(center: np.ndarray):
 
 
 def test_single_valley_c3_helper_marks_only_c3_closed_valleys_as_compatible():
-    helper = getattr(cal_ham_01, "supports_single_valley_c3", None)
+    helper = getattr(band_workflow, "supports_single_valley_c3", None)
     assert helper is not None
 
     for valley in (1, 2, 11, 12, 5):
@@ -56,14 +56,14 @@ def test_tapw_parameters_disable_single_valley_c3_for_m_valleys():
     config.valley = 31
     config.bravais = "hex"
 
-    tapw_parameters = cal_ham_01.TAPW_parameters(structure=object(), config=config)
+    tapw_parameters = band_workflow.TAPW_parameters(structure=object(), config=config)
 
     assert tapw_parameters.use_C3_H is False
     assert "M valleys" in tapw_parameters.c3_h_disable_reason
 
 
 def test_m_valley_threefold_symmetrization_helper_enables_only_tapw_hex_m_triplet():
-    helper = getattr(cal_ham_01, "uses_m_valley_threefold_symmetrization", None)
+    helper = getattr(band_workflow, "uses_m_valley_threefold_symmetrization", None)
     assert helper is not None
 
     config = ComputeConfig(C3_H=True, TAPW=True)
@@ -86,7 +86,7 @@ def test_m_valley_threefold_symmetrization_helper_enables_only_tapw_hex_m_triple
 
 
 def test_m_valley_d3_symmetrization_helper_requires_explicit_flag():
-    helper = getattr(cal_ham_01, "uses_m_valley_d3_symmetrization", None)
+    helper = getattr(band_workflow, "uses_m_valley_d3_symmetrization", None)
     assert helper is not None
 
     config = ComputeConfig(C3_H=True, TAPW=True)
@@ -107,7 +107,7 @@ def test_m_valley_d3_symmetrization_helper_requires_explicit_flag():
 
 
 def test_rotate_local_k_between_m_valleys_is_invertible():
-    rotate_k = getattr(cal_ham_01, "rotate_local_k_between_m_valleys", None)
+    rotate_k = getattr(band_workflow, "rotate_local_k_between_m_valleys", None)
     assert rotate_k is not None
 
     reciprocal_tmat = np.eye(3)
@@ -120,8 +120,8 @@ def test_rotate_local_k_between_m_valleys_is_invertible():
 
 
 def test_threefold_reference_average_and_derived_valley_transport_are_consistent():
-    average_hs = getattr(cal_ham_01, "threefold_reference_hs_average", None)
-    derive_matrix = getattr(cal_ham_01, "transport_matrix_between_m_valleys", None)
+    average_hs = getattr(band_workflow, "threefold_reference_hs_average", None)
+    derive_matrix = getattr(band_workflow, "transport_matrix_between_m_valleys", None)
     assert average_hs is not None
     assert derive_matrix is not None
 
@@ -154,7 +154,7 @@ def test_threefold_reference_average_and_derived_valley_transport_are_consistent
 
 
 def test_m_valley_threefold_hs_ge_false_standardizes_only_after_raw_average():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     raw_hs = {
@@ -216,7 +216,7 @@ def test_m_valley_threefold_hs_ge_false_standardizes_only_after_raw_average():
 
 
 def test_build_projected_m_valley_transport_matches_rotated_g_permutation():
-    builder = getattr(cal_ham_01, "build_projected_m_valley_transport", None)
+    builder = getattr(band_workflow, "build_projected_m_valley_transport", None)
     assert builder is not None
 
     rot120 = lambda vec: rot(np.asarray(vec, dtype=float), 120)
@@ -254,7 +254,7 @@ def test_build_projected_m_valley_transport_matches_rotated_g_permutation():
 
 
 def test_build_reference_m_valley_c2_transport_swaps_projected_k1_k2_groups():
-    builder = getattr(cal_ham_01, "build_reference_m_valley_c2_transport", None)
+    builder = getattr(band_workflow, "build_reference_m_valley_c2_transport", None)
     assert builder is not None
 
     structure = SimpleNamespace(
@@ -290,7 +290,7 @@ def test_build_reference_m_valley_c2_transport_swaps_projected_k1_k2_groups():
 
 
 def test_build_reference_m_valley_c2_transport_reverses_atom_type_block_order_between_groups():
-    builder = getattr(cal_ham_01, "build_reference_m_valley_c2_transport", None)
+    builder = getattr(band_workflow, "build_reference_m_valley_c2_transport", None)
     assert builder is not None
 
     structure = SimpleNamespace(
@@ -327,7 +327,7 @@ def test_build_reference_m_valley_c2_transport_reverses_atom_type_block_order_be
 
 
 def test_build_reference_m_valley_c2_partner_projector_uses_explicit_transformed_q_on_target_group():
-    builder = getattr(cal_ham_01, "build_reference_m_valley_c2_partner_projector", None)
+    builder = getattr(band_workflow, "build_reference_m_valley_c2_partner_projector", None)
     assert builder is not None
 
     structure = SimpleNamespace(
@@ -368,7 +368,7 @@ def test_build_reference_m_valley_c2_partner_projector_uses_explicit_transformed
 
 
 def test_select_reference_m_valley_c2_operation_chooses_candidate_that_fixes_m1():
-    selector = getattr(cal_ham_01, "select_reference_m_valley_c2_operation", None)
+    selector = getattr(band_workflow, "select_reference_m_valley_c2_operation", None)
     assert selector is not None
 
     lattice = np.array(
@@ -405,7 +405,7 @@ def test_select_reference_m_valley_c2_operation_chooses_candidate_that_fixes_m1(
 
 
 def test_spin_reps_accepts_nearly_exact_order_two_rotation_axis():
-    spin_reps = getattr(cal_ham_01, "spin_reps", None)
+    spin_reps = getattr(band_workflow, "spin_reps", None)
     assert spin_reps is not None
 
     rotation = np.array(
@@ -424,7 +424,7 @@ def test_spin_reps_accepts_nearly_exact_order_two_rotation_axis():
 
 
 def test_spin_reps_clips_arccos_argument_under_tiny_trace_drift():
-    spin_reps = getattr(cal_ham_01, "spin_reps", None)
+    spin_reps = getattr(band_workflow, "spin_reps", None)
     assert spin_reps is not None
 
     rotation = np.eye(3, dtype=float)
@@ -439,7 +439,7 @@ def test_spin_reps_clips_arccos_argument_under_tiny_trace_drift():
 
 
 def test_map_atom_types_by_fractional_symmetry_uses_explicit_operation():
-    mapper = getattr(cal_ham_01, "map_atom_types_by_fractional_symmetry", None)
+    mapper = getattr(band_workflow, "map_atom_types_by_fractional_symmetry", None)
     assert mapper is not None
 
     lattice = np.eye(3, dtype=float)
@@ -497,7 +497,7 @@ def test_map_atom_types_by_fractional_symmetry_uses_explicit_operation():
 
 
 def test_m_valley_d3_hs_uses_cached_reference_projector_average_then_derives_target_valley():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     h_ref = np.array([[1.0, 2.0 + 1.0j], [2.0 - 1.0j, 5.0]], dtype=np.complex128)
@@ -525,7 +525,7 @@ def test_m_valley_d3_hs_uses_cached_reference_projector_average_then_derives_tar
     k_input = np.array([0.2, 0.1, 0.0], dtype=float)
     hamk, samk = calculator_cls._calculate_m_valley_threefold_hs(fake, k_input, mpi_index=0)
 
-    expected_k_reference = cal_ham_01.rotate_local_k_between_m_valleys(
+    expected_k_reference = band_workflow.rotate_local_k_between_m_valleys(
         k_input,
         fake.structure.reciprocal_Tmat,
         source_valley=32,
@@ -541,7 +541,7 @@ def test_m_valley_d3_hs_uses_cached_reference_projector_average_then_derives_tar
 
 
 def test_m_valley_c3_hs_skips_target_transport_for_eigenvalue_only_runs():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     h_ref = np.array([[1.0, 2.0 + 1.0j], [2.0 - 1.0j, 5.0]], dtype=np.complex128)
@@ -576,7 +576,7 @@ def test_m_valley_c3_hs_skips_target_transport_for_eigenvalue_only_runs():
     k_input = np.array([0.2, 0.1, 0.0], dtype=float)
     hamk, samk = calculator_cls._calculate_m_valley_threefold_hs(fake, k_input, mpi_index=0)
 
-    expected_k_reference = cal_ham_01.rotate_local_k_between_m_valleys(
+    expected_k_reference = band_workflow.rotate_local_k_between_m_valleys(
         k_input,
         fake.structure.reciprocal_Tmat,
         source_valley=32,
@@ -590,7 +590,7 @@ def test_m_valley_c3_hs_skips_target_transport_for_eigenvalue_only_runs():
 
 
 def test_calculate_reference_m_valley_c3_hs_averages_cached_projector_terms():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     h_ref = np.array([[1.0, 0.2], [0.2, 3.0]], dtype=np.complex128)
@@ -640,7 +640,7 @@ def test_calculate_reference_m_valley_c3_hs_averages_cached_projector_terms():
 
 
 def test_calculate_reference_m_valley_c3_hs_prefers_valley_projection_then_transport_when_metadata_is_available():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     h_ref = np.array([[1.0, 0.2], [0.2, 3.0]], dtype=np.complex128)
@@ -732,7 +732,7 @@ def test_calculate_reference_m_valley_c3_hs_prefers_valley_projection_then_trans
     k_input = np.array([0.2, 0.1, 0.0], dtype=float)
     hamk, samk = calculator_cls._calculate_reference_m_valley_c3_hs(fake, k_input, mpi_index=0)
 
-    expected_h, expected_s = cal_ham_01.threefold_reference_hs_average(
+    expected_h, expected_s = band_workflow.threefold_reference_hs_average(
         h_ref,
         s_ref,
         h_m2,
@@ -767,7 +767,7 @@ def test_calculate_reference_m_valley_c3_hs_prefers_valley_projection_then_trans
 
 
 def test_calculate_reference_m_valley_d3_hs_averages_cached_projector_terms():
-    calculator_cls = getattr(cal_ham_01, "BandStructureCalculator", None)
+    calculator_cls = getattr(band_workflow, "BandStructureCalculator", None)
     assert calculator_cls is not None
 
     h_identity = np.array([[1.0, 0.2], [0.2, 3.0]], dtype=np.complex128)
@@ -810,7 +810,7 @@ def test_calculate_reference_m_valley_d3_hs_averages_cached_projector_terms():
 
 
 def test_build_reference_m_valley_c2_transport_uses_c2t_spin_unitary_for_spinful_case():
-    builder = getattr(cal_ham_01, "build_reference_m_valley_c2_transport", None)
+    builder = getattr(band_workflow, "build_reference_m_valley_c2_transport", None)
     assert builder is not None
 
     structure = SimpleNamespace(
@@ -834,8 +834,8 @@ def test_build_reference_m_valley_c2_transport_uses_c2t_spin_unitary_for_spinful
     transport = builder(structure, reference_params).toarray()
     sigma_y = np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128)
     axis = np.array([0.0, -1.0, 0.0], dtype=float)
-    rotation_matrix = cal_ham_01.rotate_mat(axis, np.pi)
-    expected_spin = cal_ham_01.spin_reps(rotation_matrix) @ (1.0j * sigma_y)
+    rotation_matrix = band_workflow.rotate_mat(axis, np.pi)
+    expected_spin = band_workflow.spin_reps(rotation_matrix) @ (1.0j * sigma_y)
     expected_orbital = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
     expected = np.kron(expected_spin, expected_orbital)
 

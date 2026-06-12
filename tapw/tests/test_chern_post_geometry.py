@@ -1,6 +1,6 @@
 import numpy as np
 
-from tapw.cal_ham_01 import BandStructureCalculator
+from tapw.workflows.band import BandStructureCalculator
 from tapw import chern_post
 from tapw.config import resolve_chern_grid_shape
 

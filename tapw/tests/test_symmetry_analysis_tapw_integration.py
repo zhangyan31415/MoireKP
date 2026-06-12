@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import numpy as np
 import scipy.sparse
 
-import tapw.symmetry_analysis as symmetry_analysis
+import tapw.workflows.symmetry as symmetry_analysis
 
 
 def test_valley_center_resolution_uses_tapw_parameter_convention(monkeypatch):

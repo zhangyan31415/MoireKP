@@ -9,11 +9,11 @@ import shutil
 from typing import Tuple
 
 from .config import Config
-from .cal_ham_01 import BandStructureCalculator
-from .read_pos_01 import OpenMXFile, StructureProcessorSpglib
+from .workflows.band import BandStructureCalculator
+from .io.structure import OpenMXFile, StructureProcessorSpglib
 from .io.kpath import KPathGenerator
 from .io.hr import HrSparseHandler
-from .symmetry_analysis import SymmetryAnalysisRunner
+from .workflows.symmetry import SymmetryAnalysisRunner
 
 def _mpi_world_rank_size() -> Tuple[int, int]:
     # Best-effort: works both under mpiexec/srun and in normal (non-MPI) runs.

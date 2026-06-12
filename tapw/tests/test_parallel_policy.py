@@ -1,6 +1,6 @@
 from types import SimpleNamespace
 
-import tapw.cal_ham_01 as cal_ham_01
+import tapw.workflows.band as band_workflow
 from tapw.config import ComputeConfig
 
 
@@ -18,7 +18,7 @@ def _make_cfg(**overrides):
 
 
 def test_resolve_kpoint_parallel_policy_auto_promotes_tapw_defaults_to_mp():
-    helper = getattr(cal_ham_01, "resolve_kpoint_parallel_policy", None)
+    helper = getattr(band_workflow, "resolve_kpoint_parallel_policy", None)
     assert helper is not None
 
     policy = helper(_make_cfg(), os_name="posix")
@@ -29,7 +29,7 @@ def test_resolve_kpoint_parallel_policy_auto_promotes_tapw_defaults_to_mp():
 
 
 def test_resolve_kpoint_parallel_policy_respects_explicit_opt_out():
-    helper = getattr(cal_ham_01, "resolve_kpoint_parallel_policy", None)
+    helper = getattr(band_workflow, "resolve_kpoint_parallel_policy", None)
     assert helper is not None
 
     policy = helper(_make_cfg(tapw_auto_fork=False), os_name="posix")
@@ -40,7 +40,7 @@ def test_resolve_kpoint_parallel_policy_respects_explicit_opt_out():
 
 
 def test_resolve_kpoint_parallel_policy_keeps_non_tapw_joblib_loky():
-    helper = getattr(cal_ham_01, "resolve_kpoint_parallel_policy", None)
+    helper = getattr(band_workflow, "resolve_kpoint_parallel_policy", None)
     assert helper is not None
 
     policy = helper(_make_cfg(TAPW=False), os_name="posix")
@@ -51,7 +51,7 @@ def test_resolve_kpoint_parallel_policy_keeps_non_tapw_joblib_loky():
 
 
 def test_resolve_kpoint_parallel_policy_requires_multiple_processes_and_posix():
-    helper = getattr(cal_ham_01, "resolve_kpoint_parallel_policy", None)
+    helper = getattr(band_workflow, "resolve_kpoint_parallel_policy", None)
     assert helper is not None
 
     one_proc = helper(_make_cfg(num_processes=1), os_name="posix")
