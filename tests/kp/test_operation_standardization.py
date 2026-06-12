@@ -30,6 +30,7 @@ from kp.symmetry.projection import (
 def _source_meta(antiunitary: bool = False) -> dict[str, object]:
     return {
         "name": "C2",
+        "matrix_kind": "action",
         "source_matrix_role": "raw_h_sewing_action",
         "source_gauge": "raw_saved_TAPW",
         "target_role": "continuum_internal_rep",
@@ -515,6 +516,7 @@ def test_nonstandard_action_name_is_rejected(tmp_path: Path) -> None:
                         "operation": "C2",
                         "matrix_file": "C2_low_raw.npy",
                         "k_map": {"type": "nonstandard_reflection_name"},
+                        "q_map": {"type": "reflection", "axis_deg": 0.0},
                         "sector_map": "layer_exchange",
                         "antiunitary": False,
                         "pairs": [{"raw": {"heff_covariance_residual": 0.0, "subspace_leakage": 0.0}}],

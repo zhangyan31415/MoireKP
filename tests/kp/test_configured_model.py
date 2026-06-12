@@ -42,6 +42,7 @@ from kp.symmetry.projection import _kp_symm_exactification_config, _operation_po
 
 def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> dict[str, object]:
     return {
+        "matrix_kind": "action",
         "source_matrix_role": "bare_D0_internal_rep" if representation else "raw_h_sewing_action",
         "source_gauge": "raw_saved_TAPW",
         "target_role": "continuum_internal_rep",
@@ -1949,7 +1950,7 @@ def test_symmetry_source_requires_explicit_k_map_instead_of_axis_deg(tmp_path: P
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="requires explicit k_map"):
+    with pytest.raises(ValueError, match="k_map"):
         load_symmetry_source({"type": "kp_symm_output", "path": str(tmp_path), "use": "raw"}, base=tmp_path, expected_dim=2)
 
 
@@ -1965,7 +1966,7 @@ def test_symmetry_source_rejects_representation_low_matrix_as_production_source(
             {
                 "operations": [
                     {
-                        **_source_meta(representation=True),
+                        **{k: v for k, v in _source_meta(representation=True).items() if k != "matrix_kind"},
                         "name": "C2",
                         "operation": "C2",
                         "matrix_file": "C2_low_representation_raw.npy",
@@ -2000,7 +2001,7 @@ def test_symmetry_source_rejects_manifest_default_representation_matrix_kind(tmp
                 "default_matrix_kind": "representation",
                 "operations": [
                     {
-                        **_source_meta(representation=True),
+                        **{k: v for k, v in _source_meta(representation=True).items() if k != "matrix_kind"},
                         "name": "C2",
                         "operation": "C2",
                         "matrix_file": "C2_low_representation_raw.npy",
@@ -2015,7 +2016,7 @@ def test_symmetry_source_rejects_manifest_default_representation_matrix_kind(tmp
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="production symmetry matrices must use raw-action or kp_symm exactified matrices"):
+    with pytest.raises(ValueError, match="matrix_kind"):
         load_symmetry_source({"type": "kp_symm_output", "path": str(tmp_path), "use": "raw"}, base=tmp_path, expected_dim=2)
 
 

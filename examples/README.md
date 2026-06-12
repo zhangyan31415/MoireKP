@@ -4,6 +4,10 @@ This directory contains release-facing examples. Examples are grouped by
 material and twist angle so the TAPW inputs/outputs and downstream KP configs
 stay together.
 
+Dataset provenance for release-facing examples is tracked in
+`examples/data-manifest.yaml`. The release cannot be archived until the manifest
+has resolved license, DOI, and public data URL metadata.
+
 ## Canonical Layout
 
 ```text
@@ -62,6 +66,17 @@ examples/<material>_<angle>/
   - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml`
   - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml`
   - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml`
+
+## Active KP DAG
+
+The active KP workflow is documented as a dependency DAG rather than as a
+large-data smoke test. TAPW arrays and projected KP artifacts are external to
+the small release checkout unless they are listed in `examples/data-manifest.yaml`.
+
+- `kp plot -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band/Q arrays)
+- `kp project -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band/Q arrays; produces precomputed Heff)
+- `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml`
+- `kp model -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp project` and `kp symm` outputs when configured)
 
 ## TAPW Templates
 

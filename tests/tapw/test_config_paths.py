@@ -1,0 +1,116 @@
+import builtins
+from pathlib import Path
+from typing import Optional
+
+import pytest
+import yaml
+
+from tapw.config import Config, PathConfig
+
+
+def _write_relative_path_config(
+    config_dir: Path,
+    *,
+    paths: Optional[dict] = None,
+    compute: Optional[dict] = None,
+) -> Path:
+    for name in ("H.dat", "S.dat", "openmx.dat", "KPATH.in"):
+        (config_dir / name).write_text("placeholder\n", encoding="utf-8")
+
+    payload = {
+        "twist": {"twist_index_m": 3},
+        "paths": {
+            "H_file": "H.dat",
+            "S_file": "S.dat",
+            "input_file": "openmx.dat",
+            "output_dir": "results",
+            "kpath_in": "KPATH.in",
+            "kpath_out": "KPATH.out",
+        },
+        "compute": {
+            "mode": "band",
+            "n_g": 6,
+        },
+    }
+    if paths:
+        payload["paths"].update(paths)
+    if compute:
+        payload["compute"].update(compute)
+
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return config_path
+
+
+def test_config_relative_paths_resolve_from_config_file_directory(tmp_path, monkeypatch):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    other_cwd = tmp_path / "cwd"
+    other_cwd.mkdir()
+    config_path = _write_relative_path_config(config_dir)
+    monkeypatch.chdir(other_cwd)
+
+    config = Config.from_yaml(str(config_path))
+
+    assert Path(config.paths.H_file) == config_dir / "H.dat"
+    assert Path(config.paths.S_file) == config_dir / "S.dat"
+    assert Path(config.paths.input_file) == config_dir / "openmx.dat"
+    assert Path(config.paths.kpath_in) == config_dir / "KPATH.in"
+    assert Path(config.paths.kpath_out) == config_dir / "KPATH.out"
+    assert Path(config.paths.output_dir) == config_dir / "results"
+
+
+def test_path_config_has_no_filesystem_or_stack_inspection_side_effects(tmp_path, monkeypatch):
+    output_dir = tmp_path / "not_created"
+    original_import = builtins.__import__
+
+    def fail_on_inspect(name, *args, **kwargs):
+        if name == "inspect":
+            raise AssertionError("PathConfig must not import inspect")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fail_on_inspect)
+
+    PathConfig(
+        H_file=str(tmp_path / "H.dat"),
+        S_file=None,
+        input_file=str(tmp_path / "openmx.dat"),
+        output_dir=str(output_dir),
+        kpath_in=str(tmp_path / "KPATH.in"),
+        kpath_out=str(tmp_path / "KPATH.out"),
+    )
+
+    assert not output_dir.exists()
+
+
+def test_tapw_config_requires_explicit_ng_without_twist_angle_inference(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config_path = _write_relative_path_config(config_dir, compute={"TAPW": True})
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    del payload["compute"]["n_g"]
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"TAPW.*compute\.n_g"):
+        Config.from_yaml(str(config_path))
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        "examples/tapw/mote2_9.43/configs/mote2_direct.yaml",
+        "examples/tapw/mote2_9.43/configs/mote2_k_tapw.yaml",
+        "examples/tapw/mgi2_9.43/configs/mgi2_direct.yaml",
+        "examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw.yaml",
+    ],
+)
+def test_release_tapw_example_paths_are_config_relative(config_path):
+    root = Path(__file__).resolve().parents[2]
+    config = Config.from_yaml(str(root / config_path))
+    case_root = (root / config_path).parent.parent
+
+    assert Path(config.paths.H_file).parent == case_root / "openmx" / "soc"
+    assert Path(config.paths.S_file).parent == case_root / "openmx" / "soc"
+    assert Path(config.paths.input_file).parent == case_root / "openmx" / "soc"
+    assert Path(config.paths.kpath_in) == case_root / "KPATH.in"
+    assert Path(config.paths.output_dir).parent == case_root / "runs"

@@ -20,6 +20,7 @@ from .schema import (
     validate_model_config,
 )
 from .symmetry import load_symmetry_source
+from ..symmetry.action_schema import allows_inferred_action_metadata
 from ..symmetry.geometry import (
     bM_candidates_from_q_distances,
     canonical_bM_pair_from_candidates,
@@ -350,6 +351,7 @@ def _complete_kp_symm_operation_entry(
     *,
     use: str,
     matrix_kind: str,
+    allow_inferred: bool = False,
 ) -> dict[str, Any]:
     row = dict(operation) if isinstance(operation, Mapping) else {"name": str(operation)}
     user_name = str(row.get("name", row.get("operation", "")))
@@ -358,7 +360,9 @@ def _complete_kp_symm_operation_entry(
     if matrix_kind != "action":
         raise ValueError("kp_symm_output production symmetry_source.matrix_kind must be 'action'")
     semantics = SOURCE_SEMANTICS
-    missing_action = [field for field in ("antiunitary", "k_map", "sector_map") if field not in row]
+    missing_action = [field for field in ("antiunitary", "k_map", "q_map", "sector_map") if field not in row]
+    if allow_inferred and "q_map" in missing_action and "k_map" in row:
+        missing_action.remove("q_map")
     if missing_action:
         raise ValueError(
             f"symmetry_source operation {user_name!r} requires explicit action metadata when matrix_kind is set; "
@@ -375,8 +379,9 @@ def _complete_kp_symm_operation_entry(
     completed["name"] = name
     completed.setdefault("operation", source_operation)
     completed["antiunitary_convention"] = "U_K" if completed["antiunitary"] else "none"
-    if "q_map" not in completed and "k_map" in completed:
+    if allow_inferred and "q_map" not in completed and "k_map" in completed:
         completed["q_map"] = copy.deepcopy(completed["k_map"])
+        completed["inferred_fields"] = sorted(set([*completed.get("inferred_fields", []), "q_map"]))
     return completed
 
 
@@ -401,6 +406,7 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
         raise ValueError("symmetry_source.operations must be a list or mapping when provided")
     use = str(source_out.get("use", "raw"))
     matrix_kind_raw = source_out.get("matrix_kind", source_out.get("kind"))
+    allow_inferred = allows_inferred_action_metadata(source_out)
     if matrix_kind_raw is None:
         normalized_operations: list[Any] = []
         for operation in operations:
@@ -423,7 +429,13 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
     else:
         matrix_kind = str(matrix_kind_raw)
         source_out["operations"] = [
-            _complete_kp_symm_operation_entry(operation, valley_model, use=use, matrix_kind=matrix_kind)
+            _complete_kp_symm_operation_entry(
+                operation,
+                valley_model,
+                use=use,
+                matrix_kind=matrix_kind,
+                allow_inferred=allow_inferred,
+            )
             for operation in operations
         ]
     out["symmetry_source"] = source_out
@@ -495,8 +507,6 @@ def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: floa
             enriched["k_map"] = _rotate_k_map_to_model_frame(record.get("k_map"), rotation_deg=rotation_deg)
             if "q_map" in record:
                 enriched["q_map"] = _rotate_k_map_to_model_frame(record.get("q_map"), rotation_deg=rotation_deg)
-            elif "k_map" in enriched:
-                enriched["q_map"] = copy.deepcopy(enriched["k_map"])
         keys = [record.get("name"), record.get("operation")]
         for key in keys:
             if key is None:
@@ -528,8 +538,6 @@ def _enrich_symmetry_map(
                 for key, value in row.items():
                     if key not in {"antiunitary", "k_map", "q_map", "sector_map"}:
                         merged[key] = value
-                if "q_map" not in merged and "k_map" in merged:
-                    merged["q_map"] = dict(merged["k_map"]) if isinstance(merged["k_map"], Mapping) else merged["k_map"]
                 row = merged
             if require_action_metadata:
                 _require_resolved_operation_action(row)

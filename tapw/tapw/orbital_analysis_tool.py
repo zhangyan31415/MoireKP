@@ -38,6 +38,7 @@ from json import JSONEncoder
 from tqdm import tqdm
 
 # 导入TAPW模块
+from .artifacts import array_output_filename, gvec_output_filename
 from .config import ComputeConfig, Config
 from .io.structure import OpenMXFile, StructureProcessorSpglib
 
@@ -147,6 +148,7 @@ class OrbitalAnalyzer:
                 band_path = os.path.join(band_dir, file)
                 # 对应 vec 文件
                 vec_candidate_names = [
+                    array_output_filename(f"vec_{band_type}", valley_flag=valley_name, tapw=True),
                     f"vec_{band_type}_{valley_name}_valley.npy",
                     f"vec_{band_type}_{valley_name}.npy",
                 ]
@@ -178,6 +180,7 @@ class OrbitalAnalyzer:
                         if bt != self.band_type:
                             continue
                         vec_candidate_names = [
+                            array_output_filename(f"vec_{bt}", valley_flag=valley_name, tapw=True),
                             f"vec_{bt}_{valley_name}_valley.npy",
                             f"vec_{bt}_{valley_name}.npy",
                         ]
@@ -216,6 +219,7 @@ class OrbitalAnalyzer:
                     if bt != self.band_type:
                         continue
                     vec_candidate_names = [
+                        array_output_filename(f"vec_{bt}", valley_flag=valley_name, tapw=True),
                         f"vec_{bt}_{valley_name}_valley.npy",
                         f"vec_{bt}_{valley_name}.npy",
                     ]
@@ -693,6 +697,17 @@ class OrbitalAnalyzer:
                     # 新/旧格式兼容：有些版本会带 band_type，有些不带
                     patterns.extend(
                         [
+                            os.path.join(
+                                root,
+                                gvec_output_filename(n_g="*", valley_flag=f"{self.band_type}_{v}", layer=1),
+                            ),
+                            os.path.join(
+                                root,
+                                "**",
+                                gvec_output_filename(n_g="*", valley_flag=f"{self.band_type}_{v}", layer=1),
+                            ),
+                            os.path.join(root, gvec_output_filename(n_g="*", valley_flag=v, layer=1)),
+                            os.path.join(root, "**", gvec_output_filename(n_g="*", valley_flag=v, layer=1)),
                             os.path.join(root, f"g_vec_list_*_{self.band_type}_{v}_1layer.npy"),
                             os.path.join(root, f"**/g_vec_list_*_{self.band_type}_{v}_1layer.npy"),
                             os.path.join(root, f"g_vec_list_*_{v}_1layer.npy"),

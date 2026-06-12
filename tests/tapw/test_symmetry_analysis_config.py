@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import pytest
 import yaml
 
 from tapw.config import Config
@@ -97,3 +98,58 @@ def test_symmetry_analysis_valleys_are_independent_from_compute_valleys(tmp_path
 
     assert config.compute.valleys == [31, 32, 33]
     assert config.symmetry_analysis.valleys == [5]
+
+
+def _write_config_without_s_file(tmp_path: Path, *, mode: str, orthogonal_basis: bool = False) -> Path:
+    h_file = tmp_path / "H.dat"
+    input_file = tmp_path / "openmx.dat"
+    kpath_in = tmp_path / "KPATH.in"
+    for file_path in (h_file, input_file, kpath_in):
+        file_path.write_text("placeholder\n", encoding="utf-8")
+
+    payload = {
+        "twist": {"twist_index_m": 6},
+        "paths": {
+            "H_file": str(h_file),
+            "input_file": str(input_file),
+            "output_dir": str(tmp_path / "out"),
+            "kpath_in": str(kpath_in),
+            "kpath_out": str(tmp_path / "KPATH.out"),
+        },
+        "compute": {
+            "mode": mode,
+            "n_g": 6,
+            "orthogonal_basis": orthogonal_basis,
+        },
+    }
+
+    config_path = tmp_path / f"config_{mode}_{orthogonal_basis}.yaml"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return config_path
+
+
+@pytest.mark.parametrize("mode", ["band", "chern"])
+def test_nonorthogonal_band_and_chern_require_s_file(tmp_path, mode):
+    config_path = _write_config_without_s_file(tmp_path, mode=mode, orthogonal_basis=False)
+
+    with pytest.raises(ValueError, match=r"S_file.*required.*non-orthogonal"):
+        Config.from_yaml(str(config_path))
+
+
+@pytest.mark.parametrize("mode", ["band", "chern"])
+def test_orthogonal_band_and_chern_do_not_require_s_file(tmp_path, mode):
+    config_path = _write_config_without_s_file(tmp_path, mode=mode, orthogonal_basis=True)
+
+    config = Config.from_yaml(str(config_path))
+
+    assert config.paths.S_file is None
+    assert config.compute.orthogonal_basis is True
+
+
+def test_symmetry_mode_does_not_require_s_file(tmp_path):
+    config_path = _write_config_without_s_file(tmp_path, mode="symmetry", orthogonal_basis=False)
+
+    config = Config.from_yaml(str(config_path))
+
+    assert config.paths.S_file is None
+    assert config.compute.mode == "symmetry"

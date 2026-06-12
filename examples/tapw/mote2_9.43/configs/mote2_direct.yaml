@@ -6,12 +6,12 @@ twist:
   twist_layer: [1, 1]
 
 paths:
-  H_file: openmx/soc/H.npz
-  S_file: openmx/soc/S.npz
-  input_file: openmx/soc/openmx.dat_rigid
-  kpath_in: KPATH.in
-  kpath_out: runs/mote2_direct/KPATH.out
-  output_dir: runs/mote2_direct
+  H_file: ../openmx/soc/H.npz
+  S_file: ../openmx/soc/S.npz
+  input_file: ../openmx/soc/openmx.dat_rigid
+  kpath_in: ../KPATH.in
+  kpath_out: ../runs/mote2_direct/KPATH.out
+  output_dir: ../runs/mote2_direct
 
 compute:
   mode: band

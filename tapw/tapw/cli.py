@@ -180,7 +180,7 @@ def main():
         config.compute.kpoint_chunk_count = args.kpoint_chunk_count
 
     # Re-check constraints after applying CLI overrides.
-    config.compute.validate()
+    config.validate()
 
     # Setup logging
     os.makedirs(config.paths.output_dir + "/logs", exist_ok=True)

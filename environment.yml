@@ -1,0 +1,26 @@
+name: moirekp
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - pip
+  - numpy
+  - scipy
+  - matplotlib
+  - pandas
+  - pyyaml
+  - scikit-learn
+  - joblib
+  - tqdm
+  - psutil
+  - sympy
+  - ase
+  - spglib
+  - mpi4py
+  - petsc=*=*complex*
+  - slepc=*=*complex*
+  - petsc4py
+  - slepc4py
+  - pytest
+  - pip:
+      - -e .

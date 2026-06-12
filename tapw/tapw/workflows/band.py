@@ -33,6 +33,12 @@ from ..symmetry.representations import (
 )
 from tqdm import tqdm
 from ..config import ComputeConfig
+from ..artifacts import (
+    array_output_filename,
+    band_output_filename,
+    gvec_output_filename,
+    raw_memmap_filename,
+)
 from ..io.structure import StructureProcessorSpglib
 from ..io.kpath import KPathGenerator
 from ..geometry.rotations import get_any_rot_orb_twostep
@@ -72,22 +78,6 @@ _NOTAPW_SLEPC_MAX_IT = 5000
 _M_VALLEY_TRIPLET = (31, 32, 33)
 _M_VALLEY_ROTATIONS = {31: 0, 32: 120, 33: 240}
 _SIGMA_Y = np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128)
-
-
-def band_output_filename(kind: str, *, valley_flag: str, suffix: str = "", tapw: bool = True) -> str:
-    kind = str(kind).upper()
-    suffix = str(suffix)
-    if tapw:
-        return f"band_{kind}_{valley_flag}_valley{suffix}.txt"
-    return f"band_{kind}{suffix}.txt"
-
-
-def array_output_filename(kind: str, *, valley_flag: str, suffix: str = "", tapw: bool = True) -> str:
-    kind = str(kind).upper()
-    suffix = str(suffix)
-    if tapw:
-        return f"{kind}_{valley_flag}_valley{suffix}.npy"
-    return f"{kind}{suffix}.npy"
 
 
 def uses_m_valley_threefold_symmetrization(config: ComputeConfig) -> bool:
@@ -3026,11 +3016,17 @@ class BandStructureCalculator:
         os.makedirs(path, exist_ok=True)
         if self.config.TAPW:
             np.save(
-                os.path.join(path, f"g_vec_list_{self.config.n_g}_{self.valley_flag}_1layer"),
+                os.path.join(
+                    path,
+                    gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=1),
+                ),
                 self.TAPW_parameters.g_vec_list_K1,
             )
             np.save(
-                os.path.join(path, f"g_vec_list_{self.config.n_g}_{self.valley_flag}_2layer"),
+                os.path.join(
+                    path,
+                    gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=2),
+                ),
                 self.TAPW_parameters.g_vec_list_K2,
             )
         if self.use_C3_H:
@@ -3813,8 +3809,14 @@ class BandStructureCalculator:
             os.makedirs(memmap_dir, exist_ok=True)
 
             # File names include the same suffix as the final outputs, so different modes/num_chern don't collide.
-            eig_path = os.path.join(memmap_dir, f"eig_raw_{self.valley_flag}_valley{suffix}.npy")
-            vec_path = os.path.join(memmap_dir, f"vec_raw_{self.valley_flag}_valley{suffix}.npy")
+            eig_path = os.path.join(
+                memmap_dir,
+                raw_memmap_filename("eig", valley_flag=self.valley_flag, suffix=suffix),
+            )
+            vec_path = os.path.join(
+                memmap_dir,
+                raw_memmap_filename("vec", valley_flag=self.valley_flag, suffix=suffix),
+            )
 
             nb = int(self.config.num_bands_cal) if getattr(self.config, "eigsh_cal", True) else None
             dim = int(self.TAPW_parameters.g_matrix.shape[0]) if getattr(self.config, "TAPW", False) else None
@@ -3995,8 +3997,12 @@ class BandStructureCalculator:
         n_g = self.config.n_g
         valley_flag = self.config.valley_flag
         
-        g_vec_list_K_1layer = np.load(path + f"/g_vec_list_{n_g}_{valley_flag}_1layer.npy")
-        g_vec_list_K_2layer = np.load(path + f"/g_vec_list_{n_g}_{valley_flag}_2layer.npy")
+        g_vec_list_K_1layer = np.load(
+            os.path.join(path, gvec_output_filename(n_g=n_g, valley_flag=valley_flag, layer=1))
+        )
+        g_vec_list_K_2layer = np.load(
+            os.path.join(path, gvec_output_filename(n_g=n_g, valley_flag=valley_flag, layer=2))
+        )
 
         orb_num = self.structure.num_orbs_per_unit_cell
         band_wave = self.result['vec']
@@ -4023,7 +4029,9 @@ class BandStructureCalculator:
         valley_flag = self.config.valley_flag
         orb_num = self.structure.num_orbs_per_unit_cell
         
-        g_vec_list_K_1layer = np.load(path + f"/g_vec_list_{n_g}_{valley_flag}_1layer.npy")
+        g_vec_list_K_1layer = np.load(
+            os.path.join(path, gvec_output_filename(n_g=n_g, valley_flag=valley_flag, layer=1))
+        )
         num_gn_all = len(g_vec_list_K_1layer) * 2 
         up_all_index, down_all_index = self.generate_indices(num_gn_all, num_Te, num_Mo, orb_num)
         num_kpoints = len(self.kpath_config.kpoints)

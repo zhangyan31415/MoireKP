@@ -1,6 +1,5 @@
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Sequence, Tuple, Union
-import os
 import yaml
 from pathlib import Path
 
@@ -67,27 +66,28 @@ class PathConfig:
     S_file: Optional[str] = None
 
     def __post_init__(self):
-        self.H_file = os.path.abspath(self.H_file)
+        pass
+
+    @staticmethod
+    def _resolve_path(path_value: str, base_dir: Path) -> str:
+        path = Path(path_value).expanduser()
+        if path.is_absolute():
+            return str(path.resolve())
+        return str((base_dir / path).resolve())
+
+    def normalize(self, base_dir: Path) -> None:
+        """Resolve relative path fields against the configuration file directory."""
+        base_dir = Path(base_dir).expanduser()
+        if not base_dir.is_absolute():
+            base_dir = Path.cwd() / base_dir
+
+        self.H_file = self._resolve_path(self.H_file, base_dir)
+        self.input_file = self._resolve_path(self.input_file, base_dir)
+        self.output_dir = self._resolve_path(self.output_dir, base_dir)
+        self.kpath_in = self._resolve_path(self.kpath_in, base_dir)
+        self.kpath_out = self._resolve_path(self.kpath_out, base_dir)
         if self.S_file is not None:
-            self.S_file = os.path.abspath(self.S_file)
-        self.output_dir = os.path.abspath(self.output_dir)
-        os.makedirs(self.output_dir, exist_ok=True)
-        # 新增：如果不是正交基底，S_file 必须存在
-        # from .config import ComputeConfig
-        import inspect
-        # 尝试获取调用栈中的Config对象
-        frame = inspect.currentframe()
-        while frame:
-            local_vars = frame.f_locals
-            if 'self' in local_vars and hasattr(local_vars['self'], 'compute'):
-                compute = local_vars['self'].compute
-                break
-            frame = frame.f_back
-        else:
-            compute = None
-        if compute is not None and not getattr(compute, 'orthogonal_basis', False):
-            if self.S_file is None or not os.path.isfile(self.S_file):
-                raise ValueError("S_file must be provided and exist when not using orthogonal basis.")
+            self.S_file = self._resolve_path(self.S_file, base_dir)
 
 @dataclass
 class ClusterConfig:
@@ -286,10 +286,28 @@ class Config:
     symmetry_analysis: SymmetryAnalysisConfig = field(default_factory=SymmetryAnalysisConfig)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
 
+    def validate(self) -> None:
+        """Validate cross-section configuration constraints."""
+        self.compute.validate()
+        if (
+            self.compute.mode in {"band", "chern"}
+            and not self.compute.orthogonal_basis
+            and not self.paths.S_file
+        ):
+            raise ValueError(
+                "paths.S_file is required for non-orthogonal band/chern calculations. "
+                "Set compute.orthogonal_basis=true for orthogonal bases or use mode='symmetry'."
+            )
+
     @classmethod
     def from_yaml(cls, yaml_path: str) -> 'Config':
         """Load configuration from YAML file"""
-        with open(yaml_path, 'r') as f:
+        config_path = Path(yaml_path).expanduser()
+        if not config_path.is_absolute():
+            config_path = Path.cwd() / config_path
+        config_dir = config_path.parent
+
+        with open(config_path, 'r') as f:
             config_dict = yaml.safe_load(f)
         if 'slab' in config_dict:
             raise ValueError("The release TAPW package does not support slab configuration.")
@@ -297,9 +315,15 @@ class Config:
         removed = {'gpu', 'gpu_index', 'delay_time'} & set(compute_raw)
         if removed:
             raise ValueError(f"The release TAPW package does not support GPU options: {sorted(removed)}")
+        if compute_raw.get('TAPW', True) and 'n_g' not in compute_raw:
+            raise ValueError(
+                "TAPW configurations require compute.n_g. "
+                "Automatic n_g inference from twist.twist_angle is not supported by Config.from_yaml."
+            )
         
         twist_config = TwistConfig(**config_dict.get('twist', {}))
         paths_config = PathConfig(**config_dict.get('paths', {}))
+        paths_config.normalize(config_dir)
         compute_config = ComputeConfig(**compute_raw)
         symmetry_analysis_config = SymmetryAnalysisConfig(**config_dict.get('symmetry_analysis', {}))
         # Use default cluster config if not provided
@@ -314,10 +338,7 @@ class Config:
         )
         # Propagate twist bravais to compute for downstream logic
         config_obj.compute.bravais = config_obj.twist.bravais
-        # n_g controls the TAPW projected basis only. Direct non-TAPW solves do
-        # not use it and should not require twist-angle based inference.
-        if 'n_g' not in config_dict.get('compute', {}) and config_obj.compute.TAPW:
-            config_obj.update_ng()
+        config_obj.validate()
         return config_obj
 
     def save_yaml(self, yaml_path: str):
@@ -333,22 +354,8 @@ class Config:
             yaml.dump(config_dict, f, default_flow_style=False)
 
     def update_ng(self):
-        """Update n_g based on twist angle"""
-        angle = float(self.twist.twist_angle)
-        if angle > 9:
-            self.compute.n_g = 3
-        elif angle > 6:
-            # self.compute.efermi = -0.17
-            self.compute.n_g = 6
-        elif angle > 4:
-            # self.compute.efermi = -0.172
-            self.compute.n_g = 7
-        elif angle > 2.8:
-            # self.compute.efermi = -0.178
-            self.compute.n_g = 8
-        elif angle > 2:
-            self.compute.efermi = -0.18
-            self.compute.n_g = 9
-        elif angle > 1:
-            self.compute.efermi = -0.18
-            self.compute.n_g = 10 
+        """Reject legacy automatic n_g inference in release configs."""
+        raise ValueError(
+            "Automatic n_g inference from twist.twist_angle is not supported. "
+            "Set compute.n_g explicitly."
+        )

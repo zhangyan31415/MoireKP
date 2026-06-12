@@ -9,32 +9,15 @@ import numpy as np
 import yaml
 
 from .schema import M_EFFECTIVE_OPERATION_ALIASES
+from ..symmetry.action_schema import (
+    PRODUCTION_MATRIX_KINDS,
+    allows_inferred_action_metadata,
+    complete_action_operation_metadata,
+    validate_action_map,
+)
 
 
-_REQUIRED_METADATA = {
-    "name",
-    "matrix_file",
-    "antiunitary",
-    "k_map",
-    "sector_map",
-    "spin_map",
-    "valley_map",
-    "matrix_kind",
-    "source_matrix_role",
-    "source_gauge",
-    "target_role",
-    "gauge_correction",
-    "antiunitary_convention",
-}
 _CANONICAL_OPERATION_NAMES = {"C3z", "C2", "TR", "C2T"}
-_ACTION_MAP_TYPES = {"rotation", "reflection", "identity", "negation"}
-_PRODUCTION_MATRIX_KINDS = {"action", "continuum_internal_rep_exact"}
-_ACTION_MATRIX_SEMANTICS = {
-    "source_matrix_role": "raw_h_sewing_action",
-    "source_gauge": "raw_saved_TAPW",
-    "target_role": "continuum_internal_rep",
-    "gauge_correction": {"kind": "none"},
-}
 _ARTIFACT_METADATA_KEYS = (
     "strict_metadata",
     "requires_model_exactification",
@@ -215,13 +198,7 @@ def _operation_records(raw_operations: Any, manifest: Mapping[str, Any]) -> list
 
 
 def _validate_map(raw: Any, *, field: str) -> Any:
-    if not isinstance(raw, Mapping):
-        return raw
-    out = dict(raw)
-    map_type = str(out.get("type", "")).lower()
-    if map_type not in _ACTION_MAP_TYPES:
-        raise ValueError(f"Unsupported {field}.type {out.get('type')!r}; use explicit standard action metadata")
-    return out
+    return validate_action_map(raw, field=field)
 
 
 def _pairs_for_matrix_kind(record: Mapping[str, Any], matrix_kind: str) -> list[Any]:
@@ -256,7 +233,7 @@ def _manifest_matrix_kind(record: Mapping[str, Any]) -> str:
     raw = record.get("matrix_kind", record.get("kind"))
     if raw:
         return str(raw)
-    return "action"
+    raise ValueError("kp_symm_output operation requires explicit matrix_kind metadata")
 
 
 def _manifest_default_matrix_kind(manifest: Mapping[str, Any]) -> str | None:
@@ -266,7 +243,7 @@ def _manifest_default_matrix_kind(manifest: Mapping[str, Any]) -> str | None:
     return None
 
 
-def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[str, Any]:
+def _complete_operation_record(record: Mapping[str, Any], *, use: str, allow_inferred: bool = False) -> dict[str, Any]:
     out = dict(record)
     raw_name = str(out.get("name", ""))
     alias = M_EFFECTIVE_OPERATION_ALIASES.get(raw_name)
@@ -283,33 +260,12 @@ def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[s
     canonical_name = str(out.get("name", ""))
     if canonical_name not in _CANONICAL_OPERATION_NAMES:
         raise ValueError(f"Unsupported canonical operation {canonical_name!r}")
-    if "k_map" not in out:
-        raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit k_map metadata")
-    if "sector_map" not in out:
-        raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit sector_map metadata")
-    out["antiunitary"] = bool(out["antiunitary"])
-    matrix_kind = _manifest_matrix_kind(out)
-    if matrix_kind not in _PRODUCTION_MATRIX_KINDS:
-        raise ValueError("production symmetry matrices must use raw-action or kp_symm exactified matrices")
-    out["matrix_kind"] = matrix_kind
-    defaulted_metadata: list[str] = []
-    for key, value in _ACTION_MATRIX_SEMANTICS.items():
-        if key not in out:
-            out[key] = value
-            defaulted_metadata.append(key)
-    if "antiunitary_convention" not in out:
-        out["antiunitary_convention"] = "U_K" if out["antiunitary"] else "none"
-        defaulted_metadata.append("antiunitary_convention")
-    if defaulted_metadata:
-        out["manifest_defaulted_metadata"] = sorted(defaulted_metadata)
-    missing = sorted(_REQUIRED_METADATA - set(out))
-    if missing:
-        raise ValueError(f"kp_symm_output metadata for operation {canonical_name!r} is incomplete; missing {missing}")
-    out["k_map"] = _validate_map(out["k_map"], field="k_map")
-    if "q_map" in out:
-        out["q_map"] = _validate_map(out["q_map"], field="q_map")
-    if "q_map" not in out:
-        raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit q_map metadata")
+    out = complete_action_operation_metadata(
+        out,
+        allow_inferred=allow_inferred,
+        context="kp_symm_output operation",
+    )
+    matrix_kind = str(out["matrix_kind"])
     support_resolution = out.get("support_resolution")
     if not isinstance(support_resolution, Mapping):
         model_basis_action = out.get("model_basis_action")
@@ -367,17 +323,18 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     matrices: dict[str, np.ndarray] = {}
     metadata_records: list[dict[str, Any]] = []
     use = str(raw.get("use", "raw"))
-    manifest_matrix_kind = _manifest_default_matrix_kind(manifest)
+    allow_inferred = allows_inferred_action_metadata(raw) or allows_inferred_action_metadata(manifest)
+    manifest_matrix_kind = _manifest_default_matrix_kind(manifest) if allow_inferred else None
     matrix_kind_raw = raw.get("matrix_kind", raw.get("kind", manifest_matrix_kind))
-    if matrix_kind_raw is not None and str(matrix_kind_raw) not in _PRODUCTION_MATRIX_KINDS:
+    if matrix_kind_raw is not None and str(matrix_kind_raw) not in PRODUCTION_MATRIX_KINDS:
         raise ValueError("production symmetry matrices must use raw-action or kp_symm exactified matrices")
     for record in records:
         record = dict(record)
-        if matrix_kind_raw is not None and "matrix_kind" not in record and "kind" not in record:
+        if matrix_kind_raw is not None and ("matrix_kind" not in record and "kind" not in record):
             record["matrix_kind"] = str(matrix_kind_raw)
-        else:
+        elif "matrix_kind" in record or "kind" in record:
             record["matrix_kind"] = _manifest_matrix_kind(record)
-        record = _complete_operation_record(record, use=use)
+        record = _complete_operation_record(record, use=use, allow_inferred=allow_inferred)
         name = str(record["name"])
         matrix_file = Path(str(record["matrix_file"]))
         if not matrix_file.is_absolute():

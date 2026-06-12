@@ -39,6 +39,8 @@ from typing import Dict, List, Tuple, Optional
 import re
 import yaml
 
+from .artifacts import band_output_filename
+
 # 设置字体为 Times New Roman
 plt.rc('font', family='Times New Roman')
 # 公式也是 Times New Roman
@@ -222,6 +224,7 @@ class OrbitalPlotter:
         if os.path.isdir(band_dir):
             bt = (self.config.band_type or "CBM").upper()
             band_file_candidates.extend([
+                os.path.join(band_dir, band_output_filename(bt, valley_flag=self.config.valley, tapw=True)),
                 os.path.join(band_dir, f"band_{bt}_{self.config.valley}_valley.txt"),
                 os.path.join(band_dir, f"band_{bt}_{self.config.valley}.txt"),
             ])

@@ -6,6 +6,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
+from .artifacts import array_output_filename
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
 
 
@@ -870,6 +871,15 @@ def _candidate_suffixes(num_k1, num_k2, num_chern):
 
 def _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2, num_chern):
     suffixes = _candidate_suffixes(num_k1, num_k2, num_chern)
+    seen = set()
+    for suffix in suffixes:
+        candidate = os.path.join(
+            output_dir,
+            array_output_filename(f"vec_{band_type}", valley_flag=valley_str, suffix=suffix, tapw=True),
+        )
+        seen.add(candidate)
+        if os.path.exists(candidate):
+            return candidate
     prefixes = [
         "vec_{0}_{1}_valley".format(band_type, valley_str),
         "vec_{0}_valley".format(valley_str),
@@ -877,6 +887,8 @@ def _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2,
     for prefix in prefixes:
         for suffix in suffixes:
             candidate = os.path.join(output_dir, prefix + suffix + ".npy")
+            if candidate in seen:
+                continue
             if os.path.exists(candidate):
                 return candidate
     return None

@@ -6,6 +6,7 @@ from typing import Optional
 
 import numpy as np
 
+from .artifacts import array_output_filename, band_output_filename, raw_memmap_filename
 from .workflows.band import open_memmap, _ensure_memmap_file
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
 
@@ -60,8 +61,8 @@ def postprocess_memmap(
         num_k1, num_k2 = resolve_chern_grid_shape(num_chern, num_k1, num_k2)
         suffix = format_chern_grid_suffix(num_k1, num_k2)
 
-    eig_path = memmap_dir / f"eig_raw_{valley_flag}_valley{suffix}.npy"
-    vec_path = memmap_dir / f"vec_raw_{valley_flag}_valley{suffix}.npy"
+    eig_path = memmap_dir / raw_memmap_filename("eig", valley_flag=valley_flag, suffix=suffix)
+    vec_path = memmap_dir / raw_memmap_filename("vec", valley_flag=valley_flag, suffix=suffix)
     if not eig_path.exists():
         raise FileNotFoundError(f"Missing {eig_path}")
     if not vec_path.exists():
@@ -99,19 +100,27 @@ def postprocess_memmap(
     want_cbm = band_type_u != "VBM"
 
     if want_vbm and vbm.size:
-        np.savetxt(out_dir / f"band_VBM_{valley_flag}_valley{suffix}.txt", vbm, fmt="%15.11f")
+        np.savetxt(
+            out_dir / band_output_filename("VBM", valley_flag=valley_flag, suffix=suffix, tapw=True),
+            vbm,
+            fmt="%15.11f",
+        )
     if want_cbm and cbm.size:
-        np.savetxt(out_dir / f"band_CBM_{valley_flag}_valley{suffix}.txt", cbm, fmt="%15.11f")
+        np.savetxt(
+            out_dir / band_output_filename("CBM", valley_flag=valley_flag, suffix=suffix, tapw=True),
+            cbm,
+            fmt="%15.11f",
+        )
 
     # Wavefunctions: write requested blocks as memmap .npy to avoid huge RAM usage.
     vbm_mm = None
     cbm_mm = None
     if want_vbm and vbm.shape[1] > 0:
-        vbm_out = out_dir / f"vec_VBM_{valley_flag}_valley{suffix}.npy"
+        vbm_out = out_dir / array_output_filename("vec_VBM", valley_flag=valley_flag, suffix=suffix, tapw=True)
         _ensure_memmap_file(str(vbm_out), np.complex128, (energies.shape[0], vec_raw.shape[1], vbm.shape[1]))
         vbm_mm = open_memmap(str(vbm_out), mode="r+")
     if want_cbm and cbm.shape[1] > 0:
-        cbm_out = out_dir / f"vec_CBM_{valley_flag}_valley{suffix}.npy"
+        cbm_out = out_dir / array_output_filename("vec_CBM", valley_flag=valley_flag, suffix=suffix, tapw=True)
         _ensure_memmap_file(str(cbm_out), np.complex128, (energies.shape[0], vec_raw.shape[1], cbm.shape[1]))
         cbm_mm = open_memmap(str(cbm_out), mode="r+")
 

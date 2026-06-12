@@ -1,76 +1,63 @@
 # moirekp
 
-A Python package for moiré physics calculations.
+`moirekp` provides Python workflows for moire electronic-structure studies:
 
-## Overview
+- `tapw`: truncated atomic plane-wave calculations and post-processing for twisted bilayer systems.
+- `kp`: continuum-model construction, symmetry projection, and model validation utilities.
 
-`moirekp` provides tools for studying moiré systems through two approaches:
-
-1. **TAPW (Twisted Angle Plane Wave)**: Ab initio calculations for twisted bilayer systems
-2. **Continuum Model**: Effective low-energy descriptions of moiré systems (in development)
-
-## Features
-
-### TAPW Module
-- Band structure calculation for twisted bilayer systems
-- Support for various valleys (K, K', Γ, M points)
-- C3 symmetry consideration
-- CPU/HPC parallel computation capabilities
-- Chern number calculations
-
-### Continuum Model Module
-- Low-energy effective Hamiltonians for moiré systems
-- Continuum Model for moiré systems
-- (More features coming soon...)
+The repository is packaged as a single editable Python project with command-line entry points for both modules.
 
 ## Installation
 
-1. Clone the repository:
-```bash
-git clone git@github.com:zhangyan31415/moirekp.git
-cd moirekp
-```
+Create the release environment from the repository root:
 
-2. Create a conda environment and install dependencies:
 ```bash
 conda env create -f environment.yml
 conda activate moirekp
 ```
 
-3. Install the package:
+The environment file installs the package in editable mode with `python -m pip install -e .`.
+
+## Quick Checks
+
 ```bash
-pip install -e .
+python -m pytest tests/test_release_contract.py -q
+tapw-config -h
+kp --help
 ```
 
-## Usage
+## TAPW Workflow
 
-### TAPW Calculations
+Generate starter configuration files:
 
-1. Prepare configuration:
 ```bash
 tapw-config -o output_dir
 ```
 
-2. Edit configuration files and set paths to DFT data files.
+Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the required OpenMX-derived input files, then run:
 
-3. Run calculation:
 ```bash
 cd output_dir
 tapw-calc --config config.yaml
-```
-
-4. Plot results:
-```bash
 tapw-plot --config bands.yaml
 ```
 
-### Continuum Model
-(Documentation coming soon...)
+For Chern-number post-processing, run `tapw-calc` with a Chern configuration and then use `tapw-chernpost` in the generated `Q_shell_*` directory.
 
-## Examples
+## Continuum-Model Workflow
 
-See the `examples/` directory for sample calculations.
+The `kp` command works with YAML source and model configurations under `examples/<material>_<angle>/kp/configs/`.
 
-## License
+Typical operations are:
 
-MIT License
+```bash
+kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+```
+
+See `examples/README.md` for the release-facing example layout and `examples/data-manifest.yaml` for the current dataset provenance status.
+
+## Release Metadata
+
+Release license, DOI, and public data URL metadata are not finalized in this checkout. Track those items in `RELEASE_BLOCKERS.md` before publishing an archival release.
