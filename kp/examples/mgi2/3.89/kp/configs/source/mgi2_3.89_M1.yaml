@@ -1,0 +1,86 @@
+
+material:
+  name: MgI2
+  hamk_file: ../../../tapw/Q_shell_7/band/hamk_M1_valley.npy
+  qset1_file: ../../../tapw/Q_shell_7/g_vec_list_7_M1_1layer.npy
+  qset2_file: ../../../tapw/Q_shell_7/g_vec_list_7_M1_2layer.npy
+  # Precomputed band energies (fast path)
+  band_file: ../../../tapw/Q_shell_7/band/band_CBM_M1_valley.txt
+  # Explicit Fermi level in eV (overrides vbm_file)
+  efermi: -4.168612
+  # vbm_file: "/data/work/zy/software/1.tapw_code/moirekp/kp/configs/8_3.89/tapw/Q_shell_6/band/band_VBM_Gamma_valley.txt"
+  spin: "up"
+  num_layers: 2
+  # Optional: provide per-layer orbitals; otherwise inferred
+  # num_orb_per_layer: [46, 46]
+  # Optional: orbital order string (not used in this plot step)
+  orbital_order: "I-s3p2d2,Mg-s2p2,I-s3p2d2"
+
+plot:
+  hamk_index: 0
+  target: "all"  # 'all' plots full spectrum; or 'valence'/'conduction'/band index
+  ref_q_index: 30
+  out: ../../outputs/plot/mgi2_3.89_M1/mgi2_M1_scatter.png
+  data_out: ../../outputs/plot/mgi2_3.89_M1/mgi2_M1_spectrum.txt
+  title: "MgI2 M1 valley — CBM band vs Q"
+  ylim: [-1, 8]
+  sort_by_qnorm: true
+  report_below: 2
+  report_above: 2
+  report_components: 8
+  mode: "M1"
+
+  nlow_state_list: [[11],[11]]
+  norb_fix_list:
+    -  # bottom
+      - [[19,1]]
+    -  # top
+      - [[19,-1]]
+
+  # nlow_state_list: [[44,45,46,47]]
+  # norb_fix_list:
+  #   -  # bottom
+  #     - [[111,1]]
+  #     - [[19,1]]
+  #     - [[157,1]]
+  #     - [[65,1]]
+
+
+project:
+  enable: false
+  workers: 4
+  out_dir: ../../outputs/project/mgi2_3.89_M1
+  report_below: 8      # bands below EF to report
+  report_above: 8      # bands above EF to report
+  report_components: 10 # top-N orbital components per band
+  ylim: [-3,-2]
+  mode: "M1"
+  e_ref: -2.6
+
+  # nlow_state_list: [[36,37,38,39,40,41,42,43]]
+  # nlow_state_list: [[22,23],[22,23]]
+  # norb_fix_list:
+  #   -  # bottom
+  #     - [[19,1]]
+  #     - [[65,1]]
+  #   -  # top
+  #     - [[65,1]]
+  #     - [[19,1]]
+
+  nlow_state_list: [[11],[11]]
+  norb_fix_list:
+    -  # bottom
+      - [[19,1]]
+    -  # top
+      - [[65,1]]
+
+
+symm:
+  enable: true
+  valley: M1
+  spin: up
+  spin_sector_sewing: up_to_down
+  tapw_symmetry_dir: ../../../tapw/symmetry_analysis_test_m_q7
+  operations: [TR, C2]
+  output_dir: ../../outputs/symm/mgi2_3.89_M1
+  tolerance: 1.0e-2

@@ -9,6 +9,42 @@ import scipy.linalg
 from .downfold import DownfoldingOptions, downfold_from_projectors
 
 
+def _hermitian_eigh(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    return scipy.linalg.eigh(
+        np.asarray(matrix, dtype=np.complex128),
+        check_finite=False,
+        overwrite_a=True,
+        driver="evr",
+    )
+
+
+def _hermitian_eigh_columns(matrix: np.ndarray, columns: list[int] | None) -> tuple[np.ndarray, np.ndarray]:
+    if columns is None:
+        return _hermitian_eigh(matrix)
+    if not columns:
+        size = int(np.asarray(matrix).shape[0])
+        return np.zeros(size, dtype=float), np.zeros((size, size), dtype=np.complex128)
+    size = int(np.asarray(matrix).shape[0])
+    unique_cols = sorted({int(col) for col in columns})
+    if unique_cols[0] < 0 or unique_cols[-1] >= size:
+        raise IndexError(f"eigenvector column request {unique_cols} outside block size {size}")
+    lo, hi = unique_cols[0], unique_cols[-1]
+    eig_window, vec_window = scipy.linalg.eigh(
+        np.asarray(matrix, dtype=np.complex128),
+        subset_by_index=(lo, hi),
+        check_finite=False,
+        overwrite_a=True,
+        driver="evr",
+    )
+    eig = np.zeros(size, dtype=float)
+    vec = np.zeros((size, size), dtype=np.complex128)
+    for offset, band in enumerate(range(lo, hi + 1)):
+        if band in unique_cols:
+            eig[band] = float(eig_window[offset])
+            vec[:, band] = vec_window[:, offset]
+    return eig, vec
+
+
 def align_eigenstates(U_low: np.ndarray, Phi_ref: np.ndarray) -> np.ndarray:
     """Align low-energy eigenstates to a reference basis using Procrustes via SVD.
 
@@ -192,6 +228,7 @@ def get_H_block(
     *,
     spin: Literal["up", "down", "all"] = "up",
     mode: Literal["gamma", "K1", "K2"] = "gamma",
+    selected_bands_by_layer: list[list[int]] | None = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Assemble Hamiltonian sub-blocks and diagonalize per-Q selection.
 
@@ -269,7 +306,16 @@ def get_H_block(
             same_q_index = apply_spin(same_q_index)
             block = hamk[np.ix_(same_q_index, same_q_index)]
             # print(block[10,20])
-            eig, vec = np.linalg.eigh(block)
+            selected_bands: list[int] | None = None
+            if selected_bands_by_layer is not None:
+                selected_bands = sorted(
+                    {
+                        int(band)
+                        for layer_bands in selected_bands_by_layer
+                        for band in layer_bands
+                    }
+                )
+            eig, vec = _hermitian_eigh_columns(block, selected_bands)
             # print(np.sort(eig)[:5],np.linalg.norm(block))
             if nlow_state_list and norb_fix_list:
                 bands_flat: list[int] = []
@@ -316,7 +362,8 @@ def get_H_block(
                     same_q_index = apply_spin(same_q_index)
                     # print(f"ilx = {ilx}, j = {jj}, iq = {iq}, iqx = {iqx}, base = {base}, shift = {shift}, same_q_index = {same_q_index}")
                     block = hamk[np.ix_(same_q_index, same_q_index)]
-                    eig, vec = np.linalg.eigh(block)
+                    selected_bands = None if selected_bands_by_layer is None else [int(band) for band in selected_bands_by_layer[int(ilx)]]
+                    eig, vec = _hermitian_eigh_columns(block, selected_bands)
 
                     if nlow_state_list and norb_fix_list:
                         layer = int(ilx)
@@ -345,7 +392,6 @@ def get_H_block(
                     H_diag_block.append(block)
                     H_GM_diag_eig.append(eig)
                     H_GM_diag_eig_vec.append(vec)
-    # np.save("//data/work/zy/software/1.tapw_code/moirekp/kp/H_GM_diag_eig_vec.npy",H_GM_diag_eig_vec)
     return (
         np.array(H_GM_diag_eig, dtype=object),
         np.array(H_GM_diag_eig_vec, dtype=object),
@@ -755,7 +801,7 @@ def project_heff_full(
             # 一阶：Heff = U† H U
             Heff = U_low_full.conj().T @ np.asarray(hamk_full, dtype=np.complex128) @ U_low_full
             Heff = 0.5 * (Heff + Heff.conj().T)
-            heig, hvec = np.linalg.eigh(Heff)
+            heig, hvec = _hermitian_eigh(Heff)
             print("heff mean=", float(np.mean(heig)))
             return Heff, heig, hvec
 
@@ -805,7 +851,7 @@ def project_heff_full(
     )
 
     Heff = result.heff
-    heig, hvec = np.linalg.eigh(Heff)
+    heig, hvec = _hermitian_eigh(Heff)
     if return_diagnostics:
         return Heff, heig, hvec, result
     return Heff, heig, hvec

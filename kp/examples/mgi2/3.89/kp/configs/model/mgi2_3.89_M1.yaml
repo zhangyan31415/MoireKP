@@ -1,7 +1,7 @@
-source_config: ../../source/mgi2_3.89_M1.yaml
+source_config: ../source/mgi2_3.89_M1.yaml
 valley: M1
-spin: spinless
-symmetry_source: ../../../outputs/symm/mgi2_3.89_M1
+spin: spinless_effective
+symmetry_source: ../../outputs/symm/mgi2_3.89_M1
 sectors:
 - name: bottom
   qset: qset1
@@ -16,7 +16,7 @@ sectors:
   - 0.0
   n_orb: 1
 kpath:
-  file: ../../../../tapw/KPATH.in
+  file: ../../../tapw/KPATH.in
   tmat:
   - - 60.9508659523
     - 0.0
@@ -60,7 +60,7 @@ bands:
     - 0.0
     - 0.16
 output:
-  dir: ../../../outputs/model/production/mgi2_3.89_M1
+  dir: ../../outputs/model/mgi2_3.89_M1
   save_coefficients: true
   verbose: false
   progress: true

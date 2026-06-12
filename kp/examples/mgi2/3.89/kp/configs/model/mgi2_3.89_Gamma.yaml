@@ -1,8 +1,8 @@
-source_config: ../../source/mgi2_3.89_Gamma.yaml
+source_config: ../source/mgi2_3.89_Gamma.yaml
 valley: Gamma
 spin: spinful
 kpath:
-  file: ../../../../tapw/KPATH.in
+  file: ../../../tapw/KPATH.in
   tmat:
   - - 60.9508659523
     - 0.0
@@ -37,7 +37,7 @@ bands:
     top_bands: 4
     align: top
 output:
-  dir: ../../../runs/release/mgi2_3.89_Gamma
+  dir: ../../outputs/model/mgi2_3.89_Gamma
   save_coefficients: true
   verbose: false
   progress: true

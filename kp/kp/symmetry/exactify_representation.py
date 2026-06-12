@@ -253,7 +253,13 @@ def _candidate_operation_actions(
         for key in ("antiunitary", "k_map", "q_map", "sector_map"):
             if key in model_action:
                 model_record[key] = model_action[key]
-    model_record["k_map"] = _model_frame_k_map(model_record.get("k_map", {}))
+        model_record["k_map"] = _model_frame_k_map(model_record.get("k_map", {}))
+        if "q_map" in model_record:
+            model_record["q_map"] = _model_frame_k_map(model_record.get("q_map", {}))
+    else:
+        model_record["k_map"] = _rotate_k_map_to_model_frame(model_record.get("k_map", {}), rotation_deg=rotation_deg)
+        if "q_map" in model_record:
+            model_record["q_map"] = _rotate_k_map_to_model_frame(model_record.get("q_map", {}), rotation_deg=rotation_deg)
     out = [_build_operation_from_record(model_record)]
     if discover_action_candidates:
         for sector_map in ("identity", "layer_exchange"):
@@ -918,6 +924,83 @@ def _central_phase_for_operation(operation_name: str, cfg: Mapping[str, Any], *,
     return 1, complex(1.0, 0.0)
 
 
+def _complex_from_metadata(value: Any) -> complex:
+    if isinstance(value, complex):
+        return value
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        if len(value) == 2:
+            return complex(float(value[0]), float(value[1]))
+    return complex(value)
+
+
+def _relation_operation_matches(relation: Mapping[str, Any], operation_name: str) -> bool:
+    raw_name = relation.get("name", relation.get("operation", ""))
+    if raw_name in {None, ""}:
+        return True
+    text = str(raw_name).replace(" ", "")
+    relation_op = text.split("^", 1)[0]
+    names = {str(operation_name)}
+    if operation_name == "C3z":
+        names.add("C3")
+    return relation_op in names
+
+
+def _power_relation_from_record(record: Mapping[str, Any], operation_name: str) -> tuple[int, complex, dict[str, Any]] | None:
+    relations = record.get("group_relations", [])
+    if isinstance(relations, Mapping):
+        items: list[Mapping[str, Any]] = []
+        for key, phase in relations.items():
+            raw = str(key).replace(" ", "")
+            if "^" not in raw:
+                continue
+            op_name, power_text = raw.split("^", 1)
+            items.append({"type": "power", "name": f"{op_name}^{power_text}", "power": int(power_text), "phase": phase})
+    elif isinstance(relations, Sequence) and not isinstance(relations, (str, bytes)):
+        items = [item for item in relations if isinstance(item, Mapping)]
+    else:
+        items = []
+    for relation in items:
+        if str(relation.get("type", "power")) != "power":
+            continue
+        if "power" not in relation or "phase" not in relation:
+            continue
+        if not _relation_operation_matches(relation, operation_name):
+            continue
+        parsed = {
+            "type": "power",
+            "name": relation.get("name", f"{operation_name}^{relation['power']}"),
+            "power": int(relation["power"]),
+            "phase": _complex_from_metadata(relation["phase"]),
+        }
+        return int(parsed["power"]), complex(parsed["phase"]), parsed
+    return None
+
+
+def _power_relation_for_exactification(
+    *,
+    record: Mapping[str, Any],
+    operation_name: str,
+    op_cfg: Mapping[str, Any],
+    exact_cfg: Mapping[str, Any],
+    antiunitary: bool,
+    require_group_relations: bool,
+) -> tuple[int, complex, str, dict[str, Any] | None, bool]:
+    relation = _power_relation_from_record(record, operation_name)
+    if relation is not None:
+        power, central_phase, relation_record = relation
+        return power, central_phase, "manifest", relation_record, False
+    if require_group_relations:
+        raise ValueError(
+            f"exactification strict mode requires explicit group relation metadata for operation {operation_name!r}"
+        )
+    if "power" in op_cfg or "central_phase" in op_cfg:
+        power = int(op_cfg.get("power", 2 if antiunitary else 1))
+        central_phase = _complex_from_metadata(op_cfg.get("central_phase", 1.0))
+        return power, central_phase, "operation_config", {"type": "power", "power": power, "phase": central_phase}, False
+    power, central_phase = _central_phase_for_operation(operation_name, exact_cfg, antiunitary=antiunitary)
+    return power, central_phase, "legacy_config_or_name", {"type": "power", "power": power, "phase": central_phase}, True
+
+
 def exactify_loaded_symmetry_source(
     *,
     loaded_metadata: Mapping[str, Any],
@@ -986,6 +1069,12 @@ def exactify_loaded_symmetry_source(
     op_records = loaded_metadata.get("operations", [])
     if not isinstance(op_records, Sequence) or isinstance(op_records, (str, bytes)):
         raise ValueError("loaded_metadata.operations must be a list")
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for pattern in ("exactified_*.npy", "*_exactification_report.json"):
+            for old_file in output_dir.glob(pattern):
+                if old_file.is_file():
+                    old_file.unlink()
     for record in op_records:
         if not isinstance(record, Mapping):
             continue
@@ -997,11 +1086,17 @@ def exactify_loaded_symmetry_source(
         accept_support_resolved_action = bool(
             op_cfg.get("accept_support_resolved_action", exact_cfg.get("accept_support_resolved_action", False))
         )
+        action_candidates_raw = op_cfg.get("action_candidates")
+        explicit_action_candidates = (
+            action_candidates_raw
+            if isinstance(action_candidates_raw, Sequence) and not isinstance(action_candidates_raw, (str, bytes))
+            else None
+        )
         candidates = _candidate_operation_actions(
             record,
             sectors,
             rotation_deg=rotation_deg,
-            explicit_candidates=op_cfg.get("action_candidates") if isinstance(op_cfg.get("action_candidates"), Sequence) and not isinstance(op_cfg.get("action_candidates"), (str, bytes)) else None,
+            explicit_candidates=explicit_action_candidates,
             require_explicit_action_candidates=require_explicit_action_candidates,
             discover_action_candidates=discover_action_candidates,
         )
@@ -1025,6 +1120,16 @@ def exactify_loaded_symmetry_source(
             max(tol, 1.0e-8),
         )
         if candidate is None:
+            allow_no_candidate = bool(
+                op_cfg.get(
+                    "allow_no_complete_support_candidate",
+                    exact_cfg.get("allow_no_complete_support_candidate", False),
+                )
+            )
+            if not allow_no_candidate:
+                raise ValueError(
+                    f"{name} exactification failed: No candidate produced complete geometry support"
+                )
             manifest_op = candidates[0]
             manifest_label_action = build_label_action(
                 labels,
@@ -1076,6 +1181,14 @@ def exactify_loaded_symmetry_source(
         manifest_action = _action_candidate_summary(candidates[0])
         selected_action = _action_candidate_summary(op)
         action_mismatch = not _action_summaries_equal(manifest_action, selected_action)
+        if not action_mismatch:
+            candidate_source = "manifest_model_action"
+        elif explicit_action_candidates is not None:
+            candidate_source = "explicit_action_candidates_report"
+        elif discover_action_candidates:
+            candidate_source = "support_discovery"
+        else:
+            candidate_source = "support_resolution"
         if action_mismatch and not accept_support_resolved_action:
             raise ValueError(
                 f"{name} exactification selected a support action that differs from manifest model_action; "
@@ -1125,17 +1238,16 @@ def exactify_loaded_symmetry_source(
         elif support_mode == "block_monomial":
             preferred_mode = "block_monomial"
         support_report = candidate["monomial_report"] if preferred_mode == "monomial" else candidate["block_report"]
-        group_relation_inferred = False
-        if "power" in op_cfg or "central_phase" in op_cfg:
-            power = int(op_cfg.get("power", 2 if op.antiunitary else 1))
-            central_phase = complex(op_cfg.get("central_phase", 1.0))
-        else:
-            if require_group_relations and not record.get("group_relations") and not exact_cfg.get("central_phase"):
-                raise ValueError(
-                    f"exactification strict mode requires explicit group relation metadata for operation {name!r}"
-                )
-            power, central_phase = _central_phase_for_operation(name, exact_cfg, antiunitary=op.antiunitary)
-            group_relation_inferred = True
+        power, central_phase, group_relation_source, group_relation, group_relation_inferred = (
+            _power_relation_for_exactification(
+                record=record,
+                operation_name=name,
+                op_cfg=op_cfg,
+                exact_cfg=exact_cfg,
+                antiunitary=op.antiunitary,
+                require_group_relations=require_group_relations,
+            )
+        )
         allowed_roots_spec = op_cfg.get("allowed_roots")
         if allowed_roots_spec is None:
             allowed_roots_map = exact_cfg.get("allowed_roots", {})
@@ -1242,11 +1354,7 @@ def exactify_loaded_symmetry_source(
             "selected_action_candidate": selected_action,
             "support_resolution": {
                 "action_mismatch": bool(action_mismatch),
-                "candidate_source": (
-                    "explicit_action_candidates_report"
-                    if action_mismatch
-                    else "manifest_model_action"
-                ),
+                "candidate_source": candidate_source,
                 "declared_model_action": manifest_action,
                 "selected_action_candidate": selected_action,
                 "declared_support_residual": None if provenance is None else provenance["declared_support_residual"],
@@ -1256,6 +1364,8 @@ def exactify_loaded_symmetry_source(
                 "candidate_support_residuals": candidate_support_residuals,
             },
             "preferred_mode": preferred_mode,
+            "group_relation_source": group_relation_source,
+            "group_relation": _jsonable(group_relation),
             "label_action": {
                 "perm_complete": label_action.diagnostics["perm_complete"],
                 "missing_count": label_action.diagnostics["missing_count"],
@@ -1269,7 +1379,6 @@ def exactify_loaded_symmetry_source(
         if provenance is not None:
             reports[name]["support_resolution"]["provenance"] = provenance
         if output_dir is not None:
-            output_dir.mkdir(parents=True, exist_ok=True)
             np.save(output_dir / f"exactified_{name}.npy", D_exact)
             with (output_dir / f"{name.lower()}_exactification_report.json").open("w", encoding="utf-8") as handle:
                 json.dump(_jsonable(reports[name]), handle, indent=2)

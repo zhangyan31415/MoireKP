@@ -1,9 +1,9 @@
-source_config: ../../source/mote2_3.89_K1.yaml
+source_config: ../source/mote2_3.89_K1.yaml
 valley: K1
-spin: spinless
-symmetry_source: ../../../outputs/symm/mote2_3.89_K1
+spin: spin_up_projected
+symmetry_source: ../../outputs/symm/mote2_3.89_K1
 kpath:
-  file: ../../../../tapw/KPATH.in
+  file: ../../../tapw/KPATH.in
   tmat:
   - - 52.4951056667
     - 0.0
@@ -48,7 +48,7 @@ bands:
     - 3.0
     - 5.8
 output:
-  dir: ../../../outputs/model/production/mote2_3.89_K1
+  dir: ../../outputs/model/mote2_3.89_K1
   save_coefficients: true
   verbose: false
   progress: true

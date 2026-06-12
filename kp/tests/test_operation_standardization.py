@@ -12,13 +12,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kp.model.config_schema import CANONICAL_INTERNAL_NAMES, canonical_operation_name_for_valley
 from kp.model.configured import (
-    ACTION_SPECS,
     _build_operation_registry,
-    _resolved_action_for_source_operation,
+    _enrich_symmetry_map,
     _symmetry_operation_index,
 )
 from kp.model.symmetry import MatrixSymmetryGenerator, load_symmetry_source
 from kp.symmetry.project import (
+    _action_candidates_from_model_action,
     _model_action_metadata,
     _operation_action_metadata,
     _resolve_projected_model_action,
@@ -42,7 +42,7 @@ def _source_meta(antiunitary: bool = False) -> dict[str, object]:
 
 def test_standard_family_names_do_not_rewrite_unknown_families() -> None:
     gamma = {"valley_type": "Gamma", "mode": "single_valley", "spin_convention": "spinful"}
-    k_single = {"valley_type": "K", "mode": "single_valley", "spin_convention": "spin_up_only"}
+    k_single = {"valley_type": "K", "mode": "single_valley", "spin_convention": "spin_up_projected"}
     m_effective = {"valley_type": "M", "mode": "single_valley", "spin_convention": "spinless_effective"}
 
     assert canonical_operation_name_for_valley("C4", gamma) == "C4"
@@ -56,9 +56,7 @@ def test_standard_family_names_do_not_rewrite_unknown_families() -> None:
 def test_canonical_operation_registries_exclude_legacy_axis_names() -> None:
     allowed = {"C2", "C2T", "C3z", "TR"}
     assert CANONICAL_INTERNAL_NAMES <= allowed
-    assert set(ACTION_SPECS) <= allowed
     assert {"TR_eff", "C2_eff", "C2TR_eff"}.isdisjoint(CANONICAL_INTERNAL_NAMES)
-    assert {"TR_eff", "C2_eff", "C2TR_eff"}.isdisjoint(ACTION_SPECS)
 
 
 def test_loaded_symmetry_source_keeps_source_and_canonical_family_separate(tmp_path: Path) -> None:
@@ -172,7 +170,7 @@ def test_kp_symm_representation_matrix_kind_loads_representation_file(tmp_path: 
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="production symmetry matrices must use matrix_kind='action'"):
+    with pytest.raises(ValueError, match="production symmetry matrices must use raw-action or kp_symm exactified matrices"):
         load_symmetry_source(
             {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
             base=tmp_path,
@@ -236,7 +234,23 @@ def test_rawh_action_is_only_production_matrix_source_even_if_rep_support_cleane
 def test_sector_map_auto_rejected_for_production_manifest() -> None:
     with pytest.raises(ValueError, match="requires explicit sector_map"):
         _operation_action_metadata(
-            {"axis_deg": 0.0, "q_map": {"type": "reflection", "axis_deg": 0.0}},
+            {
+                "k_map": {"type": "reflection", "axis_deg": 0.0},
+                "q_map": {"type": "reflection", "axis_deg": 0.0},
+            },
+            operation="C2",
+            antiunitary=False,
+        )
+
+
+def test_kp_symm_manifest_requires_k_map_in_strict_mode() -> None:
+    with pytest.raises(ValueError, match="requires explicit k_map"):
+        _operation_action_metadata(
+            {
+                "axis_deg": 0.0,
+                "q_map": {"type": "reflection", "axis_deg": 0.0},
+                "sector_map": "identity",
+            },
             operation="C2",
             antiunitary=False,
         )
@@ -254,10 +268,35 @@ def test_q_map_inferred_from_k_map_is_reported_in_compat_mode() -> None:
     assert source["q_map"] == source["k_map"]
 
 
+def test_sector_map_auto_is_rejected_even_in_compat_mode() -> None:
+    with pytest.raises(ValueError, match="requires explicit sector_map"):
+        _operation_action_metadata(
+            {
+                "axis_deg": 0.0,
+                "sector_map": "auto",
+            },
+            operation="C2",
+            antiunitary=False,
+            strict=False,
+        )
+
+
+def test_support_discovery_rejects_auto_sector_map() -> None:
+    model_action = {
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
+        "sector_map": "auto",
+    }
+
+    with pytest.raises(ValueError, match="requires explicit sector_map"):
+        _action_candidates_from_model_action(model_action)
+
+
 def test_support_discovery_default_off() -> None:
     source = _operation_action_metadata(
         {
-            "axis_deg": 0.0,
+            "k_map": {"type": "reflection", "axis_deg": 0.0},
             "q_map": {"type": "reflection", "axis_deg": 0.0},
             "sector_map": "identity",
         },
@@ -342,7 +381,7 @@ def test_operation_registry_records_canonical_names_and_source_metadata() -> Non
         "matrix_kind": "continuum_internal_rep_exact",
     }
     model_config = SimpleNamespace(
-        valley_model={"valley_type": "K", "mode": "single_valley", "spin_convention": "spin_up_only"},
+        valley_model={"valley_type": "K", "mode": "single_valley", "spin_convention": "spin_up_projected"},
         symmetry_source_config={
             "type": "kp_symm_output",
             "matrix_kind": "continuum_internal_rep_exact",
@@ -360,7 +399,7 @@ def test_operation_registry_records_canonical_names_and_source_metadata() -> Non
     assert row["source_operation"] == "C2T"
     assert row["valley_type"] == "K"
     assert row["valley_mode"] == "single_valley"
-    assert row["spin_convention"] == "spin_up_only"
+    assert row["spin_convention"] == "spin_up_projected"
     assert row["operation_physics_level"] == "physical"
     assert row["matrix_kind"] == "continuum_internal_rep_exact"
     assert row["source_matrix_role"] == "raw_h_sewing_action"
@@ -397,7 +436,7 @@ def test_internal_resolved_action_without_provenance_does_not_override_manifest_
     assert index["C2T"]["sector_map"] == "identity"
 
 
-def test_internal_resolved_action_with_provenance_can_override_manifest_model_action() -> None:
+def test_internal_resolved_action_with_unaccepted_provenance_does_not_override_manifest_model_action() -> None:
     metadata = {
         "operations": [
             {
@@ -416,9 +455,43 @@ def test_internal_resolved_action_with_provenance_can_override_manifest_model_ac
                     "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
                     "sector_map": "layer_exchange",
                     "provenance": {
-                        "source": "exactification_support_report",
+                        "source": "support_exactification",
                         "action_mismatch": True,
                         "accepted_by": "explicit_accept_support_resolved_action",
+                    },
+                },
+            }
+        ]
+    }
+
+    index = _symmetry_operation_index(metadata, rotation_deg=210.0)
+
+    assert index["C2T"]["k_map"]["axis_deg"] == pytest.approx(90.0)
+    assert index["C2T"]["sector_map"] == "identity"
+
+
+def test_internal_resolved_action_with_accepted_support_provenance_can_override_manifest_model_action() -> None:
+    metadata = {
+        "operations": [
+            {
+                "name": "C2T",
+                "operation": "C2T",
+                "antiunitary": True,
+                "model_action": {
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 90.0, "in_model_frame": True},
+                    "sector_map": "identity",
+                },
+                "internal_resolved_action": {
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "sector_map": "layer_exchange",
+                    "provenance": {
+                        "source": "support_exactification",
+                        "action_mismatch": True,
+                        "accepted_by_user": True,
                     },
                 },
             }
@@ -546,12 +619,10 @@ def test_sector_identity_conjugation_stays_identity_under_relabel() -> None:
     assert conjugated != {"L1": "L2", "L2": "L1"}
 
 
-def test_k_single_valley_c2t_fallback_does_not_guess_notebook_support() -> None:
-    action = _resolved_action_for_source_operation(
-        "C2T",
-        {"valley_type": "K", "mode": "single_valley", "spin_convention": "spin_up_only"},
-    )
-
-    assert action["sector_map"] == "identity"
-    assert reflection_axis_equiv(action["k_map"]["axis_deg"], ACTION_SPECS["C2T"]["k_map"]["axis_deg"])
-    assert float(action["k_map"]["axis_deg"]) == float(ACTION_SPECS["C2T"]["k_map"]["axis_deg"])
+def test_symmetry_map_does_not_fill_missing_action_from_action_specs() -> None:
+    with pytest.raises(ValueError, match="requires explicit resolved action metadata"):
+        _enrich_symmetry_map(
+            {"Kinect": [{"name": "C2T"}]},
+            {"operations": []},
+            rotation_deg=210.0,
+        )

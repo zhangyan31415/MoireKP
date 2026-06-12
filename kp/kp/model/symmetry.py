@@ -28,19 +28,21 @@ _REQUIRED_METADATA = {
 }
 _CANONICAL_OPERATION_NAMES = {"C3z", "C2", "TR", "C2T"}
 _ACTION_MAP_TYPES = {"rotation", "reflection", "identity", "negation"}
-_REPRESENTATION_MATRIX_KINDS = {"representation", "d0", "D0"}
+_PRODUCTION_MATRIX_KINDS = {"action", "continuum_internal_rep_exact"}
 _ACTION_MATRIX_SEMANTICS = {
     "source_matrix_role": "raw_h_sewing_action",
     "source_gauge": "raw_saved_TAPW",
     "target_role": "continuum_internal_rep",
     "gauge_correction": {"kind": "none"},
 }
-_REPRESENTATION_MATRIX_SEMANTICS = {
-    "source_matrix_role": "bare_D0_internal_rep",
-    "source_gauge": "raw_saved_TAPW",
-    "target_role": "continuum_internal_rep",
-    "gauge_correction": {"kind": "none"},
-}
+_ARTIFACT_METADATA_KEYS = (
+    "strict_metadata",
+    "requires_model_exactification",
+    "exactification_owner",
+    "kp_symm_exactification",
+    "source_action_definition",
+    "model_action_definition",
+)
 _MANIFEST_AUTHORED_OPERATION_FIELDS = {
     "antiunitary",
     "k_map",
@@ -223,10 +225,6 @@ def _validate_map(raw: Any, *, field: str) -> Any:
 
 
 def _pairs_for_matrix_kind(record: Mapping[str, Any], matrix_kind: str) -> list[Any]:
-    if matrix_kind in _REPRESENTATION_MATRIX_KINDS:
-        pairs = record.get("representation_pairs", [])
-        if isinstance(pairs, list) and pairs:
-            return pairs
     pairs = record.get("pairs", [])
     return pairs if isinstance(pairs, list) else []
 
@@ -291,12 +289,11 @@ def _complete_operation_record(record: Mapping[str, Any], *, use: str) -> dict[s
         raise ValueError(f"kp_symm_output operation {canonical_name!r} requires explicit sector_map metadata")
     out["antiunitary"] = bool(out["antiunitary"])
     matrix_kind = _manifest_matrix_kind(out)
-    if matrix_kind in _REPRESENTATION_MATRIX_KINDS:
-        raise ValueError("production symmetry matrices must use matrix_kind='action'; representation projections are diagnostic only")
+    if matrix_kind not in _PRODUCTION_MATRIX_KINDS:
+        raise ValueError("production symmetry matrices must use raw-action or kp_symm exactified matrices")
     out["matrix_kind"] = matrix_kind
-    semantics = _REPRESENTATION_MATRIX_SEMANTICS if matrix_kind in _REPRESENTATION_MATRIX_KINDS else _ACTION_MATRIX_SEMANTICS
     defaulted_metadata: list[str] = []
-    for key, value in semantics.items():
+    for key, value in _ACTION_MATRIX_SEMANTICS.items():
         if key not in out:
             out[key] = value
             defaulted_metadata.append(key)
@@ -372,22 +369,15 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     use = str(raw.get("use", "raw"))
     manifest_matrix_kind = _manifest_default_matrix_kind(manifest)
     matrix_kind_raw = raw.get("matrix_kind", raw.get("kind", manifest_matrix_kind))
-    if matrix_kind_raw is not None and str(matrix_kind_raw) in _REPRESENTATION_MATRIX_KINDS:
-        raise ValueError("production symmetry matrices must use matrix_kind='action'; representation projections are diagnostic only")
+    if matrix_kind_raw is not None and str(matrix_kind_raw) not in _PRODUCTION_MATRIX_KINDS:
+        raise ValueError("production symmetry matrices must use raw-action or kp_symm exactified matrices")
     for record in records:
         record = dict(record)
-        record["matrix_kind"] = str(matrix_kind_raw) if matrix_kind_raw else _manifest_matrix_kind(record)
+        if matrix_kind_raw is not None and "matrix_kind" not in record and "kind" not in record:
+            record["matrix_kind"] = str(matrix_kind_raw)
+        else:
+            record["matrix_kind"] = _manifest_matrix_kind(record)
         record = _complete_operation_record(record, use=use)
-        if (
-            record.get("matrix_kind") in _REPRESENTATION_MATRIX_KINDS
-            and record.get("projection_quality_warnings")
-            and not bool(raw.get("allow_invalid_representation", False))
-        ):
-            raise ValueError(
-                f"kp_symm_output representation for operation {record.get('name')!r} has projection quality warnings; "
-                "do not use it as a clean low-energy internal representation unless this is an explicit diagnostic run "
-                "with symmetry_source.allow_invalid_representation: true"
-            )
         name = str(record["name"])
         matrix_file = Path(str(record["matrix_file"]))
         if not matrix_file.is_absolute():
@@ -400,8 +390,14 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
         metadata_record["matrix_file"] = str(matrix_file)
         metadata_record["use"] = use
         metadata_records.append(metadata_record)
+    artifact_metadata = {
+        key: manifest[key]
+        for key in _ARTIFACT_METADATA_KEYS
+        if key in manifest
+    }
+    metadata = {"operations": metadata_records, "path": str(path), "use": use, **artifact_metadata}
     return LoadedSymmetrySource(
         source_type="kp_symm_output",
-        generator=MatrixSymmetryGenerator(matrices, {"operations": metadata_records, "path": str(path), "use": use}),
-        metadata={"operations": metadata_records, "path": str(path), "use": use},
+        generator=MatrixSymmetryGenerator(matrices, metadata),
+        metadata=metadata,
     )

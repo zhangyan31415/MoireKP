@@ -1,0 +1,48 @@
+material:
+  name: MgI2
+  spin: all
+  num_layers: 2
+  efermi: -4.168612
+  orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2
+  hamk_file: ../../../tapw/Q_shell_5_symm/band/hamk_Gamma_valley.npy
+  qset1_file: ../../../tapw/Q_shell_5_symm/g_vec_list_5_Gamma_1layer.npy
+  qset2_file: ../../../tapw/Q_shell_5_symm/g_vec_list_5_Gamma_2layer.npy
+  band_file: ../../../tapw/Q_shell_5_symm/band/band_VBM_Gamma_valley.txt
+
+plot:
+  mode: gamma
+  hamk_index: 0
+  target: all
+  ref_q_index: 0
+  sort_by_qnorm: true
+  report_below: 12
+  report_above: 0
+  report_components: 12
+  ylim: [-4, -1]
+  title: "MgI2 3.89 Gamma valley formal shell"
+  out: ../../outputs/plot/mgi2_3.89_Gamma_formal/mgi2_gamma_scatter.png
+  data_out: ../../outputs/plot/mgi2_3.89_Gamma_formal/mgi2_gamma_spectrum.txt
+
+project:
+  mode: gamma
+  workers: 4
+  downfold_method: fixed_schur
+  e_ref: -5.75
+  out_dir: ../../outputs/project/mgi2_3.89_Gamma_formal
+  nlow_state_list:
+    - [40, 41, 42, 43]
+  norb_fix_list:
+    - - [[142, 1.0], [141, "1j"]]
+      - [[50, 1.0], [49, "-1j"]]
+      - [[123, 1.0], [122, "1j"]]
+      - [[31, 1.0], [30, "-1j"]]
+  ylim: [-5.8, -5.6]
+
+symm:
+  enable: true
+  valley: Gamma
+  spin: all
+  tapw_symmetry_dir: ../../../tapw/symmetry_analysis_test_gamma_q5
+  operations: [C3, C2, TR]
+  output_dir: ../../outputs/symm/mgi2_3.89_Gamma_formal
+  tolerance: 1.0e-2

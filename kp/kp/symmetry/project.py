@@ -13,6 +13,12 @@ from ..blocks.blocks import _assemble_projectors_from_block_eigenvectors, calcul
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..io.tapw_loader import load_Q_sets, load_hamk
 from ..model.config_schema import M_EFFECTIVE_OPERATION_ALIASES
+from .exactify_representation import exactify_loaded_symmetry_source
+from .geometry import (
+    bM_candidates_from_q_distances,
+    canonical_bM_pair_from_candidates,
+    sectors_with_q_offsets,
+)
 
 try:
     import scipy.sparse as _sparse
@@ -72,6 +78,64 @@ def _validate_operation_label(label: str) -> str:
             f"Unsupported symm operation {text!r}; use a standard operation family and explicit action metadata"
         )
     return text
+
+
+def _canonical_internal_operation_name(operation: str) -> str:
+    return "C3z" if operation in {"C3", "C3z"} else str(operation)
+
+
+def _valley_family(valley: str) -> str:
+    text = str(valley).lower()
+    if text.startswith("k"):
+        return "K"
+    if text.startswith("m"):
+        return "M"
+    if text.startswith("g"):
+        return "Gamma"
+    return str(valley)
+
+
+def _spin_convention_for_exactification(spin: str, n_orb: tuple[int, int], *, valley: str) -> str:
+    spin_text = str(spin).lower()
+    if str(spin).lower() == "all" or max(int(n_orb[0]), int(n_orb[1])) > 1:
+        return "spinful"
+    if _valley_family(valley) == "K" and spin_text in {"up", "down"}:
+        return f"spin_{spin_text}_projected"
+    return "spinless_effective"
+
+
+def _operation_power_relation(operation: str, *, spin_convention: str) -> dict[str, Any]:
+    name = _canonical_internal_operation_name(operation)
+    if name == "C3z":
+        power, phase = 3, -1
+    elif name == "C2":
+        power, phase = 2, (-1 if spin_convention == "spinful" else 1)
+    elif name == "C2T":
+        power, phase = 2, 1
+    elif name == "TR":
+        power, phase = 2, (-1 if spin_convention == "spinful" else 1)
+    else:
+        raise ValueError(f"Unsupported operation family for group relation: {operation!r}")
+    return {
+        "type": "power",
+        "name": f"{name}^{power}",
+        "operation": name,
+        "power": power,
+        "phase": phase,
+        "source": "kp_symm_manifest",
+    }
+
+
+def _kp_symm_exactification_config() -> dict[str, Any]:
+    return {
+        "support_source": "geometry",
+        "require_group_relations": True,
+        "phase_classes": "global",
+        "reject_if_off_support_rel_gt": 1.0e-5,
+        "reject_if_amplitude_deviation_gt": 0.05,
+        "inferred": True,
+        "source": "kp_symm",
+    }
 
 
 def _normalize_nlow_state_list(project_cfg: dict[str, Any]) -> list[list[int]]:
@@ -238,6 +302,8 @@ def _entry_filename(entry: dict[str, Any], valley: str, operation: str) -> str:
 def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitary: bool, *, strict: bool = True) -> dict[str, Any]:
     if isinstance(entry.get("k_map"), dict):
         k_map = dict(entry["k_map"])
+    elif strict:
+        raise ValueError(f"Operation {operation!r} requires explicit k_map metadata in the TAPW symmetry manifest")
     elif entry.get("axis_deg") is not None:
         k_map = {"type": "reflection", "axis_deg": float(entry["axis_deg"])}
     elif operation in {"C3", "C3z"}:
@@ -250,25 +316,19 @@ def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitar
         raise ValueError(f"Operation {operation!r} requires explicit q_map metadata in the TAPW symmetry manifest")
     q_map_inferred = "q_map" not in entry
     q_map_raw = entry.get("q_map", k_map)
-    if strict and ("sector_map" not in entry or entry.get("sector_map") == "auto"):
+    if "sector_map" not in entry or entry.get("sector_map") == "auto":
         raise ValueError(f"Operation {operation!r} requires explicit sector_map metadata in the TAPW symmetry manifest")
-    has_sector_map = "sector_map" in entry
-    sector_map = entry["sector_map"] if has_sector_map else "auto"
     out = {
         "k_map": k_map,
         "q_map": dict(q_map_raw) if isinstance(q_map_raw, dict) else q_map_raw,
-        "sector_map": sector_map,
-        "sector_map_source": "manifest" if has_sector_map else "diagnostic_qset_closure",
+        "sector_map": entry["sector_map"],
+        "sector_map_source": "manifest",
         "spin_map": entry.get("spin_map", "from_kp_symm_output"),
         "valley_map": entry.get("valley_map", "identity"),
         "antiunitary": bool(antiunitary),
     }
     if q_map_inferred:
         out["q_map_inferred_from_k_map"] = True
-    if sector_map == "auto":
-        out["sector_map_candidates"] = ["identity", "layer_exchange"]
-        out["candidate_source"] = "diagnostic_qset_closure"
-        out["not_canonical"] = True
     return out
 
 
@@ -279,9 +339,9 @@ def _rotation_matrix_2d(angle_deg: float) -> list[list[float]]:
     return [[c, -s], [s, c]]
 
 
-def _frame_metadata(*, rotation_deg: float) -> dict[str, Any]:
+def _frame_metadata(*, rotation_deg: float, inference: Mapping[str, Any] | None = None) -> dict[str, Any]:
     rotation = _rotation_matrix_2d(rotation_deg)
-    return {
+    metadata = {
         "source": "tapw_q_lists",
         "model": "continuum_model_q_basis",
         "k_transform": {
@@ -296,6 +356,9 @@ def _frame_metadata(*, rotation_deg: float) -> dict[str, Any]:
             "linear_matrix": [[-value for value in row] for row in rotation],
         },
     }
+    if inference is not None:
+        metadata["inference"] = dict(inference)
+    return metadata
 
 
 def _model_q_sets(q1: np.ndarray, q2: np.ndarray, *, rotation_deg: float) -> tuple[np.ndarray, np.ndarray]:
@@ -306,6 +369,65 @@ def _model_q_sets(q1: np.ndarray, q2: np.ndarray, *, rotation_deg: float) -> tup
     center1 = np.mean(q1_arr, axis=0)
     center2 = np.mean(q2_arr, axis=0)
     return (center1 - q1_arr) @ rotation.T, (center2 - q2_arr) @ rotation.T
+
+
+def _angle_deg(vector: np.ndarray) -> float:
+    return float(np.degrees(np.arctan2(float(vector[1]), float(vector[0]))))
+
+
+def _normalize_angle_360(angle_deg: float) -> float:
+    value = float(angle_deg) % 360.0
+    return 0.0 if abs(value) < 1.0e-10 or abs(value - 360.0) < 1.0e-10 else value
+
+
+def _infer_model_frame_rotation(
+    q1: np.ndarray,
+    q2: np.ndarray,
+    operation_entries: Mapping[str, Mapping[str, Any]],
+    *,
+    target_reflection_axis_deg: float = 0.0,
+) -> tuple[float, dict[str, Any]]:
+    for operation_name in ("C2T", "C2"):
+        entry = operation_entries.get(operation_name)
+        if not isinstance(entry, Mapping):
+            continue
+        for map_key in ("q_map", "k_map"):
+            action_map = entry.get(map_key)
+            if not isinstance(action_map, Mapping):
+                continue
+            if str(action_map.get("type", "")).lower() != "reflection" or "axis_deg" not in action_map:
+                continue
+            source_axis = float(action_map["axis_deg"])
+            rotation_deg = _normalize_angle_360(float(target_reflection_axis_deg) - source_axis)
+            return rotation_deg, {
+                "source": "reflection_axis",
+                "operation": operation_name,
+                "action_map": map_key,
+                "source_axis_deg": source_axis,
+                "target_model_axis_deg": float(target_reflection_axis_deg),
+                "formula": "rotation_deg = target_model_axis_deg - source_axis_deg",
+            }
+
+    q0_1, q0_2 = _model_q_sets(q1, q2, rotation_deg=0.0)
+    candidates = bM_candidates_from_q_distances(q0_1, q0_2)
+    if candidates:
+        bM1, bM2 = canonical_bM_pair_from_candidates(candidates, angle_deg=60.0)
+        bM1_angle = _angle_deg(bM1)
+        rotation_deg = _normalize_angle_360(-bM1_angle)
+        return rotation_deg, {
+            "source": "q_lattice_bM1",
+            "source_bM1": bM1.tolist(),
+            "source_bM2": bM2.tolist(),
+            "source_bM1_angle_deg": bM1_angle,
+            "target_bM1_angle_deg": 0.0,
+            "formula": "rotation_deg = -angle(canonical_bM1(center - q_source))",
+        }
+
+    return 0.0, {
+        "source": "degenerate_q_lattice",
+        "reason": "No nonzero Q differences and no reflection action were available",
+        "formula": "rotation_deg = 0 for degenerate diagnostic inputs",
+    }
 
 
 def _model_frame_map(raw: Any, *, rotation_deg: float) -> Any:
@@ -400,20 +522,11 @@ def _action_key_for_mismatch(action: dict[str, Any]) -> str:
     return json.dumps(comparable, sort_keys=True)
 
 
-def _has_explicit_sector_map(action: dict[str, Any]) -> bool:
-    return action.get("sector_map") not in {"auto", None}
-
-
 def _action_candidates_from_model_action(model_action: dict[str, Any]) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]]
-    sector_map = model_action.get("sector_map", "identity")
+    sector_map = model_action.get("sector_map")
     if sector_map in {"auto", None}:
-        candidates = []
-        for value in ("identity", "layer_exchange"):
-            candidate = dict(model_action)
-            candidate["sector_map"] = value
-            candidate["sector_map_source"] = "inferred_from_q_support"
-            candidates.append(candidate)
+        raise ValueError("model_action requires explicit sector_map metadata")
     else:
         candidates = [dict(model_action)]
         if sector_map == "identity":
@@ -593,6 +706,8 @@ def _resolve_projected_model_action(
     accept_support_resolved_action: bool = False,
     strict: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
+    if model_action.get("sector_map") in {"auto", None}:
+        raise ValueError("model_action requires explicit sector_map metadata")
     matrix_options = list(support_matrices or [("raw", D_low)])
     low_dim = int(np.asarray(matrix_options[0][1]).shape[-1])
     labels = _model_basis_labels(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
@@ -706,19 +821,23 @@ def _select_operation_matrix_kind(
 ) -> tuple[str, dict[str, Any]]:
     support_source = (model_basis_action.get("support_resolution") or {}).get("support_matrix_source")
     representation_invalid = _has_projection_quality_warnings(representation_pair_rows)
+    projection_warnings = (
+        [str(item) for row in representation_pair_rows for item in row.get("quality_warnings", [])]
+        if representation_pair_rows
+        else []
+    )
+    rep_support_selected = support_source == "representation"
     return "action", {
         "kind": "action",
         "matrix_source": "raw_h_action_projection",
-        "reason": "representation_projection_diagnostic_only" if support_source == "representation" else "support_source_selected_action",
+        "reason": "representation_projection_diagnostic_only" if rep_support_selected else "support_source_selected_action",
         "support_matrix_source": support_source,
         "representation_quality_warnings": representation_invalid,
         "representation_projection_diagnostic": {
-            "status": "raw_action_exactification_problem" if support_source == "representation" else "not_selected",
+            "status": "raw_action_exactification_problem" if rep_support_selected else "not_selected",
             "support_matrix_source": support_source,
-            "projection_warnings": [str(item) for row in representation_pair_rows for item in row.get("quality_warnings", [])]
-            if representation_pair_rows
-            else [],
-            "representation_support_cleaner_than_raw_action": support_source == "representation",
+            "projection_warnings": projection_warnings,
+            "representation_support_cleaner_than_raw_action": rep_support_selected,
         },
     }
 
@@ -731,7 +850,7 @@ def _gamma_c2_action_audit(
     matrix_selection: Mapping[str, Any],
     model_basis_action: Mapping[str, Any],
     raw_matrix: np.ndarray,
-    representation_matrix: np.ndarray,
+    representation_matrix: np.ndarray | None,
     pair_rows: Sequence[Mapping[str, Any]],
     representation_pair_rows: Sequence[Mapping[str, Any]],
     declared_model_action: Mapping[str, Any],
@@ -747,15 +866,21 @@ def _gamma_c2_action_audit(
         if isinstance(row, Mapping)
     }
     raw = np.asarray(raw_matrix, dtype=np.complex128)
-    rep = np.asarray(representation_matrix, dtype=np.complex128)
     denom = max(float(np.linalg.norm(raw)), 1.0)
+    if representation_matrix is None:
+        rep_diff = None
+        rep_equivalent = None
+    else:
+        rep = np.asarray(representation_matrix, dtype=np.complex128)
+        rep_diff = float(np.linalg.norm(raw - rep) / denom)
+        rep_equivalent = bool(rep_diff < 1.0e-10)
     rep_diag = matrix_selection.get("representation_projection_diagnostic", {}) if isinstance(matrix_selection, Mapping) else {}
     return {
         "matrix_kind": matrix_kind,
         "matrix_source": "raw_h_action_projection",
         "D_low_action_support_residual": by_matrix.get("raw_action", support_resolution.get("declared_support_residual") if isinstance(support_resolution, Mapping) else None),
         "D_low_rep_support_residual": by_matrix.get("representation"),
-        "D_low_action_vs_rep_norm": float(np.linalg.norm(raw - rep) / denom),
+        "D_low_action_vs_rep_norm": rep_diff,
         "rawH_full_space_covariance_residual": (
             pair_rows[0].get("full_space_covariance_residual")
             if pair_rows and isinstance(pair_rows[0], Mapping)
@@ -767,7 +892,7 @@ def _gamma_c2_action_audit(
         "q_map": declared_model_action.get("q_map"),
         "group_relation_residuals_action": {},
         "exactification_status": rep_diag.get("status", "not_run_in_kp_symm_projection") if isinstance(rep_diag, Mapping) else "not_run_in_kp_symm_projection",
-        "representation_projection_equivalent": bool(float(np.linalg.norm(raw - rep) / denom) < 1.0e-10),
+        "representation_projection_equivalent": rep_equivalent,
         "representation_projection_diagnostic": rep_diag,
         "representation_projection_warnings": [
             str(item)
@@ -785,7 +910,13 @@ def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
     return None
 
 
-def _pairs_from_entry(entry: dict[str, Any], nk: int, *, default_k_index: int | None = None) -> list[tuple[int, int]]:
+def _pairs_from_entry(
+    entry: dict[str, Any],
+    nk: int,
+    *,
+    default_k_index: int | None = None,
+    allow_default_k_index: bool = False,
+) -> list[tuple[int, int]]:
     raw_pairs = entry.get("k_pairs", entry.get("pairs"))
     if raw_pairs is not None:
         pairs: list[tuple[int, int]] = []
@@ -809,7 +940,14 @@ def _pairs_from_entry(entry: dict[str, Any], nk: int, *, default_k_index: int | 
         return [(idx, idx) for idx in range(nk)]
     if rule in {"gamma", "gamma_only"} or target_rule in {"gamma", "gamma_only"}:
         return [(0, 0)]
-    if default_k_index is not None:
+    if default_k_index is not None and allow_default_k_index:
+        entry["k_pairs_inferred_from_default_k_index"] = True
+        entry["candidate_source"] = "diagnostic_default_k_index"
+        entry["_k_pairs_provenance"] = {
+            "authored_in_manifest": False,
+            "candidate_source": "diagnostic_default_k_index",
+            "default_k_index": int(default_k_index),
+        }
         return [(int(default_k_index), int(default_k_index))]
     raise ValueError("Manifest operation must provide k_pairs/source_indices or a supported k rule")
 
@@ -958,8 +1096,8 @@ def _projectors_for_k(
         norb_fix_list,
         spin=spin,
         mode=mode,
+        selected_bands_by_layer=nlow_state_list,
     )
-    include_high = method != "first_order"
     if spin == "all" and mode.lower() != "gamma":
         q_count = int(len(q1))
         shift = q_count * int(orb0)
@@ -972,7 +1110,7 @@ def _projectors_for_k(
             h_vec_blk,
             idx_list,
             nlow_state_list,
-            include_high=include_high,
+            include_high=False,
         )
     else:
         u_low, u_high = calculate_energy_lists(
@@ -982,17 +1120,16 @@ def _projectors_for_k(
             q_layers,
             orb_layers,
             mode=mode,
-            include_high=include_high,
+            include_high=False,
         )
     u_low = np.asarray(u_low, dtype=np.complex128)
-    u_high = None if u_high is None else np.asarray(u_high, dtype=np.complex128)
     result = downfold_from_projectors(
         hamk_spin,
         u_low,
-        u_high,
+        None,
         DownfoldingOptions(
-            method=method,
-            e_ref=e_ref,
+            method="first_order",
+            e_ref=None,
             pole_warning_mev=float(project_cfg.get("pole_warning_mev", 10.0)),
             pole_danger_mev=float(project_cfg.get("pole_danger_mev", 1.0)),
             fail_on_near_pole=_as_bool(project_cfg.get("fail_on_near_pole", False)),
@@ -1026,6 +1163,7 @@ def _project_operation(
     tolerance: float,
     enforce_heff_covariance: bool = True,
     raise_on_quality_failure: bool = True,
+    compute_polar: bool = False,
     target_states: dict[int, ProjectionState] | None = None,
     source_states: dict[int, ProjectionState] | None = None,
 ):
@@ -1046,8 +1184,6 @@ def _project_operation(
             image = image.toarray()
         image = np.asarray(image, dtype=np.complex128)
         d_raw = target.u_low.conj().T @ image
-        x, singular_values, yh = np.linalg.svd(d_raw, full_matrices=False)
-        d_polar = x @ yh
 
         def metrics(d_matrix: np.ndarray) -> dict[str, Any]:
             leakage = float(np.linalg.norm(image - target.u_low @ d_matrix) / np.sqrt(d_matrix.shape[0]))
@@ -1059,11 +1195,25 @@ def _project_operation(
             }
 
         raw_metrics = metrics(d_raw)
-        polar_metrics = metrics(d_polar)
-        sv_max_dev = float(np.max(np.abs(singular_values - 1.0))) if singular_values.size else 0.0
+        if compute_polar:
+            x, singular_values, yh = np.linalg.svd(d_raw, full_matrices=False)
+            d_polar = x @ yh
+            polar_metrics = metrics(d_polar)
+            sv_max_dev = float(np.max(np.abs(singular_values - 1.0))) if singular_values.size else 0.0
+            singular_values_out = [float(value) for value in singular_values]
+            polar_mats.append(d_polar)
+        else:
+            d_unitarity = raw_metrics["d_unitarity_error"]
+            sv_max_dev = float(min(d_unitarity, 1.0))
+            singular_values_out = []
+            polar_metrics = None
         quality_warnings = []
         if sv_max_dev > tolerance:
-            message = f"singular values deviate from 1 by {sv_max_dev:.3e}"
+            message = (
+                f"unitarity error {raw_metrics['d_unitarity_error']:.3e} exceeds tolerance"
+                if not compute_polar
+                else f"singular values deviate from 1 by {sv_max_dev:.3e}"
+            )
             if raise_on_quality_failure:
                 raise ValueError(f"{operation} k=({target_idx},{source_idx}) {message}")
             quality_warnings.append(message)
@@ -1078,19 +1228,18 @@ def _project_operation(
                 raise ValueError(f"{operation} k=({target_idx},{source_idx}) {message}")
             quality_warnings.append(message)
         raw_mats.append(d_raw)
-        polar_mats.append(d_polar)
-        pair_rows.append(
-            {
-                "target_k_index": int(target_idx),
-                "source_k_index": int(source_idx),
-                "d_shape": list(d_raw.shape),
-                "singular_values": [float(value) for value in singular_values],
-                "singular_value_max_deviation": sv_max_dev,
-                "quality_warnings": quality_warnings,
-                "raw": raw_metrics,
-                "polar": polar_metrics,
-            }
-        )
+        pair_row = {
+            "target_k_index": int(target_idx),
+            "source_k_index": int(source_idx),
+            "d_shape": list(d_raw.shape),
+            "singular_values": singular_values_out,
+            "singular_value_max_deviation": sv_max_dev,
+            "quality_warnings": quality_warnings,
+            "raw": raw_metrics,
+        }
+        if polar_metrics is not None:
+            pair_row["polar"] = polar_metrics
+        pair_rows.append(pair_row)
     return raw_mats, polar_mats, pair_rows
 
 
@@ -1134,14 +1283,15 @@ def _write_summary_md(path: Path, summary: dict[str, Any]) -> None:
             lines.append(f"- raw_h_spin_leakage: {op['raw_h_spin_leakage']:.6e}")
         for pair in op["pairs"]:
             raw = pair["raw"]
-            polar = pair["polar"]
-            lines.append(
+            line = (
                 f"- k target/source {pair['target_k_index']}/{pair['source_k_index']}: "
                 f"full cov={pair.get('full_space_covariance_residual', float('nan')):.6e}, "
                 f"raw cov={raw['heff_covariance_residual']:.6e}, "
-                f"raw leakage={raw['subspace_leakage']:.6e}, "
-                f"polar cov={polar['heff_covariance_residual']:.6e}"
+                f"raw leakage={raw['subspace_leakage']:.6e}"
             )
+            if "polar" in pair:
+                line += f", polar cov={pair['polar']['heff_covariance_residual']:.6e}"
+            lines.append(line)
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -1156,13 +1306,19 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
     plot_cfg = cfg.get("plot", {})
     project_cfg = cfg.get("project", {})
     symm_cfg = cfg.get("symm", {})
+    diagnostics_cfg = symm_cfg.get("diagnostics", {})
+    if diagnostics_cfg is None:
+        diagnostics_cfg = {}
+    if not isinstance(diagnostics_cfg, Mapping):
+        raise ValueError("symm.diagnostics must be a mapping when provided")
+    save_projection_diagnostics = _as_bool(diagnostics_cfg.get("projection_matrices", False))
     if not _as_bool(symm_cfg.get("enable", True)):
         raise ValueError("symm.enable is false")
 
     valley = str(symm_cfg.get("valley", "K1"))
     spin = str(symm_cfg.get("spin", material.get("spin", "all"))).lower()
     spin_sector_sewing = symm_cfg.get("spin_sector_sewing")
-    q_rotation_deg = float(plot_cfg.get("q_rotation_deg", symm_cfg.get("q_rotation_deg", 0.0)))
+    q_rotation_raw = plot_cfg.get("q_rotation_deg", symm_cfg.get("q_rotation_deg"))
     source_operations = [str(op) for op in symm_cfg.get("operations", [])]
     if not source_operations:
         raise ValueError("symm.operations must not be empty")
@@ -1217,6 +1373,15 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             all_pairs.add((target_idx, source_idx))
         entry["_pairs"] = pairs
         operation_entries[output_operation] = entry
+
+    if q_rotation_raw is None:
+        q_rotation_deg, frame_inference = _infer_model_frame_rotation(q1, q2, operation_entries)
+    else:
+        q_rotation_deg = float(q_rotation_raw)
+        frame_inference = {
+            "source": "explicit_config",
+            "field": "plot.q_rotation_deg" if "q_rotation_deg" in plot_cfg else "symm.q_rotation_deg",
+        }
 
     required_k = sorted({idx for pair in all_pairs for idx in pair})
     if not required_k:
@@ -1356,18 +1521,24 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         "orbital_block_dim": orb0,
         "full_dim": full_dim,
         "low_dim": low_dim,
-        "frame": _frame_metadata(rotation_deg=q_rotation_deg),
+        "frame": _frame_metadata(rotation_deg=q_rotation_deg, inference=frame_inference),
         "q_model": {
             "files": {"layer1": "q_model_layer1.npy", "layer2": "q_model_layer2.npy"},
             "source_files": {"layer1": str(qset1_file), "layer2": str(qset2_file)},
             "formula": "q_model = R(rotation_deg) @ (layer_mean - q_source)",
         },
         "operations": [],
+        "requires_model_exactification": False,
+        "exactification_owner": "kp_symm",
     }
 
+    raw_low_matrices: dict[str, np.ndarray] = {}
+    n_orb_for_exactification = _sector_orbital_counts(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    spin_convention = _spin_convention_for_exactification(spin, n_orb_for_exactification, valley=valley)
     for request in operation_requests:
         operation = request["source"]
         output_operation = request["output"]
+        canonical_name = _canonical_internal_operation_name(output_operation)
         payload = operation_payloads[output_operation]
         entry = payload["entry"]
         antiunitary = bool(payload["antiunitary"])
@@ -1389,29 +1560,34 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             states=source_states,
             pairs=entry["_pairs"],
             tolerance=tolerance,
+            compute_polar=save_projection_diagnostics,
             target_states=target_states,
             source_states=source_states,
         )
-        rep_raw_mats, rep_polar_mats, rep_pair_rows = _project_operation(
-            operation=output_operation,
-            antiunitary=antiunitary,
-            d_full=rep.matrix,
-            states=source_states,
-            pairs=entry["_pairs"],
-            tolerance=tolerance,
-            enforce_heff_covariance=False,
-            raise_on_quality_failure=False,
-            target_states=target_states,
-            source_states=source_states,
-        )
+        rep_raw_mats: list[np.ndarray] = []
+        rep_pair_rows: list[dict[str, Any]] = []
+        if save_projection_diagnostics:
+            rep_raw_mats, rep_polar_mats, rep_pair_rows = _project_operation(
+                operation=output_operation,
+                antiunitary=antiunitary,
+                d_full=rep.matrix,
+                states=source_states,
+                pairs=entry["_pairs"],
+                tolerance=tolerance,
+                enforce_heff_covariance=False,
+                raise_on_quality_failure=False,
+                compute_polar=True,
+                target_states=target_states,
+                source_states=source_states,
+            )
         for pair_row, full_pair_row in zip(pair_rows, payload["full_pair_rows"]):
             pair_row["full_space_covariance_residual"] = full_pair_row["full_space_covariance_residual"]
+        support_matrices = [("raw_action", np.asarray(raw_mats[0], dtype=np.complex128))]
+        if rep_raw_mats:
+            support_matrices.append(("representation", np.asarray(rep_raw_mats[0], dtype=np.complex128)))
         resolved_model_action, model_basis_action = _resolve_projected_model_action(
             D_low=np.asarray(raw_mats[0], dtype=np.complex128),
-            support_matrices=[
-                ("raw_action", np.asarray(raw_mats[0], dtype=np.complex128)),
-                ("representation", np.asarray(rep_raw_mats[0], dtype=np.complex128)),
-            ],
+            support_matrices=support_matrices,
             model_action=model_action_metadata,
             q_model1=q_model1,
             q_model2=q_model2,
@@ -1419,27 +1595,34 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             tol=max(float(tolerance), 1.0e-8),
         )
         _save_matrix_stack(output_dir / f"{output_operation}_low_raw.npy", raw_mats)
-        _save_matrix_stack(output_dir / f"{output_operation}_low_polar.npy", polar_mats)
-        _save_matrix_stack(output_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
-        _save_matrix_stack(output_dir / f"{output_operation}_low_representation_polar.npy", rep_polar_mats)
+        if save_projection_diagnostics:
+            _save_matrix_stack(output_dir / f"{output_operation}_low_polar.npy", polar_mats)
+            _save_matrix_stack(output_dir / f"{output_operation}_low_representation_raw.npy", rep_raw_mats)
+            _save_matrix_stack(output_dir / f"{output_operation}_low_representation_polar.npy", rep_polar_mats)
         matrix_kind, matrix_selection = _select_operation_matrix_kind(
             model_basis_action,
             representation_pair_rows=rep_pair_rows,
         )
+        support_resolution = model_basis_action.get("support_resolution", {})
+        accepted_internal_action = (
+            isinstance(support_resolution, Mapping)
+            and isinstance(support_resolution.get("provenance"), Mapping)
+            and bool(support_resolution["provenance"].get("accepted_by_user"))
+        )
         operation_summary = {
+            "name": canonical_name,
             "operation": output_operation,
             "antiunitary": antiunitary,
             "matrix_file": f"{output_operation}_low_raw.npy",
-            "representation_matrix_file": f"{output_operation}_low_representation_raw.npy",
             "matrix_kind": matrix_kind,
-            "source_matrix_role": "bare_D0_internal_rep" if matrix_kind == "representation" else "raw_h_sewing_action",
+            "source_matrix_role": "raw_h_sewing_action",
             "source_gauge": "raw_saved_TAPW",
             "target_role": "continuum_internal_rep",
             "gauge_correction": {"kind": "none"},
             "antiunitary_convention": "U_K" if antiunitary else "none",
-            **resolved_model_action,
+            **model_action_metadata,
             "source_action": source_action_metadata,
-            "model_action": resolved_model_action,
+            "model_action": model_action_metadata,
             "declared_model_action": model_action_metadata,
             "model_basis_action": model_basis_action,
             "matrix_selection": matrix_selection,
@@ -1461,8 +1644,20 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             "source_spin": spin if spin_sector_sewing is None else "up",
             "target_spin": spin if spin_sector_sewing is None else "down",
             "pairs": pair_rows,
-            "representation_pairs": rep_pair_rows,
+            "group_relations": [
+                _operation_power_relation(canonical_name, spin_convention=spin_convention)
+            ],
         }
+        if save_projection_diagnostics:
+            operation_summary["representation_matrix_file"] = f"{output_operation}_low_representation_raw.npy"
+            operation_summary["representation_pairs"] = rep_pair_rows
+        raw_low_matrices[canonical_name] = np.asarray(raw_mats[0], dtype=np.complex128)
+        if entry.get("k_pairs_inferred_from_default_k_index"):
+            operation_summary["k_pairs_inferred_from_default_k_index"] = True
+            operation_summary["candidate_source"] = entry.get("candidate_source", "diagnostic_default_k_index")
+            operation_summary["k_pairs_provenance"] = dict(entry.get("_k_pairs_provenance", {}))
+        if accepted_internal_action:
+            operation_summary["internal_resolved_action"] = resolved_model_action
         gamma_c2_audit = _gamma_c2_action_audit(
             mode=mode,
             operation=output_operation,
@@ -1470,7 +1665,7 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
             matrix_selection=matrix_selection,
             model_basis_action=model_basis_action,
             raw_matrix=np.asarray(raw_mats[0], dtype=np.complex128),
-            representation_matrix=np.asarray(rep_raw_mats[0], dtype=np.complex128),
+            representation_matrix=None if not rep_raw_mats else np.asarray(rep_raw_mats[0], dtype=np.complex128),
             pair_rows=pair_rows,
             representation_pair_rows=rep_pair_rows,
             declared_model_action=model_action_metadata,
@@ -1479,6 +1674,63 @@ def run_symmetry_projection_from_config(cfg_path: str) -> dict[str, Any]:
         if gamma_c2_audit is not None:
             operation_summary["gamma_C2_action_audit"] = gamma_c2_audit
         summary["operations"].append(operation_summary)
+
+    n_orb = n_orb_for_exactification
+    bM_candidates = bM_candidates_from_q_distances(q_model1, q_model2)
+    if bM_candidates:
+        bM1, bM2 = canonical_bM_pair_from_candidates(bM_candidates, angle_deg=60.0)
+    else:
+        bM1 = np.array([1.0, 0.0], dtype=float)
+        bM2 = np.array([0.5, float(np.sqrt(3.0) / 2.0)], dtype=float)
+    sectors = sectors_with_q_offsets(
+        [
+            {"name": "L1", "qset": "qset1", "n_orb": int(n_orb[0])},
+            {"name": "L2", "qset": "qset2", "n_orb": int(n_orb[1])},
+        ],
+        Q_set1=q_model1,
+        Q_set2=q_model2,
+        bM1=bM1,
+        bM2=bM2,
+    )
+    exact_config = _kp_symm_exactification_config()
+    exact_matrices, exact_reports = exactify_loaded_symmetry_source(
+        loaded_metadata=summary,
+        matrices=raw_low_matrices,
+        Q_set1=q_model1,
+        Q_set2=q_model2,
+        sectors=sectors,
+        n_orb=n_orb,
+        bM1=bM1,
+        bM2=bM2,
+        raw_config={"exactification": exact_config},
+        rotation_deg=0.0,
+        output_dir=output_dir,
+    )
+    for operation_summary in summary["operations"]:
+        name = str(operation_summary["name"])
+        report = exact_reports.get(name)
+        if not isinstance(report, Mapping):
+            raise ValueError(f"{name} kp_symm exactification did not produce a report")
+        status = report.get("report", {}).get("status") if isinstance(report.get("report"), Mapping) else None
+        if status != "exactified":
+            raise ValueError(f"{name} kp_symm exactification did not finish: status={status!r}")
+        if name not in exact_matrices:
+            raise ValueError(f"{name} kp_symm exactification did not produce a matrix")
+        operation_summary["raw_matrix_file"] = operation_summary["matrix_file"]
+        operation_summary["matrix_file"] = f"exactified_{name}.npy"
+        operation_summary["matrix_kind"] = "continuum_internal_rep_exact"
+        operation_summary["matrix_source"] = "kp_symm_exactified_action"
+        operation_summary["exactification_report_file"] = f"{name.lower()}_exactification_report.json"
+        operation_summary["source_matrix_projection_report"] = report
+        operation_summary["internal_resolved_action"] = report.get("resolved_action", operation_summary["model_action"])
+    summary["kp_symm_exactification"] = {
+        "status": "exactified",
+        "matrix_source": "kp_symm_exactified_action",
+        "bM1": bM1.tolist(),
+        "bM2": bM2.tolist(),
+        "n_orb": [int(n_orb[0]), int(n_orb[1])],
+        "sectors": sectors,
+    }
 
     payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
     (output_dir / "manifest.json").write_text(payload, encoding="utf-8")

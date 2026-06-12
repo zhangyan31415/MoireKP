@@ -19,7 +19,9 @@ from kp.symmetry.project import (
     _model_action_metadata,
     _model_frame_action_metadata,
     _operation_entry,
+    _pairs_from_entry,
     _resolve_projected_model_action,
+    _select_operation_matrix_kind,
     _validate_operation_label,
 )
 
@@ -56,6 +58,40 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertTrue(basis_action["support_resolution"]["action_mismatch"])
         self.assertEqual(basis_action["support_resolution"]["support_matrix_source"], "representation")
 
+    def test_rep_support_cleaner_stays_action_and_reports_diagnostic_only(self) -> None:
+        model_basis_action = {
+            "support_resolution": {
+                "support_matrix_source": "representation",
+                "declared_support_residuals": [
+                    {"matrix": "raw_action", "block_off_support_rel": 1.0},
+                    {"matrix": "representation", "block_off_support_rel": 2.0e-7},
+                ],
+                "declared_model_action": {
+                    "antiunitary": False,
+                    "k_map": {"type": "reflection", "axis_deg": 0.0},
+                    "q_map": {"type": "reflection", "axis_deg": 0.0},
+                    "sector_map": "layer_exchange",
+                },
+            }
+        }
+
+        matrix_kind, selection = _select_operation_matrix_kind(
+            model_basis_action,
+            representation_pair_rows=[{"quality_warnings": []}],
+        )
+
+        self.assertEqual(matrix_kind, "action")
+        self.assertEqual(selection["kind"], "action")
+        self.assertEqual(selection["matrix_source"], "raw_h_action_projection")
+        self.assertEqual(
+            selection["representation_projection_diagnostic"]["status"],
+            "raw_action_exactification_problem",
+        )
+        self.assertTrue(
+            selection["representation_projection_diagnostic"]["representation_support_cleaner_than_raw_action"]
+        )
+        self.assertNotEqual(matrix_kind, "representation")
+
     def _run_minimal_two_layer_projection(
         self,
         tmp: Path,
@@ -64,7 +100,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         operation: str,
         d_up: np.ndarray,
         manifest_entry: dict,
-        q_rotation_deg: float = 0.0,
+        q_rotation_deg: float | None = 0.0,
+        include_default_k_pairs: bool = True,
     ) -> Path:
         q1_file = tmp / f"{operation}_q1.npy"
         q2_file = tmp / f"{operation}_q2.npy"
@@ -94,9 +131,10 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             "antiunitary": False,
             "filename": f"{valley}/{operation}.npz",
             "raw_h_operator_file": f"{valley}/{operation}_rawH.npz",
-            "k_pairs": [[0, 0]],
             **manifest_entry,
         }
+        if include_default_k_pairs and "k_pairs" not in entry:
+            entry["k_pairs"] = [[0, 0]]
         nlow_state_list = [[0], [1]] if valley.lower() == "gamma" else [[0], [0]]
         norb_fix_list = [[[[0, 1.0]]], [[[1 if valley.lower() == "gamma" else 0, 1.0]]]]
         (symm_dir / "representations" / "manifest.json").write_text(
@@ -104,6 +142,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+        plot_section = {"hamk_index": 0}
+        if q_rotation_deg is not None:
+            plot_section["q_rotation_deg"] = q_rotation_deg
         cfg = {
             "material": {
                 "hamk_file": str(hamk_file),
@@ -113,7 +154,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 "num_layers": 2,
                 "num_orb_per_layer": [2, 2],
             },
-            "plot": {"hamk_index": 0, "q_rotation_deg": q_rotation_deg},
+            "plot": plot_section,
             "project": {
                 "enable": True,
                 "mode": valley,
@@ -135,6 +176,40 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
         cli.main(["symm", "--config", str(cfg_path)])
         return out_dir
+
+    def test_symm_auto_frame_uses_reflection_axis_when_rotation_is_not_configured(self):
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            d = np.array(
+                [
+                    [0.0, 0.0, 1.0, 0.0],
+                    [0.0, 0.0, 0.0, 1.0],
+                    [1.0, 0.0, 0.0, 0.0],
+                    [0.0, 1.0, 0.0, 0.0],
+                ],
+                dtype=np.complex128,
+            )
+            out_dir = self._run_minimal_two_layer_projection(
+                tmp,
+                valley="K1",
+                operation="C2T",
+                d_up=d,
+                manifest_entry={
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 150.0},
+                    "q_map": {"type": "reflection", "axis_deg": 150.0},
+                    "sector_map": "layer_exchange",
+                },
+                q_rotation_deg=None,
+            )
+
+            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertAlmostEqual(summary["frame"]["k_transform"]["rotation_deg"], 210.0)
+            self.assertEqual(summary["frame"]["inference"]["source"], "reflection_axis")
+            op = summary["operations"][0]
+            self.assertAlmostEqual(op["source_action"]["k_map"]["axis_deg"], 150.0)
+            self.assertAlmostEqual(op["model_action"]["k_map"]["axis_deg"], 360.0)
+            self.assertEqual(op["model_action"]["sector_map"], "layer_exchange")
 
     def _reader_operation_row(
         self,
@@ -191,6 +266,52 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     spin="up",
                     full_dim=2,
                     tolerance=1.0e-8,
+                )
+
+    def test_manifest_k_pairs_missing_does_not_fallback_to_default_k_index(self) -> None:
+        entry = {
+            "filename": "K1/C3.npz",
+            "raw_h_operator_file": "K1/C3_rawH.npz",
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+        }
+
+        with self.assertRaisesRegex(ValueError, "k_pairs/source_indices.*k rule"):
+            _pairs_from_entry(entry, nk=3, default_k_index=1)
+
+    def test_default_k_index_fallback_requires_explicit_diagnostic_provenance(self) -> None:
+        entry = {
+            "filename": "K1/C3.npz",
+            "raw_h_operator_file": "K1/C3_rawH.npz",
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+        }
+
+        pairs = _pairs_from_entry(entry, nk=3, default_k_index=1, allow_default_k_index=True)
+
+        self.assertEqual(pairs, [(1, 1)])
+        self.assertTrue(entry["k_pairs_inferred_from_default_k_index"])
+        self.assertEqual(entry["candidate_source"], "diagnostic_default_k_index")
+        self.assertFalse(entry["_k_pairs_provenance"]["authored_in_manifest"])
+
+    def test_symm_manifest_missing_k_pairs_rejected_even_with_plot_hamk_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp = Path(tmpdir)
+
+            with self.assertRaisesRegex(ValueError, "k_pairs/source_indices.*k rule"):
+                self._run_minimal_two_layer_projection(
+                    tmp,
+                    valley="K1",
+                    operation="C3",
+                    d_up=np.eye(4, dtype=np.complex128),
+                    manifest_entry={
+                        "k_map": {"type": "rotation", "angle_deg": 120.0},
+                        "q_map": {"type": "rotation", "angle_deg": 120.0},
+                        "sector_map": "identity",
+                    },
+                    include_default_k_pairs=False,
                 )
 
     def test_model_frame_action_rotates_source_reflection_axis(self) -> None:
@@ -329,12 +450,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cli.main(["symm", "--config", str(cfg_path)])
 
             raw = np.load(out_dir / "C2T_low_raw.npy")
-            polar = np.load(out_dir / "C2T_low_polar.npy")
             c3_raw = np.load(out_dir / "C3_low_raw.npy")
             self.assertEqual(raw.shape, (2, 2))
             np.testing.assert_allclose(raw, np.array([[0.0, 1.0], [1.0, 0.0]]), atol=1e-12)
-            np.testing.assert_allclose(polar, raw, atol=1e-12)
             np.testing.assert_allclose(c3_raw, np.eye(2), atol=1e-12)
+            self.assertFalse((out_dir / "C2T_low_polar.npy").exists())
+            self.assertFalse((out_dir / "C2T_low_representation_raw.npy").exists())
 
             summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
             manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
@@ -357,7 +478,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
             self.assertLess(by_name["C2T"]["pairs"][0]["raw"]["subspace_leakage"], 1.0e-12)
 
-    def test_symm_records_model_basis_action_from_projected_matrix_support(self) -> None:
+    def test_symm_records_exactified_model_basis_action(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             tmp = Path(tmpdir)
             q1_file = tmp / "q1.npy"
@@ -415,7 +536,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                     "raw_h_operator_file": "K1/C2_rawH.npz",
                                     "k_map": {"type": "reflection", "axis_deg": 0.0},
                                     "q_map": {"type": "reflection", "axis_deg": 0.0},
-                                    "sector_map": "identity",
+                                    "sector_map": "layer_exchange",
                                     "k_pairs": [[0, 0]],
                                 }
                             }
@@ -471,25 +592,32 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(manifest_rows["C3"]["model_basis_action"], c3["model_basis_action"])
 
             row = rows["C2"]
-            self.assertEqual(row["source_action"]["sector_map"], "identity")
-            self.assertEqual(row["declared_model_action"]["sector_map"], "identity")
-            self.assertEqual(row["model_action"]["sector_map"], "identity")
-            self.assertEqual(row["sector_map"], "identity")
+            self.assertEqual(row["source_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(row["declared_model_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(row["model_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(row["sector_map"], "layer_exchange")
             self.assertTrue(row["model_basis_action"]["complete"])
-            self.assertEqual(row["model_basis_action"]["sector_map"], "identity")
+            self.assertEqual(row["model_basis_action"]["sector_map"], "layer_exchange")
             self.assertEqual(manifest_rows["C2"]["model_basis_action"], row["model_basis_action"])
             self.assertFalse(row["model_basis_action"]["support_resolution"]["action_mismatch"])
+            self.assertEqual(row["model_basis_action"]["support_resolution"]["block_off_support_rel"], 0.0)
+            self.assertEqual(row["matrix_kind"], "continuum_internal_rep_exact")
+            self.assertEqual(row["matrix_source"], "kp_symm_exactified_action")
+            self.assertEqual(row["matrix_file"], "exactified_C2.npy")
+            self.assertEqual(row["raw_matrix_file"], "C2_low_raw.npy")
+            self.assertEqual(row["source_matrix_projection_report"]["report"]["status"], "exactified")
+            self.assertEqual(row["internal_resolved_action"]["sector_map"], "layer_exchange")
             self.assertEqual(
                 row["model_basis_action"]["support_resolution"]["declared_model_action"]["sector_map"],
-                "identity",
+                "layer_exchange",
             )
             self.assertEqual(
                 row["model_basis_action"]["support_resolution"]["selected_model_action"]["sector_map"],
-                "identity",
+                "layer_exchange",
             )
             self.assertEqual(
                 [(item["source_sector"], item["target_sector"]) for item in row["model_basis_action"]["items"]],
-                [("L1", "L1"), ("L2", "L2")],
+                [("L1", "L2"), ("L2", "L1")],
             )
             self.assertEqual(
                 [(item["source_q_index"], item["target_q_index"]) for item in row["model_basis_action"]["items"]],
@@ -497,26 +625,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             )
 
             loaded = load_symmetry_source(
-                {
-                    "type": "kp_symm_output",
-                    "path": str(out_dir),
-                    "operations": [
-                        self._reader_operation_row(
-                            name="C2",
-                            operation="C2",
-                            matrix_file="C2_low_raw.npy",
-                            antiunitary=False,
-                            k_map={"type": "reflection", "axis_deg": 0.0},
-                            q_map={"type": "reflection", "axis_deg": 0.0},
-                            sector_map="identity",
-                        )
-                    ],
-                },
+                {"type": "kp_symm_output", "path": str(out_dir), "operations": [{"name": "C2", "operation": "C2"}]},
                 base=tmp,
                 expected_dim=2,
             )
             loaded_row = loaded.metadata["operations"][0]
-            self.assertEqual(loaded_row["model_action"]["sector_map"], "identity")
+            self.assertEqual(loaded_row["model_action"]["sector_map"], "layer_exchange")
             self.assertEqual(loaded_row["model_basis_action"]["items"], row["model_basis_action"]["items"])
             np.testing.assert_allclose(
                 loaded.generator.get_operator("C2"),
@@ -637,7 +751,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                                 "raw_h_operator_file": "M1/TR_rawH.npz",
                                 "k_map": {"type": "negation"},
                                 "q_map": {"type": "negation"},
-                                "sector_map": "identity",
+                                "sector_map": "layer_exchange",
                                 "k_pairs": [[0, 0]],
                             }
                         ]
@@ -679,15 +793,50 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cli.main(["symm", "--config", str(cfg_path)])
 
             raw = np.load(out_dir / "TR_low_raw.npy")
-            polar = np.load(out_dir / "TR_low_polar.npy")
             np.testing.assert_allclose(raw, np.array([[0.0, 1.0], [1.0, 0.0]]), atol=1.0e-12)
-            np.testing.assert_allclose(polar, raw, atol=1.0e-12)
+            self.assertFalse((out_dir / "TR_low_polar.npy").exists())
+            self.assertFalse((out_dir / "TR_low_representation_raw.npy").exists())
             summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
             row = summary["operations"][0]
             self.assertEqual(row["spin_sector_sewing"], "up_to_down")
             self.assertEqual(row["source_spin"], "up")
             self.assertEqual(row["target_spin"], "down")
+            self.assertEqual(row["matrix_kind"], "continuum_internal_rep_exact")
+            self.assertEqual(row["matrix_source"], "kp_symm_exactified_action")
+            self.assertEqual(row["matrix_file"], "exactified_TR.npy")
+            self.assertEqual(row["model_action"]["sector_map"], "layer_exchange")
+            self.assertEqual(row["source_matrix_projection_report"]["report"]["status"], "exactified")
             self.assertLess(row["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
+
+    def test_symm_projection_diagnostics_explicitly_save_polar_and_representation_files(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            d = np.eye(4, dtype=np.complex128)
+            out_dir = self._run_minimal_two_layer_projection(
+                tmp,
+                valley="K1",
+                operation="C3",
+                d_up=d,
+                manifest_entry={
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                },
+                q_rotation_deg=0.0,
+            )
+            cfg_path = tmp / "C3_symm.yaml"
+            cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+            cfg["symm"]["diagnostics"] = {"projection_matrices": True}
+            cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+            cli.main(["symm", "--config", str(cfg_path)])
+
+            self.assertTrue((out_dir / "C3_low_polar.npy").exists())
+            self.assertTrue((out_dir / "C3_low_representation_raw.npy").exists())
+            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            row = summary["operations"][0]
+            self.assertEqual(row["representation_matrix_file"], "C3_low_representation_raw.npy")
+            self.assertIn("polar", row["pairs"][0])
 
     def test_symm_fails_when_full_space_representation_does_not_covary_hamk(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:

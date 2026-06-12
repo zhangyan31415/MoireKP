@@ -485,7 +485,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     # Optional Q ordering by |Q| after rotation
     index_order = None
     sort_by_qnorm = bool(plot_cfg.get("sort_by_qnorm", True))
-    q_rotation_deg = float(plot_cfg.get("q_rotation_deg", 210.0))
+    q_rotation_deg = float(plot_cfg.get("q_rotation_deg", 0.0))
     if sort_by_qnorm and q1 is not None and q2 is not None:
         q_base = q1
         q_base2 = q2
@@ -1269,13 +1269,43 @@ def main(argv: Sequence[str] | None = None) -> None:
         from .model.configured import run_configured_model
 
         results = run_configured_model(args.config)
+        model_cfg = results.get("configured_model")
+        moire_cfg = results.get("moire_config")
         comparison = results.get("comparison")
+        plot_comparison = results.get("plot_comparison")
+        if model_cfg is not None and moire_cfg is not None:
+            q1 = len(moire_cfg.Q_set1) if moire_cfg.Q_set1 is not None else 0
+            q2 = len(moire_cfg.Q_set2) if moire_cfg.Q_set2 is not None else 0
+            dim = q1 * int(moire_cfg.n_orb1) + q2 * int(moire_cfg.n_orb2)
+            sym_ops = [op.get("name") for op in model_cfg.symmetry_source_metadata.get("operations", [])]
+            print("[kp model] Completed configured continuum model")
+            print(f"[kp model]   config: {model_cfg.path}")
+            print(f"[kp model]   output: {model_cfg.output_dir}")
+            print(f"[kp model]   basis: dim={dim}, Q=({q1}, {q2}), n_orb={model_cfg.n_orb}")
+            print(f"[kp model]   fit k-points: {len(model_cfg.fit_indices)}, band k-points: {len(moire_cfg.kpoints)}")
+            print(f"[kp model]   bM source: {model_cfg.bM_diagnostics.get('source', 'unknown')}")
+            print(f"[kp model]   harmonics: intra={len(moire_cfg.intra_harmonics_map)}, inter={len(moire_cfg.inter_harmonics_map)}")
+            if sym_ops:
+                print(f"[kp model]   symmetry: {', '.join(str(op) for op in sym_ops)}")
+            if results.get("model_log"):
+                print(f"[kp model]   detailed log: {results['model_log']}")
+            if results.get("runtime_s") is not None:
+                print(f"[kp model]   runtime: {float(results['runtime_s']):.2f} s")
+        if results.get("band_plot"):
+            print(f"[kp model]   band plot: {results['band_plot']}")
         if comparison:
-            print("[kp] Model comparison:")
             rms = float(comparison["rms_error"])
             max_abs = float(comparison["max_abs_error"])
-            print(f"[kp]   RMS error: {rms:.6e} eV ({1000.0 * rms:.3f} meV)")
-            print(f"[kp]   Max error: {max_abs:.6e} eV ({1000.0 * max_abs:.3f} meV)")
+            print(f"[kp model]   RMS error: {rms:.6e} eV ({1000.0 * rms:.3f} meV)")
+            print(f"[kp model]   Max error: {max_abs:.6e} eV ({1000.0 * max_abs:.3f} meV)")
+        if plot_comparison:
+            rms_mev = float(plot_comparison.get("rms_error_mev", 1000.0 * float(plot_comparison["rms_error"])))
+            max_mev = float(plot_comparison.get("max_abs_error_mev", 1000.0 * float(plot_comparison["max_abs_error"])))
+            bands = int(plot_comparison.get("num_bands", 0))
+            align = str(plot_comparison.get("align", "none"))
+            print(f"[kp model]   plot bands RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})")
+            if plot_comparison.get("model_alignment_shift_meV") is not None:
+                print(f"[kp model]   plot alignment shift: {float(plot_comparison['model_alignment_shift_meV']):.3f} meV")
     else:
         raise SystemExit(2)
 

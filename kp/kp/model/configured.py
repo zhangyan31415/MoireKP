@@ -19,8 +19,13 @@ from .config_schema import (
     effective_operation_metadata_for_valley,
     validate_model_config,
 )
-from .exactify_representation import exactify_loaded_symmetry_source, infer_q_offset_from_qset
 from .symmetry import load_symmetry_source
+from ..symmetry.geometry import (
+    bM_candidates_from_q_distances,
+    canonical_bM_pair_from_candidates,
+    sector_qset,
+    sectors_with_q_offsets,
+)
 from ..src.moire_refactored import (
     ContinuumModelBuilder,
     MoireConfig,
@@ -38,6 +43,13 @@ from ..src.moire_refactored import (
 )
 
 DEFAULT_MAX_ORDER = {"Kinect": 2, "intra": 0, "inter": 0}
+GAMMA_LEGACY_ORDER_ALIASES = {
+    "tunneling_zero": "inter",
+    "tunneling_nonzero": "intra",
+    "moire_intra_zero": "intra",
+    "moire_intra_nonzero": "intra",
+    "kinetic": "Kinect",
+}
 SOURCE_META_KEYS = (
     "source_matrix_role",
     "source_gauge",
@@ -102,15 +114,6 @@ def _load_yaml(path: Path) -> dict[str, Any]:
         raise ValueError(f"YAML root must be a mapping: {path}")
     return data
 
-
-
-ACTION_SPECS: dict[str, dict[str, Any]] = {
-    "C3z": {"antiunitary": False, "k_map": {"type": "rotation", "angle_deg": 120.0}, "sector_map": "identity"},
-    "TR": {"antiunitary": True, "k_map": {"type": "negation"}, "sector_map": "identity"},
-    "C2": {"antiunitary": False, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "layer_exchange"},
-    "C2T": {"antiunitary": True, "k_map": {"type": "reflection", "axis_deg": 0.0}, "sector_map": "identity"},
-}
-
 SOURCE_SEMANTICS: dict[str, Any] = {
     "source_matrix_role": "raw_h_sewing_action",
     "source_gauge": "raw_saved_TAPW",
@@ -119,79 +122,6 @@ SOURCE_SEMANTICS: dict[str, Any] = {
     "spin_map": "from_kp_symm_output",
     "valley_map": "identity",
 }
-
-REPRESENTATION_SEMANTICS: dict[str, Any] = {
-    "source_matrix_role": "bare_D0_internal_rep",
-    "source_gauge": "raw_saved_TAPW",
-    "target_role": "continuum_internal_rep",
-    "gauge_correction": {"kind": "none"},
-    "spin_map": "from_kp_symm_output",
-    "valley_map": "identity",
-}
-
-def _map_with_axis(base: Mapping[str, Any], axis_deg: float | None) -> dict[str, Any]:
-    out = copy.deepcopy(dict(base))
-    if axis_deg is not None:
-        if out.get("type") != "reflection":
-            raise ValueError("axis_deg override is only valid for reflection actions")
-        out["axis_deg"] = float(axis_deg)
-    return out
-
-
-def _operation_action(name: str, *, axis_deg: float | None = None, q_axis_deg: float | None = None) -> dict[str, Any]:
-    spec = copy.deepcopy(ACTION_SPECS[name])
-    k_map = _map_with_axis(spec["k_map"], axis_deg)
-    q_map = _map_with_axis(spec.get("q_map", k_map), axis_deg if q_axis_deg is None else q_axis_deg)
-    return {
-        "antiunitary": bool(spec["antiunitary"]),
-        "k_map": k_map,
-        "q_map": q_map,
-        "sector_map": copy.deepcopy(spec["sector_map"]),
-    }
-
-
-def _with_sector_map(action: dict[str, Any], sector_map: Any | None) -> dict[str, Any]:
-    if sector_map is not None:
-        action["sector_map"] = copy.deepcopy(sector_map)
-    return action
-
-
-def _model_op(name: str, *, axis_deg: float | None = None) -> dict[str, Any]:
-    return {"name": name, **_operation_action(name, axis_deg=axis_deg)}
-
-
-def _source_op(
-    name: str,
-    operation: str,
-    matrix_file: str,
-    *,
-    axis_deg: float | None = None,
-    q_axis_deg: float | None = None,
-    sector_map: Any | None = None,
-    semantics: Mapping[str, Any] = SOURCE_SEMANTICS,
-) -> dict[str, Any]:
-    action = _with_sector_map(_operation_action(name, axis_deg=axis_deg, q_axis_deg=q_axis_deg), sector_map)
-    metadata = copy.deepcopy(dict(semantics))
-    metadata.setdefault("antiunitary_convention", "U_K" if action["antiunitary"] else "none")
-    return {
-        "name": name,
-        "operation": operation,
-        "matrix_file": matrix_file,
-        **action,
-        **metadata,
-    }
-
-
-def _exact_candidate(name: str, *, axis_deg: float | None = None, sector_map: Any | None = None) -> dict[str, Any]:
-    out = _with_sector_map(_operation_action(name, axis_deg=axis_deg), sector_map)
-    if isinstance(out["k_map"], dict):
-        out["k_map"]["in_model_frame"] = True
-    return out
-
-
-def _ops(*operations: dict[str, Any]) -> list[dict[str, Any]]:
-    return [copy.deepcopy(op) for op in operations]
-
 
 def _as_int_list(value: Any, *, name: str) -> list[int]:
     if value is None:
@@ -254,13 +184,16 @@ def _valley_type_from_label(label: str) -> str:
 def _spin_convention_from_short(spin: str, valley_type: str) -> str:
     if spin in {"spinful", "all"}:
         return "spinful"
-    if spin in {"spinless", "up"}:
-        if valley_type == "K":
-            return "spin_up_only"
-        if valley_type == "M":
-            return "spinless_effective"
-        return "spinless"
-    raise ValueError(f"Unsupported spin value {spin!r}; expected spinless or spinful")
+    if spin in {"spin_up_projected", "up"}:
+        return "spin_up_projected"
+    if spin == "spin_down_projected":
+        return "spin_down_projected"
+    if spin == "spinless_effective":
+        return "spinless_effective"
+    raise ValueError(
+        f"Unsupported spin value {spin!r}; use spinful, spin_up_projected, "
+        "spin_down_projected, or spinless_effective"
+    )
 
 
 def _default_internal_symmetries(valley_type: str, spin_convention: str) -> list[str]:
@@ -378,12 +311,14 @@ def _default_symmetry_source(
         symm = source_raw.get("symm", {})
         if isinstance(symm, Mapping) and symm.get("output_dir"):
             out["type"] = "kp_symm_output"
+            out["inferred_from_source_config"] = True
     if out.get("type") == "kp_symm_output" and not out.get("path"):
         symm = source_raw.get("symm", {})
         if isinstance(symm, Mapping) and symm.get("output_dir"):
             resolved = _resolve_path(symm.get("output_dir"), source_base)
             if resolved is not None:
                 out["path"] = str(resolved)
+                out["inferred_from_source_config"] = True
     if out.get("type") == "kp_symm_output":
         valley_model = raw.get("valley_model", {})
         out.setdefault("use", "raw")
@@ -392,8 +327,9 @@ def _default_symmetry_source(
 
 
 def _source_matrix_file(source_name: str, use: str, matrix_kind: str) -> str:
-    suffix = "representation_" if matrix_kind in {"representation", "d0", "D0"} else ""
-    return f"{source_name}_low_{suffix}{use}.npy"
+    if matrix_kind != "action":
+        raise ValueError("kp_symm_output production symmetry_source.matrix_kind must be 'action'")
+    return f"{source_name}_low_{use}.npy"
 
 
 def _default_source_operation_name(name: str) -> str:
@@ -408,19 +344,6 @@ def _matrix_file_stem(source_operation: str) -> str:
     return source_operation
 
 
-def _resolved_action_for_source_operation(name: str, valley_model: Mapping[str, Any]) -> dict[str, Any]:
-    spin = str(valley_model.get("spin_convention", ""))
-    if name in {"C2"}:
-        return _with_sector_map(_operation_action(name, axis_deg=0.0), "layer_exchange")
-    if name in ACTION_SPECS:
-        return _operation_action(name)
-    if spin == "spinless_effective":
-        canonical = canonical_source_operation_name_for_valley(name, valley_model)
-        if canonical in ACTION_SPECS:
-            return _resolved_action_for_source_operation(canonical, valley_model)
-    raise ValueError(f"Cannot infer resolved action for symmetry operation {name!r}")
-
-
 def _complete_kp_symm_operation_entry(
     operation: Any,
     valley_model: Mapping[str, Any],
@@ -432,20 +355,26 @@ def _complete_kp_symm_operation_entry(
     user_name = str(row.get("name", row.get("operation", "")))
     name = canonical_source_operation_name_for_valley(user_name, valley_model)
     source_operation = str(row.get("operation", _default_source_operation_name(name)))
-    action = _resolved_action_for_source_operation(name, valley_model)
-    semantics = REPRESENTATION_SEMANTICS if matrix_kind in {"representation", "d0", "D0"} else SOURCE_SEMANTICS
+    if matrix_kind != "action":
+        raise ValueError("kp_symm_output production symmetry_source.matrix_kind must be 'action'")
+    semantics = SOURCE_SEMANTICS
+    missing_action = [field for field in ("antiunitary", "k_map", "sector_map") if field not in row]
+    if missing_action:
+        raise ValueError(
+            f"symmetry_source operation {user_name!r} requires explicit action metadata when matrix_kind is set; "
+            f"missing {missing_action}"
+        )
     completed = {
         "name": name,
         "operation": source_operation,
         "matrix_file": _source_matrix_file(_matrix_file_stem(source_operation), use, matrix_kind),
-        **copy.deepcopy(action),
         **effective_operation_metadata_for_valley(user_name, valley_model),
         **copy.deepcopy(dict(semantics)),
     }
-    completed["antiunitary_convention"] = "U_K" if completed["antiunitary"] else "none"
     completed.update(row)
     completed["name"] = name
     completed.setdefault("operation", source_operation)
+    completed["antiunitary_convention"] = "U_K" if completed["antiunitary"] else "none"
     if "q_map" not in completed and "k_map" in completed:
         completed["q_map"] = copy.deepcopy(completed["k_map"])
     return completed
@@ -501,31 +430,19 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
     return out
 
 
-def _default_source_matrix_projection_config(config: ConfiguredModel) -> dict[str, Any]:
-    phases: dict[str, int] = {}
-    spin = str(config.valley_model.get("spin_convention", ""))
-    valley_type = str(config.valley_model.get("valley_type", ""))
-    for operation in config.symmetry_source_config.get("operations", []):
-        if isinstance(operation, Mapping):
-            name = str(operation.get("name", ""))
-        else:
-            name = str(operation)
-        if name == "C3z":
-            phases[f"{name}^3"] = -1
-        elif name == "C2":
-            phases[f"{name}^2"] = -1 if spin == "spinful" else 1
-        elif name == "C2T":
-            phases[f"{name}^2"] = 1
-        elif name in {"TR"}:
-            phases[f"{name}^2"] = -1 if spin == "spinful" else 1
-    return {
-        "support_source": "geometry",
-        "central_phase": phases,
-        "phase_classes": "global",
-        "reject_if_off_support_rel_gt": 3.0e-6 if valley_type == "K" else 1.0e-5,
-        "reject_if_amplitude_deviation_gt": 0.02 if valley_type == "K" else 0.05,
-        "inferred": True,
-    }
+def _max_derivative_order_values(model: Mapping[str, Any]) -> dict[str, int]:
+    legacy = {**DEFAULT_MAX_ORDER, **{str(key): int(value) for key, value in dict(model.get("max_order", {})).items()}}
+    values = dict(legacy)
+    for semantic_key, legacy_key in GAMMA_LEGACY_ORDER_ALIASES.items():
+        values.setdefault(semantic_key, int(legacy.get(legacy_key, 0)))
+    explicit = model.get("max_derivative_order", {})
+    if explicit is None:
+        explicit = {}
+    if not isinstance(explicit, Mapping):
+        raise ValueError("model.max_derivative_order must be a mapping when provided")
+    for key, value in explicit.items():
+        values[str(key)] = int(value)
+    return values
 
 
 def _reflect_vector(kvec: np.ndarray, axis_deg: float) -> np.ndarray:
@@ -546,6 +463,14 @@ def _rotate_k_map_to_model_frame(k_map: Any, *, rotation_deg: float) -> Any:
     return out
 
 
+def _is_accepted_support_exactification_provenance(provenance: Any) -> bool:
+    return (
+        isinstance(provenance, Mapping)
+        and provenance.get("source") == "support_exactification"
+        and bool(provenance.get("accepted_by_user"))
+    )
+
+
 def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: float) -> dict[str, dict[str, Any]]:
     operations = metadata.get("operations", [])
     if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
@@ -556,7 +481,9 @@ def _symmetry_operation_index(metadata: Mapping[str, Any], *, rotation_deg: floa
             continue
         enriched = dict(record)
         resolved_action = record.get("internal_resolved_action")
-        if isinstance(resolved_action, Mapping) and not isinstance(resolved_action.get("provenance"), Mapping):
+        if isinstance(resolved_action, Mapping) and not _is_accepted_support_exactification_provenance(
+            resolved_action.get("provenance")
+        ):
             resolved_action = None
         if not isinstance(resolved_action, Mapping):
             resolved_action = record.get("model_action")
@@ -583,6 +510,7 @@ def _enrich_symmetry_map(
     symmetry_metadata: Mapping[str, Any],
     *,
     rotation_deg: float,
+    require_action_metadata: bool = True,
 ) -> dict[str, list[dict[str, Any]]]:
     op_index = _symmetry_operation_index(symmetry_metadata, rotation_deg=rotation_deg)
     out: dict[str, list[dict[str, Any]]] = {}
@@ -603,11 +531,8 @@ def _enrich_symmetry_map(
                 if "q_map" not in merged and "k_map" in merged:
                     merged["q_map"] = dict(merged["k_map"]) if isinstance(merged["k_map"], Mapping) else merged["k_map"]
                 row = merged
-            if name in ACTION_SPECS:
-                action = _operation_action(name)
-                for key, value in action.items():
-                    row.setdefault(key, value)
-            _require_resolved_operation_action(row)
+            if require_action_metadata:
+                _require_resolved_operation_action(row)
             rows.append(row)
         out[str(tag)] = rows
     return out
@@ -634,57 +559,58 @@ def _default_kpath_config(raw: Mapping[str, Any], *, source_base: Path) -> dict[
     return out
 
 
-def _rotation_deg_from_config(raw: Mapping[str, Any], source_raw: Mapping[str, Any]) -> float:
-    coordinate_frame = raw.get("coordinate_frame", {})
-    if isinstance(coordinate_frame, Mapping) and "rotation_deg" in coordinate_frame:
-        legacy_labels: list[str] = []
-        if "rotation_deg" in raw:
-            legacy_labels.append("rotation_deg")
-        model = raw.get("model", {})
-        if isinstance(model, Mapping):
-            if "rotation_deg" in model:
-                legacy_labels.append("model.rotation_deg")
-            if "q_rotation_deg" in model:
-                legacy_labels.append("model.q_rotation_deg")
-        kpath = raw.get("kpath", {})
-        if isinstance(kpath, Mapping) and "phase_deg" in kpath:
-            legacy_labels.append("kpath.phase_deg")
-        if legacy_labels:
-            labels = ", ".join(legacy_labels)
-            raise ValueError(f"Use only coordinate_frame.rotation_deg; remove duplicate rotation settings: {labels}")
-        return float(coordinate_frame["rotation_deg"])
+def _rotation_deg_from_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> float | None:
+    symmetry_source = raw.get("symmetry_source", {})
+    if not isinstance(symmetry_source, Mapping) or str(symmetry_source.get("type", "")) != "kp_symm_output":
+        return None
+    path_raw = symmetry_source.get("path")
+    if path_raw is None:
+        return None
+    path = Path(str(path_raw))
+    if not path.is_absolute():
+        path = (base / path).resolve()
+    for filename in ("manifest.json", "summary.json"):
+        manifest_path = path / filename
+        if not manifest_path.exists():
+            continue
+        manifest = _load_yaml(manifest_path)
+        frame = manifest.get("frame", {})
+        if not isinstance(frame, Mapping):
+            continue
+        q_transform = frame.get("q_transform", {})
+        if isinstance(q_transform, Mapping) and "rotation_deg" in q_transform:
+            return float(q_transform["rotation_deg"])
+        k_transform = frame.get("k_transform", {})
+        if isinstance(k_transform, Mapping) and "rotation_deg" in k_transform:
+            return float(k_transform["rotation_deg"])
+    return None
 
-    values: list[tuple[str, float]] = []
+
+def _rotation_deg_from_config(raw: Mapping[str, Any], *, base: Path) -> float:
+    if "coordinate_frame" in raw:
+        raise ValueError("coordinate_frame is not a supported model input; use the kp_symm manifest frame")
+    legacy_labels: list[str] = []
     if "rotation_deg" in raw:
-        values.append(("rotation_deg", float(raw["rotation_deg"])))
-
+        legacy_labels.append("rotation_deg")
     model = raw.get("model", {})
     if isinstance(model, Mapping):
         if "rotation_deg" in model:
-            values.append(("model.rotation_deg", float(model["rotation_deg"])))
+            legacy_labels.append("model.rotation_deg")
         if "q_rotation_deg" in model:
-            values.append(("model.q_rotation_deg", float(model["q_rotation_deg"])))
-
+            legacy_labels.append("model.q_rotation_deg")
     kpath = raw.get("kpath", {})
     if isinstance(kpath, Mapping) and "phase_deg" in kpath:
-        values.append(("kpath.phase_deg", float(kpath["phase_deg"])))
-
-    plot = source_raw.get("plot", {})
-    if isinstance(plot, Mapping) and "q_rotation_deg" in plot:
-        values.append(("source_config.plot.q_rotation_deg", float(plot["q_rotation_deg"])))
-
-    if not values:
-        return 0.0
-
-    label0, rotation = values[0]
-    for label, value in values[1:]:
-        if abs(value - rotation) > 1.0e-12:
-            raise ValueError(
-                "Conflicting rotation settings: "
-                f"{label0}={rotation} but {label}={value}. "
-                "Use a single coordinate_frame.rotation_deg."
-            )
-    return rotation
+        legacy_labels.append("kpath.phase_deg")
+    if legacy_labels:
+        labels = ", ".join(legacy_labels)
+        raise ValueError(f"Model frame rotation must come from the kp_symm manifest; remove {labels}")
+    manifest_rotation = _rotation_deg_from_symmetry_manifest(raw, base=base)
+    if manifest_rotation is not None:
+        return manifest_rotation
+    raise ValueError(
+        "Configured model YAML requires a kp_symm symmetry manifest frame rotation. "
+        "Rerun `kp symm` with automatic frame inference; do not hand-write model frame rotations."
+    )
 
 
 def load_model_config(path: str | Path) -> ConfiguredModel:
@@ -768,7 +694,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     nlow_state = _as_int_list(model.get("nlow_state", n_orb_values), name="model.nlow_state")
     if len(nlow_state) != 2:
         raise ValueError(f"model.nlow_state must have length 2, got {nlow_state}")
-    max_order_values = {**DEFAULT_MAX_ORDER, **{str(key): int(value) for key, value in dict(model.get("max_order", {})).items()}}
+    max_order_values = _max_derivative_order_values(model)
 
     fit = raw.get("fit", {})
     if not isinstance(fit, Mapping):
@@ -825,6 +751,10 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             harmonic_counts=harmonic_count_limits,
         )
 
+    symmetry_source_metadata = {}
+    if isinstance(symmetry_source, Mapping) and bool(symmetry_source.get("inferred_from_source_config", False)):
+        symmetry_source_metadata["inferred_from_source_config"] = True
+
     return ConfiguredModel(
         path=cfg_path,
         raw=dict(raw),
@@ -836,7 +766,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         heff_file=heff_file,
         heff_eig_file=heff_eig_file,
         output_dir=output_dir,
-        rotation_deg=_rotation_deg_from_config(raw, source_raw),
+        rotation_deg=_rotation_deg_from_config(raw, base=base),
         fit_indices=fit_indices,
         band_indices=band_indices,
         n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
@@ -850,6 +780,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         kpath_config=dict(kpath_config),
         valley_model=dict(valley_model),
         symmetry_source_config=dict(symmetry_source) if isinstance(symmetry_source, Mapping) else {},
+        symmetry_source_metadata=symmetry_source_metadata,
         sectors_config=[dict(item) for item in sectors],
         term_templates=[dict(item) for item in term_templates],
         output_config=dict(output_section),
@@ -1045,7 +976,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 [[1, 1]],
                 [[2, 1]],
                 harmonic_filter=_harmonic_filter("intra", [1]),
-                max_order_from="intra",
+                max_order_from="moire_intra_zero",
             ),
             _term_template_row(
                 "gamma_intra_nonzero",
@@ -1053,7 +984,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 [[1, 1]],
                 [[1, 1], [1, 2], [2, 1]],
                 harmonic_filter=_harmonic_filter("intra", [2, 3, 4]),
-                max_order_from="intra",
+                max_order_from="moire_intra_nonzero",
             ),
             _term_template_row(
                 "gamma_inter_zero",
@@ -1061,7 +992,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 [[2, 1]],
                 [[1, 1], [2, 1]],
                 harmonic_filter=_harmonic_filter("inter", [1]),
-                max_order_from="inter",
+                max_order_from="tunneling_zero",
             ),
             _term_template_row(
                 "gamma_inter_nonzero",
@@ -1069,7 +1000,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 [[2, 1]],
                 [[1, 1], [2, 1]],
                 harmonic_filter=_harmonic_filter("inter", [2, 3, 4]),
-                max_order_from="intra",
+                max_order_from="tunneling_nonzero",
             ),
             _term_template_row(
                 "gamma_inter_nonzero_negative",
@@ -1077,7 +1008,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 [[2, 1]],
                 [[1, 1]],
                 harmonic_filter=_harmonic_filter("inter", [2, 3, 4], sign=-1.0),
-                max_order_from="intra",
+                max_order_from="tunneling_nonzero",
             ),
         ),
     ),
@@ -1288,35 +1219,6 @@ def _validate_sector_orbital_counts(
             )
 
 
-def _sector_qset(sector: Mapping[str, Any], Q_set1: np.ndarray, Q_set2: np.ndarray) -> np.ndarray:
-    qset_name = str(sector.get("qset", ""))
-    if qset_name == "qset1":
-        return Q_set1
-    if qset_name == "qset2":
-        return Q_set2
-    raise ValueError(f"Unsupported sector qset {qset_name!r}; expected qset1/qset2")
-
-
-def _sectors_with_q_offsets(
-    sectors: Sequence[Mapping[str, Any]],
-    *,
-    Q_set1: np.ndarray,
-    Q_set2: np.ndarray,
-    bM1: np.ndarray,
-    bM2: np.ndarray,
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
-    for sector in sectors:
-        row = dict(sector)
-        if "q_offset" not in row:
-            row["q_offset"] = infer_q_offset_from_qset(_sector_qset(row, Q_set1, Q_set2), bM1, bM2).tolist()
-            row["_q_offset_inferred"] = True
-        else:
-            row["_q_offset_inferred"] = False
-        out.append(row)
-    return out
-
-
 def _sector_offset(sector: Mapping[str, Any]) -> np.ndarray:
     return np.asarray(sector.get("q_offset", [0.0, 0.0]), dtype=float)
 
@@ -1374,8 +1276,8 @@ def _support_count_for_sector_pair(
     Q_set2: np.ndarray,
     tol: float,
 ) -> int:
-    q_from = _sector_qset(sector_from, Q_set1, Q_set2)
-    q_to = _sector_qset(sector_to, Q_set1, Q_set2)
+    q_from = sector_qset(sector_from, Q_set1, Q_set2)
+    q_to = sector_qset(sector_to, Q_set1, Q_set2)
     off_from = _sector_offset(sector_from)
     off_to = _sector_offset(sector_to)
     count = 0
@@ -1460,8 +1362,8 @@ def _support_harmonic_records(
     basis = np.column_stack([bM1, bM2])
     grouped: dict[tuple[int, int], dict[str, Any]] = {}
     for sector_from, sector_to in _sector_pair_specs(raw, kind, sectors):
-        q_from = _sector_qset(sector_from, Q_set1, Q_set2) + _sector_offset(sector_from)
-        q_to = _sector_qset(sector_to, Q_set1, Q_set2) + _sector_offset(sector_to)
+        q_from = sector_qset(sector_from, Q_set1, Q_set2) + _sector_offset(sector_from)
+        q_to = sector_qset(sector_to, Q_set1, Q_set2) + _sector_offset(sector_to)
         pair_label = [str(sector_from["name"]), str(sector_to["name"])]
         for qf in q_from:
             for qt in q_to:
@@ -2028,6 +1930,24 @@ def _load_model_q_sets(config: ConfiguredModel) -> tuple[np.ndarray, np.ndarray]
     )
 
 
+def _operation_matrix_is_exactified(record: Mapping[str, Any]) -> bool:
+    matrix_kind = str(record.get("matrix_kind", ""))
+    matrix_source = str(record.get("matrix_source", record.get("matrix_file_role", "")))
+    return matrix_kind == "continuum_internal_rep_exact" or matrix_source in {
+        "kp_symm_exactified_action",
+        "exactified_raw_h_action_projection",
+    }
+
+
+def _requires_model_side_exactification(metadata: Mapping[str, Any]) -> bool:
+    if bool(metadata.get("requires_model_exactification", False)):
+        return True
+    operations = metadata.get("operations", [])
+    if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)) or not operations:
+        return False
+    return not all(isinstance(record, Mapping) and _operation_matrix_is_exactified(record) for record in operations)
+
+
 def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, ConfiguredModel]:
     config = load_model_config(path)
     heff_list = np.load(config.heff_file, mmap_mode="r")
@@ -2038,7 +1958,7 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     model_section = _model_section(config.raw)
     variables = _build_variables(Q_set1, bM1, bM2, model_section)
     harmonics = config.harmonics_config
-    sectors = _sectors_with_q_offsets(
+    sectors = sectors_with_q_offsets(
         _default_sectors(config),
         Q_set1=Q_set1,
         Q_set2=Q_set2,
@@ -2049,6 +1969,7 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         config.symmetry_map,
         {},
         rotation_deg=config.rotation_deg,
+        require_action_metadata=False,
     )
     intra, inter, harmonics_diagnostics = _resolve_harmonics_maps(
         harmonics,
@@ -2068,60 +1989,16 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     expected_dim = len(Q_set1) * config.n_orb[0] + len(Q_set2) * config.n_orb[1]
     loaded_symmetry = load_symmetry_source(config.symmetry_source_config, base=config.path.parent, expected_dim=expected_dim)
     source_type = str(config.symmetry_source_config.get("type", "none"))
-    matrix_kind = str(config.symmetry_source_config.get("matrix_kind", config.symmetry_source_config.get("kind", "action")))
-    if source_type == "kp_symm_output" and any(config.symmetry_map.get(tag) for tag in ("Kinect", "Onsite", "intra", "inter")):
-        projection_config = _default_source_matrix_projection_config(config)
-        if not hasattr(loaded_symmetry.generator, "matrices"):
-            raise ValueError("Source matrix projection requires a matrix-backed symmetry generator")
-        projection_raw_config = {**config.symmetry_source_config, "exactification": projection_config}
-        projection_output_dir = config.output_dir / "symmetry_source_matrix_projection"
-        try:
-            exact_matrices, exact_reports = exactify_loaded_symmetry_source(
-                loaded_metadata=loaded_symmetry.metadata,
-                matrices=getattr(loaded_symmetry.generator, "matrices"),
-                Q_set1=Q_set1,
-                Q_set2=Q_set2,
-                sectors=sectors,
-                n_orb=config.n_orb,
-                bM1=bM1,
-                bM2=bM2,
-                raw_config=projection_raw_config,
-                rotation_deg=config.rotation_deg,
-                output_dir=projection_output_dir,
-            )
-        except ValueError as exc:
-            if matrix_kind not in {"representation", "d0", "D0"}:
-                raise
-            loaded_symmetry.metadata["source_matrix_projection_skipped"] = {"reason": str(exc), "matrix_kind": matrix_kind}
-            exact_matrices, exact_reports = {}, {}
-        loaded_symmetry.generator.matrices.update(exact_matrices)
-        for record in loaded_symmetry.metadata.get("operations", []):
-            if isinstance(record, dict) and record.get("name") in exact_reports:
-                record["source_matrix_projection_report"] = exact_reports[record["name"]]
-                record["matrix_kind"] = "continuum_internal_rep_exact"
-                record["target_role"] = "continuum_internal_rep"
-                report = exact_reports[record["name"]]
-                resolved_action = report.get("resolved_action", {})
-                support_resolution = report.get("support_resolution", {})
-                action_mismatch = bool(support_resolution.get("action_mismatch")) if isinstance(support_resolution, Mapping) else False
-                if isinstance(resolved_action, dict):
-                    internal_action = dict(resolved_action)
-                    if (
-                        action_mismatch
-                        and isinstance(support_resolution, Mapping)
-                        and isinstance(support_resolution.get("provenance"), Mapping)
-                        and bool(support_resolution["provenance"].get("accepted_by_user"))
-                        and not isinstance(internal_action.get("provenance"), Mapping)
-                    ):
-                        internal_action["provenance"] = copy.deepcopy(support_resolution["provenance"])
-                    provenance = internal_action.get("provenance")
-                    accepted_mismatch = isinstance(provenance, Mapping) and bool(provenance.get("accepted_by_user"))
-                    if not action_mismatch or accepted_mismatch:
-                        for map_key in ("k_map", "q_map"):
-                            if isinstance(internal_action.get(map_key), Mapping):
-                                internal_action[map_key] = {**internal_action[map_key], "in_model_frame": True}
-                        record["internal_resolved_action"] = internal_action
-        loaded_symmetry.metadata["source_matrix_projection_reports"] = exact_reports
+    if source_type == "kp_symm_output" and _requires_model_side_exactification(loaded_symmetry.metadata):
+        raise ValueError(
+            "kp_symm_output must provide exactified continuum matrices. "
+            "Rerun `kp symm` so the manifest contains matrix_kind='continuum_internal_rep_exact' "
+            "and matrix_source='kp_symm_exactified_action'."
+        )
+    if config.symmetry_source_metadata:
+        loaded_symmetry.metadata = {**config.symmetry_source_metadata, **loaded_symmetry.metadata}
+        if hasattr(loaded_symmetry.generator, "metadata") and isinstance(loaded_symmetry.generator.metadata, dict):
+            loaded_symmetry.generator.metadata.update(config.symmetry_source_metadata)
     config.symmetry_source_metadata = loaded_symmetry.metadata
     enriched_symmetry_map = _enrich_symmetry_map(
         config.symmetry_map,
@@ -2156,42 +2033,6 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     moire_config.bM_diagnostics = bM_diagnostics
     setattr(moire_config, "_harmonics_diagnostics", harmonics_diagnostics)
     return moire_config, config
-
-
-def _candidate_score_for_bM(vector: np.ndarray) -> tuple[float, float, float]:
-    theta = float(np.mod(np.arctan2(vector[1], vector[0]), 2.0 * np.pi))
-    circular_angle = min(theta, 2.0 * np.pi - theta)
-    if circular_angle < 1.0e-8:
-        circular_angle = 0.0
-    return (circular_angle, theta, float(np.linalg.norm(vector)))
-
-
-def _canonical_bM_pair_from_candidates(candidates: list[np.ndarray], *, angle_deg: float, tol: float | None = None) -> tuple[np.ndarray, np.ndarray]:
-    vectors = [np.asarray(vector, dtype=float) for vector in candidates if np.linalg.norm(vector) > 1.0e-12]
-    if not vectors:
-        raise ValueError("Cannot infer bM vectors from an empty candidate set")
-
-    min_norm = min(float(np.linalg.norm(vector)) for vector in vectors)
-    tol_abs = float(tol if tol is not None else max(1.0e-10, min_norm * 1.0e-6))
-    first_shell = [vector for vector in vectors if abs(np.linalg.norm(vector) - min_norm) <= tol_abs]
-    bM1 = np.array(min(first_shell, key=_candidate_score_for_bM), dtype=float)
-
-    target_angle = np.deg2rad(float(angle_deg))
-    b1_norm = float(np.linalg.norm(bM1))
-    b2_candidates = []
-    for vector in first_shell:
-        cross = float(bM1[0] * vector[1] - bM1[1] * vector[0])
-        if cross <= tol_abs * b1_norm:
-            continue
-        dot = float(np.dot(bM1, vector) / (b1_norm * np.linalg.norm(vector)))
-        angle = float(np.arccos(np.clip(dot, -1.0, 1.0)))
-        b2_candidates.append((abs(angle - target_angle), _candidate_score_for_bM(vector), vector))
-
-    if b2_candidates:
-        bM2 = np.array(min(b2_candidates, key=lambda item: (item[0], item[1]))[2], dtype=float)
-    else:
-        bM2 = rot(bM1, float(angle_deg))
-    return bM1, bM2
 
 
 def _bM_candidate_rows(candidates: list[np.ndarray], *, max_rows: int = 24) -> list[dict[str, Any]]:
@@ -2256,16 +2097,6 @@ def _bM_geometry(bM1: np.ndarray, bM2: np.ndarray) -> dict[str, Any]:
     }
 
 
-def _bM_candidates_from_q_distances(Q_set1: np.ndarray, Q_set2: np.ndarray) -> list[np.ndarray]:
-    candidates: list[np.ndarray] = []
-    for Q in (np.asarray(Q_set1, dtype=float), np.asarray(Q_set2, dtype=float)):
-        for i in range(len(Q)):
-            for j in range(len(Q)):
-                if i != j:
-                    candidates.append(Q[i] - Q[j])
-    return candidates
-
-
 def _bM_candidates_from_tmat(Tmat: Any, *, rotation_deg: float) -> list[np.ndarray]:
     reciprocal = reciprocal_Tmat_from_Tmat(np.asarray(Tmat, dtype=float))
     g1 = rot(reciprocal[0, :2], rotation_deg)
@@ -2290,8 +2121,8 @@ def _build_bM_vectors(Q_set1: np.ndarray, Q_set2: np.ndarray, config: Configured
     if not raw or source == "auto":
         source = "tmat" if config.kpath_config.get("tmat") is not None else "q_distance"
     if source in {"q", "q_distance", "q_distances"}:
-        candidates = _bM_candidates_from_q_distances(Q_set1, Q_set2)
-        bM1, bM2 = _canonical_bM_pair_from_candidates(candidates, angle_deg=angle)
+        candidates = bM_candidates_from_q_distances(Q_set1, Q_set2)
+        bM1, bM2 = canonical_bM_pair_from_candidates(candidates, angle_deg=angle)
         b_norm = max(float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
         validation = raw.get("validation", {})
         if validation is None:
@@ -2315,7 +2146,7 @@ def _build_bM_vectors(Q_set1: np.ndarray, Q_set2: np.ndarray, config: Configured
             )
         if config.kpath_config.get("tmat") is not None:
             tmat_candidates = _bM_candidates_from_tmat(config.kpath_config["tmat"], rotation_deg=config.rotation_deg)
-            t_bM1, t_bM2 = _canonical_bM_pair_from_candidates(tmat_candidates, angle_deg=angle)
+            t_bM1, t_bM2 = canonical_bM_pair_from_candidates(tmat_candidates, angle_deg=angle)
             diagnostics["comparison_with_tmat"] = {
                 "b1_delta_norm": float(np.linalg.norm(bM1 - t_bM1)),
                 "b2_delta_norm": float(np.linalg.norm(bM2 - t_bM2)),
@@ -2327,7 +2158,7 @@ def _build_bM_vectors(Q_set1: np.ndarray, Q_set2: np.ndarray, config: Configured
         if config.kpath_config.get("tmat") is None:
             raise ValueError("model.bM.source=tmat requires kpath.tmat")
         candidates = _bM_candidates_from_tmat(config.kpath_config["tmat"], rotation_deg=config.rotation_deg)
-        bM1, bM2 = _canonical_bM_pair_from_candidates(candidates, angle_deg=angle)
+        bM1, bM2 = canonical_bM_pair_from_candidates(candidates, angle_deg=angle)
         diagnostics = {
             "source": "tmat",
             **_bM_geometry(bM1, bM2),
@@ -2866,67 +2697,124 @@ def _operation_physics_level(model_config: ConfiguredModel, operation: Mapping[s
 def _symmetry_integrity(model_config: ConfiguredModel) -> str:
     if model_config.symmetry_source_config.get("type") == "toy_generator":
         return "toy_generator"
+    if model_config.symmetry_source_metadata.get("exactification_owner") == "kp_symm":
+        return "kp_symm_exactified"
     if model_config.symmetry_source_metadata.get("source_matrix_projection_reports"):
         return "source_matrix_projected"
     return "matrix_backed"
 
 
+def _term_template_tag(template: Mapping[str, Any]) -> str:
+    if "tag" in template:
+        return str(template["tag"])
+    source = str(template.get("source", ""))
+    if source == "diagonal_kp":
+        return "Kinect"
+    if source == "onsite":
+        return "Onsite"
+    if source == "moire_potential":
+        return "intra"
+    if source == "tunneling":
+        return "inter"
+    return ""
+
+
+def _term_tags_by_symmetry_tag(term_templates: Sequence[Mapping[str, Any]]) -> dict[str, list[str]]:
+    out: dict[str, list[str]] = {}
+    for template in term_templates:
+        if not isinstance(template, Mapping):
+            continue
+        tag = _term_template_tag(template)
+        if not tag:
+            continue
+        term_name = str(template.get("name", tag))
+        out.setdefault(tag, [])
+        if term_name not in out[tag]:
+            out[tag].append(term_name)
+    return out
+
+
 def _build_operation_registry(model_config: ConfiguredModel) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, str]] = set()
-    source_ops = {
-        str(op.get("name")): op
-        for op in model_config.symmetry_source_config.get("operations", [])
-        if isinstance(op, Mapping) and op.get("name") is not None
-    }
-    for operations in model_config.symmetry_map.values():
+    rows_by_key: dict[tuple[str, str, str, str, str, str], dict[str, Any]] = {}
+    source_ops_by_identity: dict[tuple[str, str], Mapping[str, Any]] = {}
+    source_ops_by_name: dict[str, Mapping[str, Any]] = {}
+    for op in model_config.symmetry_source_config.get("operations", []):
+        if not isinstance(op, Mapping) or op.get("name") is None:
+            continue
+        source_name = str(op.get("name"))
+        source_operation = str(op.get("operation", source_name))
+        source_ops_by_identity[(source_name, source_operation)] = op
+        source_ops_by_name.setdefault(source_name, op)
+    term_tags_by_tag = _term_tags_by_symmetry_tag(getattr(model_config, "term_templates", []))
+    for tag, operations in model_config.symmetry_map.items():
         for operation in operations:
             if not isinstance(operation, Mapping):
                 continue
             user_name = str(operation.get("user_name", operation.get("name", "")))
             canonical_name = str(operation.get("name", ""))
-            source_record = source_ops.get(canonical_name, {})
             _require_resolved_operation_action(operation)
             resolved_k_map = operation["k_map"]
             resolved_q_map = operation["q_map"]
             resolved_sector_map = operation["sector_map"]
-            key = (user_name, canonical_name, json.dumps(_json_safe(resolved_k_map), sort_keys=True))
-            if key in seen:
-                continue
-            seen.add(key)
-            antiunitary = bool(operation["antiunitary"])
-            rows.append(
-                {
-                    "user_operation": user_name,
-                    "canonical_operation": canonical_name,
-                    "operation_alias": operation.get("operation_alias", source_record.get("operation_alias")),
-                    "canonical_physical_operation": operation.get(
-                        "canonical_physical_operation",
-                        source_record.get("canonical_physical_operation", canonical_name),
-                    ),
-                    "representation_level": operation.get("representation_level", source_record.get("representation_level")),
-                    "effective_name": operation.get("effective_name", source_record.get("effective_name")),
-                    "physical_parent": operation.get("physical_parent", source_record.get("physical_parent")),
-                    "approximation": _json_safe(operation.get("approximation", source_record.get("approximation"))),
-                    "derived_from": _json_safe(operation.get("derived_from", source_record.get("derived_from"))),
-                    "valley_type": str(model_config.valley_model.get("valley_type", "")),
-                    "valley_mode": str(model_config.valley_model.get("mode", "")),
-                    "spin_convention": str(model_config.valley_model.get("spin_convention", "")),
-                    "operation_physics_level": _operation_physics_level(model_config, operation),
-                    "antiunitary": antiunitary,
-                    "k_map": _json_safe(resolved_k_map),
-                    "q_map": _json_safe(resolved_q_map),
-                    "sector_map": _json_safe(resolved_sector_map),
-                    "source_operation": operation.get("operation", source_record.get("operation", canonical_name)),
-                    "internal_resolved_action": _json_safe(operation.get("internal_resolved_action")),
-                    "matrix_kind": operation.get("matrix_kind", source_record.get("matrix_kind", model_config.symmetry_source_config.get("matrix_kind"))),
-                    **{
-                        key: _json_safe(operation.get(key, source_record.get(key)))
-                        for key in SOURCE_META_KEYS
-                    },
-                }
+            source_operation = str(operation.get("operation", canonical_name))
+            source_record = source_ops_by_identity.get(
+                (canonical_name, source_operation),
+                source_ops_by_name.get(canonical_name, {}),
             )
-    return rows
+            if isinstance(source_record, Mapping):
+                source_operation = str(operation.get("operation", source_record.get("operation", canonical_name)))
+            key = (
+                user_name,
+                canonical_name,
+                json.dumps(_json_safe(resolved_k_map), sort_keys=True),
+                json.dumps(_json_safe(resolved_q_map), sort_keys=True),
+                json.dumps(_json_safe(resolved_sector_map), sort_keys=True),
+                source_operation,
+            )
+            if key in rows_by_key:
+                row = rows_by_key[key]
+                if str(tag) not in row["used_by_tags"]:
+                    row["used_by_tags"].append(str(tag))
+                for term_tag in term_tags_by_tag.get(str(tag), []):
+                    if term_tag not in row["term_tags"]:
+                        row["term_tags"].append(term_tag)
+                continue
+            antiunitary = bool(operation["antiunitary"])
+            rows_by_key[key] = {
+                "user_operation": user_name,
+                "canonical_operation": canonical_name,
+                "operation_alias": operation.get("operation_alias", source_record.get("operation_alias")),
+                "canonical_physical_operation": operation.get(
+                    "canonical_physical_operation",
+                    source_record.get("canonical_physical_operation", canonical_name),
+                ),
+                "representation_level": operation.get("representation_level", source_record.get("representation_level")),
+                "effective_name": operation.get("effective_name", source_record.get("effective_name")),
+                "physical_parent": operation.get("physical_parent", source_record.get("physical_parent")),
+                "approximation": _json_safe(operation.get("approximation", source_record.get("approximation"))),
+                "derived_from": _json_safe(operation.get("derived_from", source_record.get("derived_from"))),
+                "valley_type": str(model_config.valley_model.get("valley_type", "")),
+                "valley_mode": str(model_config.valley_model.get("mode", "")),
+                "spin_convention": str(model_config.valley_model.get("spin_convention", "")),
+                "operation_physics_level": _operation_physics_level(model_config, operation),
+                "antiunitary": antiunitary,
+                "k_map": _json_safe(resolved_k_map),
+                "q_map": _json_safe(resolved_q_map),
+                "sector_map": _json_safe(resolved_sector_map),
+                "source_operation": source_operation,
+                "used_by_tags": [str(tag)],
+                "term_tags": list(term_tags_by_tag.get(str(tag), [])),
+                "internal_resolved_action": _json_safe(operation.get("internal_resolved_action")),
+                "matrix_kind": operation.get("matrix_kind", source_record.get("matrix_kind", model_config.symmetry_source_config.get("matrix_kind"))),
+                **{
+                    key: _json_safe(operation.get(key, source_record.get(key)))
+                    for key in SOURCE_META_KEYS
+                },
+            }
+    for row in rows_by_key.values():
+        row["used_by_tags"] = sorted(row["used_by_tags"])
+        row["term_tags"] = sorted(row["term_tags"])
+    return list(rows_by_key.values())
 
 
 def _selected_index_positions(model_config: ConfiguredModel, count: int) -> tuple[list[int], list[int]]:

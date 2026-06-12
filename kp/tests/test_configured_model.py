@@ -13,8 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from kp.model.configured import (  # noqa: E402
     _auto_harmonics_from_q_sets,
     _auto_harmonics_from_support,
-    _default_source_matrix_projection_config,
+    _build_operation_registry,
     _default_term_templates_for_model,
+    _max_derivative_order_values,
     _symmetry_operation_index,
     ConfiguredModel,
     build_moire_config_from_file,
@@ -36,6 +37,7 @@ from kp.src.moire_refactored import (  # noqa: E402
     build_model,
     compute_bands,
 )
+from kp.symmetry.project import _kp_symm_exactification_config, _operation_power_relation  # noqa: E402
 
 
 def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> dict[str, object]:
@@ -154,10 +156,11 @@ def _write_auto_fixture(tmp_path: Path) -> Path:
         },
     }
     (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_cfg), encoding="utf-8")
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
 
     model_cfg = {
         "source_config": "source.yaml",
-        "coordinate_frame": {"rotation_deg": 0},
+        "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
         "valley_model": {
             "lattice": "hexagonal",
             "system": "bilayer",
@@ -199,6 +202,16 @@ def _write_auto_fixture(tmp_path: Path) -> Path:
     path = tmp_path / "model_auto.yaml"
     path.write_text(yaml.safe_dump(model_cfg, sort_keys=False), encoding="utf-8")
     return path
+
+
+def _write_symm_frame_manifest(tmp_path: Path, *, rotation_deg: float, path_name: str = "symm") -> Path:
+    symm_dir = tmp_path / path_name
+    symm_dir.mkdir(exist_ok=True)
+    (symm_dir / "manifest.json").write_text(
+        json.dumps({"frame": {"q_transform": {"rotation_deg": float(rotation_deg)}}, "operations": []}),
+        encoding="utf-8",
+    )
+    return symm_dir
 
 
 def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: Path) -> None:
@@ -272,10 +285,11 @@ def _write_fixture(tmp_path: Path) -> Path:
         },
     }
     (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_cfg), encoding="utf-8")
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
 
     model_cfg = {
         "source_config": "source.yaml",
-        "coordinate_frame": {"rotation_deg": 0},
+        "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
         "valley_model": {
             "lattice": "hexagonal",
             "system": "bilayer",
@@ -353,8 +367,26 @@ def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> Non
 
     assert cfg.n_orb == (1, 1)
     assert cfg.nlow_state == [1, 1]
-    assert cfg.max_order == {"Kinect": 2, "intra": 0, "inter": 0}
+    assert {key: cfg.max_order[key] for key in ("Kinect", "intra", "inter")} == {
+        "Kinect": 2,
+        "intra": 0,
+        "inter": 0,
+    }
+    assert cfg.max_order["tunneling_zero"] == 0
+    assert cfg.max_order["tunneling_nonzero"] == 0
     assert len(model.terms) < 30
+
+
+def test_short_spinless_label_is_rejected_as_ambiguous(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["valley"] = "K1"
+    raw["spin"] = "spinless"
+    raw.pop("valley_model", None)
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="spin_up_projected.*spinless_effective"):
+        load_model_config(cfg_path)
 
 
 def test_load_model_config_rejects_sector_n_orb_mismatch(tmp_path: Path) -> None:
@@ -386,17 +418,33 @@ def test_load_model_config_rejects_user_exactification_knobs(tmp_path: Path) -> 
         load_model_config(cfg_path)
 
 
+def test_load_model_config_marks_symmetry_source_inferred_from_source_config(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    symm_dir = _write_symm_frame_manifest(tmp_path, rotation_deg=0.0, path_name="symm_from_source")
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw.pop("symmetry_source", None)
+    source_raw = yaml.safe_load((tmp_path / "source.yaml").read_text(encoding="utf-8"))
+    source_raw["symm"] = {"output_dir": "symm_from_source"}
+    (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.symmetry_source_config["type"] == "kp_symm_output"
+    assert cfg.symmetry_source_config["path"] == str(symm_dir.resolve())
+    assert cfg.symmetry_source_metadata["inferred_from_source_config"] is True
+
+
 def test_build_moire_config_reads_model_q_sets_from_symmetry_artifact(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["coordinate_frame"] = {"rotation_deg": 90.0}
     raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     q1_model = np.array([[10.0, 0.0], [11.0, 0.0], [12.0, 0.0]], dtype=float)
     q2_model = np.array([[20.0, 0.0], [21.0, 0.0], [22.0, 0.0]], dtype=float)
     symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
+    symm_dir.mkdir(exist_ok=True)
     np.save(symm_dir / "q_model_layer1.npy", q1_model)
     np.save(symm_dir / "q_model_layer2.npy", q2_model)
     (symm_dir / "manifest.json").write_text(
@@ -434,6 +482,46 @@ def test_short_kp_symm_source_does_not_infer_matrix_kind_from_valley(tmp_path: P
     assert "matrix_file" not in cfg.symmetry_source_config["operations"][0]
 
 
+def test_matrix_kind_operations_require_explicit_action_metadata(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {
+        "type": "kp_symm_output",
+        "path": "symm",
+        "use": "raw",
+        "matrix_kind": "action",
+        "operations": ["C2T"],
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="requires explicit action metadata"):
+        load_model_config(cfg_path)
+
+
+def test_model_config_rejects_representation_matrix_kind_during_normalization(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {
+        "type": "kp_symm_output",
+        "path": "symm",
+        "use": "raw",
+        "matrix_kind": "representation",
+        "operations": [
+            {
+                "name": "C2",
+                "antiunitary": False,
+                "k_map": {"type": "reflection", "axis_deg": 0.0},
+                "q_map": {"type": "reflection", "axis_deg": 0.0},
+                "sector_map": "identity",
+            }
+        ],
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="matrix_kind must be 'action'"):
+        load_model_config(cfg_path)
+
+
 def test_model_max_order_overrides_safe_defaults(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -442,7 +530,13 @@ def test_model_max_order_overrides_safe_defaults(tmp_path: Path) -> None:
 
     cfg = load_model_config(cfg_path)
 
-    assert cfg.max_order == {"Kinect": 4, "intra": 1, "inter": 0}
+    assert {key: cfg.max_order[key] for key in ("Kinect", "intra", "inter")} == {
+        "Kinect": 4,
+        "intra": 1,
+        "inter": 0,
+    }
+    assert cfg.max_order["tunneling_zero"] == 0
+    assert cfg.max_order["tunneling_nonzero"] == 1
 
 
 def test_evaluate_vector_expression_supports_bM_symbols() -> None:
@@ -458,7 +552,7 @@ def test_evaluate_vector_expression_supports_bM_symbols() -> None:
 
 
 def test_default_term_templates_are_profile_driven_and_preserve_k_gamma_m_behavior() -> None:
-    max_order = {"Kinect": 10, "intra": 4, "inter": 3}
+    max_order = _max_derivative_order_values({"max_order": {"Kinect": 10, "intra": 4, "inter": 3}})
 
     k_templates = _default_term_templates_for_model(
         valley_model={"valley_type": "K"},
@@ -500,6 +594,26 @@ def test_default_term_templates_are_profile_driven_and_preserve_k_gamma_m_behavi
         "m1_inter_top_to_bottom",
     ]
     assert m_templates[-1]["harmonics"] == "inter"
+
+
+def test_gamma_max_derivative_order_uses_semantic_tunneling_names() -> None:
+    max_order = _max_derivative_order_values(
+        {
+            "max_order": {"Kinect": 10, "intra": 4, "inter": 3},
+            "max_derivative_order": {"tunneling_nonzero": 6},
+        }
+    )
+
+    gamma_templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        max_order=max_order,
+    )
+    by_name = {row["name"]: row for row in gamma_templates}
+
+    assert by_name["gamma_inter_zero"]["max_order"] == 3
+    assert by_name["gamma_inter_nonzero"]["max_order"] == 6
+    assert by_name["gamma_inter_nonzero_negative"]["max_order"] == 6
 
 
 def test_default_term_templates_clamp_profile_harmonics_to_requested_count() -> None:
@@ -584,102 +698,125 @@ def test_symmetry_operation_index_rotates_q_map_when_model_action_absent() -> No
     assert index["C2T"]["sector_map"] == "identity"
 
 
-def test_source_matrix_projection_uses_manifest_actions_without_model_discovery() -> None:
-    cfg = ConfiguredModel(
-        path=Path("model.yaml"),
-        raw={},
-        source_config=Path("source.yaml"),
-        source_raw={},
-        qset1_file=Path("q1.npy"),
-        qset2_file=Path("q2.npy"),
-        kpoints_file=None,
-        heff_file=Path("heff.npy"),
-        heff_eig_file=None,
-        output_dir=Path("run"),
-        rotation_deg=0.0,
-        fit_indices=[0],
-        band_indices=None,
-        n_orb=(2, 2),
-        nlow_state=[2, 2],
-        bM_config={},
-        harmonics_config={},
-        max_order={},
-        symmetry_map={},
-        coeff_tol=1.0e-6,
-        compare_to_heff=False,
-        valley_model={"valley_type": "M", "spin_convention": "spinful"},
-        symmetry_source_config={"operations": [{"name": "TR"}, {"name": "C2"}]},
-    )
+def test_operation_registry_keeps_distinct_geometry_and_records_usage_tags(tmp_path: Path) -> None:
+    cfg = load_model_config(_write_fixture(tmp_path))
+    cfg.symmetry_source_config = {
+        "type": "kp_symm_output",
+        "operations": [
+            {"name": "C2", "operation": "C2_raw"},
+            {"name": "C2", "operation": "C2_shifted"},
+        ],
+    }
+    first = {
+        "user_name": "C2",
+        "name": "C2",
+        "operation": "C2_raw",
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 0.0},
+        "q_map": {"type": "reflection", "axis_deg": 0.0},
+        "sector_map": "identity",
+    }
+    same_geometry_other_tag = dict(first)
+    second = {
+        **first,
+        "operation": "C2_shifted",
+        "q_map": {"type": "reflection", "axis_deg": 60.0},
+        "sector_map": "layer_exchange",
+    }
+    cfg.symmetry_map = {
+        "Kinect": [first, second],
+        "intra": [same_geometry_other_tag],
+    }
+    cfg.term_templates = [
+        {"name": "kinetic_layer1", "source": "diagonal_kp"},
+        {"name": "intra_layer1", "source": "moire_potential"},
+    ]
 
-    exact_cfg = _default_source_matrix_projection_config(cfg)
+    registry = _build_operation_registry(cfg)
+
+    assert len(registry) == 2
+    by_source = {row["source_operation"]: row for row in registry}
+    assert by_source["C2_raw"]["q_map"]["axis_deg"] == 0.0
+    assert by_source["C2_shifted"]["q_map"]["axis_deg"] == 60.0
+    assert by_source["C2_shifted"]["sector_map"] == "layer_exchange"
+    assert by_source["C2_raw"]["used_by_tags"] == ["Kinect", "intra"]
+    assert by_source["C2_raw"]["term_tags"] == ["intra_layer1", "kinetic_layer1"]
+
+
+def test_kp_symm_exactification_uses_manifest_actions_without_model_discovery() -> None:
+    exact_cfg = _kp_symm_exactification_config()
 
     assert not exact_cfg.get("discover_action_candidates", False)
     assert not exact_cfg.get("accept_support_resolved_action", False)
-    assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
+    assert "central_phase" not in exact_cfg
+    assert exact_cfg["require_group_relations"] is True
+    assert exact_cfg["source"] == "kp_symm"
+    assert exact_cfg["reject_if_off_support_rel_gt"] == pytest.approx(1.0e-5)
+    assert exact_cfg["reject_if_amplitude_deviation_gt"] == pytest.approx(0.05)
 
 
-def test_spinful_gamma_source_matrix_projection_uses_spinful_C2_square() -> None:
-    cfg = ConfiguredModel(
-        path=Path("model.yaml"),
-        raw={},
-        source_config=Path("source.yaml"),
-        source_raw={},
-        qset1_file=Path("q1.npy"),
-        qset2_file=Path("q2.npy"),
-        kpoints_file=None,
-        heff_file=Path("heff.npy"),
-        heff_eig_file=None,
-        output_dir=Path("run"),
-        rotation_deg=0.0,
-        fit_indices=[0],
-        band_indices=None,
-        n_orb=(2, 2),
-        nlow_state=[2, 2],
-        bM_config={},
-        harmonics_config={},
-        max_order={},
-        symmetry_map={},
-        coeff_tol=1.0e-6,
-        compare_to_heff=False,
-        valley_model={"valley_type": "Gamma", "spin_convention": "spinful"},
-        symmetry_source_config={"operations": [{"name": "TR"}, {"name": "C2"}]},
+def test_kp_symm_exactification_tolerance_is_not_valley_dependent() -> None:
+    assert _kp_symm_exactification_config() == _kp_symm_exactification_config()
+
+
+def test_kp_symm_operation_group_relations_are_manifest_metadata() -> None:
+    assert _operation_power_relation("C2", spin_convention="spinful") == {
+        "type": "power",
+        "name": "C2^2",
+        "operation": "C2",
+        "power": 2,
+        "phase": -1,
+        "source": "kp_symm_manifest",
+    }
+    assert _operation_power_relation("TR", spin_convention="spinless_effective")["phase"] == 1
+    assert _operation_power_relation("C3z", spin_convention="spinful")["phase"] == -1
+    assert _operation_power_relation("C2T", spin_convention="spinful")["phase"] == 1
+
+
+def test_spinful_gamma_kp_symm_exactification_requires_manifest_group_relations() -> None:
+    exact_cfg = _kp_symm_exactification_config()
+
+    assert "central_phase" not in exact_cfg
+    assert exact_cfg["require_group_relations"] is True
+
+
+def test_kp_symm_exactification_config_does_not_use_operation_entry_shape_for_phases() -> None:
+    exact_cfg = _kp_symm_exactification_config()
+
+    assert "central_phase" not in exact_cfg
+    assert exact_cfg["require_group_relations"] is True
+
+
+def test_model_rotation_reads_symmetry_manifest_without_coordinate_frame(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw.pop("coordinate_frame", None)
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm"}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir(exist_ok=True)
+    (symm_dir / "manifest.json").write_text(
+        json.dumps({"frame": {"q_transform": {"rotation_deg": 210.0}}, "operations": []}),
+        encoding="utf-8",
     )
 
-    exact_cfg = _default_source_matrix_projection_config(cfg)
+    cfg = load_model_config(cfg_path)
 
-    assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
+    assert cfg.rotation_deg == 210.0
 
 
-def test_source_matrix_projection_accepts_string_operation_entries() -> None:
-    cfg = ConfiguredModel(
-        path=Path("model.yaml"),
-        raw={},
-        source_config=Path("source.yaml"),
-        source_raw={},
-        qset1_file=Path("q1.npy"),
-        qset2_file=Path("q2.npy"),
-        kpoints_file=None,
-        heff_file=Path("heff.npy"),
-        heff_eig_file=None,
-        output_dir=Path("run"),
-        rotation_deg=0.0,
-        fit_indices=[0],
-        band_indices=None,
-        n_orb=(2, 2),
-        nlow_state=[2, 2],
-        bM_config={},
-        harmonics_config={},
-        max_order={},
-        symmetry_map={},
-        coeff_tol=1.0e-6,
-        compare_to_heff=False,
-        valley_model={"valley_type": "Gamma", "spin_convention": "spinful"},
-        symmetry_source_config={"operations": ["TR", "C2"]},
-    )
+def test_model_rotation_fails_without_manifest_frame(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw.pop("coordinate_frame", None)
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm"}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir(exist_ok=True)
+    (symm_dir / "manifest.json").write_text(json.dumps({"operations": []}), encoding="utf-8")
 
-    exact_cfg = _default_source_matrix_projection_config(cfg)
-
-    assert exact_cfg["central_phase"] == {"TR^2": -1, "C2^2": -1}
+    with pytest.raises(ValueError, match="symmetry manifest frame rotation"):
+        load_model_config(cfg_path)
 
 
 def test_build_moire_config_loads_fit_block_and_band_kpoints(tmp_path: Path) -> None:
@@ -738,12 +875,13 @@ def test_build_moire_config_infers_bM_from_q_distances_not_q_norm(tmp_path: Path
         ),
         encoding="utf-8",
     )
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text(
         yaml.safe_dump(
             {
                 "source_config": "source.yaml",
-                "coordinate_frame": {"rotation_deg": 0},
+                "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
                 "valley_model": {
                     "lattice": "hexagonal",
                     "system": "bilayer",
@@ -790,7 +928,7 @@ def test_build_moire_config_infers_bM_from_tmat_with_shared_rotation(tmp_path: P
             [0.0, 0.0, 50.0],
         ],
     }
-    raw["coordinate_frame"] = {"rotation_deg": 210}
+    _write_symm_frame_manifest(tmp_path, rotation_deg=210.0)
     (tmp_path / "KPATH.in").write_text(
         "\n".join(
             [
@@ -820,7 +958,17 @@ def test_load_model_config_rejects_duplicate_model_rotation_settings(tmp_path: P
     raw["kpath"] = {"phase_deg": 0}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="Use only coordinate_frame.rotation_deg"):
+    with pytest.raises(ValueError, match="Model frame rotation must come from the kp_symm manifest"):
+        load_model_config(cfg_path)
+
+
+def test_load_model_config_rejects_coordinate_frame_rotation(tmp_path: Path) -> None:
+    cfg_path = _write_auto_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["coordinate_frame"] = {"rotation_deg": 210}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="coordinate_frame is not a supported model input"):
         load_model_config(cfg_path)
 
 
@@ -872,7 +1020,7 @@ def test_K_single_valley_rejects_T_C2(tmp_path: Path) -> None:
         "allowed_internal_symmetries": ["C3z", "C2T"],
         "external_sewing_symmetries": ["TR", "C2"],
     }
-    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "identity_c3"}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "operations": []}
     raw["model"]["bM"] = {"bM1": [1.0, 0.0], "bM2": [0.5, 0.8660254037844386]}
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "TR"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -895,7 +1043,7 @@ def test_K_single_valley_keeps_source_operation_separate_from_canonical_name(tmp
         "valley_type": "K",
         "mode": "single_valley",
         "active_valleys": ["K1"],
-        "spin_convention": "spin_up_only",
+        "spin_convention": "spin_up_projected",
         "allowed_internal_symmetries": ["C3z", "C2T"],
         "external_sewing_symmetries": [],
     }
@@ -942,7 +1090,7 @@ def test_K_single_valley_C2T_requires_kp_symm_output(tmp_path: Path) -> None:
         "valley_type": "K",
         "mode": "single_valley",
         "active_valleys": ["K1"],
-        "spin_convention": "spin_up_only",
+        "spin_convention": "spin_up_projected",
         "allowed_internal_symmetries": ["C3z", "C2T"],
         "external_sewing_symmetries": [],
     }
@@ -1008,7 +1156,7 @@ def test_M_spinless_uses_physical_T_with_effective_metadata(tmp_path: Path) -> N
         "allowed_internal_symmetries": ["TR_eff", "C2_eff", "C2TR_eff"],
         "external_sewing_symmetries": [],
     }
-    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "M_spinless_layer_exchange"}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "operations": []}
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "TR"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
@@ -1033,7 +1181,7 @@ def test_M_spinless_legacy_effective_C2_alias_normalizes_to_physical_name(tmp_pa
         "allowed_internal_symmetries": ["TR_eff", "C2_eff"],
         "external_sewing_symmetries": [],
     }
-    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "M_spinless_layer_exchange"}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "operations": []}
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "C2"}, {"name": "TR_eff"}], "intra": [], "inter": []}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
@@ -1050,7 +1198,7 @@ def test_Gamma_user_facing_C2_stays_standard_family(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"]["allowed_internal_symmetries"] = ["TR", "C2"]
-    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "Gamma_four_orbital"}
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "operations": []}
     raw["model"]["n_orb"] = [2, 2]
     raw["model"]["nlow_state"] = [2, 2]
     raw["model"]["symmetry_map"] = {"Kinect": [{"name": "TR"}, {"name": "C2"}], "intra": [], "inter": []}
@@ -1348,7 +1496,7 @@ def test_compute_coefficients_skips_empty_orthogonalized_subgroup(monkeypatch) -
     heff = np.eye(2, dtype=complex)
     k_points = np.array([[0.0, 0.0]])
 
-    def empty_subset(self, sub_keys, k_points, tol=1.0e-6, tag=None):
+    def empty_subset(self, sub_keys, k_points, tol=1.0e-6, tag=None, **_kwargs):
         dim = heff.shape[0]
         initial = np.zeros((2 * len(sub_keys), dim, dim), dtype=complex)
         final = np.zeros((0,), dtype=complex)
@@ -1444,13 +1592,13 @@ def test_fit_uses_symmetry_closed_block_not_raw_subgroup(monkeypatch) -> None:
     builder = model._moire_builder
     calls = []
 
-    def keep_all(self, keys, k_points, *, tol, max_exact_group_size=16):
+    def keep_all(self, keys, k_points, *, tol, max_exact_group_size=16, **_kwargs):
         return keys
 
     def same_fit_block(self, key):
         return (0, 1), (0, 1)
 
-    def empty_subset(self, sub_keys, k_points, tol=1.0e-6, tag=None):
+    def empty_subset(self, sub_keys, k_points, tol=1.0e-6, tag=None, **_kwargs):
         calls.append(tuple((key.layer_from, key.layer_to, key.orbital_from, key.orbital_to) for key in sub_keys))
         dim = 2
         initial = np.zeros((2 * len(sub_keys), dim, dim), dtype=complex)
@@ -1465,6 +1613,51 @@ def test_fit_uses_symmetry_closed_block_not_raw_subgroup(monkeypatch) -> None:
 
     assert calls == [((1, 1, 1, 1), (1, 1, 2, 2))]
     assert len(diagnostics["Onsite"]) == 1
+
+
+def test_fit_reuses_stacked_term_matrices_between_duplicate_filter_and_orthogonalization(monkeypatch) -> None:
+    q1 = np.array([[0.0, 0.0]], dtype=float)
+    q2 = np.zeros((0, 2), dtype=float)
+    k_points = np.array([[0.0, 0.0], [0.25, 0.0]], dtype=float)
+    builder = ContinuumModelBuilder(
+        q1,
+        q2,
+        1,
+        0,
+        np.array([1.0, 0.0], dtype=float),
+        np.array([0.0, 1.0], dtype=float),
+        {},
+        {},
+        {"intra": 1},
+        SymmetryGenerator(q1, q2, [1, 0]),
+        {"intra": []},
+    )
+    for mz in (0, 1):
+        key = ContinuumTermKey(mz, 0, 1, 1, 1, 1, (0.0, 0.0))
+        builder.model.add_term(
+            key,
+            ContinuumModelBuilder.make_Y_basis_function(key, q1, q2, 1, 0),
+            tag="intra",
+            symmetry_ops=[],
+        )
+
+    moire_module.clear_symmetry_caches()
+    original = ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static
+    calls: list[tuple[ContinuumTermKey, tuple[float, float]]] = []
+
+    def counted_symmetrize(Y_basis, k, sym_ops, symmetry_gen=None, term=None, use_cache=False, **kwargs):
+        calls.append((term.key, tuple(float(x) for x in k)))
+        return original(Y_basis, k, sym_ops, symmetry_gen=symmetry_gen, term=term, use_cache=use_cache, **kwargs)
+
+    monkeypatch.setattr(
+        ContinuumModelBuilder,
+        "symmetrize_Y_and_iY_basis_static",
+        staticmethod(counted_symmetrize),
+    )
+
+    builder.compute_coefficients_by_tag(np.diag([1.0, 1.25]).astype(complex), k_points, tol=1.0e-10)
+
+    assert len(calls) == len(builder.model.terms) * len(k_points)
 
 
 def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> None:
@@ -1627,6 +1820,7 @@ def test_symmetry_source_loads_m_effective_aliases_under_physical_keys(tmp_path:
     (tmp_path / "summary.json").write_text(
         yaml.safe_dump(
             {
+                "requires_model_exactification": True,
                 "operations": [
                     {
                         **_source_meta(antiunitary=True),
@@ -1731,6 +1925,7 @@ def test_symmetry_source_requires_explicit_k_map_instead_of_axis_deg(tmp_path: P
     (tmp_path / "summary.json").write_text(
         yaml.safe_dump(
             {
+                "requires_model_exactification": True,
                 "operations": [
                     {
                         **_source_meta(),
@@ -1787,12 +1982,41 @@ def test_symmetry_source_rejects_representation_low_matrix_as_production_source(
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="production symmetry matrices must use matrix_kind='action'"):
+    with pytest.raises(ValueError, match="production symmetry matrices must use raw-action or kp_symm exactified matrices"):
         load_symmetry_source(
             {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
             base=tmp_path,
             expected_dim=2,
         )
+
+
+def test_symmetry_source_rejects_manifest_default_representation_matrix_kind(tmp_path: Path) -> None:
+    from kp.model.symmetry import load_symmetry_source
+
+    np.save(tmp_path / "C2_low_representation_raw.npy", -np.eye(2, dtype=complex))
+    (tmp_path / "summary.json").write_text(
+        yaml.safe_dump(
+            {
+                "default_matrix_kind": "representation",
+                "operations": [
+                    {
+                        **_source_meta(representation=True),
+                        "name": "C2",
+                        "operation": "C2",
+                        "matrix_file": "C2_low_representation_raw.npy",
+                        "k_map": {"type": "reflection", "axis_deg": 150.0},
+                        "q_map": {"type": "reflection", "axis_deg": 150.0},
+                        "sector_map": "layer_exchange",
+                        "antiunitary": False,
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="production symmetry matrices must use raw-action or kp_symm exactified matrices"):
+        load_symmetry_source({"type": "kp_symm_output", "path": str(tmp_path), "use": "raw"}, base=tmp_path, expected_dim=2)
 
 
 def test_symmetry_source_rejects_invalid_representation_by_default(tmp_path: Path) -> None:
@@ -1829,7 +2053,7 @@ def test_symmetry_source_rejects_invalid_representation_by_default(tmp_path: Pat
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="production symmetry matrices must use matrix_kind='action'"):
+    with pytest.raises(ValueError, match="production symmetry matrices must use raw-action or kp_symm exactified matrices"):
         load_symmetry_source(
             {"type": "kp_symm_output", "path": str(tmp_path), "use": "raw", "matrix_kind": "representation"},
             base=tmp_path,
@@ -1840,7 +2064,6 @@ def test_symmetry_source_rejects_invalid_representation_by_default(tmp_path: Pat
 def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["coordinate_frame"] = {"rotation_deg": 30.0}
     raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
     raw["model"]["symmetry_map"] = {
         "Kinect": [{"name": "C2"}],
@@ -1854,16 +2077,21 @@ def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: P
     np.save(tmp_path / "q2.npy", np.array([-v, v], dtype=float))
 
     symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
-    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
+    symm_dir.mkdir(exist_ok=True)
+    np.save(symm_dir / "exactified_C2.npy", np.eye(4, dtype=complex))
     (symm_dir / "manifest.json").write_text(
         yaml.safe_dump(
             {
+                "exactification_owner": "kp_symm",
+                "frame": {"q_transform": {"rotation_deg": 30.0}},
+                "requires_model_exactification": False,
                 "operations": [
                         {
-                            **_source_meta(representation=True),
+                            **_source_meta(),
                             "name": "C2",
-                            "matrix_file": "C2_low_raw.npy",
+                            "matrix_file": "exactified_C2.npy",
+                            "matrix_kind": "continuum_internal_rep_exact",
+                            "matrix_source": "kp_symm_exactified_action",
                             "k_map": {"type": "reflection", "axis_deg": 150.0},
                             "q_map": {"type": "reflection", "axis_deg": 150.0},
                             "antiunitary": False,
@@ -1885,7 +2113,6 @@ def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: P
 def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["coordinate_frame"] = {"rotation_deg": 30.0}
     raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
     raw["model"]["symmetry_map"] = {
         "Kinect": [{"name": "C2"}],
@@ -1899,16 +2126,21 @@ def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_pa
     np.save(tmp_path / "q2.npy", np.array([-v, v], dtype=float))
 
     symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
-    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
+    symm_dir.mkdir(exist_ok=True)
+    np.save(symm_dir / "exactified_C2.npy", np.eye(4, dtype=complex))
     (symm_dir / "manifest.json").write_text(
         yaml.safe_dump(
             {
+                "exactification_owner": "kp_symm",
+                "frame": {"q_transform": {"rotation_deg": 30.0}},
+                "requires_model_exactification": False,
                 "operations": [
                     {
-                        **_source_meta(representation=True),
+                        **_source_meta(),
                         "name": "C2",
-                        "matrix_file": "C2_low_raw.npy",
+                        "matrix_file": "exactified_C2.npy",
+                        "matrix_kind": "continuum_internal_rep_exact",
+                        "matrix_source": "kp_symm_exactified_action",
                         "k_map": {"type": "reflection", "axis_deg": 150.0},
                         "q_map": {"type": "reflection", "axis_deg": 150.0},
                         "model_action": {
@@ -1934,9 +2166,67 @@ def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_pa
     assert op["k_map"]["in_model_frame"] is True
 
 
-def test_build_moire_config_records_projection_report_without_action_mismatch(monkeypatch, tmp_path: Path) -> None:
-    import kp.model.configured as configured_module
+def test_build_moire_config_loads_strict_symm_artifact_without_model_exactification(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
+    raw["model"]["symmetry_map"] = {
+        "Kinect": [{"name": "C2"}],
+        "Onsite": [],
+        "intra": [],
+        "inter": [],
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    v = np.array([np.sqrt(3.0) / 2.0, -0.5], dtype=float)
+    np.save(tmp_path / "q1.npy", np.array([-v, v], dtype=float))
+    np.save(tmp_path / "q2.npy", np.array([-v, v], dtype=float))
 
+    model_action = {
+        "antiunitary": False,
+        "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        "sector_map": "identity",
+    }
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir(exist_ok=True)
+    np.save(symm_dir / "exactified_C2.npy", np.eye(4, dtype=complex))
+    (symm_dir / "manifest.json").write_text(
+        yaml.safe_dump(
+            {
+                "strict_metadata": True,
+                "exactification_owner": "kp_symm",
+                "frame": {"q_transform": {"rotation_deg": 30.0}},
+                "requires_model_exactification": False,
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "name": "C2",
+                        "matrix_file": "exactified_C2.npy",
+                        "matrix_kind": "continuum_internal_rep_exact",
+                        "matrix_source": "kp_symm_exactified_action",
+                        "k_map": {"type": "reflection", "axis_deg": 150.0},
+                        "q_map": {"type": "reflection", "axis_deg": 150.0},
+                        "model_action": model_action,
+                        "antiunitary": False,
+                        "sector_map": "identity",
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
+
+    operation = model_cfg.symmetry_source_metadata["operations"][0]
+    assert "source_matrix_projection_reports" not in model_cfg.symmetry_source_metadata
+    assert "source_matrix_projection_report" not in operation
+    assert operation["matrix_kind"] == "continuum_internal_rep_exact"
+    assert model_cfg.symmetry_map["Kinect"][0]["k_map"]["axis_deg"] == pytest.approx(180.0)
+    assert moire_cfg.symmetry_map["Kinect"][0]["k_map"]["axis_deg"] == pytest.approx(180.0)
+
+
+def test_build_moire_config_reads_kp_symm_projection_report_without_action_mismatch(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
@@ -1955,20 +2245,35 @@ def test_build_moire_config_records_projection_report_without_action_mismatch(mo
         "sector_map": "layer_exchange",
     }
     symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
-    np.save(symm_dir / "C2T_low_raw.npy", np.eye(4, dtype=complex))
+    symm_dir.mkdir(exist_ok=True)
+    np.save(symm_dir / "exactified_C2T.npy", np.eye(4, dtype=complex))
     (symm_dir / "manifest.json").write_text(
         yaml.safe_dump(
             {
+                "frame": {"q_transform": {"rotation_deg": 0.0}},
+                "exactification_owner": "kp_symm",
+                "requires_model_exactification": False,
                 "operations": [
                     {
                         **_source_meta(antiunitary=True),
                         "name": "C2T",
-                        "matrix_file": "C2T_low_raw.npy",
+                        "matrix_file": "exactified_C2T.npy",
+                        "matrix_kind": "continuum_internal_rep_exact",
+                        "matrix_source": "kp_symm_exactified_action",
                         "k_map": {"type": "reflection", "axis_deg": 60.0},
                         "q_map": {"type": "reflection", "axis_deg": 60.0},
                         "sector_map": "identity",
                         "model_action": manifest_action,
+                        "internal_resolved_action": manifest_action,
+                        "source_matrix_projection_report": {
+                            "report": {"status": "exactified"},
+                            "resolved_action": manifest_action,
+                            "manifest_model_action": manifest_action,
+                            "support_resolution": {
+                                "action_mismatch": False,
+                                "candidate_source": "manifest_model_action",
+                            },
+                        },
                         "model_basis_action": {
                             "complete": True,
                             "sector_map": "layer_exchange",
@@ -1990,26 +2295,6 @@ def test_build_moire_config_records_projection_report_without_action_mismatch(mo
         encoding="utf-8",
     )
 
-    def fake_exactify_loaded_symmetry_source(**kwargs):
-        exact_cfg = kwargs["raw_config"]["exactification"]
-        assert not exact_cfg.get("discover_action_candidates", False)
-        assert not exact_cfg.get("accept_support_resolved_action", False)
-        return (
-            {"C2T": np.eye(4, dtype=complex)},
-            {
-                "C2T": {
-                    "resolved_action": dict(manifest_action),
-                    "manifest_model_action": dict(manifest_action),
-                    "support_resolution": {
-                        "action_mismatch": False,
-                        "candidate_source": "manifest_model_action",
-                    },
-                }
-            },
-        )
-
-    monkeypatch.setattr(configured_module, "exactify_loaded_symmetry_source", fake_exactify_loaded_symmetry_source)
-
     moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
 
     operation = model_cfg.symmetry_source_metadata["operations"][0]
@@ -2021,9 +2306,7 @@ def test_build_moire_config_records_projection_report_without_action_mismatch(mo
     assert moire_cfg.symmetry_map["Kinect"][0]["k_map"]["in_model_frame"] is True
 
 
-def test_action_mismatch_default_does_not_write_internal_resolved_action(monkeypatch, tmp_path: Path) -> None:
-    import kp.model.configured as configured_module
-
+def test_action_mismatch_default_does_not_write_internal_resolved_action(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
@@ -2043,19 +2326,38 @@ def test_action_mismatch_default_does_not_write_internal_resolved_action(monkeyp
         "sector_map": "layer_exchange",
     }
     symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
-    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
+    symm_dir.mkdir(exist_ok=True)
+    np.save(symm_dir / "exactified_C2.npy", np.eye(4, dtype=complex))
     (symm_dir / "manifest.json").write_text(
         yaml.safe_dump(
             {
+                "frame": {"q_transform": {"rotation_deg": 0.0}},
+                "exactification_owner": "kp_symm",
+                "requires_model_exactification": False,
                 "operations": [
                     {
                         **_source_meta(),
                         "name": "C2",
-                        "matrix_file": "C2_low_raw.npy",
+                        "matrix_file": "exactified_C2.npy",
+                        "matrix_kind": "continuum_internal_rep_exact",
+                        "matrix_source": "kp_symm_exactified_action",
                         "k_map": declared["k_map"],
                         "q_map": declared["q_map"],
                         "model_action": declared,
+                        "source_matrix_projection_report": {
+                            "report": {"status": "exactified"},
+                            "resolved_action": declared,
+                            "manifest_model_action": declared,
+                            "selected_action_candidate": selected,
+                            "support_resolution": {
+                                "action_mismatch": True,
+                                "candidate_source": "support_discovery",
+                                "declared_model_action": declared,
+                                "selected_action_candidate": selected,
+                                "declared_support_residual": 0.5,
+                                "selected_support_residual": 0.0,
+                            },
+                        },
                         "antiunitary": False,
                         "sector_map": "identity",
                     }
@@ -2064,28 +2366,6 @@ def test_action_mismatch_default_does_not_write_internal_resolved_action(monkeyp
         ),
         encoding="utf-8",
     )
-
-    def fake_exactify_loaded_symmetry_source(**kwargs):
-        return (
-            {"C2": np.eye(4, dtype=complex)},
-            {
-                "C2": {
-                    "resolved_action": dict(declared),
-                    "manifest_model_action": dict(declared),
-                    "selected_action_candidate": dict(selected),
-                    "support_resolution": {
-                        "action_mismatch": True,
-                        "candidate_source": "support_discovery",
-                        "declared_model_action": dict(declared),
-                        "selected_action_candidate": dict(selected),
-                        "declared_support_residual": 0.5,
-                        "selected_support_residual": 0.0,
-                    },
-                }
-            },
-        )
-
-    monkeypatch.setattr(configured_module, "exactify_loaded_symmetry_source", fake_exactify_loaded_symmetry_source)
 
     moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
 
@@ -2096,9 +2376,7 @@ def test_action_mismatch_default_does_not_write_internal_resolved_action(monkeyp
     assert moire_cfg.symmetry_map["Kinect"][0]["sector_map"] == "identity"
 
 
-def test_action_mismatch_explicit_accept_writes_internal_resolved_action_with_provenance(monkeypatch, tmp_path: Path) -> None:
-    import kp.model.configured as configured_module
-
+def test_action_mismatch_explicit_accept_writes_internal_resolved_action_with_provenance(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["symmetry_source"] = {"type": "kp_symm_output", "path": "symm", "matrix_kind": "action"}
@@ -2131,19 +2409,40 @@ def test_action_mismatch_explicit_accept_writes_internal_resolved_action_with_pr
         },
     }
     symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
-    np.save(symm_dir / "C2_low_raw.npy", np.eye(4, dtype=complex))
+    symm_dir.mkdir(exist_ok=True)
+    np.save(symm_dir / "exactified_C2.npy", np.eye(4, dtype=complex))
     (symm_dir / "manifest.json").write_text(
         yaml.safe_dump(
             {
+                "frame": {"q_transform": {"rotation_deg": 0.0}},
+                "exactification_owner": "kp_symm",
+                "requires_model_exactification": False,
                 "operations": [
                     {
                         **_source_meta(),
                         "name": "C2",
-                        "matrix_file": "C2_low_raw.npy",
+                        "matrix_file": "exactified_C2.npy",
+                        "matrix_kind": "continuum_internal_rep_exact",
+                        "matrix_source": "kp_symm_exactified_action",
                         "k_map": declared["k_map"],
                         "q_map": declared["q_map"],
                         "model_action": declared,
+                        "internal_resolved_action": selected,
+                        "source_matrix_projection_report": {
+                            "report": {"status": "exactified"},
+                            "resolved_action": selected,
+                            "manifest_model_action": declared,
+                            "selected_action_candidate": selected,
+                            "support_resolution": {
+                                "action_mismatch": True,
+                                "candidate_source": "support_discovery",
+                                "declared_model_action": declared,
+                                "selected_action_candidate": selected,
+                                "declared_support_residual": 0.5,
+                                "selected_support_residual": 0.0,
+                                "provenance": selected["provenance"],
+                            },
+                        },
                         "antiunitary": False,
                         "sector_map": "identity",
                     }
@@ -2152,29 +2451,6 @@ def test_action_mismatch_explicit_accept_writes_internal_resolved_action_with_pr
         ),
         encoding="utf-8",
     )
-
-    def fake_exactify_loaded_symmetry_source(**kwargs):
-        return (
-            {"C2": np.eye(4, dtype=complex)},
-            {
-                "C2": {
-                    "resolved_action": dict(selected),
-                    "manifest_model_action": dict(declared),
-                    "selected_action_candidate": dict(selected),
-                    "support_resolution": {
-                        "action_mismatch": True,
-                        "candidate_source": "support_discovery",
-                        "declared_model_action": dict(declared),
-                        "selected_action_candidate": dict(selected),
-                        "declared_support_residual": 0.5,
-                        "selected_support_residual": 0.0,
-                        "provenance": dict(selected["provenance"]),
-                    },
-                }
-            },
-        )
-
-    monkeypatch.setattr(configured_module, "exactify_loaded_symmetry_source", fake_exactify_loaded_symmetry_source)
 
     _moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
 
@@ -2312,7 +2588,7 @@ def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_pat
 def test_M_spinless_kp_symm_output_physical_source_ops_stay_physical_with_effective_metadata(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
+    symm_dir.mkdir(exist_ok=True)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"] = {
         "lattice": "hexagonal",
@@ -2329,7 +2605,22 @@ def test_M_spinless_kp_symm_output_physical_source_ops_stay_physical_with_effect
         "path": "symm",
         "use": "raw",
         "matrix_kind": "action",
-        "operations": ["TR", "C2"],
+        "operations": [
+            {
+                "name": "TR",
+                "antiunitary": True,
+                "k_map": {"type": "negation"},
+                "q_map": {"type": "negation"},
+                "sector_map": "identity",
+            },
+            {
+                "name": "C2",
+                "antiunitary": False,
+                "k_map": {"type": "reflection", "axis_deg": 0.0},
+                "q_map": {"type": "reflection", "axis_deg": 0.0},
+                "sector_map": "layer_exchange",
+            },
+        ],
                 "source_matrix_role": "raw_h_sewing_action",
         "source_gauge": "raw_saved_TAPW",
         "target_role": "raw_low_heff_sewing",

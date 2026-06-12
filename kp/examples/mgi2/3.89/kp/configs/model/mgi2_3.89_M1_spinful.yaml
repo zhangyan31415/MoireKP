@@ -1,0 +1,65 @@
+source_config: ../source/mgi2_3.89_M1_spinful.yaml
+valley: M1
+spin: spinful
+heff_file: ../../outputs/project/mgi2_3.89_M1_spinful/heff_list.npy
+symmetry_source: ../../outputs/symm/mgi2_3.89_M1_spinful
+kpath:
+  file: ../../../tapw/KPATH.in
+  tmat:
+  - - 60.9508659523
+    - 0.0
+    - 0.0
+  - - -30.4754329751
+    - 52.7849982976
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 50.0
+sectors:
+- name: bottom
+  qset: qset1
+  n_orb: 2
+- name: top
+  qset: qset2
+  n_orb: 2
+model:
+  n_orb:
+  - 2
+  - 2
+  bM:
+    source: tmat
+  harmonics:
+    intra: 6
+    inter: 2
+  max_order:
+    Kinect: 10
+    intra: 4
+    inter: 6
+  nlow_state:
+  - 2
+  - 2
+fit:
+  indices:
+  - 0
+  - 20
+  - 40
+  - 60
+  coeff_tol: 1.0e-06
+bands:
+  compare_to_heff: true
+  band_slice:
+  - 0
+  - 16
+  plot:
+    bottom_bands: 8
+    align: bottom
+    figsize:
+    - 3.0
+    - 5.8
+    num_bands: 16
+output:
+  dir: ../../outputs/model/mgi2_3.89_M1_spinful
+  save_coefficients: true
+  verbose: false
+  progress: true
+heff_eig_file: ../../outputs/project/mgi2_3.89_M1_spinful/heff_eig.npy

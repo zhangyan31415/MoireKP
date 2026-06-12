@@ -64,6 +64,9 @@ kp/.codex_remote_logs/
 # Review bundles and one-off archives
 /review_bundles/
 /review_outputs/
+/review_packages/
+/context/
+/kp/context/
 *_review_*.tar.gz
 *_review_*.tar.gz.sha256
 kp_examples_*.tar.gz

@@ -1,0 +1,60 @@
+source_config: ../source/mote2_3.89_K1_spinful.yaml
+valley: K1
+spin: spinful
+symmetry_source: ../../outputs/symm/mote2_3.89_K1_spinful
+kpath:
+  file: ../../../tapw/KPATH.in
+  tmat:
+  - - 52.4951056667
+    - 0.0
+    - 0.0
+  - - -26.247552834
+    - 45.4620950821
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 27.0
+model:
+  n_orb:
+  - 2
+  - 2
+  bM:
+    bM1:
+    - 0.13820712168748003
+    - 0.0
+    bM2:
+    - 0.06910356084374003
+    - 0.11969087836528494
+  harmonics:
+    intra: 4
+    inter: 4
+  max_order:
+    Kinect: 6
+    intra: 4
+    inter: 4
+  nlow_state:
+  - 2
+  - 2
+fit:
+  indices:
+  - 0
+  coeff_tol: 1.0e-06
+bands:
+  compare_to_heff: true
+  band_slice:
+  - 92
+  - 108
+  plot:
+    top_bands: 8
+    align: top
+    figsize:
+    - 3.0
+    - 5.8
+    num_bands: 16
+output:
+  dir: ../../outputs/model/mote2_3.89_K1_spinful
+  save_coefficients: true
+  verbose: false
+  progress: true
+heff_file: ../../outputs/project/mote2_3.89_K1_spinful/heff_list.npy
+heff_eig_file: ../../outputs/project/mote2_3.89_K1_spinful/heff_eig.npy

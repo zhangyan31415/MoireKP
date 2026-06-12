@@ -8,7 +8,7 @@ import pytest
 import yaml
 
 from kp.model.configured import build_moire_config_from_file
-from kp.model.exactify_representation import (
+from kp.symmetry.exactify_representation import (
     BasisLabel,
     OperationAction,
     analyze_monomial_support,
@@ -19,6 +19,7 @@ from kp.model.exactify_representation import (
     nearest_root_of_unity,
     root_of_unity,
 )
+from kp.symmetry.geometry import infer_q_offset_from_qset
 
 
 def _source_meta(*, antiunitary: bool = False, source_matrix_role: str = "raw_h_sewing_action") -> dict[str, object]:
@@ -37,6 +38,25 @@ def _hex_bm() -> tuple[np.ndarray, np.ndarray]:
     b1 = np.array([1.0, 0.0], dtype=float)
     b2 = np.array([0.5, np.sqrt(3.0) / 2.0], dtype=float)
     return b1, b2
+
+
+def test_infer_q_offset_handles_branch_cut_half_coset() -> None:
+    b1, b2 = _hex_bm()
+    offset = 0.5 * b2
+    qset = np.array(
+        [
+            offset + b1,
+            offset - b1,
+            offset + 2.0 * b1 - b2,
+            offset - b1 + b2,
+        ],
+        dtype=float,
+    )
+
+    inferred = infer_q_offset_from_qset(qset, b1, b2)
+    coeffs = np.linalg.solve(np.column_stack([b1, b2]), (qset - inferred).T).T
+
+    np.testing.assert_allclose(coeffs, np.rint(coeffs), atol=1.0e-10)
 
 
 def _k_basis_labels() -> list[BasisLabel]:
@@ -773,6 +793,62 @@ def test_accept_support_resolved_action_writes_provenance() -> None:
     assert report["support_resolution"]["provenance"]["source"] == "support_exactification"
 
 
+def test_accept_support_resolved_action_reports_support_discovery_source() -> None:
+    labels = _k_basis_labels()
+    q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
+    q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
+    b1, b2 = _hex_bm()
+    support_action = OperationAction(
+        name="C2T",
+        canonical_name="C2T",
+        antiunitary=True,
+        k_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        R=np.array([[1.0, 0.0], [0.0, -1.0]], dtype=float),
+        sector_map="layer_exchange",
+        q_map={"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+        central_phase=1.0 + 0.0j,
+        group_relations=[],
+        source="test",
+    )
+    exact = _make_matrix_for_action(labels, support_action, b1, b2)
+
+    _exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "C2T",
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "q_map": {"type": "reflection", "axis_deg": 180.0, "in_model_frame": True},
+                    "sector_map": "identity",
+                }
+            ]
+        },
+        matrices={"C2T": exact},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "discover_action_candidates": True,
+                "accept_support_resolved_action": True,
+                "operations": {"C2T": {"support_mode": "monomial", "power": 2}},
+            }
+        },
+    )
+
+    resolution = reports["C2T"]["support_resolution"]
+    assert resolution["action_mismatch"] is True
+    assert resolution["candidate_source"] == "support_discovery"
+
+
 def test_exactify_strict_rejects_support_discovery_mismatch_even_when_accept_enabled() -> None:
     labels = _k_basis_labels()
     q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
@@ -1324,6 +1400,142 @@ def test_exactify_strict_requires_group_relations() -> None:
         )
 
 
+def test_manifest_group_relation_overrides_legacy_central_phase_config() -> None:
+    labels = _k_basis_labels()
+    exact, _perm = _make_exact_c3_matrix(labels)
+    q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
+    q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
+    b1, b2 = _hex_bm()
+
+    _out, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(),
+                    "name": "C3z",
+                    "matrix_file": "C3_low_raw.npy",
+                    "antiunitary": False,
+                    "k_map": {"type": "rotation", "angle_deg": 120},
+                    "sector_map": "identity",
+                    "q_map": {"type": "rotation", "angle_deg": 120},
+                    "group_relations": [{"type": "power", "power": 3, "phase": -1.0, "name": "C3z^3"}],
+                }
+            ]
+        },
+        matrices={"C3z": exact},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "strict": True,
+                "require_explicit_action_candidates": True,
+                "central_phase": {"C3z^3": 1.0},
+                "operations": {
+                    "C3z": {
+                        "action_candidates": [
+                            {
+                                "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                "sector_map": "identity",
+                                "antiunitary": False,
+                            }
+                        ]
+                    }
+                },
+            }
+        },
+    )
+
+    assert reports["C3z"]["group_relation_source"] == "manifest"
+    assert reports["C3z"]["group_relation"]["power"] == 3
+    assert reports["C3z"]["group_relation"]["phase"] == [-1.0, 0.0]
+    assert reports["C3z"]["report"]["group_residuals"]["power"] == pytest.approx(0.0)
+
+
+def test_exactify_no_complete_support_candidate_raises_by_default() -> None:
+    b1, b2 = _hex_bm()
+    q1 = np.array([b1], dtype=float)
+    q2 = np.array([b1], dtype=float)
+
+    with pytest.raises(ValueError, match="No candidate produced complete geometry support"):
+        exactify_loaded_symmetry_source(
+            loaded_metadata={
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "name": "C3z",
+                        "matrix_file": "C3_low_raw.npy",
+                        "antiunitary": False,
+                        "k_map": {"type": "rotation", "angle_deg": 120.0},
+                        "q_map": {"type": "rotation", "angle_deg": 120.0},
+                        "sector_map": "identity",
+                    }
+                ]
+            },
+            matrices={"C3z": np.eye(2, dtype=complex)},
+            Q_set1=q1,
+            Q_set2=q2,
+            sectors=[
+                {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+                {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+            ],
+            n_orb=(1, 1),
+            bM1=b1,
+            bM2=b2,
+            raw_config={"exactification": {"support_mode": "monomial"}},
+        )
+
+
+def test_exactify_output_dir_removes_stale_reports(tmp_path: Path) -> None:
+    labels = _k_basis_labels()
+    exact, _perm = _make_exact_c3_matrix(labels)
+    q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
+    q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
+    b1, b2 = _hex_bm()
+    output_dir = tmp_path / "projection"
+    output_dir.mkdir()
+    stale_report = output_dir / "c2_eff_exactification_report.json"
+    stale_report.write_text("{}", encoding="utf-8")
+
+    exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(),
+                    "name": "C3z",
+                    "matrix_file": "C3_low_raw.npy",
+                    "antiunitary": False,
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                }
+            ]
+        },
+        matrices={"C3z": exact},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={"exactification": {"support_mode": "monomial"}},
+        output_dir=output_dir,
+    )
+
+    assert not stale_report.exists()
+    assert (output_dir / "c3z_exactification_report.json").exists()
+
+
 def test_exactify_report_contains_source_semantics_and_inference_flag() -> None:
     labels = _k_basis_labels()
     exact, _perm = _make_exact_c3_matrix(labels)
@@ -1392,7 +1604,7 @@ def test_exactify_report_contains_source_semantics_and_inference_flag() -> None:
     assert "distance_mod_global_phase" in report["report"]
 
 
-def test_no_raw_action_in_model_symmetrization(tmp_path: Path) -> None:
+def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path: Path) -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     heff = np.array([[[1.0, 0.0], [0.0, 2.0]]], dtype=complex)
     np.save(tmp_path / "q1.npy", q)
@@ -1416,11 +1628,13 @@ def test_no_raw_action_in_model_symmetrization(tmp_path: Path) -> None:
     symm_dir.mkdir()
     np.save(symm_dir / "C3_low_raw.npy", np.eye(2, dtype=complex))
     (symm_dir / "manifest.json").write_text(
-        json.dumps(
-            {
-                "operations": [
-                    {
-                        **_source_meta(),
+            json.dumps(
+                {
+                    "frame": {"q_transform": {"rotation_deg": 0.0}},
+                    "requires_model_exactification": True,
+                    "operations": [
+                        {
+                            **_source_meta(),
                         "name": "C3z",
                         "matrix_file": "C3_low_raw.npy",
                         "antiunitary": False,
@@ -1441,7 +1655,6 @@ def test_no_raw_action_in_model_symmetrization(tmp_path: Path) -> None:
         yaml.safe_dump(
             {
                 "source_config": "source.yaml",
-                "coordinate_frame": {"rotation_deg": 0},
                 "valley_model": {
                     "lattice": "hexagonal",
                     "system": "bilayer",
@@ -1453,13 +1666,22 @@ def test_no_raw_action_in_model_symmetrization(tmp_path: Path) -> None:
                     "external_sewing_symmetries": [],
                 },
                 "kpoints_file": "kpoints.npy",
-                "symmetry_source": {
-                    "type": "kp_symm_output",
-                    "path": "symm",
-                    "use": "raw",
-                    "matrix_kind": "action",
-                    "operations": ["C3z"],
-                },
+                    "symmetry_source": {
+                        "type": "kp_symm_output",
+                        "path": "symm",
+                        "use": "raw",
+                        "matrix_kind": "action",
+                        "operations": [
+                            {
+                                "name": "C3z",
+                                "operation": "C3",
+                                "antiunitary": False,
+                                "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                "sector_map": "identity",
+                            }
+                        ],
+                    },
                 "model": {
                     "n_orb": [1, 1],
                     "nlow_state": [1, 1],
@@ -1477,14 +1699,8 @@ def test_no_raw_action_in_model_symmetrization(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    _moire_config, model_config = build_moire_config_from_file(cfg_path)
-    metadata = model_config.symmetry_source_metadata
-    record = metadata["operations"][0]
+    with pytest.raises(ValueError, match="kp_symm_output must provide exactified continuum matrices"):
+        build_moire_config_from_file(cfg_path)
 
-    assert "source_matrix_projection_reports" in metadata
-    assert "source_matrix_projection_report" in record
-    assert "exactification_report" not in record
-    assert record["matrix_kind"] == "continuum_internal_rep_exact"
-    assert record["target_role"] == "continuum_internal_rep"
-    assert (tmp_path / "model_out" / "symmetry_source_matrix_projection").is_dir()
+    assert not (tmp_path / "model_out" / "symmetry_source_matrix_projection").exists()
     assert not (tmp_path / "model_out" / "symmetry_exactification").exists()

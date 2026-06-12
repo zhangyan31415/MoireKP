@@ -773,14 +773,6 @@ class SymmetryGenerator:
                 ])
                 C3_matrix.append(matrix)
         C3_proj_matrix = scipy.linalg.block_diag(*C3_matrix)
-        # C3_temp = np.load("/data/work/zy/software/TAPW_tmdc/dft_relax_from_mlff/3.48_same/2soc/Q_shell_7/band_data/C3_matrix.npy")
-        # if params == 2:
-        #     C3_temp = C3_temp @ C3_temp
-        # if params == 0:
-        #     C3_temp = np.eye(C3_temp.shape[0], dtype=complex)
-        # if np.sum(np.abs(C3_proj_matrix@C3_proj_matrix - C3_proj_matrix.T)) > 1e-8:
-        # if np.sum(np.abs(C3_proj_matrix - C3_temp.T)) > 1e-8:
-        #     raise ValueError("C3z operator not orthogonal.")
         if params == 2:
             C3_proj_matrix = C3_proj_matrix @ C3_proj_matrix
         if params == -1:
@@ -1034,13 +1026,18 @@ class SymmetryGenerator:
             if name == "C3z":
                 D = self.get_C3z_operator(params)
             elif name == "TR":
-                D = self.get_time_reversal_matrix()
+                if self.basis_template == "M_spinless_layer_exchange":
+                    D = self.get_time_reversal_matrix_effective()
+                else:
+                    D = self.get_time_reversal_matrix()
             elif name == "TR_eff":
                 D = self.get_time_reversal_matrix_effective()
             elif name == "C2":
                 D = self.get_C2_operator()
             elif name == "C2_eff":
                 D = self.get_C2_operator()
+            elif name == "C2T" and self.basis_template == "M_spinless_layer_exchange":
+                D = self.get_C2_operator() @ self.get_time_reversal_matrix_effective()
             elif name == "C2TR_eff":
                 D = self.get_C2_operator() @ self.get_time_reversal_matrix_effective()
             else:
@@ -1137,7 +1134,7 @@ class ContinuumModelBuilder:
     _SYMMETRIZE_COMPOSED_OP_VALIDATED = SYMMETRIZE_COMPOSED_OP_VALIDATED
     _SYMMETRIZE_ORBIT_CACHE = SYMMETRIZE_ORBIT_CACHE
     _KZ_POW_CACHE = KZ_POW_CACHE
-    _SYMM_ANTIUNITARY_OPS = frozenset({"TR", "TR_eff", "C2T", "C2TR_eff"})
+    _SYMM_ANTIUNITARY_OPS = frozenset({"TR", "C2T", "TR_eff", "C2TR_eff"})
     _SYMM_UNITARY_OPS = frozenset({"C2", "C2_eff"})
     _SYMM_VALIDATE_MONOMIAL = True
     _SYMM_VALIDATE_SPARSE = True
@@ -2210,13 +2207,26 @@ class ContinuumModelBuilder:
                     H_out[cc_idx, rr_idx] += vv_h
 
     # @timing_decorator_factory(0)
-    def stack_Y_for_term(self, term: ContinuumTerm, k_points: List[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+    def stack_Y_for_term(
+        self,
+        term: ContinuumTerm,
+        k_points: List[np.ndarray],
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         对于 term，在各个 k 点下分别计算对称化后的两部分矩阵：
           - real 部分：直接 symmetrize_Y_basis
           - imag 部分：先乘 i，再 symmetrize_Y_basis
         最后以 block_diag 拼接后返回。
         """
+        cache_key = None
+        if term_matrix_cache is not None:
+            k_signature = tuple(tuple(float(x) for x in np.asarray(k).ravel()) for k in k_points)
+            cache_key = (term.key, k_signature)
+            cached = term_matrix_cache.get(cache_key)
+            if cached is not None:
+                return cached[0].copy(), cached[1].copy()
+
         # Y_real_list = [self.symmetrize_Y_basis(term.Y_basis, k) for k in k_points]
         # Y_imag_list = [self.symmetrize_Y_basis(lambda k: 1j * term.Y_basis(k), k) for k in k_points]
         Y_pairs = [
@@ -2231,8 +2241,13 @@ class ContinuumModelBuilder:
         #     print(f"Y_real_list for term {term.key}:\n{np.sum(np.abs(np.array(Y_real_list)))}")
         #     print(f"Y_imag_list for term {term.key}:\n{np.sum(np.abs(np.array(Y_imag_list)))}")
             # print(f"Y_imag_list for term {term.key}:\n{Y_imag_list[0]}")
-        return (scipy.linalg.block_diag(*Y_real_list),
-                scipy.linalg.block_diag(*Y_imag_list))
+        matrices = (
+            scipy.linalg.block_diag(*Y_real_list),
+            scipy.linalg.block_diag(*Y_imag_list),
+        )
+        if term_matrix_cache is not None and cache_key is not None:
+            term_matrix_cache[cache_key] = (matrices[0].copy(), matrices[1].copy())
+        return matrices
 
     def symmetrize_Y_basis(self, Y_basis: Callable[[np.ndarray], np.ndarray], k: np.ndarray) -> np.ndarray:
         """
@@ -2243,40 +2258,44 @@ class ContinuumModelBuilder:
                                                                 symmetry_gen=self.symmetry_gen)
 
     @timing_decorator_factory(0)
-    def orthogonalize_hermitian_matrices(self,matlist: List[np.ndarray], tol: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
+    def _orthogonalize_hermitian_matrices_with_support(
+        self,
+        matlist: List[np.ndarray],
+        tol: float = 1e-8,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray | None]:
         mats = np.asarray(matlist)
         print(f"orthogonalize_hermitian_matrices num of matlist new: {len(mats)} dim: {mats[0].shape}")
         if len(mats) == 0:
-            return np.array([]), np.array([], dtype=int)
+            return np.array([]), np.array([], dtype=int), None
 
         n = mats[0].shape[0]
-        if len(mats) <= 512:
+        if n <= 64 and len(mats) <= 512:
             orthonormal_list = []
             including_list = []
             flattened = [mat.flatten() for mat in mats]
-            for i, v in tqdm(enumerate(flattened)):
-                U = v.copy()
-                for w in orthonormal_list:
-                    U -= np.vdot(w, v) * w
-                norm = np.linalg.norm(U)
+            for i, v in enumerate(flattened):
+                residual = v.copy()
+                for basis_vector in orthonormal_list:
+                    residual -= np.vdot(basis_vector, v) * basis_vector
+                norm = np.linalg.norm(residual)
                 if norm > tol:
-                    orthonormal_list.append(U / norm)
+                    orthonormal_list.append(residual / norm)
                     including_list.append(i)
             orthonormal_matrices = [v.reshape(n, n) for v in orthonormal_list]
-            return np.array(orthonormal_matrices), np.array(including_list, dtype=int)
+            return np.array(orthonormal_matrices), np.array(including_list, dtype=int), None
 
         flat = mats.reshape(len(mats), -1)
         norms = np.linalg.norm(flat, axis=1)
         nonzero = np.flatnonzero(norms > tol)
         if nonzero.size == 0:
-            return np.empty((0, n, n), dtype=mats.dtype), np.array([], dtype=int)
+            return np.empty((0, n, n), dtype=mats.dtype), np.array([], dtype=int), None
 
         max_abs = float(np.max(np.abs(flat[nonzero]))) if nonzero.size else 0.0
         support_tol = max(np.finfo(float).eps * max(max_abs, 1.0) * 100.0, float(tol) * 1.0e-4)
         support = np.any(np.abs(flat[nonzero]) > support_tol, axis=0)
         support_idx = np.flatnonzero(support)
         if support_idx.size == 0:
-            return np.empty((0, n, n), dtype=mats.dtype), np.array([], dtype=int)
+            return np.empty((0, n, n), dtype=mats.dtype), np.array([], dtype=int), None
 
         qr_input = np.asfortranarray(flat[np.ix_(nonzero, support_idx)].T)
         q, r, piv = scipy.linalg.qr(
@@ -2292,11 +2311,20 @@ class ContinuumModelBuilder:
         orthonormal_flat = np.zeros((rank, flat.shape[1]), dtype=mats.dtype)
         orthonormal_flat[:, support_idx] = q[:, :rank].T
         orthonormal_matrices = orthonormal_flat.reshape(rank, n, n)
+        return orthonormal_matrices, including_list, support_idx
+
+    @timing_decorator_factory(0)
+    def orthogonalize_hermitian_matrices(self,matlist: List[np.ndarray], tol: float = 1e-8) -> Tuple[np.ndarray, np.ndarray]:
+        orthonormal_matrices, including_list, _support_idx = self._orthogonalize_hermitian_matrices_with_support(
+            matlist,
+            tol=tol,
+        )
         return orthonormal_matrices, including_list
 
     @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
-                                        tol: float = 1e-8, tag: str = None) -> Tuple[List[ContinuumTermKey], List[np.ndarray], np.ndarray, np.ndarray]:
+                                        tol: float = 1e-8, tag: str = None,
+                                        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None) -> Tuple[List[ContinuumTermKey], List[np.ndarray], np.ndarray, np.ndarray, np.ndarray | None]:
         """
         对模型中指定 keys 的项，在 k_points 下采样后，
         对于每个 term同时采样 real 与 imag 两部分（分别由 stack_Y_for_term 返回），
@@ -2315,39 +2343,18 @@ class ContinuumModelBuilder:
         # 内部定义处理单个 key 的函数
         def _process_single_term(key):
             # 采样获得实部与虚部矩阵
-            mat_real, mat_imag = self.stack_Y_for_term(self.model.terms[key], k_points)
-            l1, l2 = key.layer_from, key.layer_to
-            orb1, orb2 = key.orbital_from, key.orbital_to
-            n_orb1, n_orb2 = self.n_orb1, self.n_orb2
-            Q_set1 = self.Q_set1
-            Q_set2 = self.Q_set2
-            H_dim = len(Q_set1) * self.n_orb1 + len(Q_set2) * self.n_orb2
-            
-
-            Qlayer = Q_set1 if l1 == 1 else Q_set2
+            mat_real, mat_imag = self.stack_Y_for_term(
+                self.model.terms[key],
+                k_points,
+                term_matrix_cache=term_matrix_cache,
+            )
             
             # 若是 Kinect 项，则对每个 k 点对应的子块进行校正
             if tag in ("Kinect",):
-                exchange_antiunitary_flag = ContinuumModelBuilder._uses_full_bilayer_block(
-                    self.symmetry_map[tag],
-                    [str(sector.get("name")) for sector in self.sectors],
-                )
-                for ik, _ in enumerate(k_points):
-                    # if exchange_antiunitary_flag:
-                        # idx_start = ik * H_dim
-                        # idx_end = (ik + 1) * H_dim
-                    # else:
-                        # idx_start = ik * H_dim + self.get_global_index(l1, 0, orb1 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
-                        # idx_end = ik * H_dim + self.get_global_index(l1, len(Qlayer), orb1 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
-                    # block_dim = np.abs(idx_end - idx_start)
-                    # if idx_end < idx_start:
-                    #     raise ValueError(f"Invalid index range: {idx_start} to {idx_end}")
-                    # onsite_energy = np.trace(mat_real[idx_start:idx_end, idx_start:idx_end]) / block_dim
-                    # mat_real[idx_start:idx_end, idx_start:idx_end] -= onsite_energy * np.eye(block_dim)
-                    sub_block = self.get_mat_blocks([mat_real], key, len(k_points))[0]
-                    block_dim = sub_block.shape[0]
-                    onsite_energy = np.trace(sub_block) / block_dim
-                    mat_real -= onsite_energy * np.eye(mat_real.shape[0])
+                sub_block = self.get_mat_blocks([mat_real], key, len(k_points))[0]
+                block_dim = sub_block.shape[0]
+                onsite_energy = np.trace(sub_block) / block_dim
+                mat_real -= onsite_energy * np.eye(mat_real.shape[0])
             # 返回该 key 对应的两个矩阵
             return mat_real, mat_imag
 
@@ -2372,17 +2379,17 @@ class ContinuumModelBuilder:
         initialterms = np.array(self.get_mat_blocks(initialterms, keys[0], len(k_points)))
         
         # 正交化
-        finalterms, includinglist = self.orthogonalize_hermitian_matrices(initialterms, tol=tol)
+        finalterms, includinglist, support_idx = self._orthogonalize_hermitian_matrices_with_support(initialterms, tol=tol)
         
         # 更新每个 term 的 active 标志：如果该 term 对应的两个矩阵中至少有一个被保留，则 active 为 True
         for i, key in enumerate(keys):
             idx1, idx2 = 2 * i, 2 * i + 1
             self.model.terms[key].active = (idx1 in includinglist or idx2 in includinglist)
         
-        return keys, initialterms, finalterms, includinglist
+        return keys, initialterms, finalterms, includinglist, support_idx
     
     
-    def compute_coeffs_extreme(self,finalterms, initialterms, includinglist, heff):
+    def compute_coeffs_extreme(self,finalterms, initialterms, includinglist, heff, support_idx: np.ndarray | None = None):
         """
         极致向量化实现：
         transfermat[i, j] = trace(finalterms[i] @ initialterms[includinglist[j]])
@@ -2397,17 +2404,21 @@ class ContinuumModelBuilder:
         返回求解出的系数 coeffs。
         """
         m, n, _ = finalterms.shape
-        # 选取包含项
-        init_included = initialterms[includinglist]  # shape (k, n, n)
-        # 将 finalterms 重塑为 (m, n*n)
-        F = finalterms.reshape(m, -1)
-        # 对初始矩阵先取转置，再重塑为 (k, n*n)
-        I_T = init_included.transpose(0, 2, 1).reshape(len(includinglist), -1)
-        # 利用矩阵乘法计算 transfermat (m x k)
-        transfermat = F @ I_T.T
-        # 计算 rhs：heff 部分先转置后展平
-        H_T = heff.T.ravel()
-        rhs = F @ H_T
+        if support_idx is None:
+            init_included = initialterms[includinglist]  # shape (k, n, n)
+            F = finalterms.reshape(m, -1)
+            I_T = init_included.transpose(0, 2, 1).reshape(len(includinglist), -1)
+            transfermat = F @ I_T.T
+            H_T = heff.T.ravel()
+            rhs = F @ H_T
+        else:
+            support_idx = np.asarray(support_idx, dtype=int)
+            rows = support_idx // n
+            cols = support_idx % n
+            F = finalterms.reshape(m, -1)[:, support_idx]
+            I_T = initialterms[np.asarray(includinglist, dtype=int)[:, None], cols[None, :], rows[None, :]]
+            transfermat = F @ I_T.T
+            rhs = F @ heff[cols, rows]
         # 求解线性方程组；rank selection 已经保证独立，fallback 只处理极端病态数值。
         try:
             coeffs = scipy.linalg.solve(transfermat, rhs, check_finite=False)
@@ -2499,6 +2510,7 @@ class ContinuumModelBuilder:
         *,
         tol: float,
         max_exact_group_size: int = 16,
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> List[ContinuumTermKey]:
         signature_groups: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
         for key in keys:
@@ -2513,7 +2525,11 @@ class ContinuumModelBuilder:
 
             basis: List[np.ndarray] = []
             for key in group_keys:
-                mat_real, mat_imag = self.stack_Y_for_term(self.model.terms[key], k_points)
+                mat_real, mat_imag = self.stack_Y_for_term(
+                    self.model.terms[key],
+                    k_points,
+                    term_matrix_cache=term_matrix_cache,
+                )
                 is_new_seed = False
                 for block in self.get_mat_blocks([mat_real, mat_imag], key, len(k_points)):
                     vector = block.ravel()
@@ -2605,6 +2621,7 @@ class ContinuumModelBuilder:
             tag_groups.setdefault(term.tag, []).append(key)
         
         coeffs_by_tag = {}
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] = {}
         
         # 遍历每个 tag 组
         for tag, keys in tag_groups.items():
@@ -2618,7 +2635,12 @@ class ContinuumModelBuilder:
                 f"Time: {time.strftime('%H:%M:%S', time.localtime())}"
             )
             
-            keys = self._filter_duplicate_symmetry_seed_keys(keys, k_points, tol=tol)
+            keys = self._filter_duplicate_symmetry_seed_keys(
+                keys,
+                k_points,
+                tol=tol,
+                term_matrix_cache=term_matrix_cache,
+            )
 
             subgroup_dict: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
             for key in keys:
@@ -2636,12 +2658,18 @@ class ContinuumModelBuilder:
                 }
                 diagnostics_key = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
                 # 获取正交化结果（同时处理 real 与 imag 部分）
-                grp_keys, initialterms, finalterms, includinglist = self.get_orthogonalized_terms_subset(
+                orthogonalized = self.get_orthogonalized_terms_subset(
                     sub_keys,
                     k_points,
                     tol=tol,
                     tag=tag,
+                    term_matrix_cache=term_matrix_cache,
                 )
+                if len(orthogonalized) == 4:
+                    grp_keys, initialterms, finalterms, includinglist = orthogonalized
+                    fit_support_idx = None
+                else:
+                    grp_keys, initialterms, finalterms, includinglist, fit_support_idx = orthogonalized
                 print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
                 if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
                     for key in sub_keys:
@@ -2678,7 +2706,7 @@ class ContinuumModelBuilder:
                         kinetic_blocks.append(H_kinetic)
                     kinetic_block = scipy.linalg.block_diag(*kinetic_blocks)
                     heff_block = heff_block - self.get_mat_blocks([kinetic_block], sub_keys[0], len(k_points))[0]
-                    coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block)
+                    coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
                     coeffs = np.real(coeffs)
 
                     included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
@@ -2697,7 +2725,7 @@ class ContinuumModelBuilder:
                     if tag == "Kinect":
                         heff_block = heff_block - np.eye(heff_block.shape[0]) * np.trace(heff_block) / heff_block.shape[0]
                         # initialterms = np.array([initialterms[i] - np.eye(initialterms[i].shape[0]) * np.trace(initialterms[i]) / initialterms[i].shape[0] for i in range(len(initialterms))])
-                    coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block)
+                    coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
                     
                     
                     coeffs = np.real(coeffs)
@@ -2705,15 +2733,10 @@ class ContinuumModelBuilder:
                     # print(f"diag of initialterms", np.diag(initialterms[0]))
                     # print(f"diag of finalterms", np.diag(finalterms[0]))
                     print(f'    after transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
+                    included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
                     for i in tqdm(range(len(sub_keys))):
-                        try:
-                            idx_real = includinglist.tolist().index(2*i)
-                        except ValueError:
-                            idx_real = None
-                        try:
-                            idx_imag = includinglist.tolist().index(2*i+1)
-                        except ValueError:
-                            idx_imag = None
+                        idx_real = included.get(2 * i)
+                        idx_imag = included.get(2 * i + 1)
                         r_real = coeffs[idx_real] if idx_real is not None else 0.0
                         r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
                         r = r_real + 1j*r_imag
@@ -3386,6 +3409,20 @@ def load_Q_sets_from_gvec_files(
     Qlayer1 = np.load(file_layer1)
     Qlayer2 = np.load(file_layer2)
     return make_Q_sets_from_gvec_lists(Qlayer1, Qlayer2, rotation_deg=float(rotation_deg))
+
+
+def infer_model_rotation_from_gvec_lists(Qlayer1: np.ndarray, Qlayer2: np.ndarray) -> float:
+    """Infer the example model frame that places the first Q shell along +x."""
+    q0, _ = make_Q_sets_from_gvec_lists(Qlayer1, Qlayer2, rotation_deg=0.0)
+    norms = np.linalg.norm(q0, axis=1)
+    nonzero = norms > 1.0e-12
+    if not np.any(nonzero):
+        return 0.0
+    min_norm = float(np.min(norms[nonzero]))
+    shell = q0[np.abs(norms - min_norm) <= max(1.0e-10, min_norm * 1.0e-6)]
+    angles = np.degrees(np.arctan2(shell[:, 1], shell[:, 0]))
+    angle = float(min(angles, key=lambda item: min(abs(item), abs(item - 360.0), abs(item + 360.0))))
+    return float((-angle) % 360.0)
 
 
 def infer_bM_vectors_from_Q_set1(Q_set1: np.ndarray, *, angle_deg: float = 60.0) -> Tuple[np.ndarray, np.ndarray]:
@@ -4183,8 +4220,7 @@ def example_config() -> MoireConfig:
         )
 
     try:
-        # cfg_dir = Path(__file__).resolve().parent.parent  # kp/configs/mgi2_G
-        cfg_dir = Path("/Users/xtz/code/TAPW_tmdc/tMgI2/moirekp/kp/configs/mgi2_G")
+        cfg_dir = Path(__file__).resolve().parents[2] / "configs" / "mgi2_G"
         plots_dir = cfg_dir / "plots_mgi2_5_Gamma"
         g1 = plots_dir / "g_vec_list_5_Gamma_1layer.npy"
         g2 = plots_dir / "g_vec_list_5_Gamma_2layer.npy"
@@ -4192,7 +4228,7 @@ def example_config() -> MoireConfig:
         if not (g1.exists() and g2.exists() and kpath_in.exists()):
             return _synthetic()
 
-        phase_deg = 210.0
+        phase_deg = infer_model_rotation_from_gvec_lists(np.load(g1), np.load(g2))
         Q_set1, Q_set2 = load_Q_sets_from_gvec_files(g1, g2, rotation_deg=phase_deg)
         bM1, bM2 = infer_bM_vectors_from_Q_set1(Q_set1, angle_deg=60.0)
 
@@ -4294,10 +4330,17 @@ def self_test(*, k_index: int = 0) -> None:
 def main() -> None:
     """Entry point for a small, dependency-free sanity run."""
     self_test()
-    cfg = example_config()              # 现在会优先用你真实的 mgi2_Gamma 文件
+    cfg = example_config()
     model = build_model(cfg)
 
-    heff_list = np.load("/Users/xtz/code/TAPW_tmdc/tMgI2/moirekp/kp/configs/mgi2_G/plots_mgi2_5_Gamma/heff_list.npy")
+    heff_path = None
+    if cfg.kpath_out_file is not None:
+        heff_path = Path(cfg.kpath_out_file).parent / "heff_list.npy"
+    if heff_path is None or not heff_path.exists():
+        logger.info("No local heff_list.npy found next to the example k-path; skipping coefficient extraction.")
+        return
+
+    heff_list = np.load(heff_path)
     k_proj = [0, 40]
     cfg.kpoints_fit = select_kpoints(cfg.kpoints, k_proj)
     cfg.heff = scipy.linalg.block_diag(*(heff_list[k_proj]))
