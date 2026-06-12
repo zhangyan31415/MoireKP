@@ -85,6 +85,9 @@ examples/**/outputs/
 examples/**/runs/
 examples/garbage/
 examples/**/kp/configs/model/reference/
+# External KP regression data copied from private TAPW/KP runs.
+examples/mote2_3.89/tapw/
+examples/mgi2_3.89/tapw/
 kp/.tmp_*/
 
 # Scratch notebooks and external notebook data dumps
