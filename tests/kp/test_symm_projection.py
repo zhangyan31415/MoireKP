@@ -860,6 +860,18 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 q_rotation_deg=0.0,
             )
             cfg_path = tmp / "C3_symm.yaml"
+            symm_dir = tmp / "C3_symmetry_analysis"
+            rep_dir = symm_dir / "representations"
+            diag_rep_dir = rep_dir / "diagnostics" / "K1"
+            diag_rep_dir.mkdir(parents=True)
+            (rep_dir / "K1" / "C3.npz").rename(diag_rep_dir / "C3.npz")
+            manifest_path = rep_dir / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            entry = manifest["operations"]["K1"]["C3"]
+            entry.pop("filename")
+            entry["developer_outputs"] = {"file": "diagnostics/K1/C3.npz"}
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
             cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
             cfg["symm"]["developer_outputs"] = True
             cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -876,6 +888,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(row["developer_outputs"]["representation_matrix_file"], "diagnostics/C3_low_representation_raw.npy")
             self.assertEqual(row["developer_outputs"]["polar_matrix_file"], "diagnostics/C3_low_polar.npy")
             self.assertIn("polar", row["pairs"][0])
+
+            cfg["symm"]["developer_outputs"] = False
+            cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+            cli.main(["symm", "--config", str(cfg_path)])
+            self.assertFalse((out_dir / "diagnostics" / "C3_low_polar.npy").exists())
+            self.assertFalse((out_dir / "diagnostics" / "C3_low_representation_raw.npy").exists())
 
     def test_symm_rejects_legacy_projection_matrices_diagnostics_config(self) -> None:
         with tempfile.TemporaryDirectory() as td:

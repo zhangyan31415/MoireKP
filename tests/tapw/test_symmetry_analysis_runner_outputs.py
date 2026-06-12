@@ -308,6 +308,13 @@ def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_p
         "pg_file": "diagnostics/K1/C2T_PG.npz",
     }
 
+    runner.config.symmetry_analysis.developer_outputs = False
+    runner.run()
+
+    assert not (diag_dir / "C2T.npz").exists()
+    assert not (diag_dir / "C2T_Pin.npz").exists()
+    assert not (diag_dir / "C2T_PG.npz").exists()
+
 
 def test_analyze_collects_only_minimal_supported_representation_generators(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)

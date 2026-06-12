@@ -911,6 +911,11 @@ def _optional_entry_filename(entry: dict[str, Any], *keys: str) -> str | None:
     for key in keys:
         if entry.get(key):
             return str(entry[key])
+    developer_outputs = entry.get("developer_outputs")
+    if isinstance(developer_outputs, Mapping):
+        for key in keys:
+            if developer_outputs.get(key):
+                return str(developer_outputs[key])
     return None
 
 
@@ -1615,6 +1620,9 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             output_dir / f"{output_operation}_low_polar.npy",
             output_dir / f"{output_operation}_low_representation_raw.npy",
             output_dir / f"{output_operation}_low_representation_polar.npy",
+            diagnostics_dir / f"{output_operation}_low_polar.npy",
+            diagnostics_dir / f"{output_operation}_low_representation_raw.npy",
+            diagnostics_dir / f"{output_operation}_low_representation_polar.npy",
         ):
             if stale.exists():
                 stale.unlink()

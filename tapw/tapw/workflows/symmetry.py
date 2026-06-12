@@ -3897,6 +3897,9 @@ class SymmetryAnalysisRunner:
                 old_path = matrix_dir / old_name
                 if old_path.exists():
                     old_path.unlink()
+                old_diagnostic_path = diagnostics_dir / old_name
+                if old_diagnostic_path.exists() and not developer_outputs:
+                    old_diagnostic_path.unlink()
             if developer_outputs:
                 diagnostics_dir.mkdir(parents=True, exist_ok=True)
                 relative_path = Path("diagnostics") / valley_label / operation_file
