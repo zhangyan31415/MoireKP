@@ -239,8 +239,8 @@ def test_translation_removable_by_origin_shift_detects_removable_c2_seitz_shift(
     assert np.allclose((np.eye(3) - rotation) @ shift, translation)
 
 
-def test_build_k_c2yt_g_transport_matches_named_formula():
-    helper = getattr(symmetry_analysis, "build_k_c2yt_g_transport", None)
+def test_build_k_c2t_g_transport_matches_named_formula():
+    helper = getattr(symmetry_analysis, "build_k_c2t_g_transport", None)
     assert helper is not None
 
     k_source = np.array([1.0, 0.0], dtype=float)
@@ -412,8 +412,8 @@ def test_legacy_c3_layer_centers_helper_matches_authoritative_k_centers():
     assert np.allclose(centers[1], expected_k1_2)
 
 
-def test_k_c2yt_center_diagnostics_reports_metrics_per_center_choice():
-    helper = getattr(symmetry_analysis, "diagnose_k_c2yt_center_choices", None)
+def test_k_c2t_center_diagnostics_reports_metrics_per_center_choice():
+    helper = getattr(symmetry_analysis, "diagnose_k_c2t_center_choices", None)
     assert helper is not None
 
     linear_map = np.array([[-1.0, 0.0], [0.0, 1.0]], dtype=float)
@@ -441,8 +441,8 @@ def test_k_c2yt_center_diagnostics_reports_metrics_per_center_choice():
     assert diagnostics["C"]["one_to_one"] is False
 
 
-def test_k_c2yt_axis_diagnostics_reports_metrics_per_axis():
-    helper = getattr(symmetry_analysis, "diagnose_k_c2yt_axis_choices", None)
+def test_k_c2t_axis_diagnostics_reports_metrics_per_axis():
+    helper = getattr(symmetry_analysis, "diagnose_k_c2t_axis_choices", None)
     assert helper is not None
 
     source_k = np.array([1.0, 0.0], dtype=float)

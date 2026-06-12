@@ -77,9 +77,9 @@ RAW_H_ACTION_RULE = "unitary: D_raw H D_raw^dagger; antiunitary: D_raw H^* D_raw
 def displayed_operation_name(name: str) -> str:
     """Return the user-facing operation symbol without provisional axis names."""
     text = str(name)
-    if text == "C2y":
+    if text == "C2":
         return "C2"
-    if text in {"K_C2yT", "K_C2T"}:
+    if text in {"K_C2T", "K_C2T"}:
         return "C2T"
     if text == "M_C2_eta":
         return "C2"
@@ -712,7 +712,7 @@ def build_m_time_reversal_g_transport(
     return transport, max_delta
 
 
-def build_k_c2yt_g_transport(
+def build_k_c2t_g_transport(
     *,
     source_g_vectors: np.ndarray,
     target_g_vectors: np.ndarray,
@@ -739,12 +739,12 @@ def build_k_c2yt_g_transport(
         if float(deltas[target_index]) > tol:
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                f"K_C2yT direct G mapping failed for source index {source_index}: min delta={deltas[target_index]:.3e}.",
+                f"K_C2T direct G mapping failed for source index {source_index}: min delta={deltas[target_index]:.3e}.",
             )
         if target_index in used_targets:
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                f"K_C2yT direct G mapping is not one-to-one; repeated target index {target_index}.",
+                f"K_C2T direct G mapping is not one-to-one; repeated target index {target_index}.",
             )
         used_targets.add(target_index)
         rows.append(target_index)
@@ -758,7 +758,7 @@ def build_k_c2yt_g_transport(
     return transport, max_delta
 
 
-def diagnose_k_c2yt_axis_choices(
+def diagnose_k_c2t_axis_choices(
     *,
     source_g_vectors: np.ndarray,
     target_g_vectors: np.ndarray,
@@ -845,7 +845,7 @@ def _diagnose_affine_g_mapping(
     }
 
 
-def diagnose_k_c2yt_center_choices(
+def diagnose_k_c2t_center_choices(
     *,
     source_g_vectors: np.ndarray,
     target_g_vectors: np.ndarray,
@@ -1138,7 +1138,7 @@ def _minimal_symmetry_candidates_for_valley(
         candidates.append(
             {
                 "index": 20,
-                "name": "K_C2yT",
+                "name": "K_C2T",
                 "antiunitary": True,
                 "rotation_cart": np.diag([-1.0, 1.0, -1.0]),
                 "translation_cart": np.zeros(3, dtype=float),
@@ -1169,7 +1169,7 @@ def _minimal_symmetry_candidates_for_valley(
         if selected_operation is not None:
             payload = {
                 "index": int(selected_operation["index"]),
-                "name": "C2y",
+                "name": "C2",
                 "antiunitary": False,
                 "rotation_frac": np.asarray(selected_operation.get("rotation_frac", np.eye(3, dtype=float)), dtype=float),
                 "translation_frac": np.asarray(selected_operation.get("translation_frac", np.zeros(3, dtype=float)), dtype=float),
@@ -1307,7 +1307,7 @@ def _candidate_spglib_index(candidate: dict[str, Any]):
         return int(candidate["spglib_layer_exchange_c2"]["index"])
     if candidate.get("spglib_m_c2_operation") is not None:
         return int(candidate["spglib_m_c2_operation"]["index"])
-    if candidate.get("name") == "C2y" and "rotation_frac" in candidate:
+    if candidate.get("name") == "C2" and "rotation_frac" in candidate:
         return int(candidate["index"])
     return ""
 
@@ -1699,7 +1699,7 @@ def _candidate_group_target_map_for_source_pin(candidate: dict[str, Any], groups
     name = str(candidate.get("name", ""))
     if name in {"E", "T", "C3z", "C3z^2"}:
         return {int(group): int(group) for group in groups}
-    if name in {"C2y", "K_C2yT", "M_C2_eta"} and set(groups) == {0, 1}:
+    if name in {"C2", "K_C2T", "M_C2_eta"} and set(groups) == {0, 1}:
         return {0: 1, 1: 0}
     return {int(group): int(group) for group in groups}
 
@@ -2394,7 +2394,7 @@ class SymmetryAnalysisRunner:
         if not removable:
             raise SymmetrySupportError(
                 "seitz_translation_unsupported",
-                f"C2y v1 requires removable Seitz translation; got translation={translation_cart.tolist()} with origin-shift residual={origin_shift_residual:.3e}.",
+                f"C2 v1 requires removable Seitz translation; got translation={translation_cart.tolist()} with origin-shift residual={origin_shift_residual:.3e}.",
             )
 
         q_target_cart = np.dot(q_target, np.asarray(self.structure.reciprocal_Tmat, dtype=float))[:2]
@@ -2403,14 +2403,14 @@ class SymmetryAnalysisRunner:
         if q_consistency >= 1.0e-8:
             raise SymmetrySupportError(
                 "q_mapping_missing",
-                f"C2y q consistency failed: ||R2y q_source - q_target||={q_consistency:.3e}.",
+                f"C2 q consistency failed: ||R2 q_source - q_target||={q_consistency:.3e}.",
             )
 
         atom_mapping = _build_atom_mapping(self.structure, candidate)
         if atom_mapping["group_target_map"] != {0: 1, 1: 0}:
             raise SymmetrySupportError(
                 "atom_mapping_missing",
-                f"C2y must exchange the two physical layers, got group_target_map={atom_mapping['group_target_map']}.",
+                f"C2 must exchange the two physical layers, got group_target_map={atom_mapping['group_target_map']}.",
             )
 
         df = self.structure.df
@@ -2493,7 +2493,7 @@ class SymmetryAnalysisRunner:
             if returned_spin_rep is None:
                 raise SymmetrySupportError(
                     "spin_lift_unsupported",
-                    "Spinful C2y did not yield a spin representation.",
+                    "Spinful C2 did not yield a spin representation.",
                 )
             transport = scipy.sparse.kron(scipy.sparse.csr_matrix(returned_spin_rep), spinless, format="csr")
             expected = -scipy.sparse.identity(transport.shape[0], dtype=np.complex128, format="csr")
@@ -2509,7 +2509,7 @@ class SymmetryAnalysisRunner:
         self._last_transport_diagnostics = diagnostics
         return transport
 
-    def _build_k_c2yt_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
+    def _build_k_c2t_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
         valley_ctx = self._valley_context_for_valley(valley)
         q_target = np.asarray(q_target, dtype=float)
         q_source = np.asarray(q_source, dtype=float)
@@ -2534,7 +2534,7 @@ class SymmetryAnalysisRunner:
             target_group = 1 - source_group
             source_g = np.asarray(valley_ctx.group_g_vectors[source_group], dtype=float)
             target_g = np.asarray(valley_ctx.group_g_vectors[target_group], dtype=float)
-            axis_diagnostics = diagnose_k_c2yt_axis_choices(
+            axis_diagnostics = diagnose_k_c2t_axis_choices(
                 source_g_vectors=source_g,
                 target_g_vectors=target_g,
                 source_k_center=np.asarray(valley_ctx.group_k_centers[source_group], dtype=float),
@@ -2548,7 +2548,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                "K_C2yT could not find a layer-exchange order-2 spatial operation from spglib.",
+                "K_C2T could not find a layer-exchange order-2 spatial operation from spglib.",
             )
 
         spglib_axis_closed = True
@@ -2562,7 +2562,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                "K_C2yT opposite-layer G mapping does not close for the spglib layer-exchange C2 axis.",
+                "K_C2T opposite-layer G mapping does not close for the spglib layer-exchange C2 axis.",
             )
 
         rotation_cart = np.asarray(spglib_operation["rotation_cart"], dtype=float)
@@ -2576,7 +2576,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "q_mapping_missing",
-                f"K_C2yT q consistency failed for spglib layer-exchange C2 axis: ||-C2 q_source - q_target||={q_consistency:.3e}.",
+                f"K_C2T q consistency failed for spglib layer-exchange C2 axis: ||-C2 q_source - q_target||={q_consistency:.3e}.",
             )
 
         atom_mapping = _build_atom_mapping(self.structure, spglib_operation)
@@ -2584,7 +2584,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "atom_mapping_missing",
-                f"K_C2yT spglib axis does not exchange the two layers: group_target_map={atom_mapping.get('group_target_map')}.",
+                f"K_C2T spglib axis does not exchange the two layers: group_target_map={atom_mapping.get('group_target_map')}.",
             )
 
         df = self.structure.df
@@ -2596,7 +2596,7 @@ class SymmetryAnalysisRunner:
             target_group = 1 - source_group
             source_g = np.asarray(valley_ctx.group_g_vectors[source_group], dtype=float)
             target_g = np.asarray(valley_ctx.group_g_vectors[target_group], dtype=float)
-            q_transport, max_delta = build_k_c2yt_g_transport(
+            q_transport, max_delta = build_k_c2t_g_transport(
                 source_g_vectors=source_g,
                 target_g_vectors=target_g,
                 source_k_center=np.asarray(valley_ctx.group_k_centers[source_group], dtype=float),
@@ -2670,7 +2670,7 @@ class SymmetryAnalysisRunner:
         self._last_transport_diagnostics = diagnostics
         return transport
 
-    def _select_k_c2yt_spatial_operation(
+    def _select_k_c2t_spatial_operation(
         self,
         valley: int,
         spatial_operations: list[dict[str, Any]],
@@ -2684,7 +2684,7 @@ class SymmetryAnalysisRunner:
         for operation in candidates:
             candidate = {
                 "index": int(operation["index"]),
-                "name": "K_C2yT",
+                "name": "K_C2T",
                 "antiunitary": True,
                 "closed": True,
                 "rotation_frac": np.asarray(operation.get("rotation_frac", np.eye(3, dtype=float)), dtype=float),
@@ -2695,7 +2695,7 @@ class SymmetryAnalysisRunner:
                 "spglib_layer_exchange_c2": operation,
             }
             try:
-                transport = self._build_k_c2yt_transport(candidate, valley, q0, q0)
+                transport = self._build_k_c2t_transport(candidate, valley, q0, q0)
                 diagnostics = dict(getattr(self, "_last_transport_diagnostics", {}) or {})
                 if h0 is None:
                     h0, _ = self._raw_projected_hs(valley, q0)
@@ -2729,7 +2729,7 @@ class SymmetryAnalysisRunner:
                     }
                 )
 
-        self._last_k_c2yt_operation_scan = scan
+        self._last_k_c2t_operation_scan = scan
         if best is None:
             return None
         return best[1]
@@ -3154,8 +3154,8 @@ class SymmetryAnalysisRunner:
             self._transport_cache[cache_key] = transport
             return transport
 
-        if candidate.get("name") == "K_C2yT" and candidate.get("antiunitary", False):
-            transport = self._build_k_c2yt_transport(candidate, valley, q_target, q_source)
+        if candidate.get("name") == "K_C2T" and candidate.get("antiunitary", False):
+            transport = self._build_k_c2t_transport(candidate, valley, q_target, q_source)
             self._transport_cache[cache_key] = transport
             return transport
 
@@ -3165,7 +3165,7 @@ class SymmetryAnalysisRunner:
             self._transport_cache[cache_key] = generic_transport
             return generic_transport
 
-        if not candidate.get("antiunitary", False) and candidate.get("name") == "C2y":
+        if not candidate.get("antiunitary", False) and candidate.get("name") == "C2":
             transport = self._build_gamma_c2y_transport(candidate, valley, q_target, q_source)
             self._transport_cache[cache_key] = transport
             return transport
@@ -3178,7 +3178,7 @@ class SymmetryAnalysisRunner:
         if not candidate.get("antiunitary", False) and str(candidate.get("name", "")).startswith("C2(axis="):
             raise SymmetrySupportError(
                 "atom_mapping_missing",
-                f"Generic C2 transport is disabled; only the dedicated Gamma C2y path is enabled.",
+                f"Generic C2 transport is disabled; only the dedicated Gamma C2 path is enabled.",
             )
 
         raise SymmetrySupportError(
@@ -3591,8 +3591,8 @@ class SymmetryAnalysisRunner:
                 candidate = dict(candidate)
                 candidate["index"] = int(candidate["index"])
                 candidate["spatial_operations"] = spatial_operations
-                if candidate["name"] == "K_C2yT":
-                    spglib_c2 = self._select_k_c2yt_spatial_operation(
+                if candidate["name"] == "K_C2T":
+                    spglib_c2 = self._select_k_c2t_spatial_operation(
                         int(valley),
                         spatial_operations,
                         tolerance,
@@ -3602,7 +3602,7 @@ class SymmetryAnalysisRunner:
                             self.structure,
                             spatial_operations,
                         )
-                    candidate["k_c2yt_operation_scan"] = list(getattr(self, "_last_k_c2yt_operation_scan", []) or [])
+                    candidate["k_c2t_operation_scan"] = list(getattr(self, "_last_k_c2t_operation_scan", []) or [])
                     candidate["spglib_layer_exchange_c2"] = spglib_c2
                     if spglib_c2 is not None:
                         candidate["rotation_frac"] = np.asarray(spglib_c2["rotation_frac"], dtype=float)
@@ -3641,7 +3641,7 @@ class SymmetryAnalysisRunner:
                             dtype=float,
                         )
                         candidate["translation_cart"] = np.asarray(resolved_symmetry.translation_cart, dtype=float)
-                if candidate["name"] in {"K_C2yT", "M_C2_eta"}:
+                if candidate["name"] in {"K_C2T", "M_C2_eta"}:
                     candidate["closed"] = True
                     candidate["closure_reason"] = ""
                     candidate["reciprocal_shift"] = np.zeros(2, dtype=int)

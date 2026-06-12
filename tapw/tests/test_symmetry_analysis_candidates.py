@@ -105,8 +105,8 @@ def test_minimal_symmetry_candidates_include_only_gamma_c2y_without_duplicates()
     assert "T" in names
     assert "C3z" in names
     assert "C3z^2" in names
-    assert "C2y" in names
-    assert names.count("C2y") == 1
+    assert "C2" in names
+    assert names.count("C2") == 1
     assert all(not name.startswith("C2(") for name in names)
 
 
@@ -129,7 +129,7 @@ def test_minimal_symmetry_candidates_do_not_add_c2_for_non_gamma_valley():
     candidates = helper(valley_ctx, "hex", spatial_operations=operations, structure=object())
     names = [candidate["name"] for candidate in candidates]
 
-    assert "C2y" not in names
+    assert "C2" not in names
 
 
 def test_minimal_symmetry_candidates_include_generic_layer_exchange_c2_for_gamma(monkeypatch):
@@ -176,13 +176,13 @@ def test_minimal_symmetry_candidates_include_generic_layer_exchange_c2_for_gamma
     monkeypatch.setattr(symmetry_analysis, "_build_atom_mapping", fake_atom_mapping)
 
     candidates = helper(valley_ctx, "hex", spatial_operations=operations, structure=object())
-    c2_candidates = [candidate for candidate in candidates if candidate["name"] == "C2y"]
+    c2_candidates = [candidate for candidate in candidates if candidate["name"] == "C2"]
 
     assert len(c2_candidates) == 1
     assert int(c2_candidates[0]["index"]) == 23
 
 
-def test_minimal_symmetry_candidates_include_named_k_c2yt_for_k_valley():
+def test_minimal_symmetry_candidates_include_named_k_c2t_for_k_valley():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -193,7 +193,7 @@ def test_minimal_symmetry_candidates_include_named_k_c2yt_for_k_valley():
     candidates = helper(valley_ctx, "hex", spatial_operations=[])
     names = [candidate["name"] for candidate in candidates]
 
-    assert "K_C2yT" in names
+    assert "K_C2T" in names
 
 
 def test_minimal_symmetry_candidates_include_c3_for_supported_k_valley():

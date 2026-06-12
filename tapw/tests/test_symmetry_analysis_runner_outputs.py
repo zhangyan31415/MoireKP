@@ -423,8 +423,7 @@ def test_summary_markdown_uses_c2_display_name_axis_angle_and_generators(tmp_pat
         }
     )
     text = "\n".join(lines)
-    assert "C2y" not in text
-    assert "K_C2yT" not in text
+    assert "K_C2T" not in text
     assert "C2 (axis 30deg)" in text
     assert "C2T (axis 60deg)" in text
     assert "Minimal generators:" in text
@@ -432,9 +431,8 @@ def test_summary_markdown_uses_c2_display_name_axis_angle_and_generators(tmp_pat
     assert "- K1: C2T" in text
 
 
-def test_displayed_operation_name_removes_c2y_axis_suffix():
-    assert symmetry_analysis.displayed_operation_name("C2y") == "C2"
-    assert symmetry_analysis.displayed_operation_name("K_C2yT") == "C2T"
+def test_displayed_operation_name_maps_internal_effective_names_to_family_names():
+    assert symmetry_analysis.displayed_operation_name("C2") == "C2"
     assert symmetry_analysis.displayed_operation_name("K_C2T") == "C2T"
     assert symmetry_analysis.displayed_operation_name("M_C2_eta") == "C2"
 
