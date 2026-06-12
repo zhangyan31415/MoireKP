@@ -972,9 +972,9 @@ class OrbitalAnalyzer:
             print(f"\n轨道分析完成！结果保存在: {self.config.output_dir}")
 
 
-def main():
+def main(argv=None, *, prog=None):
     """轨道分析工具主函数"""
-    parser = argparse.ArgumentParser(description='TAPW 轨道成分分析工具')
+    parser = argparse.ArgumentParser(prog=prog, description='TAPW 轨道成分分析工具')
     parser.add_argument('result_dir', nargs="?", type=str, default=".", help='TAPW计算结果目录')
     parser.add_argument('--config', '-c', type=str, required=True,
                         help='TAPW配置文件路径 (config.yaml)')
@@ -991,7 +991,7 @@ def main():
     parser.add_argument('--quiet', '-q', action='store_true',
                         help='静默模式，减少输出信息')
     
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     config = OrbitalAnalysisConfig(
         config_file=args.config,

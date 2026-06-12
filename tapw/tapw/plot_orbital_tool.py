@@ -1706,9 +1706,9 @@ class OrbitalPlotter:
         return 0
 
 
-def main():
+def main(argv=None, *, prog=None):
     """主函数"""
-    parser = argparse.ArgumentParser(description="TAPW轨道成分能带绘图工具")
+    parser = argparse.ArgumentParser(prog=prog, description="TAPW轨道成分能带绘图工具")
     parser.add_argument("result_dir", nargs="?", default=".", help="结果目录路径")
     parser.add_argument("--config", default="config.yaml", help="配置文件路径")
     parser.add_argument("--valley", default="Gamma", help="谷标识 (default: Gamma)")
@@ -1731,7 +1731,7 @@ def main():
     parser.add_argument("--kpath-out", type=str, help="KPATH.out文件路径（用于k点坐标）")
     parser.add_argument("--no-kpath", action="store_true", help="禁用自动检测k路径文件")
     
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     # 解析参数
     energy_window = tuple(args.energy_window)

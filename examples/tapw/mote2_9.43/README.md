@@ -7,8 +7,8 @@ not intended for source distribution.
 Run from this directory:
 
 ```bash
-tapw-calc --config configs/mote2_k_tapw.yaml
-tapw-calc --config configs/mote2_direct.yaml
+tapw calc --config configs/mote2_k_tapw.yaml
+tapw calc --config configs/mote2_direct.yaml
 ```
 
 The TAPW config evaluates the K1 valley. The direct config runs the non-TAPW

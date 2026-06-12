@@ -40,9 +40,12 @@ def setup_logging(log_file: str = None):
     )
     return logging.getLogger(__name__)
 
-def parse_args():
-    """Parse command line arguments"""
-    parser = argparse.ArgumentParser(description='Twisted Material Band Structure Calculator')
+def build_calc_parser(prog: str = None):
+    """Build the TAPW calculation parser used by both tapw calc and tapw-calc."""
+    parser = argparse.ArgumentParser(
+        prog=prog,
+        description='Twisted Material Band Structure Calculator',
+    )
     parser.add_argument('--config', type=str, default='config.yaml',
                        help='Path to configuration file')
     parser.add_argument('--twist-index', type=int,
@@ -77,7 +80,12 @@ def parse_args():
                        help='0-based chunk id for job-array sharding (overrides config file)')
     parser.add_argument('--kpoint_chunk_count', type=int,
                        help='Total chunk count for job-array sharding (overrides config file)')
-    return parser.parse_args()
+    return parser
+
+
+def parse_args(argv=None):
+    """Parse command line arguments"""
+    return build_calc_parser().parse_args(argv)
 
 
 def can_reuse_m_valley_c3_band_outputs(compute_cfg) -> bool:
@@ -136,10 +144,8 @@ def copy_reused_m_valley_band_outputs(qshell_path: Path, source_valley_flag: str
         )
         shutil.copy2(source, band_dir / target_name)
 
-def main():
+def run_calc(args):
     """Main program"""
-    # Parse arguments and load configuration
-    args = parse_args()
     config = Config.from_yaml(args.config)
 
     mpi_rank, mpi_size = _mpi_world_rank_size()
@@ -379,5 +385,106 @@ def main():
     logger.info("Calculation completed successfully")
     exit_cli(0)
 
+
+def main_calc(argv=None):
+    """Run the TAPW calculator entry point."""
+    return run_calc(build_calc_parser(prog="tapw calc").parse_args(argv))
+
+
+def build_main_parser():
+    """Build the unified TAPW command dispatcher parser."""
+    parser = argparse.ArgumentParser(
+        prog="tapw",
+        description="Unified TAPW command line interface",
+    )
+    subparsers = parser.add_subparsers(dest="command", metavar="command")
+    subparsers.add_parser("config", help="Generate TAPW configuration files")
+    subparsers.add_parser("calc", help="Run TAPW band, Chern, or symmetry calculations")
+    subparsers.add_parser("plot", help="Plot TAPW band structures")
+    subparsers.add_parser("chern-post", help="Post-process TAPW Chern/Wilson-loop outputs")
+    orbital = subparsers.add_parser("orbital", help="Analyze or plot TAPW orbital weights")
+    orbital_subparsers = orbital.add_subparsers(dest="orbital_command", metavar="command")
+    orbital_subparsers.add_parser("analyze", help="Analyze orbital weights")
+    orbital_subparsers.add_parser("plot", help="Plot orbital-weighted bands")
+    return parser
+
+
+def _main_orbital(argv):
+    if not argv or argv[0] in ("-h", "--help"):
+        parser = build_main_parser()
+        parser.parse_args(["orbital"] + list(argv))
+        return 0
+
+    command, rest = argv[0], argv[1:]
+    if command == "analyze":
+        from . import orbital_analysis_tool
+
+        return orbital_analysis_tool.main(rest, prog="tapw orbital analyze")
+    if command == "plot":
+        from . import plot_orbital_tool
+
+        return plot_orbital_tool.main(rest, prog="tapw orbital plot")
+
+    parser = build_main_parser()
+    parser.parse_args(["orbital"] + list(argv))
+    return None
+
+
+def main(argv=None):
+    """Unified TAPW command dispatcher."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    program = Path(sys.argv[0]).name
+
+    if program == "tapw-calc":
+        return main_calc(argv)
+    if program == "tapw-config":
+        from . import config_generator
+
+        return config_generator.main(argv)
+    if program == "tapw-plot":
+        from . import plot_band_01
+
+        return plot_band_01.main(argv)
+    if program == "tapw-chernpost":
+        from . import chern_post
+
+        return chern_post.main(argv)
+    if program == "tapw-orbital":
+        from . import orbital_analysis_tool
+
+        return orbital_analysis_tool.main(argv)
+    if program == "tapw-plot-orbital":
+        from . import plot_orbital_tool
+
+        return plot_orbital_tool.main(argv)
+
+    if not argv:
+        parser = build_main_parser()
+        parser.print_help()
+        return 0
+    if argv[0] in ("-h", "--help"):
+        build_main_parser().parse_args(argv)
+
+    command, rest = argv[0], argv[1:]
+    if command == "config":
+        from . import config_generator
+
+        return config_generator.main(rest, prog="tapw config")
+    if command == "calc":
+        return main_calc(rest)
+    if command == "plot":
+        from . import plot_band_01
+
+        return plot_band_01.main(rest, prog="tapw plot")
+    if command == "chern-post":
+        from . import chern_post
+
+        return chern_post.main(rest, prog="tapw chern-post")
+    if command == "orbital":
+        return _main_orbital(rest)
+
+    build_main_parser().parse_args(argv)
+    return None
+
 if __name__ == "__main__":
-    main() 
+    main()

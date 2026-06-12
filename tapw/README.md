@@ -26,7 +26,7 @@ The root environment includes `mpi4py`, `petsc4py`, `slepc4py`, and editable ins
 Create a starter TAPW working directory:
 
 ```bash
-tapw-config -o output_dir
+tapw config -o output_dir
 ```
 
 Edit `output_dir/config.yaml` and `output_dir/bands.yaml`, especially the paths to `H.dat`, `S.dat`, and `openmx.dat`.
@@ -35,14 +35,14 @@ Run a band calculation:
 
 ```bash
 cd output_dir
-tapw-calc --config config.yaml
+tapw calc --config config.yaml
 ```
 
 Plot the generated bands:
 
 ```bash
 cd output_dir/Q_shell_{n_g}/band
-tapw-plot --config ../../bands.yaml
+tapw plot --config ../../bands.yaml
 ```
 
 Legacy outputs may use `band_data/` instead of `band/`.
@@ -51,18 +51,20 @@ Legacy outputs may use `band_data/` instead of `band/`.
 
 ```bash
 cd output_dir
-tapw-calc --config config.yaml --mode chern --n_g 4 --num_processes 100 --num_chern 20
+tapw calc --config config.yaml --mode chern --n_g 4 --num_processes 100 --num_chern 20
 cd output_dir/Q_shell_{n_g}
-tapw-chernpost --config config.yaml -b -1,-2 -v 1 > tapw_chern.log
+tapw chern-post --config config.yaml -b -1 -2 -v 1 > tapw_chern.log
 ```
 
 ## Orbital Analysis
 
 ```bash
 cd output_dir/Q_shell_{n_g}
-tapw-orbital . --config ../config.yaml --valley Gamma --band CBM
-tapw-plot-orbital . --valley Gamma --band CBM --orbital-dir orbital_analysis --output-dir orbital_plots
+tapw orbital analyze . --config ../config.yaml --valley Gamma --band CBM
+tapw orbital plot . --valley Gamma --band CBM --orbital-dir orbital_analysis --output-dir orbital_plots
 ```
+
+Legacy aliases remain supported for existing scripts: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 
 ## Examples
 

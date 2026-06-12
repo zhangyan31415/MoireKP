@@ -1,4 +1,7 @@
 # Python
+/build/
+/dist/
+/*.egg-info/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -19,6 +22,10 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
+
+# Root generated runtime outputs
+/runs/
+/results/
 
 # IDE
 .idea/

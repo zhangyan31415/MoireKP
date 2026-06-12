@@ -894,11 +894,48 @@ def _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2,
     return None
 
 
-def main():
-    parser = argparse.ArgumentParser(description="TAPW Chern number, Wilson-loop, and QGT post-processing")
+def _expand_comma_band_tokens(argv):
+    if argv is None:
+        return None
+    expanded = []
+    band_option_pending = False
+    for token in argv:
+        if band_option_pending and "," in token:
+            expanded.extend(part for part in token.split(",") if part)
+            band_option_pending = False
+            continue
+        expanded.append(token)
+        band_option_pending = token in {"-b", "--band", "-wb", "--wcc-bands"}
+    return expanded
+
+
+class ChernPostArgumentParser(argparse.ArgumentParser):
+    def parse_args(self, args=None, namespace=None):
+        if args is None:
+            args = sys.argv[1:]
+        return super().parse_args(_expand_comma_band_tokens(args), namespace)
+
+
+def build_parser(*, prog=None):
+    parser = ChernPostArgumentParser(
+        prog=prog,
+        description="TAPW Chern number, Wilson-loop, and QGT post-processing",
+    )
     parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
-    parser.add_argument("-b", "--band", type=int, nargs="+", help="Band index list for Berry/QGT outputs")
-    parser.add_argument("-wb", "--wcc-bands", type=int, nargs="+", help="Band index list for WCC")
+    parser.add_argument(
+        "-b",
+        "--band",
+        type=int,
+        nargs="+",
+        help="Band index list for Berry/QGT outputs, e.g. -b -1 -2 or -b -1,-2",
+    )
+    parser.add_argument(
+        "-wb",
+        "--wcc-bands",
+        type=int,
+        nargs="+",
+        help="Band index list for WCC, e.g. -wb -1 -2 or -wb -1,-2",
+    )
     parser.add_argument(
         "-wd",
         "--wcc-direction",
@@ -916,7 +953,12 @@ def main():
         help="Valley number (1:K1, 2:K2, 5:Gamma, 11:K1_120, 12:K1_240, 31:M1, 32:M2, 33:M3)",
     )
     parser.add_argument("-bt", "--band-type", type=str, default="VBM", help="Band type (default: VBM)")
-    args = parser.parse_args()
+    return parser
+
+
+def main(argv=None, *, prog=None):
+    parser = build_parser(prog=prog)
+    args = parser.parse_args(argv)
 
     if not args.band and not args.wcc_bands:
         parser.error("No action requested, add --band or --wcc-bands")

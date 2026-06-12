@@ -178,14 +178,14 @@ def generate_config(output_dir='.', use_logical_path=True):
     # os.makedirs(os.path.join(output_dir, 'output'), exist_ok=True)
     # print(f"  + output/ directory created")
 
-def main():
-    parser = argparse.ArgumentParser(description='Generate TAPW configuration files')
+def main(argv=None, *, prog=None):
+    parser = argparse.ArgumentParser(prog=prog, description='Generate TAPW configuration files')
     parser.add_argument('-o', '--output', default='./output',
                       help='Output directory for configuration files (default: current directory)')
     parser.add_argument('-P', '--physical-path', action='store_true',
                       help='Use physical path (resolve symlinks) instead of logical path')
 
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     generate_config(args.output, not args.physical_path)
 
 if __name__ == '__main__':

@@ -7,8 +7,8 @@ not intended for source distribution.
 Run from this directory:
 
 ```bash
-tapw-calc --config configs/mgi2_m_gamma_tapw.yaml
-tapw-calc --config configs/mgi2_direct.yaml
+tapw calc --config configs/mgi2_m_gamma_tapw.yaml
+tapw calc --config configs/mgi2_direct.yaml
 ```
 
 The TAPW config evaluates M1 and Gamma valleys. The direct config runs the

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+import subprocess
 from pathlib import Path
 
 import yaml
@@ -24,9 +26,57 @@ FORBIDDEN_README_TERMS = [
     "tapw_mkl",
 ]
 
+FORBIDDEN_TRACKED_PATTERNS = re.compile(
+    r"(^dist/|"
+    r"egg-info|"
+    r"__pycache__|"
+    r"\.pyc$|"
+    r"^runs/|"
+    r"^results/|"
+    r"examples/.*/runs/|"
+    r"examples/.*/outputs/|"
+    r"H\.npz$|"
+    r"S\.npz$|"
+    r"openmx\.out$)"
+)
+
+REQUIRED_GITIGNORE_RULES = [
+    "/runs/",
+    "/results/",
+    "/build/",
+    "/dist/",
+    "/*.egg-info/",
+]
+
 
 def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
+
+
+def test_release_contract_blocks_tracked_generated_artifacts() -> None:
+    tracked_files = subprocess.run(
+        ["git", "ls-files"],
+        check=True,
+        cwd=ROOT,
+        text=True,
+        capture_output=True,
+    ).stdout.splitlines()
+
+    forbidden_files = [
+        path for path in tracked_files if FORBIDDEN_TRACKED_PATTERNS.search(path)
+    ]
+
+    assert forbidden_files == []
+
+
+def test_release_gitignore_declares_root_generated_directories() -> None:
+    gitignore = set(_read(ROOT / ".gitignore").splitlines())
+
+    missing_rules = [
+        rule for rule in REQUIRED_GITIGNORE_RULES if rule not in gitignore
+    ]
+
+    assert missing_rules == []
 
 
 def test_release_readmes_are_public_facing() -> None:

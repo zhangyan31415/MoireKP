@@ -4,6 +4,10 @@ This directory contains release-facing examples. Examples are grouped by
 material and twist angle so the TAPW inputs/outputs and downstream KP configs
 stay together.
 
+For the release checkout, examples are versioned as configs plus an external
+data manifest. `runs/` and `outputs/` directories under `examples/` are local
+generated artifacts and must not be committed.
+
 Dataset provenance for release-facing examples is tracked in
 `examples/data-manifest.yaml`. The release cannot be archived until the manifest
 has resolved license, DOI, and public data URL metadata.

@@ -360,8 +360,8 @@ def plot_bands(config: PlotConfig):
     else:
         plt.show()
 
-def main():
-    parser = argparse.ArgumentParser(description='Plot band structure')
+def main(argv=None, *, prog=None):
+    parser = argparse.ArgumentParser(prog=prog, description='Plot band structure')
     parser.add_argument('--config', type=str, help='YAML config file')
     parser.add_argument('--kpath-in', type=str, help='KPATH.in file')
     parser.add_argument('--kpath-out', type=str, help='KPATH.out file')
@@ -382,7 +382,7 @@ def main():
     parser.add_argument('--no-fermi-line', action='store_true',
                        help='Do not plot the Fermi level line')
     
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     
     if args.config:
         # 从YAML读取配置
@@ -426,8 +426,8 @@ def main():
             kpath_out=args.kpath_out,
             bands=bands,
             title=args.title,
-            ymin=args.yrange[0] if args.yrange else None,
-            ymax=args.yrange[1] if args.yrange else None,
+            ymin=args.energy_range[0] if args.energy_range else None,
+            ymax=args.energy_range[1] if args.energy_range else None,
             output=args.output,
             global_plot_type=args.plot_type,
             fermi_energy=args.fermi,

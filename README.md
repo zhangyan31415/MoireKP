@@ -22,7 +22,8 @@ The environment file installs the package in editable mode with `python -m pip i
 
 ```bash
 python -m pytest tests/test_release_contract.py -q
-tapw-config -h
+tapw --help
+tapw config --help
 kp --help
 ```
 
@@ -31,18 +32,20 @@ kp --help
 Generate starter configuration files:
 
 ```bash
-tapw-config -o output_dir
+tapw config -o output_dir
 ```
 
 Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the required OpenMX-derived input files, then run:
 
 ```bash
 cd output_dir
-tapw-calc --config config.yaml
-tapw-plot --config bands.yaml
+tapw calc --config config.yaml
+tapw plot --config bands.yaml
 ```
 
-For Chern-number post-processing, run `tapw-calc` with a Chern configuration and then use `tapw-chernpost` in the generated `Q_shell_*` directory.
+For Chern-number post-processing, run `tapw calc` with a Chern configuration and then use `tapw chern-post` in the generated `Q_shell_*` directory.
+
+Legacy TAPW aliases remain available for existing scripts: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 
 ## Continuum-Model Workflow
 

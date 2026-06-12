@@ -31,12 +31,13 @@ slepc = [
 
 [project.scripts]
 kp = "kp.cli:main"
+tapw = "tapw.cli:main"
 tapw-calc = "tapw.cli:main"
-tapw-plot = "tapw.plot_band_01:main"
-tapw-config = "tapw.config_generator:main"
-tapw-chernpost = "tapw.chern_post:main"
-tapw-orbital = "tapw.orbital_analysis_tool:main"
-tapw-plot-orbital = "tapw.plot_orbital_tool:main"
+tapw-plot = "tapw.cli:main"
+tapw-config = "tapw.cli:main"
+tapw-chernpost = "tapw.cli:main"
+tapw-orbital = "tapw.cli:main"
+tapw-plot-orbital = "tapw.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["kp", "tapw"]
