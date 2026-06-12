@@ -16,9 +16,7 @@ paths:
 compute:
   mode: band
   TAPW: false
-  valleys: [1]
   efermi: -4.093002
-  n_g: 20
   num_processes: 61
   blas_threads: 0
   num_bands_cal: 20

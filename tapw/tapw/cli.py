@@ -87,6 +87,8 @@ def can_reuse_m_valley_c3_band_outputs(compute_cfg) -> bool:
 
 
 def resolve_qshell_dir_name(compute_cfg, calculator) -> str:
+    if not bool(getattr(compute_cfg, "TAPW", True)):
+        return "direct"
     qshell_name = f"Q_shell_{compute_cfg.n_g}"
     uses_symm = bool(
         getattr(calculator, "use_M_valley_threefold_symm", False)
@@ -95,6 +97,28 @@ def resolve_qshell_dir_name(compute_cfg, calculator) -> str:
     if uses_symm:
         return qshell_name + "_symm"
     return qshell_name
+
+
+def calculation_targets(compute_cfg) -> list:
+    if not bool(getattr(compute_cfg, "TAPW", True)):
+        return [None]
+    return list(getattr(compute_cfg, "valleys", []))
+
+
+def shutdown_parallel_runtime() -> None:
+    try:
+        from joblib.externals.loky import get_reusable_executor
+    except Exception:
+        return
+    get_reusable_executor().shutdown(wait=False, kill_workers=True)
+
+
+def exit_cli(code: int) -> None:
+    shutdown_parallel_runtime()
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(int(code))
 
 
 def copy_reused_m_valley_band_outputs(qshell_path: Path, source_valley_flag: str, target_valley_flag: str) -> None:
@@ -166,9 +190,12 @@ def main():
     logger.info("Starting calculation with configuration:")
     logger.info(f"Twist index: {config.twist.twist_index_m}")
     logger.info(f"Output directory: {config.paths.output_dir}")
-    logger.info(f"Valleys to calculate: {config.compute.valleys}")
     logger.info(f"Calculation mode: {config.compute.mode}")
-    logger.info(f"Harmonic of G vectors: {config.compute.n_g}")
+    if config.compute.TAPW:
+        logger.info(f"Valleys to calculate: {config.compute.valleys}")
+        logger.info(f"Harmonic of G vectors: {config.compute.n_g}")
+    else:
+        logger.info("Basis: non-TAPW full-space generalized eigenproblem")
     if config.compute.mode == "chern":
         num_k1, num_k2 = config.compute.get_chern_grid_shape()
         logger.info(f"Number of k-points for Chern number calculation: {num_k1}x{num_k2}")
@@ -284,17 +311,21 @@ def main():
         reused_reference_valley_flag = None
         reusable_m_valley_calculator = None
 
-        # Calculate for each valley
-        for valley in config.compute.valleys:
-            logger.info(f"Starting calculation for valley {valley}")
-            config.compute.valley = valley
+        # TAPW projects around configured valleys. non-TAPW solves the full-space
+        # generalized problem once; valley and n_g are not part of that basis.
+        for target in calculation_targets(config.compute):
+            if target is None:
+                logger.info("Starting non-TAPW direct calculation")
+            else:
+                logger.info(f"Starting calculation for valley {target}")
+                config.compute.valley = target
             
             if reusable_m_valley_calculator is not None:
-                reusable_m_valley_calculator.switch_m_valley(valley)
+                reusable_m_valley_calculator.switch_m_valley(target)
                 calculator = reusable_m_valley_calculator
                 logger.info(
                     "Reusing initialized M-valley symmetry state for valley %s",
-                    valley,
+                    target,
                 )
             else:
                 calculator = BandStructureCalculator(
@@ -319,12 +350,15 @@ def main():
                 )
                 logger.info(
                     "Reused M-valley C3-only band outputs for valley %s from reference valley flag %s",
-                    valley,
+                    target,
                     reused_reference_valley_flag,
                 )
             else:
                 calculator.run_calculation(str(out_path))
-                logger.info(f"Completed calculation for valley {valley}")
+                if target is None:
+                    logger.info("Completed non-TAPW direct calculation")
+                else:
+                    logger.info(f"Completed calculation for valley {target}")
                 if reuse_m_valley_band_outputs and getattr(calculator, "use_M_valley_threefold_symm", False):
                     reused_reference_valley_flag = calculator.valley_flag
 
@@ -340,9 +374,10 @@ def main():
 
     except Exception as e:
         logger.error(f"Error during calculation: {str(e)}", exc_info=True)
-        sys.exit(1)
+        exit_cli(1)
 
     logger.info("Calculation completed successfully")
+    exit_cli(0)
 
 if __name__ == "__main__":
     main() 

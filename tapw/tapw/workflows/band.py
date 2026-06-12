@@ -74,6 +74,22 @@ _M_VALLEY_ROTATIONS = {31: 0, 32: 120, 33: 240}
 _SIGMA_Y = np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128)
 
 
+def band_output_filename(kind: str, *, valley_flag: str, suffix: str = "", tapw: bool = True) -> str:
+    kind = str(kind).upper()
+    suffix = str(suffix)
+    if tapw:
+        return f"band_{kind}_{valley_flag}_valley{suffix}.txt"
+    return f"band_{kind}{suffix}.txt"
+
+
+def array_output_filename(kind: str, *, valley_flag: str, suffix: str = "", tapw: bool = True) -> str:
+    kind = str(kind).upper()
+    suffix = str(suffix)
+    if tapw:
+        return f"{kind}_{valley_flag}_valley{suffix}.npy"
+    return f"{kind}{suffix}.npy"
+
+
 def uses_m_valley_threefold_symmetrization(config: ComputeConfig) -> bool:
     bravais = getattr(config, "bravais", "hex")
     return bool(
@@ -3150,11 +3166,17 @@ class BandStructureCalculator:
             vbm_mm = None
             cbm_mm = None
             if want_vbm and vbm.shape[1] > 0:
-                vbm_path = os.path.join(out_path, f"vec_VBM_{self.valley_flag}_valley{suffix}.npy")
+                vbm_path = os.path.join(
+                    out_path,
+                    array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                )
                 _ensure_memmap_file(vbm_path, np.complex128, (energies.shape[0], vec_data.shape[1], vbm.shape[1]))
                 vbm_mm = open_memmap(vbm_path, mode="r+")
             if want_cbm and cbm.shape[1] > 0:
-                cbm_path = os.path.join(out_path, f"vec_CBM_{self.valley_flag}_valley{suffix}.npy")
+                cbm_path = os.path.join(
+                    out_path,
+                    array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                )
                 _ensure_memmap_file(cbm_path, np.complex128, (energies.shape[0], vec_data.shape[1], cbm.shape[1]))
                 cbm_mm = open_memmap(cbm_path, mode="r+")
 
@@ -3183,24 +3205,54 @@ class BandStructureCalculator:
         
         # Save VBM data if exists
         if want_vbm and vbm.size > 0:
-            np.savetxt(os.path.join(out_path, f"band_VBM_{self.valley_flag}_valley{suffix}.txt"),
-                      vbm, fmt='%15.11f')
+            np.savetxt(
+                os.path.join(
+                    out_path,
+                    band_output_filename("VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                ),
+                vbm,
+                fmt='%15.11f',
+            )
         
         # Save CBM data if exists  
         if want_cbm and cbm.size > 0:
-            np.savetxt(os.path.join(out_path, f"band_CBM_{self.valley_flag}_valley{suffix}.txt"),
-                      cbm, fmt='%15.11f')
+            np.savetxt(
+                os.path.join(
+                    out_path,
+                    band_output_filename("CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                ),
+                cbm,
+                fmt='%15.11f',
+            )
         
         # Save eigenvectors if calculated
         if self.config.eig_vec_cal:
             if want_vbm and vbm_vecs is not None and vbm_vecs.size > 0:
-                np.save(os.path.join(out_path, f"vec_VBM_{self.valley_flag}_valley{suffix}"), vbm_vecs)
+                np.save(
+                    os.path.join(
+                        out_path,
+                        array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    ),
+                    vbm_vecs,
+                )
             if want_cbm and cbm_vecs is not None and cbm_vecs.size > 0:
-                np.save(os.path.join(out_path, f"vec_CBM_{self.valley_flag}_valley{suffix}"), cbm_vecs)
+                np.save(
+                    os.path.join(
+                        out_path,
+                        array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    ),
+                    cbm_vecs,
+                )
         
         # Save Hamiltonian if requested
         if self.config.hamk_save:
-            np.save(os.path.join(out_path, f"hamk_{self.valley_flag}_valley{suffix}"), self.result['hamk'])
+            np.save(
+                os.path.join(
+                    out_path,
+                    array_output_filename("hamk", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                ),
+                self.result['hamk'],
+            )
 
     def calculate_chern(self, path):
         """Calculate Chern number using uniform k-point mesh

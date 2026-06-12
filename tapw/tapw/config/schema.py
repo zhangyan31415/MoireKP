@@ -126,7 +126,7 @@ class ComputeConfig:
     blas_threads: int = 1  # BLAS/OpenMP threads per worker; 0 leaves thread pools unrestricted.
     parallel_impl: str = "joblib"  # "joblib" or "mp"
     parallel_backend: str = "loky"  # joblib backend: "loky" (spawn) or "multiprocessing" (fork on Linux)
-    tapw_auto_fork: bool = False  # Opt-in: for TAPW on POSIX, upgrade default joblib/loky k-loop to mp/fork.
+    tapw_auto_fork: bool = False  # Optional: for TAPW on POSIX, upgrade default joblib/loky k-loop to mp/fork.
     vec_store: str = "memory"  # "memory" or "memmap" (recommended for large k-mesh + wavefunctions)
     memmap_dir: Optional[str] = None  # If set, store memmap outputs here; otherwise use output path
     kpoint_chunk_id: int = 0  # For job-array sharding: 0-based chunk index
@@ -207,6 +207,10 @@ class ComputeConfig:
                 f"Invalid eigensolver={self.eigensolver!r}. Must be one of {sorted(allowed_eigensolver)}"
             )
         if not self.TAPW:
+            if not self.ge:
+                raise ValueError("non-TAPW band calculations require ge=true.")
+            if self.eig_vec_cal:
+                raise ValueError("non-TAPW band calculations currently require eig_vec_cal=false.")
             if self.eigensolver == "slepc":
                 allowed_slepc_comm = {"self", "world"}
                 if self.slepc_comm not in allowed_slepc_comm:
@@ -221,9 +225,6 @@ class ComputeConfig:
                         "eigensolver='slepc' requires parallel_impl='joblib' and parallel_backend='loky' "
                         "(spawn). Do not use multiprocessing/fork with MPI libraries."
                     )
-                if self.eig_vec_cal:
-                    raise ValueError("eigensolver='slepc' currently supports eig_vec_cal=false only.")
-
                 if self.slepc_comm == "world":
                     # In COMM_WORLD mode we expect the user to launch with MPI (srun/mpiexec -n N).
                     # Do not also spawn local workers or do k-point chunking; it can deadlock or duplicate work.
@@ -313,8 +314,9 @@ class Config:
         )
         # Propagate twist bravais to compute for downstream logic
         config_obj.compute.bravais = config_obj.twist.bravais
-        # 如果config.yaml没有n_g字段，则自动调用update_ng
-        if 'n_g' not in config_dict.get('compute', {}):
+        # n_g controls the TAPW projected basis only. Direct non-TAPW solves do
+        # not use it and should not require twist-angle based inference.
+        if 'n_g' not in config_dict.get('compute', {}) and config_obj.compute.TAPW:
             config_obj.update_ng()
         return config_obj
 
