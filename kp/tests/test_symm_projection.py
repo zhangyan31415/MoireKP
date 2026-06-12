@@ -13,7 +13,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.cli as cli
 from kp.model.symmetry import load_symmetry_source
-from kp.symmetry.project import (
+from kp.symmetry.projection import (
     _build_action_representation,
     _gamma_c2_action_audit,
     _model_action_metadata,

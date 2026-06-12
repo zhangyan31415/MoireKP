@@ -17,7 +17,7 @@ from kp.model.pipeline import (
     _symmetry_operation_index,
 )
 from kp.model.symmetry import MatrixSymmetryGenerator, load_symmetry_source
-from kp.symmetry.project import (
+from kp.symmetry.projection import (
     _action_candidates_from_model_action,
     _model_action_metadata,
     _operation_action_metadata,

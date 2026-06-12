@@ -2,7 +2,7 @@
 
 from .generator import SymmetryGenerator
 from .checks import check_symmetry_consistency
-from .project import run_symmetry_projection_from_config
+from .projection import run_symmetry_projection_from_config
 
 __all__ = [
     "SymmetryGenerator",

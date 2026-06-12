@@ -37,7 +37,7 @@ from kp.model.core import (  # noqa: E402
     build_model,
     compute_bands,
 )
-from kp.symmetry.project import _kp_symm_exactification_config, _operation_power_relation  # noqa: E402
+from kp.symmetry.projection import _kp_symm_exactification_config, _operation_power_relation  # noqa: E402
 
 
 def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> dict[str, object]:

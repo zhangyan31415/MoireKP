@@ -22,7 +22,7 @@ from .blocks import get_H_block, project_heff_full#, get_h_dft_low
 #     write_sweep_json,
 #     SweepRow,
 # )
-from .symmetry.project import run_symmetry_projection_from_config
+from .symmetry.projection import run_symmetry_projection_from_config
 hartree = 27.2113845
 hartree = 1
 
