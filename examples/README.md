@@ -67,6 +67,8 @@ examples/<material>_<angle>/
 
 - `examples/tapw/basic/`: additional TAPW example configs.
 - `examples/tapw/kpaths/`: alternative K-path inputs.
+- `examples/tapw/mote2_9.43/`: MoTe2 rigid-OpenMX example; TAPW K1 and direct diagonalization configs.
+- `examples/tapw/mgi2_9.43/`: MgI2 rigid-OpenMX example; TAPW M1/Gamma and direct diagonalization configs.
 - `tapw-config` uses package templates from `tapw/tapw/templates/`; those are not user examples.
 
 ## Cleanup Policy

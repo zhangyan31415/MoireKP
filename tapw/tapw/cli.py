@@ -158,21 +158,6 @@ def main():
     # Re-check constraints after applying CLI overrides.
     config.compute.validate()
 
-    # Temporary compatibility mode for non-TAPW outputs:
-    # keep legacy K1 / Q_shell_20 naming so existing scripts continue to work.
-    if not config.compute.TAPW:
-        original_valleys = list(config.compute.valleys)
-        original_ng = int(config.compute.n_g)
-        config.compute.valleys = [1]
-        config.compute.valley = 1
-        config.compute.n_g = 20
-        if original_valleys != [1] or original_ng != 20:
-            print(
-                "[notapw] compatibility naming enabled: "
-                f"forcing valleys={config.compute.valleys} and n_g={config.compute.n_g} "
-                f"(from valleys={original_valleys}, n_g={original_ng})"
-            )
-
     # Setup logging
     os.makedirs(config.paths.output_dir + "/logs", exist_ok=True)
     log_suffix = f"_rank{mpi_rank}" if mpi_size > 1 else ""

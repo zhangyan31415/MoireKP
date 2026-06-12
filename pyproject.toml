@@ -23,6 +23,12 @@ dependencies = [
     "tqdm>=4.60.0",
 ]
 
+[project.optional-dependencies]
+slepc = [
+    "petsc4py",
+    "slepc4py",
+]
+
 [project.scripts]
 kp = "kp.cli:main"
 tapw-calc = "tapw.cli:main"
