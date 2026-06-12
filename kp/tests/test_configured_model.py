@@ -26,8 +26,8 @@ from kp.model.configured import (  # noqa: E402
     matrix_residual,
     run_configured_model,
 )
-from kp.src import moire_refactored as moire_module  # noqa: E402
-from kp.src.moire_refactored import (  # noqa: E402
+import kp.model.core as model_core  # noqa: E402
+from kp.model.core import (  # noqa: E402
     ContinuumModel,
     ContinuumModelBuilder,
     ContinuumTerm,
@@ -73,7 +73,7 @@ def test_compute_bands_uses_eigvals_only_without_saved_eigenvectors(monkeypatch)
     def fail_eigh(*_args, **_kwargs):
         raise AssertionError("compute_bands should not compute eigenvectors when save_eigvecs=false")
 
-    monkeypatch.setattr(moire_module.scipy.linalg, "eigh", fail_eigh)
+    monkeypatch.setattr(model_core.scipy.linalg, "eigh", fail_eigh)
 
     cfg = MoireConfig(
         Q_set1=np.zeros((1, 2), dtype=float),
@@ -121,11 +121,11 @@ def test_monomial_extraction_rejects_dense_leakage():
 
 
 def test_clear_symmetry_caches_clears_orbit_and_kz_caches():
-    moire_module.clear_symmetry_caches()
+    model_core.clear_symmetry_caches()
     ContinuumModelBuilder._SYMMETRIZE_ORBIT_CACHE["orbit"] = object()
     ContinuumModelBuilder._KZ_POW_CACHE["kz"] = np.ones((1, 1), dtype=complex)
 
-    moire_module.clear_symmetry_caches()
+    model_core.clear_symmetry_caches()
 
     assert not ContinuumModelBuilder._SYMMETRIZE_ORBIT_CACHE
     assert not ContinuumModelBuilder._KZ_POW_CACHE
@@ -1641,7 +1641,7 @@ def test_fit_reuses_stacked_term_matrices_between_duplicate_filter_and_orthogona
             symmetry_ops=[],
         )
 
-    moire_module.clear_symmetry_caches()
+    model_core.clear_symmetry_caches()
     original = ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static
     calls: list[tuple[ContinuumTermKey, tuple[float, float]]] = []
 

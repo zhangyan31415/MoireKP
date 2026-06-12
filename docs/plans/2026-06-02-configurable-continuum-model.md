@@ -4,7 +4,7 @@
 
 **Goal:** Turn the notebook-only term generation, coefficient fitting, and band comparison flow into a reusable YAML-driven pipeline.
 
-**Architecture:** Add a thin configuration/pipeline layer over the existing `kp.kp.src.moire_refactored` numerical implementation. Keep the new code in separate files so notebook logic can be retired without rewriting the working numerical core.
+**Architecture:** Add a thin configuration/pipeline layer over the existing `kp.model.core` numerical implementation. Keep the new code in separate files so notebook logic can be retired without rewriting the working numerical core.
 
 **Tech Stack:** Python, NumPy, SciPy, PyYAML, pytest.
 

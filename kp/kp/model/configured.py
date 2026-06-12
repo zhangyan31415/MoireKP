@@ -26,7 +26,7 @@ from ..symmetry.geometry import (
     sector_qset,
     sectors_with_q_offsets,
 )
-from ..src.moire_refactored import (
+from .core import (
     ContinuumModelBuilder,
     MoireConfig,
     SymmetryGenerator,

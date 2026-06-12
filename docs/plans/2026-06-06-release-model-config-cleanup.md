@@ -17,7 +17,7 @@
 - Modify: `kp/kp/model/configured.py`
 - Modify: `kp/kp/model/symmetry.py`
 - Modify: `kp/kp/model/exactify_representation.py`
-- Modify: `kp/kp/src/moire_refactored.py`
+- Modify: `kp/kp/model/core.py`
 - Modify: `kp/kp/symmetry/generator.py`
 - Modify: `kp/tests/*.py`
 - Modify: `kp/examples/*/3.89/kp/configs/model/**/*.yaml`

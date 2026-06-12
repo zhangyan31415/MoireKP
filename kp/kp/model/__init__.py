@@ -1,7 +1,6 @@
-"""Continuum model structures and builder (skeleton)."""
+"""Continuum model structures and builder."""
 
-from .continuum import ContinuumTermKey, ContinuumTerm, ContinuumModel
-from .builder import ContinuumModelBuilder
+from .core import ContinuumTermKey, ContinuumTerm, ContinuumModel, ContinuumModelBuilder
 
 __all__ = [
     "ContinuumTermKey",
@@ -9,4 +8,3 @@ __all__ = [
     "ContinuumModel",
     "ContinuumModelBuilder",
 ]
-
