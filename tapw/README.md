@@ -19,9 +19,7 @@ The most relevant live result files are under:
 - Band structure calculation for twisted bilayer systems
 - Support for various valleys (K1, K2, Gamma, M points)
 - C3 symmetry consideration
-- Slab/ribbon band calculations
-- GPU acceleration support
-- Parallel computation capabilities
+- CPU/HPC parallel computation capabilities
 - Orbital analysis and fatband plotting tools
 
 ## 安装
@@ -199,13 +197,6 @@ cd output_dir/Q_shell_{n_g}
 tapw-orbital . --config ../config.yaml --valley Gamma --band CBM
 tapw-plot-orbital . --valley Gamma --band CBM --orbital-dir orbital_analysis --output-dir orbital_plots
 ```
-
-6. Slab/ribbon calculation:
-```bash
-cd output_dir
-tapw-calc --config config.yaml --mode slab
-```
-
 
 ## Configuration
 

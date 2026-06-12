@@ -34,8 +34,8 @@ from .C3_symm_01 import (
 from tqdm import tqdm
 from .config import ComputeConfig
 from .read_pos_01 import StructureProcessorSpglib
-from .read_kpath_01 import KPathGenerator
-from .rot_matrix import get_any_rot_orb_twostep
+from .io.kpath import KPathGenerator
+from .geometry.rotations import get_any_rot_orb_twostep
 from .utils import (
     timing_decorator_factory, rotate_vector, unique_sorted, 
     check_hermitian, is_positive_definite, print_sparse_matrix_info, 
@@ -44,12 +44,6 @@ from .utils import (
 import re
 # 设置numpy的打印精度
 np.set_printoptions(precision=6)
-
-# Try to import CuPy for GPU support
-try:
-    import cupy as cp
-except ImportError:
-    cp = None
 
 # Optional MKL-accelerated sparse GEMM (can be a big speedup for g@H@g^H)
 try:
@@ -1620,12 +1614,6 @@ def _mp_kpoint_worker(args: tuple[int, np.ndarray]) -> tuple[int, bool, str | No
     vec_path = _MP_STATE.get("vec_path")
     use_memmap = bool(_MP_STATE.get("use_memmap"))
 
-    # Stagger start a little to avoid hitting the filesystem at the exact same time.
-    delay_time = getattr(cfg, "delay_time", 0)
-    if delay_time:
-        nproc = max(int(getattr(cfg, "num_processes", 1)), 1)
-        time.sleep((i % nproc) * delay_time)
-
     try:
         # Safety: in case the Pool initializer was not used for some reason.
         _set_thread_limits(getattr(cfg, "blas_threads", None))
@@ -2154,57 +2142,6 @@ class TAPW_parameters:
             gr.sort_indices()
         return gr
 
-    def generate_gr_matrix_gpu(self):
-        """Generate the g_matrix for TAPW using GPU (only supports bilayer n_groups=2)."""
-        # Check number of groups
-        if 'twist_group' not in self.structure.df.columns:
-            raise ValueError("structure.df must contain 'twist_group' column for GPU gr_matrix")
-        n_groups = len(self.structure.df['twist_group'].unique())
-        if n_groups != 2:
-            raise NotImplementedError(
-                f"GPU gr_matrix only supports bilayer (n_groups=2). "
-                f"Current n_groups={n_groups}. Use CPU for multi-group alternating."
-            )
-        
-        n_wann_perlayer = int(len(self.structure.sort_wann) / 2)
-        n_wann = n_wann_perlayer * 2
-
-        num_orbs = self.structure.num_orbs_per_unit_cell * 2
-        sel_orbs = np.arange(num_orbs)
-        len_type = len(sel_orbs) * 2
-        num_g_vec = len(self.g_vec_list_K1)
-        gr_mtrx = cp.zeros((num_g_vec * len_type, n_wann), dtype=cp.complex128)
-
-        iter = -1
-        print(f"num of orb per cell = {num_orbs}, len type= {len_type} num g vec = {num_g_vec}")
-
-        sort_wann = cp.asarray(self.structure.sort_wann)
-        g_vec_list_K1 = cp.asarray(self.g_vec_list_K1)
-        g_vec_list_K2 = cp.asarray(self.g_vec_list_K2)
-
-        for ilayer in range(2):
-            for i in tqdm(range(num_g_vec)):
-                for k, iorb in enumerate(sel_orbs):
-                    iter += 1
-                    for j in range(n_wann):
-                        if j % num_orbs == iorb and int(j / n_wann_perlayer) == ilayer:
-                            wann_coord = sort_wann[j, :2]
-                            if ilayer == 0:
-                                gr_mtrx[iter, j] = cp.exp(-1j * cp.dot(g_vec_list_K1[i], wann_coord))
-                            elif ilayer == 1:
-                                gr_mtrx[iter, j] = cp.exp(-1j * cp.dot(g_vec_list_K2[i], wann_coord))
-
-        factor = 1 / cp.sqrt(self.structure.num_unit_cell)
-        gr_mtrx = factor * gr_mtrx
-
-        delta = cp.abs(det(gr_mtrx @ gr_mtrx.T.conj()))
-        if delta < 1.0e-2:
-            raise Exception("cp.abs(det(gr_mtrx @ gr_mtrx.T.conj())) < 1.0e-2")
-        else:
-            print("cp.abs(det(gr_mtrx @ gr_mtrx.T.conj())) = ", delta)
-
-        self.g_matrix = scipy.sparse.csr_matrix(cp.asnumpy(gr_mtrx))
-
     def generate_C3_matrix(self):
         """Generate the C3_matrix (C3_H) for alternating multi-group stacks.
 
@@ -2242,7 +2179,7 @@ class TAPW_parameters:
 
         # Helpers for orbital representation (only needed for multi-group)
         from .C3_symm_01 import direct_sum, rot_matrix
-        from .rot_matrix import get_any_rot_orb_twostep
+        from .geometry.rotations import get_any_rot_orb_twostep
 
         C3_rot_matrix = rot_matrix(120)
         sigma_z = np.array([[1, 0], [0, -1]])
@@ -2465,15 +2402,6 @@ class TAPW_parameters:
 
     def generate_all_parameters(self):
         """Generate all TAPW parameters"""
-        # Check number of groups for GPU. GPU gr_matrix is bilayer-only.
-        if 'twist_group' in self.structure.df.columns:
-            n_groups = len(self.structure.df['twist_group'].unique())
-            if self.config.gpu and n_groups != 2:
-                raise NotImplementedError(
-                    f"GPU gr_matrix only supports bilayer (n_groups=2). "
-                    f"Current n_groups={n_groups}. Use CPU for multi-group alternating."
-                )
-
         self.generate_g_vec_list()
         self.generate_gr_matrix()
         # test1 = self.generate_C3_matrix_test().toarray()
@@ -2555,10 +2483,6 @@ class BandStructureCalculator:
                         + f" Proceeding with C3_H disabled for valley {self.config.valley}."
                     )
                 self.TAPW_parameters.generate_all_parameters()
-            
-        if self.config.gpu and cp is None:
-            raise ImportError("CuPy is not installed. Please install CuPy to use GPU acceleration.")
-
     def _set_progress_stage(self, index: int, stage: str) -> None:
         _write_progress_state(self._progress_dir, index, stage)
 
@@ -3316,20 +3240,6 @@ class BandStructureCalculator:
     def rot(self, vec, theta):
         """Rotate a vector by a given angle in degrees"""
         return rotate_vector(vec, theta)
-    
-    def rot_gpu(self, vec, theta):
-        """GPU version of rotation"""
-        if cp is None:
-            raise ImportError("CuPy is required for GPU operations")
-        theta = theta / 180 * cp.pi
-        rot_mat = cp.array([[cp.cos(theta), -cp.sin(theta)], [cp.sin(theta), cp.cos(theta)]])
-        if len(vec) == 2:
-            return cp.dot(rot_mat, vec)
-        elif len(vec) == 3:
-            temp = cp.zeros(3)
-            temp[:2] = cp.dot(rot_mat, vec[:2])
-            temp[2] = vec[2]
-            return temp
 
     # @timing_decorator_factory(process_id=0)
     def get_kvec(self, k):
@@ -3424,7 +3334,7 @@ class BandStructureCalculator:
         return mk_list
 
     @timing_decorator_factory(process_id=0) 
-    def Getk_super_gauge_sparse_final_HS(self, Hr, Sr, k, mpi_index):
+    def Getk_super_gauge_sparse_final_HS(self, Hr, Sr, k):
         """Get final Hamiltonian for orthogonal or non-orthogonal basis (no symmetry)"""
         phase_ctx = self._build_getk_phase_context(k)
         Hk = self._assemble_sparse_realspace_matrix(Hr, phase_ctx, type="H")
@@ -3435,7 +3345,7 @@ class BandStructureCalculator:
             Sk = self._assemble_sparse_realspace_matrix(Sr, phase_ctx, type="S")
             Sk = self.cal_TAPW_hamiltonian_k(Sk)
             if not self.config.ge:
-                Hk = self.gen_H_new(Hk, Sk, mpi_index)
+                Hk = self.gen_H_new(Hk, Sk)
                 return Hk, None
             else:
                 return Hk, Sk
@@ -3444,10 +3354,7 @@ class BandStructureCalculator:
     @timing_decorator_factory(process_id=0)
     def C3_symm(self, hamk, hamk_C1, hamk_C2, C3_matrix):
         """Apply C3 symmetry to Hamiltonian"""
-        if not self.config.gpu:
-            return self.C3_symm_cpu(hamk, hamk_C1, hamk_C2, C3_matrix)
-        else:
-            return self.C3_symm_gpu(hamk, hamk_C1, hamk_C2, C3_matrix)
+        return self.C3_symm_cpu(hamk, hamk_C1, hamk_C2, C3_matrix)
 
     def C3_symm_cpu(self, hamk, hamk_C1, hamk_C2, C3_matrix):
         """CPU version of C3 symmetry"""
@@ -3455,19 +3362,10 @@ class BandStructureCalculator:
         return (hamk + C3_matrix @ hamk_C1 @ C3_matrix.conj().T + 
                 C3_matrix_2 @ hamk_C2 @ C3_matrix_2.conj().T) / 3
 
-    def C3_symm_gpu(self, hamk, hamk_C1, hamk_C2, C3_matrix):
-        """GPU version of C3 symmetry"""
-        C3_matrix_2 = C3_matrix @ C3_matrix
-        return (hamk + C3_matrix @ hamk_C1 @ C3_matrix.conj().T + 
-                C3_matrix_2 @ hamk_C2 @ C3_matrix_2.conj().T) / 3
-
     @timing_decorator_factory(process_id=0)
-    def gen_H_new(self, hamk, samk, gpu_index=0):
+    def gen_H_new(self, hamk, samk):
         """Generate new Hamiltonian from overlap matrix"""
-        if not self.config.gpu:
-            return self.gen_H_new_cpu(hamk, samk)
-        else:
-            return self.gen_H_new_gpu(hamk, samk, gpu_index)
+        return self.gen_H_new_cpu(hamk, samk)
     
     @timing_decorator_factory(process_id=0)
     def gen_H_new_cpu(self, hamk, samk):
@@ -3480,39 +3378,7 @@ class BandStructureCalculator:
         return uminvud @ hamk @ uminvud
     
     @timing_decorator_factory(process_id=0)
-    def gen_H_new_gpu(self, hamk, samk, gpu_index=0):
-        """GPU version of Hamiltonian transformation"""
-        with cp.cuda.Device(gpu_index):
-            samk_gpu = cp.asarray(samk)
-            S_eig_gpu, S_vec_gpu = cp.linalg.eigh(samk_gpu)
-            self.del_cupy_gpu(samk_gpu)
-            
-            M_inv_gpu = cp.diag(1 / cp.sqrt(S_eig_gpu))
-            UMinvUd_gpu = S_vec_gpu @ M_inv_gpu @ S_vec_gpu.conj().T
-            self.del_cupy_gpu(S_vec_gpu, S_eig_gpu, M_inv_gpu)
-
-            hamk_gpu = cp.asarray(hamk)
-            UH_gpu = UMinvUd_gpu @ hamk_gpu
-            hamk_new_gpu = UH_gpu @ UMinvUd_gpu
-            self.del_cupy_gpu(UMinvUd_gpu, UH_gpu)
-            
-            result = cp.asnumpy(hamk_new_gpu)
-            self.del_cupy_gpu(hamk_gpu, hamk_new_gpu)
-            return result
-
-    def del_cupy_gpu(self, *args):
-        """Delete CuPy GPU arrays and free memory"""
-        for arg in args:
-            del arg
-        cp.get_default_memory_pool().free_all_blocks()
-        cp.get_default_pinned_memory_pool().free_all_blocks()
-
-    @timing_decorator_factory(process_id=0)
     def cal_TAPW_hamiltonian_k(self, hamk):
-        # if not self.config.gpu:
-        #     return self.cal_TAPW_hamiltonian_k_cpu(hamk)
-        # else:
-        #     return self.cal_TAPW_hamiltonian_k_gpu(hamk)
         return self.cal_TAPW_hamiltonian_k_cpu(hamk)
 
     def cal_TAPW_hamiltonian_k_cpu(self, hamk, tapw_parameters=None, force_sparse_dot: bool = False):
@@ -3604,7 +3470,7 @@ class BandStructureCalculator:
         )
         return hamk, samk
 
-    def _finalize_tapw_projected_hs(self, hamk, samk, mpi_index):
+    def _finalize_tapw_projected_hs(self, hamk, samk, mpi_index=0):
         if self.config.orthogonal_basis:
             return hamk, None
 
@@ -3612,7 +3478,7 @@ class BandStructureCalculator:
             raise ValueError("Non-orthogonal TAPW finalization requires an overlap matrix.")
 
         if not self.config.ge:
-            return self.gen_H_new(hamk, samk, mpi_index), None
+            return self.gen_H_new(hamk, samk), None
         return hamk, samk
 
     def _get_tapw_projected_hs_for_parameters(self, Hr, Sr, k, mpi_index, tapw_parameters):
@@ -3720,7 +3586,7 @@ class BandStructureCalculator:
             raise ValueError("Reference M-valley D3 averaging did not accumulate any overlap matrices.")
         return h_avg, s_sum / count
 
-    def _calculate_m_valley_threefold_hs(self, k, mpi_index):
+    def _calculate_m_valley_threefold_hs(self, k, mpi_index=0):
         k_reference = rotate_local_k_between_m_valleys(
             k,
             self.structure.reciprocal_Tmat,
@@ -3752,7 +3618,7 @@ class BandStructureCalculator:
         return self._finalize_tapw_projected_hs(hamk, samk, mpi_index)
     
     @timing_decorator_factory(process_id=0)
-    def Getk_super_gauge_sparse_symm_final_HS(self, Hr, Sr, symm_matrix, symm_matrix_inv, k, mpi_index):
+    def Getk_super_gauge_sparse_symm_final_HS(self, Hr, Sr, symm_matrix, symm_matrix_inv, k):
         """Get final Hamiltonian for orthogonal or non-orthogonal basis (with symmetry)"""
         Hk_list = self.Getk_super_gauge_sparse_symm(Hr, k)
         if self.config.orthogonal_basis:
@@ -3769,7 +3635,7 @@ class BandStructureCalculator:
                 Sk_new = self.C3_symm(Sk_list[0], Sk_list[1], Sk_list[2], self.TAPW_parameters.C3_matrix)
                 return HK_new, Sk_new
             else:
-                Hk_new_list = [self.gen_H_new(Hk, Sk, mpi_index) for Hk, Sk in zip(Hk_list, Sk_list)]
+                Hk_new_list = [self.gen_H_new(Hk, Sk) for Hk, Sk in zip(Hk_list, Sk_list)]
                 Hk_new = self.C3_symm(Hk_new_list[0], Hk_new_list[1], Hk_new_list[2], self.TAPW_parameters.C3_matrix)
                 return Hk_new, None
 
@@ -3779,20 +3645,16 @@ class BandStructureCalculator:
         if self.config.TAPW:
             self._set_progress_stage(i, "build_hs")
             if self.use_M_valley_threefold_symm:
-                hamk, samk = self._calculate_m_valley_threefold_hs(
-                    kpoints[:3],
-                    self.config.gpu_index[i % self.config.gpu_num],
-                )
+                hamk, samk = self._calculate_m_valley_threefold_hs(kpoints[:3])
             elif self.use_C3_H:
                 hamk, samk = self.Getk_super_gauge_sparse_symm_final_HS(
                     self.hr_supercell, self.sr_supercell, 
                     self.TAPW_parameters.symm_matrix, self.TAPW_parameters.symm_matrix_inv, 
-                    kpoints[:3], self.config.gpu_index[i % self.config.gpu_num]
+                    kpoints[:3]
                 )
             else:
                 hamk, samk = self.Getk_super_gauge_sparse_final_HS(
-                    self.hr_supercell, self.sr_supercell, kpoints[:3],
-                    self.config.gpu_index[i % self.config.gpu_num]
+                    self.hr_supercell, self.sr_supercell, kpoints[:3]
                 )
             # 正交基底下直接对角化Hk
             self._set_progress_stage(i, "solve")
@@ -3924,9 +3786,6 @@ class BandStructureCalculator:
             try:
                 _maybe_pin_current_worker(blas_threads, num_processes)
                 _set_thread_limits(blas_threads)
-                delay_time = getattr(self.config, "delay_time", 0)
-                if delay_time:
-                    time.sleep((i % max(num_processes, 1)) * delay_time)
                 eig, vec, hamk, samk = self.calculate_band_01(kpoint, i)
 
                 if use_memmap and eig_path is not None:

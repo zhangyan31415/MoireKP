@@ -32,7 +32,7 @@ compute:
                           # 33: M3 valley
   
   # Calculation mode
-  mode: "band"            # Calculation mode: "band" for band structure, "chern" for Chern number, "slab" for slab/ribbon calculation
+  mode: "band"            # Calculation mode: "band", "chern", or "symmetry"
   
   # Energy parameters
   efermi: -4.6           # Fermi energy level, unit: eV
@@ -42,11 +42,6 @@ compute:
   num_processes: 61       # Number of parallel processes
   num_bands_cal: 2000      # Number of bands to calculate
   num_chern: 40          # Number of k-points for Chern number calculation (grid size will be num_chern x num_chern)
-  
-  # Hardware acceleration
-  gpu: false             # Whether to use GPU acceleration
-  gpu_index: [0, 1]      # GPU device indices to use
-  delay_time: 0          # Delay time between GPU operations
   
   # Calculation flags
   hamk_save: true       # Whether to save Hamiltonian matrices
@@ -63,13 +58,3 @@ compute:
   Inner_symmetrical_Electric_Field: false  # Whether to use inner symmetrical electric field
 
   orthogonal_basis: false
-
-# Slab calculation parameters (only used when mode: "slab")
-slab:
-  nslab: 7                    # Number of layers in the slab
-  ijmax: 1                    # Maximum interlayer distance (for twisted materials)
-  slab_direction: [0,1,0]     # Slab normal direction (010 cut)
-  analyze_surface: false       # Whether to analyze surface character
-  surface_threshold: 0.5      # Threshold for identifying surface states
-  kpath_slab_in: "KPATH_SLAB.in"   # Slab k-path input file
-  kpath_slab_out: "KPATH_SLAB.out" # Slab k-path output file

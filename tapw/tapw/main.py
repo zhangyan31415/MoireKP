@@ -11,9 +11,8 @@ from typing import Tuple
 from .config import Config
 from .cal_ham_01 import BandStructureCalculator
 from .read_pos_01 import OpenMXFile, StructureProcessorSpglib
-from .read_kpath_01 import KPathGenerator
-from .read_hr_01 import HrSparseHandler
-from .tapw_slab import TAPWSlab
+from .io.kpath import KPathGenerator
+from .io.hr import HrSparseHandler
 from .symmetry_analysis import SymmetryAnalysisRunner
 
 def _mpi_world_rank_size() -> Tuple[int, int]:
@@ -52,7 +51,7 @@ def parse_args():
                        help='Output directory (overrides config file)')
     parser.add_argument('--valleys', type=int, nargs='+',
                        help='List of valleys to calculate (overrides config file)')
-    parser.add_argument('--mode', choices=['band', 'chern', 'slab', 'symmetry'],
+    parser.add_argument('--mode', choices=['band', 'chern', 'symmetry'],
                        help='Calculation mode (overrides config file)')
     parser.add_argument('--n_g', type=int,
                        help='Harmonic of G vectors (overrides config file)')
@@ -284,9 +283,6 @@ def main():
                 config.paths.kpath_out = str(config.paths.kpath_out) + f".rank{mpi_rank}"
             kpath_config = KPathGenerator(structure.Tmat)
             kpath_config.read_and_generate_kpath(config.paths.kpath_in, config.paths.kpath_out)
-        elif config.compute.mode == "slab":
-            # For slab mode, k-path is handled internally by TAPWSlab
-            pass
 
         if config.compute.mode == "symmetry":
             SymmetryAnalysisRunner(
@@ -308,59 +304,44 @@ def main():
             logger.info(f"Starting calculation for valley {valley}")
             config.compute.valley = valley
             
-            # Choose calculator based on mode
-            if config.compute.mode == "slab":
-                
-                calculator = TAPWSlab(
+            if reusable_m_valley_calculator is not None:
+                reusable_m_valley_calculator.switch_m_valley(valley)
+                calculator = reusable_m_valley_calculator
+                logger.info(
+                    "Reusing initialized M-valley symmetry state for valley %s",
+                    valley,
+                )
+            else:
+                calculator = BandStructureCalculator(
                     hr_supercell=hr,
                     sr_supercell=sr,
                     structure=processor,
-                    config=config,  # Pass full config for slab parameters
+                    config=config.compute,
                     kpath_config=kpath_config
                 )
-            else:
-                if reusable_m_valley_calculator is not None:
-                    reusable_m_valley_calculator.switch_m_valley(valley)
-                    calculator = reusable_m_valley_calculator
-                    logger.info(
-                        "Reusing initialized M-valley symmetry state for valley %s",
-                        valley,
-                    )
-                else:
-                    calculator = BandStructureCalculator(
-                        hr_supercell=hr,
-                        sr_supercell=sr,
-                        structure=processor,
-                        config=config.compute,
-                        kpath_config=kpath_config
-                    )
-                    if getattr(calculator, "use_M_valley_threefold_symm", False):
-                        reusable_m_valley_calculator = calculator
+                if getattr(calculator, "use_M_valley_threefold_symm", False):
+                    reusable_m_valley_calculator = calculator
             
             out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config.compute, calculator)
             out_path.mkdir(exist_ok=True)
             
-            if config.compute.mode == "slab":
-                calculator.calculate_ribbon_bands(str(out_path))
-                logger.info(f"Completed slab calculation for valley {valley}")
+            if reuse_m_valley_band_outputs and reused_reference_valley_flag is not None:
+                calculator.save_band_static_metadata(str(out_path))
+                copy_reused_m_valley_band_outputs(
+                    out_path,
+                    source_valley_flag=reused_reference_valley_flag,
+                    target_valley_flag=calculator.valley_flag,
+                )
+                logger.info(
+                    "Reused M-valley C3-only band outputs for valley %s from reference valley flag %s",
+                    valley,
+                    reused_reference_valley_flag,
+                )
             else:
-                if reuse_m_valley_band_outputs and reused_reference_valley_flag is not None:
-                    calculator.save_band_static_metadata(str(out_path))
-                    copy_reused_m_valley_band_outputs(
-                        out_path,
-                        source_valley_flag=reused_reference_valley_flag,
-                        target_valley_flag=calculator.valley_flag,
-                    )
-                    logger.info(
-                        "Reused M-valley C3-only band outputs for valley %s from reference valley flag %s",
-                        valley,
-                        reused_reference_valley_flag,
-                    )
-                else:
-                    calculator.run_calculation(str(out_path))
-                    logger.info(f"Completed calculation for valley {valley}")
-                    if reuse_m_valley_band_outputs and getattr(calculator, "use_M_valley_threefold_symm", False):
-                        reused_reference_valley_flag = calculator.valley_flag
+                calculator.run_calculation(str(out_path))
+                logger.info(f"Completed calculation for valley {valley}")
+                if reuse_m_valley_band_outputs and getattr(calculator, "use_M_valley_threefold_symm", False):
+                    reused_reference_valley_flag = calculator.valley_flag
 
         if getattr(config.symmetry_analysis, "enable", False):
             SymmetryAnalysisRunner(

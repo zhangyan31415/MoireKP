@@ -15,8 +15,7 @@ A Python package for moiré physics calculations.
 - Band structure calculation for twisted bilayer systems
 - Support for various valleys (K, K', Γ, M points)
 - C3 symmetry consideration
-- GPU acceleration support
-- Parallel computation capabilities
+- CPU/HPC parallel computation capabilities
 - Chern number calculations
 
 ### Continuum Model Module
@@ -40,7 +39,6 @@ conda activate moirekp
 
 3. Install the package:
 ```bash
-cd tapw
 pip install -e .
 ```
 
@@ -75,4 +73,4 @@ See the `examples/` directory for sample calculations.
 
 ## License
 
-MIT License 
+MIT License

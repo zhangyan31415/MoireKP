@@ -90,37 +90,6 @@ class PathConfig:
                 raise ValueError("S_file must be provided and exist when not using orthogonal basis.")
 
 @dataclass
-class SlabConfig:
-    """Configuration for slab calculations"""
-    nslab: int = 7  # Number of layers in the slab
-    ijmax: int = 1  # Maximum interlayer distance (for twisted materials)
-    slab_direction: List[int] = field(default_factory=lambda: [0, 1, 0])  # Slab normal direction vector [x,y,z]
-    analyze_surface: bool = True  # Whether to analyze surface character
-    surface_threshold: float = 0.5  # Threshold for identifying surface states
-    kpath_slab_in: str = "KPATH_SLAB.in"  # Slab k-path input file
-    kpath_slab_out: str = "KPATH_SLAB.out"  # Slab k-path output file
-    
-    def __post_init__(self):
-        """Validate slab direction vector"""
-        if len(self.slab_direction) != 3:
-            raise ValueError("slab_direction must be a 3-element vector [x, y, z]")
-        
-        # Convert to list of integers
-        self.slab_direction = [int(x) for x in self.slab_direction]
-        
-        # Check that exactly one component is non-zero
-        non_zero_count = sum(1 for x in self.slab_direction if x != 0)
-        if non_zero_count != 1:
-            raise ValueError("slab_direction must have exactly one non-zero component (e.g., [0,1,0] for y-direction)")
-        
-        # Get direction index and name for convenience
-        self.direction_index = self.slab_direction.index(max(self.slab_direction, key=abs))
-        direction_names = ['x', 'y', 'z']
-        self.direction_name = direction_names[self.direction_index]
-        
-        print(f"Slab direction: {self.slab_direction} ({self.direction_name}-direction, index {self.direction_index})")
-
-@dataclass
 class ClusterConfig:
     """Configuration for clustering parameters with fixed values"""
     layer_eps: float = 0.5
@@ -180,9 +149,6 @@ class ComputeConfig:
     num_k1: Optional[int] = None  # Fractional reciprocal-grid points along kappa1 (falls back to num_chern).
     num_k2: Optional[int] = None  # Fractional reciprocal-grid points along kappa2 (falls back to num_chern).
     band_type: str = "BOTH"  # Band subset to save: "CBM", "VBM", or "BOTH"
-    gpu: bool = False
-    gpu_index: List[int] = field(default_factory=lambda: [0, 1])
-    delay_time: int = 0  # seconds; stagger start a little to reduce I/O spikes (max delay is ~(workers-1)*delay_time)
     hamk_save: bool = False
     TAPW: bool = True
     eigsh_cal: bool = True
@@ -195,7 +161,6 @@ class ComputeConfig:
     solve_flag: str = field(init=False)  # Solver flag
     eq_flag: str = field(init=False)  # Equation flag
     symm_flag: str = field(init=False)  # Symmetry flag
-    gpu_num: int = field(init=False)  # Number of GPUs
     Electric_field_in_eVpA: Optional[float] = None  # 电场强度 (eV/Å)
     zero_potential_layers: Optional[List[int]] = None  # 选择的层数（用于确定零势能面）
     Inner_symmetrical_Electric_Field: bool = False  # 是否加内对称电场
@@ -203,7 +168,7 @@ class ComputeConfig:
 
     def validate(self) -> None:
         """Validate runtime-related options that may be overridden after YAML load."""
-        allowed_modes = {"band", "chern", "slab", "symmetry"}
+        allowed_modes = {"band", "chern", "symmetry"}
         if self.mode not in allowed_modes:
             raise ValueError(
                 f"Invalid mode={self.mode!r}. Must be one of {sorted(allowed_modes)}"
@@ -311,15 +276,6 @@ class ComputeConfig:
         self.eq_flag = eq_flag[self.ge]
         self.symm_flag = symm_flag[self.C3_H]
         
-        # Set GPU number
-        self.gpu_num = len(self.gpu_index) #if self.gpu else 0
-
-        # Set GPU environment if using GPU
-        if self.gpu:
-            import os
-            os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(idx) for idx in self.gpu_index)
-            print(f"Using GPU with index {self.gpu_index}")
-
 @dataclass
 class Config:
     """Main configuration class"""
@@ -328,33 +284,32 @@ class Config:
     compute: ComputeConfig
     symmetry_analysis: SymmetryAnalysisConfig = field(default_factory=SymmetryAnalysisConfig)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
-    slab: Optional[SlabConfig] = None  # Slab configuration (only used when mode="slab")
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> 'Config':
         """Load configuration from YAML file"""
         with open(yaml_path, 'r') as f:
             config_dict = yaml.safe_load(f)
+        if 'slab' in config_dict:
+            raise ValueError("The release TAPW package does not support slab configuration.")
+        compute_raw = config_dict.get('compute', {})
+        removed = {'gpu', 'gpu_index', 'delay_time'} & set(compute_raw)
+        if removed:
+            raise ValueError(f"The release TAPW package does not support GPU options: {sorted(removed)}")
         
         twist_config = TwistConfig(**config_dict.get('twist', {}))
         paths_config = PathConfig(**config_dict.get('paths', {}))
-        compute_config = ComputeConfig(**config_dict.get('compute', {}))
+        compute_config = ComputeConfig(**compute_raw)
         symmetry_analysis_config = SymmetryAnalysisConfig(**config_dict.get('symmetry_analysis', {}))
         # Use default cluster config if not provided
         cluster_config = ClusterConfig(**config_dict.get('cluster', {})) if 'cluster' in config_dict else ClusterConfig()
-        
-        # Load slab config if mode is "slab" or if slab section exists
-        slab_config = None
-        if (compute_config.mode == "slab"):
-            slab_config = SlabConfig(**config_dict.get('slab', {}))
         
         config_obj = cls(
             twist=twist_config,
             paths=paths_config,
             compute=compute_config,
             symmetry_analysis=symmetry_analysis_config,
-            cluster=cluster_config,
-            slab=slab_config
+            cluster=cluster_config
         )
         # Propagate twist bravais to compute for downstream logic
         config_obj.compute.bravais = config_obj.twist.bravais
@@ -372,11 +327,6 @@ class Config:
             'symmetry_analysis': self.symmetry_analysis.__dict__,
             # Don't save cluster config as it uses fixed values
         }
-        
-        # Add slab config if it exists
-        if self.slab is not None:
-            config_dict['slab'] = self.slab.__dict__
-        
         with open(yaml_path, 'w') as f:
             yaml.dump(config_dict, f, default_flow_style=False)
 

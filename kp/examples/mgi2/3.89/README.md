@@ -22,7 +22,7 @@ Production status on 2026-06-03:
 - `Gamma`:
   - active config: `kp/configs/model/mgi2_3.89_Gamma.yaml`
   - user-facing symmetry names: `C3z`, `TR`, `C2`
-  - aligned `top4` comparison on `gpuh2002`: RMS about `0.670 meV`, max about `2.210 meV`
+  - aligned `top4` external-data comparison: RMS about `0.670 meV`, max about `2.210 meV`
 
 - `M1`, `M2`, `M3`:
   - raw TAPW `hamk_*_valley.npy` and `g_vec_list_*` inputs live under `tapw/Q_shell_7/`
