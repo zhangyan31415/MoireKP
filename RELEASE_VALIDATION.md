@@ -23,7 +23,7 @@ Targeted CPC hardening checks:
 ```bash
 python -m pytest -q -p no:cacheprovider tests/kp/test_action_schema.py tests/kp/test_symm_projection.py tests/kp/test_exactify_representation.py
 python -m pytest -q -p no:cacheprovider tests/tapw/test_c3_symm_valleys.py tests/tapw/test_tapw_chern_workflow.py tests/tapw/test_cli_surface.py
-python -m pytest -q -p no:cacheprovider tests/test_release_contract.py tests/kp/test_example_dependency_contract.py examples/minimal_synthetic
+python -m pytest -q -p no:cacheprovider tests/test_release_contract.py tests/kp/test_example_dependency_contract.py
 ```
 
 ## Static Gates

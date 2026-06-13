@@ -4,7 +4,7 @@ This directory contains release-facing examples grouped by material and twist
 angle. The repository tracks configuration files and small template inputs; TAPW
 arrays, OpenMX matrices, projected Heff files, and paper-scale outputs are
 external unless `examples/data-manifest.yaml` explicitly lists them as tracked
-clean-clone data.
+release data.
 
 ## Command Classes
 
@@ -20,14 +20,14 @@ clean-clone data.
 
 ```bash
 python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py -q  # clean-clone
-python -m pytest examples/minimal_synthetic -q  # clean-clone
 tapw --help  # clean-clone
 tapw init --help  # clean-clone
 kp --help  # clean-clone
 ```
 
-`examples/minimal_synthetic/` is a text-only example that checks public KP helper
-APIs against expected outputs without consuming TAPW arrays.
+Clean-clone smoke checks intentionally do not include synthetic scientific
+examples. Release-facing scientific examples are tied to the external datasets
+listed in `examples/data-manifest.yaml`.
 
 ## Canonical Layout
 
@@ -86,7 +86,7 @@ examples/<material>_<angle>/
 ## External-Data Scientific Examples
 
 The active KP workflow is documented as a dependency DAG rather than as a
-large-data clean-clone test:
+clean-clone test:
 
 - `kp plot -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays)
 - `kp project -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)

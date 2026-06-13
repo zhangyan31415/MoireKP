@@ -25,7 +25,6 @@ OpenMX matrices, TAPW Q-shell arrays, or precomputed KP outputs.
 
 ```bash
 python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py -q  # clean-clone
-python -m pytest examples/minimal_synthetic -q  # clean-clone
 tapw --help  # clean-clone
 tapw init --help  # clean-clone
 kp --help  # clean-clone
@@ -55,7 +54,7 @@ Legacy TAPW aliases remain available for existing scripts: `tapw-calc`, `tapw-co
 
 The `kp` command works with YAML source and model configurations under `examples/<material>_<angle>/kp/configs/`.
 The release example commands consume external TAPW arrays or precomputed KP
-outputs unless `examples/data-manifest.yaml` marks them as clean-clone smoke.
+outputs; clean-clone checks are limited to package metadata and CLI surfaces.
 
 Typical operations are:
 

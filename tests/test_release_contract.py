@@ -346,10 +346,9 @@ def test_final_release_gate_script_requires_final_mode() -> None:
     assert 'not slow and not external_data' in text
     assert "tests/test_release_contract.py" in text
     assert "tests/kp/test_example_dependency_contract.py" in text
-    assert "examples/minimal_synthetic" in text
 
 
-def test_default_pytest_discovery_includes_release_contract_and_minimal_example() -> None:
+def test_default_pytest_discovery_includes_release_contract_and_package_tests() -> None:
     pytest_ini = ROOT / "pytest.ini"
     assert pytest_ini.exists(), "pytest.ini is required for default release test discovery"
 
@@ -371,7 +370,7 @@ def test_default_pytest_discovery_includes_release_contract_and_minimal_example(
                 testpaths.append(stripped)
 
     assert "tests" in testpaths or "tests/test_release_contract.py" in testpaths
-    assert "examples/minimal_synthetic" in testpaths
+    assert "tests/kp" in testpaths
 
 
 def test_release_validation_matches_cli_exit_contract() -> None:

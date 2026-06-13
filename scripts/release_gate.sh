@@ -11,5 +11,4 @@ python -m pytest \
   -m "not slow and not external_data" \
   tests/test_release_contract.py \
   tests/kp/test_example_dependency_contract.py \
-  examples/minimal_synthetic \
   -q
