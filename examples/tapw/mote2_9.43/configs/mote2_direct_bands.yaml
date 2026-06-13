@@ -1,8 +1,8 @@
 kpath_in: KPATH.in
 kpath_out: runs/mote2_direct/KPATH.out
 title: "MoTe2 9.43 direct bands"
-ymin: -1.0
-ymax: 1.0
+ymin: -0.9
+ymax: 0.9
 output: runs/mote2_direct/direct/band/tapw_mote2_direct_bands.pdf
 legend_show: true
 legend_loc: upper right

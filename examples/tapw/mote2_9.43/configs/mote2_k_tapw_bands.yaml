@@ -1,8 +1,8 @@
 kpath_in: KPATH.in
 kpath_out: runs/mote2_k_tapw/KPATH.out
 title: "MoTe2 9.43 K1 TAPW bands"
-ymin: -1.0
-ymax: 1.0
+ymin: -0.9
+ymax: 0.9
 output: runs/mote2_k_tapw/Q_shell_3/band/tapw_mote2_k1_bands.pdf
 legend_show: true
 legend_loc: upper right

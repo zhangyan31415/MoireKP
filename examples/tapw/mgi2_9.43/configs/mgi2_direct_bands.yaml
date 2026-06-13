@@ -1,8 +1,8 @@
 kpath_in: KPATH.in
 kpath_out: runs/mgi2_direct/KPATH.out
 title: "MgI2 9.43 direct bands"
-ymin: -1.0
-ymax: 1.0
+ymin: -2.2
+ymax: 2.2
 output: runs/mgi2_direct/direct/band/tapw_mgi2_direct_bands.pdf
 legend_show: true
 legend_loc: upper right

@@ -93,11 +93,11 @@ datasets:
       - path: examples/tapw/mote2_9.43/configs/mote2_k_tapw_bands.yaml
         kind: file
         size_bytes: 623
-        sha256: 6089e089d3d12bb1e3790a4d48a2f0f9fb4d85388c4cf2ed44453e7f2946a4c6
+        sha256: f84fabc74fedc467a81153d03ae45966405fe148e573f597528e4a23baca1b4e
       - path: examples/tapw/mote2_9.43/configs/mote2_direct_bands.yaml
         kind: file
         size_bytes: 605
-        sha256: 252f269046476c2d4cb99aba4c8df85ae5f7995eb670327268652b5d28df7116
+        sha256: c5b5520547f3d5eabd0fea411882de619d5e9c4dc7048d9f29554dc4fd1ff090
       - path: examples/tapw/mote2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
@@ -169,11 +169,11 @@ datasets:
       - path: examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw_bands.yaml
         kind: file
         size_bytes: 801
-        sha256: 8e2233274e9b7c75771205a2e30df5f80556540c3595b6a49ff976b795b4d104
+        sha256: f90b0a2d87a1fc760e36b01d98a20eb85ef1d3c25bc410f2ded23e15151202ad
       - path: examples/tapw/mgi2_9.43/configs/mgi2_direct_bands.yaml
         kind: file
         size_bytes: 599
-        sha256: 34b6533fc9f91114333b1a84d6e5d442503f20537dc28bf3b921396808529986
+        sha256: 6a3bf7e53424e64611f9728086bf29e6b354a1cc34856647178cf740fac330d4
       - path: examples/tapw/mgi2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
