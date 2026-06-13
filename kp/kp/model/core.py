@@ -1,29 +1,13 @@
-# =============================================================================
-# >>> SECTION: 00. Module Overview & Public API
-# =============================================================================
-# >>> SPLIT_HINT: move this section into __init__.py
 from __future__ import annotations
 
 """
-Moire k·p continuum model (single-file module).
-
-This file is a structural refactor of `kp/configs/mgi2_G/src/moire.py` into an import-safe,
-reproducible single-file module. The numerical core (Y_basis, symmetry operators,
-symmetrization, assembly, eigensolve, coefficient extraction) is preserved as-is.
+Moire k·p continuum model.
 
 Most common entrypoints:
 - `build_model(config) -> ContinuumModel`
 - `compute_coefficients(config, model) -> (model, diagnostics)`
 - `compute_bands(config, model, kpoints) -> eigvals` (optionally eigvecs)
 - `run_end_to_end(config) -> dict`
-
-Minimal usage (pseudo-code):
-    cfg = MoireConfig(Q_set1=..., Q_set2=..., n_orb1=..., n_orb2=..., bM1=..., bM2=...,
-                     intra_harmonics_map=..., inter_harmonics_map=..., max_order=...,
-                     symmetry_map=..., kpoints=...)
-    model = build_model(cfg)
-    model, diag = compute_coefficients(cfg, model)
-    eigvals = compute_bands(cfg, model, cfg.kpoints)
 """
 
 __all__ = [
@@ -51,15 +35,8 @@ __all__ = [
     "timing_decorator_factory",
 ]
 
-# =============================================================================
-# >>> SECTION: 01. Imports
-# =============================================================================
-# >>> SPLIT_HINT: move this section into imports.py
-
-# --- stdlib ---
 import json
 import logging
-import os
 import sys
 import time
 from dataclasses import dataclass, field
@@ -76,86 +53,49 @@ import psutil
 from scipy import sparse
 from tqdm import tqdm
 
+try:
+    from .constants import (
+        CANONICAL_P_TOL,
+        KZ_POW_CACHE,
+        SYMMETRIZE_COMPOSED_OP_CACHE,
+        SYMMETRIZE_COMPOSED_OP_VALIDATED,
+        SYMMETRIZE_GLOBAL_CACHE,
+        SYMMETRIZE_MONOMIAL_OP_CACHE,
+        SYMMETRIZE_MONOMIAL_OP_VALIDATED,
+        SYMMETRIZE_ORBIT_CACHE,
+        clear_symmetry_caches,
+        hartree,
+    )
+    from .logging_utils import (
+        logger,
+        setup_logging,
+        summarize_coefficients,
+        summarize_symmetry_ops,
+    )
+except ImportError:
+    _model_dir = str(Path(__file__).resolve().parent)
+    if _model_dir not in sys.path:
+        sys.path.insert(0, _model_dir)
+    from constants import (  # type: ignore[no-redef]
+        CANONICAL_P_TOL,
+        KZ_POW_CACHE,
+        SYMMETRIZE_COMPOSED_OP_CACHE,
+        SYMMETRIZE_COMPOSED_OP_VALIDATED,
+        SYMMETRIZE_GLOBAL_CACHE,
+        SYMMETRIZE_MONOMIAL_OP_CACHE,
+        SYMMETRIZE_MONOMIAL_OP_VALIDATED,
+        SYMMETRIZE_ORBIT_CACHE,
+        clear_symmetry_caches,
+        hartree,
+    )
+    from logging_utils import (  # type: ignore[no-redef]
+        logger,
+        setup_logging,
+        summarize_coefficients,
+        summarize_symmetry_ops,
+    )
+
 # Plotting is optional; imports are kept local to plotting section when possible.
-
-
-def _summarize_symmetry_ops(symm: Sequence[Mapping[str, Any]] | Sequence[Any]) -> str:
-    names: list[str] = []
-    for op in symm:
-        if isinstance(op, Mapping):
-            name = str(op.get("name", op.get("operation", "?")))
-            matrix_kind = op.get("matrix_kind")
-            source = op.get("source")
-            suffix = []
-            if source:
-                suffix.append(str(source))
-            if matrix_kind:
-                suffix.append(str(matrix_kind))
-            if suffix:
-                name = f"{name}({','.join(suffix)})"
-            names.append(name)
-        else:
-            names.append(str(op))
-    return "[" + ", ".join(names) + "]"
-
-
-def _summarize_coefficients(values: Sequence[Any] | np.ndarray) -> str:
-    arr = np.asarray(values, dtype=np.complex128).ravel()
-    if arr.size == 0:
-        return "count=0"
-    abs_arr = np.abs(arr)
-    return (
-        f"count={arr.size}, nonzero={int(np.count_nonzero(abs_arr > 0.0))}, "
-        f"max_abs={float(np.max(abs_arr)):.6g}, median_abs={float(np.median(abs_arr)):.6g}"
-    )
-
-# =============================================================================
-# >>> SECTION: 02. Constants & Global Toggles
-# =============================================================================
-# >>> SPLIT_HINT: move this section into constants.py
-
-hartree = 27.2113845
-CANONICAL_P_TOL = 1.0e-10
-
-# Symmetrization caches (shared by ContinuumModelBuilder static methods).
-# Key structure is internal; safe to clear between runs by calling `clear_symmetry_caches()`.
-SYMMETRIZE_GLOBAL_CACHE: dict = {}
-SYMMETRIZE_MONOMIAL_OP_CACHE: dict = {}
-SYMMETRIZE_MONOMIAL_OP_VALIDATED: set = set()
-SYMMETRIZE_COMPOSED_OP_CACHE: dict = {}
-SYMMETRIZE_COMPOSED_OP_VALIDATED: set = set()
-SYMMETRIZE_ORBIT_CACHE: dict = {}
-KZ_POW_CACHE: dict = {}
-
-def clear_symmetry_caches() -> None:
-    """Clear module-level symmetrization caches."""
-    SYMMETRIZE_GLOBAL_CACHE.clear()
-    SYMMETRIZE_MONOMIAL_OP_CACHE.clear()
-    SYMMETRIZE_MONOMIAL_OP_VALIDATED.clear()
-    SYMMETRIZE_COMPOSED_OP_CACHE.clear()
-    SYMMETRIZE_COMPOSED_OP_VALIDATED.clear()
-    SYMMETRIZE_ORBIT_CACHE.clear()
-    KZ_POW_CACHE.clear()
-
-# =============================================================================
-# >>> SECTION: 03. Logging
-# =============================================================================
-# >>> SPLIT_HINT: move this section into logging_utils.py
-
-logger = logging.getLogger(__name__)
-
-def setup_logging(level: int = logging.INFO) -> None:
-    """Configure root logging (optional)."""
-    logging.basicConfig(
-        level=level,
-        format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
-    )
-
-# =============================================================================
-# >>> SECTION: 04. Small Utilities
-# =============================================================================
-# >>> SPLIT_HINT: move this section into utils.py
 
 def timing_decorator_factory(process_id):
     def timing_decorator(func):
@@ -582,11 +522,6 @@ def truncate_Q_indices(Q_set1: np.ndarray, cutoff_shells: int) -> tuple[np.ndarr
 
     return np.array(keep1, dtype=int), np.array(remove1, dtype=int)
 
-# =============================================================================
-# >>> SECTION: 05. Data Structures
-# =============================================================================
-# >>> SPLIT_HINT: move this section into types.py
-
 @dataclass(frozen=True)
 class ContinuumTermKey:
     """
@@ -724,16 +659,11 @@ class KPath:
     x_ticks: List[float]
     labels_ticks: List[str]
 
-# =============================================================================
-# >>> SECTION: 06. Symmetry Layer
-# =============================================================================
-# >>> SPLIT_HINT: move this section into symmetry.py
-
 class SymmetryGenerator:
     """
     根据输入的 Q 数据生成对称操作矩阵，其维度与基函数矩阵一致。
 
-    This is a toy/legacy fallback for explicit templates. Production configured
+    This is a template-backed compatibility path for explicit matrices. Production configured
     models should prefer matrix-backed symmetry sources from kp_symm_output.
     """
 
@@ -757,7 +687,7 @@ class SymmetryGenerator:
         这里利用输入的 Qlayer 与 nlow_state 生成 block_diag 矩阵
         """
         if self.basis_template != "Gamma_four_orbital":
-            raise ValueError("C3z toy generator requires Gamma_four_orbital basis_template; use kp_symm_output for production.")
+            raise ValueError("C3z template generator requires Gamma_four_orbital basis_template; use kp_symm_output for production.")
         gamma_template_phases = [np.exp(1j * np.pi / 3)]
         q1norm = np.max(np.linalg.norm(self.Q_set, axis=1)) - np.min(np.linalg.norm(self.Q_set, axis=1))
         C3_matrix = []
@@ -809,7 +739,7 @@ class SymmetryGenerator:
 
         if any(int(n) % 2 for n in self.nlow_state):
             raise ValueError(
-                "TR toy generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
+                "TR template generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
                 "for spinless effective TR use operation name TR_eff with explicit matrix convention."
             )
 
@@ -908,7 +838,7 @@ class SymmetryGenerator:
                             T_matrix_layer[idx(orb_i, q_i), idx(orb_i, q_j)] = 1.0
                             matched = True
                     if not matched:
-                        raise ValueError("TR_eff toy generator requires Q -> -Q matching within each layer")
+                        raise ValueError("TR_eff template generator requires Q -> -Q matching within each layer")
             T_blocks.append(T_matrix_layer)
 
         return scipy.linalg.block_diag(*T_blocks)
@@ -950,7 +880,7 @@ class SymmetryGenerator:
 
         m, nQ = m1, nQ1
         if self.basis_template not in {"Gamma_four_orbital", "M_spinless_layer_exchange"}:
-            raise ValueError("C2 toy generator requires Gamma_four_orbital or M_spinless_layer_exchange basis_template")
+            raise ValueError("C2 template generator requires Gamma_four_orbital or M_spinless_layer_exchange basis_template")
 
         if qtol is None:
             qset = getattr(self, "Q_set", None)
@@ -979,7 +909,7 @@ class SymmetryGenerator:
 
         if self.basis_template == "M_spinless_layer_exchange":
             if m != 1:
-                raise ValueError("M_spinless_layer_exchange C2 toy template requires one low-energy orbital per layer")
+                raise ValueError("M_spinless_layer_exchange C2 template requires one low-energy orbital per layer")
             M12 = P12
             M21 = P12.conj().T
             Z = np.zeros((nQ, nQ), dtype=complex)
@@ -1045,11 +975,6 @@ class SymmetryGenerator:
             self.cached_operators[operator_name] = D
         return self.cached_operators[operator_name]
 
-# =============================================================================
-# >>> SECTION: 07. Continuum Model Core
-# =============================================================================
-# >>> SPLIT_HINT: move this section into model.py
-
 class ContinuumModel:
     """
     存储所有 term 的集合，并提供组装连续模型哈密顿量的方法。
@@ -1108,11 +1033,6 @@ class ContinuumModel:
                     print(f"Y basis for onsite term {term.key}:\n{Y_symm}")
                 H_cont += contribution
         return H_cont
-
-# =============================================================================
-# >>> SECTION: 08. Builder / Pipeline
-# =============================================================================
-# >>> SPLIT_HINT: move this section into builder.py
 
 class ContinuumModelBuilder:
     """
@@ -2631,7 +2551,7 @@ class ContinuumModelBuilder:
             print("\n" + "="*100)
             print(
                 f"Processing tag '{tag}' with {len(keys)} terms, "
-                f"symmetry={_summarize_symmetry_ops(symm)}. "
+                f"symmetry={summarize_symmetry_ops(symm)}. "
                 f"Time: {time.strftime('%H:%M:%S', time.localtime())}"
             )
             
@@ -2743,7 +2663,7 @@ class ContinuumModelBuilder:
                         coeffs_print.append(r)
                         self.model.terms[sub_keys[i]].r_value_real = r_real
                         self.model.terms[sub_keys[i]].r_value_imag = r_imag
-                print(f"  Updated coefficients for subgroup {subgroup}: {_summarize_coefficients(coeffs_print)}")
+                print(f"  Updated coefficients for subgroup {subgroup}: {summarize_coefficients(coeffs_print)}")
                 coeffs_by_subgroup[diagnostics_key] = np.array(coeffs)
             print("="*100)
             coeffs_by_tag[tag] = coeffs_by_subgroup
@@ -3055,11 +2975,6 @@ class ContinuumModelBuilder:
     
     def get_model(self) -> ContinuumModel:
         return self.model
-
-# =============================================================================
-# >>> SECTION: 09. I/O Helpers
-# =============================================================================
-# >>> SPLIT_HINT: move this section into io.py
 
 def convert_to_serializable(obj):
     if isinstance(obj, np.ndarray):
@@ -3458,11 +3373,6 @@ def select_kpoints(kpoints: np.ndarray, indices: Sequence[int]) -> np.ndarray:
     if idx.min() < 0 or idx.max() >= kpoints.shape[0]:
         raise ValueError(f"indices out of range for kpoints of length {kpoints.shape[0]}: {idx}")
     return kpoints[idx]
-
-# =============================================================================
-# >>> SECTION: 10. High-level User Functions
-# =============================================================================
-# >>> SPLIT_HINT: move this section into api.py
 
 @dataclass
 class _BandState:
@@ -3891,11 +3801,6 @@ def run_end_to_end(config: MoireConfig) -> Dict[str, Any]:
             save_json(out_dir / "diagnostics.json", diagnostics)
     return results
 
-# =============================================================================
-# >>> SECTION: 10b. Plotting Helpers (optional)
-# =============================================================================
-# >>> SPLIT_HINT: move this section into plotting.py
-
 plt = None
 LineCollection = None
 MultipleLocator = None
@@ -4177,177 +4082,3 @@ def set_pic(ax,ymin,ymax,ylim = True,meV=True,xticks =np.array([0, 0.125, 0.197,
         ax.set_facecolor('none')
         plt.savefig(savepath, dpi=300,bbox_inches='tight',transparent=transparent_flag)
     plt.show()
-
-# =============================================================================
-# >>> SECTION: 11. Self-test & Example
-# =============================================================================
-# >>> SPLIT_HINT: move this section into self_test.py
-
-def example_config() -> MoireConfig:
-    """
-    Return a runnable config for `main()` sanity run.
-
-    Preference order:
-      1) Use the local `kp/configs/mgi2_G/plots_mgi2_5_Gamma/*` files if present.
-      2) Fallback to a tiny synthetic config if the files are missing.
-    """
-
-    def _synthetic() -> MoireConfig:
-        Q1 = np.array([[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]], dtype=float)
-        Q2 = np.array([[0.0, 0.0], [-1.0, 0.0], [0.0, -1.0]], dtype=float)
-        bM1 = np.array([1.0, 0.0], dtype=float)
-        bM2 = rot(bM1, 60)
-        intra = {1: bM1 * 0.0, 2: -bM1}
-        inter = {1: bM1 * 0.0, 2: -bM1}
-        max_order = {"Kinect": 1, "intra": 1, "inter": 1}
-        symmetry_map = {"Onsite": [], "Kinect": [], "intra": [], "inter": []}
-        kpoints = np.array([[0.0, 0.0], [0.1, 0.0], [0.0, 0.1]], dtype=float)
-        return MoireConfig(
-            Q_set1=Q1,
-            Q_set2=Q2,
-            n_orb1=2,
-            n_orb2=2,
-            bM1=bM1,
-            bM2=bM2,
-            intra_harmonics_map=intra,
-            inter_harmonics_map=inter,
-            max_order=max_order,
-            symmetry_map=symmetry_map,
-            kpoints=kpoints,
-            use_cache=False,
-            profile_light=True,
-            log_level=logging.INFO,
-        )
-
-    try:
-        cfg_dir = Path(__file__).resolve().parents[2] / "configs" / "mgi2_G"
-        plots_dir = cfg_dir / "plots_mgi2_5_Gamma"
-        g1 = plots_dir / "g_vec_list_5_Gamma_1layer.npy"
-        g2 = plots_dir / "g_vec_list_5_Gamma_2layer.npy"
-        kpath_in = plots_dir / "KPATH_GMKG.in"
-        if not (g1.exists() and g2.exists() and kpath_in.exists()):
-            return _synthetic()
-
-        phase_deg = infer_model_rotation_from_gvec_lists(np.load(g1), np.load(g2))
-        Q_set1, Q_set2 = load_Q_sets_from_gvec_files(g1, g2, rotation_deg=phase_deg)
-        bM1, bM2 = infer_bM_vectors_from_Q_set1(Q_set1, angle_deg=60.0)
-
-        intra = {1: bM1 * 0.0, 2: -bM1}
-        inter = {1: bM1 * 0.0, 2: -bM1}
-
-        # Original script Tmat (direct lattice, rows are vectors).
-        Tmat = np.array(
-            [
-                [39.4387956162, 0.0, 0.0],
-                [-19.7193978074, 34.1549988985, 0.0],
-                [0.0, 0.0, 50.0],
-            ],
-            dtype=float,
-        )
-        kpath_out = plots_dir / "kpath.out"
-        kpath = generate_kpath_from_file(
-            Tmat=Tmat,
-            file_path=kpath_in,
-            phase_deg=phase_deg,
-            output_file_path=kpath_out,
-        )
-
-        max_order = {"Kinect": 10, "intra": 4, "inter": 4}
-        symmetry_map = {
-            "Kinect": [{"name": "TR"}, {"name": "C2"}],
-            "Onsite": [{"name": "TR"}, {"name": "C2"}],
-            "intra": [{"name": "C3z"}, {"name": "TR"}, {"name": "C2"}],
-            "inter": [{"name": "C3z"}, {"name": "TR"}, {"name": "C2"}],
-        }
-
-        return MoireConfig(
-            Q_set1=Q_set1,
-            Q_set2=Q_set2,
-            n_orb1=2,
-            n_orb2=2,
-            nlow_state=[2, 2],
-            bM1=bM1,
-            bM2=bM2,
-            intra_harmonics_map=intra,
-            inter_harmonics_map=inter,
-            max_order=max_order,
-            symmetry_map=symmetry_map,
-            kpoints=kpath.kpoints_2d,
-            use_cache=False,
-            profile_light=True,
-            log_level=logging.INFO,
-            Tmat=Tmat,
-            phase_deg=phase_deg,
-            kpath_file=kpath_in,
-            kpath_out_file=kpath_out,
-            gvec_file_layer1=g1,
-            gvec_file_layer2=g2,
-        )
-    except Exception:
-        # Keep `main()` robust even if local files are missing/misconfigured.
-        return _synthetic()
-
-
-def self_test(*, k_index: int = 0) -> None:
-    """Sanity run: build terms, assemble H(k), run eigh, and report basics."""
-    cfg = example_config()
-    setup_logging(cfg.log_level)
-
-    model = build_model(cfg)
-
-    # Assign synthetic coefficients so at least some terms contribute.
-    rng = np.random.default_rng(0)
-    for term in model.terms.values():
-        term.active = True
-        term.r_value_real = float(rng.normal(scale=0.1))
-        term.r_value_imag = float(rng.normal(scale=0.1))
-
-    if cfg.kpoints is None:
-        raise ValueError("example_config() returned config.kpoints=None")
-    if not (0 <= int(k_index) < len(cfg.kpoints)):
-        raise ValueError(f"k_index={k_index} out of range for kpoints of length {len(cfg.kpoints)}")
-    k0 = np.asarray(cfg.kpoints[int(k_index)], dtype=float)
-    symmetry_gen = getattr(model, "_moire_symmetry_gen", None)
-    if symmetry_gen is None:
-        basis_template = cfg.symmetry_source_metadata.get("basis_template") if isinstance(cfg.symmetry_source_metadata, dict) else None
-        symmetry_gen = SymmetryGenerator(np.asarray(cfg.Q_set1), np.asarray(cfg.Q_set2), [cfg.n_orb1, cfg.n_orb2], basis_template=basis_template)
-
-    # 1) Validate `assemble_hamiltonian` path.
-    H_full = model.assemble_hamiltonian(k0, symmetry_gen=symmetry_gen, use_cache=cfg.use_cache)
-    herm_err_full = float(np.max(np.abs(H_full - H_full.conjugate().T)))
-    w_full, _v_full = scipy.linalg.eigh(H_full, check_finite=False)
-
-    logger.info(f"dim={H_full.shape[0]}")
-    logger.info(f"Hermitian check: max|H-H†| = {herm_err_full:.3e}")
-    logger.info(f"eigvals[:5] = {w_full[:5]}")
-
-    # 2) Also run the same internal routine used by `compute_bands` (profiling-friendly).
-    state = _prepare_band_state(cfg, model)
-    _H_kept, _w_kept, _v_kept, _counts, prof = _compute_one_k(0, k0, state)
-    if prof is not None:
-        logger.info(f"profile: {prof}")
-
-def main() -> None:
-    """Entry point for a small, dependency-free sanity run."""
-    self_test()
-    cfg = example_config()
-    model = build_model(cfg)
-
-    heff_path = None
-    if cfg.kpath_out_file is not None:
-        heff_path = Path(cfg.kpath_out_file).parent / "heff_list.npy"
-    if heff_path is None or not heff_path.exists():
-        logger.info("No local heff_list.npy found next to the example k-path; skipping coefficient extraction.")
-        return
-
-    heff_list = np.load(heff_path)
-    k_proj = [0, 40]
-    cfg.kpoints_fit = select_kpoints(cfg.kpoints, k_proj)
-    cfg.heff = scipy.linalg.block_diag(*(heff_list[k_proj]))
-
-    model, diag = compute_coefficients(cfg, model)
-    eigvals = compute_bands(cfg, model, cfg.kpoints)   # 这里才是整条 kpath
-
-
-if __name__ == "__main__":
-    main()

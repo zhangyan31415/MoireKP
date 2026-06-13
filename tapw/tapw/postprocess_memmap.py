@@ -144,8 +144,11 @@ def postprocess_memmap(
     print(f"Postprocess finished: {out_dir}")
 
 
-def main() -> None:
-    p = argparse.ArgumentParser(description="Postprocess TAPW raw memmap outputs into vec_CBM/VBM files.")
+def main(argv=None, *, prog=None) -> None:
+    p = argparse.ArgumentParser(
+        prog=prog,
+        description="Postprocess TAPW raw memmap outputs into vec_CBM/VBM files.",
+    )
     p.add_argument("--root-dir", required=True, help="Q_shell_<n_g> directory that contains memmap/")
     p.add_argument("--valley", type=int, required=True, help="Valley integer (e.g. 31/32/33/5)")
     p.add_argument("--mode", choices=["band", "chern"], required=True)
@@ -154,7 +157,7 @@ def main() -> None:
     p.add_argument("--num-k2", type=int, default=None, help="Optional rectangular Chern grid size along kappa2")
     p.add_argument("--efermi", type=float, required=True)
     p.add_argument("--band-type", default="CBM", help="CBM, VBM, or anything else to write both")
-    args = p.parse_args()
+    args = p.parse_args(argv)
 
     postprocess_memmap(
         root_dir=args.root_dir,

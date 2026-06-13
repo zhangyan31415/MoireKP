@@ -25,7 +25,7 @@ compute:
   eigsh_cal: true
   eig_vec_cal: false
   ge: false
-  C3_H: false
+  symmetrize_hamiltonian: false
   hamk_save: false
   orthogonal_basis: false
   zero_potential_layers: [1]

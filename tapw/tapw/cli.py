@@ -13,7 +13,10 @@ from .workflows.band import BandStructureCalculator
 from .io.structure import OpenMXFile, StructureProcessorSpglib
 from .io.kpath import KPathGenerator
 from .io.hr import HrSparseHandler
-from .workflows.symmetry import SymmetryAnalysisRunner
+from .workflows.symmetry import SymmetryAnalysisRunner, resolve_requested_symmetrization_operations
+
+VALLEY_LABELS = dict(BandStructureCalculator.VALLEY_MAP)
+
 
 def _mpi_world_rank_size() -> Tuple[int, int]:
     # Best-effort: works both under mpiexec/srun and in normal (non-MPI) runs.
@@ -40,7 +43,7 @@ def setup_logging(log_file: str = None):
     )
     return logging.getLogger(__name__)
 
-def build_calc_parser(prog: str = None):
+def build_calc_parser(prog: str = None, *, fixed_mode: str | None = None):
     """Build the TAPW calculation parser used by both tapw calc and tapw-calc."""
     parser = argparse.ArgumentParser(
         prog=prog,
@@ -54,8 +57,9 @@ def build_calc_parser(prog: str = None):
                        help='Output directory (overrides config file)')
     parser.add_argument('--valleys', type=int, nargs='+',
                        help='List of valleys to calculate (overrides config file)')
-    parser.add_argument('--mode', choices=['band', 'chern', 'symmetry'],
-                       help='Calculation mode (overrides config file)')
+    if fixed_mode is None:
+        parser.add_argument('--mode', choices=['band', 'chern', 'symmetry'],
+                           help='Calculation mode (overrides config file)')
     parser.add_argument('--n_g', type=int,
                        help='Harmonic of G vectors (overrides config file)')
     parser.add_argument('--num_chern', type=int,
@@ -100,10 +104,7 @@ def resolve_qshell_dir_name(compute_cfg, calculator) -> str:
     if not bool(getattr(compute_cfg, "TAPW", True)):
         return "direct"
     qshell_name = f"Q_shell_{compute_cfg.n_g}"
-    uses_symm = bool(
-        getattr(calculator, "use_M_valley_threefold_symm", False)
-        or getattr(calculator, "use_C3_H", False)
-    )
+    uses_symm = bool(getattr(calculator, "uses_hamiltonian_symmetrization", False))
     if uses_symm:
         return qshell_name + "_symm"
     return qshell_name
@@ -113,6 +114,50 @@ def calculation_targets(compute_cfg) -> list:
     if not bool(getattr(compute_cfg, "TAPW", True)):
         return [None]
     return list(getattr(compute_cfg, "valleys", []))
+
+
+def set_compute_valley(compute_cfg, valley: int) -> None:
+    if hasattr(compute_cfg, "set_valley"):
+        compute_cfg.set_valley(valley)
+        return
+    compute_cfg.valley = valley
+    compute_cfg.valley_flag = _valley_label_for_target(valley)
+
+
+def hamiltonian_symmetrization_requested(compute_cfg) -> bool:
+    return getattr(compute_cfg, "symmetrize_hamiltonian", False) is not False
+
+
+def _valley_label_for_target(target) -> str:
+    return VALLEY_LABELS.get(target, str(target))
+
+
+def _run_symmetry_analysis(config, processor, hr, sr, logger):
+    payload = SymmetryAnalysisRunner(
+        config=config,
+        structure=processor,
+        hr_supercell=hr,
+        sr_supercell=sr,
+        logger=logger,
+    ).run()
+    logger.info("Completed symmetry analysis")
+    return payload
+
+
+def _resolve_hamiltonian_symmetrization_from_summary(config, payload) -> None:
+    if not hamiltonian_symmetrization_requested(config.compute):
+        return
+    if not isinstance(payload, dict):
+        raise ValueError("Hamiltonian symmetrization requires a symmetry-analysis payload.")
+    summary = payload.get("summary", {})
+    request = getattr(config.compute, "symmetrize_hamiltonian", False)
+    resolved = {}
+    for target in calculation_targets(config.compute):
+        if target is None:
+            continue
+        valley_label = _valley_label_for_target(target)
+        resolved[valley_label] = resolve_requested_symmetrization_operations(summary, valley_label, request)
+    config.compute.resolved_hamiltonian_symmetry_operations_by_valley = resolved
 
 
 def shutdown_parallel_runtime() -> None:
@@ -128,7 +173,14 @@ def exit_cli(code: int) -> None:
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(int(code))
+    raise SystemExit(int(code))
+
+
+def finish_calculation_process(code: int) -> None:
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    raise SystemExit(int(code))
 
 
 def copy_reused_m_valley_band_outputs(qshell_path: Path, source_valley_flag: str, target_valley_flag: str) -> None:
@@ -159,7 +211,7 @@ def run_calc(args):
         config.paths.output_dir = args.output_dir
     if args.valleys:
         config.compute.valleys = args.valleys
-        config.compute.valley = args.valleys[0]
+        set_compute_valley(config.compute, args.valleys[0])
     if args.mode:
         config.compute.mode = args.mode
     if args.n_g is not None:
@@ -262,8 +314,7 @@ def run_calc(args):
                 read_from_npz=False
             )
         else:
-            logger.error(f"H_file后缀必须为.npz或.dat，当前为: {H_file}")
-            sys.exit(1)
+            raise ValueError(f"H_file后缀必须为.npz或.dat，当前为: {H_file}")
         hr = H_handler.get_hr_sparse()
 
         # Symmetry analysis is raw-H-only; avoid reading S.dat on this path.
@@ -291,11 +342,9 @@ def run_calc(args):
                     )
                     sr = S_handler.get_hr_sparse()
                 else:
-                    logger.error(f"S_file后缀必须为.npz或.dat，当前为: {S_file}")
-                    sys.exit(1)
+                    raise ValueError(f"S_file后缀必须为.npz或.dat，当前为: {S_file}")
             else:
-                logger.info("S_file is None, please check the config.yaml")
-                sys.exit(1)
+                raise ValueError("S_file is None, please check the config.yaml")
 
         # Initialize k-path if needed
         kpath_config = None
@@ -307,15 +356,14 @@ def run_calc(args):
             kpath_config.read_and_generate_kpath(config.paths.kpath_in, config.paths.kpath_out)
 
         if config.compute.mode == "symmetry":
-            SymmetryAnalysisRunner(
-                config=config,
-                structure=processor,
-                hr_supercell=hr,
-                sr_supercell=sr,
-                logger=logger,
-            ).run()
-            logger.info("Completed symmetry analysis")
+            _run_symmetry_analysis(config, processor, hr, sr, logger)
+            shutdown_parallel_runtime()
+            logging.shutdown()
             return
+
+        if hamiltonian_symmetrization_requested(config.compute):
+            payload = _run_symmetry_analysis(config, processor, hr, sr, logger)
+            _resolve_hamiltonian_symmetrization_from_summary(config, payload)
 
         reuse_m_valley_band_outputs = can_reuse_m_valley_c3_band_outputs(config.compute)
         reused_reference_valley_flag = None
@@ -328,7 +376,7 @@ def run_calc(args):
                 logger.info("Starting non-TAPW direct calculation")
             else:
                 logger.info(f"Starting calculation for valley {target}")
-                config.compute.valley = target
+                set_compute_valley(config.compute, target)
             
             if reusable_m_valley_calculator is not None:
                 reusable_m_valley_calculator.switch_m_valley(target)
@@ -372,27 +420,33 @@ def run_calc(args):
                 if reuse_m_valley_band_outputs and getattr(calculator, "use_M_valley_threefold_symm", False):
                     reused_reference_valley_flag = calculator.valley_flag
 
-        if getattr(config.symmetry_analysis, "enable", False):
-            SymmetryAnalysisRunner(
-                config=config,
-                structure=processor,
-                hr_supercell=hr,
-                sr_supercell=sr,
-                logger=logger,
-            ).run()
-            logger.info("Completed symmetry analysis")
+        if getattr(config.symmetry_analysis, "enable", False) and not hamiltonian_symmetrization_requested(config.compute):
+            _run_symmetry_analysis(config, processor, hr, sr, logger)
 
     except Exception as e:
         logger.error(f"Error during calculation: {str(e)}", exc_info=True)
-        exit_cli(1)
+        logging.shutdown()
+        sys.stdout.flush()
+        sys.stderr.flush()
+        return 1
 
     logger.info("Calculation completed successfully")
-    exit_cli(0)
+    logging.shutdown()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    return 0
 
 
 def main_calc(argv=None, *, prog="tapw run"):
     """Run the TAPW calculator entry point."""
     return run_calc(build_calc_parser(prog=prog).parse_args(argv))
+
+
+def main_chern(argv=None, *, prog="tapw chern"):
+    """Run TAPW Chern calculation with mode fixed to `chern`."""
+    args = build_calc_parser(prog=prog, fixed_mode="chern").parse_args(argv)
+    args.mode = "chern"
+    return run_calc(args)
 
 
 def build_main_parser():
@@ -404,8 +458,10 @@ def build_main_parser():
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.add_parser("init", help="Generate TAPW configuration files")
     subparsers.add_parser("run", help="Run TAPW band, Chern, or symmetry calculations")
+    subparsers.add_parser("chern", help="Run TAPW Chern calculation")
     subparsers.add_parser("plot", help="Plot TAPW band structures")
     subparsers.add_parser("topo", help="Post-process TAPW Chern/Wilson-loop outputs")
+    subparsers.add_parser("postprocess-memmap", help="Finalize chunked TAPW memmap outputs")
     subparsers.add_parser("orbital", help="Analyze TAPW orbital weights")
     subparsers.add_parser("fatband", help="Plot orbital-weighted bands")
     return parser
@@ -467,6 +523,8 @@ def main(argv=None):
         return config_generator.main(rest, prog="tapw init")
     if command in {"run", "calc"}:
         return main_calc(rest, prog="tapw run")
+    if command == "chern":
+        return main_chern(rest, prog="tapw chern")
     if command == "plot":
         from . import plot_band_01
 
@@ -475,6 +533,10 @@ def main(argv=None):
         from . import chern_post
 
         return chern_post.main(rest, prog="tapw topo")
+    if command == "postprocess-memmap":
+        from . import postprocess_memmap
+
+        return postprocess_memmap.main(rest, prog="tapw postprocess-memmap")
     if command == "orbital":
         return _main_orbital(rest)
     if command == "fatband":

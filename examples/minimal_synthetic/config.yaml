@@ -1,0 +1,14 @@
+schema_version: 1
+runtime_class: clean-clone
+description: Tiny text-only KP helper smoke example.
+inputs:
+  orbital_order: data/orbital_order.csv
+  eigvec_coefficients: data/eigvec_coefficients.csv
+  kpath: data/KPATH.in
+parameters:
+  band_indices: [0]
+  score: sum
+  top_k: 2
+expected_outputs:
+  orbital_selection: expected/orbital_selection.json
+  kpath: expected/KPATH.out

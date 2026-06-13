@@ -7,7 +7,7 @@ name = "moirekp"
 version = "0.1.0"
 description = "TAPW workflows and moire k.p model construction."
 readme = "README.md"
-requires-python = ">=3.9"
+requires-python = ">=3.11"
 dependencies = [
     "ase>=3.22.0",
     "joblib>=1.0.0",
@@ -43,5 +43,13 @@ tapw-plot-orbital = "tapw.cli:main"
 where = ["kp", "tapw"]
 include = ["kp*", "tapw*"]
 
+[tool.setuptools]
+include-package-data = true
+
 [tool.setuptools.package-data]
 tapw = ["templates/*.yaml", "templates/*.in"]
+
+[tool.moirekp.release]
+metadata_status = "pending"
+data_manifest = "examples/data-manifest.yaml"
+release_blockers = ["license", "doi", "data_url"]

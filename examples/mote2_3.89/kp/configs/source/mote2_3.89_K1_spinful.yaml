@@ -2,6 +2,7 @@
 material:
   name: MoTe2
   spin: all
+  energy_unit: eV
   num_layers: 2
   efermi: -4.1
   orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
@@ -56,6 +57,6 @@ symm:
   valley: K1
   spin: all
   tapw_symmetry_dir: ../../../tapw/symmetry_analysis_test_k
-  operations: [C3, C2T]
+  operations: [C3z, C2T]
   output_dir: ../../outputs/symm/mote2_3.89_K1_spinful
   tolerance: 2.0e-2

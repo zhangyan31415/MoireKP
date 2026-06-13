@@ -56,7 +56,7 @@ compute:
   hamk_save: false       # Whether to save Hamiltonian matrices
   TAPW: true            # Use TAPW method
   eigsh_cal: true       # Use eigsh for eigenvalue calculation
-  C3_H: true           # Apply C3 symmetry to Hamiltonian
+  symmetrize_hamiltonian: false  # false, true, or canonical operation list such as [C3z]
   ge: false             # Use generalized eigenvalue solver
   eigensolver: "slepc"  # "scipy" or "slepc"; SLEPc currently requires joblib+loky and eig_vec_cal=false
   eig_vec_cal: false     # Calculate eigenvectors 

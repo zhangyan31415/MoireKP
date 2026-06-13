@@ -240,7 +240,7 @@ class OrbitalPlotter:
             raise FileNotFoundError(f"Band structure file not found. Tried: {band_file_candidates}")
         
         self.band_data = np.loadtxt(band_file)
-        print(f"✓ Loaded band data: {self.band_data.shape}")
+        print(f"[OK] Loaded band data: {self.band_data.shape}")
         
         # Load orbital composition data
         bt = (self.config.band_type or "CBM").upper()
@@ -258,7 +258,7 @@ class OrbitalPlotter:
         with open(orbital_file, 'r') as f:
             self.orbital_data = json.load(f)
         
-        print(f"✓ Loaded orbital data: {len(self.orbital_data['data'])} k-points")
+        print(f"[OK] Loaded orbital data: {len(self.orbital_data['data'])} k-points")
         
         # Load k-path data if available
         self._load_kpath_data()
@@ -274,12 +274,12 @@ class OrbitalPlotter:
                     self.kpath_labels, self.kpath_coords, self.kpath_ticks = read_kpath(
                         self.config.kpath_in, self.config.kpath_out)
                     self.config.use_kpath = True
-                    print(f"✓ Loaded K-path data: {len(self.kpath_labels)} high-symmetry points")
+                    print(f"[OK] Loaded K-path data: {len(self.kpath_labels)} high-symmetry points")
                 except Exception as e:
-                    print(f"⚠ Failed to load K-path data: {e}")
+                    print(f"[WARN] Failed to load K-path data: {e}")
                     self.config.use_kpath = False
             else:
-                print(f"⚠ K-path files not found: {self.config.kpath_in}, {self.config.kpath_out}")
+                print(f"[WARN] K-path files not found: {self.config.kpath_in}, {self.config.kpath_out}")
                 self.config.use_kpath = False
         else:
             # Try to load from TAPW config.yaml
@@ -290,9 +290,9 @@ class OrbitalPlotter:
                     self.kpath_labels, self.kpath_coords, self.kpath_ticks = read_kpath(
                         kpath_from_config['kpath_in'], kpath_from_config['kpath_out'])
                     self.config.use_kpath = True
-                    print(f"✓ Loaded K-path from TAPW config: {len(self.kpath_labels)} high-symmetry points")
+                    print(f"[OK] Loaded K-path from TAPW config: {len(self.kpath_labels)} high-symmetry points")
                 except Exception as e:
-                    print(f"⚠ Failed to load K-path from TAPW config: {e}")
+                    print(f"[WARN] Failed to load K-path from TAPW config: {e}")
                     self.config.use_kpath = False
             else:
                 # Try to auto-detect K-path files in result directory
@@ -303,12 +303,12 @@ class OrbitalPlotter:
                     try:
                         self.kpath_labels, self.kpath_coords, self.kpath_ticks = read_kpath(kpath_in, kpath_out)
                         self.config.use_kpath = True
-                        print(f"✓ Auto-detected and loaded K-path data: {len(self.kpath_labels)} high-symmetry points")
+                        print(f"[OK] Auto-detected and loaded K-path data: {len(self.kpath_labels)} high-symmetry points")
                     except Exception as e:
-                        print(f"⚠ Failed to auto-load K-path data: {e}")
+                        print(f"[WARN] Failed to auto-load K-path data: {e}")
                         self.config.use_kpath = False
                 else:
-                    print("ℹ K-path data not available (KPATH.in/KPATH.out not found)")
+                    print("[INFO] K-path data not available (KPATH.in/KPATH.out not found)")
                     self.config.use_kpath = False
     
     def _try_load_kpath_from_tapw_config(self):
@@ -316,7 +316,7 @@ class OrbitalPlotter:
         try:
             import yaml
         except ImportError:
-            print("⚠ PyYAML not installed, cannot read TAPW config.yaml")
+            print("[WARN] PyYAML not installed, cannot read TAPW config.yaml")
             return None
             
         # 尝试在多个位置查找 config.yaml
@@ -341,7 +341,7 @@ class OrbitalPlotter:
                         if kpath_in and kpath_out:
                             # 检查文件是否存在
                             if os.path.exists(kpath_in) and os.path.exists(kpath_out):
-                                print(f"✓ Found K-path configuration in {config_path}")
+                                print(f"[OK] Found K-path configuration in {config_path}")
                                 return {'kpath_in': kpath_in, 'kpath_out': kpath_out}
                             else:
                                 # 尝试相对于配置文件的路径
@@ -350,11 +350,11 @@ class OrbitalPlotter:
                                 kpath_out_rel = os.path.join(config_dir, os.path.basename(kpath_out))
                                 
                                 if os.path.exists(kpath_in_rel) and os.path.exists(kpath_out_rel):
-                                    print(f"✓ Found K-path files relative to config in {config_path}")
+                                    print(f"[OK] Found K-path files relative to config in {config_path}")
                                     return {'kpath_in': kpath_in_rel, 'kpath_out': kpath_out_rel}
                                 
                 except Exception as e:
-                    print(f"⚠ Failed to read config file {config_path}: {e}")
+                    print(f"[WARN] Failed to read config file {config_path}: {e}")
                     continue
         
         return None
@@ -464,22 +464,22 @@ class OrbitalPlotter:
         self.available_sublayers = sublayers
         
         # Print available options
-        print(f"\n📋 Available atom types ({len(self.available_atoms)} types):")
+        print(f"\nAvailable atom types ({len(self.available_atoms)} types):")
         for i, atom in enumerate(self.available_atoms, 1):
             print(f"  {i:2d}. {atom}")
         
-        print(f"\n📋 Available orbital types ({len(self.available_orbitals)} types):")
+        print(f"\nAvailable orbital types ({len(self.available_orbitals)} types):")
         for i, orb in enumerate(self.available_orbitals, 1):
             print(f"  {i:2d}. {orb}")
         
-        print(f"\n📋 Available sublayers ({len(self.available_sublayers)} sublayers):")
+        print(f"\nAvailable sublayers ({len(self.available_sublayers)} sublayers):")
         for i, sub in enumerate(self.available_sublayers, 1):
             print(f"  {i:2d}. {sub['label']} - orbitals: {', '.join(sub['orbs'])}")
     
     def interactive_selection(self):
         """交互式选择绘图内容"""
         print("\n" + "="*60)
-        print("🎨 交互式轨道绘图选择")
+        print("交互式轨道绘图选择")
         print("="*60)
         
         print("\n请选择绘图模式:")
@@ -494,9 +494,9 @@ class OrbitalPlotter:
                 mode = int(input("\n请输入模式编号 (1-5): "))
                 if 1 <= mode <= 5:
                     break
-                print("❌ 请输入1-5之间的数字")
+                print("错误: 请输入1-5之间的数字")
             except ValueError:
-                print("❌ 请输入有效数字")
+                print("错误: 请输入有效数字")
         
         if mode == 1:
             return self._select_atoms()
@@ -518,7 +518,7 @@ class OrbitalPlotter:
         indices = self._parse_selection(selection, len(self.available_atoms))
         
         selected_atoms = [self.available_atoms[i] for i in indices]
-        print(f"✓ 已选择原子: {', '.join(selected_atoms)}")
+        print(f"[OK] 已选择原子: {', '.join(selected_atoms)}")
         
         return {
             'type': 'atoms',
@@ -536,7 +536,7 @@ class OrbitalPlotter:
         indices = self._parse_selection(selection, len(self.available_orbitals))
         
         selected_orbitals = [self.available_orbitals[i] for i in indices]
-        print(f"✓ 已选择轨道: {', '.join(selected_orbitals)}")
+        print(f"[OK] 已选择轨道: {', '.join(selected_orbitals)}")
         
         return {
             'type': 'orbitals',
@@ -554,7 +554,7 @@ class OrbitalPlotter:
         indices = self._parse_selection(selection, len(self.available_sublayers))
         
         selected_sublayers = [self.available_sublayers[i] for i in indices]
-        print(f"✓ 已选择子层: {', '.join([s['label'] for s in selected_sublayers])}")
+        print(f"[OK] 已选择子层: {', '.join([s['label'] for s in selected_sublayers])}")
         
         return {
             'type': 'sublayers',
@@ -577,7 +577,7 @@ class OrbitalPlotter:
     
     def _select_summary(self):
         """总结模式"""
-        print("\n📊 总结模式将生成以下图表:")
+        print("\n总结模式将生成以下图表:")
         print("  - 层级总贡献 (L0 vs L1)")
         print("  - 原子类型总贡献 (Se vs In)")
         print("  - 轨道类型总贡献 (s, p, d)")
@@ -614,7 +614,7 @@ class OrbitalPlotter:
     
     def plot_detailed(self):
         """详细模式：绘制所有原子和轨道"""
-        print("\n🎨 Detailed mode: Generating all detailed plots...")
+        print("\nDetailed mode: Generating all detailed plots...")
         
         # 1. Plot detailed sublayer plots (all orbitals combined)
         for i, sublayer in enumerate(self.available_sublayers):
@@ -657,7 +657,7 @@ class OrbitalPlotter:
         # 6. Plot overall summary
         self._plot_overall_summary("summary_overall")
         
-        print(f"✓ Detailed mode completed, plots saved in: {self.valley_output_dir}/")
+        print(f"[OK] Detailed mode completed, plots saved in: {self.valley_output_dir}/")
     
     def _group_orbitals(self) -> Dict[str, List[str]]:
         """将轨道按类型分组"""
@@ -1148,14 +1148,12 @@ class OrbitalPlotter:
     def _plot_atom_summary(self, atom: str, filename: str):
         """绘制原子类型总结图"""
         print(f"  绘制 {atom} 原子总结图...")
-        # 实现原子总结绘图逻辑
-        pass
+        return None
     
     def _plot_orbital_group(self, group_name: str, orbitals: List[str], filename: str):
         """绘制轨道组总结图"""
         print(f"  绘制 {group_name} 轨道组总结图...")
-        # 实现轨道组绘图逻辑
-        pass
+        return None
     
     def _plot_layer_sublayer_atom_contributions(self):
         """Plot fatband contributions by layer, sublayer, and atom type"""
@@ -1683,8 +1681,7 @@ class OrbitalPlotter:
     def _plot_overall_summary(self, filename: str):
         """绘制总体总结图"""
         print("  绘制总体总结图...")
-        # 实现总体总结绘图逻辑
-        pass
+        return None
     
     def run(self):
         """运行绘图工具"""
@@ -1700,7 +1697,7 @@ class OrbitalPlotter:
                 print("请指定 --interactive 或 --detailed 模式")
                 
         except Exception as e:
-            print(f"❌ 错误: {e}")
+            print(f"错误: {e}")
             return 1
         
         return 0

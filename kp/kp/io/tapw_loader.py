@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import csv
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
 
 import numpy as np
@@ -49,7 +52,44 @@ def load_orbital_order(path: str) -> List[Dict[str, Any]]:
     """Load orbital ordering metadata (CSV/JSON).
 
     Expected columns/keys include: index, name, layer, atom, l, m, spin(optional).
-    Implementation to be provided according to your source format.
     """
 
-    raise NotImplementedError("Implement orbital order loader for your CSV/JSON format.")
+    source = Path(path)
+    if not source.exists():
+        raise FileNotFoundError(path)
+    suffix = source.suffix.lower()
+    if suffix == ".json":
+        with source.open("r", encoding="utf-8") as handle:
+            data = json.load(handle)
+        if isinstance(data, dict):
+            data = data.get("orbitals", data.get("orbital_order", data))
+        if not isinstance(data, list):
+            raise ValueError("orbital order JSON must contain a list of orbital records")
+        return [_coerce_record(dict(row)) for row in data]
+    if suffix in {".csv", ".txt"}:
+        with source.open("r", encoding="utf-8", newline="") as handle:
+            reader = csv.DictReader(handle)
+            if reader.fieldnames is None:
+                raise ValueError(f"orbital order CSV has no header: {path}")
+            return [_coerce_record(dict(row)) for row in reader]
+    raise ValueError(f"Unsupported orbital order file extension {source.suffix!r}; use CSV or JSON")
+
+
+def _coerce_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    return {str(key): _coerce_value(value) for key, value in record.items()}
+
+
+def _coerce_value(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    text = value.strip()
+    if text == "":
+        return ""
+    try:
+        return int(text)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        return text

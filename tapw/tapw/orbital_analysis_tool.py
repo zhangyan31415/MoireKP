@@ -530,7 +530,7 @@ class OrbitalAnalyzer:
                 print(f"加载能带数据: {band_data.shape}")
         except Exception as e:
             print(f"加载能带数据失败: {e}")
-            return
+            raise RuntimeError(f"加载能带数据失败: {e}") from e
         
         # 加载特征向量数据
         try:
@@ -539,7 +539,7 @@ class OrbitalAnalyzer:
                 print(f"加载特征向量数据: {vec_data.shape}")
         except Exception as e:
             print(f"加载特征向量数据失败: {e}")
-            return
+            raise RuntimeError(f"加载特征向量数据失败: {e}") from e
         
         # 加载真实的结构信息
         processor = self.load_structure_from_existing_files()
@@ -555,7 +555,7 @@ class OrbitalAnalyzer:
         result = self.perform_orbital_analysis(band_data, vec_data, structure_info, valley_flag, processor)
         
         # 保存结果
-        self.save_results(result, valley_flag)
+        return self.save_results(result, valley_flag)
     
     def perform_orbital_analysis(self, band_data: np.ndarray, vec_data: np.ndarray, 
                                 structure_info: Dict, valley_flag: str, processor: 'StructureProcessorSpglib') -> Dict:
@@ -924,8 +924,10 @@ class OrbitalAnalyzer:
                 f.write(compact_json_str)
             if self.config.verbose:
                 print(f"结果已保存: {output_file}")
+            return output_file
         except Exception as e:
             print(f"保存结果时发生错误: {e}", file=sys.stderr)
+            raise RuntimeError(f"保存结果失败: {e}") from e
     
 
     
@@ -940,7 +942,7 @@ class OrbitalAnalyzer:
         if not valleys:
             print("错误: 未找到有效的能带数据和特征向量文件")
             print("请确保计算时设置了 eig_vec_cal=True")
-            return
+            raise FileNotFoundError("未找到有效的能带数据和特征向量文件")
         
         if self.config.verbose:
             print(f"检测到 {len(valleys)} 个谷: {list(valleys.keys())}")
@@ -953,20 +955,27 @@ class OrbitalAnalyzer:
         else:
             print(f"错误: 指定的谷 '{self.config.valley}' 不存在")
             print(f"可用的谷: {list(valleys.keys())}")
-            return
+            raise ValueError(f"指定的谷不存在: {self.config.valley}")
         
         # 分析每个谷
+        outputs = []
+        failures = []
         for valley in target_valleys:
             try:
                 valley_info = valleys[valley]
-                self.analyze_from_files(
+                outputs.append(self.analyze_from_files(
                     valley_info["band_file"],
                     valley_info["vec_file"],
                     valley_info["valley_flag"]
-                )
+                ))
             except Exception as e:
                 print(f"分析谷 {valley} 时出错: {e}")
-                continue
+                failures.append(f"{valley}: {e}")
+
+        if failures:
+            raise RuntimeError("轨道分析失败: " + "; ".join(failures))
+        if not outputs:
+            raise RuntimeError("轨道分析未生成任何输出")
         
         if self.config.verbose:
             print(f"\n轨道分析完成！结果保存在: {self.config.output_dir}")
@@ -984,10 +993,8 @@ def main(argv=None, *, prog=None):
                         help='要分析的谷 (默认: auto，分析所有可用的谷)')
     parser.add_argument('--band', '--band-type', dest='band', type=str, default='CBM',
                         help='能带类型: CBM 或 VBM (默认: CBM)')
-    parser.add_argument('--spin', action='store_true', default=True,
-                        help='是否为自旋极化计算 (默认: True)')
-    parser.add_argument('--no-spin', action='store_false', dest='spin',
-                        help='非自旋极化计算')
+    parser.add_argument('--spin', default=True, action=argparse.BooleanOptionalAction,
+                        help='是否为自旋极化计算 (默认: True；使用 --no-spin 关闭)')
     parser.add_argument('--quiet', '-q', action='store_true',
                         help='静默模式，减少输出信息')
     
@@ -1008,7 +1015,7 @@ def main(argv=None, *, prog=None):
         analyzer.run()
     except Exception as e:
         print(f"分析过程中出现错误: {e}")
-        sys.exit(1)
+        raise SystemExit(1)
 
 
 if __name__ == '__main__':

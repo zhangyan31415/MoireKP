@@ -66,7 +66,24 @@ def _as_bool(value: Any) -> bool:
     return bool(value)
 
 
-_SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "TR"})
+_SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "T", "TR"})
+HARTREE_TO_EV = 27.211386245988
+
+
+def _energy_scale_from_material(material: Mapping[str, Any]) -> float:
+    unit = material.get("energy_unit")
+    if unit is None:
+        raise ValueError("material.energy_unit is required and must be 'eV' or 'Hartree'")
+    text = str(unit).strip().lower()
+    if text in {"ev", "electronvolt", "electron_volt"}:
+        return 1.0
+    if text in {"hartree", "ha"}:
+        return HARTREE_TO_EV
+    raise ValueError(f"material.energy_unit must be 'eV' or 'Hartree', got {unit!r}")
+
+
+def _load_hamk_with_energy_unit(path: str, material: Mapping[str, Any], *, mmap_mode: str | None = "r") -> np.ndarray:
+    return load_hamk(path, mmap_mode=mmap_mode) * _energy_scale_from_material(material)
 
 
 def _validate_operation_label(label: str) -> str:
@@ -81,7 +98,35 @@ def _validate_operation_label(label: str) -> str:
 
 
 def _canonical_internal_operation_name(operation: str) -> str:
-    return "C3z" if operation in {"C3", "C3z"} else str(operation)
+    if operation in {"C3", "C3z"}:
+        return "C3z"
+    if operation in {"T", "TR"}:
+        return "TR"
+    return str(operation)
+
+
+def _source_manifest_operation_name(operation: str) -> str:
+    if operation in {"C3", "C3z"}:
+        return operation
+    if operation in {"T", "TR"}:
+        return "TR"
+    return str(operation)
+
+
+def _output_operation_name(requested: str, validated: str) -> str:
+    if validated in {"T", "TR"}:
+        return "TR"
+    return str(requested)
+
+
+def _manifest_operation_lookup_names(operation: str) -> tuple[str, ...]:
+    if operation == "C3z":
+        return ("C3z", "C3")
+    if operation == "T":
+        return ("T", "TR")
+    if operation == "TR":
+        return ("TR", "T")
+    return (operation,)
 
 
 def _valley_family(valley: str) -> str:
@@ -252,26 +297,31 @@ def _slice_representation_for_spin(matrix: np.ndarray, spin: str, target_dim: in
 
 
 def _operation_entry(manifest: dict[str, Any], valley: str, operation: str) -> dict[str, Any]:
+    operation_names = _manifest_operation_lookup_names(operation)
+
     def _matches(entry: dict[str, Any]) -> bool:
         entry_operation = str(entry.get("operation", entry.get("name", "")))
         entry_valley = str(entry.get("valley_label", entry.get("valley", valley)))
-        return entry_operation == operation and entry_valley == valley
+        return entry_operation in operation_names and entry_valley == valley
 
     operations = manifest.get("operations")
     if isinstance(operations, dict):
         if valley in operations:
             valley_ops = operations[valley]
             if isinstance(valley_ops, dict):
-                if operation in valley_ops:
-                    entry = valley_ops[operation]
-                    return dict(entry) if isinstance(entry, dict) else {"filename": entry}
-                if isinstance(valley_ops.get("operations"), dict):
-                    entry = valley_ops["operations"].get(operation)
-                    if entry is not None:
+                for name in operation_names:
+                    if name in valley_ops:
+                        entry = valley_ops[name]
                         return dict(entry) if isinstance(entry, dict) else {"filename": entry}
-        if operation in operations:
-            entry = operations[operation]
-            return dict(entry) if isinstance(entry, dict) else {"filename": entry}
+                if isinstance(valley_ops.get("operations"), dict):
+                    for name in operation_names:
+                        entry = valley_ops["operations"].get(name)
+                        if entry is not None:
+                            return dict(entry) if isinstance(entry, dict) else {"filename": entry}
+        for name in operation_names:
+            if name in operations:
+                entry = operations[name]
+                return dict(entry) if isinstance(entry, dict) else {"filename": entry}
     if isinstance(operations, list):
         for entry in operations:
             if not isinstance(entry, dict):
@@ -286,9 +336,10 @@ def _operation_entry(manifest: dict[str, Any], valley: str, operation: str) -> d
     valleys = manifest.get("valleys")
     if isinstance(valleys, dict) and valley in valleys:
         valley_ops = valleys[valley].get("operations", {}) if isinstance(valleys[valley], dict) else {}
-        if operation in valley_ops:
-            entry = valley_ops[operation]
-            return dict(entry) if isinstance(entry, dict) else {"filename": entry}
+        for name in operation_names:
+            if name in valley_ops:
+                entry = valley_ops[name]
+                return dict(entry) if isinstance(entry, dict) else {"filename": entry}
     raise KeyError(f"manifest missing operation {valley}/{operation}")
 
 
@@ -312,7 +363,7 @@ def _operation_action_metadata(entry: dict[str, Any], operation: str, antiunitar
         k_map = {"type": "reflection", "axis_deg": float(entry["axis_deg"])}
     elif operation in {"C3", "C3z"}:
         k_map = {"type": "rotation", "angle_deg": 120.0}
-    elif operation == "TR":
+    elif operation in {"T", "TR"}:
         k_map = {"type": "negation"}
     else:
         raise ValueError(f"Operation {operation!r} requires explicit k_map metadata in the TAPW symmetry manifest")
@@ -846,7 +897,7 @@ def _select_operation_matrix_kind(
     }
 
 
-def _gamma_c2_action_audit(
+def _c2_action_audit_for_gamma(
     *,
     mode: str,
     operation: str,
@@ -1098,6 +1149,8 @@ def _projectors_for_k(
 ) -> ProjectionState:
     q_layers = [[q1], [q2]]
     orb_layers = [[orb0], [orb0]]
+    method = str(method).lower()
+    include_high = method != "first_order"
     _, h_vec_blk, _, _ = get_H_block(
         hamk_spin,
         q_layers,
@@ -1107,7 +1160,7 @@ def _projectors_for_k(
         norb_fix_list,
         spin=spin,
         mode=mode,
-        selected_bands_by_layer=nlow_state_list,
+        selected_bands_by_layer=None if include_high else nlow_state_list,
     )
     if spin == "all" and mode.lower() != "gamma":
         q_count = int(len(q1))
@@ -1121,7 +1174,7 @@ def _projectors_for_k(
             h_vec_blk,
             idx_list,
             nlow_state_list,
-            include_high=False,
+            include_high=include_high,
         )
     else:
         u_low, u_high = calculate_energy_lists(
@@ -1131,16 +1184,16 @@ def _projectors_for_k(
             q_layers,
             orb_layers,
             mode=mode,
-            include_high=False,
+            include_high=include_high,
         )
     u_low = np.asarray(u_low, dtype=np.complex128)
     result = downfold_from_projectors(
         hamk_spin,
         u_low,
-        None,
+        u_high,
         DownfoldingOptions(
-            method="first_order",
-            e_ref=None,
+            method=method,
+            e_ref=e_ref,
             pole_warning_mev=float(project_cfg.get("pole_warning_mev", 10.0)),
             pole_danger_mev=float(project_cfg.get("pole_danger_mev", 1.0)),
             fail_on_near_pole=_as_bool(project_cfg.get("fail_on_near_pole", False)),
@@ -1341,7 +1394,16 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     source_operations = [str(op) for op in symm_cfg.get("operations", [])]
     if not source_operations:
         raise ValueError("symm.operations must not be empty")
-    operation_requests = [{"source": _validate_operation_label(operation), "output": operation} for operation in source_operations]
+    operation_requests = []
+    for operation in source_operations:
+        canonical = _validate_operation_label(operation)
+        operation_requests.append(
+            {
+                "source": _source_manifest_operation_name(canonical),
+                "output": _output_operation_name(operation, canonical),
+                "requested": operation,
+            }
+        )
     tolerance = float(symm_cfg.get("tolerance", 1.0e-2))
 
     tapw_symmetry_dir = _resolve(symm_cfg.get("tapw_symmetry_dir"), cfg_dir)
@@ -1358,7 +1420,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     qset2_file = _resolve(material.get("qset2_file"), cfg_dir)
     if hamk_file is None or qset1_file is None or qset2_file is None:
         raise ValueError("material.hamk_file/qset1_file/qset2_file are required")
-    hamk = load_hamk(hamk_file, mmap_mode="r")
+    hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
     if q2 is None:
         raise ValueError("K-valley symmetry projection requires qset2_file")
@@ -1547,6 +1609,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             "formula": "q_model = R(rotation_deg) @ (layer_mean - q_source)",
         },
         "operations": [],
+        "strict_metadata": True,
         "requires_model_exactification": False,
         "exactification_owner": "kp_symm",
     }
@@ -1700,7 +1763,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             operation_summary["k_pairs_provenance"] = dict(entry.get("_k_pairs_provenance", {}))
         if accepted_internal_action:
             operation_summary["internal_resolved_action"] = resolved_model_action
-        gamma_c2_audit = _gamma_c2_action_audit(
+        c2_action_audit = _c2_action_audit_for_gamma(
             mode=mode,
             operation=output_operation,
             matrix_kind=matrix_kind,
@@ -1713,8 +1776,8 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             declared_model_action=model_action_metadata,
             combined_raw_h_residual=action.combined_raw_h_residual,
         )
-        if gamma_c2_audit is not None:
-            operation_summary["gamma_C2_action_audit"] = gamma_c2_audit
+        if c2_action_audit is not None:
+            operation_summary["C2_action_audit"] = c2_action_audit
         summary["operations"].append(operation_summary)
 
     n_orb = n_orb_for_exactification

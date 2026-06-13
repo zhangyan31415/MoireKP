@@ -1,8 +1,7 @@
-"""k-space utilities: k-path generation and BZ helpers (skeleton)."""
+"""k-space utilities: k-path generation and Brillouin-zone helpers."""
 
 from .kpath import KPathGenerator
 
 __all__ = [
     "KPathGenerator",
 ]
-

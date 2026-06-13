@@ -1,6 +1,7 @@
 material:
   name: MgI2
   spin: all
+  energy_unit: eV
   num_layers: 2
   efermi: -4.168612
   orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2

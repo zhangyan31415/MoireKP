@@ -4,6 +4,7 @@ from types import MethodType, SimpleNamespace
 
 import numpy as np
 import pandas as pd
+import pytest
 import scipy.sparse
 
 import tapw.workflows.symmetry as symmetry_analysis
@@ -214,8 +215,18 @@ def test_runner_writes_release_rawh_representation_and_manifest_by_default(tmp_p
     assert np.allclose(loaded_raw_h.toarray(), raw_h_matrix.toarray())
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["output_schema"] == "tapw_source_symmetry/v2"
+    assert manifest["schema_version"] == 2
     assert manifest["basis"] == "tapw_projected"
     assert manifest["basis_order"] == "spin_outermost; group -> g_index -> atom_type -> orbital"
+    assert manifest["operation_name_convention"]["time_reversal"] == "TR"
+    assert manifest["operation_name_convention"]["legacy_input_aliases"] == {"T": "TR"}
+    assert manifest["source_action_definition"]["required_fields"] == [
+        "k_map",
+        "q_map",
+        "sector_map",
+        "source_action",
+    ]
     assert manifest["matrices"] == [
         {
             "valley": 1,
@@ -243,8 +254,60 @@ def test_runner_writes_release_rawh_representation_and_manifest_by_default(tmp_p
             "g_perm_max_delta": 2.0e-12,
             "nonzero_reciprocal_shift_count": 0,
             "square_residual": 4.0e-9,
+            "source_valley": "K1",
+            "target_valley": "K1",
+            "closed_in_active_set": True,
+            "role": "internal",
+            "supported": True,
+            "k_pairs": [[0, 0]],
+            "k_pair_source": "symmetry_analysis_reference_k_index",
+            "source_matrix_role": "raw_h_action",
+            "source_gauge": "tapw_raw_hamiltonian",
+            "target_role": "kp_source_action",
+            "matrix_kind": "action",
+            "conventions": {
+                "antiunitary_convention": "U_K",
+                "gauge_correction": {"kind": "none"},
+                "source_action_frame": "tapw_source",
+            },
+            "k_map": {
+                "type": "reflection",
+                "axis_deg": 93.7,
+                "reflection_axis_convention": "mirror_axis_deg",
+            },
+            "q_map": {
+                "type": "reflection",
+                "axis_deg": 93.7,
+                "reflection_axis_convention": "mirror_axis_deg",
+            },
+            "sector_map": "layer_exchange",
+            "source_action": {
+                "antiunitary": True,
+                "k_map": {
+                    "type": "reflection",
+                    "axis_deg": 93.7,
+                    "reflection_axis_convention": "mirror_axis_deg",
+                },
+                "q_map": {
+                    "type": "reflection",
+                    "axis_deg": 93.7,
+                    "reflection_axis_convention": "mirror_axis_deg",
+                },
+                "sector_map": "layer_exchange",
+                "spin_map": "from_tapw_source",
+                "valley_map": "identity",
+            },
         }
     ]
+    serialized_outputs = "\n".join(
+        [
+            (output_dir / "summary.json").read_text(encoding="utf-8"),
+            (output_dir / "details.csv").read_text(encoding="utf-8"),
+            manifest_path.read_text(encoding="utf-8"),
+        ]
+    )
+    assert "K" + "_C2T" not in serialized_outputs
+    assert "M" + "_C2_eta" not in serialized_outputs
 
 
 def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_path):
@@ -316,6 +379,92 @@ def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_p
     assert not (diag_dir / "C2T_PG.npz").exists()
 
 
+def test_runner_does_not_write_manifest_row_without_raw_h_matrix(tmp_path):
+    runner = _make_runner(tmp_path)
+    matrix = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    payload = {
+        "summary": {"valleys": [1], "tolerance": 1.0e-2, "operations": {"K1": []}},
+        "details": [],
+        "representations": [
+            {
+                "valley": 1,
+                "valley_label": "K1",
+                "operation": "T",
+                "antiunitary": True,
+                "matrix": matrix,
+                "matrix_role": "D_g^(0)",
+                "export_raw_h_matrix": False,
+            }
+        ],
+    }
+    runner._analyze = MethodType(lambda self: payload, runner)
+
+    runner.run()
+
+    manifest = json.loads((Path(runner.output_dir) / "representations" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["matrices"] == []
+    assert "T_rawH.npz" not in (Path(runner.output_dir) / "summary.md").read_text(encoding="utf-8")
+
+
+def test_runner_canonicalizes_time_reversal_outputs_to_tr(tmp_path):
+    runner = _make_runner(tmp_path)
+    matrix = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    payload = {
+        "summary": {
+            "valleys": [31],
+            "tolerance": 1.0e-2,
+            "operations": {
+                "M1": [
+                    {
+                        "operation": "T",
+                        "antiunitary": True,
+                        "supported": True,
+                        "status": "exact",
+                        "source_valley": "M1",
+                        "target_valley": "M1",
+                        "closed_in_active_set": True,
+                        "role": "internal",
+                        "export_raw_h_matrix": True,
+                    }
+                ]
+            },
+            "minimal_generators": {"M1": ["T"]},
+        },
+        "details": [],
+        "representations": [
+            {
+                "valley": 31,
+                "valley_label": "M1",
+                "operation": "T",
+                "antiunitary": True,
+                "matrix": matrix,
+                "matrix_role": "raw_h_action",
+                "raw_h_matrix": matrix,
+            }
+        ],
+    }
+    runner._analyze = MethodType(lambda self: payload, runner)
+
+    runner.run()
+
+    output_dir = Path(runner.output_dir)
+    assert (output_dir / "representations" / "M1" / "TR_rawH.npz").is_file()
+    assert not (output_dir / "representations" / "M1" / "T_rawH.npz").exists()
+    manifest = json.loads((output_dir / "representations" / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["matrices"][0]["operation"] == "TR"
+    assert manifest["matrices"][0]["raw_h_operator_file"] == "M1/TR_rawH.npz"
+    text_outputs = "\n".join(
+        [
+            (output_dir / "summary.md").read_text(encoding="utf-8"),
+            (output_dir / "summary.json").read_text(encoding="utf-8"),
+            (output_dir / "details.csv").read_text(encoding="utf-8"),
+            (output_dir / "representations" / "manifest.json").read_text(encoding="utf-8"),
+        ]
+    )
+    assert "T_rawH.npz" not in text_outputs
+    assert "| TR | yes | M1 | M1 | yes | internal |" in text_outputs
+
+
 def test_analyze_collects_only_minimal_supported_representation_generators(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)
     runner.config.compute = SimpleNamespace(TAPW=True, valleys=[5])
@@ -374,7 +523,85 @@ def test_analyze_collects_only_minimal_supported_representation_generators(tmp_p
 
     payload = runner._analyze()
 
-    assert [record["operation"] for record in payload["representations"]] == ["C3"]
+    assert [record["operation"] for record in payload["representations"]] == ["C3z"]
+    export_flags = {
+        entry["operation"]: entry["export_raw_h_matrix"]
+        for entry in payload["summary"]["operations"]["Gamma"]
+    }
+    assert export_flags == {"E": False, "C3z": True, "C3z^2": False}
+
+
+def test_k_source_c2_and_internal_c2t_use_same_spglib_axis(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path)
+    runner.config.compute = SimpleNamespace(TAPW=True, valleys=[1])
+    runner.config.symmetry_analysis.valleys = [1]
+    runner.config.twist = SimpleNamespace(bravais="hex")
+    runner.structure = SimpleNamespace(spin=False, reciprocal_Tmat=np.eye(3))
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=1,
+        valley_label="K1",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=SimpleNamespace(TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr"))),
+    )
+    theta = np.deg2rad(120.0)
+    spglib_c2 = {
+        "index": 7,
+        "rotation_frac": np.eye(3),
+        "translation_frac": np.zeros(3),
+        "rotation_cart": np.array(
+            [
+                [np.cos(theta), np.sin(theta), 0.0],
+                [np.sin(theta), -np.cos(theta), 0.0],
+                [0.0, 0.0, -1.0],
+            ],
+            dtype=float,
+        ),
+        "translation_cart": np.zeros(3),
+    }
+    runner._calculator_for_valley = MethodType(
+        lambda self, valley: SimpleNamespace(valley_flag="K1", TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr"))),
+        runner,
+    )
+    runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
+    runner._select_antiunitary_c2_layer_exchange_spatial_operation = MethodType(lambda self, valley, spatial_operations, tolerance: spglib_c2, runner)
+    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure: [spglib_c2])
+    monkeypatch.setattr(symmetry_analysis, "_default_validation_q_points", lambda: [("Gamma", np.zeros(3))])
+    runner._candidate_rows_for_q = MethodType(
+        lambda self, candidate, valley, valley_label, q_label, q_target, tolerance: {
+            "valley": valley_label,
+            "operation": symmetry_analysis.displayed_operation_name(candidate["name"]),
+            "k_label": q_label,
+            "supported": bool(candidate.get("closed", False)),
+            "status": "exact" if candidate.get("closed", False) else "not_supported",
+            "not_supported_reason": "" if candidate.get("closed", False) else candidate.get("closure_reason", ""),
+            "residual_H_raw": 0.0 if candidate.get("closed", False) else None,
+        },
+        runner,
+    )
+    runner._representation_record_for_candidate = MethodType(
+        lambda self, candidate, valley, valley_label, valley_ctx, candidate_rows: {
+            "valley": valley,
+            "valley_label": valley_label,
+            "operation": symmetry_analysis.representation_operation_name(candidate["name"]),
+            "antiunitary": bool(candidate.get("antiunitary", False)),
+            "matrix": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+            "raw_h_matrix": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+        },
+        runner,
+    )
+
+    payload = runner._analyze()
+
+    entries = {entry["operation"]: entry for entry in payload["summary"]["operations"]["K1"]}
+    assert entries["C2"]["axis_angle_deg"] == pytest.approx(60.0)
+    assert entries["C2T"]["axis_angle_deg"] == pytest.approx(60.0)
+    assert entries["C2"]["spglib_index"] == 7
+    assert entries["C2T"]["spglib_index"] == 7
 
 
 def test_runner_writes_debug_json_only_when_debug_enabled(tmp_path):
@@ -389,7 +616,7 @@ def test_runner_writes_debug_json_only_when_debug_enabled(tmp_path):
         "details": [
             {
                 "valley": "M1",
-                "operation": "M_C2_eta",
+                "operation": "C2",
                 "spglib_index": 3,
                 "R_2d": "[[1.0, 0.0], [0.0, -1.0]]",
                 "k_label": "q1",
@@ -421,7 +648,7 @@ def test_runner_writes_debug_json_only_when_debug_enabled(tmp_path):
     assert debug["details"][0]["debug"]["phase_side"] == "left_target_rows"
 
 
-def test_summary_markdown_documents_m_eta_convention(tmp_path):
+def test_summary_markdown_documents_m_valley_convention_without_backend_names(tmp_path):
     runner = _make_runner(tmp_path)
     lines = runner._summary_markdown_lines(
         {
@@ -432,9 +659,306 @@ def test_summary_markdown_documents_m_eta_convention(tmp_path):
         }
     )
     text = "\n".join(lines)
-    assert "eta labels the three C3-related M valleys" in text
-    assert "C2 denotes C3^eta C2 C3^{-eta}" in text
-    assert "M_C2_eta" not in text
+    assert "M-valley convention: M1, M2, and M3 are related by C3z." in text
+    assert "single-M valley output exports only operations closed within the selected valley block" in text
+    assert "M" + "_C2_eta" not in text
+
+
+def test_summary_markdown_is_human_source_symmetry_report(tmp_path):
+    runner = _make_runner(tmp_path)
+    summary = {
+        "valleys": [31, 5],
+        "tolerance": 1.0e-2,
+        "output_schema": "tapw_source_symmetry/v2",
+        "operations": {
+            "M1": [
+                {
+                    "operation": "TR",
+                    "antiunitary": True,
+                    "supported": True,
+                    "status": "exact",
+                    "source_valley": "M1",
+                    "target_valley": "M1",
+                    "closed_in_active_set": True,
+                    "role": "internal",
+                },
+                {
+                    "operation": "C2",
+                    "antiunitary": False,
+                    "supported": True,
+                    "status": "exact",
+                    "source_valley": "M1",
+                    "target_valley": "M1",
+                    "closed_in_active_set": True,
+                    "role": "internal",
+                },
+                {
+                    "operation": "C3z",
+                    "antiunitary": False,
+                    "supported": False,
+                    "status": "not_supported",
+                    "not_supported_reason": "valley_not_closed",
+                    "source_valley": "M1",
+                    "target_valley": "M2",
+                    "closed_in_active_set": False,
+                    "role": "inter-valley",
+                },
+            ],
+            "Gamma": [
+                {
+                    "operation": "TR",
+                    "antiunitary": True,
+                    "supported": True,
+                    "status": "exact",
+                    "source_valley": "Gamma",
+                    "target_valley": "Gamma",
+                    "closed_in_active_set": True,
+                    "role": "internal",
+                },
+                {
+                    "operation": "C3z",
+                    "antiunitary": False,
+                    "supported": True,
+                    "status": "exact",
+                    "source_valley": "Gamma",
+                    "target_valley": "Gamma",
+                    "closed_in_active_set": True,
+                    "role": "internal",
+                },
+            ],
+        },
+        "minimal_generators": {"M1": ["TR", "C2"], "Gamma": ["TR", "C3z"]},
+    }
+    representations = [
+        {
+            "valley_label": "M1",
+            "operation": "TR",
+            "matrix": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+            "raw_h_operator_file": "M1/TR_rawH.npz",
+            "matrix_role": "raw_h_action",
+        },
+        {
+            "valley_label": "Gamma",
+            "operation": "C3z",
+            "matrix": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+            "raw_h_operator_file": "Gamma/C3z_rawH.npz",
+            "matrix_role": "raw_h_action",
+        },
+    ]
+
+    text = "\n".join(
+        runner._summary_markdown_lines(
+            summary,
+            representations=representations,
+            developer_outputs=False,
+        )
+    )
+
+    assert text.startswith("# TAPW Source Symmetry Summary")
+    assert "## Run" in text
+    assert "- Active valleys: M1, Gamma" in text
+    assert "- Production matrix source: raw-H action only" in text
+    assert "## Valley Action" in text
+    assert "| TR | yes | M1 | M1 | yes | internal |" in text
+    assert "| C3z | no | M1 | M2 | no | inter-valley |" in text
+    assert "## Internal Generators For This Output" in text
+    assert "- M1: TR, C2" in text
+    assert "- Gamma: TR, C3z" in text
+    assert "## Inter-Valley Operations" in text
+    assert "- C3z maps M1 -> M2" in text
+    assert "not exported as a single-M1 internal matrix" in text
+    assert "## Exported Production Matrices" in text
+    assert "| M1 -> M1 | TR | representations/M1/TR_rawH.npz | raw_h_action |" in text
+    assert "| Gamma -> Gamma | C3z | representations/Gamma/C3z_rawH.npz | raw_h_action |" in text
+    assert "## Diagnostics" in text
+    assert "- Developer outputs: disabled" in text
+    assert "D0/PG/Pin matrices are not production inputs." in text
+    assert "## KP Model Guidance" in text
+    assert "- Single-valley M1 KP model may use: TR, C2." in text
+    assert "- Do not use M1 C3z as a single-valley constraint from this output." in text
+    assert "Minimal generators:" not in text
+
+
+def test_summary_markdown_documents_single_k_internal_and_inter_valley_operations(tmp_path):
+    runner = _make_runner(tmp_path)
+    text = "\n".join(
+        runner._summary_markdown_lines(
+            {
+                "valleys": [1],
+                "tolerance": 1.0e-2,
+                "operations": {
+                    "K1": [
+                        {
+                            "operation": "C3z",
+                            "antiunitary": False,
+                            "supported": True,
+                            "source_valley": "K1",
+                            "target_valley": "K1",
+                            "closed_in_active_set": True,
+                            "role": "internal",
+                        },
+                        {
+                            "operation": "C2T",
+                            "antiunitary": True,
+                            "supported": True,
+                            "source_valley": "K1",
+                            "target_valley": "K1",
+                            "closed_in_active_set": True,
+                            "role": "internal",
+                        },
+                        {
+                            "operation": "TR",
+                            "antiunitary": True,
+                            "supported": False,
+                            "source_valley": "K1",
+                            "target_valley": "K2",
+                            "closed_in_active_set": False,
+                            "role": "inter-valley",
+                        },
+                        {
+                            "operation": "C2",
+                            "antiunitary": False,
+                            "supported": False,
+                            "source_valley": "K1",
+                            "target_valley": "K2",
+                            "closed_in_active_set": False,
+                            "role": "inter-valley",
+                        },
+                    ]
+                },
+                "minimal_generators": {"K1": ["C3z", "C2T"]},
+            },
+            representations=[],
+            developer_outputs=False,
+        )
+    )
+
+    assert "| C3z | no | K1 | K1 | yes | internal |" in text
+    assert "| C2T | yes | K1 | K1 | yes | internal |" in text
+    assert "| TR | yes | K1 | K2 | no | inter-valley |" in text
+    assert "| C2 | no | K1 | K2 | no | inter-valley |" in text
+    assert "- Single-valley K1 KP model may use: C3z, C2T." in text
+    assert "- TR and C2 are source physical symmetries but are not single-K1 internal constraints in this output." in text
+
+
+def test_summary_markdown_infers_antiunitary_for_legacy_t_and_c2t_entries(tmp_path):
+    runner = _make_runner(tmp_path)
+    text = "\n".join(
+        runner._summary_markdown_lines(
+            {
+                "valleys": [1],
+                "tolerance": 1.0e-2,
+                "operations": {
+                    "K1": [
+                        {"operation": "T", "supported": True},
+                        {"operation": "C2T", "supported": True},
+                        {"operation": "C3z", "supported": True},
+                    ]
+                },
+                "minimal_generators": {"K1": ["C3z", "C2T"]},
+            }
+        )
+    )
+
+    assert "| TR | yes | K1 | K1 | yes | internal |" in text
+    assert "| C2T | yes | K1 | K1 | yes | internal |" in text
+    assert "| C3z | no | K1 | K1 | yes | internal |" in text
+
+
+def test_source_symmetry_candidates_include_m_inter_valley_c3_operations(tmp_path):
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=31,
+        valley_label="M1",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=None,
+    )
+
+    candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(valley_ctx, "hex")
+    by_name = {candidate["name"]: candidate for candidate in candidates}
+
+    assert by_name["C3z"]["target_valley_label"] == "M2"
+    assert by_name["C3z"]["source_symmetry_role"] == "inter-valley"
+    assert by_name["C3z"]["export_raw_h_matrix"] is False
+    assert by_name["C3z^2"]["target_valley_label"] == "M3"
+    assert by_name["C2"]["source_symmetry_role"] == "internal"
+    assert by_name["C2"]["transport_backend"] == symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_UNITARY
+
+
+def test_source_symmetry_candidates_include_k_inter_valley_tr_and_c2_operations(tmp_path):
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=1,
+        valley_label="K1",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=None,
+    )
+
+    candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(valley_ctx, "hex")
+    by_name = {candidate["name"]: candidate for candidate in candidates}
+
+    assert by_name["TR"]["antiunitary"] is True
+    assert by_name["TR"]["target_valley_label"] == "K2"
+    assert by_name["TR"]["source_symmetry_role"] == "inter-valley"
+    assert by_name["TR"]["export_raw_h_matrix"] is False
+    assert by_name["C2"]["target_valley_label"] == "K2"
+    assert by_name["C2"]["source_symmetry_role"] == "inter-valley"
+    assert by_name["C2T"]["target_valley_label"] == "K1"
+    assert by_name["C2T"]["spatial_parent"] == "C2"
+    assert by_name["C2T"]["transport_backend"] == symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY
+    assert np.allclose(by_name["C2"]["rotation_cart"], by_name["C2T"]["rotation_cart"])
+
+
+def test_source_symmetry_candidates_are_generated_from_common_source_operations(tmp_path):
+    def _context(valley, label):
+        return symmetry_analysis.ValleyContext(
+            valley=valley,
+            valley_label=label,
+            valley_center_cart=np.zeros(2),
+            partner_center_cart=np.zeros(2),
+            group_k_centers={0: np.zeros(2)},
+            group_m_k_centers={0: np.zeros(2)},
+            group_g_vectors={0: np.zeros((1, 2))},
+            moire_reciprocal_basis=np.eye(2),
+            calculator=None,
+        )
+
+    expected_source_ops = {"E", "TR", "C3z", "C3z^2", "C2"}
+    for valley, label in [(5, "Gamma"), (31, "M1"), (1, "K1")]:
+        candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(_context(valley, label), "hex")
+        displayed = {symmetry_analysis.displayed_operation_name(candidate["name"]) for candidate in candidates}
+        assert expected_source_ops.issubset(displayed)
+
+    k_candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(_context(1, "K1"), "hex")
+    assert "C2T" in {candidate["name"] for candidate in k_candidates}
+    assert "K" + "_C2T" not in {candidate["name"] for candidate in k_candidates}
+
+
+def test_minimal_generators_ignore_inter_valley_even_if_marked_supported():
+    generators = symmetry_analysis._minimal_generators_by_valley(
+        {
+            "K1": [
+                {"operation": "TR", "supported": True, "role": "inter-valley", "export_raw_h_matrix": False},
+                {"operation": "C2", "supported": True, "role": "inter-valley", "export_raw_h_matrix": False},
+                {"operation": "C3z", "supported": True, "role": "internal", "export_raw_h_matrix": True},
+                {"operation": "C2T", "supported": True, "role": "internal", "export_raw_h_matrix": True},
+            ]
+        }
+    )
+
+    assert generators == {"K1": ["C3z", "C2T"]}
+
+
+def test_inter_valley_reason_is_registered():
+    assert "inter_valley_operation_not_exported_in_single_valley_block" in symmetry_analysis.NOT_SUPPORTED_REASONS
 
 
 def test_summary_markdown_uses_c2_display_name_axis_angle_and_generators(tmp_path):
@@ -474,18 +998,42 @@ def test_summary_markdown_uses_c2_display_name_axis_angle_and_generators(tmp_pat
         }
     )
     text = "\n".join(lines)
-    assert "K_C2T" not in text
+    assert "K" + "_C2T" not in text
     assert "C2 (axis 30deg)" in text
     assert "C2T (axis 60deg)" in text
-    assert "Minimal generators:" in text
+    assert "Internal Generators For This Output" in text
     assert "- Gamma: C3z, C2" in text
     assert "- K1: C2T" in text
 
 
-def test_displayed_operation_name_maps_internal_effective_names_to_family_names():
+def test_displayed_operation_name_keeps_canonical_family_names():
     assert symmetry_analysis.displayed_operation_name("C2") == "C2"
-    assert symmetry_analysis.displayed_operation_name("K_C2T") == "C2T"
-    assert symmetry_analysis.displayed_operation_name("M_C2_eta") == "C2"
+    assert symmetry_analysis.displayed_operation_name("C2T") == "C2T"
+
+
+def test_resolve_requested_symmetrization_operations_requires_supported_manifest_entries():
+    summary = {
+        "operations": {
+            "K1": [
+                {"operation": "C3z", "supported": True},
+                {"operation": "C2T", "supported": True},
+                {"operation": "C2", "supported": False, "not_supported_reason": "valley_not_closed"},
+                {"operation": "TR", "supported": True, "role": "inter-valley", "export_raw_h_matrix": False},
+            ]
+        },
+        "minimal_generators": {"K1": ["C3z", "C2T"]},
+    }
+
+    resolve = symmetry_analysis.resolve_requested_symmetrization_operations
+
+    assert resolve(summary, "K1", True) == ["C3z", "C2T"]
+    assert resolve(summary, "K1", ["C2T"]) == ["C2T"]
+
+    with pytest.raises(ValueError, match="C2.*not supported"):
+        resolve(summary, "K1", ["C2"])
+
+    with pytest.raises(ValueError, match="TR.*not an internal"):
+        resolve(summary, "K1", ["T"])
 
 
 def test_default_validation_points_are_gamma_plus_one_generic_point():

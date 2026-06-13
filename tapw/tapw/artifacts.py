@@ -34,10 +34,48 @@ def array_output_filename(kind: str, *, valley_flag: str, suffix: str = "", tapw
     return f"{kind}{suffix}.npy"
 
 
+def berry_flux_output_filename(kind: str, *, valley_flag: str, suffix: str = "", tapw: bool = True) -> str:
+    kind = _normalized_kind(kind)
+    suffix = str(suffix)
+    if tapw:
+        return f"berry_flux_{kind}_{valley_flag}_valley{suffix}.npy"
+    return f"berry_flux_{kind}{suffix}.npy"
+
+
+def chern_summary_output_filename(kind: str, *, valley_flag: str, suffix: str = "", tapw: bool = True) -> str:
+    kind = _normalized_kind(kind)
+    suffix = str(suffix)
+    if tapw:
+        return f"chern_summary_{kind}_{valley_flag}_valley{suffix}.txt"
+    return f"chern_summary_{kind}{suffix}.txt"
+
+
 def raw_memmap_filename(kind: str, *, valley_flag: str, suffix: str = "") -> str:
     kind = str(kind).lower()
     suffix = str(suffix)
     return f"{kind}_raw_{valley_flag}_valley{suffix}.npy"
+
+
+def chern_flux_filename(*, band_type: str, valley_flag: str, band_label: str, suffix: str = "") -> str:
+    band_type = str(band_type).upper()
+    suffix = str(suffix)
+    return f"berry_flux_{band_type}_{valley_flag}_valley{suffix}_{band_label}.npy"
+
+
+def chern_summary_filename(
+    *,
+    band_type: str | None = None,
+    valley_flag: str | None = None,
+    suffix: str = "",
+    tapw: bool = True,
+) -> str:
+    if band_type is None or valley_flag is None:
+        return "chern_summary.json"
+    band_type = str(band_type).upper()
+    suffix = str(suffix)
+    if tapw:
+        return f"chern_summary_{band_type}_{valley_flag}_valley{suffix}.json"
+    return f"chern_summary_{band_type}{suffix}.json"
 
 
 def gvec_output_filename(*, n_g, valley_flag: str, layer: int) -> str:

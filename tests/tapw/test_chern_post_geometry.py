@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from tapw.workflows.band import BandStructureCalculator
 from tapw import chern_post
@@ -116,16 +117,87 @@ def test_rectangular_wavefunction_reshape_preserves_flatten_order():
     assert np.array_equal(reshaped[2, 4], raw[-1])
 
 
-def test_square_generate_kmesh_uses_legacy_flatten_order_for_backward_compatibility():
+def test_square_generate_kmesh_uses_ij_flatten_order():
     calculator = BandStructureCalculator.__new__(BandStructureCalculator)
 
     kpoints = calculator.generate_kmesh(3, 3)
 
     assert kpoints.shape == (9, 3)
     assert np.allclose(kpoints[0], np.array([-0.5, -0.5, 0.0]))
-    assert np.allclose(kpoints[1], np.array([0.0, -0.5, 0.0]))
-    assert np.allclose(kpoints[2], np.array([0.5, -0.5, 0.0]))
-    assert np.allclose(kpoints[3], np.array([-0.5, 0.0, 0.0]))
+    assert np.allclose(kpoints[1], np.array([-0.5, 0.0, 0.0]))
+    assert np.allclose(kpoints[2], np.array([-0.5, 0.5, 0.0]))
+    assert np.allclose(kpoints[3], np.array([0.0, -0.5, 0.0]))
+
+
+def test_rotation_helpers_raise_value_error_instead_of_successful_system_exit():
+    from tapw.geometry import rotations
+
+    with pytest.raises(ValueError, match="p orbital"):
+        rotations.get_orb_map_p(rotations.x, rotations.y, rotations.z, ndim=2, orbi=1)
+
+
+def test_chern_post_resolves_relative_input_file_like_tapw_run(tmp_path, monkeypatch):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    input_file = config_dir / "openmx.dat"
+    input_file.write_text(
+        "Atoms.UnitVectors.Unit Ang\n<Atoms.UnitVectors\n1 0 0\n0 1 0\n0 0 1\nAtoms.UnitVectors>\n",
+        encoding="utf-8",
+    )
+    output_dir = tmp_path / "run-output"
+    output_dir.mkdir()
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "paths:",
+                "  input_file: openmx.dat",
+                f"  output_dir: {output_dir}",
+                "compute:",
+                "  num_chern: 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    seen = {}
+
+    def fake_parse_lattice(path):
+        seen["openmx_path"] = path
+        raise RuntimeError("stop after path resolution")
+
+    monkeypatch.setattr(chern_post, "parse_lattice_vectors_from_openmx", fake_parse_lattice)
+
+    with pytest.raises(SystemExit):
+        chern_post.main(["--config", str(config_path), "--output-dir", str(output_dir), "-b", "0"])
+
+    assert seen["openmx_path"] == str(input_file.resolve())
+
+
+def test_chern_post_rejects_generalized_eigenvectors_before_file_lookup(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "paths:",
+                "  input_file: missing-openmx.dat",
+                "compute:",
+                "  ge: true",
+                "  num_chern: 2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def fail_if_called(path):
+        raise AssertionError("ge=true should fail before parsing lattice vectors")
+
+    monkeypatch.setattr(chern_post, "parse_lattice_vectors_from_openmx", fail_if_called)
+
+    with pytest.raises(SystemExit) as excinfo:
+        chern_post.main(["--config", str(config_path), "--output-dir", str(tmp_path), "-b", "0"])
+
+    assert excinfo.value.code == 1
 
 
 def test_single_band_berry_flux_supports_rectangular_grids():
@@ -136,6 +208,16 @@ def test_single_band_berry_flux_supports_rectangular_grids():
 
     assert berry_flux.shape == (2, 4)
     assert np.allclose(berry_flux, 0.0)
+
+
+def test_single_band_berry_flux_changes_sign_when_grid_orientation_is_swapped():
+    band_grid = _random_orthonormal_grid(seed=42, shape=(4, 5), dim_h=3, num_bands=1)
+
+    berry_flux = chern_post.compute_berry_flux_single_band(band_grid, 0)
+    swapped_flux = chern_post.compute_berry_flux_single_band(band_grid.transpose(1, 0, 2, 3), 0)
+
+    assert np.max(np.abs(berry_flux)) > 1.0e-6
+    assert np.allclose(swapped_flux, -berry_flux.T, atol=1.0e-12)
 
 
 def test_qgt_matches_projector_reference_for_single_band():

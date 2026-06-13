@@ -245,6 +245,17 @@ def _manifest_default_matrix_kind(manifest: Mapping[str, Any]) -> str | None:
 
 def _complete_operation_record(record: Mapping[str, Any], *, use: str, allow_inferred: bool = False) -> dict[str, Any]:
     out = dict(record)
+    if not allow_inferred:
+        inferred_markers = [
+            key
+            for key in ("inferred_fields", "defaulted_fields")
+            if out.get(key)
+        ]
+        if inferred_markers:
+            raise ValueError(
+                f"kp_symm_output operation {out.get('name', out.get('operation', ''))!r} "
+                f"cannot use inferred production action metadata: {inferred_markers}"
+            )
     raw_name = str(out.get("name", ""))
     alias = M_EFFECTIVE_OPERATION_ALIASES.get(raw_name)
     if alias is not None:
@@ -257,6 +268,10 @@ def _complete_operation_record(record: Mapping[str, Any], *, use: str, allow_inf
         if "derived_from" in alias:
             out.setdefault("derived_from", list(alias["derived_from"]))
         out["name"] = str(alias["canonical"])
+    elif raw_name:
+        out["name"] = _canonical_manifest_operation_name(raw_name)
+    if out.get("operation") is not None:
+        out["operation"] = _canonical_manifest_operation_name(str(out["operation"]))
     canonical_name = str(out.get("name", ""))
     if canonical_name not in _CANONICAL_OPERATION_NAMES:
         raise ValueError(f"Unsupported canonical operation {canonical_name!r}")
@@ -296,6 +311,51 @@ def _complete_operation_record(record: Mapping[str, Any], *, use: str, allow_inf
     return out
 
 
+def _validate_exactified_operation_record(record: Mapping[str, Any], manifest: Mapping[str, Any]) -> None:
+    if str(record.get("matrix_kind", "")) != "continuum_internal_rep_exact":
+        return
+    name = str(record.get("name", record.get("operation", "")))
+    if str(manifest.get("exactification_owner", "")) != "kp_symm":
+        raise ValueError(
+            f"continuum_internal_rep_exact operation {name!r} requires kp_symm exactification provenance"
+        )
+    if str(record.get("matrix_source", "")) != "kp_symm_exactified_action":
+        raise ValueError(
+            f"continuum_internal_rep_exact operation {name!r} requires matrix_source='kp_symm_exactified_action'"
+        )
+    if str(record.get("source_matrix_role", "")) != "raw_h_sewing_action":
+        raise ValueError(
+            f"continuum_internal_rep_exact operation {name!r} requires source_matrix_role='raw_h_sewing_action'"
+        )
+    if str(record.get("target_role", "")) != "continuum_internal_rep":
+        raise ValueError(
+            f"continuum_internal_rep_exact operation {name!r} requires target_role='continuum_internal_rep'"
+        )
+    report = record.get("source_matrix_projection_report")
+    if not isinstance(report, Mapping):
+        return
+    if report.get("source_matrix_role") is not None and str(report.get("source_matrix_role")) != "raw_h_sewing_action":
+        raise ValueError(
+            f"continuum_internal_rep_exact operation {name!r} requires raw-H action exactification"
+        )
+    support_resolution = report.get("support_resolution")
+    if isinstance(support_resolution, Mapping):
+        if support_resolution.get("matrix_kind") is not None and str(support_resolution.get("matrix_kind")) != "action":
+            raise ValueError(
+                f"continuum_internal_rep_exact operation {name!r} requires source support matrix_kind='action'"
+            )
+        if support_resolution.get("matrix_source") is not None and str(support_resolution.get("matrix_source")) != "raw_h_action_projection":
+            raise ValueError(
+                f"continuum_internal_rep_exact operation {name!r} requires raw-H action exactification"
+            )
+
+
+def _add_inferred_field(record: dict[str, Any], field: str) -> None:
+    raw_fields = record.get("inferred_fields", [])
+    fields = [str(item) for item in raw_fields] if isinstance(raw_fields, list) else []
+    record["inferred_fields"] = sorted({*fields, str(field)})
+
+
 def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_dim: int | None = None) -> LoadedSymmetrySource:
     if raw is None:
         raw = {}
@@ -324,17 +384,27 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     metadata_records: list[dict[str, Any]] = []
     use = str(raw.get("use", "raw"))
     allow_inferred = allows_inferred_action_metadata(raw) or allows_inferred_action_metadata(manifest)
+    root_matrix_kind = raw.get("matrix_kind", raw.get("kind"))
     manifest_matrix_kind = _manifest_default_matrix_kind(manifest) if allow_inferred else None
-    matrix_kind_raw = raw.get("matrix_kind", raw.get("kind", manifest_matrix_kind))
-    if matrix_kind_raw is not None and str(matrix_kind_raw) not in PRODUCTION_MATRIX_KINDS:
-        raise ValueError("production symmetry matrices must use raw-action or kp_symm exactified matrices")
+    for matrix_kind_raw in (root_matrix_kind, manifest_matrix_kind):
+        if matrix_kind_raw is not None and str(matrix_kind_raw) not in PRODUCTION_MATRIX_KINDS:
+            raise ValueError("production symmetry matrices must use raw-action or kp_symm exactified matrices")
+    inferred_matrix_kind = root_matrix_kind if root_matrix_kind is not None else manifest_matrix_kind
+    if not allow_inferred:
+        inferred_matrix_kind = None
     for record in records:
         record = dict(record)
-        if matrix_kind_raw is not None and ("matrix_kind" not in record and "kind" not in record):
-            record["matrix_kind"] = str(matrix_kind_raw)
+        used_inferred_matrix_kind = False
+        if allow_inferred and inferred_matrix_kind is not None and ("matrix_kind" not in record and "kind" not in record):
+            record["matrix_kind"] = str(inferred_matrix_kind)
+            _add_inferred_field(record, "matrix_kind")
+            used_inferred_matrix_kind = True
         elif "matrix_kind" in record or "kind" in record:
             record["matrix_kind"] = _manifest_matrix_kind(record)
         record = _complete_operation_record(record, use=use, allow_inferred=allow_inferred)
+        if used_inferred_matrix_kind:
+            _add_inferred_field(record, "matrix_kind")
+        _validate_exactified_operation_record(record, manifest)
         name = str(record["name"])
         matrix_file = Path(str(record["matrix_file"]))
         if not matrix_file.is_absolute():

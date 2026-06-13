@@ -5,7 +5,8 @@ import yaml
 import re
 import subprocess
 
-class PreservedScalarString(str): pass
+class PreservedScalarString(str):
+    """String marker that should be emitted as a YAML block literal."""
 
 def string_presenter(dumper, data):
     """Preserve multiline strings as block literals."""

@@ -7,11 +7,12 @@ not intended for source distribution.
 Run from this directory:
 
 ```bash
-tapw run --config configs/mote2_k_tapw.yaml
-tapw run --config configs/mote2_direct.yaml
+tapw run --config configs/mote2_k_tapw.yaml  # external-data
+tapw run --config configs/mote2_direct.yaml  # external-data
 ```
 
 The TAPW config evaluates the K1 valley. The direct config runs the non-TAPW
 generalized diagonalization path with SLEPc. The direct path requires an
 environment with `petsc4py` and `slepc4py`; it is intentionally separate from
-the TAPW projection path.
+the TAPW projection path. Both commands require pending external OpenMX
+matrices listed in `examples/data-manifest.yaml`.

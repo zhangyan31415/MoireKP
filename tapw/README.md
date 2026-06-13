@@ -41,7 +41,8 @@ tapw run --config config.yaml
 Plot the generated bands:
 
 ```bash
-cd output_dir/Q_shell_{n_g}/band
+Q_SHELL_DIR=Q_shell_4
+cd "output_dir/${Q_SHELL_DIR}/band"
 tapw plot --config ../../bands.yaml
 ```
 
@@ -52,14 +53,15 @@ Legacy outputs may use `band_data/` instead of `band/`.
 ```bash
 cd output_dir
 tapw run --config config.yaml --mode chern --n_g 4 --num_processes 100 --num_chern 20
-cd output_dir/Q_shell_{n_g}
+cd output_dir/Q_shell_4
 tapw topo --config config.yaml -b -1 -2 -v 1 > tapw_chern.log
 ```
 
 ## Orbital Analysis
 
 ```bash
-cd output_dir/Q_shell_{n_g}
+Q_SHELL_DIR=Q_shell_4
+cd "output_dir/${Q_SHELL_DIR}"
 tapw orbital . --config ../config.yaml --valley Gamma --band CBM
 tapw fatband . --valley Gamma --band CBM --orbital-dir orbital_analysis --output-dir orbital_plots
 ```

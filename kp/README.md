@@ -10,16 +10,27 @@ Install from the repository root:
 pip install -e .
 ```
 
-## Examples
+## Clean-Clone Smoke
+
+These commands do not require external TAPW arrays:
+
+```bash
+kp --help  # clean-clone
+python -m pytest examples/minimal_synthetic -q  # clean-clone
+```
+
+## External-Data Examples
 
 Release examples are under the repository-level `examples/` directory. Start with:
 
 ```bash
-kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml
-kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml
+kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml  # precomputed
 ```
 
-See `examples/README.md` for the full input/output workflow and the meaning of `nlow_state_list` and `norb_fix_list`.
+These model commands require precomputed `kp project` and `kp symm` outputs
+listed in `examples/data-manifest.yaml`. See `examples/README.md` for the full
+input/output workflow and the meaning of `nlow_state_list` and `norb_fix_list`.
 
 ## Package Layout
 

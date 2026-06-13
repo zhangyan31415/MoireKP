@@ -1,6 +1,8 @@
 """
 TAPW (Twisted Atomic Plane Wave) Hamiltonian calculation module
 """
+from __future__ import annotations
+
 import numpy as np
 import scipy
 from scipy.linalg import lapack
@@ -13,8 +15,9 @@ import time
 import os
 import sys
 import copy
+import json
 import multiprocessing as mp
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from types import SimpleNamespace
 
 from numpy.lib.format import open_memmap
@@ -32,12 +35,19 @@ from ..symmetry.representations import (
     rotate_mat,
 )
 from tqdm import tqdm
-from ..config import ComputeConfig
+from ..config import ComputeConfig, normalize_symmetrize_hamiltonian
 from ..artifacts import (
     array_output_filename,
     band_output_filename,
+    chern_flux_filename,
+    chern_summary_filename,
     gvec_output_filename,
     raw_memmap_filename,
+)
+from ..chern_post import (
+    compute_berry_flux_multiband,
+    compute_berry_flux_single_band,
+    reshape_wavefunction_grid,
 )
 from ..io.structure import StructureProcessorSpglib
 from ..io.kpath import KPathGenerator
@@ -82,18 +92,56 @@ _SIGMA_Y = np.array([[0.0, -1.0j], [1.0j, 0.0]], dtype=np.complex128)
 
 def uses_m_valley_threefold_symmetrization(config: ComputeConfig) -> bool:
     bravais = getattr(config, "bravais", "hex")
+    operations = requested_hamiltonian_symmetry_operations(config)
     return bool(
         getattr(config, "TAPW", False)
-        and getattr(config, "C3_H", False)
+        and "C3z" in operations
         and str(bravais).lower() == "hex"
         and getattr(config, "valley", None) in _M_VALLEY_TRIPLET
     )
 
 
 def uses_m_valley_d3_symmetrization(config: ComputeConfig) -> bool:
+    operations = requested_hamiltonian_symmetry_operations(config)
     return bool(
         uses_m_valley_threefold_symmetrization(config)
-        and getattr(config, "M_valley_D3_H", False)
+        and "C2" in operations
+    )
+
+
+def requested_hamiltonian_symmetry_operations(config: ComputeConfig) -> list[str]:
+    resolved_by_valley = getattr(config, "resolved_hamiltonian_symmetry_operations_by_valley", None)
+    valley_label = BandStructureCalculator.VALLEY_MAP.get(getattr(config, "valley", None))
+    if valley_label is None:
+        valley_label = getattr(config, "valley_flag", None)
+    if isinstance(resolved_by_valley, dict) and valley_label in resolved_by_valley:
+        return list(resolved_by_valley[valley_label])
+
+    spec = normalize_symmetrize_hamiltonian(getattr(config, "symmetrize_hamiltonian", False))
+    if spec is False:
+        return []
+    if spec is True:
+        # Direct calculator construction outside the CLI cannot know the manifest-selected
+        # generators. Use the existing C3 backend as the conservative default.
+        return ["C3z"]
+    return list(spec)
+
+
+def _validate_hamiltonian_symmetrization_backend(config: ComputeConfig, valley_label: str, operations: list[str]) -> None:
+    if not operations:
+        return
+    bravais = str(getattr(config, "bravais", "hex")).lower()
+    valley = getattr(config, "valley", None)
+    op_set = set(operations)
+    if valley in _M_VALLEY_TRIPLET and bravais == "hex":
+        if op_set in ({"C3z"}, {"C3z", "C2"}):
+            return
+    elif op_set == {"C3z"} and supports_single_valley_c3(bravais, valley):
+        return
+    raise ValueError(
+        "No TAPW Hamiltonian symmetrization backend is implemented for "
+        f"valley {valley_label} with operations {operations}. "
+        "Available release backends are single-valley [C3z] and M-valley [C3z] or [C3z, C2]."
     )
 
 
@@ -1248,10 +1296,8 @@ def _acquire_mkdir_lock(lock_dir: str, poll_s: float = 0.2, max_wait_s: float = 
 
 
 def _release_mkdir_lock(lock_dir: str) -> None:
-    try:
+    with suppress(OSError):
         os.rmdir(lock_dir)
-    except OSError:
-        pass
 
 
 def _ensure_memmap_file(path: str, dtype, shape: tuple[int, ...]) -> None:
@@ -1317,7 +1363,7 @@ def _maybe_pin_current_worker(slot_width: int | None, worker_count: int | None) 
     """Best-effort CPU affinity for loky/joblib workers.
 
     Why:
-      - On 4-socket bigmem nodes, many small OpenMP teams can drift across NUMA domains.
+      - On multi-socket nodes, many small OpenMP teams can drift across NUMA domains.
       - Pinning each worker to a disjoint chunk of the Slurm cpuset reduces cross-socket traffic.
       - This is only attempted inside worker processes whose names look like `LokyProcess-N`.
     """
@@ -1557,12 +1603,10 @@ def _pick_available_slepc_factor_backend() -> str:
             _SLEPC_FACTOR_PROBE_CACHE[key] = candidate
             return candidate
         except Exception:
-            pass
+            continue
         finally:
-            try:
+            with suppress(Exception):
                 ksp.destroy()
-            except Exception:
-                pass
 
     _SLEPC_FACTOR_PROBE_CACHE[key] = "petsc"
     return "petsc"
@@ -1652,9 +1696,11 @@ class TAPW_parameters:
         self.structure = structure
         self.bravais = getattr(self.config, "bravais", "hex")
         self.c3_h_disable_reason = None
-        if self.config.C3_H:
+        self.requested_symmetry_operations = requested_hamiltonian_symmetry_operations(self.config)
+        self.use_single_valley_c3 = "C3z" in self.requested_symmetry_operations
+        if getattr(self, "use_single_valley_c3", False):
             self.c3_h_disable_reason = single_valley_c3_incompatibility_reason(self.bravais, self.valley)
-        self.use_C3_H = bool(self.config.C3_H and self.c3_h_disable_reason is None)
+        self.use_single_valley_c3 = bool(self.use_single_valley_c3 and self.c3_h_disable_reason is None)
 
         # Initialize matrices
         self.g_matrix = None
@@ -1743,12 +1789,10 @@ class TAPW_parameters:
             reciprocal_Tmat_layer2 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]]
             K1 = 1/3 * reciprocal_Tmat_layer1[0][:2] + 2/3 * reciprocal_Tmat_layer1[1][:2]
             K2 = 1/3 * reciprocal_Tmat_layer2[0][:2] + 2/3 * reciprocal_Tmat_layer2[1][:2]
-            if self.config.valley == 1:
-                pass
-            elif self.config.valley == 2:
+            if self.config.valley == 2:
                 K1 = -K1
                 K2 = -K2
-            else:
+            elif self.config.valley != 1:
                 raise ValueError("For non-twisted Heterostructures, only valley 1 (K1) and 2 (K2) are allowed now")
             offset = K2
             m_K1 = K1 - offset
@@ -2149,7 +2193,7 @@ class TAPW_parameters:
         return gr
 
     def generate_C3_matrix(self):
-        """Generate the C3_matrix (C3_H) for alternating multi-group stacks.
+        """Generate the C3 transport matrix for alternating multi-group stacks.
 
         Representation conventions (must match generate_gr_matrix_cpu row ordering):
         - Rows are ordered by twist_group major blocks 0..G-1.
@@ -2161,7 +2205,7 @@ class TAPW_parameters:
         and optionally ⊗ C3_spin if spin is enabled.
         """
         if 'twist_group' not in self.structure.df.columns:
-            raise ValueError("structure.df must contain 'twist_group' column for C3_H")
+            raise ValueError("structure.df must contain 'twist_group' column for single-valley C3 symmetrization")
 
         df_temp = self.structure.df.copy()
         unique_groups = sorted(df_temp['twist_group'].unique().tolist())
@@ -2275,13 +2319,13 @@ class TAPW_parameters:
         """Generate the C3_matrix (only supports bilayer n_groups=2)."""
         # Check number of groups
         if 'twist_group' not in self.structure.df.columns:
-            raise ValueError("structure.df must contain 'twist_group' column for C3_H")
+            raise ValueError("structure.df must contain 'twist_group' column for single-valley C3 symmetrization")
         n_groups = len(self.structure.df['twist_group'].unique())
         if n_groups != 2:
-            raise NotImplementedError(
-                f"C3_H is implemented only for bilayer (n_groups=2) in this codebase. "
-                f"Current n_groups={n_groups}. Multi-group representation is not implemented; "
-                f"using it would be incorrect (avoid silent wrong)."
+            raise ValueError(
+                f"Single-valley C3 symmetrization supports only bilayer (n_groups=2) in this release. "
+                f"Current n_groups={n_groups}. Multi-group representation is outside the supported contract; "
+                f"using it would be incorrect."
             )
         
         df_temp = self.structure.df.copy()
@@ -2414,7 +2458,7 @@ class TAPW_parameters:
         # diff = np.sum(np.abs(test1 - test2))
         # print("diff = ", diff)
         # exit()
-        if self.use_C3_H:
+        if getattr(self, "use_single_valley_c3", False):
             self.generate_C3_matrix()
             self.generate_g_symm_matrix()
         print("g matrix shape = ", self.g_matrix.shape)
@@ -2448,7 +2492,19 @@ class BandStructureCalculator:
         
         self.result = {}
         self._progress_dir: str | None = None
-        self.use_C3_H = bool(self.config.C3_H)
+        # Validate valley configuration
+        if not hasattr(self.config, 'valley') or self.config.valley not in self.VALLEY_MAP:
+            raise ValueError(f"Invalid valley configuration. Must be one of {list(self.VALLEY_MAP.keys())}")
+
+        self.valley_flag = self.VALLEY_MAP[self.config.valley]
+        self.requested_symmetry_operations = requested_hamiltonian_symmetry_operations(self.config)
+        _validate_hamiltonian_symmetrization_backend(
+            self.config,
+            self.valley_flag,
+            self.requested_symmetry_operations,
+        )
+        self.uses_hamiltonian_symmetrization = bool(self.requested_symmetry_operations)
+        self.use_single_valley_c3 = "C3z" in self.requested_symmetry_operations
         self.use_M_valley_threefold_symm = uses_m_valley_threefold_symmetrization(self.config)
         self.use_M_valley_d3_symm = uses_m_valley_d3_symmetrization(self.config)
         self._m_valley_reference = 31
@@ -2461,12 +2517,6 @@ class BandStructureCalculator:
         self._m_valley_c2_reference_transport: scipy.sparse.csr_matrix | None = None
         self._m_valley_c2_reference_linear_map: np.ndarray | None = None
         
-        # Validate valley configuration
-        if not hasattr(self.config, 'valley') or self.config.valley not in self.VALLEY_MAP:
-            raise ValueError(f"Invalid valley configuration. Must be one of {list(self.VALLEY_MAP.keys())}")
-        
-        self.valley_flag = self.VALLEY_MAP[self.config.valley]
-
         # Cache for (orbital-expanded) Wannier coordinates used by Getk_super_gauge_sparse.
         # This avoids rebuilding `sorted_wann` for every rvec loop and every k-point.
         self._sorted_wann: np.ndarray | None = None
@@ -2476,16 +2526,17 @@ class BandStructureCalculator:
         
         if self.config.TAPW:
             if self.use_M_valley_threefold_symm:
-                self.use_C3_H = False
+                self.use_single_valley_c3 = False
                 self._initialize_m_valley_threefold_symmetrization()
             else:
                 self.TAPW_parameters = TAPW_parameters(self.structure, self.config)
-                self.use_C3_H = self.TAPW_parameters.use_C3_H
-                if self.config.C3_H and not self.use_C3_H:
+                self.use_single_valley_c3 = self.TAPW_parameters.use_single_valley_c3
+                self.uses_hamiltonian_symmetrization = self.use_single_valley_c3
+                if "C3z" in self.requested_symmetry_operations and not self.use_single_valley_c3:
                     print(
-                        "[C3_H] "
+                        "[symmetrize_hamiltonian] "
                         + self.TAPW_parameters.c3_h_disable_reason
-                        + f" Proceeding with C3_H disabled for valley {self.config.valley}."
+                        + f" Proceeding with C3z disabled for valley {self.config.valley}."
                     )
                 self.TAPW_parameters.generate_all_parameters()
     def _set_progress_stage(self, index: int, stage: str) -> None:
@@ -2756,7 +2807,11 @@ class BandStructureCalculator:
         if valley not in self._m_valley_parameters:
             raise ValueError(f"M-valley {valley} is not initialized in this calculator.")
 
-        self.config.valley = valley
+        if hasattr(self.config, "set_valley"):
+            self.config.set_valley(valley)
+        else:
+            self.config.valley = valley
+            self.config.valley_flag = self.VALLEY_MAP[valley]
         self.valley_flag = self.VALLEY_MAP[valley]
         self.TAPW_parameters = self._m_valley_parameters[valley]
         self.result = {}
@@ -2893,23 +2948,15 @@ class BandStructureCalculator:
     def generate_kmesh(self, num_k1, num_k2=None):
         """Generate a uniform fractional kappa-grid for Chern calculations.
 
-        Backward compatibility:
-        - Historical square-grid Chern runs in the original `tapw` code used
-          `np.meshgrid(kx, ky)` with the default `xy` convention before the
-          final row-major flatten. Existing `vec_*_2d_<N>.npy` files and WCC
-          post-processing therefore expect that square-grid flat order.
-        - Rectangular grids are a `tapw_mkl` extension and keep the explicit
-          `indexing='ij'` convention introduced for that feature.
+        The flattened order is always the row-major order of an `indexing='ij'`
+        mesh, matching `chern_post.reshape_wavefunction_grid`.
         """
         if num_k2 is None:
             num_k2 = num_k1
 
         kappa1 = np.linspace(-0.5, 0.5, int(num_k1), endpoint=True)
         kappa2 = np.linspace(-0.5, 0.5, int(num_k2), endpoint=True)
-        if int(num_k1) == int(num_k2):
-            kappa1_mesh, kappa2_mesh = np.meshgrid(kappa1, kappa2)
-        else:
-            kappa1_mesh, kappa2_mesh = np.meshgrid(kappa1, kappa2, indexing='ij')
+        kappa1_mesh, kappa2_mesh = np.meshgrid(kappa1, kappa2, indexing='ij')
         kpoints = np.stack(
             (
                 kappa1_mesh,
@@ -3029,7 +3076,7 @@ class BandStructureCalculator:
                 ),
                 self.TAPW_parameters.g_vec_list_K2,
             )
-        if self.use_C3_H:
+        if getattr(self, "use_single_valley_c3", False):
             np.save(
                 os.path.join(path, f"C3_matrix_{self.valley_flag}"),
                 self.TAPW_parameters.C3_matrix.toarray(),
@@ -3099,14 +3146,15 @@ class BandStructureCalculator:
         ):
             try:
                 from mpi4py import MPI  # type: ignore
+            except Exception:
+                MPI = None
 
+            if MPI is not None:
                 comm = MPI.COMM_WORLD
                 if comm.Get_size() > 1:
                     comm.Barrier()
                     if comm.Get_rank() != 0:
                         return
-            except Exception:
-                pass
 
         # In chunked mode we only compute/write raw eig/vec (memmap) slices. Post-process after all chunks finish.
         if chunk_count > 1:
@@ -3256,20 +3304,128 @@ class BandStructureCalculator:
         Args:
             path: Output path for results
         """
+        if not getattr(self.config, "eig_vec_cal", False):
+            raise ValueError("tapw chern requires compute.eig_vec_cal=true so Berry flux can be computed.")
+        if bool(getattr(self.config, "ge", False)):
+            raise ValueError(
+                "tapw chern does not support ge=true in this release because generalized eigenvectors "
+                "require overlap-metric Berry phases, not Euclidean overlaps."
+            )
+        if int(getattr(self.config, "kpoint_chunk_count", 1)) != 1:
+            raise ValueError(
+                "tapw chern cannot produce a Chern number from unfinished k-point chunks. "
+                "Finalize chunked wavefunctions first, then run topology post-processing."
+            )
+
         # Generate uniform k-point mesh
         num_k1, num_k2 = self.config.get_chern_grid_shape()
         kpoints = self.generate_kmesh(num_k1, num_k2)
         print("kpoints shape = ", kpoints.shape)
-        print("kpoints = ", kpoints)
         
         # Calculate band structure on the mesh
         self.calculate_band_structure(path, kpoints)
-        
-        # TODO: Implement actual Chern number calculation using Berry curvature
-        # This would involve calculating the Berry curvature at each k-point
-        # and integrating over the Brillouin zone
-        
-        return NotImplemented
+
+        vec = getattr(self, "result", {}).get("vec")
+        if vec is None:
+            raise RuntimeError("tapw chern did not produce wavefunctions; check eig_vec_cal and solver output.")
+
+        band_vec_grid = reshape_wavefunction_grid(np.asarray(vec), int(num_k1), int(num_k2))
+        num_bands = int(band_vec_grid.shape[-1])
+        raw_band_indices = getattr(self.config, "chern_band_indices", None)
+        if raw_band_indices is None:
+            if num_bands == 1:
+                raw_band_indices = [0]
+            else:
+                raise ValueError(
+                    "mode='chern' requires compute.chern_band_indices when more than one band is available."
+                )
+
+        resolved_band_indices = []
+        for raw_band_index in [int(index) for index in raw_band_indices]:
+            resolved = raw_band_index if raw_band_index >= 0 else num_bands + raw_band_index
+            if resolved < 0 or resolved >= num_bands:
+                raise ValueError(
+                    "Band index {0} out of range for {1} bands.".format(raw_band_index, num_bands)
+                )
+            if resolved not in resolved_band_indices:
+                resolved_band_indices.append(resolved)
+
+        if not resolved_band_indices:
+            raise ValueError("compute.chern_band_indices must not be empty.")
+
+        topo_path = os.path.join(os.fspath(path), "topo")
+        os.makedirs(topo_path, exist_ok=True)
+        band_type = str(getattr(self.config, "band_type", "BOTH")).upper()
+        suffix = self.config.get_chern_grid_suffix()
+        entries = []
+        for band_index in resolved_band_indices:
+            berry_flux = compute_berry_flux_single_band(band_vec_grid, band_index)
+            filename = chern_flux_filename(
+                band_type=band_type,
+                valley_flag=self.valley_flag,
+                suffix=suffix,
+                band_label=f"band{band_index}",
+            )
+            np.save(os.path.join(topo_path, filename), berry_flux)
+            entries.append(
+                {
+                    "band_indices": [band_index],
+                    "chern_number": float(np.sum(berry_flux) / (2.0 * np.pi)),
+                    "berry_flux_file": filename,
+                }
+            )
+
+        if len(resolved_band_indices) > 1:
+            berry_flux = compute_berry_flux_multiband(band_vec_grid, resolved_band_indices)
+            label = "bands" + "_".join(str(index) for index in resolved_band_indices)
+            filename = chern_flux_filename(
+                band_type=band_type,
+                valley_flag=self.valley_flag,
+                suffix=suffix,
+                band_label=label,
+            )
+            np.save(os.path.join(topo_path, filename), berry_flux)
+            entries.append(
+                {
+                    "band_indices": resolved_band_indices,
+                    "chern_number": float(np.sum(berry_flux) / (2.0 * np.pi)),
+                    "berry_flux_file": filename,
+                }
+            )
+
+        primary = entries[-1]
+        summary = {
+            "schema": "tapw_chern_summary/v1",
+            "algorithm": "Fukui-Hatsugai-Suzuki Berry flux",
+            "grid_shape": [int(num_k1), int(num_k2)],
+            "grid_order": "ij",
+            "valley": self.valley_flag,
+            "band_type": band_type,
+            "band_indices": primary["band_indices"],
+            "resolved_band_indices": resolved_band_indices,
+            "chern_number": primary["chern_number"],
+            "berry_flux_file": primary["berry_flux_file"],
+            "entries": entries,
+        }
+        summary_filename = chern_summary_filename(
+            band_type=band_type,
+            valley_flag=self.valley_flag,
+            suffix=suffix,
+            tapw=self.config.TAPW,
+        )
+        summary["summary_file"] = summary_filename
+        with open(os.path.join(topo_path, summary_filename), "w", encoding="utf-8") as handle:
+            json.dump(summary, handle, indent=2, sort_keys=True)
+            handle.write("\n")
+
+        print(
+            "[chern] Chern number for {0} {1}: {2:.8f}".format(
+                self.valley_flag,
+                primary["band_indices"],
+                primary["chern_number"],
+            )
+        )
+        return summary
 
     def run_calculation(self, path):
         """Main calculation entry point
@@ -3693,7 +3849,7 @@ class BandStructureCalculator:
             self._set_progress_stage(i, "build_hs")
             if self.use_M_valley_threefold_symm:
                 hamk, samk = self._calculate_m_valley_threefold_hs(kpoints[:3])
-            elif self.use_C3_H:
+            elif self.use_single_valley_c3:
                 hamk, samk = self.Getk_super_gauge_sparse_symm_final_HS(
                     self.hr_supercell, self.sr_supercell, 
                     self.TAPW_parameters.symm_matrix, self.TAPW_parameters.symm_matrix_inv, 
@@ -3740,7 +3896,7 @@ class BandStructureCalculator:
                 self._set_progress_stage(i, "solve")
                 w = _solve_notapw_generalized_eigs(hamk, samk, self.config)
             else:
-                raise ValueError("Not implemented! Recommend to use generalized eigenvalue solver (ge=true).")
+                raise ValueError("non-TAPW calculations require ge=true in the release TAPW workflow.")
         if self.config.eig_vec_cal:
             eig = np.sort(np.real(w[0]))
             vec = w[1][:, np.argsort(np.real(w[0]))]
@@ -3968,15 +4124,14 @@ class BandStructureCalculator:
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         print(f"Current Time: {current_time}")
         if use_memmap:
-            try:
-                self.result.get("eig").flush()
-            except Exception:
-                pass
-            try:
-                if self.result.get("vec") is not None:
-                    self.result.get("vec").flush()
-            except Exception:
-                pass
+            with suppress(Exception):
+                eig = self.result.get("eig")
+                if eig is not None:
+                    eig.flush()
+            with suppress(Exception):
+                vec = self.result.get("vec")
+                if vec is not None:
+                    vec.flush()
 
     def generate_indices(self, num_gn_all, num_Te, num_Mo, orbs_num):
         """Generate indices for spin up/down components"""

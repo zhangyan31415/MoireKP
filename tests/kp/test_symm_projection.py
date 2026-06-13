@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
 import numpy as np
 import yaml
@@ -14,16 +16,19 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.cli as cli
+import kp.symmetry.projection as projection_mod
 from kp.model.symmetry import load_symmetry_source
 from kp.symmetry.projection import (
     _build_action_representation,
-    _gamma_c2_action_audit,
+    _c2_action_audit_for_gamma,
     _model_action_metadata,
     _model_frame_action_metadata,
     _operation_entry,
     _pairs_from_entry,
+    _projectors_for_k,
     _resolve_projected_model_action,
     _select_operation_matrix_kind,
+    _source_manifest_operation_name,
     _validate_operation_label,
 )
 
@@ -36,6 +41,50 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 0)
         self.assertIn("--developer-outputs", stream.getvalue())
+
+    def test_projectors_for_k_honors_configured_downfold_method(self) -> None:
+        ham = np.diag([0.0, 1.0, 10.0, 20.0]).astype(np.complex128)
+        u_low = np.eye(4, 1, dtype=np.complex128)
+        u_high = np.eye(4, 4, dtype=np.complex128)[:, 1:]
+        calls = {}
+
+        def fake_get_h_block(*_args, **_kwargs):
+            return None, [np.eye(2, dtype=np.complex128), np.eye(2, dtype=np.complex128)], None, None
+
+        def fake_calculate_energy_lists(*_args, **kwargs):
+            calls["include_high"] = kwargs.get("include_high")
+            return u_low, u_high
+
+        def fake_downfold_from_projectors(_ham, _u_low, _u_high, options):
+            calls["method"] = options.method
+            calls["e_ref"] = options.e_ref
+            calls["u_high_is_none"] = _u_high is None
+            return SimpleNamespace(heff=np.array([[2.0]], dtype=np.complex128))
+
+        with (
+            patch.object(projection_mod, "get_H_block", side_effect=fake_get_h_block),
+            patch.object(projection_mod, "calculate_energy_lists", side_effect=fake_calculate_energy_lists),
+            patch.object(projection_mod, "downfold_from_projectors", side_effect=fake_downfold_from_projectors),
+        ):
+            state = projection_mod._projectors_for_k(
+                ham,
+                np.array([[0.0, 0.0]], dtype=float),
+                np.array([[0.0, 0.0]], dtype=float),
+                orb0=1,
+                spin="up",
+                mode="K1",
+                nlow_state_list=[[0], [0]],
+                norb_fix_list=[[0], [0]],
+                method="fixed_schur",
+                e_ref=0.5,
+                project_cfg={},
+            )
+
+        self.assertEqual(calls["include_high"], True)
+        self.assertEqual(calls["method"], "fixed_schur")
+        self.assertEqual(calls["e_ref"], 0.5)
+        self.assertFalse(calls["u_high_is_none"])
+        np.testing.assert_allclose(state.heff, [[2.0]])
 
     def test_action_resolution_infers_sector_orbitals_from_low_dim_for_single_nlow_list(self) -> None:
         q = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
@@ -67,6 +116,29 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertTrue(basis_action["complete"])
         self.assertTrue(basis_action["support_resolution"]["action_mismatch"])
         self.assertEqual(basis_action["support_resolution"]["support_matrix_source"], "representation")
+
+    def test_projectors_for_k_uses_configured_downfold_method_and_e_ref(self) -> None:
+        q = np.array([[0.0, 0.0]], dtype=float)
+        ham = np.diag([0.0, 10.0, 0.0, 10.0]).astype(np.complex128)
+        ham[0, 3] = ham[3, 0] = 0.5
+        ham[2, 1] = ham[1, 2] = 0.25
+
+        state = _projectors_for_k(
+            ham,
+            q,
+            q.copy(),
+            orb0=2,
+            spin="up",
+            mode="K1",
+            nlow_state_list=[[0], [0]],
+            norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+            method="fixed_schur",
+            e_ref=1.0,
+            project_cfg={},
+        )
+
+        expected = np.diag([-0.25 / 9.0, -0.0625 / 9.0]).astype(np.complex128)
+        np.testing.assert_allclose(state.heff, expected, atol=1.0e-12)
 
     def test_rep_support_cleaner_stays_action_and_reports_diagnostic_only(self) -> None:
         model_basis_action = {
@@ -113,6 +185,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         q_rotation_deg: float | None = 0.0,
         include_default_k_pairs: bool = True,
         include_representation_file: bool = True,
+        include_energy_unit: bool = True,
     ) -> Path:
         q1_file = tmp / f"{operation}_q1.npy"
         q2_file = tmp / f"{operation}_q2.npy"
@@ -161,6 +234,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         cfg = {
             "material": {
                 "hamk_file": str(hamk_file),
+                "energy_unit": "eV",
                 "qset1_file": str(q1_file),
                 "qset2_file": str(q2_file),
                 "spin": "up",
@@ -185,10 +259,29 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 "tolerance": 1.0e-8,
             },
         }
+        if not include_energy_unit:
+            cfg["material"].pop("energy_unit", None)
         cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
         cli.main(["symm", "--config", str(cfg_path)])
         return out_dir
+
+    def test_symm_requires_explicit_energy_unit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            with self.assertRaisesRegex(ValueError, "material.energy_unit"):
+                self._run_minimal_two_layer_projection(
+                    tmp,
+                    valley="K1",
+                    operation="C3",
+                    d_up=np.eye(4, dtype=np.complex128),
+                    manifest_entry={
+                        "k_map": {"type": "rotation", "angle_deg": 120.0},
+                        "q_map": {"type": "rotation", "angle_deg": 120.0},
+                        "sector_map": "identity",
+                    },
+                    include_energy_unit=False,
+                )
 
     def test_symm_accepts_release_manifest_with_rawh_only(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -285,6 +378,10 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         entry = _operation_entry(manifest, "Gamma", "TR")
 
         self.assertEqual(entry["filename"], "Gamma/TR.npz")
+
+    def test_tr_request_uses_tr_as_source_manifest_name(self) -> None:
+        self.assertEqual(_source_manifest_operation_name("TR"), "TR")
+        self.assertEqual(_source_manifest_operation_name("T"), "TR")
 
     def test_source_manifest_requires_unique_raw_h_action_operator(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -456,6 +553,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cfg = {
                 "material": {
                     "hamk_file": str(hamk_file),
+                    "energy_unit": "eV",
                     "qset1_file": str(q1_file),
                     "qset2_file": str(q2_file),
                     "spin": "up",
@@ -584,6 +682,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cfg = {
                 "material": {
                     "hamk_file": str(hamk_file),
+                    "energy_unit": "eV",
                     "qset1_file": str(q1_file),
                     "qset2_file": str(q2_file),
                     "spin": "up",
@@ -698,14 +797,14 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 [("L1", "L1"), ("L2", "L2")],
             )
 
-    def test_gamma_c2_action_audit_report_exists(self) -> None:
+    def test_c2_action_audit_for_gamma_report_exists(self) -> None:
         declared_model_action = {
             "antiunitary": False,
             "k_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
             "q_map": {"type": "reflection", "axis_deg": 0.0, "in_model_frame": True},
             "sector_map": "identity",
         }
-        audit = _gamma_c2_action_audit(
+        audit = _c2_action_audit_for_gamma(
             mode="gamma",
             operation="C2",
             matrix_kind="action",
@@ -798,6 +897,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cfg = {
                 "material": {
                     "hamk_file": str(hamk_file),
+                    "energy_unit": "eV",
                     "qset1_file": str(q1_file),
                     "qset2_file": str(q2_file),
                     "spin": "up",
@@ -974,6 +1074,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cfg = {
                 "material": {
                     "hamk_file": str(hamk_file),
+                    "energy_unit": "eV",
                     "qset1_file": str(q1_file),
                     "qset2_file": str(q2_file),
                     "spin": "up",
@@ -1067,6 +1168,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cfg = {
                 "material": {
                     "hamk_file": str(hamk_file),
+                    "energy_unit": "eV",
                     "qset1_file": str(q1_file),
                     "qset2_file": str(q2_file),
                     "spin": "up",

@@ -13,6 +13,7 @@ def test_unified_tapw_help_lists_subcommands(capsys):
     assert "run" in out
     assert "plot" in out
     assert "topo" in out
+    assert "postprocess-memmap" in out
     assert "orbital" in out
     assert "fatband" in out
     assert "chern-post" not in out
@@ -52,6 +53,46 @@ def test_unified_tapw_dispatches_calc_without_rewriting_algorithm(monkeypatch):
     assert calls == ["config.yaml"]
 
 
+def test_exit_cli_raises_system_exit_without_os_exit(monkeypatch):
+    from tapw import cli
+
+    calls = []
+    monkeypatch.setattr(cli, "shutdown_parallel_runtime", lambda: calls.append("shutdown"))
+    monkeypatch.setattr(cli.logging, "shutdown", lambda: calls.append("logging"))
+    monkeypatch.setattr(
+        cli.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(AssertionError("os._exit should not be used")),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.exit_cli(7)
+
+    assert excinfo.value.code == 7
+    assert calls == ["shutdown", "logging"]
+
+
+def test_finish_calculation_process_flushes_then_raises_system_exit(monkeypatch):
+    from tapw import cli
+
+    calls = []
+
+    monkeypatch.setattr(cli.logging, "shutdown", lambda: calls.append("logging"))
+    monkeypatch.setattr(cli.sys.stdout, "flush", lambda: calls.append("stdout"))
+    monkeypatch.setattr(cli.sys.stderr, "flush", lambda: calls.append("stderr"))
+    monkeypatch.setattr(
+        cli.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(AssertionError("os._exit should not be used")),
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.finish_calculation_process(5)
+
+    assert excinfo.value.code == 5
+    assert calls == ["logging", "stdout", "stderr"]
+
+
 def test_tapw_run_help_lists_developer_outputs(capsys):
     from tapw import cli
 
@@ -78,6 +119,30 @@ def test_unified_tapw_dispatches_orbital_commands(monkeypatch):
         ("orbital", [".", "--config", "config.yaml"]),
         ("fatband", [".", "--valley", "Gamma"]),
     ]
+
+
+def test_unified_tapw_dispatches_postprocess_memmap(monkeypatch):
+    from tapw import cli
+    from tapw import postprocess_memmap
+
+    calls = []
+    monkeypatch.setattr(postprocess_memmap, "main", lambda argv=None, **_kwargs: calls.append(argv))
+
+    cli.main(["postprocess-memmap", "--root-dir", "Q_shell_6", "--mode", "band", "--valley", "31", "--efermi", "0"])
+
+    assert calls == [["--root-dir", "Q_shell_6", "--mode", "band", "--valley", "31", "--efermi", "0"]]
+
+
+def test_tapw_orbital_exits_nonzero_when_required_inputs_are_missing(tmp_path):
+    from tapw import orbital_analysis_tool
+
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("paths: {}\ncompute: {}\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        orbital_analysis_tool.main([str(tmp_path), "--config", str(config_path), "--quiet"])
+
+    assert excinfo.value.code == 1
 
 
 def test_legacy_tapw_subcommands_still_dispatch(monkeypatch):

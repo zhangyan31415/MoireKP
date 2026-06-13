@@ -1,6 +1,6 @@
 # Configurable Continuum Model Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Internal implementation note:** use the executing-plans workflow to implement this plan task-by-task.
 
 **Goal:** Turn the notebook-only term generation, coefficient fitting, and band comparison flow into a reusable YAML-driven pipeline.
 

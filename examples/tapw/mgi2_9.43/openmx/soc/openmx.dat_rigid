@@ -1,6 +1,6 @@
 System.CurrrentDirectory         ./          # default=./
 System.Name                     openmx
-DATA.PATH                       /data/home/zy/software/openmx3.9/DFT_DATA19   # default=../DFT_DATA19
+DATA.PATH                       ${OPENMX_DATA_PATH}   # set to your OpenMX DFT_DATA19 directory
 level.of.stdout                   1          # default=1 (1-3)
 level.of.fileout                  0          # default=1 (0-2)
 HS.fileout                       on          # on|off, default=off

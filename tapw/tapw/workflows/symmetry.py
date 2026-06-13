@@ -60,6 +60,7 @@ NOT_SUPPORTED_REASONS = (
     "orbit_not_closed",
     "S_not_positive_definite",
     "generic_C3_builder_failed",
+    "inter_valley_operation_not_exported_in_single_valley_block",
     "reciprocal_shift_phase_unsupported",
     "seitz_translation_unsupported",
     "reference_operation_not_structure_symmetry",
@@ -72,17 +73,25 @@ PG_EXTRACTED_PHASE_CONVENTION = (
     "unitary: D_raw=D_g^(0) P_G; antiunitary: D_raw=D_g^(0) P_G^*"
 )
 RAW_H_ACTION_RULE = "unitary: D_raw H D_raw^dagger; antiunitary: D_raw H^* D_raw^dagger"
+BACKEND_IDENTITY = "identity"
+BACKEND_TIME_REVERSAL = "time_reversal"
+BACKEND_C3_ROTATION = "c3_rotation"
+BACKEND_C3_SQUARE_ROTATION = "c3_square_rotation"
+BACKEND_C2_SPATIAL_LAYER_EXCHANGE = "c2_spatial_layer_exchange"
+BACKEND_C2_LAYER_EXCHANGE_UNITARY = "c2_layer_exchange_unitary"
+BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY = "c2_layer_exchange_antiunitary"
+SHARED_C2_SELECTOR_ANTIUNITARY_LAYER_EXCHANGE = "c2_layer_exchange_antiunitary_spglib_axis"
 
 
 def displayed_operation_name(name: str) -> str:
     """Return the user-facing operation symbol without provisional axis names."""
     text = str(name)
-    if text == "C2":
-        return "C2"
-    if text in {"K_C2T", "K_C2T"}:
-        return "C2T"
-    if text == "M_C2_eta":
-        return "C2"
+    if text == "T":
+        return "TR"
+    if text == "C3":
+        return "C3z"
+    if text == "C3^2":
+        return "C3z^2"
     if text.startswith("C2(axis="):
         return "C2"
     return text
@@ -91,11 +100,39 @@ def displayed_operation_name(name: str) -> str:
 def representation_operation_name(name: str) -> str:
     """Return the compact operation symbol used for saved representation files."""
     text = displayed_operation_name(name)
-    if text == "C3z":
-        return "C3"
-    if text == "C3z^2":
-        return "C3^2"
     return text
+
+
+def resolve_requested_symmetrization_operations(
+    summary: dict[str, Any],
+    valley_label: str,
+    requested,
+) -> list[str]:
+    """Validate and resolve Hamiltonian symmetrization operations from a TAPW summary."""
+    operations_by_valley = summary.get("operations", {}) or {}
+    minimal_by_valley = summary.get("minimal_generators", {}) or {}
+    entries = list(operations_by_valley.get(str(valley_label), []))
+    present = {displayed_operation_name(entry.get("operation", "")): entry for entry in entries}
+
+    if requested is True:
+        return [displayed_operation_name(op) for op in minimal_by_valley.get(str(valley_label), [])]
+    requested_ops = [displayed_operation_name(op) for op in requested]
+
+    resolved: list[str] = []
+    for op in requested_ops:
+        entry = present.get(op)
+        if entry is None:
+            raise ValueError(f"Requested Hamiltonian symmetrization operation {op} is not present for valley {valley_label}.")
+        if not bool(entry.get("supported", False)):
+            reason = entry.get("not_supported_reason") or entry.get("status") or "unsupported"
+            raise ValueError(f"Requested Hamiltonian symmetrization operation {op} is not supported for valley {valley_label}: {reason}")
+        if entry.get("role") not in (None, "", "internal") or entry.get("export_raw_h_matrix") is False:
+            raise ValueError(
+                f"Requested Hamiltonian symmetrization operation {op} is not an internal exported operation for valley {valley_label}."
+            )
+        if op not in resolved:
+            resolved.append(op)
+    return resolved
 
 
 def _safe_path_component(text: Any) -> str:
@@ -129,9 +166,10 @@ def _json_int_vector_dict(value) -> dict[str, list[int]]:
 
 
 def _is_saved_minimal_generator(operation: str, already_saved: set[str]) -> bool:
+    operation = displayed_operation_name(operation)
     if operation == "E":
         return False
-    if operation == "C3^2":
+    if operation == "C3z^2":
         return False
     if operation in already_saved:
         return False
@@ -182,6 +220,10 @@ def _minimal_generators_by_valley(operations_summary: dict[str, list[dict[str, A
         for entry in entries:
             if not entry.get("supported", False):
                 continue
+            if entry.get("role") not in (None, "", "internal"):
+                continue
+            if entry.get("export_raw_h_matrix") is False:
+                continue
             name = displayed_operation_name(entry.get("operation", "unknown"))
             if name == "E":
                 continue
@@ -193,6 +235,68 @@ def _minimal_generators_by_valley(operations_summary: dict[str, list[dict[str, A
                 selected.append(name)
         generators[valley] = selected
     return generators
+
+
+def _markdown_yes_no(value: Any) -> str:
+    return "yes" if bool(value) else "no"
+
+
+def _operation_is_antiunitary(entry: dict[str, Any]) -> bool:
+    if entry.get("antiunitary") is not None:
+        return bool(entry.get("antiunitary"))
+    return displayed_operation_name(entry.get("operation", "")) in {"TR", "C2T"}
+
+
+def _display_valley_name(value: Any) -> str:
+    if value is None or value == "":
+        return "unknown"
+    return str(value)
+
+
+def _operation_role(entry: dict[str, Any], source_valley: str, target_valley: str) -> str:
+    explicit = entry.get("role")
+    if explicit:
+        return str(explicit)
+    if entry.get("closed_in_active_set") is not None:
+        return "internal" if bool(entry.get("closed_in_active_set")) else "inter-valley"
+    if bool(entry.get("supported", False)) and source_valley == target_valley:
+        return "internal"
+    reason = str(entry.get("not_supported_reason", ""))
+    if "valley" in reason or source_valley != target_valley:
+        return "inter-valley"
+    return "not-exported"
+
+
+def _entry_closed_in_active_set(entry: dict[str, Any]) -> bool:
+    if entry.get("closed_in_active_set") is not None:
+        return bool(entry.get("closed_in_active_set"))
+    if entry.get("closed") is not None:
+        return bool(entry.get("closed"))
+    return bool(entry.get("supported", False))
+
+
+def _inter_valley_operations(operations: dict[str, list[dict[str, Any]]]) -> dict[str, list[tuple[str, str]]]:
+    result: dict[str, list[tuple[str, str]]] = {}
+    for valley, entries in operations.items():
+        source_default = str(valley)
+        for entry in entries:
+            source = _display_valley_name(entry.get("source_valley", source_default))
+            target = _display_valley_name(entry.get("target_valley", source))
+            role = _operation_role(entry, source, target)
+            if role != "inter-valley":
+                continue
+            result.setdefault(source, []).append((_operation_markdown_label(entry), target))
+    return result
+
+
+def _raw_h_file_from_record(record: dict[str, Any]) -> str:
+    path = record.get("raw_h_operator_file")
+    if path:
+        text = str(path)
+        return text if text.startswith("representations/") else f"representations/{text}"
+    valley_label = _safe_path_component(record.get("valley_label", record.get("valley", "unknown")))
+    operation = _safe_path_component(representation_operation_name(record.get("operation", "unknown")))
+    return f"representations/{valley_label}/{operation}_rawH.npz"
 
 
 @dataclass(frozen=True)
@@ -277,7 +381,227 @@ def inverse_sqrt_positive_definite(matrix, atol: float = 1.0e-12):
 def _candidate_name(base_name: str, antiunitary: bool) -> str:
     if not antiunitary:
         return base_name
-    return "T" if base_name == "E" else f"{base_name}T"
+    return "TR" if base_name == "E" else f"{base_name}T"
+
+
+def _rotation_z_cart(angle_deg: float) -> np.ndarray:
+    theta = np.deg2rad(float(angle_deg))
+    rotation = np.eye(3, dtype=float)
+    rotation[:2, :2] = np.array(
+        [
+            [np.cos(theta), -np.sin(theta)],
+            [np.sin(theta), np.cos(theta)],
+        ],
+        dtype=float,
+    )
+    return rotation
+
+
+def _opposite_k_valley_label(label: str, valley: int) -> str:
+    text = str(label)
+    if text.endswith("1"):
+        return text[:-1] + "2"
+    if text.endswith("2"):
+        return text[:-1] + "1"
+    if int(valley) in {1, 11}:
+        return "K2"
+    if int(valley) in {2, 12}:
+        return "K1"
+    return "K_partner"
+
+
+def _m_valley_label(valley: int) -> str:
+    return {31: "M1", 32: "M2", 33: "M3"}.get(int(valley), f"M{int(valley)}")
+
+
+VALLEY_FAMILY_BY_ID = {
+    5: "Gamma",
+    1: "K",
+    2: "K",
+    11: "K",
+    12: "K",
+    31: "M",
+    32: "M",
+    33: "M",
+}
+
+SOURCE_ACTION_REGISTRY = {
+    "Gamma": {
+        "operations": ("E", "TR", "C3z", "C3z^2", "C2"),
+        "template_c2_selector": "standard_layer_exchange_c2",
+        "actions": {
+            "E": ("self", "internal", BACKEND_IDENTITY),
+            "TR": ("self", "internal", BACKEND_TIME_REVERSAL),
+            "C3z": ("self", "internal", BACKEND_C3_ROTATION),
+            "C3z^2": ("self", "internal", BACKEND_C3_SQUARE_ROTATION),
+            "C2": ("self", "internal", BACKEND_C2_SPATIAL_LAYER_EXCHANGE),
+        },
+    },
+    "K": {
+        "operations": ("E", "TR", "C3z", "C3z^2", "C2", "C2T"),
+        "shared_c2_selector": SHARED_C2_SELECTOR_ANTIUNITARY_LAYER_EXCHANGE,
+        "actions": {
+            "E": ("self", "internal", BACKEND_IDENTITY),
+            "TR": ("k_partner", "inter-valley", BACKEND_TIME_REVERSAL),
+            "C3z": ("self", "internal", BACKEND_C3_ROTATION),
+            "C3z^2": ("self", "internal", BACKEND_C3_SQUARE_ROTATION),
+            "C2": ("k_partner", "inter-valley", BACKEND_C2_SPATIAL_LAYER_EXCHANGE),
+            "C2T": ("self", "internal", BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY),
+        },
+    },
+    "M": {
+        "operations": ("E", "TR", "C3z", "C3z^2", "C2"),
+        "actions": {
+            "E": ("self", "internal", BACKEND_IDENTITY),
+            "TR": ("self", "internal", BACKEND_TIME_REVERSAL),
+            "C3z": ("m_next", "inter-valley", BACKEND_C3_ROTATION),
+            "C3z^2": ("m_next2", "inter-valley", BACKEND_C3_SQUARE_ROTATION),
+            "C2": ("self", "internal", BACKEND_C2_LAYER_EXCHANGE_UNITARY),
+        },
+    },
+    "generic": {
+        "operations": ("E", "TR", "C3z", "C3z^2", "C2"),
+        "actions": {
+            "E": ("self", "internal", BACKEND_IDENTITY),
+            "TR": ("self", "internal", BACKEND_TIME_REVERSAL),
+            "C3z": ("self", "internal", BACKEND_C3_ROTATION),
+            "C3z^2": ("self", "internal", BACKEND_C3_SQUARE_ROTATION),
+            "C2": ("self", "internal", BACKEND_C2_SPATIAL_LAYER_EXCHANGE),
+        },
+    },
+}
+
+
+def _valley_family(valley: int) -> str:
+    return VALLEY_FAMILY_BY_ID.get(int(valley), "generic")
+
+
+def _source_action_profile(family: str) -> dict[str, Any]:
+    return SOURCE_ACTION_REGISTRY.get(str(family), SOURCE_ACTION_REGISTRY["generic"])
+
+
+def _source_operations_for_family(family: str) -> tuple[str, ...]:
+    return tuple(_source_action_profile(family)["operations"])
+
+
+def _select_template_c2_operation(family: str, structure, spatial_operations: list[dict[str, Any]]):
+    selector = _source_action_profile(family).get("template_c2_selector")
+    if selector != "standard_layer_exchange_c2":
+        return None
+    selected_operation = None
+    if structure is not None:
+        selected_operation = find_layer_exchange_c2_spatial_operation(structure, spatial_operations)
+    if selected_operation is not None:
+        return selected_operation
+    for operation in spatial_operations:
+        if _is_standard_layer_exchange_c2_rotation(np.asarray(operation["rotation_cart"], dtype=float)):
+            return operation
+    return None
+
+
+def _rotated_m_valley_label(source_label: str, power: int) -> str:
+    labels = ["M1", "M2", "M3"]
+    text = str(source_label)
+    if text not in labels:
+        return f"{text}_C3^{int(power)}"
+    return labels[(labels.index(text) + int(power)) % 3]
+
+
+def _mark_source_role(
+    candidate: dict[str, Any],
+    *,
+    source_valley_label: str,
+    target_valley_label: str,
+    role: str,
+) -> dict[str, Any]:
+    candidate["source_valley_label"] = str(source_valley_label)
+    candidate["target_valley_label"] = str(target_valley_label)
+    candidate["source_symmetry_role"] = str(role)
+    candidate["export_raw_h_matrix"] = role == "internal"
+    return candidate
+
+
+def _source_operation_templates(
+    bravais: str,
+    *,
+    operation_names: tuple[str, ...] | None = None,
+    c2_rotation_cart: np.ndarray | None = None,
+    c2_index: int = 11,
+    c2_translation_cart: np.ndarray | None = None,
+    c2_rotation_frac: np.ndarray | None = None,
+    c2_translation_frac: np.ndarray | None = None,
+) -> list[dict[str, Any]]:
+    """Return source-level physical operations before valley/action classification."""
+    requested = tuple(displayed_operation_name(name) for name in (operation_names or ("E", "TR", "C3z", "C3z^2", "C2")))
+    templates_by_name: dict[str, dict[str, Any]] = {
+        "E": {
+            "index": 0,
+            "name": "E",
+            "antiunitary": False,
+            "rotation_cart": np.eye(3, dtype=float),
+            "translation_cart": np.zeros(3, dtype=float),
+        },
+        "TR": {
+            "index": 1,
+            "name": "TR",
+            "antiunitary": True,
+            "rotation_cart": np.eye(3, dtype=float),
+            "translation_cart": np.zeros(3, dtype=float),
+        },
+    }
+    if str(bravais or "hex").lower() == "hex":
+        templates_by_name["C3z"] = {
+            "index": 2,
+            "name": "C3z",
+            "antiunitary": False,
+            "rotation_cart": _rotation_z_cart(120.0),
+            "translation_cart": np.zeros(3, dtype=float),
+        }
+        templates_by_name["C3z^2"] = {
+            "index": 3,
+            "name": "C3z^2",
+            "antiunitary": False,
+            "rotation_cart": _rotation_z_cart(240.0),
+            "translation_cart": np.zeros(3, dtype=float),
+        }
+    c2 = {
+        "index": int(c2_index),
+        "name": "C2",
+        "antiunitary": False,
+        "rotation_cart": np.asarray(c2_rotation_cart if c2_rotation_cart is not None else np.diag([-1.0, 1.0, -1.0]), dtype=float),
+        "translation_cart": np.asarray(c2_translation_cart if c2_translation_cart is not None else np.zeros(3, dtype=float), dtype=float),
+    }
+    if c2_rotation_frac is not None:
+        c2["rotation_frac"] = np.asarray(c2_rotation_frac, dtype=float)
+    if c2_translation_frac is not None:
+        c2["translation_frac"] = np.asarray(c2_translation_frac, dtype=float)
+    templates_by_name["C2"] = c2
+    c2t = dict(c2)
+    c2t["name"] = "C2T"
+    c2t["antiunitary"] = True
+    c2t["spatial_parent"] = "C2"
+    templates_by_name["C2T"] = c2t
+    return [dict(templates_by_name[name]) for name in requested if name in templates_by_name]
+
+
+def _classify_source_valley_action(source_label: str, valley: int, operation_name: str) -> tuple[str, str]:
+    name = displayed_operation_name(operation_name)
+    target_rule, role, _ = _source_action_profile(_valley_family(valley))["actions"].get(name, ("self", "internal", name.lower()))
+    if target_rule == "self":
+        return source_label, role
+    if target_rule == "k_partner":
+        return _opposite_k_valley_label(source_label, valley), role
+    if target_rule == "m_next":
+        return _rotated_m_valley_label(source_label, 1), role
+    if target_rule == "m_next2":
+        return _rotated_m_valley_label(source_label, 2), role
+    return source_label, role
+
+
+def _transport_backend_for_operation(valley: int, operation_name: str, role: str) -> str:
+    name = displayed_operation_name(operation_name)
+    _, _, backend = _source_action_profile(_valley_family(valley))["actions"].get(name, ("self", role, name.lower().replace("^", "")))
+    return str(backend)
 
 
 def expand_spatial_operation_candidates(operations):
@@ -532,6 +856,11 @@ def _rounded_q_key(q, ndigits: int = 10):
     return tuple(np.round(q, decimals=ndigits).tolist())
 
 
+def _rounded_matrix_key(matrix, ndigits: int = 10):
+    matrix = np.asarray(matrix, dtype=float).reshape(-1)
+    return tuple(np.round(matrix, decimals=ndigits).tolist())
+
+
 def build_projected_g_transport_by_physical_momentum(
     *,
     source_g_vectors: np.ndarray,
@@ -712,7 +1041,7 @@ def build_m_time_reversal_g_transport(
     return transport, max_delta
 
 
-def build_k_c2t_g_transport(
+def build_antiunitary_c2_layer_exchange_g_transport(
     *,
     source_g_vectors: np.ndarray,
     target_g_vectors: np.ndarray,
@@ -739,12 +1068,12 @@ def build_k_c2t_g_transport(
         if float(deltas[target_index]) > tol:
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                f"K_C2T direct G mapping failed for source index {source_index}: min delta={deltas[target_index]:.3e}.",
+                f"K C2T transport mapping failed for source index {source_index}: min delta={deltas[target_index]:.3e}.",
             )
         if target_index in used_targets:
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                f"K_C2T direct G mapping is not one-to-one; repeated target index {target_index}.",
+                f"K C2T transport mapping is not one-to-one; repeated target index {target_index}.",
             )
         used_targets.add(target_index)
         rows.append(target_index)
@@ -758,7 +1087,7 @@ def build_k_c2t_g_transport(
     return transport, max_delta
 
 
-def diagnose_k_c2t_axis_choices(
+def diagnose_antiunitary_c2_axis_choices(
     *,
     source_g_vectors: np.ndarray,
     target_g_vectors: np.ndarray,
@@ -845,7 +1174,7 @@ def _diagnose_affine_g_mapping(
     }
 
 
-def diagnose_k_c2t_center_choices(
+def diagnose_antiunitary_c2_center_choices(
     *,
     source_g_vectors: np.ndarray,
     target_g_vectors: np.ndarray,
@@ -889,7 +1218,7 @@ def diagnose_k_c2t_center_choices(
     return diagnostics
 
 
-def build_m_c2_eta_g_transport(
+def build_unitary_c2_layer_exchange_g_transport(
     *,
     source_g_vectors: np.ndarray,
     target_g_vectors: np.ndarray,
@@ -916,12 +1245,12 @@ def build_m_c2_eta_g_transport(
         if float(deltas[target_index]) > tol:
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                f"M_C2_eta direct G mapping failed for source index {source_index}: min delta={deltas[target_index]:.3e}.",
+                f"M C2 transport mapping failed for source index {source_index}: min delta={deltas[target_index]:.3e}.",
             )
         if target_index in used_targets:
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                f"M_C2_eta direct G mapping is not one-to-one; repeated target index {target_index}.",
+                f"M C2 transport mapping is not one-to-one; repeated target index {target_index}.",
             )
         used_targets.add(target_index)
         rows.append(target_index)
@@ -962,13 +1291,13 @@ def m_unitary_c2_target_group_shifts(
         if residual > tol:
             raise SymmetrySupportError(
                 "reciprocal_shift_phase_unsupported",
-                f"M_C2_eta reciprocal shift for group {source_group}->{target_group} is not integral: residual={residual:.3e}.",
+                f"M C2 reciprocal shift for group {source_group}->{target_group} is not integral: residual={residual:.3e}.",
             )
         existing = shifts.get(int(target_group))
         if existing is not None and not np.array_equal(existing, coeffs):
             raise SymmetrySupportError(
                 "reciprocal_shift_phase_unsupported",
-                f"M_C2_eta assigns inconsistent reciprocal shifts to target group {target_group}.",
+                f"M C2 assigns inconsistent reciprocal shifts to target group {target_group}.",
             )
         shifts[int(target_group)] = coeffs
     return shifts, max_residual
@@ -1016,7 +1345,7 @@ def build_direct_linear_g_transport(
     return transport, max_delta
 
 
-def _is_gamma_c2y_rotation(rotation_cart: np.ndarray) -> bool:
+def _is_standard_layer_exchange_c2_rotation(rotation_cart: np.ndarray) -> bool:
     rotation_cart = np.asarray(rotation_cart, dtype=float)
     det3d = float(np.linalg.det(rotation_cart))
     if abs(det3d - 1.0) > 1.0e-8:
@@ -1042,7 +1371,7 @@ def find_layer_exchange_c2_spatial_operation(structure, spatial_operations: list
     if not candidates:
         return None
     for operation in candidates:
-        if _is_gamma_c2y_rotation(np.asarray(operation["rotation_cart"], dtype=float)):
+        if _is_standard_layer_exchange_c2_rotation(np.asarray(operation["rotation_cart"], dtype=float)):
             return operation
     return candidates[0]
 
@@ -1092,91 +1421,50 @@ def _minimal_symmetry_candidates_for_valley(
     spatial_operations: list[dict[str, Any]] | None = None,
     structure=None,
 ):
-    candidates = [
-        {
-            "index": 0,
-            "name": "E",
-            "antiunitary": False,
-            "rotation_cart": np.eye(3, dtype=float),
-            "translation_cart": np.zeros(3, dtype=float),
-        },
-    ]
-
+    source_label = str(valley_ctx.valley_label)
     valley = int(valley_ctx.valley)
-    if valley == 5 or valley in {31, 32, 33}:
-        candidates.append(
-            {
-                "index": 1,
-                "name": "T",
-                "antiunitary": True,
-                "rotation_cart": np.eye(3, dtype=float),
-                "translation_cart": np.zeros(3, dtype=float),
-            }
-        )
-
-    if supports_single_valley_c3(bravais, valley):
-        for index, (name, angle_deg) in enumerate((("C3z", 120.0), ("C3z^2", 240.0)), start=2):
-            theta = np.deg2rad(angle_deg)
-            rotation_cart = np.eye(3, dtype=float)
-            rotation_cart[:2, :2] = np.array(
-                [
-                    [np.cos(theta), -np.sin(theta)],
-                    [np.sin(theta), np.cos(theta)],
-                ],
-                dtype=float,
-            )
-            candidates.append(
-                {
-                    "index": index,
-                    "name": name,
-                    "antiunitary": False,
-                    "rotation_cart": rotation_cart,
-                    "translation_cart": np.zeros(3, dtype=float),
-                }
-            )
-    if valley in {1, 2, 11, 12}:
-        candidates.append(
-            {
-                "index": 20,
-                "name": "K_C2T",
-                "antiunitary": True,
-                "rotation_cart": np.diag([-1.0, 1.0, -1.0]),
-                "translation_cart": np.zeros(3, dtype=float),
-            }
-        )
-    if valley in {31, 32, 33}:
-        candidates.append(
-            {
-                "index": 30,
-                "name": "M_C2_eta",
-                "antiunitary": False,
-                "rotation_cart": np.diag([-1.0, 1.0, -1.0]),
-                "translation_cart": np.zeros(3, dtype=float),
-            }
-        )
+    family = _valley_family(valley)
+    if family == "M":
+        m_label = _m_valley_label(valley)
+        if source_label == str(valley):
+            source_label = m_label
     if spatial_operations is None:
         spatial_operations = []
-    if valley == 5:
-        selected_operation = None
-        if structure is not None:
-            selected_operation = find_layer_exchange_c2_spatial_operation(structure, spatial_operations)
-        if selected_operation is None:
-            for operation in spatial_operations:
-                if not _is_gamma_c2y_rotation(np.asarray(operation["rotation_cart"], dtype=float)):
-                    continue
-                selected_operation = operation
-                break
-        if selected_operation is not None:
-            payload = {
-                "index": int(selected_operation["index"]),
-                "name": "C2",
-                "antiunitary": False,
-                "rotation_frac": np.asarray(selected_operation.get("rotation_frac", np.eye(3, dtype=float)), dtype=float),
-                "translation_frac": np.asarray(selected_operation.get("translation_frac", np.zeros(3, dtype=float)), dtype=float),
-                "rotation_cart": np.asarray(selected_operation["rotation_cart"], dtype=float),
-                "translation_cart": np.asarray(selected_operation.get("translation_cart", np.zeros(3, dtype=float)), dtype=float),
-            }
-            candidates.append(payload)
+    c2_rotation_cart = None
+    c2_rotation_frac = None
+    c2_translation_cart = None
+    c2_translation_frac = None
+    c2_index = 11
+    selected_operation = _select_template_c2_operation(family, structure, spatial_operations)
+    if selected_operation is not None:
+        c2_index = int(selected_operation["index"])
+        c2_rotation_frac = np.asarray(selected_operation.get("rotation_frac", np.eye(3, dtype=float)), dtype=float)
+        c2_translation_frac = np.asarray(selected_operation.get("translation_frac", np.zeros(3, dtype=float)), dtype=float)
+        c2_rotation_cart = np.asarray(selected_operation["rotation_cart"], dtype=float)
+        c2_translation_cart = np.asarray(selected_operation.get("translation_cart", np.zeros(3, dtype=float)), dtype=float)
+    templates = _source_operation_templates(
+        bravais,
+        operation_names=_source_operations_for_family(family),
+        c2_rotation_cart=c2_rotation_cart,
+        c2_index=c2_index,
+        c2_translation_cart=c2_translation_cart,
+        c2_rotation_frac=c2_rotation_frac,
+        c2_translation_frac=c2_translation_frac,
+    )
+    candidates = []
+    for template in templates:
+        target_label, role = _classify_source_valley_action(source_label, valley, template["name"])
+        candidate = dict(template)
+        candidate["source_operation_name"] = displayed_operation_name(template["name"])
+        candidate["transport_backend"] = _transport_backend_for_operation(valley, template["name"], role)
+        candidates.append(
+            _mark_source_role(
+                candidate,
+                source_valley_label=source_label,
+                target_valley_label=target_label,
+                role=role,
+            )
+        )
     return candidates
 
 
@@ -1269,8 +1557,7 @@ def _prepare_compute_config_for_valley(compute_config, valley: int):
     cfg.mode = "symmetry"
     cfg.valley = int(valley)
     cfg.valleys = [int(valley)]
-    cfg.C3_H = False
-    cfg.M_valley_D3_H = False
+    cfg.symmetrize_hamiltonian = False
     cfg.hamk_save = False
     return cfg
 
@@ -1697,9 +1984,15 @@ def _group_orbital_identity_block(structure_df, group_id: int):
 
 def _candidate_group_target_map_for_source_pin(candidate: dict[str, Any], groups: list[int]) -> dict[int, int]:
     name = str(candidate.get("name", ""))
-    if name in {"E", "T", "C3z", "C3z^2"}:
+    if name in {"E", "TR", "C3z", "C3z^2"}:
         return {int(group): int(group) for group in groups}
-    if name in {"C2", "K_C2T", "M_C2_eta"} and set(groups) == {0, 1}:
+    backend = str(candidate.get("transport_backend", "") or "")
+    c2_layer_exchange_backends = {
+        BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY,
+        BACKEND_C2_LAYER_EXCHANGE_UNITARY,
+        BACKEND_C2_SPATIAL_LAYER_EXCHANGE,
+    }
+    if (name == "C2" or candidate.get("spatial_parent") == "C2" or backend in c2_layer_exchange_backends) and set(groups) == {0, 1}:
         return {0: 1, 1: 0}
     return {int(group): int(group) for group in groups}
 
@@ -2046,7 +2339,7 @@ class SymmetryAnalysisRunner:
             return cached
 
         cfg = _prepare_compute_config_for_valley(self.config.compute, valley)
-        cfg.C3_H = True
+        cfg.symmetrize_hamiltonian = ["C3z"]
         params = TAPW_parameters(self.structure, cfg)
         params.generate_all_parameters()
         if params.C3_matrix is None:
@@ -2379,7 +2672,7 @@ class SymmetryAnalysisRunner:
         self._last_transport_diagnostics = diagnostics
         return transport
 
-    def _build_gamma_c2y_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
+    def _build_spatial_c2_layer_exchange_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
         valley_ctx = self._valley_context_for_valley(valley)
         q_target = np.asarray(q_target, dtype=float)
         q_source = np.asarray(q_source, dtype=float)
@@ -2509,7 +2802,7 @@ class SymmetryAnalysisRunner:
         self._last_transport_diagnostics = diagnostics
         return transport
 
-    def _build_k_c2t_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
+    def _build_antiunitary_c2_layer_exchange_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
         valley_ctx = self._valley_context_for_valley(valley)
         q_target = np.asarray(q_target, dtype=float)
         q_source = np.asarray(q_source, dtype=float)
@@ -2534,7 +2827,7 @@ class SymmetryAnalysisRunner:
             target_group = 1 - source_group
             source_g = np.asarray(valley_ctx.group_g_vectors[source_group], dtype=float)
             target_g = np.asarray(valley_ctx.group_g_vectors[target_group], dtype=float)
-            axis_diagnostics = diagnose_k_c2t_axis_choices(
+            axis_diagnostics = diagnose_antiunitary_c2_axis_choices(
                 source_g_vectors=source_g,
                 target_g_vectors=target_g,
                 source_k_center=np.asarray(valley_ctx.group_k_centers[source_group], dtype=float),
@@ -2548,7 +2841,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                "K_C2T could not find a layer-exchange order-2 spatial operation from spglib.",
+                "K C2T transport could not find a layer-exchange order-2 spatial operation from spglib.",
             )
 
         spglib_axis_closed = True
@@ -2562,7 +2855,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "g_mapping_missing",
-                "K_C2T opposite-layer G mapping does not close for the spglib layer-exchange C2 axis.",
+                "K C2T opposite-layer G mapping does not close for the spglib layer-exchange C2 axis.",
             )
 
         rotation_cart = np.asarray(spglib_operation["rotation_cart"], dtype=float)
@@ -2576,7 +2869,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "q_mapping_missing",
-                f"K_C2T q consistency failed for spglib layer-exchange C2 axis: ||-C2 q_source - q_target||={q_consistency:.3e}.",
+                f"K C2T q consistency failed for spglib layer-exchange C2 axis: ||-C2 q_source - q_target||={q_consistency:.3e}.",
             )
 
         atom_mapping = _build_atom_mapping(self.structure, spglib_operation)
@@ -2584,7 +2877,7 @@ class SymmetryAnalysisRunner:
             self._last_transport_diagnostics = diagnostics
             raise SymmetrySupportError(
                 "atom_mapping_missing",
-                f"K_C2T spglib axis does not exchange the two layers: group_target_map={atom_mapping.get('group_target_map')}.",
+                f"K C2T spglib axis does not exchange the two layers: group_target_map={atom_mapping.get('group_target_map')}.",
             )
 
         df = self.structure.df
@@ -2596,7 +2889,7 @@ class SymmetryAnalysisRunner:
             target_group = 1 - source_group
             source_g = np.asarray(valley_ctx.group_g_vectors[source_group], dtype=float)
             target_g = np.asarray(valley_ctx.group_g_vectors[target_group], dtype=float)
-            q_transport, max_delta = build_k_c2t_g_transport(
+            q_transport, max_delta = build_antiunitary_c2_layer_exchange_g_transport(
                 source_g_vectors=source_g,
                 target_g_vectors=target_g,
                 source_k_center=np.asarray(valley_ctx.group_k_centers[source_group], dtype=float),
@@ -2670,7 +2963,7 @@ class SymmetryAnalysisRunner:
         self._last_transport_diagnostics = diagnostics
         return transport
 
-    def _select_k_c2t_spatial_operation(
+    def _select_antiunitary_c2_layer_exchange_spatial_operation(
         self,
         valley: int,
         spatial_operations: list[dict[str, Any]],
@@ -2684,7 +2977,9 @@ class SymmetryAnalysisRunner:
         for operation in candidates:
             candidate = {
                 "index": int(operation["index"]),
-                "name": "K_C2T",
+                "name": "C2T",
+                "transport_backend": BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY,
+                "spatial_parent": "C2",
                 "antiunitary": True,
                 "closed": True,
                 "rotation_frac": np.asarray(operation.get("rotation_frac", np.eye(3, dtype=float)), dtype=float),
@@ -2695,7 +2990,7 @@ class SymmetryAnalysisRunner:
                 "spglib_layer_exchange_c2": operation,
             }
             try:
-                transport = self._build_k_c2t_transport(candidate, valley, q0, q0)
+                transport = self._build_antiunitary_c2_layer_exchange_transport(candidate, valley, q0, q0)
                 diagnostics = dict(getattr(self, "_last_transport_diagnostics", {}) or {})
                 if h0 is None:
                     h0, _ = self._raw_projected_hs(valley, q0)
@@ -2729,12 +3024,34 @@ class SymmetryAnalysisRunner:
                     }
                 )
 
-        self._last_k_c2t_operation_scan = scan
+        self._last_antiunitary_c2_layer_exchange_operation_scan = scan
         if best is None:
             return None
         return best[1]
 
-    def _select_m_c2_eta_spatial_operation(
+    def _select_shared_c2_spatial_operation(
+        self,
+        family: str,
+        valley: int,
+        spatial_operations: list[dict[str, Any]],
+        tolerance: float,
+    ):
+        selector = _source_action_profile(family).get("shared_c2_selector")
+        if selector == SHARED_C2_SELECTOR_ANTIUNITARY_LAYER_EXCHANGE:
+            selected = self._select_antiunitary_c2_layer_exchange_spatial_operation(
+                int(valley),
+                spatial_operations,
+                tolerance,
+            )
+            if selected is not None:
+                return selected
+            return find_layer_exchange_c2_spatial_operation(
+                self.structure,
+                spatial_operations,
+            )
+        return None
+
+    def _select_unitary_c2_layer_exchange_spatial_operation(
         self,
         valley: int,
         spatial_operations: list[dict[str, Any]],
@@ -2761,7 +3078,7 @@ class SymmetryAnalysisRunner:
                 if atom_mapping.get("group_target_map") != {0: 1, 1: 0}:
                     raise SymmetrySupportError(
                         "atom_mapping_missing",
-                        f"M_C2_eta operation {operation['index']} does not exchange layers.",
+                        f"M C2 operation {operation['index']} does not exchange layers.",
                     )
                 max_delta = 0.0
                 for source_group, target_group in ((0, 1), (1, 0)):
@@ -2778,7 +3095,7 @@ class SymmetryAnalysisRunner:
                     if not (g_diag["one_to_one"] and g_diag["max_delta"] < 1.0e-8):
                         raise SymmetrySupportError(
                             "spglib_operation_not_valley_closed",
-                            f"M_C2_eta operation {operation['index']} is not K-center G-closed.",
+                            f"M C2 operation {operation['index']} is not K-center G-closed.",
                         )
                 shifts, shift_residual = m_unitary_c2_target_group_shifts(
                     group_centers=valley_ctx.group_k_centers,
@@ -2798,15 +3115,15 @@ class SymmetryAnalysisRunner:
                     }
                 )
                 scan.append(entry)
-                self._last_m_c2_eta_operation_scan = scan
+                self._last_unitary_c2_layer_exchange_operation_scan = scan
                 return operation
             except SymmetrySupportError as exc:
                 entry["not_supported_reason"] = exc.reason
                 scan.append(entry)
-        self._last_m_c2_eta_operation_scan = scan
+        self._last_unitary_c2_layer_exchange_operation_scan = scan
         return None
 
-    def _build_m_c2_eta_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
+    def _build_unitary_c2_layer_exchange_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
         valley_ctx = self._valley_context_for_valley(valley)
         q_target = np.asarray(q_target, dtype=float)
         q_source = np.asarray(q_source, dtype=float)
@@ -2825,7 +3142,7 @@ class SymmetryAnalysisRunner:
         if axis_norm < 1.0e-12:
             raise SymmetrySupportError(
                 "q_mapping_missing",
-                "M_C2_eta cannot determine the reference unitary C2 axis because m_K1 + m_K2 is numerically zero.",
+                "M C2 cannot determine the reference unitary C2 axis because m_K1 + m_K2 is numerically zero.",
             )
         axis_vec = axis_vec / axis_norm
         reference_rotation_cart = np.asarray(rotate_mat(np.array([axis_vec[0], axis_vec[1], 0.0]), np.pi), dtype=float)
@@ -2903,7 +3220,7 @@ class SymmetryAnalysisRunner:
                         f"repeated={g_diag['repeated_target_count']}.",
                     )
 
-                q_transport, max_delta = build_m_c2_eta_g_transport(
+                q_transport, max_delta = build_unitary_c2_layer_exchange_g_transport(
                     source_g_vectors=source_g,
                     target_g_vectors=target_g,
                     source_k_center=np.asarray(center_by_group[source_group], dtype=float),
@@ -3114,7 +3431,7 @@ class SymmetryAnalysisRunner:
             raise reference_exc
         if spglib_exc is not None:
             raise spglib_exc
-        raise SymmetrySupportError("atom_mapping_missing", "M_C2_eta could not build any consistent transport path.")
+        raise SymmetrySupportError("atom_mapping_missing", "M C2 could not build any consistent transport path.")
 
     def _build_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
         if not hasattr(self, "_transport_cache"):
@@ -3123,11 +3440,15 @@ class SymmetryAnalysisRunner:
             self._operation_mapping_cache = {}
         q_target = np.asarray(q_target, dtype=float)
         q_source = np.asarray(q_source, dtype=float)
+        backend = str(candidate.get("transport_backend", "") or "").lower()
         cache_key = (
             int(valley),
+            str(candidate.get("name", "")),
+            backend,
             int(candidate["index"]),
             bool(candidate.get("antiunitary", False)),
             bool(candidate.get("export_pure_d0", False)),
+            _rounded_matrix_key(np.asarray(candidate.get("rotation_cart", np.eye(3)), dtype=float)),
             _rounded_q_key(q_target),
             _rounded_q_key(q_source),
         )
@@ -3144,7 +3465,7 @@ class SymmetryAnalysisRunner:
             self._transport_cache[cache_key] = transport
             return transport
 
-        if candidate.get("name") == "T" and candidate.get("antiunitary", False):
+        if displayed_operation_name(candidate.get("name")) == "TR" and candidate.get("antiunitary", False):
             transport = self._build_time_reversal_transport(
                 valley,
                 q_target,
@@ -3154,8 +3475,8 @@ class SymmetryAnalysisRunner:
             self._transport_cache[cache_key] = transport
             return transport
 
-        if candidate.get("name") == "K_C2T" and candidate.get("antiunitary", False):
-            transport = self._build_k_c2t_transport(candidate, valley, q_target, q_source)
+        if backend == BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY and candidate.get("antiunitary", False):
+            transport = self._build_antiunitary_c2_layer_exchange_transport(candidate, valley, q_target, q_source)
             self._transport_cache[cache_key] = transport
             return transport
 
@@ -3165,13 +3486,13 @@ class SymmetryAnalysisRunner:
             self._transport_cache[cache_key] = generic_transport
             return generic_transport
 
-        if not candidate.get("antiunitary", False) and candidate.get("name") == "C2":
-            transport = self._build_gamma_c2y_transport(candidate, valley, q_target, q_source)
+        if not candidate.get("antiunitary", False) and backend == BACKEND_C2_SPATIAL_LAYER_EXCHANGE:
+            transport = self._build_spatial_c2_layer_exchange_transport(candidate, valley, q_target, q_source)
             self._transport_cache[cache_key] = transport
             return transport
 
-        if not candidate.get("antiunitary", False) and candidate.get("name") == "M_C2_eta":
-            transport = self._build_m_c2_eta_transport(candidate, valley, q_target, q_source)
+        if not candidate.get("antiunitary", False) and backend == BACKEND_C2_LAYER_EXCHANGE_UNITARY:
+            transport = self._build_unitary_c2_layer_exchange_transport(candidate, valley, q_target, q_source)
             self._transport_cache[cache_key] = transport
             return transport
 
@@ -3582,6 +3903,13 @@ class SymmetryAnalysisRunner:
 
             valley_entries = []
             saved_representation_operations: set[str] = set()
+            family = _valley_family(int(valley))
+            source_c2_operation = self._select_shared_c2_spatial_operation(
+                family,
+                int(valley),
+                spatial_operations,
+                tolerance,
+            )
             for candidate in _minimal_symmetry_candidates_for_valley(
                 valley_ctx,
                 getattr(self.config.twist, "bravais", "hex"),
@@ -3591,35 +3919,26 @@ class SymmetryAnalysisRunner:
                 candidate = dict(candidate)
                 candidate["index"] = int(candidate["index"])
                 candidate["spatial_operations"] = spatial_operations
-                if candidate["name"] == "K_C2T":
-                    spglib_c2 = self._select_k_c2t_spatial_operation(
-                        int(valley),
-                        spatial_operations,
-                        tolerance,
-                    )
-                    if spglib_c2 is None:
-                        spglib_c2 = find_layer_exchange_c2_spatial_operation(
-                            self.structure,
-                            spatial_operations,
-                        )
-                    candidate["k_c2t_operation_scan"] = list(getattr(self, "_last_k_c2t_operation_scan", []) or [])
+                if candidate.get("spatial_parent") == "C2" or displayed_operation_name(candidate["name"]) == "C2":
+                    spglib_c2 = source_c2_operation
+                    candidate["c2_layer_exchange_antiunitary_operation_scan"] = list(getattr(self, "_last_antiunitary_c2_layer_exchange_operation_scan", []) or [])
                     candidate["spglib_layer_exchange_c2"] = spglib_c2
                     if spglib_c2 is not None:
                         candidate["rotation_frac"] = np.asarray(spglib_c2["rotation_frac"], dtype=float)
                         candidate["translation_frac"] = np.asarray(spglib_c2["translation_frac"], dtype=float)
                         candidate["rotation_cart"] = np.asarray(spglib_c2["rotation_cart"], dtype=float)
                         candidate["translation_cart"] = np.asarray(spglib_c2["translation_cart"], dtype=float)
-                if candidate["name"] == "M_C2_eta":
+                if candidate.get("transport_backend") == BACKEND_C2_LAYER_EXCHANGE_UNITARY:
                     resolved_symmetry = resolve_reference_m_valley_c2_symmetry(
                         self.structure,
                         valley_ctx.calculator.TAPW_parameters,
                     )
                     candidate["resolved_m_c2_symmetry"] = resolved_symmetry
-                    spglib_m_c2 = self._select_m_c2_eta_spatial_operation(
+                    spglib_m_c2 = self._select_unitary_c2_layer_exchange_spatial_operation(
                         int(valley),
                         spatial_operations,
                     )
-                    candidate["m_c2_eta_operation_scan"] = list(getattr(self, "_last_m_c2_eta_operation_scan", []) or [])
+                    candidate["c2_layer_exchange_unitary_operation_scan"] = list(getattr(self, "_last_unitary_c2_layer_exchange_operation_scan", []) or [])
                     params = valley_ctx.calculator.TAPW_parameters
                     m_k1 = np.asarray(getattr(params, "m_K1", None), dtype=float) if getattr(params, "m_K1", None) is not None else None
                     m_k2 = np.asarray(getattr(params, "m_K2", None), dtype=float) if getattr(params, "m_K2", None) is not None else None
@@ -3641,7 +3960,15 @@ class SymmetryAnalysisRunner:
                             dtype=float,
                         )
                         candidate["translation_cart"] = np.asarray(resolved_symmetry.translation_cart, dtype=float)
-                if candidate["name"] in {"K_C2T", "M_C2_eta"}:
+                if candidate.get("source_symmetry_role") == "inter-valley":
+                    candidate["closed"] = False
+                    candidate["closure_reason"] = "inter_valley_operation_not_exported_in_single_valley_block"
+                    candidate["reciprocal_shift"] = None
+                elif candidate.get("transport_backend") in {
+                    BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY,
+                    BACKEND_C2_LAYER_EXCHANGE_UNITARY,
+                    BACKEND_C2_SPATIAL_LAYER_EXCHANGE,
+                }:
                     candidate["closed"] = True
                     candidate["closure_reason"] = ""
                     candidate["reciprocal_shift"] = np.zeros(2, dtype=int)
@@ -3684,7 +4011,12 @@ class SymmetryAnalysisRunner:
                 if "C2" in operation_display_name:
                     axis_angle_deg = c2_axis_angle_deg_from_rotation(candidate.get("rotation_cart"))
                 representation_name = representation_operation_name(candidate["name"])
-                if candidate_supported and _is_saved_minimal_generator(representation_name, saved_representation_operations):
+                export_raw_h_matrix = (
+                    bool(candidate.get("export_raw_h_matrix", True))
+                    and candidate_supported
+                    and _is_saved_minimal_generator(representation_name, saved_representation_operations)
+                )
+                if export_raw_h_matrix:
                     try:
                         representations.append(
                             self._representation_record_for_candidate(
@@ -3697,15 +4029,26 @@ class SymmetryAnalysisRunner:
                         )
                         saved_representation_operations.add(representation_name)
                     except SymmetrySupportError:
-                        pass
+                        export_raw_h_matrix = False
                 valley_entries.append(
                     {
                         "operation": operation_display_name,
+                        "antiunitary": bool(candidate.get("antiunitary", False)),
                         "supported": candidate_supported,
                         "status": candidate_status,
                         "not_supported_reason": candidate_reason,
                         "axis_angle_deg": axis_angle_deg,
                         "spglib_index": _candidate_spglib_index(candidate),
+                        "source_valley": str(candidate.get("source_valley_label", valley_label)),
+                        "target_valley": str(candidate.get("target_valley_label", valley_label)),
+                        "closed_in_active_set": bool(candidate.get("closed", candidate_supported)),
+                        "export_raw_h_matrix": bool(export_raw_h_matrix),
+                        "role": str(
+                            candidate.get(
+                                "source_symmetry_role",
+                                "internal" if bool(candidate.get("closed", candidate_supported)) else "inter-valley",
+                            )
+                        ),
                     }
                 )
 
@@ -3742,9 +4085,9 @@ class SymmetryAnalysisRunner:
             "summary": {
                 "valleys": list(valleys),
                 "tolerance": tolerance,
-                "eta_convention": (
-                    "eta labels the three C3-related M valleys, eta=0,1,2. "
-                    "In each M_eta valley, C2 denotes C3^eta C2 C3^{-eta}."
+                "m_valley_convention": (
+                    "M1, M2, and M3 are related by C3z. "
+                    "A single-M valley output exports only operations closed within the selected valley block."
                 ),
                 "operations": operations_summary,
                 "valley_results": valley_results,
@@ -3754,38 +4097,61 @@ class SymmetryAnalysisRunner:
             "representations": [record for record in representations if record is not None],
         }
 
-    def _summary_markdown_lines(self, summary: dict[str, Any]) -> list[str]:
+    def _summary_markdown_lines(
+        self,
+        summary: dict[str, Any],
+        *,
+        representations: list[dict[str, Any]] | None = None,
+        developer_outputs: bool = False,
+    ) -> list[str]:
         valleys = summary.get("valleys", [])
         tolerance = summary.get("tolerance")
         operations = summary.get("operations", {})
-        valley_results = summary.get("valley_results", {})
         minimal_generators = summary.get("minimal_generators", {})
+        output_schema = summary.get("output_schema", "tapw_source_symmetry/v2")
+        active_valleys = list(operations.keys()) if operations else [str(v) for v in valleys]
+        active_valley_text = ", ".join(str(v) for v in active_valleys) if active_valleys else "None"
+        representations = list(representations or [])
 
         lines = [
-            "# Symmetry Analysis Summary",
+            "# TAPW Source Symmetry Summary",
             "",
-            "Valleys analyzed: " + (", ".join(str(v) for v in valleys) if valleys else "None"),
-            f"Tolerance: {tolerance}",
+            "## Run",
             "",
-            "Eta convention: eta labels the three C3-related M valleys, eta=0,1,2.",
-            "In each M_eta valley, C2 denotes C3^eta C2 C3^{-eta}.",
+            f"- Active valleys: {active_valley_text}",
+            "- Valleys analyzed: " + (", ".join(str(v) for v in valleys) if valleys else active_valley_text),
+            f"- Tolerance: {tolerance}",
+            f"- Output schema: {output_schema}",
+            "- Production matrix source: raw-H action only",
             "",
-            "Per-valley assessment:",
+            "## Valley Action",
+            "",
+            "| operation | antiunitary | source valley | target valley | closed in active set | role |",
+            "|---|---:|---|---|---:|---|",
         ]
-        if valley_results:
-            for valley, result in valley_results.items():
-                lines.extend(
-                    [
-                        f"- {valley}:",
-                        f"  - Raw H covariance: {result.get('covariance_status', 'not_supported')}",
-                    ]
-                )
+        if operations:
+            for valley, entries in operations.items():
+                for entry in entries:
+                    source = _display_valley_name(entry.get("source_valley", valley))
+                    target = _display_valley_name(entry.get("target_valley", source))
+                    role = _operation_role(entry, source, target)
+                    lines.append(
+                        "| {operation} | {antiunitary} | {source} | {target} | {closed} | {role} |".format(
+                            operation=_operation_markdown_label(entry),
+                            antiunitary=_markdown_yes_no(_operation_is_antiunitary(entry)),
+                            source=source,
+                            target=target,
+                            closed=_markdown_yes_no(_entry_closed_in_active_set(entry)),
+                            role=role,
+                        )
+                    )
         else:
-            lines.append("- None")
+            lines.append("| None | no | None | None | no | not-evaluated |")
         lines.extend(
             [
                 "",
-                "Minimal generators:",
+                "## Internal Generators For This Output",
+                "",
             ]
         )
         if minimal_generators:
@@ -3797,10 +4163,90 @@ class SymmetryAnalysisRunner:
         lines.extend(
             [
                 "",
-                "Operations:",
+                "## Inter-Valley Operations",
+                "",
+            ]
+        )
+        inter_valley = _inter_valley_operations(operations)
+        if inter_valley:
+            for valley, entries in inter_valley.items():
+                lines.append(f"- {valley}:")
+                for operation, target in entries:
+                    lines.append(f"  - {operation} maps {valley} -> {target}, so it is not exported as a single-{valley} internal matrix.")
+                if str(valley).startswith("M"):
+                    lines.append("  - To use C3z for M valleys, run/export the full M1/M2/M3 valley block.")
+        else:
+            lines.append("- None")
+        lines.extend(
+            [
+                "",
+                "## Exported Production Matrices",
+                "",
+                "| valley block | operation | file | matrix role |",
+                "|---|---|---|---|",
+            ]
+        )
+        exported_rows = []
+        for record in representations:
+            if record.get("matrix") is None:
+                continue
+            raw_h_matrix = record.get("raw_h_matrix")
+            raw_h_file = record.get("raw_h_operator_file")
+            if raw_h_matrix is None and not raw_h_file:
+                continue
+            valley_label = _display_valley_name(record.get("valley_label", record.get("valley", "unknown")))
+            target_valley = _display_valley_name(record.get("target_valley", valley_label))
+            operation = representation_operation_name(record.get("operation", "unknown"))
+            matrix_role = str(record.get("matrix_role", "raw_h_action"))
+            if matrix_role == "D_g^(0)":
+                matrix_role = "raw_h_action"
+            exported_rows.append(
+                f"| {valley_label} -> {target_valley} | {operation} | {_raw_h_file_from_record(record)} | {matrix_role} |"
+            )
+        if exported_rows:
+            lines.extend(exported_rows)
+        else:
+            lines.append("| None | None | None | None |")
+        lines.extend(
+            [
+                "",
+                "## Diagnostics",
+                "",
+                f"- Developer outputs: {'enabled' if developer_outputs else 'disabled'}",
+                "- D0/PG/Pin matrices are not production inputs.",
+                "- Exactification/projection reports are diagnostics unless explicitly consumed by KP symm.",
+                "",
+                "## KP Model Guidance",
+                "",
+            ]
+        )
+        if minimal_generators:
+            for valley, generators in minimal_generators.items():
+                generator_text = ", ".join(str(name) for name in generators) if generators else "identity only"
+                lines.append(f"- Single-valley {valley} KP model may use: {generator_text}.")
+        else:
+            lines.append("- No single-valley KP model generators were exported.")
+        for valley, entries in inter_valley.items():
+            names = [operation for operation, _ in entries]
+            if set(names) == {"TR", "C2"}:
+                lines.append(f"- TR and C2 are source physical symmetries but are not single-{valley} internal constraints in this output.")
+            else:
+                for operation in names:
+                    lines.append(f"- Do not use {valley} {operation} as a single-valley constraint from this output.")
+        lines.extend(
+            [
+                "",
+                "M-valley convention: M1, M2, and M3 are related by C3z.",
+                "A single-M valley output exports only operations closed within the selected valley block.",
             ]
         )
         if operations:
+            lines.extend(
+                [
+                    "",
+                    "Operation status:",
+                ]
+            )
             for valley, entries in operations.items():
                 lines.append(f"- {valley}:")
                 if entries:
@@ -3814,17 +4260,61 @@ class SymmetryAnalysisRunner:
                         )
                 else:
                     lines.append("  - None")
-        else:
-            lines.append("- None")
+        lines.extend(
+            [
+                "",
+                "Note: summary.md is human-facing only. Use summary.json and representations/manifest.json as machine-readable outputs.",
+            ]
+        )
         return lines
 
-    def _write_summary_markdown(self, summary: dict[str, Any], output_dir: Path) -> None:
+    def _write_summary_markdown(
+        self,
+        summary: dict[str, Any],
+        output_dir: Path,
+        *,
+        representations: list[dict[str, Any]] | None = None,
+        developer_outputs: bool = False,
+    ) -> None:
         path = output_dir / "summary.md"
-        path.write_text("\n".join(self._summary_markdown_lines(summary)) + "\n", encoding="utf-8")
+        path.write_text(
+            "\n".join(
+                self._summary_markdown_lines(
+                    summary,
+                    representations=representations,
+                    developer_outputs=developer_outputs,
+                )
+            )
+            + "\n",
+            encoding="utf-8",
+        )
 
     def _write_summary_json(self, summary: dict[str, Any], output_dir: Path) -> None:
         path = output_dir / "summary.json"
         path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    def _canonicalize_operation_outputs(self, summary: dict[str, Any], details: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        summary_out = copy.deepcopy(summary)
+        summary_out["output_schema"] = "tapw_source_symmetry/v2"
+        operations = summary_out.get("operations")
+        if isinstance(operations, dict):
+            for entries in operations.values():
+                if isinstance(entries, list):
+                    for entry in entries:
+                        if isinstance(entry, dict) and "operation" in entry:
+                            entry["operation"] = displayed_operation_name(entry["operation"])
+        minimal = summary_out.get("minimal_generators")
+        if isinstance(minimal, dict):
+            for valley, generators in list(minimal.items()):
+                if isinstance(generators, list):
+                    minimal[valley] = [displayed_operation_name(item) for item in generators]
+        details_out: list[dict[str, Any]] = []
+        for row in details:
+            row_out = dict(row)
+            if "operation" in row_out:
+                row_out["operation"] = displayed_operation_name(row_out["operation"])
+            details_out.append(row_out)
+        return summary_out, details_out
 
     def _write_debug_json(self, summary: dict[str, Any], details: list[dict[str, Any]], output_dir: Path) -> None:
         diagnostics_dir = output_dir / "diagnostics"
@@ -3874,8 +4364,19 @@ class SymmetryAnalysisRunner:
         representations_dir = output_dir / "representations"
         representations_dir.mkdir(parents=True, exist_ok=True)
         manifest = {
+            "output_schema": "tapw_source_symmetry/v2",
+            "schema_version": 2,
             "basis": "tapw_projected",
             "basis_order": "spin_outermost; group -> g_index -> atom_type -> orbital",
+            "operation_name_convention": {
+                "time_reversal": "TR",
+                "legacy_input_aliases": {"T": "TR"},
+            },
+            "source_action_definition": {
+                "schema": "tapw_source_action/v1",
+                "required_fields": ["k_map", "q_map", "sector_map", "source_action"],
+                "frame": "tapw_source",
+            },
             "matrices": [],
         }
 
@@ -3949,6 +4450,55 @@ class SymmetryAnalysisRunner:
                 scipy.sparse.save_npz(representations_dir / raw_h_relative_path, raw_h_matrix)
                 raw_h_shape = [int(raw_h_matrix.shape[0]), int(raw_h_matrix.shape[1])]
                 raw_h_nnz = int(raw_h_matrix.nnz)
+            if raw_h_matrix is None:
+                continue
+            action_metadata: dict[str, Any]
+            if operation == "C3z":
+                action_metadata = {
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                }
+            elif operation == "TR":
+                action_metadata = {
+                    "k_map": {"type": "negation"},
+                    "q_map": {"type": "negation"},
+                    "sector_map": "identity",
+                }
+            elif operation in {"C2", "C2T"}:
+                axis = _json_optional_float(record.get("axis_angle_deg"))
+                if axis is None:
+                    raise ValueError(f"{operation} raw-H manifest row requires axis_angle_deg")
+                if operation == "C2T":
+                    # In 2D, applying time reversal after a C2 mirror-like source
+                    # action multiplies the linear map by -I, shifting the mirror
+                    # axis by 90 degrees.
+                    axis = (axis + 90.0) % 180.0
+                reflection = {
+                    "type": "reflection",
+                    "axis_deg": axis,
+                    "reflection_axis_convention": "mirror_axis_deg",
+                }
+                action_metadata = {
+                    "k_map": dict(reflection),
+                    "q_map": dict(reflection),
+                    "sector_map": "layer_exchange",
+                }
+            else:
+                raise ValueError(f"Unsupported production operation in raw-H manifest: {operation!r}")
+            source_action = {
+                "antiunitary": bool(record.get("antiunitary", False)),
+                "k_map": copy.deepcopy(action_metadata["k_map"]),
+                "q_map": copy.deepcopy(action_metadata["q_map"]),
+                "sector_map": action_metadata["sector_map"],
+                "spin_map": str(record.get("spin_map", "from_tapw_source")),
+                "valley_map": str(record.get("valley_map", "identity")),
+            }
+            conventions = {
+                "antiunitary_convention": "U_K" if bool(record.get("antiunitary", False)) else "none",
+                "gauge_correction": {"kind": "none"},
+                "source_action_frame": "tapw_source",
+            }
 
             manifest_row = {
                 "valley": int(record.get("valley")),
@@ -3976,6 +4526,20 @@ class SymmetryAnalysisRunner:
                 "g_perm_max_delta": _json_optional_float(record.get("g_perm_max_delta")),
                 "nonzero_reciprocal_shift_count": _json_optional_int(record.get("nonzero_reciprocal_shift_count", "")),
                 "square_residual": _json_optional_float(record.get("square_residual")),
+                "source_valley": str(record.get("source_valley", record.get("valley_label", ""))),
+                "target_valley": str(record.get("target_valley", record.get("valley_label", ""))),
+                "closed_in_active_set": bool(record.get("closed_in_active_set", True)),
+                "role": str(record.get("role", "internal")),
+                "supported": bool(record.get("supported", True)),
+                "k_pairs": [[0, 0]],
+                "k_pair_source": "symmetry_analysis_reference_k_index",
+                "source_matrix_role": "raw_h_action",
+                "source_gauge": "tapw_raw_hamiltonian",
+                "target_role": "kp_source_action",
+                "matrix_kind": "action",
+                "conventions": conventions,
+                "source_action": source_action,
+                **action_metadata,
             }
             if developer_files:
                 manifest_row["developer_outputs"] = developer_files
@@ -3989,16 +4553,23 @@ class SymmetryAnalysisRunner:
         summary = dict(payload.get("summary", {}))
         details = list(payload.get("details", []))
         representations = list(payload.get("representations", []))
+        summary, details = self._canonicalize_operation_outputs(summary, details)
 
         output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        self._write_summary_markdown(summary, output_dir)
+        developer_outputs = bool(getattr(self.config.symmetry_analysis, "developer_outputs", False))
+        self._write_summary_markdown(
+            summary,
+            output_dir,
+            representations=representations,
+            developer_outputs=developer_outputs,
+        )
         self._write_summary_json(summary, output_dir)
         self._write_details_csv(details, output_dir)
         self._write_representations(
             representations,
             output_dir,
-            developer_outputs=bool(getattr(self.config.symmetry_analysis, "developer_outputs", False)),
+            developer_outputs=developer_outputs,
         )
         debug_path = output_dir / "debug.json"
         if debug_path.exists():

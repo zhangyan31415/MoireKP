@@ -239,8 +239,8 @@ def test_translation_removable_by_origin_shift_detects_removable_c2_seitz_shift(
     assert np.allclose((np.eye(3) - rotation) @ shift, translation)
 
 
-def test_build_k_c2t_g_transport_matches_named_formula():
-    helper = getattr(symmetry_analysis, "build_k_c2t_g_transport", None)
+def test_build_antiunitary_c2_layer_exchange_g_transport_matches_formula():
+    helper = getattr(symmetry_analysis, "build_antiunitary_c2_layer_exchange_g_transport", None)
     assert helper is not None
 
     k_source = np.array([1.0, 0.0], dtype=float)
@@ -281,7 +281,7 @@ def test_build_k_c2t_g_transport_matches_named_formula():
     assert max_delta < 1.0e-8
 
 
-def test_build_m_c2_eta_transport_does_not_reject_m2_upfront(monkeypatch):
+def test_build_unitary_c2_layer_exchange_transport_does_not_reject_m2_upfront(monkeypatch):
     runner = symmetry_analysis.SymmetryAnalysisRunner.__new__(symmetry_analysis.SymmetryAnalysisRunner)
     runner.structure = SimpleNamespace(
         spin=False,
@@ -337,18 +337,19 @@ def test_build_m_c2_eta_transport_does_not_reject_m2_upfront(monkeypatch):
     )
 
     candidate = {
-        "name": "M_C2_eta",
+        "name": "C2",
+        "transport_backend": symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_UNITARY,
         "spatial_operations": [],
     }
 
-    transport = runner._build_m_c2_eta_transport(candidate, 32, np.zeros(3, dtype=float), np.zeros(3, dtype=float))
+    transport = runner._build_unitary_c2_layer_exchange_transport(candidate, 32, np.zeros(3, dtype=float), np.zeros(3, dtype=float))
 
     assert scipy.sparse.issparse(transport)
     assert transport.shape == (2, 2)
 
 
-def test_build_m_c2_eta_g_transport_matches_named_formula():
-    helper = getattr(symmetry_analysis, "build_m_c2_eta_g_transport", None)
+def test_build_unitary_c2_layer_exchange_g_transport_matches_named_formula():
+    helper = getattr(symmetry_analysis, "build_unitary_c2_layer_exchange_g_transport", None)
     assert helper is not None
 
     k_source = np.array([0.5, 0.0], dtype=float)
@@ -412,8 +413,8 @@ def test_legacy_c3_layer_centers_helper_matches_authoritative_k_centers():
     assert np.allclose(centers[1], expected_k1_2)
 
 
-def test_k_c2t_center_diagnostics_reports_metrics_per_center_choice():
-    helper = getattr(symmetry_analysis, "diagnose_k_c2t_center_choices", None)
+def test_antiunitary_c2_center_diagnostics_reports_metrics_per_center_choice():
+    helper = getattr(symmetry_analysis, "diagnose_antiunitary_c2_center_choices", None)
     assert helper is not None
 
     linear_map = np.array([[-1.0, 0.0], [0.0, 1.0]], dtype=float)
@@ -441,8 +442,8 @@ def test_k_c2t_center_diagnostics_reports_metrics_per_center_choice():
     assert diagnostics["C"]["one_to_one"] is False
 
 
-def test_k_c2t_axis_diagnostics_reports_metrics_per_axis():
-    helper = getattr(symmetry_analysis, "diagnose_k_c2t_axis_choices", None)
+def test_antiunitary_c2_axis_diagnostics_reports_metrics_per_axis():
+    helper = getattr(symmetry_analysis, "diagnose_antiunitary_c2_axis_choices", None)
     assert helper is not None
 
     source_k = np.array([1.0, 0.0], dtype=float)

@@ -1,12 +1,13 @@
 import argparse
 import os
 import sys
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from .artifacts import array_output_filename
+from .artifacts import array_output_filename, berry_flux_output_filename, chern_summary_output_filename
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
 
 
@@ -36,6 +37,20 @@ _DEFAULT_SAVEFIG_KWARGS = {
 def load_config(config_path):
     with open(config_path, "r") as handle:
         return yaml.safe_load(handle)
+
+
+def _config_base_dir(config_path):
+    path = Path(config_path).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve().parent
+
+
+def _resolve_path_like_config(config_path, path_value):
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return str(path.resolve())
+    return str((_config_base_dir(config_path) / path).resolve())
 
 
 def build_fractional_axis(num_k):
@@ -412,7 +427,8 @@ def trace_g_plot_title(title_prefix, trace_g_cart, b_phys_2d, delta_kappa1, delt
     return (
         title_prefix
         + "\n"
-        + rf"$\frac{{1}}{{2\pi}}\int_{{\mathrm{{BZ}}}}\mathrm{{Tr}}\,g\,d^2k \approx {trace_g_integral / (2.0 * np.pi):.4f}$"
+        + rf"$\mathrm{{Trace[g]}}\ \mathrm{{BZ}}\int \mathrm{{Tr}}\,g\,d^2k \approx {trace_g_integral:.4f};\ "
+        + rf"\frac{{1}}{{2\pi}}\int_{{\mathrm{{BZ}}}}\mathrm{{Tr}}\,g\,d^2k \approx {trace_g_integral / (2.0 * np.pi):.4f}$"
     )
 
 
@@ -427,7 +443,7 @@ def berry_curvature_density_plot_title(title_prefix, omega_xy_cart, b_phys_2d, d
     return (
         title_prefix
         + "\n"
-        + rf"$C \approx {chern_number:.4f}$"
+        + rf"$\int_{{\mathrm{{BZ}}}}\Omega_{{xy}}\,d^2k \approx {omega_integral:.4f};\ C \approx {chern_number:.4f}$"
     )
 
 
@@ -839,6 +855,16 @@ def _resolve_chern_grid_from_config(config):
     )
 
 
+def _reject_generalized_eigenvectors(config):
+    compute_config = config.get("compute", {})
+    if bool(compute_config.get("ge", False)):
+        print(
+            "[ERROR] Chern post-processing does not support compute.ge=true in this release; "
+            "generalized eigenvectors require overlap-metric Berry phases, not Euclidean overlaps."
+        )
+        raise SystemExit(1)
+
+
 def _grid_label(num_k1, num_k2):
     if int(num_k1) == int(num_k2):
         return str(int(num_k1))
@@ -892,6 +918,93 @@ def _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2,
             if os.path.exists(candidate):
                 return candidate
     return None
+
+
+def _default_summary_band_indices(band_type, resolved_indices, num_bands):
+    if str(band_type).upper() == "VBM":
+        return [int(index) - int(num_bands) for index in resolved_indices]
+    return [int(index) for index in resolved_indices]
+
+
+def write_chern_flux_outputs(
+    output_dir,
+    band_type,
+    valley_str,
+    num_k1,
+    num_k2,
+    band_indices=None,
+    *,
+    num_chern=None,
+    tapw=True,
+):
+    """Write canonical Berry-flux and Chern-summary artifacts from saved wavefunctions."""
+    num_k1 = int(num_k1)
+    num_k2 = int(num_k2)
+    suffix = format_chern_grid_suffix(num_k1, num_k2)
+    num_chern_for_lookup = [num_k1, num_k2] if num_chern is None else num_chern
+
+    vec_file = _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2, num_chern_for_lookup)
+    if vec_file is None:
+        raise FileNotFoundError(
+            "Wavefunction file not found for Chern output: band_type={0}, valley={1}, grid={2}x{3}, dir={4}".format(
+                band_type,
+                valley_str,
+                num_k1,
+                num_k2,
+                output_dir,
+            )
+        )
+
+    band_vec = np.load(vec_file)
+    band_vec_grid = reshape_wavefunction_grid(band_vec, num_k1, num_k2)
+    num_bands = int(band_vec_grid.shape[-1])
+    if band_indices is None:
+        resolved_band_indices = list(range(num_bands))
+        summary_band_indices = _default_summary_band_indices(band_type, resolved_band_indices, num_bands)
+    else:
+        summary_band_indices = [int(index) for index in band_indices]
+        resolved_band_indices = _resolve_band_indices(summary_band_indices, num_bands)
+    if not resolved_band_indices:
+        raise ValueError("band_indices must contain at least one band.")
+
+    berry_flux = np.stack(
+        [compute_berry_flux_single_band(band_vec_grid, band_index) for band_index in resolved_band_indices],
+        axis=0,
+    )
+    flux_sums = np.sum(berry_flux, axis=(1, 2))
+    chern_numbers = flux_sums / (2.0 * np.pi)
+
+    os.makedirs(output_dir, exist_ok=True)
+    berry_flux_path = os.path.join(
+        output_dir,
+        berry_flux_output_filename(band_type, valley_flag=valley_str, suffix=suffix, tapw=tapw),
+    )
+    chern_summary_path = os.path.join(
+        output_dir,
+        chern_summary_output_filename(band_type, valley_flag=valley_str, suffix=suffix, tapw=tapw),
+    )
+    np.save(berry_flux_path, berry_flux)
+    np.savetxt(
+        chern_summary_path,
+        np.column_stack(
+            [
+                np.asarray(summary_band_indices, dtype=int),
+                np.asarray(resolved_band_indices, dtype=int),
+                chern_numbers,
+                flux_sums,
+            ]
+        ),
+        header="band_index resolved_band_index chern_number berry_flux_sum",
+        fmt=["%d", "%d", "%.12f", "%.12f"],
+    )
+    return {
+        "berry_flux_path": berry_flux_path,
+        "chern_summary_path": chern_summary_path,
+        "wavefunction_path": vec_file,
+        "band_indices": summary_band_indices,
+        "resolved_band_indices": resolved_band_indices,
+        "chern_numbers": chern_numbers,
+    }
 
 
 def _expand_comma_band_tokens(argv):
@@ -965,6 +1078,7 @@ def main(argv=None, *, prog=None):
 
     valley_str = VALLEY_MAP.get(args.valley, "valley{0}".format(args.valley))
     config = load_config(args.config)
+    _reject_generalized_eigenvectors(config)
     output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
 
@@ -974,10 +1088,10 @@ def main(argv=None, *, prog=None):
     band_type = args.band_type if args.band_type else config.get("compute", {}).get("band_type", "VBM")
 
     input_file = config["paths"].get("input_file", "openmx.dat")
-    openmx_path = input_file if os.path.isabs(input_file) else os.path.join(config["paths"]["output_dir"], input_file)
+    openmx_path = _resolve_path_like_config(args.config, input_file)
     if not os.path.exists(openmx_path):
         print("[ERROR] openmx.dat 文件未找到: {0}".format(openmx_path))
-        sys.exit(1)
+        raise SystemExit(1)
 
     try:
         b_phys = parse_lattice_vectors_from_openmx(openmx_path)
@@ -985,7 +1099,7 @@ def main(argv=None, *, prog=None):
         b_plot = build_plot_basis(b_phys_2d)
     except Exception as exc:
         print("[ERROR] 解析 openmx.dat 失败: {0}".format(exc))
-        sys.exit(1)
+        raise SystemExit(1)
 
     vec_file = _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2, num_chern)
     if vec_file is None:
@@ -996,14 +1110,14 @@ def main(argv=None, *, prog=None):
                 valley_str,
             )
         )
-        sys.exit(1)
+        raise SystemExit(1)
 
     band_vec = np.load(vec_file)
     try:
         band_vec_grid = reshape_wavefunction_grid(band_vec, num_k1, num_k2)
     except Exception as exc:
         print("[ERROR] 波函数文件形状不正确: {0}".format(exc))
-        sys.exit(1)
+        raise SystemExit(1)
 
     delta_kappa1, delta_kappa2, kappa1_values, kappa2_values = compute_fractional_spacings(num_k1, num_k2)
     # `kappa1`, `kappa2` are dimensionless fractional moire reciprocal coordinates.
@@ -1022,7 +1136,7 @@ def main(argv=None, *, prog=None):
             resolved_band_indices = _resolve_band_indices(args.band, band_vec_grid.shape[-1])
         except IndexError as exc:
             print("[ERROR] {0}".format(exc))
-            sys.exit(1)
+            raise SystemExit(1)
 
         for raw_band_index, band_index in zip(args.band, resolved_band_indices):
             berry_flux = compute_berry_flux_single_band(band_vec_grid, band_index)
@@ -1247,7 +1361,7 @@ def main(argv=None, *, prog=None):
             occ_bands = _resolve_band_indices(args.wcc_bands, band_vec_grid.shape[-1])
         except IndexError as exc:
             print("[ERROR] {0}".format(exc))
-            sys.exit(1)
+            raise SystemExit(1)
 
         sweep_values, wcc_branches = sweep_wcc(
             band_vec_grid,

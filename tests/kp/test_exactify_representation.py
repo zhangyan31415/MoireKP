@@ -1628,15 +1628,17 @@ def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path
     symm_dir.mkdir()
     np.save(symm_dir / "C3_low_raw.npy", np.eye(2, dtype=complex))
     (symm_dir / "manifest.json").write_text(
-            json.dumps(
-                {
-                    "frame": {"q_transform": {"rotation_deg": 0.0}},
-                    "requires_model_exactification": True,
-                    "operations": [
-                        {
-                            **_source_meta(),
+        json.dumps(
+            {
+                "frame": {"q_transform": {"rotation_deg": 0.0}},
+                "requires_model_exactification": True,
+                "operations": [
+                    {
+                        **_source_meta(),
                         "name": "C3z",
+                        "operation": "C3",
                         "matrix_file": "C3_low_raw.npy",
+                        "matrix_kind": "action",
                         "antiunitary": False,
                         "k_map": {"type": "rotation", "angle_deg": 120},
                         "sector_map": "identity",
@@ -1666,26 +1668,28 @@ def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path
                     "external_sewing_symmetries": [],
                 },
                 "kpoints_file": "kpoints.npy",
-                    "symmetry_source": {
-                        "type": "kp_symm_output",
-                        "path": "symm",
-                        "use": "raw",
-                        "matrix_kind": "action",
-                        "operations": [
-                            {
-                                "name": "C3z",
-                                "operation": "C3",
-                                "antiunitary": False,
-                                "k_map": {"type": "rotation", "angle_deg": 120.0},
-                                "q_map": {"type": "rotation", "angle_deg": 120.0},
-                                "sector_map": "identity",
-                            }
-                        ],
-                    },
+                "symmetry_source": {
+                    "type": "kp_symm_output",
+                    "path": "symm",
+                    "use": "raw",
+                    "matrix_kind": "action",
+                    "operations": [
+                        {
+                            **_source_meta(),
+                            "name": "C3z",
+                            "operation": "C3",
+                            "matrix_kind": "action",
+                            "antiunitary": False,
+                            "k_map": {"type": "rotation", "angle_deg": 120.0},
+                            "q_map": {"type": "rotation", "angle_deg": 120.0},
+                            "sector_map": "identity",
+                        }
+                    ],
+                },
                 "model": {
                     "n_orb": [1, 1],
                     "nlow_state": [1, 1],
-                        "bM": {"bM1": [1.0, 0.0], "bM2": [0.5, float(np.sqrt(3.0) / 2.0)]},
+                    "bM": {"bM1": [1.0, 0.0], "bM2": [0.5, float(np.sqrt(3.0) / 2.0)]},
                     "harmonics": {"intra": {1: "zero"}, "inter": {1: "zero"}},
                     "max_order": {"Kinect": 0, "intra": 0, "inter": 0},
                     "symmetry_map": {"Kinect": [{"name": "C3z"}], "intra": [], "inter": []},

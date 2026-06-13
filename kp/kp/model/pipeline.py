@@ -3,6 +3,7 @@ from __future__ import annotations
 import ast
 import copy
 import contextlib
+import hashlib
 import json
 import time
 from dataclasses import dataclass, field
@@ -359,8 +360,18 @@ def _complete_kp_symm_operation_entry(
     source_operation = str(row.get("operation", _default_source_operation_name(name)))
     if matrix_kind != "action":
         raise ValueError("kp_symm_output production symmetry_source.matrix_kind must be 'action'")
-    semantics = SOURCE_SEMANTICS
-    missing_action = [field for field in ("antiunitary", "k_map", "q_map", "sector_map") if field not in row]
+    required_fields = (
+        "antiunitary",
+        "k_map",
+        "q_map",
+        "sector_map",
+        "source_matrix_role",
+        "source_gauge",
+        "target_role",
+        "gauge_correction",
+        "antiunitary_convention",
+    )
+    missing_action = [field for field in required_fields if field not in row]
     if allow_inferred and "q_map" in missing_action and "k_map" in row:
         missing_action.remove("q_map")
     if missing_action:
@@ -373,12 +384,10 @@ def _complete_kp_symm_operation_entry(
         "operation": source_operation,
         "matrix_file": _source_matrix_file(_matrix_file_stem(source_operation), use, matrix_kind),
         **effective_operation_metadata_for_valley(user_name, valley_model),
-        **copy.deepcopy(dict(semantics)),
     }
     completed.update(row)
     completed["name"] = name
     completed.setdefault("operation", source_operation)
-    completed["antiunitary_convention"] = "U_K" if completed["antiunitary"] else "none"
     if allow_inferred and "q_map" not in completed and "k_map" in completed:
         completed["q_map"] = copy.deepcopy(completed["k_map"])
         completed["inferred_fields"] = sorted(set([*completed.get("inferred_fields", []), "q_map"]))
@@ -407,6 +416,17 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
     use = str(source_out.get("use", "raw"))
     matrix_kind_raw = source_out.get("matrix_kind", source_out.get("kind"))
     allow_inferred = allows_inferred_action_metadata(source_out)
+    operation_defaults = {
+        key: copy.deepcopy(source_out[key])
+        for key in (
+            "source_matrix_role",
+            "source_gauge",
+            "target_role",
+            "gauge_correction",
+            "antiunitary_convention",
+        )
+        if key in source_out
+    }
     if matrix_kind_raw is None:
         normalized_operations: list[Any] = []
         for operation in operations:
@@ -430,7 +450,7 @@ def _normalize_kp_symm_source(raw: Mapping[str, Any]) -> dict[str, Any]:
         matrix_kind = str(matrix_kind_raw)
         source_out["operations"] = [
             _complete_kp_symm_operation_entry(
-                operation,
+                {**operation_defaults, **(dict(operation) if isinstance(operation, Mapping) else {"name": str(operation)})},
                 valley_model,
                 use=use,
                 matrix_kind=matrix_kind,
@@ -1406,7 +1426,8 @@ def _support_harmonic_records(
                 lattice_index = [int(rounded[0]), int(rounded[1])]
                 shell = int(max(abs(rounded[0]), abs(rounded[1]), abs(rounded[0] + rounded[1])))
         except np.linalg.LinAlgError:
-            pass
+            lattice_index = None
+            shell = None
         records.append(
             {
                 "vector": vector,
@@ -2841,7 +2862,8 @@ def _compute_validation_outputs(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     validations: dict[str, Any] = {}
     summary: dict[str, Any] = {"validation_incomplete": False, "missing": []}
-    strict = bool(model_config.validation_config.get("strict", False))
+    strict = _validation_strict_enabled(model_config.validation_config)
+    band_level_only = bool(model_config.validation_config.get("band_level_only", False))
     model = results.get("model")
 
     if model is None:
@@ -2866,6 +2888,8 @@ def _compute_validation_outputs(
         if strict:
             for name, payload in validations.items():
                 if not bool(payload.get("available", False)):
+                    if band_level_only and name in {"block_residuals", "symmetry_residuals", "wavefunction_overlap"}:
+                        continue
                     if name == "wavefunction_overlap" and bool(model_config.validation_config.get("allow_missing_wavefunction_overlap", False)):
                         continue
                     raise ValueError(
@@ -2984,6 +3008,8 @@ def _compute_validation_outputs(
     if strict:
         for name, payload in validations.items():
             if not bool(payload.get("available", False)):
+                if band_level_only and name in {"block_residuals", "symmetry_residuals", "wavefunction_overlap"}:
+                    continue
                 if name == "wavefunction_overlap" and bool(model_config.validation_config.get("allow_missing_wavefunction_overlap", False)):
                     continue
                 raise ValueError(
@@ -2994,15 +3020,26 @@ def _compute_validation_outputs(
     return validations, summary
 
 
+def _validation_strict_enabled(validation_config: Mapping[str, Any]) -> bool:
+    if bool(validation_config.get("strict", False)):
+        return True
+    for key in ("mode", "profile", "level"):
+        value = validation_config.get(key)
+        if value is not None and str(value).strip().lower() in {"strict", "production"}:
+            return True
+    return bool(validation_config.get("production", False))
+
+
 def _build_run_summary(
     *,
     model_config: ConfiguredModel,
     results: Mapping[str, Any],
     operation_registry: Sequence[Mapping[str, Any]],
     validation_summary: Mapping[str, Any],
+    active_terms_hash: str | None = None,
 ) -> dict[str, Any]:
     uses_toy = model_config.symmetry_source_config.get("type") == "toy_generator"
-    return {
+    summary = {
         "symmetry_integrity": _symmetry_integrity(model_config),
         "symmetry_source_type": str(model_config.symmetry_source_config.get("type", "none")),
         "uses_toy_generator": bool(uses_toy),
@@ -3015,6 +3052,10 @@ def _build_run_summary(
         "plot_comparison": _json_safe(results.get("plot_comparison")),
         "operations": list(operation_registry),
     }
+    if active_terms_hash is not None:
+        summary["active_terms_hash"] = active_terms_hash
+        summary["active_terms_hash_file"] = "active_terms.sha256"
+    return summary
 
 
 def _write_model_registry_outputs(
@@ -3032,8 +3073,12 @@ def _write_model_registry_outputs(
     discarded = [row for row in rows if not row["active"]]
     with (output_dir / "terms.json").open("w", encoding="utf-8") as handle:
         json.dump(rows, handle, indent=2)
+    active_terms_text = json.dumps(_json_safe(active), indent=2)
     with (output_dir / "active_terms.json").open("w", encoding="utf-8") as handle:
-        json.dump(active, handle, indent=2)
+        handle.write(active_terms_text)
+    active_terms_hash = hashlib.sha256(active_terms_text.encode("utf-8")).hexdigest()
+    with (output_dir / "active_terms.sha256").open("w", encoding="utf-8") as handle:
+        handle.write(f"{active_terms_hash}\n")
     with (output_dir / "discarded_terms.json").open("w", encoding="utf-8") as handle:
         json.dump(discarded, handle, indent=2)
     with (output_dir / "coefficients.json").open("w", encoding="utf-8") as handle:
@@ -3066,6 +3111,7 @@ def _write_model_registry_outputs(
                     results=results,
                     operation_registry=operation_registry,
                     validation_summary=validation_summary,
+                    active_terms_hash=active_terms_hash,
                 )
             ),
             handle,

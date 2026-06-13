@@ -200,18 +200,18 @@ def validate_model_config(raw: Mapping[str, Any], *, nlow_state: Sequence[int]) 
         if any(name in sym_names for name in {"C3z", "C2", "C2T", "TR"}) and not template:
             raise ValueError("toy_generator symmetry operations require explicit basis_template")
         if "C2T" in sym_names:
-            raise ValueError("C2T toy generator is not supported; use kp_symm_output matrices")
+            raise ValueError("C2T template generator is not supported; use kp_symm_output matrices")
         if (
             sym_names & PHYSICAL_TR_NAMES
             and any(int(n) % 2 for n in nlow_state)
             and not (valley_type == "M" and mode == "single_valley" and spin_convention == "spinless_effective")
         ):
             raise ValueError(
-                "TR toy generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
+                "TR template generator requires explicit spin/Kramers pair basis or a kp_symm_output representation; "
                 "M single-spin effective TR requires an effective_single_spin representation."
             )
         if ({"C2"} & sym_names) and str(template) not in {"Gamma_four_orbital", "M_spinless_layer_exchange"}:
-            raise ValueError("C2 toy generator requires Gamma_four_orbital or M_spinless_layer_exchange basis_template")
+            raise ValueError("C2 template generator requires Gamma_four_orbital or M_spinless_layer_exchange basis_template")
     elif source_type == "kp_symm_output":
         if not symmetry_source.get("path"):
             raise ValueError("symmetry_source.type=kp_symm_output requires path")

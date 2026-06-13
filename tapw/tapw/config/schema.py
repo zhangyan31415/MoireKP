@@ -5,6 +5,44 @@ from pathlib import Path
 
 
 _GridLike = Union[int, Sequence[int]]
+_SymmetrizeSpec = Union[bool, List[str]]
+CANONICAL_HAMILTONIAN_SYMMETRY_OPERATIONS = ("C3z", "C2", "C2T", "TR")
+LEGACY_HAMILTONIAN_SYMMETRY_OPERATION_ALIASES = {"T": "TR"}
+
+
+def normalize_symmetrize_hamiltonian(value) -> _SymmetrizeSpec:
+    """Normalize the Hamiltonian-symmetrization request from release configs."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        raise ValueError(
+            "compute.symmetrize_hamiltonian must be false, true, or a list of canonical "
+            "operation names such as [C3z, C2T]. Use C3z, not C3."
+        )
+    if isinstance(value, (list, tuple)):
+        if not value:
+            raise ValueError("compute.symmetrize_hamiltonian operation list must not be empty; use false.")
+        normalized = []
+        allowed = set(CANONICAL_HAMILTONIAN_SYMMETRY_OPERATIONS)
+        for item in value:
+            if not isinstance(item, str):
+                raise ValueError("compute.symmetrize_hamiltonian operation names must be strings.")
+            op = LEGACY_HAMILTONIAN_SYMMETRY_OPERATION_ALIASES.get(item.strip(), item.strip())
+            if op not in allowed:
+                raise ValueError(
+                    f"Invalid Hamiltonian symmetrization operation {op!r}; use canonical names "
+                    f"{list(CANONICAL_HAMILTONIAN_SYMMETRY_OPERATIONS)}. Use C3z, not C3; use TR, not T."
+                )
+            if op not in normalized:
+                normalized.append(op)
+        return normalized
+    raise ValueError(
+        "compute.symmetrize_hamiltonian must be false, true, or a list of canonical operation names."
+    )
+
+
+def hamiltonian_symmetrization_requested(value) -> bool:
+    return normalize_symmetrize_hamiltonian(value) is not False
 
 
 def _coerce_legacy_num_chern(num_chern: _GridLike) -> Tuple[int, int]:
@@ -66,7 +104,7 @@ class PathConfig:
     S_file: Optional[str] = None
 
     def __post_init__(self):
-        pass
+        return None
 
     @staticmethod
     def _resolve_path(path_value: str, base_dir: Path) -> str:
@@ -103,7 +141,7 @@ class ClusterConfig:
 
     def __post_init__(self):
         # These parameters are fixed and should not be changed
-        pass
+        return None
 
 @dataclass
 class SymmetryAnalysisConfig:
@@ -149,12 +187,12 @@ class ComputeConfig:
     num_chern: _GridLike = 40  # Legacy scalar square-grid size, or a 2-entry list like [num_k1, num_k2].
     num_k1: Optional[int] = None  # Fractional reciprocal-grid points along kappa1 (falls back to num_chern).
     num_k2: Optional[int] = None  # Fractional reciprocal-grid points along kappa2 (falls back to num_chern).
+    chern_band_indices: Optional[List[int]] = None  # Band indices used by mode='chern'; negative indices are allowed.
     band_type: str = "BOTH"  # Band subset to save: "CBM", "VBM", or "BOTH"
     hamk_save: bool = False
     TAPW: bool = True
     eigsh_cal: bool = True
-    C3_H: bool = False
-    M_valley_D3_H: bool = False  # For hex TAPW M valleys, add the single-M C2 projection after the C3 orbit average.
+    symmetrize_hamiltonian: _SymmetrizeSpec = False
     ge: bool = False
     eig_vec_cal: bool = True
     valley: int = field(init=False)  # Current valley being calculated
@@ -173,6 +211,11 @@ class ComputeConfig:
         if self.mode not in allowed_modes:
             raise ValueError(
                 f"Invalid mode={self.mode!r}. Must be one of {sorted(allowed_modes)}"
+            )
+        if self.mode == "chern" and self.ge:
+            raise ValueError(
+                "Chern mode with ge=true is not supported in this release because saved generalized "
+                "eigenvectors require overlap-metric Berry phases, not Euclidean overlaps."
             )
 
         allowed_parallel_impl = {"joblib", "mp"}
@@ -233,6 +276,9 @@ class ComputeConfig:
                         raise ValueError("slepc_comm='world' requires num_processes=1 (no k-point multiprocessing).")
                     if self.kpoint_chunk_count != 1 or self.kpoint_chunk_id != 0:
                         raise ValueError("slepc_comm='world' requires kpoint_chunk_count=1 and kpoint_chunk_id=0.")
+        self.symmetrize_hamiltonian = normalize_symmetrize_hamiltonian(self.symmetrize_hamiltonian)
+        if self.symmetrize_hamiltonian is not False and not self.TAPW:
+            raise ValueError("compute.symmetrize_hamiltonian requires TAPW=true.")
 
     def get_chern_grid_shape(self) -> tuple:
         """Return the explicit fractional Chern-grid shape `(num_k1, num_k2)`."""
@@ -247,10 +293,8 @@ class ComputeConfig:
         num_k1, num_k2 = self.get_chern_grid_shape()
         return format_chern_grid_suffix(num_k1, num_k2)
 
-    def __post_init__(self):
-        self.validate()
-
-        # Valley mapping
+    @staticmethod
+    def valley_label(valley: int) -> str:
         valley_flag = {
             1: "K1", 2: "K2",
             11: "K1_120", 12: "K1_240",
@@ -261,6 +305,15 @@ class ComputeConfig:
             42: "Y",
             31: "M1", 32: "M2", 33: "M3"
         }
+        return valley_flag.get(valley, "unknown")
+
+    def set_valley(self, valley: int) -> None:
+        """Set the active valley and refresh derived display flags."""
+        self.valley = int(valley)
+        self.valley_flag = self.valley_label(self.valley)
+
+    def __post_init__(self):
+        self.validate()
         # Solver mapping
         solve_flag = {True: "eigsh", False: "lapack"}
         # Equation mapping
@@ -273,10 +326,10 @@ class ComputeConfig:
             self.valley = self.valleys[0]
 
         # Set flags
-        self.valley_flag = valley_flag.get(self.valley, "unknown")
+        self.valley_flag = self.valley_label(self.valley)
         self.solve_flag = solve_flag[self.eigsh_cal]
         self.eq_flag = eq_flag[self.ge]
-        self.symm_flag = symm_flag[self.C3_H]
+        self.symm_flag = symm_flag[self.symmetrize_hamiltonian is not False]
         
 @dataclass
 class Config:
@@ -316,6 +369,12 @@ class Config:
         removed = {'gpu', 'gpu_index', 'delay_time'} & set(compute_raw)
         if removed:
             raise ValueError(f"The release TAPW package does not support GPU options: {sorted(removed)}")
+        removed_symmetry = {'C3_H', 'M_valley_D3_H'} & set(compute_raw)
+        if removed_symmetry:
+            raise ValueError(
+                f"Removed TAPW Hamiltonian symmetrization option(s) {sorted(removed_symmetry)}. "
+                "Use compute.symmetrize_hamiltonian instead."
+            )
         if compute_raw.get('TAPW', True) and 'n_g' not in compute_raw:
             raise ValueError(
                 "TAPW configurations require compute.n_g. "

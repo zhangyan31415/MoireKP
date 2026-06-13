@@ -2,6 +2,7 @@ import numpy as np
 from types import SimpleNamespace
 
 import tapw.workflows.symmetry as symmetry_analysis
+from tapw.config.schema import CANONICAL_HAMILTONIAN_SYMMETRY_OPERATIONS, normalize_symmetrize_hamiltonian
 
 
 def test_each_spatial_operation_yields_independent_unitary_and_antiunitary_candidates():
@@ -25,7 +26,7 @@ def test_each_spatial_operation_yields_independent_unitary_and_antiunitary_candi
     names = [(candidate["name"], candidate["antiunitary"]) for candidate in candidates]
 
     assert ("E", False) in names
-    assert ("T", True) in names
+    assert ("TR", True) in names
     assert ("C2", False) in names
     assert ("C2T", True) in names
 
@@ -67,7 +68,7 @@ def test_required_not_supported_reason_codes_are_declared():
     assert required.issubset(set(reason_codes))
 
 
-def test_minimal_symmetry_candidates_include_only_gamma_c2y_without_duplicates():
+def test_minimal_symmetry_candidates_include_only_spatial_c2_without_duplicates():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -102,7 +103,7 @@ def test_minimal_symmetry_candidates_include_only_gamma_c2y_without_duplicates()
     names = [candidate["name"] for candidate in candidates]
 
     assert "E" in names
-    assert "T" in names
+    assert "TR" in names
     assert "C3z" in names
     assert "C3z^2" in names
     assert "C2" in names
@@ -110,7 +111,7 @@ def test_minimal_symmetry_candidates_include_only_gamma_c2y_without_duplicates()
     assert all(not name.startswith("C2(") for name in names)
 
 
-def test_minimal_symmetry_candidates_do_not_add_c2_for_non_gamma_valley():
+def test_minimal_symmetry_candidates_keep_k_c2_as_inter_valley_source_operation():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -127,9 +128,11 @@ def test_minimal_symmetry_candidates_do_not_add_c2_for_non_gamma_valley():
     ]
 
     candidates = helper(valley_ctx, "hex", spatial_operations=operations, structure=object())
-    names = [candidate["name"] for candidate in candidates]
+    by_name = {candidate["name"]: candidate for candidate in candidates}
 
-    assert "C2" not in names
+    assert by_name["C2"]["target_valley_label"] == "K2"
+    assert by_name["C2"]["source_symmetry_role"] == "inter-valley"
+    assert by_name["C2"]["export_raw_h_matrix"] is False
 
 
 def test_minimal_symmetry_candidates_include_generic_layer_exchange_c2_for_gamma(monkeypatch):
@@ -182,7 +185,7 @@ def test_minimal_symmetry_candidates_include_generic_layer_exchange_c2_for_gamma
     assert int(c2_candidates[0]["index"]) == 23
 
 
-def test_minimal_symmetry_candidates_include_named_k_c2t_for_k_valley():
+def test_minimal_symmetry_candidates_include_canonical_c2t_for_k_valley():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -193,7 +196,10 @@ def test_minimal_symmetry_candidates_include_named_k_c2t_for_k_valley():
     candidates = helper(valley_ctx, "hex", spatial_operations=[])
     names = [candidate["name"] for candidate in candidates]
 
-    assert "K_C2T" in names
+    assert "C2T" in names
+    c2t = next(candidate for candidate in candidates if candidate["name"] == "C2T")
+    assert c2t["transport_backend"] == symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY
+    assert c2t["spatial_parent"] == "C2"
 
 
 def test_minimal_symmetry_candidates_include_c3_for_supported_k_valley():
@@ -211,7 +217,7 @@ def test_minimal_symmetry_candidates_include_c3_for_supported_k_valley():
     assert "C3z^2" in names
 
 
-def test_minimal_symmetry_candidates_include_named_m_c2_eta_for_m_valley():
+def test_minimal_symmetry_candidates_include_canonical_c2_for_m_valley():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -222,7 +228,27 @@ def test_minimal_symmetry_candidates_include_named_m_c2_eta_for_m_valley():
     candidates = helper(valley_ctx, "hex", spatial_operations=[])
     names = [candidate["name"] for candidate in candidates]
 
-    assert "M_C2_eta" in names
+    assert "C2" in names
+    c2 = next(candidate for candidate in candidates if candidate["name"] == "C2")
+    assert c2["transport_backend"] == symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_UNITARY
+
+
+def test_transport_backend_ids_do_not_encode_valley_or_effective_names():
+    helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
+    assert helper is not None
+
+    def _context(valley, label):
+        return SimpleNamespace(valley=valley, valley_label=label)
+
+    candidates = []
+    for valley, label in [(5, "Gamma"), (1, "K1"), (31, "M1")]:
+        candidates.extend(helper(_context(valley, label), "hex", spatial_operations=[]))
+
+    backends = {candidate.get("transport_backend", "") for candidate in candidates}
+    assert "k" + "_c2t" not in backends
+    assert "m" + "_c2_eta" not in backends
+    assert "gamma" + "_c2" not in backends
+    assert all("eta" not in backend and "c2t" not in backend for backend in backends)
 
 
 def test_minimal_symmetry_candidates_include_time_reversal_for_m_valley():
@@ -236,7 +262,15 @@ def test_minimal_symmetry_candidates_include_time_reversal_for_m_valley():
     candidates = helper(valley_ctx, "hex", spatial_operations=[])
     named = {(candidate["name"], bool(candidate.get("antiunitary", False))) for candidate in candidates}
 
-    assert ("T", True) in named
+    assert ("TR", True) in named
+
+
+def test_time_reversal_uses_tr_as_only_canonical_output_name():
+    assert symmetry_analysis.displayed_operation_name("T") == "TR"
+    assert symmetry_analysis.representation_operation_name("T") == "TR"
+    assert "TR" in CANONICAL_HAMILTONIAN_SYMMETRY_OPERATIONS
+    assert "T" not in CANONICAL_HAMILTONIAN_SYMMETRY_OPERATIONS
+    assert normalize_symmetrize_hamiltonian(["T", "TR"]) == ["TR"]
 
 
 def test_find_layer_exchange_c2_spatial_operation_prefers_gamma_like_layer_exchange(monkeypatch):

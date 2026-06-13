@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -255,6 +256,76 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
     assert f"[kp model]   band plot: {plot_path.resolve()}" in capsys.readouterr().out
 
 
+def test_cli_project_rejects_unimplemented_qdpt2() -> None:
+    import kp.cli as cli
+
+    parser = cli.build_argparser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["project", "-c", "model.yaml", "--downfold-method", "qdpt2"])
+
+    args = parser.parse_args(["project", "-c", "model.yaml", "--downfold-method", "fixed_schur"])
+    assert args.downfold_method == "fixed_schur"
+
+
+def test_cli_energy_unit_policy_is_explicit() -> None:
+    import kp.cli as cli
+
+    assert cli._energy_scale_from_material({"energy_unit": "eV"}) == pytest.approx(1.0)
+    assert cli._energy_scale_from_material({"energy_unit": "Hartree"}) == pytest.approx(cli.HARTREE_TO_EV)
+
+    with pytest.raises(ValueError, match="material.energy_unit"):
+        cli._energy_scale_from_material({})
+
+
+def test_public_release_helpers_have_basic_stable_behavior(tmp_path: Path) -> None:
+    from kp.analysis import compute_orbital_weights, rank_orbitals, select_orbit_set
+    from kp.io import load_orbital_order
+    from kp.kmesh import KPathGenerator
+    from kp.symmetry import SymmetryGenerator as PublicSymmetryGenerator
+    from kp.symmetry import check_symmetry_consistency
+    from kp.viz import plot_band_structure
+
+    orbital_csv = tmp_path / "orbitals.csv"
+    orbital_csv.write_text("index,name,layer\n0,dz2,1\n1,dxy,2\n", encoding="utf-8")
+    assert load_orbital_order(str(orbital_csv)) == [
+        {"index": 0, "name": "dz2", "layer": 1},
+        {"index": 1, "name": "dxy", "layer": 2},
+    ]
+
+    real_lattice = np.eye(2)
+    np.testing.assert_allclose(KPathGenerator.calculate_reciprocal_vectors(real_lattice), 2.0 * np.pi * np.eye(2))
+    np.testing.assert_allclose(KPathGenerator.direct_cart_real(real_lattice, [0.25, 0.5]), [0.25, 0.5])
+
+    eigvecs = np.zeros((2, 4, 2), dtype=complex)
+    eigvecs[:, 0, 0] = 1.0
+    eigvecs[:, 3, 1] = 2.0
+    weights = compute_orbital_weights(eigvecs, np.zeros((2, 2)), ["a", "b"], [0, 1], score="sum")
+    np.testing.assert_allclose(weights, [2.0, 8.0])
+    assert rank_orbitals(weights, top_k=1) == [1]
+    assert select_orbit_set(weights, {"top_k": 1}) == {"indices": [1], "weights": [8.0]}
+
+    def h_of_k(k: np.ndarray) -> np.ndarray:
+        return np.diag([float(k[0]), float(k[1])])
+
+    swap = np.array([[0.0, 1.0], [1.0, 0.0]])
+    residual = check_symmetry_consistency(
+        h_of_k,
+        swap,
+        lambda k: np.array([k[1], k[0]], dtype=float),
+        k_points=np.array([[0.2, 0.7]], dtype=float),
+    )
+    assert residual == pytest.approx(0.0)
+    k_identity, d_identity = PublicSymmetryGenerator(np.zeros((1, 2)), np.zeros((1, 2)), [1, 1]).get_operator("identity")
+    np.testing.assert_allclose(k_identity, np.eye(2))
+    np.testing.assert_allclose(d_identity, np.eye(2))
+    with pytest.raises(ValueError, match="explicit symmetry matrices"):
+        PublicSymmetryGenerator(np.zeros((1, 2)), np.zeros((1, 2)), [1, 1]).get_operator("C3z")
+
+    plot_path = plot_band_structure([0.0, 1.0], np.array([[0.0, 0.5], [0.2, 0.7]]), path=tmp_path / "bands.png")
+    assert Path(plot_path).exists()
+
+
 def _write_fixture(tmp_path: Path) -> Path:
     q1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
     q2 = np.array([[0.0, 0.0], [0.0, 1.0]], dtype=float)
@@ -496,6 +567,30 @@ def test_matrix_kind_operations_require_explicit_action_metadata(tmp_path: Path)
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match="requires explicit action metadata"):
+        load_model_config(cfg_path)
+
+
+def test_matrix_kind_operations_require_explicit_source_semantics(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {
+        "type": "kp_symm_output",
+        "path": "symm",
+        "use": "raw",
+        "matrix_kind": "action",
+        "operations": [
+            {
+                "name": "C2T",
+                "antiunitary": True,
+                "k_map": {"type": "identity"},
+                "q_map": {"type": "identity"},
+                "sector_map": "layer_exchange",
+            }
+        ],
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="source_matrix_role"):
         load_model_config(cfg_path)
 
 
@@ -973,11 +1068,11 @@ def test_load_model_config_rejects_coordinate_frame_rotation(tmp_path: Path) -> 
         load_model_config(cfg_path)
 
 
-def test_T_toy_generator_rejects_spinless_nlow_state() -> None:
+def test_T_template_generator_rejects_spinless_nlow_state() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     gen = SymmetryGenerator(q, q, [1, 1])
 
-    with pytest.raises(ValueError, match="TR toy generator requires explicit spin/Kramers pair basis"):
+    with pytest.raises(ValueError, match="TR template generator requires explicit spin/Kramers pair basis"):
         gen.get_time_reversal_matrix()
 
 
@@ -992,19 +1087,19 @@ def test_noncanonical_internal_operation_rejected(tmp_path: Path) -> None:
         load_model_config(cfg_path)
 
 
-def test_C2_toy_generator_requires_template() -> None:
+def test_C2_template_generator_requires_template() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     gen = SymmetryGenerator(q, q, [2, 2])
 
-    with pytest.raises(ValueError, match="C2 toy generator requires"):
+    with pytest.raises(ValueError, match="C2 template generator requires"):
         gen.get_C2_operator()
 
 
-def test_C3z_toy_generator_requires_template() -> None:
+def test_C3z_template_generator_requires_template() -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     gen = SymmetryGenerator(q, q, [2, 2])
 
-    with pytest.raises(ValueError, match="C3z toy generator requires"):
+    with pytest.raises(ValueError, match="C3z template generator requires"):
         gen.get_C3z_operator(1)
 
 
@@ -1103,7 +1198,7 @@ def test_K_single_valley_C2T_requires_kp_symm_output(tmp_path: Path) -> None:
     }
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    with pytest.raises(ValueError, match="C2T toy generator is not supported"):
+    with pytest.raises(ValueError, match="C2T template generator is not supported"):
         load_model_config(cfg_path)
 
 
@@ -1682,9 +1777,14 @@ def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> 
     assert (tmp_path / "model_out" / "fit_diagnostics.json").exists()
     assert (tmp_path / "model_out" / "operation_registry.json").exists()
     assert (tmp_path / "model_out" / "run_summary.json").exists()
+    assert (tmp_path / "model_out" / "active_terms.sha256").exists()
 
+    active_terms_bytes = (tmp_path / "model_out" / "active_terms.json").read_bytes()
+    active_terms_hash = (tmp_path / "model_out" / "active_terms.sha256").read_text(encoding="utf-8").strip()
     registry = json.loads((tmp_path / "model_out" / "operation_registry.json").read_text(encoding="utf-8"))
     summary = json.loads((tmp_path / "model_out" / "run_summary.json").read_text(encoding="utf-8"))
+    assert active_terms_hash == hashlib.sha256(active_terms_bytes).hexdigest()
+    assert summary["active_terms_hash"] == active_terms_hash
     assert "production" + "_level" not in summary
     assert "validation_incomplete" in summary
     assert all("user_operation" in row and "canonical_operation" in row for row in registry)
@@ -2653,6 +2753,38 @@ def test_validation_strict_rejects_unavailable_validation_outputs(monkeypatch, t
 
     with pytest.raises(ValueError, match="validation.strict=true requires"):
         run_configured_model(cfg_path)
+
+
+def test_validation_production_mode_rejects_unavailable_validation_outputs(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["validation"] = {"mode": "production"}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {"eigvals": expected_eigvals, "diagnostics": {}}
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+
+    with pytest.raises(ValueError, match="validation.strict=true requires"):
+        run_configured_model(cfg_path)
+
+
+def test_validation_production_band_level_only_allows_missing_projector_validations(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["validation"] = {"mode": "production", "band_level_only": True}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    results = run_configured_model(cfg_path)
+
+    validations = results["validations"]
+    assert validations["matrix_residuals"]["available"] is True
+    assert validations["block_residuals"]["available"] is False
+    assert validations["wavefunction_overlap"]["available"] is False
+    summary = json.loads((tmp_path / "model_out" / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["validation_incomplete"] is True
 
 
 def test_explicit_harmonics_use_neutral_registry_source() -> None:

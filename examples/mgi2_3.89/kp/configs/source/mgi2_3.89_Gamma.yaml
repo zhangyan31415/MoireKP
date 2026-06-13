@@ -1,6 +1,7 @@
 material:
   name: MgI2
   spin: all
+  energy_unit: eV
   num_layers: 2
   efermi: -4.168612
   orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2
@@ -43,6 +44,6 @@ symm:
   valley: Gamma
   spin: all
   tapw_symmetry_dir: ../../../tapw/symmetry_analysis_test_gamma_q5
-  operations: [C3, C2, TR]
+  operations: [C3z, C2, TR]
   output_dir: ../../outputs/symm/mgi2_3.89_Gamma_formal
   tolerance: 1.0e-2

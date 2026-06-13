@@ -45,6 +45,57 @@ def _write_config(tmp_path: Path, *, mode: str = "band", compute_valleys=None, s
     return config_path
 
 
+def test_c3_h_is_rejected_in_release_config(tmp_path):
+    config_path = _write_config(tmp_path)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["compute"]["C3_H"] = True
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="C3_H.*symmetrize_hamiltonian"):
+        Config.from_yaml(str(config_path))
+
+
+def test_symmetrize_hamiltonian_accepts_bool_and_operation_list(tmp_path):
+    config_path = _write_config(tmp_path)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["compute"]["symmetrize_hamiltonian"] = True
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = Config.from_yaml(str(config_path))
+    assert config.compute.symmetrize_hamiltonian is True
+
+    payload["compute"]["symmetrize_hamiltonian"] = ["C3z", "C2T"]
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = Config.from_yaml(str(config_path))
+    assert config.compute.symmetrize_hamiltonian == ["C3z", "C2T"]
+
+
+def test_symmetrize_hamiltonian_rejects_noncanonical_operations(tmp_path):
+    config_path = _write_config(tmp_path)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["compute"]["symmetrize_hamiltonian"] = ["C3"]
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="canonical.*C3z"):
+        Config.from_yaml(str(config_path))
+
+
+def test_release_tapw_example_yamls_do_not_use_removed_symmetrization_keys():
+    root = Path(__file__).resolve().parents[2]
+    yaml_paths = list((root / "examples" / "tapw").glob("**/*.yaml"))
+    yaml_paths.append(root / "tapw" / "tapw" / "templates" / "config.yaml")
+
+    offenders = []
+    for path in yaml_paths:
+        payload = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        compute = payload.get("compute", {})
+        if "C3_H" in compute or "M_valley_D3_H" in compute:
+            offenders.append(str(path.relative_to(root)))
+
+    assert offenders == []
+
+
 def test_old_config_without_symmetry_analysis_loads_default_section(tmp_path):
     config_path = _write_config(tmp_path)
 
@@ -153,3 +204,13 @@ def test_symmetry_mode_does_not_require_s_file(tmp_path):
 
     assert config.paths.S_file is None
     assert config.compute.mode == "symmetry"
+
+
+def test_chern_mode_rejects_generalized_eigenvectors(tmp_path):
+    config_path = _write_config(tmp_path, mode="chern")
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["compute"]["ge"] = True
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="Chern.*ge=true"):
+        Config.from_yaml(str(config_path))

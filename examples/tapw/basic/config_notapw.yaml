@@ -48,7 +48,7 @@ compute:
   TAPW: false            # Use TAPW method
   eigensolver: "slepc"   # non-TAPW generalized solver: "scipy" or "slepc"
   eigsh_cal: true       # Use eigsh/SLEPc sparse eigenvalue calculation
-  C3_H: true           # Apply C3 symmetry to Hamiltonian
+  symmetrize_hamiltonian: false  # Hamiltonian symmetrization is TAPW-only
   ge: true             # Use generalized eigenvalue solver
   eig_vec_cal: false    # SLEPc direct path currently computes eigenvalues only
 

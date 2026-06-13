@@ -26,6 +26,7 @@ wheels/
 # Root generated runtime outputs
 /runs/
 /results/
+/validation_runs/
 
 # IDE
 .idea/
@@ -73,12 +74,25 @@ kp/.codex_remote_logs/
 /review_outputs/
 /review_packages/
 /context/
+/dev_archive/
 /kp/context/
 *_review_*.tar.gz
 *_review_*.tar.gz.sha256
 kp_examples_*.tar.gz
 kp_examples_*.tar.zst
 kp/kp.tar.gz
+
+# Paper build products and submitted manuscript workspaces stay outside release artifacts.
+/paper/
+/manuscript/
+/cpc_submission/
+*.aux
+*.bbl
+*.bcf
+*.blg
+*.fdb_latexmk
+*.fls
+*.synctex.gz
 
 # Generated example outputs; keep configs under examples tracked.
 examples/**/outputs/
@@ -101,3 +115,4 @@ Mote_DFT_gen/
 *.npz
 !tests/fixtures/**/*.npy
 !tests/fixtures/**/*.npz
+!examples/minimal_synthetic/expected/KPATH.out

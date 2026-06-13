@@ -23,8 +23,24 @@ from .blocks import get_H_block, project_heff_full#, get_h_dft_low
 #     SweepRow,
 # )
 from .symmetry.projection import run_symmetry_projection_from_config
-hartree = 27.2113845
-hartree = 1
+
+HARTREE_TO_EV = 27.2113845
+
+
+def _energy_scale_from_material(material: dict[str, Any]) -> float:
+    unit = material.get("energy_unit")
+    if unit is None:
+        raise ValueError("material.energy_unit is required and must be 'eV' or 'Hartree'")
+    normalized = str(unit).strip().lower().replace("_", "").replace("-", "")
+    if normalized in {"ev", "electronvolt", "electronvolts"}:
+        return 1.0
+    if normalized in {"hartree", "hartrees", "ha"}:
+        return HARTREE_TO_EV
+    raise ValueError(f"material.energy_unit must be 'eV' or 'Hartree', got {unit!r}")
+
+
+def _load_hamk_with_energy_unit(path: str, material: dict[str, Any], *, mmap_mode: str | None = "r") -> np.ndarray:
+    return load_hamk(path, mmap_mode=mmap_mode) * _energy_scale_from_material(material)
 
 def load_efermi_from_vbm_txt(path: str) -> float:
     """Load VBM text file and return max energy as efermi (in eV)."""
@@ -388,7 +404,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         print(f"[kp] Using Hamiltonian: {hamk_file}")
         print(f"[kp] Using Q-set files: {qset1_file}, {qset2_file}")
 
-        hamk = load_hamk(hamk_file, mmap_mode="r")*hartree
+        hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
         q1, q2 = load_Q_sets(qset1_file, qset2_file)
         # print(f"[kp] hamk shape={hamk.shape}, dtype={hamk.dtype}")
         print(f"[kp] Q1 shape={q1.shape}, Q2 shape={q2.shape}")
@@ -817,7 +833,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     num_layers = int(material.get("num_layers", 2))
 
     print("[kp] Loading input data")
-    hamk = load_hamk(hamk_file, mmap_mode="r")*hartree
+    hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
 
     hamk_index = int(plot_cfg.get("hamk_index", 0))
@@ -1074,7 +1090,7 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     print(f"[kp] E_ref values = {e_ref_values}")
     # print(f"[kp] top-N list = {top_n_list}")
 
-    hamk = load_hamk(hamk_file, mmap_mode="r") * hartree
+    hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
     hamk_index = int(plot_cfg.get("hamk_index", 0))
     hamk2d = hamk[hamk_index] if hamk.ndim == 3 else hamk
@@ -1210,7 +1226,7 @@ def build_argparser() -> argparse.ArgumentParser:
     p_proj = sub.add_parser("project", help="Project selected bands to Heff across Q and plot")
     p_proj.add_argument("-c", "--config", required=True, help="YAML config path")
     p_proj.add_argument("--active-indices", help="Comma-separated active band indices, e.g. 46,47")
-    p_proj.add_argument("--downfold-method", choices=["first_order", "fixed_schur", "linearized_lowdin", "qdpt2"])
+    p_proj.add_argument("--downfold-method", choices=["first_order", "fixed_schur", "linearized_lowdin"])
     p_proj.add_argument("--e-ref", type=float, help="Reference energy for fixed_schur/linearized_lowdin in eV")
     p_proj.add_argument("--top-n", help="Comma-separated top-N values for diagnostics, e.g. 2,4,6,10,20")
     p_proj.add_argument("--pole-warning-mev", type=float)

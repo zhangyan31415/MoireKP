@@ -52,13 +52,13 @@ def test_single_valley_c3_helper_marks_only_c3_closed_valleys_as_compatible():
 
 
 def test_tapw_parameters_disable_single_valley_c3_for_m_valleys():
-    config = ComputeConfig(C3_H=True, TAPW=True)
+    config = ComputeConfig(symmetrize_hamiltonian=["C3z"], TAPW=True)
     config.valley = 31
     config.bravais = "hex"
 
     tapw_parameters = band_workflow.TAPW_parameters(structure=object(), config=config)
 
-    assert tapw_parameters.use_C3_H is False
+    assert tapw_parameters.use_single_valley_c3 is False
     assert "M valleys" in tapw_parameters.c3_h_disable_reason
 
 
@@ -66,7 +66,7 @@ def test_m_valley_threefold_symmetrization_helper_enables_only_tapw_hex_m_triple
     helper = getattr(band_workflow, "uses_m_valley_threefold_symmetrization", None)
     assert helper is not None
 
-    config = ComputeConfig(C3_H=True, TAPW=True)
+    config = ComputeConfig(symmetrize_hamiltonian=["C3z"], TAPW=True)
     config.bravais = "hex"
 
     for valley in (31, 32, 33):
@@ -85,17 +85,31 @@ def test_m_valley_threefold_symmetrization_helper_enables_only_tapw_hex_m_triple
     assert helper(config) is False
 
 
+def test_requested_hamiltonian_operations_follow_current_valley_not_stale_flag():
+    config = SimpleNamespace(
+        valley=32,
+        valley_flag="M1",
+        resolved_hamiltonian_symmetry_operations_by_valley={
+            "M1": ["C3z"],
+            "M2": ["C2"],
+        },
+        symmetrize_hamiltonian=True,
+    )
+
+    assert band_workflow.requested_hamiltonian_symmetry_operations(config) == ["C2"]
+
+
 def test_m_valley_d3_symmetrization_helper_requires_explicit_flag():
     helper = getattr(band_workflow, "uses_m_valley_d3_symmetrization", None)
     assert helper is not None
 
-    config = ComputeConfig(C3_H=True, TAPW=True)
+    config = ComputeConfig(symmetrize_hamiltonian=["C3z"], TAPW=True)
     config.bravais = "hex"
     config.valley = 31
 
     assert helper(config) is False
 
-    config.M_valley_D3_H = True
+    config.symmetrize_hamiltonian = ["C3z", "C2"]
     assert helper(config) is True
 
     config.valley = 1
@@ -851,7 +865,7 @@ def test_c3_g_matrix_rejects_hex_m_valleys_in_single_valley_basis(valley):
     g_vec_list_1layer = _c3_orbit(center_1layer)
     g_vec_list_2layer = _c3_orbit(center_2layer)
 
-    with pytest.raises(ValueError, match="M valleys.*single-valley C3_H"):
+    with pytest.raises(ValueError, match="M valleys.*single-valley C3"):
         C3_G_matrix(
             g_vec_list_1layer,
             g_vec_list_2layer,

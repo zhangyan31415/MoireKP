@@ -240,7 +240,7 @@ def get_H_block(
     - H_GM_diag_eig: array of eigenvalues per block (list -> array)
     - H_GM_diag_eig_vec: array of eigenvectors per block (list -> array)
     - H_diag_block: list/array of extracted Hamiltonian blocks
-    - U_new_block: placeholder for potential unitary transforms (empty)
+    - U_new_block: reserved compatibility output for unitary transforms (empty)
     """
 
     # Inputs can be large dense arrays
@@ -634,7 +634,7 @@ def project_heff_full(
     spin: Literal["up", "down", "all"] = "up",
     bands: List[int] | List[List[int]] = None,
     comps: List[int] | List[List[int]] = None,
-    # NEW: 可直接转调 get_H_block 以复用“对齐”逻辑
+    # Optional path: call get_H_block directly to reuse alignment logic.
     Qlayer_list: List[List[np.ndarray]] | None = None,
     num_orb_per_layer_list: List[List[int]] | None = None,
     nlow_state_list: List[List[int]] | None = None,
@@ -796,23 +796,6 @@ def project_heff_full(
             high_cols = np.setdiff1d(all_cols, bands_pos, assume_unique=False)
             U_high = vec[:, high_cols]  # 已正交（来自厄米对角化）
             high_parts.append((idx, U_high))
-    if False:
-        if not second_order:
-            # 一阶：Heff = U† H U
-            Heff = U_low_full.conj().T @ np.asarray(hamk_full, dtype=np.complex128) @ U_low_full
-            Heff = 0.5 * (Heff + Heff.conj().T)
-            heig, hvec = _hermitian_eigh(Heff)
-            print("heff mean=", float(np.mean(heig)))
-            return Heff, heig, hvec
-
-        # ---------- 二阶：组装 U_high_full ----------
-        high_dim_total = sum(Uh.shape[1] for _, Uh in high_parts)
-        U_high_full = np.zeros((N, high_dim_total), dtype=np.complex128)
-        col = 0
-        for idx, Uh in high_parts:
-            k = Uh.shape[1]
-            U_high_full[idx, col : col + k] = Uh
-            col += k
     method = (downfold_method or ("fixed_schur" if second_order else "first_order")).lower()
     include_high = method != "first_order"
 

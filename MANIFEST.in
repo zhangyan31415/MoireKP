@@ -1,0 +1,62 @@
+include .gitignore
+include README.md
+include RELEASE_BLOCKERS.md
+include RELEASE_VALIDATION.md
+include environment.yml
+include pytest.ini
+include pyproject.toml
+include kp/README.md
+include tapw/README.md
+recursive-include scripts *.sh
+
+recursive-include examples *.md *.yaml *.yml *.json *.txt *.csv *.py *.in *.out
+recursive-include examples/tapw/*/openmx/soc band_info.json openmx.dat_rigid
+recursive-include tests *.py *.yaml *.yml *.json *.txt
+recursive-include tests/fixtures *.txt *.yaml *.yml *.json *.npy *.npz
+recursive-include docs *.md
+recursive-include tapw/tapw/templates *.yaml *.in
+
+prune .codex
+prune .git
+prune .learnings
+prune build
+prune context
+prune dist
+prune moirekp.egg-info
+prune review_bundles
+prune review_outputs
+prune review_packages
+prune runs
+prune results
+prune validation_runs
+prune dev_archive
+prune devtools
+prune docs/internal
+prune docs/plans
+prune paper
+prune manuscript
+prune cpc_submission
+prune kp/.tmp_*
+prune kp/context
+prune examples/garbage
+prune examples/mgi2_3.89/kp/outputs
+prune examples/mgi2_3.89/kp/runs
+prune examples/mgi2_3.89/tapw
+prune examples/mote2_3.89/kp/outputs
+prune examples/mote2_3.89/kp/runs
+prune examples/mote2_3.89/tapw
+prune examples/tapw/mgi2_9.43/runs
+prune examples/tapw/mote2_9.43/runs
+
+global-exclude __pycache__/*
+global-exclude *.py[cod]
+global-exclude *.so
+global-exclude .DS_Store
+global-exclude *.egg-info/*
+global-exclude openmx.out
+global-exclude *.log
+global-exclude *.err
+global-exclude *.npy
+global-exclude *.npz
+
+recursive-include tests/fixtures *.npy *.npz

@@ -1,6 +1,6 @@
 # Release Model Config Cleanup Implementation Plan
 
-> **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
+> **Internal implementation note:** use the executing-plans workflow to implement this plan task-by-task.
 
 **Goal:** Remove release-facing release-only compatibility scaffolding from the model configuration layer and unify time-reversal operation naming.
 

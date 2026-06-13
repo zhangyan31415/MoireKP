@@ -11,14 +11,14 @@ from tapw.cli import (
     copy_reused_m_valley_band_outputs,
     resolve_qshell_dir_name,
 )
+from tapw.workflows.band import requested_hamiltonian_symmetry_operations
 
 
 def test_can_reuse_m_valley_c3_band_outputs_is_disabled_by_default():
     cfg = SimpleNamespace(
         mode="band",
         TAPW=True,
-        C3_H=True,
-        M_valley_D3_H=False,
+        symmetrize_hamiltonian=["C3z"],
         eig_vec_cal=False,
         hamk_save=False,
         valleys=[31, 32, 33],
@@ -31,13 +31,11 @@ def test_can_reuse_m_valley_c3_band_outputs_is_disabled_by_default():
 def test_resolve_qshell_dir_name_adds_symm_suffix_only_for_symmetrized_runs():
     cfg = SimpleNamespace(n_g=3)
 
-    legacy = SimpleNamespace(use_M_valley_threefold_symm=False, use_C3_H=False)
-    m_valley_symm = SimpleNamespace(use_M_valley_threefold_symm=True, use_C3_H=False)
-    c3_symm = SimpleNamespace(use_M_valley_threefold_symm=False, use_C3_H=True)
+    legacy = SimpleNamespace(uses_hamiltonian_symmetrization=False)
+    symm = SimpleNamespace(uses_hamiltonian_symmetrization=True)
 
     assert resolve_qshell_dir_name(cfg, legacy) == "Q_shell_3"
-    assert resolve_qshell_dir_name(cfg, m_valley_symm) == "Q_shell_3_symm"
-    assert resolve_qshell_dir_name(cfg, c3_symm) == "Q_shell_3_symm"
+    assert resolve_qshell_dir_name(cfg, symm) == "Q_shell_3_symm"
 
 
 def test_copy_reused_m_valley_band_outputs_renames_reference_files(tmp_path: Path):
@@ -63,7 +61,7 @@ def test_save_band_static_metadata_writes_valley_specific_g_vectors(tmp_path: Pa
     calculator = BandStructureCalculator.__new__(BandStructureCalculator)
     calculator.config = SimpleNamespace(TAPW=True, n_g=4)
     calculator.valley_flag = "M2"
-    calculator.use_C3_H = False
+    calculator.uses_hamiltonian_symmetrization = False
     calculator.TAPW_parameters = SimpleNamespace(
         g_vec_list_K1=np.array([[1.0, 2.0]], dtype=float),
         g_vec_list_K2=np.array([[3.0, 4.0]], dtype=float),
@@ -115,3 +113,18 @@ def test_switch_m_valley_requires_prebuilt_threefold_state():
 
     with pytest.raises(ValueError):
         BandStructureCalculator.switch_m_valley(calculator, 32)
+
+
+def test_requested_symmetry_operations_use_current_valley_not_stale_flag():
+    cfg = SimpleNamespace(
+        TAPW=True,
+        valley=32,
+        valley_flag="M1",
+        symmetrize_hamiltonian=True,
+        resolved_hamiltonian_symmetry_operations_by_valley={
+            "M1": ["C3z"],
+            "M2": ["C3z", "C2"],
+        },
+    )
+
+    assert requested_hamiltonian_symmetry_operations(cfg) == ["C3z", "C2"]

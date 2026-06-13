@@ -1,6 +1,7 @@
 
 material:
   name: MgI2
+  energy_unit: eV
   hamk_file: ../../../tapw/Q_shell_7/band/hamk_M1_valley.npy
   qset1_file: ../../../tapw/Q_shell_7/g_vec_list_7_M1_1layer.npy
   qset2_file: ../../../tapw/Q_shell_7/g_vec_list_7_M1_2layer.npy

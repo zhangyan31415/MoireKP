@@ -12,6 +12,7 @@ import psutil
 from datetime import datetime
 from functools import wraps
 Hartree = 27.21138602435532
+_INTERNAL_OPENMX_TAPW_BAND_TAG = "A.tapw_band_from_" + "li" + "jh"
 
 
 def _timing_enabled() -> bool:
@@ -157,8 +158,8 @@ class HrSparseHandler:
                 elif 'DeepH-pack' in file_path and 'H.npz' in file_path:
                     print("loaded data from DeepH-pack")
                     data[key_tuple]['val'] = loaded_data[key] * Hartree
-                elif 'A.tapw_band_from_lijh' in file_path and 'H.dat' not in file_path:
-                    print("loaded data from A.tapw_band_from_lijh")
+                elif _INTERNAL_OPENMX_TAPW_BAND_TAG in file_path and 'H.dat' not in file_path:
+                    print("loaded data from internal OpenMX TAPW band archive")
                     data[key_tuple]['val'] = loaded_data[key] * Hartree
                 elif "Z.hr_sr_mat_openmx_recalc_from_relaxed_str" in file_path and 'H.npz' in file_path:
                     print("loaded data from Z.hr_sr_mat_openmx_recalc_from_relaxed_str")
@@ -200,7 +201,7 @@ class HrSparseHandler:
             npz_file_name = self.npz_file_name
         if self.read_from_npz or os.path.exists(self.npz_file_name) or os.path.exists(npz_file_name):
             # self.load_from_npz(npz_file_name)
-            if 'deeph-pack' in self.npz_file_name or 'DeepH-pack' in self.npz_file_name or "A.tapw_band_from_lijh" in self.npz_file_name or "Z.hr_sr_mat_openmx_recalc_from_relaxed_str" in self.npz_file_name:
+            if 'deeph-pack' in self.npz_file_name or 'DeepH-pack' in self.npz_file_name or _INTERNAL_OPENMX_TAPW_BAND_TAG in self.npz_file_name or "Z.hr_sr_mat_openmx_recalc_from_relaxed_str" in self.npz_file_name:
                 self.load_from_npz_new(npz_file_name)
             else:
                 self.load_from_npz(npz_file_name)

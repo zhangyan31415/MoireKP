@@ -13,19 +13,19 @@ def single_valley_c3_incompatibility_reason(bravais, valley):
     bravais = (bravais or "hex").lower()
     if bravais != "hex":
         return (
-            f"C3_H requires a hex Bravais setting in this code path; got bravais={bravais!r}."
+            f"Single-valley C3 symmetrization requires a hex Bravais setting in this code path; got bravais={bravais!r}."
         )
     if valley in {31, 32, 33}:
         return (
             f"M valleys {valley} are rotated into each other by C3, so they do not admit "
-            "single-valley C3_H in the current basis."
+            "single-valley C3 symmetrization in the current basis."
         )
     if valley in {3, 41, 42}:
         return (
             f"Valley {valley} is not a single-valley C3 fixed point in this code path."
         )
     if valley not in {1, 2, 11, 12, 5}:
-        return f"Unsupported valley={valley} for single-valley C3_H."
+        return f"Unsupported valley={valley} for single-valley C3 symmetrization."
     return None
 
 
@@ -91,7 +91,7 @@ def rot_matrix(theta):
 def C3_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,m_g_vec,twisted_index_m,valley):
     reason = single_valley_c3_incompatibility_reason("hex", valley)
     if reason is not None:
-        raise ValueError(f"{reason} Disable single-valley C3_H for this valley.")
+        raise ValueError(f"{reason} Disable single-valley C3 symmetrization for this valley.")
 
     num_gn = len(g_vec_list_K1_1layer)
     C3 = np.zeros((num_gn+num_gn,num_gn+num_gn),dtype=np.complex128)
@@ -128,7 +128,7 @@ def C3_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,m_g_vec,twisted_index_
 def legacy_single_valley_c3_layer_centers(m_g_vec, twisted_index_m, valley):
     reason = single_valley_c3_incompatibility_reason("hex", valley)
     if reason is not None:
-        raise ValueError(f"{reason} Disable single-valley C3_H for this valley.")
+        raise ValueError(f"{reason} Disable single-valley C3 symmetrization for this valley.")
 
     g_vec_1l, g_vec_2l = get_g_vec_perlayer(m_g_vec, twisted_index_m)
     K1_1layer = rot(1 / 3 * g_vec_1l[0] + 1 / 3 * g_vec_1l[1], 120)

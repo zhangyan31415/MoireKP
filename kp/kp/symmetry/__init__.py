@@ -1,4 +1,4 @@
-"""Symmetry operators and checks (skeleton)."""
+"""Symmetry operators and consistency checks."""
 
 from .generator import SymmetryGenerator
 from .checks import check_symmetry_consistency

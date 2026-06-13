@@ -567,7 +567,7 @@ def test_reflection_action_frame_conjugation_preserves_sector_identity() -> None
     assert model_action["action_source"] == "derived_by_frame_conjugation"
 
 
-def test_k_c2t_model_action_does_not_use_notebook_support_hardcode() -> None:
+def test_c2t_action_for_k_model_does_not_use_notebook_support_hardcode() -> None:
     source_action = {
         "antiunitary": True,
         "k_map": {"type": "reflection", "axis_deg": 60.0},

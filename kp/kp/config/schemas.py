@@ -6,7 +6,7 @@ from typing import Dict, List, Optional
 
 @dataclass
 class MaterialConfig:
-    """Material-specific inputs and structural choices (skeleton)."""
+    """Material-specific inputs and structural choices."""
 
     hamk_file: str
     qset1_file: Optional[str] = None
@@ -22,7 +22,7 @@ class MaterialConfig:
 
 @dataclass
 class ExperimentConfig:
-    """Run-time configuration for selection, symmetry, and fitting (skeleton)."""
+    """Run-time configuration for selection, symmetry, and fitting."""
 
     energy_window: tuple[float, float] = (-0.1, 0.1)
     fermi_ref: str = "auto"
@@ -32,4 +32,3 @@ class ExperimentConfig:
     orthogonalize_tol: float = 1e-8
     fit_tol: float = 1e-8
     workers: int = 4
-

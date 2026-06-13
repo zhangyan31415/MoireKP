@@ -201,7 +201,7 @@ def downfold_blocks(
         )
 
     if method == "qdpt2":
-        raise NotImplementedError("qdpt2 is not implemented yet; use fixed_schur or linearized_lowdin")
+        raise ValueError("downfolding method 'qdpt2' is not available in this release; use fixed_schur or linearized_lowdin")
 
     raise ValueError(f"Unknown downfolding method: {options.method!r}")
 

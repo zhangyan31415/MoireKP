@@ -1,34 +1,435 @@
-schema_version: 1
+schema_version: 2
 status: pending
 release_blockers:
   - license
   - doi
   - data_url
+metadata:
+  license: null
+  doi: null
+  data_url: null
 notes: >-
   Release dataset metadata is not finalized. Do not publish an archival release
   until every dataset has confirmed license, DOI, and public data URL values.
+  Pending external entries describe files or generated artifact directories that
+  are intentionally absent from a clean source clone.
+external_data:
+  marker: pending_external
+  description: >-
+    A clean clone contains tracked configs and small template inputs only. Large
+    OpenMX matrices, TAPW Q-shell arrays, TAPW symmetry-analysis exports, and
+    precomputed KP outputs are external data until a public archive URL and
+    release DOI are assigned.
+  paths:
+    - examples/tapw/mote2_9.43/openmx/soc/H.npz
+    - examples/tapw/mote2_9.43/openmx/soc/S.npz
+    - examples/tapw/mgi2_9.43/openmx/soc/H.npz
+    - examples/tapw/mgi2_9.43/openmx/soc/S.npz
+    - examples/mote2_3.89/tapw/KPATH.in
+    - examples/mote2_3.89/tapw/Q_shell_6
+    - examples/mote2_3.89/tapw/symmetry_analysis_test_k
+    - examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1
+    - examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1_spinful
+    - examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1
+    - examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1_spinful
+    - examples/mgi2_3.89/tapw/KPATH.in
+    - examples/mgi2_3.89/tapw/Q_shell_5_symm
+    - examples/mgi2_3.89/tapw/Q_shell_7
+    - examples/mgi2_3.89/tapw/symmetry_analysis_test_gamma_q5
+    - examples/mgi2_3.89/tapw/symmetry_analysis_test_m_q7
+    - examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_Gamma_formal
+    - examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1
+    - examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1_spinful
+    - examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_Gamma_formal
+    - examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1
+    - examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1_spinful
+clean_clone_smoke:
+  runtime_class: clean-clone
+  description: >-
+    These commands are expected to run from a clean source clone after installing
+    the Python environment. They do not require pending external datasets.
+  commands:
+    - id: release-contract-tests
+      command: python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py -q
+      runtime_class: clean-clone
+      expected_outputs:
+        - Release metadata and manifest validation tests pass.
+    - id: tapw-help
+      command: tapw --help
+      runtime_class: clean-clone
+      expected_outputs:
+        - TAPW CLI help exits with status 0.
+    - id: tapw-init-help
+      command: tapw init --help
+      runtime_class: clean-clone
+      expected_outputs:
+        - TAPW init subcommand help exits with status 0.
+    - id: kp-help
+      command: kp --help
+      runtime_class: clean-clone
+      expected_outputs:
+        - KP CLI help exits with status 0.
 datasets:
   - id: tapw-mote2-9.43-rigid-openmx
     path: examples/tapw/mote2_9.43
     description: TAPW MoTe2 9.43 degree rigid-OpenMX example inputs and configs.
+    runtime_class: external-data
     license: null
     doi: null
     data_url: null
+    required_files:
+      - path: examples/tapw/mote2_9.43/KPATH.in
+        kind: file
+        size_bytes: 378
+        sha256: 7c658ede9b6fd8d559e0d1c4baecde88baa725b606b3c11a60f627182b353cdf
+      - path: examples/tapw/mote2_9.43/configs/mote2_k_tapw.yaml
+        kind: file
+        size_bytes: 674
+        sha256: 903250ef1e919a19565c4deb1a8db63dd7e66391d687f5dc8659ce03fcb6ef3c
+      - path: examples/tapw/mote2_9.43/configs/mote2_direct.yaml
+        kind: file
+        size_bytes: 672
+        sha256: 1798a52344be482e8bbc1b77d9f0079946747b1d3eb36f2a2d0201641a90cb8a
+      - path: examples/tapw/mote2_9.43/openmx/soc/band_info.json
+        kind: file
+        size_bytes: 102
+        sha256: eeadab80be30f33eab1c1e079dcdea73a0c370790026e42348f4b49adec60568
+      - path: examples/tapw/mote2_9.43/openmx/soc/openmx.dat_rigid
+        kind: file
+        size_bytes: 21521
+        sha256: 369c1d0d25cb0e7a81838fe4cf49634edc635a5e6cf839cf31ecca3e191e2833
+      - path: examples/tapw/mote2_9.43/openmx/soc/H.npz
+        kind: file
+        external:
+          marker: pending_external
+          reason: Large OpenMX Hamiltonian matrix is not tracked in the source clone.
+      - path: examples/tapw/mote2_9.43/openmx/soc/S.npz
+        kind: file
+        external:
+          marker: pending_external
+          reason: Large OpenMX overlap matrix is not tracked in the source clone.
+    commands:
+      - id: tapw-k1
+        command: tapw run --config examples/tapw/mote2_9.43/configs/mote2_k_tapw.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mote2_9.43/runs/mote2_k_tapw/KPATH.out
+            status: generated
+          - path: examples/tapw/mote2_9.43/runs/mote2_k_tapw/Q_shell_3/band/band_VBM_K1_valley.txt
+            status: generated
+      - id: direct-band
+        command: tapw run --config examples/tapw/mote2_9.43/configs/mote2_direct.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mote2_9.43/runs/mote2_direct/KPATH.out
+            status: generated
+          - path: examples/tapw/mote2_9.43/runs/mote2_direct/direct/band/band_VBM.txt
+            status: generated
+
   - id: tapw-mgi2-9.43-rigid-openmx
     path: examples/tapw/mgi2_9.43
     description: TAPW MgI2 9.43 degree rigid-OpenMX example inputs and configs.
+    runtime_class: external-data
     license: null
     doi: null
     data_url: null
+    required_files:
+      - path: examples/tapw/mgi2_9.43/KPATH.in
+        kind: file
+        size_bytes: 378
+        sha256: 7c658ede9b6fd8d559e0d1c4baecde88baa725b606b3c11a60f627182b353cdf
+      - path: examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw.yaml
+        kind: file
+        size_bytes: 688
+        sha256: 05e6ce5222154770246654c5f7b4530dd9f9e085f263d9c2bdec3f97144b04c3
+      - path: examples/tapw/mgi2_9.43/configs/mgi2_direct.yaml
+        kind: file
+        size_bytes: 670
+        sha256: 2073eab9d090379129360f99da3479e823a7ca3a5f33cedda1cab1f84578cc0f
+      - path: examples/tapw/mgi2_9.43/openmx/soc/band_info.json
+        kind: file
+        size_bytes: 102
+        sha256: 7281a0ca544966e2db4694553be4346b579f771a6a91e96b7a8f432ecb588242
+      - path: examples/tapw/mgi2_9.43/openmx/soc/openmx.dat_rigid
+        kind: file
+        size_bytes: 21516
+        sha256: 511d2a0dd74c2c961c8b9cbed7b55155bbf78ed5e499b69900e6f5f798b4e153
+      - path: examples/tapw/mgi2_9.43/openmx/soc/H.npz
+        kind: file
+        external:
+          marker: pending_external
+          reason: Large OpenMX Hamiltonian matrix is not tracked in the source clone.
+      - path: examples/tapw/mgi2_9.43/openmx/soc/S.npz
+        kind: file
+        external:
+          marker: pending_external
+          reason: Large OpenMX overlap matrix is not tracked in the source clone.
+    commands:
+      - id: tapw-m1-gamma
+        command: tapw run --config examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mgi2_9.43/runs/mgi2_m_gamma_tapw/KPATH.out
+            status: generated
+          - path: examples/tapw/mgi2_9.43/runs/mgi2_m_gamma_tapw/Q_shell_3/band/band_VBM_Gamma_valley.txt
+            status: generated
+      - id: direct-band
+        command: tapw run --config examples/tapw/mgi2_9.43/configs/mgi2_direct.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/KPATH.out
+            status: generated
+          - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/direct/band/band_VBM.txt
+            status: generated
+
   - id: kp-mote2-3.89
     path: examples/mote2_3.89
-    description: MoTe2 3.89 degree KP source/model configurations and saved outputs.
+    description: MoTe2 3.89 degree KP source/model configurations and saved-output contract.
+    runtime_class: precomputed-external
     license: null
     doi: null
     data_url: null
+    required_files:
+      - path: examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+        kind: file
+        size_bytes: 1411
+        sha256: 5f2a5374a11682d93edab0b7c49783afb6dbd2c64be8549235caffe58f321ca9
+      - path: examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml
+        kind: file
+        size_bytes: 1633
+        sha256: 3b50bf7323fb87ff75a00493990a601fcdb116f2ad0b49458bcac3860d327a53
+      - path: examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml
+        kind: file
+        size_bytes: 812
+        sha256: b045d321fa6452b3e1b7c619b0958eb975d2a88e6d9c8c8008af0a782caa0a7d
+      - path: examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml
+        kind: file
+        size_bytes: 1012
+        sha256: a5f07c1bb1ccaf3d18c4e9438b14b7d029dde1e5af3d92075eac5214354b4bfe
+      - path: examples/mote2_3.89/tapw/KPATH.in
+        kind: file
+        external:
+          marker: pending_external
+          reason: K-path input used by KP model configs is not tracked in the source clone.
+      - path: examples/mote2_3.89/tapw/Q_shell_6
+        kind: directory
+        external:
+          marker: pending_external
+          reason: TAPW Q-shell arrays and band projections are not tracked in the source clone.
+      - path: examples/mote2_3.89/tapw/symmetry_analysis_test_k
+        kind: directory
+        external:
+          marker: pending_external
+          reason: TAPW symmetry-analysis export consumed by kp symm is not tracked in the source clone.
+      - path: examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed KP projection output is not tracked in the source clone.
+      - path: examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1_spinful
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed spinful KP projection output is not tracked in the source clone.
+      - path: examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed KP symmetry output is not tracked in the source clone.
+      - path: examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1_spinful
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed spinful KP symmetry output is not tracked in the source clone.
+    commands:
+      - id: plot-k1
+        command: kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/plot/mote2_3.89_K1/mote2_k1_spectrum.txt
+            status: generated
+      - id: project-k1
+        command: kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1/heff_list.npy
+            status: generated
+      - id: project-k1-spinful
+        command: kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1_spinful/heff_list.npy
+            status: generated
+      - id: symm-k1
+        command: kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1/manifest.json
+            status: generated
+      - id: symm-k1-spinful
+        command: kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1_spinful/manifest.json
+            status: generated
+      - id: model-k1
+        command: kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml
+        runtime_class: precomputed-external
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/model/mote2_3.89_K1/run_summary.json
+            status: generated
+      - id: model-k1-spinful
+        command: kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml
+        runtime_class: precomputed-external
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/model/mote2_3.89_K1_spinful/run_summary.json
+            status: generated
+
   - id: kp-mgi2-3.89
     path: examples/mgi2_3.89
-    description: MgI2 3.89 degree KP source/model configurations and saved outputs.
+    description: MgI2 3.89 degree KP source/model configurations and saved-output contract.
+    runtime_class: precomputed-external
     license: null
     doi: null
     data_url: null
+    required_files:
+      - path: examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
+        kind: file
+        size_bytes: 1359
+        sha256: 019d707aea7588772f293e9e53005bae74ea0947e9a522e243da7d99eceb6da8
+      - path: examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml
+        kind: file
+        size_bytes: 2161
+        sha256: cdebb3de0601a0ef2af57543b5fd4e86fa69bc36d8cb65980c7b022ad73a2e56
+      - path: examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
+        kind: file
+        size_bytes: 1455
+        sha256: 551a13b38ff17382b0019b44f13126d2e4056f3f8b62f3ac2969700940d6abdc
+      - path: examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml
+        kind: file
+        size_bytes: 707
+        sha256: bd9b551c9762738d82866aaeb0d15fdc563889adade70d0f883f21ea893c88e8
+      - path: examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml
+        kind: file
+        size_bytes: 908
+        sha256: 91db3854dc85013e0a46fedc72e483589b9d8eeb5c58666e627c9fb3263ababb
+      - path: examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml
+        kind: file
+        size_bytes: 1031
+        sha256: 6c07783e42d4039191a4143f6bf945048783a77652adabf8ec6893421db9e908
+      - path: examples/mgi2_3.89/tapw/KPATH.in
+        kind: file
+        external:
+          marker: pending_external
+          reason: K-path input used by KP model configs is not tracked in the source clone.
+      - path: examples/mgi2_3.89/tapw/Q_shell_5_symm
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Gamma-valley TAPW Q-shell arrays and band projections are not tracked in the source clone.
+      - path: examples/mgi2_3.89/tapw/Q_shell_7
+        kind: directory
+        external:
+          marker: pending_external
+          reason: M-valley TAPW Q-shell arrays and band projections are not tracked in the source clone.
+      - path: examples/mgi2_3.89/tapw/symmetry_analysis_test_gamma_q5
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Gamma-valley TAPW symmetry-analysis export consumed by kp symm is not tracked.
+      - path: examples/mgi2_3.89/tapw/symmetry_analysis_test_m_q7
+        kind: directory
+        external:
+          marker: pending_external
+          reason: M-valley TAPW symmetry-analysis export consumed by kp symm is not tracked.
+      - path: examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_Gamma_formal
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed Gamma KP projection output is not tracked in the source clone.
+      - path: examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed M1 KP projection output is not tracked in the source clone.
+      - path: examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1_spinful
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed spinful M1 KP projection output is not tracked in the source clone.
+      - path: examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_Gamma_formal
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed Gamma KP symmetry output is not tracked in the source clone.
+      - path: examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed M1 KP symmetry output is not tracked in the source clone.
+      - path: examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1_spinful
+        kind: directory
+        external:
+          marker: pending_external
+          reason: Precomputed spinful M1 KP symmetry output is not tracked in the source clone.
+    commands:
+      - id: plot-gamma
+        command: kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/plot/mgi2_3.89_Gamma_formal/mgi2_gamma_spectrum.txt
+            status: generated
+      - id: project-gamma
+        command: kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_Gamma_formal/heff_list.npy
+            status: generated
+      - id: project-m1
+        command: kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1/heff_list.npy
+            status: generated
+      - id: project-m1-spinful
+        command: kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1_spinful/heff_list.npy
+            status: generated
+      - id: symm-gamma
+        command: kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_Gamma_formal/manifest.json
+            status: generated
+      - id: symm-m1
+        command: kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1/manifest.json
+            status: generated
+      - id: symm-m1-spinful
+        command: kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1_spinful/manifest.json
+            status: generated
+      - id: model-gamma
+        command: kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml
+        runtime_class: precomputed-external
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/model/mgi2_3.89_Gamma/run_summary.json
+            status: generated
+      - id: model-m1
+        command: kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml
+        runtime_class: precomputed-external
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/model/mgi2_3.89_M1/run_summary.json
+            status: generated
+      - id: model-m1-spinful
+        command: kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml
+        runtime_class: precomputed-external
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/model/mgi2_3.89_M1_spinful/run_summary.json
+            status: generated

@@ -1,4 +1,4 @@
-"""IO utilities for TAPW outputs and related data (skeleton)."""
+"""IO utilities for TAPW outputs and related data."""
 
 from .tapw_loader import (
     TAPWPaths,
@@ -13,4 +13,3 @@ __all__ = [
     "load_Q_sets",
     "load_orbital_order",
 ]
-

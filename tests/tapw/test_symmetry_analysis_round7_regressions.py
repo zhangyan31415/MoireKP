@@ -3,7 +3,7 @@ import pytest
 
 ROUND7_ROWS = [
     {
-        "case": "mote2_K1_Gamma_C2T",
+        "case": "mote2_K1_center_C2T",
         "operation": "C2T",
         "residual_H_raw": 5.659200888954053e-06,
         "g_perm_max_delta": 1.496202286144631e-11,

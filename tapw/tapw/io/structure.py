@@ -1601,7 +1601,7 @@ class LayeredLatticeAnalyzer:
         return final_a1, final_a2
 
 
-    def _determine_lattice_vectors_from_peaks_gpt2(self, vectors, angles, tolerance=np.radians(5), type_structure=1):
+    def _determine_lattice_vectors_from_clustered_peaks(self, vectors, angles, tolerance=np.radians(5), type_structure=1):
         """
         Determines lattice vectors based on clustered candidate vectors using DBSCAN.
 
@@ -2251,7 +2251,7 @@ class LayeredLatticeAnalyzerSpglib:
         plt.show()
     
     def plot_nearest_vectors_phase(self, **kwargs):
-        """Placeholder for compatibility - not implemented in spglib version."""
+        """Compatibility hook; the spglib reader does not implement this backend."""
         print("[Spglib] plot_nearest_vectors_phase is not implemented in spglib version.")
         print("[Spglib] Use the original LayeredLatticeAnalyzer if this functionality is needed.")
     

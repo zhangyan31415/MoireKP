@@ -1,6 +1,5 @@
 
-
-import sympy, sys
+import sympy
 from numpy.linalg import inv, det
 import numpy as np
 # from sympy import *
@@ -71,15 +70,14 @@ U_d = np.array([[1,0,0,0,0],
                 [0,0,0,0,1],
                 [0,1,0,0,0],
                 [0,0,1,0,0]])
-# new 2020-09-09
+# Added 2020-09-09.
 fpz=[pz]
 forb=[fs,fp,fd,ff]
 #      0  1  2  3  4    5
 
 def get_orb_map_s(xp,yp,zp,ndim,orbi):
     if ndim!=1 or orbi!=0: 
-       print("Error: local rot matrix for s orbital is of dim 1 !")
-       sys.exit(0)
+       raise ValueError("local rot matrix for s orbital is of dim 1")
 
     rmat=np.zeros((ndim,ndim),dtype=np.float64)
 
@@ -90,8 +88,7 @@ def get_orb_map_s(xp,yp,zp,ndim,orbi):
 
 def get_orb_map_p(xp,yp,zp,ndim,orbi):
     if ndim!=3 or orbi!=1: 
-       print("Error: local rot matrix for p orbital is of dim 3 !")
-       sys.exit(0)
+       raise ValueError("local rot matrix for p orbital is of dim 3")
 
     fst=[x,y,z]
     #    0 1 2
@@ -135,8 +132,7 @@ def get_orb_map_p(xp,yp,zp,ndim,orbi):
 
 def get_orb_map_d(xp,yp,zp,ndim,orbi):
     if ndim!=5 or orbi!=2: 
-       print("Error: local rot matrix for d orbital is of dim 5 !")
-       sys.exit(0)
+       raise ValueError("local rot matrix for d orbital is of dim 5")
 
     x2 =x*x; xy=x*y; xz=x*z; yz=y*z; y2=y*y; z2=z*z;
     fst=[x2,xy,xz,y2,yz,z2]
@@ -200,8 +196,7 @@ def get_orb_map_d(xp,yp,zp,ndim,orbi):
 
 def get_orb_map_f(xp,yp,zp,ndim,orbi):
     if ndim!=7 or orbi!=3: 
-       print("Error: local rot matrix for f orbital is of dim 7 !")
-       sys.exit(0)
+       raise ValueError("local rot matrix for f orbital is of dim 7")
 
     x3 =x*x*x; xy2=x*y*y; xz2=x*z*z;
     yx2=y*x*x; y3 =y*y*y; yz2=y*z*z;
@@ -321,8 +316,7 @@ def get_any_rot_orb_twostep(case,rot):
         rmat = get_orb_map_f(xp,yp,zp,ndim,orbi)
 
     else:
-        print("don't support orbitals for this case: ", case)
-        return
+        raise ValueError("don't support orbitals for this case: {0}".format(case))
 # make infinite small element zero
     # for i in range(ndim):
     #     for j in range(ndim):

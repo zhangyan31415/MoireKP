@@ -1,6 +1,7 @@
 source_config: ../source/mgi2_3.89_Gamma.yaml
 valley: Gamma
 spin: spinful
+symmetry_source: ../../outputs/symm/mgi2_3.89_Gamma_formal
 kpath:
   file: ../../../tapw/KPATH.in
   tmat:
@@ -14,6 +15,7 @@ kpath:
     - 0.0
     - 50.0
 model:
+  n_orb: [2, 2]
   bM:
     infer_from_q: true
   harmonics:

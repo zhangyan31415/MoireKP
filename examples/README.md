@@ -1,16 +1,33 @@
 # MoireKP Examples
 
-This directory contains release-facing examples. Examples are grouped by
-material and twist angle so the TAPW inputs/outputs and downstream KP configs
-stay together.
+This directory contains release-facing examples grouped by material and twist
+angle. The repository tracks configuration files and small template inputs; TAPW
+arrays, OpenMX matrices, projected Heff files, and paper-scale outputs are
+external unless `examples/data-manifest.yaml` explicitly lists them as tracked
+clean-clone data.
 
-For the release checkout, examples are versioned as configs plus an external
-data manifest. `runs/` and `outputs/` directories under `examples/` are local
-generated artifacts and must not be committed.
+## Command Classes
 
-Dataset provenance for release-facing examples is tracked in
-`examples/data-manifest.yaml`. The release cannot be archived until the manifest
-has resolved license, DOI, and public data URL metadata.
+- Clean-clone smoke: runs from a fresh checkout without external scientific
+  data. These commands validate packaging, metadata, CLI availability, and the
+  tiny synthetic example.
+- External-data scientific examples: require TAPW/OpenMX arrays or symmetry
+  exports listed in `examples/data-manifest.yaml`.
+- Paper reproduction: requires the finalized public data archive, DOI, license,
+  checksums, and the full reproduction instructions for the CPC submission.
+
+## Clean-Clone Smoke
+
+```bash
+python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py -q  # clean-clone
+python -m pytest examples/minimal_synthetic -q  # clean-clone
+tapw --help  # clean-clone
+tapw init --help  # clean-clone
+kp --help  # clean-clone
+```
+
+`examples/minimal_synthetic/` is a text-only example that checks public KP helper
+APIs against expected outputs without consuming TAPW arrays.
 
 ## Canonical Layout
 
@@ -35,86 +52,73 @@ examples/<material>_<angle>/
         diagnostics/<case_id>/
 ```
 
-其中：
-
-- `case_id = <material>_<angle>_<valley>`
-- 例子：
-  - `mote2_3.89_K1`
-  - `mgi2_3.89_Gamma`
-  - `mgi2_3.89_M1`
+`case_id` uses `<material>_<angle>_<valley>`, for example
+`mote2_3.89_K1`, `mgi2_3.89_Gamma`, or `mgi2_3.89_M1`.
 
 ## Config Roles
 
-- `configs/source/<case_id>.yaml`
-  - `kp plot / kp project / kp symm` 的统一输入
-- `configs/model/<case_id>.yaml`
-  - canonical continuum model 配置；目录名不携带运行模式语义
-  - 只能使用 validated representation 或 `action -> exactify -> continuum_internal_rep_exact`
-- `configs/model/reference/<case_id>.yaml`
-  - notebook / toy / legacy 参考路径
-- `configs/model/diagnostics/<case_id>_<tag>.yaml`
-  - raw action / polar / mixed / smoke 等诊断实验
+- `configs/source/<case_id>.yaml`: shared input for `kp plot`, `kp project`,
+  and `kp symm`.
+- `configs/model/<case_id>.yaml`: canonical continuum-model configuration.
+  Production configs consume validated symmetry/action metadata from `kp symm`
+  outputs.
+- `configs/model/reference/<case_id>.yaml`: notebook, toy, or legacy comparison
+  paths.
+- `configs/model/diagnostics/<case_id>_<tag>.yaml`: diagnostic experiments that
+  are not the active release path.
 
 ## Active GMK Cases
 
-- K:
+- MoTe2 K:
   - `examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml`
   - `examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml`
   - `examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml`
   - `examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml`
-- Gamma:
+- MgI2 Gamma:
   - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml`
   - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml`
-- M:
+- MgI2 M:
   - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml`
   - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml`
   - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml`
   - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml`
 
-## Active KP DAG
+## External-Data Scientific Examples
 
 The active KP workflow is documented as a dependency DAG rather than as a
-large-data smoke test. TAPW arrays and projected KP artifacts are external to
-the small release checkout unless they are listed in `examples/data-manifest.yaml`.
+large-data clean-clone test:
 
-- `kp plot -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band/Q arrays)
-- `kp project -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band/Q arrays; produces precomputed Heff)
-- `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml`
-- `kp model -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp project` and `kp symm` outputs when configured)
+- `kp plot -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays)
+- `kp project -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
+- `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW symmetry-analysis exports)
+- `kp model -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp project` and `kp symm` outputs)
+
+Dataset provenance and unresolved release metadata are tracked in
+`examples/data-manifest.yaml`. The release cannot be archived until every
+required external file has a public URL, license, DOI, checksum, runtime class,
+and expected-output description.
 
 ## TAPW Templates
 
-- `examples/tapw/basic/`: additional TAPW example configs.
+- `examples/tapw/basic/`: small TAPW configuration templates.
 - `examples/tapw/kpaths/`: alternative K-path inputs.
-- `examples/tapw/mote2_9.43/`: MoTe2 rigid-OpenMX example; TAPW K1 and direct diagonalization configs.
-- `examples/tapw/mgi2_9.43/`: MgI2 rigid-OpenMX example; TAPW M1/Gamma and direct diagonalization configs.
-- `tapw init` uses package templates from `tapw/tapw/templates/`; those are not user examples.
+- `examples/tapw/mote2_9.43/`: MoTe2 rigid-OpenMX TAPW and direct
+  diagonalization configs.
+- `examples/tapw/mgi2_9.43/`: MgI2 rigid-OpenMX TAPW and direct
+  diagonalization configs.
 
-## Cleanup Policy
+The `tapw init` command uses package templates under `tapw/tapw/templates/`.
+Those templates are not material-specific examples.
 
-- active 配置只指向 `kp/outputs/...` 下的 canonical source / model / reference / diagnostics 产物。
-- 失败实验、旧命名、过时输出、重复配置，统一移到：
+## Paper Reproduction
 
-```text
-examples/garbage/<material>/<stamp>/...
-```
-
-- 不在主树里保留：
-  - `_smoke`
-  - `_raw_action`
-  - `_polar`
-  - `_mix_*`
-  - 旧的平铺 `*_model*.yaml`
-  - 不再引用的输出目录
-
-## Notes
-
-- `tests/kp/test_examples_gmk_pipeline.py` 负责检查这套目录和配置约定。
-- K、Gamma、M 和 spinful 示例当前都有 canonical saved model output，可通过 `run_summary.json` 做数值回归。
-- 用户面配置只写标准 family name，例如 `C3z`、`TR`、`C2`、`C2T`。
-- 几何 action、sector map 和精确化后的 continuum representation 来自 `kp symm` manifest，不在 model YAML 中手写。
-- M valley 的 spinless effective 信息只作为 metadata/provenance 保留；active operation label 仍归一化为标准 family name。
+Paper-scale reproduction is intentionally separated from clean-clone tests. It
+requires the finalized public archive named in `examples/data-manifest.yaml` and
+the release checklist in `RELEASE_BLOCKERS.md` to be resolved. Until then, the
+repository should be treated as a pre-release checkout.
 
 ## Historical Artifacts
 
-本 checkout 可能仍包含旧的 `kp/runs/...` 和 `kp/outputs/model/production/...` 目录。它们只作为历史比较产物保留；active README 命令和 active YAML 配置不得把这些目录作为输入或输出目标。
+Older local runs may exist in developer worktrees, but active README commands
+and active YAML configs must not use historical `kp/runs/...` or production
+scratch directories as command targets.

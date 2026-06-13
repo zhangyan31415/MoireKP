@@ -9,13 +9,21 @@
 Main commands:
 
 ```bash
-kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
-kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml
-kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
-kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml
-kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml
-kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml
+kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
+kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
+kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
+kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
+kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
+kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
+kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml  # precomputed
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml  # precomputed
+kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml  # precomputed
 ```
+
+`external-data` commands require TAPW arrays or symmetry exports listed as
+`pending_external` in `examples/data-manifest.yaml`. `precomputed` commands
+also require saved KP projection/symmetry outputs from that manifest.
 
 Production status on 2026-06-03:
 

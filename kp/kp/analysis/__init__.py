@@ -1,4 +1,4 @@
-"""Analysis: orbital weights and selection strategies (skeleton)."""
+"""Analysis utilities for orbital weights and selection strategies."""
 
 from .orbital_selection import (
     compute_orbital_weights,
@@ -11,4 +11,3 @@ __all__ = [
     "rank_orbitals",
     "select_orbit_set",
 ]
-

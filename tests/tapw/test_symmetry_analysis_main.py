@@ -33,11 +33,11 @@ def _make_config(tmp_path: Path, *, mode: str, symmetry_enable: bool = False):
         n_g=6,
         num_processes=1,
         orthogonal_basis=False,
-        C3_H=False,
+        symmetrize_hamiltonian=False,
         eigensolver="scipy",
         slepc_comm="self",
     )
-    return SimpleNamespace(
+    config = SimpleNamespace(
         twist=SimpleNamespace(
             twist_index_m=6,
             spin=False,
@@ -71,6 +71,8 @@ def _make_config(tmp_path: Path, *, mode: str, symmetry_enable: bool = False):
             debug=False,
         ),
     )
+    config.validate = lambda: None
+    return config
 
 
 def _patch_main_dependencies(monkeypatch, config, events):
@@ -92,8 +94,8 @@ def _patch_main_dependencies(monkeypatch, config, events):
         memmap_dir=None,
         kpoint_chunk_id=None,
         kpoint_chunk_count=None,
+        developer_outputs=False,
     )
-    monkeypatch.setattr(main_mod, "parse_args", lambda: args)
     monkeypatch.setattr(main_mod.Config, "from_yaml", lambda _: config)
     monkeypatch.setattr(main_mod, "_mpi_world_rank_size", lambda: (0, 1))
     monkeypatch.setattr(main_mod, "setup_logging", lambda *_args, **_kwargs: _FakeLogger())
@@ -143,18 +145,25 @@ def _patch_main_dependencies(monkeypatch, config, events):
 
         def run(self):
             events.append("runner.run")
+            return {
+                "summary": {
+                    "operations": {"Gamma": [{"operation": "C3z", "supported": True}]},
+                    "minimal_generators": {"Gamma": ["C3z"]},
+                }
+            }
 
     monkeypatch.setattr(main_mod, "OpenMXFile", FakeOpenMXFile)
     monkeypatch.setattr(main_mod, "StructureProcessorSpglib", FakeProcessor)
     monkeypatch.setattr(main_mod, "HrSparseHandler", FakeHrHandler)
     monkeypatch.setattr(main_mod, "KPathGenerator", FakeKPathGenerator)
     monkeypatch.setattr(main_mod, "SymmetryAnalysisRunner", FakeRunner, raising=False)
+    return args
 
 
 def test_symmetry_mode_dispatches_to_symmetry_runner_without_band_calculation(monkeypatch, tmp_path):
     events = []
     config = _make_config(tmp_path, mode="symmetry", symmetry_enable=False)
-    _patch_main_dependencies(monkeypatch, config, events)
+    args = _patch_main_dependencies(monkeypatch, config, events)
 
     class FailingCalculator:
         def __init__(self, *args, **kwargs):
@@ -162,7 +171,7 @@ def test_symmetry_mode_dispatches_to_symmetry_runner_without_band_calculation(mo
 
     monkeypatch.setattr(main_mod, "BandStructureCalculator", FailingCalculator)
 
-    main_mod.main()
+    main_mod.run_calc(args)
 
     assert "runner.run" in events
     assert not any(isinstance(event, tuple) and event[0] == "hr.init" and event[1] == str(Path(config.paths.S_file)) for event in events)
@@ -172,13 +181,12 @@ def test_symmetry_mode_dispatches_to_symmetry_runner_without_band_calculation(mo
 def test_normal_band_mode_still_uses_existing_band_calculator(monkeypatch, tmp_path):
     events = []
     config = _make_config(tmp_path, mode="band", symmetry_enable=False)
-    _patch_main_dependencies(monkeypatch, config, events)
+    args = _patch_main_dependencies(monkeypatch, config, events)
 
     class FakeCalculator:
         def __init__(self, *args, **kwargs):
             self.valley_flag = "Gamma"
-            self.use_C3_H = False
-            self.use_M_valley_threefold_symm = False
+            self.uses_hamiltonian_symmetrization = False
             events.append("band.init")
 
         def run_calculation(self, path):
@@ -186,7 +194,7 @@ def test_normal_band_mode_still_uses_existing_band_calculator(monkeypatch, tmp_p
 
     monkeypatch.setattr(main_mod, "BandStructureCalculator", FakeCalculator)
 
-    main_mod.main()
+    main_mod.run_calc(args)
 
     assert "band.init" in events
     assert any(isinstance(event, tuple) and event[0] == "band.run" for event in events)
@@ -196,13 +204,12 @@ def test_normal_band_mode_still_uses_existing_band_calculator(monkeypatch, tmp_p
 def test_band_mode_can_run_symmetry_analysis_after_normal_calculation(monkeypatch, tmp_path):
     events = []
     config = _make_config(tmp_path, mode="band", symmetry_enable=True)
-    _patch_main_dependencies(monkeypatch, config, events)
+    args = _patch_main_dependencies(monkeypatch, config, events)
 
     class FakeCalculator:
         def __init__(self, *args, **kwargs):
             self.valley_flag = "Gamma"
-            self.use_C3_H = False
-            self.use_M_valley_threefold_symm = False
+            self.uses_hamiltonian_symmetrization = False
             events.append("band.init")
 
         def run_calculation(self, path):
@@ -210,7 +217,36 @@ def test_band_mode_can_run_symmetry_analysis_after_normal_calculation(monkeypatc
 
     monkeypatch.setattr(main_mod, "BandStructureCalculator", FakeCalculator)
 
-    main_mod.main()
+    main_mod.run_calc(args)
 
     assert any(isinstance(event, tuple) and event[0] == "band.run" for event in events)
     assert "runner.run" in events
+
+
+def test_band_mode_runs_symmetry_analysis_when_hamiltonian_symmetrization_is_requested(monkeypatch, tmp_path):
+    events = []
+    config = _make_config(tmp_path, mode="band", symmetry_enable=False)
+    config.compute.symmetrize_hamiltonian = ["C3z"]
+    args = _patch_main_dependencies(monkeypatch, config, events)
+
+    class FakeCalculator:
+        def __init__(self, *args, **kwargs):
+            self.valley_flag = "Gamma"
+            self.uses_hamiltonian_symmetrization = True
+            events.append("band.init")
+
+        def run_calculation(self, path):
+            events.append(("band.run", str(path)))
+
+    monkeypatch.setattr(main_mod, "BandStructureCalculator", FakeCalculator)
+
+    main_mod.run_calc(args)
+
+    assert "runner.run" in events
+    assert any(isinstance(event, tuple) and event[0] == "band.run" for event in events)
+    assert any(
+        isinstance(event, tuple)
+        and event[0] == "band.run"
+        and event[1].endswith("Q_shell_6_symm")
+        for event in events
+    )

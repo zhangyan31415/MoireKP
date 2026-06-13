@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # bench_eigensolvers.py
 # 对比 SciPy vs SLEPc (slepc4py) 在稀疏本征问题上的效率/资源与结果一致性
-# Author: you + ChatGPT
+# Author: TAPW development team
 # References: SLEPc/slepc4py docs (EPS, ST, interval, harmonic/sinvert) and SciPy eigsh sigma/OPinv.
 #   SLEPc tutorial & API: https://slepc.upv.es/slepc4py-current/docs/usrman/tutorial.html
 #   SciPy eigsh: https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.eigsh.html
@@ -47,7 +47,7 @@ class PeakRSS:
                 if rss > peak_local:
                     peak_local = rss
             except psutil.Error:
-                pass
+                continue
             time.sleep(self.interval)
         self.peak = peak_local
 

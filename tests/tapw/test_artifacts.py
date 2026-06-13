@@ -3,6 +3,8 @@ from types import SimpleNamespace
 from tapw.artifacts import (
     array_output_filename,
     band_output_filename,
+    chern_flux_filename,
+    chern_summary_filename,
     gvec_output_filename,
     raw_memmap_filename,
     run_dir_name,
@@ -44,3 +46,23 @@ def test_raw_memmap_filename_uses_canonical_raw_prefix():
 def test_gvec_output_filename_includes_ng_valley_and_layer():
     assert gvec_output_filename(n_g=8, valley_flag="M1", layer=1) == "g_vec_list_8_M1_1layer.npy"
     assert gvec_output_filename(n_g=12, valley_flag="Gamma", layer=2) == "g_vec_list_12_Gamma_2layer.npy"
+
+
+def test_chern_artifact_filenames_include_valley_and_grid_suffix():
+    assert (
+        chern_flux_filename(
+            band_type="CBM",
+            valley_flag="M1",
+            suffix="_2d_30x50",
+            band_label="band0",
+        )
+        == "berry_flux_CBM_M1_valley_2d_30x50_band0.npy"
+    )
+    assert (
+        chern_summary_filename(
+            band_type="CBM",
+            valley_flag="M1",
+            suffix="_2d_30x50",
+        )
+        == "chern_summary_CBM_M1_valley_2d_30x50.json"
+    )

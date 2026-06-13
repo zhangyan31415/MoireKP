@@ -1,4 +1,4 @@
-"""Visualization utilities (skeleton)."""
+"""Visualization utilities."""
 
 from .bands import plot_band_structure
 from .projections import plot_orbital_scatter, plot_orbital_scatter_multi

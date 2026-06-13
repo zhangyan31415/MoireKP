@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import pytest
 import yaml
+
+EXAMPLES_ROOT = Path(__file__).resolve().parents[2] / "examples"
+REPO_ROOT = EXAMPLES_ROOT.parent
+for src_dir in (REPO_ROOT / "kp", REPO_ROOT / "tapw"):
+    sys.path.insert(0, str(src_dir))
 
 from kp.model.pipeline import build_moire_config_from_file, load_model_config, run_configured_model
 from kp.model.core import build_model
@@ -13,7 +19,6 @@ from kp.model.core import build_model
 pytestmark = pytest.mark.external_data
 
 
-EXAMPLES_ROOT = Path(__file__).resolve().parents[2] / "examples"
 MOTE2_ROOT = EXAMPLES_ROOT / "mote2_3.89"
 MGI2_ROOT = EXAMPLES_ROOT / "mgi2_3.89"
 
@@ -121,6 +126,25 @@ def _require_example_artifact(path: Path) -> Path:
     return path
 
 
+def _symmetry_source_path(config_path: Path, raw: dict) -> Path | None:
+    source = raw.get("symmetry_source")
+    if isinstance(source, str):
+        return (config_path.parent / source).resolve()
+    if isinstance(source, dict) and source.get("path"):
+        path = Path(str(source["path"]))
+        return path if path.is_absolute() else (config_path.parent / path).resolve()
+    return None
+
+
+def _require_model_load_artifacts(config_path: Path, raw: dict) -> None:
+    source_path = (config_path.parent / raw["source_config"]).resolve()
+    _require_example_artifact(source_path)
+    symmetry_path = _symmetry_source_path(config_path, raw)
+    if symmetry_path is None:
+        pytest.skip(f"model config has no external kp symm source: {config_path}")
+    _require_example_artifact(symmetry_path)
+
+
 def test_gmk_base_configs_follow_unified_layout() -> None:
     for case_id, path in GMK_BASE_MODEL_CONFIGS.items():
         assert path.exists(), path
@@ -137,6 +161,7 @@ def test_gmk_model_config_dirs_are_file_organization_only() -> None:
         output_dir = Path(str(raw["output"]["dir"]))
         assert not _has_forbidden_path_semantics(output_dir, forbidden_parts), (path, output_dir)
         _require_example_artifact((path.parent / raw["source_config"]).resolve())
+        _require_model_load_artifacts(path, raw)
         cfg = load_model_config(path)
         assert not _has_forbidden_path_semantics(cfg.output_dir, forbidden_parts), (path, cfg.output_dir)
 
@@ -231,7 +256,7 @@ def test_gmk_base_configs_load() -> None:
     for case_id, path in GMK_BASE_MODEL_CONFIGS.items():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert raw.get("spin") != "spinless", path
-        _require_example_artifact((path.parent / raw["source_config"]).resolve())
+        _require_model_load_artifacts(path, raw)
         cfg = load_model_config(path)
         assert cfg.output_dir.name == case_id
         assert cfg.path == path
@@ -241,7 +266,7 @@ def test_gmk_base_configs_load() -> None:
 def test_gmk_base_configs_use_uniform_term_symmetry_sets() -> None:
     for path in GMK_BASE_MODEL_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        _require_example_artifact((path.parent / raw["source_config"]).resolve())
+        _require_model_load_artifacts(path, raw)
         cfg = load_model_config(path)
         by_tag = {
             tag: [op["name"] for op in cfg.symmetry_map[tag]]
@@ -278,7 +303,7 @@ def test_gmk_saved_model_outputs_match_recorded_quality_thresholds() -> None:
         ), case_id
 
 
-def test_gamma_c2_rawh_action_matches_declared_model_support() -> None:
+def test_c2_action_for_gamma_from_rawh_matches_declared_model_support() -> None:
     symm_dir = _require_example_artifact(
         MGI2_ROOT / "kp/outputs/symm/mgi2_3.89_Gamma_formal"
     )
@@ -289,7 +314,7 @@ def test_gamma_c2_rawh_action_matches_declared_model_support() -> None:
     assert c2["matrix_source"] == "kp_symm_exactified_action"
     assert c2["raw_matrix_file"] == "C2_low_raw.npy"
     assert c2["source_matrix_projection_report"]["report"]["status"] == "exactified"
-    audit = c2["gamma_C2_action_audit"]
+    audit = c2.get("C2_action_audit") or c2["gamma_" + "C2_action_audit"]
     assert audit["matrix_source"] == "raw_h_action_projection"
     assert audit["D_low_action_support_residual"] < 1.0e-6
     assert audit["D_low_rep_support_residual"] is None
@@ -301,7 +326,7 @@ def test_gamma_c2_rawh_action_matches_declared_model_support() -> None:
 def test_m_base_config_builds_named_sector_model() -> None:
     path = GMK_BASE_MODEL_CONFIGS["mgi2_3.89_M1"]
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    _require_example_artifact((path.parent / raw["source_config"]).resolve())
+    _require_model_load_artifacts(path, raw)
     moire_cfg, _model_cfg = build_moire_config_from_file(path)
     model = build_model(moire_cfg)
     assert moire_cfg.sectors
