@@ -1,0 +1,26 @@
+kpath_in: KPATH.in
+kpath_out: runs/mgi2_direct/KPATH.out
+title: "MgI2 9.43 direct bands"
+ymin: -1.0
+ymax: 1.0
+output: runs/mgi2_direct/direct/band/tapw_mgi2_direct_bands.pdf
+legend_show: true
+legend_loc: upper right
+legend_fontsize: 8
+global_plot_type: line
+marker_size: 1
+marker: o
+fermi_energy: -4.093002
+fermi_line: true
+
+bands:
+  - file: runs/mgi2_direct/direct/band/band_VBM.txt
+    label: Direct VBM
+    color: "#DE6E66"
+    linestyle: "-"
+    linewidth: 1.2
+  - file: runs/mgi2_direct/direct/band/band_CBM.txt
+    label: Direct CBM
+    color: dodgerblue
+    linestyle: "-"
+    linewidth: 1.2

@@ -10,6 +10,8 @@ Main commands:
 
 ```bash
 kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
+kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
+kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
 kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
 kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
 kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data

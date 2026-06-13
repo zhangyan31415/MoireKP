@@ -113,9 +113,15 @@ def _iter_path_strings(value: object) -> list[str]:
 
 
 def _has_forbidden_path_semantics(path_value: Path | str, forbidden_parts: set[str]) -> bool:
+    path = Path(str(path_value))
+    if path.is_absolute():
+        try:
+            path = path.resolve().relative_to(REPO_ROOT.resolve())
+        except ValueError:
+            pass
     return any(
         forbidden in part.lower()
-        for part in Path(str(path_value)).parts
+        for part in path.parts
         for forbidden in forbidden_parts
     )
 

@@ -101,7 +101,7 @@ and expected-output description.
 ## TAPW Templates
 
 - `examples/tapw/basic/`: small TAPW configuration templates.
-- `examples/tapw/kpaths/`: alternative K-path inputs.
+- `examples/tapw/kpaths/`: canonical hexagonal KMGMK K-path input.
 - `examples/tapw/mote2_9.43/`: MoTe2 rigid-OpenMX TAPW and direct
   diagonalization configs.
 - `examples/tapw/mgi2_9.43/`: MgI2 rigid-OpenMX TAPW and direct

@@ -1,0 +1,26 @@
+kpath_in: KPATH.in
+kpath_out: runs/mote2_k_tapw/KPATH.out
+title: "MoTe2 9.43 K1 TAPW bands"
+ymin: -1.0
+ymax: 1.0
+output: runs/mote2_k_tapw/Q_shell_3/band/tapw_mote2_k1_bands.pdf
+legend_show: true
+legend_loc: upper right
+legend_fontsize: 8
+global_plot_type: line
+marker_size: 1
+marker: o
+fermi_energy: -4.128442
+fermi_line: true
+
+bands:
+  - file: runs/mote2_k_tapw/Q_shell_3/band/band_VBM_K1_valley.txt
+    label: K1 VBM
+    color: "#DE6E66"
+    linestyle: "-"
+    linewidth: 1.2
+  - file: runs/mote2_k_tapw/Q_shell_3/band/band_CBM_K1_valley.txt
+    label: K1 CBM
+    color: dodgerblue
+    linestyle: "-"
+    linewidth: 1.2

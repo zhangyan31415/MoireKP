@@ -10,6 +10,7 @@ Main commands:
 
 ```bash
 kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
+kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
 kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
 kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data

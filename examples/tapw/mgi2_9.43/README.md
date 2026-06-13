@@ -9,6 +9,8 @@ Run from this directory:
 ```bash
 tapw run --config configs/mgi2_m_gamma_tapw.yaml  # external-data
 tapw run --config configs/mgi2_direct.yaml  # external-data
+tapw plot --config configs/mgi2_m_gamma_tapw_bands.yaml  # generated-output
+tapw plot --config configs/mgi2_direct_bands.yaml  # generated-output
 ```
 
 The TAPW config evaluates M1 and Gamma valleys. The direct config runs the

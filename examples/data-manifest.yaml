@@ -90,6 +90,14 @@ datasets:
         kind: file
         size_bytes: 672
         sha256: 1798a52344be482e8bbc1b77d9f0079946747b1d3eb36f2a2d0201641a90cb8a
+      - path: examples/tapw/mote2_9.43/configs/mote2_k_tapw_bands.yaml
+        kind: file
+        size_bytes: 623
+        sha256: 6089e089d3d12bb1e3790a4d48a2f0f9fb4d85388c4cf2ed44453e7f2946a4c6
+      - path: examples/tapw/mote2_9.43/configs/mote2_direct_bands.yaml
+        kind: file
+        size_bytes: 605
+        sha256: 252f269046476c2d4cb99aba4c8df85ae5f7995eb670327268652b5d28df7116
       - path: examples/tapw/mote2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
@@ -125,6 +133,18 @@ datasets:
             status: generated
           - path: examples/tapw/mote2_9.43/runs/mote2_direct/direct/band/band_VBM.txt
             status: generated
+      - id: plot-k1-bands
+        command: tapw plot --config examples/tapw/mote2_9.43/configs/mote2_k_tapw_bands.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mote2_9.43/runs/mote2_k_tapw/Q_shell_3/band/tapw_mote2_k1_bands.pdf
+            status: generated
+      - id: plot-direct-bands
+        command: tapw plot --config examples/tapw/mote2_9.43/configs/mote2_direct_bands.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mote2_9.43/runs/mote2_direct/direct/band/tapw_mote2_direct_bands.pdf
+            status: generated
 
   - id: tapw-mgi2-9.43-rigid-openmx
     path: examples/tapw/mgi2_9.43
@@ -146,6 +166,14 @@ datasets:
         kind: file
         size_bytes: 670
         sha256: 2073eab9d090379129360f99da3479e823a7ca3a5f33cedda1cab1f84578cc0f
+      - path: examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw_bands.yaml
+        kind: file
+        size_bytes: 801
+        sha256: 8e2233274e9b7c75771205a2e30df5f80556540c3595b6a49ff976b795b4d104
+      - path: examples/tapw/mgi2_9.43/configs/mgi2_direct_bands.yaml
+        kind: file
+        size_bytes: 599
+        sha256: 34b6533fc9f91114333b1a84d6e5d442503f20537dc28bf3b921396808529986
       - path: examples/tapw/mgi2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
@@ -180,6 +208,18 @@ datasets:
           - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/KPATH.out
             status: generated
           - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/direct/band/band_VBM.txt
+            status: generated
+      - id: plot-m1-gamma-bands
+        command: tapw plot --config examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw_bands.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mgi2_9.43/runs/mgi2_m_gamma_tapw/Q_shell_3/band/tapw_mgi2_m_gamma_bands.pdf
+            status: generated
+      - id: plot-direct-bands
+        command: tapw plot --config examples/tapw/mgi2_9.43/configs/mgi2_direct_bands.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/direct/band/tapw_mgi2_direct_bands.pdf
             status: generated
 
   - id: kp-mote2-3.89
@@ -247,6 +287,16 @@ datasets:
         runtime_class: external-data
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/plot/mote2_3.89_K1/mote2_k1_spectrum.txt
+            status: generated
+          - path: examples/mote2_3.89/kp/outputs/plot/mote2_3.89_K1/mote2_k1_scatter.png
+            status: generated
+      - id: plot-k1-spinful
+        command: kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mote2_3.89/kp/outputs/plot/mote2_3.89_K1_spinful/mote2_k1_spinful_spectrum.txt
+            status: generated
+          - path: examples/mote2_3.89/kp/outputs/plot/mote2_3.89_K1_spinful/mote2_k1_spinful_scatter.png
             status: generated
       - id: project-k1
         command: kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
@@ -378,6 +428,24 @@ datasets:
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/plot/mgi2_3.89_Gamma_formal/mgi2_gamma_spectrum.txt
+            status: generated
+          - path: examples/mgi2_3.89/kp/outputs/plot/mgi2_3.89_Gamma_formal/mgi2_gamma_scatter.png
+            status: generated
+      - id: plot-m1
+        command: kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/plot/mgi2_3.89_M1/mgi2_M1_spectrum.txt
+            status: generated
+          - path: examples/mgi2_3.89/kp/outputs/plot/mgi2_3.89_M1/mgi2_M1_scatter.png
+            status: generated
+      - id: plot-m1-spinful
+        command: kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
+        runtime_class: external-data
+        expected_outputs:
+          - path: examples/mgi2_3.89/kp/outputs/plot/mgi2_3.89_M1_spinful/mgi2_M1_spinful_spectrum.txt
+            status: generated
+          - path: examples/mgi2_3.89/kp/outputs/plot/mgi2_3.89_M1_spinful/mgi2_M1_spinful_scatter.png
             status: generated
       - id: project-gamma
         command: kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
