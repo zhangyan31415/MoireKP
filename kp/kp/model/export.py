@@ -293,16 +293,61 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
 
 
 def _infer_model_config_path(model_output: Path) -> Path:
+    run_summary = _load_json_if_exists(model_output / "run_summary.json")
+    if isinstance(run_summary, Mapping):
+        raw_path = run_summary.get("model_config_path") or run_summary.get("config_path")
+        if raw_path:
+            candidate = Path(str(raw_path))
+            if not candidate.is_absolute():
+                candidate = (model_output / candidate).resolve()
+            if candidate.exists():
+                return candidate.resolve()
+
     case_id = model_output.name
-    if model_output.parent.name != "model" or model_output.parent.parent.name != "outputs":
-        raise FileNotFoundError(
-            "Unable to infer model config path. Expected model_output_dir like outputs/model/<case>."
-        )
-    kp_root = model_output.parent.parent.parent
-    candidate = kp_root / "configs" / "model" / f"{case_id}.yaml"
-    if not candidate.exists():
-        raise FileNotFoundError(f"model config is required for standalone export: {candidate}")
-    return candidate
+    if model_output.parent.name == "model" and model_output.parent.parent.name == "outputs":
+        kp_root = model_output.parent.parent.parent
+        candidate = kp_root / "configs" / "model" / f"{case_id}.yaml"
+        if candidate.exists():
+            return candidate.resolve()
+
+    nearby = _find_model_config_near_output(model_output)
+    if nearby is not None:
+        return nearby
+
+    raise FileNotFoundError(
+        "Unable to infer model config path. Expected model_output_dir like outputs/model/<case> "
+        "or a model YAML next to the output directory with output.dir pointing at it."
+    )
+
+
+def _find_model_config_near_output(model_output: Path) -> Path | None:
+    search_dirs = [model_output.parent]
+    if model_output.parent.name == "model":
+        search_dirs.append(model_output.parent.parent / "configs" / "model")
+    for search_dir in search_dirs:
+        if not search_dir.is_dir():
+            continue
+        for candidate in sorted([*search_dir.glob("*.yaml"), *search_dir.glob("*.yml")]):
+            try:
+                raw = yaml.safe_load(candidate.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if not isinstance(raw, Mapping):
+                continue
+            output_cfg = raw.get("output")
+            if not isinstance(output_cfg, Mapping):
+                continue
+            raw_dir = output_cfg.get("dir")
+            if raw_dir is None:
+                continue
+            configured_output = Path(str(raw_dir))
+            if not configured_output.is_absolute():
+                configured_output = (candidate.parent / configured_output).resolve()
+            else:
+                configured_output = configured_output.resolve()
+            if configured_output == model_output.resolve():
+                return candidate.resolve()
+    return None
 
 
 def _validate_supported_export_model(model_config: Any, moire_config: Any) -> None:

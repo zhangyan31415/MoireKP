@@ -3459,6 +3459,7 @@ def _build_run_summary(
     uses_toy = model_config.symmetry_source_config.get("type") == "toy_generator"
     summary = {
         "output_profile": output_profile,
+        "model_config_path": str(model_config.path),
         "symmetry_integrity": _symmetry_integrity(model_config),
         "symmetry_source_type": str(model_config.symmetry_source_config.get("type", "none")),
         "uses_toy_generator": bool(uses_toy),

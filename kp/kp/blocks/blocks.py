@@ -356,6 +356,10 @@ def _format_auto_reference_terms(terms: list[tuple[int, complex]]) -> list[list[
     return out
 
 
+def _format_complex_for_report(value: complex) -> Any:
+    return _format_auto_reference_terms([(0, complex(value))])[0][1]
+
+
 def _reference_overlap_scores(u_low: np.ndarray, references: list[list[tuple[int, complex]]]) -> np.ndarray:
     u = np.asarray(u_low, dtype=np.complex128)
     scores = np.zeros((len(references), u.shape[1]), dtype=float)
@@ -390,6 +394,84 @@ def _same_segment(row: int, partner: int, segments: list[tuple[int, int]]) -> bo
         if start <= int(row) < stop:
             return start <= int(partner) < stop
     return False
+
+
+def _segment_index_for_row(row: int, segments: list[tuple[int, int]]) -> int | None:
+    for index, (start, stop) in enumerate(segments):
+        if int(start) <= int(row) < int(stop):
+            return int(index)
+    return None
+
+
+def _gamma_reference_sort_key(
+    terms: list[tuple[int, complex]],
+    *,
+    segments: list[tuple[int, int]],
+) -> tuple[int, int, int, int]:
+    """Order Gamma references in the continuum model frame.
+
+    Gamma same-Q blocks are laid out as spin blocks, with physical layers inside
+    each spin block.  The model frame expects physical layer sectors first, and
+    spin partners inside each sector.  QRCP row order is not stable enough for
+    that semantic ordering, especially in nearly degenerate Gamma subspaces.
+    """
+
+    if not terms:
+        return (0, 0, 0, 0)
+    total_segments = max(len(segments), 1)
+    spin_count = 2 if total_segments % 2 == 0 else 1
+    layer_count = max(total_segments // spin_count, 1)
+    layer_indices: list[int] = []
+    spin_indices: list[int] = []
+    rows: list[int] = []
+    for row, _coef in terms:
+        row_int = int(row)
+        rows.append(row_int)
+        segment_index = _segment_index_for_row(row_int, segments)
+        if segment_index is None:
+            continue
+        spin_indices.append(int(segment_index // layer_count))
+        layer_indices.append(int(segment_index % layer_count))
+    layer_key = -max(layer_indices) if layer_indices else 0
+    spin_key = -max(spin_indices) if spin_indices else 0
+    span_key = len(set(layer_indices)) if layer_indices else 0
+    row_key = min(rows)
+    return (layer_key, spin_key, span_key, row_key)
+
+
+def _same_spin_layer_exchange_candidates(
+    row: int,
+    *,
+    segments: list[tuple[int, int]],
+) -> list[int]:
+    segment_index = _segment_index_for_row(row, segments)
+    if segment_index is None or len(segments) < 2 or len(segments) % 2 != 0:
+        return []
+    layer_count = len(segments) // 2
+    spin_index = int(segment_index) // layer_count
+    layer_index = int(segment_index) % layer_count
+    candidates: list[int] = []
+    for other_layer in range(layer_count):
+        if other_layer == layer_index:
+            continue
+        other_segment = spin_index * layer_count + other_layer
+        start, stop = segments[other_segment]
+        candidates.extend(range(int(start), int(stop)))
+    return candidates
+
+
+def _order_gamma_references_for_model_basis(
+    references: list[list[tuple[int, complex]]],
+    *,
+    segments: list[tuple[int, int]],
+) -> list[list[tuple[int, complex]]]:
+    return [
+        list(ref)
+        for ref in sorted(
+            references,
+            key=lambda ref: _gamma_reference_sort_key(ref, segments=segments),
+        )
+    ]
 
 
 def _gamma_same_q_row_segments(
@@ -441,23 +523,42 @@ def _complete_gamma_spinful_reference_terms(
         row_mag = np.abs(u[row, :])
         row_norm = max(float(np.linalg.norm(row_mag)), 1.0e-15)
         candidates: list[tuple[float, int, complex, float, float]] = []
-        for partner in (row - 1, row + 1):
-            if partner < 0 or partner >= u.shape[0] or partner in selected:
-                continue
-            if not _same_segment(row, partner, segments):
-                continue
-            lev_ref = max(float(abs(leverage[row])), float(abs(leverage[partner])), 1.0e-15)
-            leverage_rel = float(abs(leverage[row] - leverage[partner]) / lev_ref)
-            if leverage_rel > float(leverage_rtol):
-                continue
-            partner_mag = np.abs(u[partner, :])
-            magnitude_rel = float(np.linalg.norm(row_mag - partner_mag) / row_norm)
-            if magnitude_rel > float(magnitude_rtol):
-                continue
-            for phase in (1.0j, -1.0j):
-                overlap = (u[row, :] + np.conjugate(phase) * u[partner, :]) / np.sqrt(2.0)
-                score = float(np.linalg.norm(overlap))
-                candidates.append((score, int(partner), complex(phase), leverage_rel, magnitude_rel))
+        adjacent_rows = [row - 1, row + 1]
+        segment_index = _segment_index_for_row(row, segments)
+        if segment_index is None:
+            partner_groups = [adjacent_rows]
+        else:
+            start, stop = segments[segment_index]
+            same_segment_rows = [
+                candidate
+                for candidate in range(int(start), int(stop))
+                if candidate not in adjacent_rows and candidate != row
+            ]
+            partner_groups = [adjacent_rows + same_segment_rows, _same_spin_layer_exchange_candidates(row, segments=segments)]
+        partner_scope = "same_segment"
+        for scope_index, partner_rows in enumerate(partner_groups):
+            scope_candidates: list[tuple[float, int, complex, float, float]] = []
+            for partner in partner_rows:
+                if partner < 0 or partner >= u.shape[0] or partner in selected:
+                    continue
+                if scope_index == 0 and not _same_segment(row, partner, segments):
+                    continue
+                lev_ref = max(float(abs(leverage[row])), float(abs(leverage[partner])), 1.0e-15)
+                leverage_rel = float(abs(leverage[row] - leverage[partner]) / lev_ref)
+                if leverage_rel > float(leverage_rtol):
+                    continue
+                partner_mag = np.abs(u[partner, :])
+                magnitude_rel = float(np.linalg.norm(row_mag - partner_mag) / row_norm)
+                if magnitude_rel > float(magnitude_rtol):
+                    continue
+                for phase in (1.0 + 0.0j, -1.0 + 0.0j, 1.0j, -1.0j):
+                    overlap = (u[row, :] + np.conjugate(phase) * u[partner, :]) / np.sqrt(2.0)
+                    score = float(np.linalg.norm(overlap))
+                    scope_candidates.append((score, int(partner), complex(phase), leverage_rel, magnitude_rel))
+            if scope_candidates:
+                candidates = scope_candidates
+                partner_scope = "same_segment" if scope_index == 0 else "same_spin_layer_exchange"
+                break
         if not candidates:
             references.append(_auto_reference_terms(row))
             warnings.append(f"auto gauge gamma spinful row {row} did not find a safe adjacent chiral partner")
@@ -465,15 +566,23 @@ def _complete_gamma_spinful_reference_terms(
             continue
         score, partner, phase, leverage_rel, magnitude_rel = sorted(
             candidates,
-            key=lambda item: (-float(item[0]), abs(int(item[1]) - row), int(item[1]), float(np.imag(item[2]))),
+            key=lambda item: (
+                -float(item[0]),
+                0 if abs(int(item[1]) - row) == 1 else 1,
+                abs(int(item[1]) - row),
+                int(item[1]),
+                float(np.real(item[2])),
+                float(np.imag(item[2])),
+            ),
         )[0]
         references.append([(int(row), 1.0 + 0.0j), (int(partner), phase)])
         details.append(
             {
                 "row": int(row),
                 "partner_row": int(partner),
-                "partner_phase": "1j" if phase == 1.0j else "-1j",
+                "partner_phase": _format_complex_for_report(phase),
                 "pair_score": float(score),
+                "partner_scope": partner_scope,
                 "leverage_relative_difference": float(leverage_rel),
                 "row_magnitude_relative_difference": float(magnitude_rel),
             }
@@ -640,18 +749,23 @@ def resolve_project_gauge_anchors(
             references = [_auto_reference_terms(int(row)) for row in selection.selected_rows]
             completion_details: list[dict[str, Any]] = []
             if spin == "all":
+                segments = _gamma_same_q_row_segments(
+                    u_low.shape[0],
+                    num_layer_list,
+                    num_orb_per_layer_list,
+                    spin=spin,
+                )
                 references, completion_details, completion_warnings = _complete_gamma_spinful_reference_terms(
                     u_low,
                     selection.selected_rows,
-                    segments=_gamma_same_q_row_segments(
-                        u_low.shape[0],
-                        num_layer_list,
-                        num_orb_per_layer_list,
-                        spin=spin,
-                    ),
+                    segments=segments,
                 )
                 warnings.extend(completion_warnings)
-            references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
+                references_by_band = _order_gamma_references_for_model_basis(references, segments=segments)
+                scores = _reference_overlap_scores(u_low, references_by_band)
+                assigned_scores = [float(np.max(scores[index, :])) for index in range(scores.shape[0])]
+            else:
+                references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
             reference_singular_values = _reference_overlap_singular_values(u_low, references_by_band)
             reference_sigma_min = float(np.min(reference_singular_values)) if reference_singular_values.size else 0.0
             reference_sigma_max = float(np.max(reference_singular_values)) if reference_singular_values.size else 0.0
@@ -682,6 +796,8 @@ def resolve_project_gauge_anchors(
                 _format_auto_reference_terms(terms) for terms in references_by_band
             ]
             selections[-1]["assigned_reference_scores"] = [float(score) for score in assigned_scores]
+            selections[-1]["reference_ordering"] = "gamma_model_frame" if spin == "all" else "overlap_assignment"
+            selections[-1]["reference_score_mode"] = "row_max_overlap" if spin == "all" else "assigned_overlap"
             selections[-1]["reference_singular_values"] = [float(value) for value in reference_singular_values.tolist()]
             selections[-1]["reference_sigma_min"] = float(reference_sigma_min)
             selections[-1]["reference_condition_number"] = float(reference_condition)

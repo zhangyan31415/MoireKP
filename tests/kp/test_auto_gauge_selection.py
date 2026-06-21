@@ -121,3 +121,30 @@ def test_gamma_spinful_auto_gauge_completes_adjacent_chiral_pairs() -> None:
     assert [len(ref) for ref in assigned] == [2, 2]
     assert min(scores) > 0.99
     np.testing.assert_allclose(singular_values, [1.0, 1.0], atol=1.0e-12)
+
+
+def test_gamma_spinful_auto_gauge_falls_back_to_same_spin_layer_partner() -> None:
+    u_low = np.zeros((8, 2), dtype=np.complex128)
+    u_low[1, 0] = 0.5
+    u_low[3, 0] = 0.5
+    u_low[5, 1] = 0.5j
+    u_low[7, 1] = 0.5j
+
+    references, details, warnings = _complete_gamma_spinful_reference_terms(
+        u_low,
+        [1, 5],
+        segments=[(0, 2), (2, 4), (4, 6), (6, 8)],
+    )
+    ordered = sorted(references, key=lambda ref: min(row for row, _coef in ref))
+    singular_values = _reference_overlap_singular_values(u_low, ordered)
+
+    assert warnings == []
+    assert [detail["partner_scope"] for detail in details] == [
+        "same_spin_layer_exchange",
+        "same_spin_layer_exchange",
+    ]
+    assert ordered == [
+        [(1, 1.0 + 0.0j), (3, 1.0 + 0.0j)],
+        [(5, 1.0 + 0.0j), (7, 1.0 + 0.0j)],
+    ]
+    np.testing.assert_allclose(singular_values, [1.0 / np.sqrt(2.0), 1.0 / np.sqrt(2.0)])
