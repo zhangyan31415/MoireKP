@@ -73,6 +73,23 @@ V = Y X^dagger
 U_aligned = U_low V
 ```
 
+When the same source config also contains a usable `symm` section
+(`symm.tapw_symmetry_dir` and `symm.operations`), auto gauge generates a small
+deterministic candidate set, projects each candidate through the TAPW raw-H
+symmetry actions, exactifies in memory, and scores the candidates by:
+
+- exactification residual;
+- phase-branch stability;
+- off-support leakage;
+- active-term count when available;
+- deterministic model-frame/layout priority only when the numerical metrics
+  cannot distinguish candidates.
+
+If every candidate fails, or if indistinguishable candidates remain after all
+metrics and priorities, the command fails instead of silently writing a model.
+`kp project` and `kp symm` use this same resolver, so `heff_list.npy` and the
+symmetry manifest are produced in the same resolved gauge.
+
 ## Outputs
 
 `kp project` writes these files in `project.out_dir`:
@@ -88,7 +105,10 @@ The JSON report separates:
 - `gauge_anchor_quality`: rank, singular values, and conditioning of the
   selected anchors.
 - `symmetry_closure_quality`: symmetry validation status. Missing symmetry
-  information is reported as `null` with `not_available`, never as zero.
+  information is reported as `null` with `not_available`, never as zero. When
+  symmetry validation is available this section records the selected candidate,
+  rejected candidates, exactification residuals, phase metrics, and support
+  leakage.
 
 ## Failure Recovery
 

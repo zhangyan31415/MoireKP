@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from contextlib import nullcontext
-from typing import Any, List, Tuple, Literal
+from dataclasses import dataclass
+from typing import Any, List, Mapping, Tuple, Literal
 
 import numpy as np
 import scipy
@@ -18,6 +19,14 @@ from .downfold import (
 from kp.basis.selection import AutoGaugeConfig, GaugeAnchorReport, select_anchor_rows_qrcp
 
 PROJECTOR_BLAS_THREADS = 8
+
+
+@dataclass(frozen=True)
+class ProjectGaugeAnchorCandidate:
+    candidate_id: str
+    resolved_norb_fix_list: list[Any]
+    report: GaugeAnchorReport
+    priority: int = 0
 
 
 def _bounded_blas_threads():
@@ -137,6 +146,12 @@ def _layer_reference_entries(layer_refs: Any, n_bands: int) -> list[Any]:
     return [layer_refs]
 
 
+def _reference_coef_to_complex(value: Any) -> complex:
+    if isinstance(value, Mapping):
+        return complex(float(value.get("real", 0.0)), float(value.get("imag", 0.0)))
+    return complex(value)
+
+
 def _parse_reference_terms(reference: Any, *, context: str) -> list[tuple[int, complex]]:
     raw_items = [reference] if _is_reference_pair(reference) else reference
     if not isinstance(raw_items, (list, tuple)):
@@ -146,12 +161,34 @@ def _parse_reference_terms(reference: Any, *, context: str) -> list[tuple[int, c
     for item in raw_items:
         if _is_reference_pair(item):
             idxc, coef = item
-            terms.append((int(idxc), complex(coef)))
+            terms.append((int(idxc), _reference_coef_to_complex(coef)))
         else:
             terms.append((int(item), complex(1.0)))
     if not terms:
         raise ValueError(f"{context}: empty reference in norb_fix_list")
     return terms
+
+
+def _canonical_resolved_anchor_key(norb_fix_list: Any) -> tuple[Any, ...]:
+    layers: list[Any] = []
+    for layer_index, layer_refs in enumerate(norb_fix_list):
+        entries = _layer_reference_entries(layer_refs, 1 if _is_reference_pair(layer_refs) else len(layer_refs))
+        layer_key: list[Any] = []
+        for ref_index, reference in enumerate(entries):
+            terms = _parse_reference_terms(reference, context=f"canonical anchor layer {layer_index} reference {ref_index}")
+            term_key = tuple(
+                sorted(
+                    (
+                        int(row),
+                        round(float(np.real(coef)), 14),
+                        round(float(np.imag(coef)), 14),
+                    )
+                    for row, coef in terms
+                )
+            )
+            layer_key.append(term_key)
+        layers.append(tuple(layer_key))
+    return tuple(layers)
 
 
 def _resolve_reference_index(
@@ -653,6 +690,130 @@ def _selection_dict(
     }
 
 
+def _auto_gauge_report(
+    *,
+    resolved_norb_fix_list: list[Any],
+    selections: list[dict[str, Any]],
+    warnings: list[str],
+    config: AutoGaugeConfig,
+) -> GaugeAnchorReport:
+    sigma_values = [
+        float(row.get("reference_sigma_min", row["sigma_min"]))
+        for row in selections
+        if row.get("reference_sigma_min", row.get("sigma_min")) is not None
+    ]
+    cond_values = [
+        float(row.get("reference_condition_number", row["condition_number"]))
+        for row in selections
+        if row.get("reference_condition_number", row.get("condition_number")) is not None
+    ]
+    sigma_min = min(sigma_values) if sigma_values else None
+    condition_number = max(cond_values) if cond_values else None
+    return GaugeAnchorReport(
+        gauge_mode="auto_scdm",
+        resolved_norb_fix_list=resolved_norb_fix_list,
+        selections=selections,
+        metric={
+            "type": "orthonormal" if config.basis_is_orthonormal else "overlap_metric",
+            "basis_is_orthonormal": bool(config.basis_is_orthonormal),
+            "formula": "diag(U U^dagger)" if config.basis_is_orthonormal else "diag(S^1/2 U U^dagger S^1/2)",
+        },
+        state_selection_quality={
+            "status": "not_evaluated",
+            "reason": "auto gauge fixes anchors for the configured nlow_state_list only",
+        },
+        gauge_anchor_quality={
+            "status": "ok",
+            "sigma_min": sigma_min,
+            "condition_number": condition_number,
+            "min_sigma": float(config.min_sigma),
+            "max_condition": float(config.max_condition),
+        },
+        symmetry_closure_quality={
+            "status": "not_available",
+            "subspace_leakage": None,
+            "reason": "symmetry validation is not available during gauge resolution",
+        },
+        warnings=warnings,
+    )
+
+
+def _resolved_from_references(
+    owners: list[tuple[int, int]],
+    references_by_band: list[list[tuple[int, complex]]],
+    *,
+    total_layers: int,
+) -> list[Any]:
+    resolved: list[Any] = [[] for _ in range(total_layers)]
+    for (layer, _band_pos), terms in zip(owners, references_by_band):
+        resolved[int(layer)].append(_format_auto_reference_terms(terms))
+    return resolved
+
+
+def _gamma_candidate_from_references(
+    *,
+    candidate_id: str,
+    u_low: np.ndarray,
+    owners: list[tuple[int, int]],
+    bands_flat: list[int],
+    selection,
+    references_by_band: list[list[tuple[int, complex]]],
+    assigned_scores: list[float],
+    total_layers: int,
+    config: AutoGaugeConfig,
+    ref_q: int,
+    reference_ordering: str,
+    reference_score_mode: str,
+    anchor_completion: list[dict[str, Any]] | None = None,
+    warnings: list[str] | None = None,
+    priority: int = 0,
+) -> ProjectGaugeAnchorCandidate:
+    reference_singular_values = _reference_overlap_singular_values(u_low, references_by_band)
+    reference_sigma_min = float(np.min(reference_singular_values)) if reference_singular_values.size else 0.0
+    reference_sigma_max = float(np.max(reference_singular_values)) if reference_singular_values.size else 0.0
+    reference_condition = float("inf") if reference_sigma_min <= 0.0 else float(reference_sigma_max / reference_sigma_min)
+    if reference_sigma_min < config.min_sigma:
+        raise ValueError(
+            f"auto gauge candidate {candidate_id!r} reference sigma_min={reference_sigma_min:.3e} "
+            f"below min_sigma={config.min_sigma:.3e}"
+        )
+    if reference_condition > config.max_condition:
+        raise ValueError(
+            f"auto gauge candidate {candidate_id!r} reference condition_number={reference_condition:.3e} "
+            f"exceeds max_condition={config.max_condition:.3e}"
+        )
+    resolved = _resolved_from_references(owners, references_by_band, total_layers=total_layers)
+    selection_row = _selection_dict(
+        scope="gamma_same_q",
+        bands=bands_flat,
+        selection=selection,
+        q_index=ref_q,
+    )
+    selection_row["candidate_id"] = candidate_id
+    selection_row["resolved_references_by_band"] = [
+        _format_auto_reference_terms(terms) for terms in references_by_band
+    ]
+    selection_row["assigned_reference_scores"] = [float(score) for score in assigned_scores]
+    selection_row["reference_ordering"] = reference_ordering
+    selection_row["reference_score_mode"] = reference_score_mode
+    selection_row["reference_singular_values"] = [float(value) for value in reference_singular_values.tolist()]
+    selection_row["reference_sigma_min"] = float(reference_sigma_min)
+    selection_row["reference_condition_number"] = float(reference_condition)
+    selection_row["anchor_completion"] = [] if anchor_completion is None else list(anchor_completion)
+    report = _auto_gauge_report(
+        resolved_norb_fix_list=resolved,
+        selections=[selection_row],
+        warnings=[] if warnings is None else list(warnings),
+        config=config,
+    )
+    return ProjectGaugeAnchorCandidate(
+        candidate_id=candidate_id,
+        resolved_norb_fix_list=resolved,
+        report=report,
+        priority=int(priority),
+    )
+
+
 def resolve_project_gauge_anchors(
     hamk_reference: np.ndarray,
     q_count: int,
@@ -903,6 +1064,152 @@ def resolve_project_gauge_anchors(
         warnings=warnings,
     )
     return resolved, report
+
+
+def resolve_project_gauge_anchor_candidates(
+    hamk_reference: np.ndarray,
+    q_count: int,
+    orb_per_layer0: int,
+    num_layer_list: List[int],
+    *,
+    spin: Literal["up", "down", "all"] = "up",
+    Qlayer_list: List[List[np.ndarray]] | None = None,
+    num_orb_per_layer_list: List[List[int]] | None = None,
+    nlow_state_list: List[List[int]] | None = None,
+    norb_fix_list: Any = None,
+    gauge_config: Any = None,
+    mode: str = "gamma",
+) -> list[ProjectGaugeAnchorCandidate]:
+    """Return all finite-basis auto-gauge candidates usable by symmetry validation.
+
+    Manual anchors intentionally produce a single candidate.  Auto gauge always
+    keeps the first candidate identical to :func:`resolve_project_gauge_anchors`
+    so callers without symmetry data keep the established structural behavior.
+    """
+
+    resolved, report = resolve_project_gauge_anchors(
+        hamk_reference,
+        q_count,
+        orb_per_layer0,
+        num_layer_list,
+        spin=spin,
+        Qlayer_list=Qlayer_list,
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        nlow_state_list=nlow_state_list,
+        norb_fix_list=norb_fix_list,
+        gauge_config=gauge_config,
+        mode=mode,
+    )
+    auto_from_norb = _is_auto_token(norb_fix_list)
+    auto_from_gauge = _gauge_requests_auto(gauge_config)
+    mode_lower = str(mode).lower()
+    primary_id = (
+        "manual_norb_fix_list"
+        if not (auto_from_norb or auto_from_gauge)
+        else "gamma_model_frame"
+        if mode_lower == "gamma" and spin == "all"
+        else "qrcp_overlap_assignment"
+    )
+    candidates = [ProjectGaugeAnchorCandidate(primary_id, resolved, report, priority=0)]
+    if report.gauge_mode != "auto_scdm" or mode_lower != "gamma" or spin != "all":
+        return candidates
+    if nlow_state_list is None:
+        return candidates
+
+    config = _auto_gauge_config(gauge_config)
+    total_layers = int(sum(int(n) for n in num_layer_list))
+    ref_q = int(config.reference_q_index)
+    if Qlayer_list is None:
+        Qlayer_list = [[np.arange(q_count) for _ in range(n)] for n in num_layer_list]
+    if num_orb_per_layer_list is None:
+        num_orb_per_layer_list = [[int(orb_per_layer0) for _ in range(n)] for n in num_layer_list]
+    _, h_vec_blk, _, _ = get_H_block(
+        np.asarray(hamk_reference, dtype=np.complex128),
+        Qlayer_list,
+        num_layer_list,
+        num_orb_per_layer_list,
+        nlow_state_list,
+        [],
+        spin=spin,
+        mode=mode_lower,
+        selected_bands_by_layer=nlow_state_list,
+    )
+    vec = np.asarray(h_vec_blk[ref_q], dtype=np.complex128)
+    bands_flat: list[int] = []
+    owners: list[tuple[int, int]] = []
+    for layer, bands in enumerate(nlow_state_list):
+        for band_pos, band in enumerate(bands):
+            bands_flat.append(int(band))
+            owners.append((int(layer), int(band_pos)))
+    if not bands_flat:
+        return candidates
+    u_low = vec[:, np.asarray(bands_flat, dtype=np.intp)]
+    selection = select_anchor_rows_qrcp(
+        u_low,
+        n_anchors=len(bands_flat),
+        basis_is_orthonormal=config.basis_is_orthonormal,
+    )
+    segments = _gamma_same_q_row_segments(
+        u_low.shape[0],
+        num_layer_list,
+        num_orb_per_layer_list,
+        spin=spin,
+    )
+
+    raw_references = [_auto_reference_terms(int(row)) for row in selection.selected_rows]
+    completed_references, completion_details, completion_warnings = _complete_gamma_spinful_reference_terms(
+        u_low,
+        selection.selected_rows,
+        segments=segments,
+    )
+
+    candidate_defs: list[tuple[str, list[list[tuple[int, complex]]], str, list[dict[str, Any]], list[str], int]] = [
+        (
+            "gamma_completed_overlap_assignment",
+            completed_references,
+            "overlap_assignment",
+            completion_details,
+            completion_warnings,
+            1,
+        ),
+        (
+            "qrcp_delta_overlap_assignment",
+            raw_references,
+            "overlap_assignment",
+            [],
+            list(selection.warnings),
+            2,
+        ),
+    ]
+    seen = {_canonical_resolved_anchor_key(resolved)}
+    for candidate_id, references, ordering, completion, candidate_warnings, priority in candidate_defs:
+        try:
+            references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
+            candidate = _gamma_candidate_from_references(
+                candidate_id=candidate_id,
+                u_low=u_low,
+                owners=owners,
+                bands_flat=bands_flat,
+                selection=selection,
+                references_by_band=references_by_band,
+                assigned_scores=assigned_scores,
+                total_layers=total_layers,
+                config=config,
+                ref_q=ref_q,
+                reference_ordering=ordering,
+                reference_score_mode="assigned_overlap",
+                anchor_completion=completion,
+                warnings=candidate_warnings,
+                priority=priority,
+            )
+        except ValueError:
+            continue
+        key = _canonical_resolved_anchor_key(candidate.resolved_norb_fix_list)
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
 
 
 def _physical_layer_entry_index(nlow_state_list: Any, num_layer_arr: np.ndarray, group_index: int, layer_in_group: int) -> int:

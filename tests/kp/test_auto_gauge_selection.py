@@ -13,8 +13,10 @@ from kp.basis.selection import (
 )
 from kp.blocks.blocks import (
     _assign_anchor_references_to_bands,
+    _canonical_resolved_anchor_key,
     _complete_gamma_spinful_reference_terms,
     _reference_overlap_singular_values,
+    resolve_project_gauge_anchor_candidates,
 )
 
 
@@ -216,3 +218,97 @@ def test_symmetry_scored_candidate_loop_fails_on_ambiguous_candidates() -> None:
             ],
             max_exactification_distance=1.0e-3,
         )
+
+
+def test_symmetry_scored_candidate_loop_uses_phase_branch_stability() -> None:
+    decision = select_gauge_candidate_by_symmetry(
+        [
+            GaugeCandidateSymmetryMetrics(
+                candidate_id="phase_unstable",
+                exactification_distance_by_op={"T": 1.0e-10},
+                active_term_count=216,
+                phase_branch_distance_by_op={"T": 4.0},
+            ),
+            GaugeCandidateSymmetryMetrics(
+                candidate_id="phase_stable",
+                exactification_distance_by_op={"T": 1.1e-10},
+                active_term_count=216,
+                phase_branch_distance_by_op={"T": 0.05},
+            ),
+        ],
+        max_exactification_distance=1.0e-3,
+    )
+
+    assert decision.selected.candidate_id == "phase_stable"
+    assert decision.rankings[0]["max_phase_branch_distance"] == pytest.approx(0.05)
+
+
+def test_symmetry_scored_candidate_loop_uses_layout_priority_when_metrics_tie() -> None:
+    decision = select_gauge_candidate_by_symmetry(
+        [
+            GaugeCandidateSymmetryMetrics(
+                candidate_id="layout_swapped",
+                exactification_distance_by_op={"TR": 1.0e-10},
+                phase_branch_distance_by_op={"TR": 0.0},
+                support_off_by_op={"TR": 1.0e-12},
+                metadata={"candidate_priority": 1},
+            ),
+            GaugeCandidateSymmetryMetrics(
+                candidate_id="model_frame",
+                exactification_distance_by_op={"TR": 1.0e-10},
+                phase_branch_distance_by_op={"TR": 0.0},
+                support_off_by_op={"TR": 1.0e-12},
+                metadata={"candidate_priority": 0},
+            ),
+        ],
+        max_exactification_distance=1.0e-3,
+    )
+
+    assert decision.selected.candidate_id == "model_frame"
+    assert decision.rankings[0]["candidate_priority"] == 0
+
+
+def test_gamma_spinful_auto_gauge_exposes_multiple_generic_candidates() -> None:
+    trial = np.eye(8, dtype=np.complex128)
+    trial[:, 0] = 0.0
+    trial[1, 0] = 1.0 / np.sqrt(2.0)
+    trial[3, 0] = 1.0 / np.sqrt(2.0)
+    trial[:, 1] = 0.0
+    trial[5, 1] = 1.0 / np.sqrt(2.0)
+    trial[7, 1] = 1.0 / np.sqrt(2.0)
+    unitary, _ = np.linalg.qr(trial)
+    ham = unitary @ np.diag(np.arange(8, dtype=float)) @ unitary.conj().T
+
+    candidates = resolve_project_gauge_anchor_candidates(
+        ham,
+        q_count=1,
+        orb_per_layer0=2,
+        num_layer_list=[1, 1],
+        spin="all",
+        Qlayer_list=[[np.zeros((1, 2), dtype=float)], [np.zeros((1, 2), dtype=float)]],
+        num_orb_per_layer_list=[[2], [2]],
+        nlow_state_list=[[0], [1]],
+        norb_fix_list="auto",
+        gauge_config="auto",
+        mode="gamma",
+    )
+
+    candidate_ids = [candidate.candidate_id for candidate in candidates]
+
+    assert candidate_ids[0] == "gamma_model_frame"
+    assert "gamma_completed_overlap_assignment" in candidate_ids
+    assert "qrcp_delta_overlap_assignment" in candidate_ids
+    assert len({tuple(map(str, candidate.resolved_norb_fix_list)) for candidate in candidates}) >= 2
+    for candidate in candidates:
+        payload = candidate.report.to_dict()
+        assert payload["gauge_mode"] == "auto_scdm"
+        assert payload["symmetry_closure_quality"]["status"] == "not_available"
+        assert "MoTe2" not in str(payload)
+        assert "MgI2" not in str(payload)
+
+
+def test_auto_gauge_candidate_key_ignores_reference_term_order() -> None:
+    left = [[[[52, 1.0], [38, 1.0]]]]
+    right = [[[[38, 1.0], [52, 1.0]]]]
+
+    assert _canonical_resolved_anchor_key(left) == _canonical_resolved_anchor_key(right)

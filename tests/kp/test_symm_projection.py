@@ -17,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.cli as cli
 import kp.symmetry.projection as projection_mod
+from kp.basis.selection import GaugeCandidateSymmetryMetrics
 from kp.model.symmetry import load_symmetry_source
 from kp.symmetry.projection import (
     _build_action_representation,
@@ -42,6 +43,35 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
         self.assertEqual(exc.exception.code, 0)
         self.assertIn("--developer-outputs", stream.getvalue())
+
+    def test_symmetry_validated_auto_gauge_chooses_candidate_by_residual(self) -> None:
+        candidates = [
+            SimpleNamespace(candidate_id="old_auto", resolved_norb_fix_list=[[[0]]]),
+            SimpleNamespace(candidate_id="fixed_auto", resolved_norb_fix_list=[[[1]]]),
+        ]
+
+        selected, decision = projection_mod._select_validated_auto_gauge_candidate(
+            candidates,
+            [
+                GaugeCandidateSymmetryMetrics(
+                    candidate_id="old_auto",
+                    exactification_distance_by_op={"T": 1.414},
+                    active_term_count=10,
+                ),
+                GaugeCandidateSymmetryMetrics(
+                    candidate_id="fixed_auto",
+                    exactification_distance_by_op={"T": 1.0e-12, "C3z": 2.0e-12},
+                    active_term_count=12,
+                ),
+            ],
+            max_exactification_distance=1.0e-3,
+        )
+
+        self.assertEqual(selected.candidate_id, "fixed_auto")
+        self.assertEqual(selected.resolved_norb_fix_list, [[[1]]])
+        self.assertEqual(decision.rankings[0]["candidate_id"], "fixed_auto")
+        self.assertEqual(decision.rankings[-1]["candidate_id"], "old_auto")
+        self.assertEqual(decision.rankings[-1]["status"], "rejected")
 
     def test_projectors_for_k_honors_configured_downfold_method(self) -> None:
         ham = np.diag([0.0, 1.0, 10.0, 20.0]).astype(np.complex128)

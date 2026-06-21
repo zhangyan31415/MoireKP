@@ -99,6 +99,12 @@ remain valid as expert overrides, but they should not be required for ordinary
 finite-basis projection. Auto-gauge reports are written next to `heff_list.npy`
 as `basis_selection.json` and `basis_selection.md`.
 
+If the same source config has a TAPW raw-H symmetry source in `symm`, `kp project`
+and `kp symm` both use the symmetry-scored auto-gauge resolver. The report then
+lists all gauge candidates and rejected residuals. Auto gauge still does not
+choose `nlow_state_list`; it only fixes the gauge of the low subspace the user
+already selected.
+
 Dataset provenance and unresolved release metadata are tracked in
 `examples/data-manifest.yaml`. The release cannot be archived until every
 required external file has a public URL, license, DOI, checksum, runtime class,

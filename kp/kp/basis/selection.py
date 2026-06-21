@@ -298,7 +298,7 @@ def select_gauge_candidate_by_symmetry(
         raise ValueError("ambiguity_exactification_tolerance must be non-negative")
 
     ranked: list[dict[str, Any]] = []
-    valid: list[tuple[tuple[int, float, str], GaugeCandidateSymmetryMetrics, dict[str, Any]]] = []
+    valid: list[tuple[tuple[int, float, float, int, int, float, str], GaugeCandidateSymmetryMetrics, dict[str, Any]]] = []
     for candidate in candidate_list:
         if not candidate.candidate_id:
             raise ValueError("gauge candidate id must be non-empty")
@@ -306,13 +306,33 @@ def select_gauge_candidate_by_symmetry(
             str(op): float(value)
             for op, value in dict(candidate.exactification_distance_by_op).items()
         }
+        phase_distances = {
+            str(op): float(value)
+            for op, value in dict(candidate.phase_branch_distance_by_op).items()
+        }
+        support_off = {
+            str(op): float(value)
+            for op, value in dict(candidate.support_off_by_op).items()
+        }
         finite_distances = [
             value for value in distances.values() if np.isfinite(value) and value >= 0.0
+        ]
+        finite_phase = [
+            value for value in phase_distances.values() if np.isfinite(value) and value >= 0.0
+        ]
+        finite_support = [
+            value for value in support_off.values() if np.isfinite(value) and value >= 0.0
         ]
         reasons: list[str] = []
         if len(finite_distances) != len(distances) or not finite_distances:
             reasons.append("missing_or_invalid_exactification_distance")
+        if len(finite_phase) != len(phase_distances):
+            reasons.append("invalid_phase_branch_distance")
+        if len(finite_support) != len(support_off):
+            reasons.append("invalid_support_off_metric")
         max_distance = max(finite_distances) if finite_distances else None
+        max_phase = max(finite_phase) if finite_phase else None
+        max_support = max(finite_support) if finite_support else None
         if max_distance is not None and max_distance > float(max_exactification_distance):
             reasons.append("exactification_distance_exceeds_threshold")
         active_term_count = candidate.active_term_count
@@ -320,37 +340,76 @@ def select_gauge_candidate_by_symmetry(
             active_term_count = int(active_term_count)
             if active_term_count < 0:
                 reasons.append("active_term_count_is_negative")
+        metadata = dict(candidate.metadata)
+        candidate_priority = int(metadata.get("candidate_priority", 0))
+        if candidate_priority < 0:
+            reasons.append("candidate_priority_is_negative")
         status = "ok" if not reasons else "rejected"
         row: dict[str, Any] = {
             "candidate_id": candidate.candidate_id,
             "status": status,
             "reasons": reasons,
             "max_exactification_distance": max_distance,
+            "max_phase_branch_distance": max_phase,
+            "max_support_off": max_support,
             "exactification_distance_by_op": distances,
             "active_term_count": active_term_count,
-            "phase_branch_distance_by_op": dict(candidate.phase_branch_distance_by_op),
-            "support_off_by_op": dict(candidate.support_off_by_op),
-            "metadata": dict(candidate.metadata),
+            "candidate_priority": candidate_priority,
+            "phase_branch_distance_by_op": phase_distances,
+            "support_off_by_op": support_off,
+            "metadata": metadata,
         }
         active_sort = active_term_count if active_term_count is not None else 10**18
         distance_sort = max_distance if max_distance is not None else float("inf")
-        sort_key = (int(active_sort), float(distance_sort), str(candidate.candidate_id))
-        row["sort_key"] = [sort_key[0], sort_key[1], sort_key[2]]
+        phase_sort = max_phase if max_phase is not None else float("inf")
+        support_sort = max_support if max_support is not None else float("inf")
+        if np.isfinite(distance_sort) and ambiguity_exactification_tolerance > 0.0:
+            distance_bucket = int(np.floor(float(distance_sort) / float(ambiguity_exactification_tolerance)))
+        else:
+            distance_bucket = 10**18
+        sort_key = (
+            int(distance_bucket),
+            float(phase_sort),
+            float(support_sort),
+            int(active_sort),
+            int(candidate_priority),
+            float(distance_sort),
+            str(candidate.candidate_id),
+        )
+        row["sort_key"] = [
+            sort_key[0],
+            sort_key[1],
+            sort_key[2],
+            sort_key[3],
+            sort_key[4],
+            sort_key[5],
+            sort_key[6],
+        ]
         ranked.append(row)
         if status == "ok":
             valid.append((sort_key, candidate, row))
 
     if not valid:
-        ranked.sort(key=lambda item: (item["status"] != "ok", item["sort_key"][0], item["sort_key"][1], item["sort_key"][2]))
+        ranked.sort(key=lambda item: (item["status"] != "ok", *item["sort_key"]))
         raise ValueError(f"No gauge candidate passed symmetry validation: {ranked}")
 
     valid.sort(key=lambda item: item[0])
     best_key, best_candidate, _best_row = valid[0]
     if len(valid) > 1:
         next_key, next_candidate, _next_row = valid[1]
-        same_complexity = best_key[0] == next_key[0]
-        close_residual = abs(float(best_key[1]) - float(next_key[1])) <= float(ambiguity_exactification_tolerance)
-        if same_complexity and close_residual:
+        same_residual_bucket = best_key[0] == next_key[0]
+        close_residual = abs(float(best_key[5]) - float(next_key[5])) <= float(ambiguity_exactification_tolerance)
+        same_phase = (
+            (not np.isfinite(best_key[1]) and not np.isfinite(next_key[1]))
+            or abs(float(best_key[1]) - float(next_key[1])) <= 1.0e-12
+        )
+        same_support = (
+            (not np.isfinite(best_key[2]) and not np.isfinite(next_key[2]))
+            or abs(float(best_key[2]) - float(next_key[2])) <= 1.0e-12
+        )
+        same_complexity = best_key[3] == next_key[3]
+        same_priority = best_key[4] == next_key[4]
+        if same_residual_bucket and close_residual and same_phase and same_support and same_complexity and same_priority:
             raise ValueError(
                 "ambiguous symmetry-validated gauge candidates: "
                 f"{best_candidate.candidate_id!r} and {next_candidate.candidate_id!r}"
@@ -359,9 +418,7 @@ def select_gauge_candidate_by_symmetry(
     ranked.sort(
         key=lambda item: (
             item["status"] != "ok",
-            item["sort_key"][0],
-            item["sort_key"][1],
-            item["sort_key"][2],
+            *item["sort_key"],
         )
     )
     return GaugeCandidateSymmetryDecision(selected=best_candidate, rankings=ranked)

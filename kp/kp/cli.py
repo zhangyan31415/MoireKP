@@ -19,7 +19,7 @@ from .blocks import (
     resolve_project_gauge_anchors,
     set_projector_blas_threads,
 )
-from .basis.selection import write_basis_selection_report
+from .basis.selection import GaugeAnchorReport, write_basis_selection_report
 # Reporting-only downfold helpers were removed from the active core. Keep the
 # old imports here as a reference while the workflow is simplified.
 # from .blocks.downfold import (
@@ -351,6 +351,56 @@ def _as_bool(value: Any) -> bool:
     if isinstance(value, str):
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
     return bool(value)
+
+
+def _is_auto_token(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"auto", "auto_scdm"}
+
+
+def _gauge_requests_auto(gauge_config: Any) -> bool:
+    if _is_auto_token(gauge_config):
+        return True
+    if isinstance(gauge_config, dict):
+        return _is_auto_token(gauge_config.get("method", gauge_config.get("mode")))
+    return False
+
+
+def _project_requests_auto_gauge(project_cfg: dict[str, Any]) -> bool:
+    norb_fix_list = project_cfg.get("norb_fix_list")
+    has_manual = norb_fix_list is not None and not _is_auto_token(norb_fix_list)
+    if has_manual:
+        return False
+    return _is_auto_token(norb_fix_list) or _gauge_requests_auto(project_cfg.get("gauge"))
+
+
+def _symm_can_validate_auto_gauge(symm_cfg: Any) -> bool:
+    if not isinstance(symm_cfg, dict):
+        return False
+    if not _as_bool(symm_cfg.get("enable", True)):
+        return False
+    return bool(symm_cfg.get("tapw_symmetry_dir")) and bool(symm_cfg.get("operations"))
+
+
+def _gauge_report_from_basis_payload(payload: dict[str, Any]) -> GaugeAnchorReport:
+    return GaugeAnchorReport(
+        gauge_mode=str(payload.get("gauge_mode", "auto_scdm")),
+        resolved_norb_fix_list=list(payload.get("resolved_norb_fix_list", [])),
+        selections=list(payload.get("selections", [])),
+        metric=dict(payload.get("metric", {"type": "orthonormal", "basis_is_orthonormal": True})),
+        state_selection_quality=dict(payload.get("state_selection_quality", {"status": "not_evaluated"})),
+        gauge_anchor_quality=dict(payload.get("gauge_anchor_quality", {"status": "unknown"})),
+        symmetry_closure_quality=dict(
+            payload.get(
+                "symmetry_closure_quality",
+                {
+                    "status": "validated",
+                    "source": "kp_symm",
+                    "subspace_leakage": None,
+                },
+            )
+        ),
+        warnings=list(payload.get("warnings", [])),
+    )
 
 
 def parse_int_list(value: str | Sequence[int] | None) -> list[int]:
@@ -1144,19 +1194,53 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     print(method_line)
     projection_spin = "all" if str(spin).lower() == "all" else "up"
     q2_for_projection = q2 if q2 is not None else q1
-    resolved_norb_fix_list, gauge_report = resolve_project_gauge_anchors(
-        _selected_spin_project_input(np.asarray(hamk2d), spin),
-        q_count,
-        orb0,
-        num_layer_list,
-        spin=projection_spin,
-        Qlayer_list=[[q1], [q2_for_projection]],
-        num_orb_per_layer_list=num_orb_per_layer_list,
-        nlow_state_list=nlow_state_list,
-        norb_fix_list=norb_fix_list,
-        gauge_config=project_cfg.get("gauge"),
-        mode=mode,
-    )
+    gauge_report: GaugeAnchorReport | None = None
+    resolved_norb_fix_list: list[Any] | None = None
+    symm_cfg = cfg.get("symm", {})
+    if _project_requests_auto_gauge(project_cfg) and _symm_can_validate_auto_gauge(symm_cfg):
+        print("[kp]   resolving auto gauge with kp symm validation")
+        symm_summary = run_symmetry_projection_from_config(cfg_path)
+        project_basis = symm_summary.get("project_basis", {}) if isinstance(symm_summary, dict) else {}
+        resolved_from_symm = project_basis.get("resolved_norb_fix_list") if isinstance(project_basis, dict) else None
+        if not isinstance(resolved_from_symm, list):
+            raise ValueError("kp symm did not return project_basis.resolved_norb_fix_list for auto gauge")
+        symm_output_dir = resolve(symm_cfg.get("output_dir", "symm_project")) if isinstance(symm_cfg, dict) else None
+        basis_payload: dict[str, Any] | None = None
+        if symm_output_dir is not None:
+            basis_path = Path(symm_output_dir) / "basis_selection.json"
+            if basis_path.exists():
+                basis_payload = json.loads(basis_path.read_text(encoding="utf-8"))
+        if basis_payload is None:
+            basis_payload = {
+                "gauge_mode": project_basis.get("gauge_mode", "auto_scdm") if isinstance(project_basis, dict) else "auto_scdm",
+                "resolved_norb_fix_list": resolved_from_symm,
+                "selections": [],
+                "metric": {"type": "orthonormal", "basis_is_orthonormal": True},
+                "state_selection_quality": {"status": "not_evaluated"},
+                "gauge_anchor_quality": {"status": "unknown"},
+                "symmetry_closure_quality": {
+                    "status": "validated",
+                    "source": "kp_symm",
+                    "subspace_leakage": None,
+                },
+                "warnings": [],
+            }
+        resolved_norb_fix_list = resolved_from_symm
+        gauge_report = _gauge_report_from_basis_payload(basis_payload)
+    else:
+        resolved_norb_fix_list, gauge_report = resolve_project_gauge_anchors(
+            _selected_spin_project_input(np.asarray(hamk2d), spin),
+            q_count,
+            orb0,
+            num_layer_list,
+            spin=projection_spin,
+            Qlayer_list=[[q1], [q2_for_projection]],
+            num_orb_per_layer_list=num_orb_per_layer_list,
+            nlow_state_list=nlow_state_list,
+            norb_fix_list=norb_fix_list,
+            gauge_config=project_cfg.get("gauge"),
+            mode=mode,
+        )
     norb_fix_list = resolved_norb_fix_list
     write_basis_selection_report(out_dir, gauge_report)
     print(f"[kp]   gauge={gauge_report.gauge_mode}")

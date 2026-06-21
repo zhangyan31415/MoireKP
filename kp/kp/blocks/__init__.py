@@ -4,6 +4,8 @@ from .blocks import (
     align_eigenstates,
     get_H_block,
     project_heff_full,
+    ProjectGaugeAnchorCandidate,
+    resolve_project_gauge_anchor_candidates,
     resolve_project_gauge_anchors,
     set_projector_blas_threads,
 )
@@ -13,6 +15,8 @@ __all__ = [
     "align_eigenstates",
     # "get_h_dft_low",
     "project_heff_full",
+    "ProjectGaugeAnchorCandidate",
+    "resolve_project_gauge_anchor_candidates",
     "resolve_project_gauge_anchors",
     "set_projector_blas_threads",
 ]

@@ -38,6 +38,14 @@ def _write_tiny_project_config(tmp_path: Path, project: dict) -> Path:
     return cfg_path
 
 
+def _write_tiny_project_config_with_symm(tmp_path: Path, project: dict, symm: dict) -> Path:
+    cfg_path = _write_tiny_project_config(tmp_path, project)
+    cfg = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    cfg["symm"] = symm
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    return cfg_path
+
+
 def test_project_gauge_auto_writes_basis_selection_reports(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         cli,
@@ -72,6 +80,67 @@ def test_project_gauge_auto_writes_basis_selection_reports(monkeypatch, tmp_path
     assert report["symmetry_closure_quality"]["subspace_leakage"] is None
     assert report["selections"][0]["sigma_min"] > 0.0
     assert "condition_number" in report["selections"][0]
+
+
+def test_project_auto_uses_symmetry_validated_resolved_anchors(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "plot_eigs_scatter",
+        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
+    )
+    selected = [[[[1, 1.0]]], [[[1, 1.0]]]]
+
+    def fake_symm(_cfg_path: str, *, developer_outputs=None):
+        symm_dir = tmp_path / "symm"
+        symm_dir.mkdir()
+        report = {
+            "gauge_mode": "auto_scdm",
+            "resolved_norb_fix_list": selected,
+            "selections": [],
+            "metric": {"type": "orthonormal", "basis_is_orthonormal": True},
+            "state_selection_quality": {"status": "not_evaluated"},
+            "gauge_anchor_quality": {"status": "ok", "sigma_min": 1.0, "condition_number": 1.0},
+            "symmetry_closure_quality": {
+                "status": "validated",
+                "selected_candidate_id": "test_candidate",
+            },
+            "warnings": [],
+        }
+        (symm_dir / "basis_selection.json").write_text(json.dumps(report), encoding="utf-8")
+        return {
+            "project_basis": {
+                "gauge_mode": "auto_scdm",
+                "resolved_norb_fix_list": selected,
+                "basis_selection_report": "basis_selection.json",
+            }
+        }
+
+    monkeypatch.setattr(cli, "run_symmetry_projection_from_config", fake_symm)
+
+    cfg_path = _write_tiny_project_config_with_symm(
+        tmp_path,
+        {
+            "mode": "K1",
+            "workers": 1,
+            "downfold_method": "first_order",
+            "out_dir": "project",
+            "nlow_state_list": [[0], [0]],
+            "gauge": "auto",
+        },
+        {
+            "enable": True,
+            "tapw_symmetry_dir": "tapw_symmetry",
+            "output_dir": "symm",
+            "operations": ["TR"],
+        },
+    )
+    (tmp_path / "tapw_symmetry").mkdir()
+
+    cli.cmd_project_from_config(str(cfg_path))
+
+    report = json.loads((tmp_path / "project" / "basis_selection.json").read_text(encoding="utf-8"))
+    assert report["resolved_norb_fix_list"] == selected
+    assert report["symmetry_closure_quality"]["status"] == "validated"
 
 
 def test_project_rejects_manual_norb_fix_with_auto_gauge(tmp_path: Path) -> None:
