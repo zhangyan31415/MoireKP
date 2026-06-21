@@ -6,6 +6,7 @@ from typing import Any, List, Tuple, Literal
 import numpy as np
 import scipy
 import scipy.linalg
+import scipy.optimize
 
 from .downfold import (
     DownfoldingOptions,
@@ -335,8 +336,179 @@ def _manual_gauge_report(norb_fix_list: Any) -> GaugeAnchorReport:
     )
 
 
-def _auto_reference_entry(row: int) -> list[list[float]]:
-    return [[int(row), 1.0]]
+def _auto_reference_terms(row: int) -> list[tuple[int, complex]]:
+    return [(int(row), 1.0 + 0.0j)]
+
+
+def _format_auto_reference_terms(terms: list[tuple[int, complex]]) -> list[list[Any]]:
+    out: list[list[Any]] = []
+    for row, coef in terms:
+        value = complex(coef)
+        if abs(value.imag) < 1.0e-14:
+            coef_out: Any = float(value.real)
+        elif abs(value.real) < 1.0e-14 and abs(value.imag - 1.0) < 1.0e-14:
+            coef_out = "1j"
+        elif abs(value.real) < 1.0e-14 and abs(value.imag + 1.0) < 1.0e-14:
+            coef_out = "-1j"
+        else:
+            coef_out = {"real": float(value.real), "imag": float(value.imag)}
+        out.append([int(row), coef_out])
+    return out
+
+
+def _reference_overlap_scores(u_low: np.ndarray, references: list[list[tuple[int, complex]]]) -> np.ndarray:
+    u = np.asarray(u_low, dtype=np.complex128)
+    scores = np.zeros((len(references), u.shape[1]), dtype=float)
+    for ref_pos, terms in enumerate(references):
+        overlap = np.zeros(u.shape[1], dtype=np.complex128)
+        norm_sq = 0.0
+        for row, coef in terms:
+            overlap += np.conjugate(complex(coef)) * u[int(row), :]
+            norm_sq += abs(complex(coef)) ** 2
+        if norm_sq <= 0.0:
+            raise ValueError("auto gauge produced a zero-norm reference")
+        scores[ref_pos, :] = np.abs(overlap) / np.sqrt(norm_sq)
+    return scores
+
+
+def _reference_overlap_singular_values(u_low: np.ndarray, references_by_band: list[list[tuple[int, complex]]]) -> np.ndarray:
+    u = np.asarray(u_low, dtype=np.complex128)
+    overlap = np.zeros((len(references_by_band), u.shape[1]), dtype=np.complex128)
+    for ref_pos, terms in enumerate(references_by_band):
+        norm_sq = 0.0
+        for row, coef in terms:
+            overlap[ref_pos, :] += np.conjugate(complex(coef)) * u[int(row), :]
+            norm_sq += abs(complex(coef)) ** 2
+        if norm_sq <= 0.0:
+            raise ValueError("auto gauge produced a zero-norm reference")
+        overlap[ref_pos, :] /= np.sqrt(norm_sq)
+    return np.linalg.svd(overlap, compute_uv=False)
+
+
+def _same_segment(row: int, partner: int, segments: list[tuple[int, int]]) -> bool:
+    for start, stop in segments:
+        if start <= int(row) < stop:
+            return start <= int(partner) < stop
+    return False
+
+
+def _gamma_same_q_row_segments(
+    block_dim: int,
+    num_layer_list: list[int],
+    num_orb_per_layer_list: list[list[int]],
+    *,
+    spin: Literal["up", "down", "all"],
+) -> list[tuple[int, int]]:
+    widths = [int(width) for group in num_orb_per_layer_list for width in group]
+    total_layers = int(sum(int(n) for n in num_layer_list))
+    if len(widths) != total_layers:
+        if total_layers <= 0:
+            return [(0, int(block_dim))]
+        spin_count = 2 if spin == "all" else 1
+        if int(block_dim) % (spin_count * total_layers) != 0:
+            return [(0, int(block_dim))]
+        widths = [int(block_dim) // (spin_count * total_layers)] * total_layers
+    per_spin_dim = int(sum(widths))
+    spin_count = 2 if spin == "all" else 1
+    if int(block_dim) != spin_count * per_spin_dim:
+        return [(0, int(block_dim))]
+    segments: list[tuple[int, int]] = []
+    for spin_index in range(spin_count):
+        offset = spin_index * per_spin_dim
+        cursor = offset
+        for width in widths:
+            segments.append((cursor, cursor + int(width)))
+            cursor += int(width)
+    return segments
+
+
+def _complete_gamma_spinful_reference_terms(
+    u_low: np.ndarray,
+    selected_rows: list[int],
+    *,
+    segments: list[tuple[int, int]],
+    leverage_rtol: float = 1.0e-2,
+    magnitude_rtol: float = 5.0e-2,
+) -> tuple[list[list[tuple[int, complex]]], list[dict[str, Any]], list[str]]:
+    u = np.asarray(u_low, dtype=np.complex128)
+    leverage = np.real(np.sum(np.abs(u) ** 2, axis=1))
+    selected = {int(row) for row in selected_rows}
+    references: list[list[tuple[int, complex]]] = []
+    details: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for row in selected_rows:
+        row = int(row)
+        row_mag = np.abs(u[row, :])
+        row_norm = max(float(np.linalg.norm(row_mag)), 1.0e-15)
+        candidates: list[tuple[float, int, complex, float, float]] = []
+        for partner in (row - 1, row + 1):
+            if partner < 0 or partner >= u.shape[0] or partner in selected:
+                continue
+            if not _same_segment(row, partner, segments):
+                continue
+            lev_ref = max(float(abs(leverage[row])), float(abs(leverage[partner])), 1.0e-15)
+            leverage_rel = float(abs(leverage[row] - leverage[partner]) / lev_ref)
+            if leverage_rel > float(leverage_rtol):
+                continue
+            partner_mag = np.abs(u[partner, :])
+            magnitude_rel = float(np.linalg.norm(row_mag - partner_mag) / row_norm)
+            if magnitude_rel > float(magnitude_rtol):
+                continue
+            for phase in (1.0j, -1.0j):
+                overlap = (u[row, :] + np.conjugate(phase) * u[partner, :]) / np.sqrt(2.0)
+                score = float(np.linalg.norm(overlap))
+                candidates.append((score, int(partner), complex(phase), leverage_rel, magnitude_rel))
+        if not candidates:
+            references.append(_auto_reference_terms(row))
+            warnings.append(f"auto gauge gamma spinful row {row} did not find a safe adjacent chiral partner")
+            details.append({"row": int(row), "partner_row": None, "partner_phase": None, "pair_score": None})
+            continue
+        score, partner, phase, leverage_rel, magnitude_rel = sorted(
+            candidates,
+            key=lambda item: (-float(item[0]), abs(int(item[1]) - row), int(item[1]), float(np.imag(item[2]))),
+        )[0]
+        references.append([(int(row), 1.0 + 0.0j), (int(partner), phase)])
+        details.append(
+            {
+                "row": int(row),
+                "partner_row": int(partner),
+                "partner_phase": "1j" if phase == 1.0j else "-1j",
+                "pair_score": float(score),
+                "leverage_relative_difference": float(leverage_rel),
+                "row_magnitude_relative_difference": float(magnitude_rel),
+            }
+        )
+    return references, details, warnings
+
+
+def _assign_anchor_references_to_bands(
+    u_low: np.ndarray,
+    references: list[list[tuple[int, complex]]],
+) -> tuple[list[list[tuple[int, complex]]], list[float]]:
+    if not references:
+        return [], []
+    u = np.asarray(u_low, dtype=np.complex128)
+    if len(references) != u.shape[1]:
+        raise ValueError(
+            f"anchor assignment requires one reference per low-state column, "
+            f"got {len(references)} references for {u.shape[1]} columns"
+        )
+    scores = _reference_overlap_scores(u, references)
+    tie_break = np.asarray([min(int(row) for row, _coef in ref) for ref in references], dtype=float)[:, np.newaxis]
+    scale = max(float(np.max(np.abs(scores))), 1.0)
+    cost = -scores + 1.0e-14 * scale * tie_break / max(float(u.shape[0]), 1.0)
+    row_ind, col_ind = scipy.optimize.linear_sum_assignment(cost)
+    assigned: list[list[tuple[int, complex]] | None] = [None] * u.shape[1]
+    assigned_scores: list[float | None] = [None] * u.shape[1]
+    for ref_pos, band_pos in zip(row_ind, col_ind):
+        assigned[int(band_pos)] = references[int(ref_pos)]
+        assigned_scores[int(band_pos)] = float(scores[int(ref_pos), int(band_pos)])
+    if any(ref is None for ref in assigned):
+        raise ValueError("anchor assignment failed to cover all low-state columns")
+    return (
+        [list(ref) for ref in assigned if ref is not None],
+        [float(score) for score in assigned_scores if score is not None],
+    )
 
 
 def _selection_dict(
@@ -465,8 +637,39 @@ def resolve_project_gauge_anchors(
                     f"auto gauge condition_number={selection.condition_number:.3e} exceeds "
                     f"max_condition={config.max_condition:.3e}"
                 )
-            for (layer, _band_pos), row in zip(owners, selection.selected_rows):
-                resolved[layer].append(_auto_reference_entry(int(row)))
+            references = [_auto_reference_terms(int(row)) for row in selection.selected_rows]
+            completion_details: list[dict[str, Any]] = []
+            if spin == "all":
+                references, completion_details, completion_warnings = _complete_gamma_spinful_reference_terms(
+                    u_low,
+                    selection.selected_rows,
+                    segments=_gamma_same_q_row_segments(
+                        u_low.shape[0],
+                        num_layer_list,
+                        num_orb_per_layer_list,
+                        spin=spin,
+                    ),
+                )
+                warnings.extend(completion_warnings)
+            references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
+            reference_singular_values = _reference_overlap_singular_values(u_low, references_by_band)
+            reference_sigma_min = float(np.min(reference_singular_values)) if reference_singular_values.size else 0.0
+            reference_sigma_max = float(np.max(reference_singular_values)) if reference_singular_values.size else 0.0
+            reference_condition = (
+                float("inf") if reference_sigma_min <= 0.0 else float(reference_sigma_max / reference_sigma_min)
+            )
+            if reference_sigma_min < config.min_sigma:
+                raise ValueError(
+                    f"auto gauge reference sigma_min={reference_sigma_min:.3e} "
+                    f"below min_sigma={config.min_sigma:.3e}"
+                )
+            if reference_condition > config.max_condition:
+                raise ValueError(
+                    f"auto gauge reference condition_number={reference_condition:.3e} exceeds "
+                    f"max_condition={config.max_condition:.3e}"
+                )
+            for (layer, _band_pos), terms in zip(owners, references_by_band):
+                resolved[layer].append(_format_auto_reference_terms(terms))
             selections.append(
                 _selection_dict(
                     scope="gamma_same_q",
@@ -475,6 +678,14 @@ def resolve_project_gauge_anchors(
                     q_index=ref_q,
                 )
             )
+            selections[-1]["resolved_references_by_band"] = [
+                _format_auto_reference_terms(terms) for terms in references_by_band
+            ]
+            selections[-1]["assigned_reference_scores"] = [float(score) for score in assigned_scores]
+            selections[-1]["reference_singular_values"] = [float(value) for value in reference_singular_values.tolist()]
+            selections[-1]["reference_sigma_min"] = float(reference_sigma_min)
+            selections[-1]["reference_condition_number"] = float(reference_condition)
+            selections[-1]["anchor_completion"] = completion_details
             warnings.extend(selection.warnings)
     else:
         for layer, bands in enumerate(nlow_state_list):
@@ -499,7 +710,25 @@ def resolve_project_gauge_anchors(
                     f"auto gauge layer {layer} condition_number={selection.condition_number:.3e} "
                     f"exceeds max_condition={config.max_condition:.3e}"
                 )
-            resolved[layer] = [_auto_reference_entry(int(row)) for row in selection.selected_rows]
+            references = [_auto_reference_terms(int(row)) for row in selection.selected_rows]
+            references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
+            reference_singular_values = _reference_overlap_singular_values(u_low, references_by_band)
+            reference_sigma_min = float(np.min(reference_singular_values)) if reference_singular_values.size else 0.0
+            reference_sigma_max = float(np.max(reference_singular_values)) if reference_singular_values.size else 0.0
+            reference_condition = (
+                float("inf") if reference_sigma_min <= 0.0 else float(reference_sigma_max / reference_sigma_min)
+            )
+            if reference_sigma_min < config.min_sigma:
+                raise ValueError(
+                    f"auto gauge layer {layer} reference sigma_min={reference_sigma_min:.3e} "
+                    f"below min_sigma={config.min_sigma:.3e}"
+                )
+            if reference_condition > config.max_condition:
+                raise ValueError(
+                    f"auto gauge layer {layer} reference condition_number={reference_condition:.3e} "
+                    f"exceeds max_condition={config.max_condition:.3e}"
+                )
+            resolved[layer] = [_format_auto_reference_terms(terms) for terms in references_by_band]
             selections.append(
                 _selection_dict(
                     scope="physical_layer",
@@ -509,10 +738,25 @@ def resolve_project_gauge_anchors(
                     q_index=ref_q,
                 )
             )
+            selections[-1]["resolved_references_by_band"] = [
+                _format_auto_reference_terms(terms) for terms in references_by_band
+            ]
+            selections[-1]["assigned_reference_scores"] = [float(score) for score in assigned_scores]
+            selections[-1]["reference_singular_values"] = [float(value) for value in reference_singular_values.tolist()]
+            selections[-1]["reference_sigma_min"] = float(reference_sigma_min)
+            selections[-1]["reference_condition_number"] = float(reference_condition)
             warnings.extend(selection.warnings)
 
-    sigma_values = [float(row["sigma_min"]) for row in selections if row.get("sigma_min") is not None]
-    cond_values = [float(row["condition_number"]) for row in selections if row.get("condition_number") is not None]
+    sigma_values = [
+        float(row.get("reference_sigma_min", row["sigma_min"]))
+        for row in selections
+        if row.get("reference_sigma_min", row.get("sigma_min")) is not None
+    ]
+    cond_values = [
+        float(row.get("reference_condition_number", row["condition_number"]))
+        for row in selections
+        if row.get("reference_condition_number", row.get("condition_number")) is not None
+    ]
     sigma_min = min(sigma_values) if sigma_values else None
     condition_number = max(cond_values) if cond_values else None
     report = GaugeAnchorReport(

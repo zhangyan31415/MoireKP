@@ -310,8 +310,8 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
         seen["path"] = path
         return {"configured_model": FakeModelConfig(), "comparison": {"rms_error": 0.0, "max_abs_error": 0.0}}
 
-    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
-        return Path(output_dir)
+    def fake_export(*_args, **_kwargs):
+        raise AssertionError("standalone export should require explicit --export-standalone")
 
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
@@ -340,8 +340,8 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
             "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
         }
 
-    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
-        return Path(output_dir)
+    def fake_export(*_args, **_kwargs):
+        raise AssertionError("standalone export should require explicit --export-standalone")
 
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
@@ -349,6 +349,37 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
     cli.main(["model", "--config", str(cfg_path)])
 
     assert f"[kp model]   band plot: {plot_path.resolve()}" in capsys.readouterr().out
+
+
+def test_cli_model_subcommand_uses_explicit_standalone_export_path(monkeypatch, tmp_path: Path) -> None:
+    import kp.cli as cli
+    import kp.model.export as export_mod
+    import kp.model.pipeline as configured
+
+    cfg_path = tmp_path / "model.yaml"
+    cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
+    model_output = tmp_path / "model_out"
+    export_output = tmp_path / "portable"
+    calls: dict[str, object] = {}
+
+    class FakeModelConfig:
+        output_dir = model_output
+
+    def fake_run(path: str) -> dict:
+        calls["run"] = path
+        return {"configured_model": FakeModelConfig(), "comparison": None}
+
+    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+        calls["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
+        return Path(output_dir)
+
+    monkeypatch.setattr(configured, "run_configured_model", fake_run)
+    monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
+
+    cli.main(["model", "--config", str(cfg_path), "--export-standalone", str(export_output)])
+
+    assert calls["run"] == str(cfg_path)
+    assert calls["export"] == (model_output, export_output, True, False)
 
 
 def test_cli_project_rejects_unimplemented_qdpt2() -> None:

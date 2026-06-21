@@ -215,7 +215,6 @@ def select_anchor_rows_qrcp(
         selected_rows = ordered[:n_anchors]
         actual_method = "leverage_fallback"
 
-    selected_rows = sorted(selected_rows)
     overlap_matrix = row_matrix[np.asarray(selected_rows, dtype=np.intp), :]
     singular_values = np.linalg.svd(overlap_matrix, compute_uv=False)
     rank = int(np.sum(singular_values > float(rank_tol)))

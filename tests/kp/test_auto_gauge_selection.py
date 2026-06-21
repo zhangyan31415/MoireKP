@@ -9,6 +9,11 @@ from kp.basis.selection import (
     polar_align_low_subspace,
     select_anchor_rows_qrcp,
 )
+from kp.blocks.blocks import (
+    _assign_anchor_references_to_bands,
+    _complete_gamma_spinful_reference_terms,
+    _reference_overlap_singular_values,
+)
 
 
 def test_one_dimensional_state_selects_largest_leverage_row() -> None:
@@ -94,3 +99,25 @@ def test_raw_delta_projectors_and_polar_alignment() -> None:
     np.testing.assert_allclose(aligned, phi)
     np.testing.assert_allclose(rotation.conj().T @ rotation, np.eye(2))
     np.testing.assert_allclose(singular_values, [1.0, 1.0])
+
+
+def test_gamma_spinful_auto_gauge_completes_adjacent_chiral_pairs() -> None:
+    u_low = np.zeros((4, 2), dtype=np.complex128)
+    u_low[1, 0] = 1.0 / np.sqrt(2.0)
+    u_low[0, 0] = -1.0j / np.sqrt(2.0)
+    u_low[3, 1] = 1.0 / np.sqrt(2.0)
+    u_low[2, 1] = 1.0j / np.sqrt(2.0)
+
+    references, details, warnings = _complete_gamma_spinful_reference_terms(
+        u_low,
+        [1, 3],
+        segments=[(0, 2), (2, 4)],
+    )
+    assigned, scores = _assign_anchor_references_to_bands(u_low, references)
+    singular_values = _reference_overlap_singular_values(u_low, assigned)
+
+    assert warnings == []
+    assert [detail["partner_row"] for detail in details] == [0, 2]
+    assert [len(ref) for ref in assigned] == [2, 2]
+    assert min(scores) > 0.99
+    np.testing.assert_allclose(singular_values, [1.0, 1.0], atol=1.0e-12)
