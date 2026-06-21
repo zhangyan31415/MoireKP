@@ -1979,13 +1979,19 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
                     "candidate_priority": int(candidate.priority),
                     "sigma_min": candidate.report.gauge_anchor_quality.get("sigma_min"),
                     "condition_number": candidate.report.gauge_anchor_quality.get("condition_number"),
+                    "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
                 },
             )
         except Exception as exc:
             return GaugeCandidateSymmetryMetrics(
                 candidate_id=str(candidate.candidate_id),
                 exactification_distance_by_op={},
-                metadata={"status": "failed", "candidate_priority": int(candidate.priority), "error": str(exc)},
+                metadata={
+                    "status": "failed",
+                    "candidate_priority": int(candidate.priority),
+                    "error": str(exc),
+                    "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
+                },
             )
 
     selected_gauge_candidate = gauge_candidates[0]
@@ -1998,7 +2004,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         selected_gauge_candidate, validation_decision = _select_validated_auto_gauge_candidate(
             gauge_candidates,
             candidate_metrics,
-            max_exactification_distance=float(validation_cfg.get("max_exactification_distance", 1.0e-3)),
+            max_exactification_distance=float(validation_cfg.get("max_exactification_distance", tolerance)),
         )
         gauge_report = replace(
             selected_gauge_candidate.report,

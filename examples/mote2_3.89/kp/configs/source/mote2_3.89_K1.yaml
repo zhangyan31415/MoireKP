@@ -43,9 +43,7 @@ project:
   nlow_state_list:
     - [22]
     - [22]
-  norb_fix_list:
-    - - [[30, 1.0], [29, "-1j"]]
-    - - [[30, 1.0], [29, "-1j"]]
+  gauge: auto
 
 symm:
   enable: true

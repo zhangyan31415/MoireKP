@@ -45,11 +45,7 @@ project:
   nlow_state_list:
   - [22, 23]
   - [22, 23]
-  norb_fix_list:
-  - - [19, 1.0]
-    - [65, 1.0]
-  - - [19, 1.0]
-    - [65, 1.0]
+  gauge: auto
   title: "MgI2 M1 spinful projected Heff"
 
 symm:

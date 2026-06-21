@@ -45,11 +45,7 @@ project:
   nlow_state_list:
   - [44, 45]
   - [44, 45]
-  norb_fix_list:
-  - - [[82, 1.0], [81, "1j"]]
-    - [[30, 1.0], [29, "-1j"]]
-  - - [[82, 1.0], [81, "1j"]]
-    - [[30, 1.0], [29, "-1j"]]
+  gauge: auto
   title: "MoTe2 K1 spinful projected Heff"
 
 symm:

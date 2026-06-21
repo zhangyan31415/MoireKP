@@ -541,6 +541,36 @@ def _gamma_same_q_row_segments(
     return segments
 
 
+def _physical_layer_widths(
+    num_layer_list: list[int],
+    num_orb_per_layer_list: list[list[int]],
+    *,
+    fallback_width: int,
+) -> list[int]:
+    widths = [int(width) for group in num_orb_per_layer_list for width in group]
+    total_layers = int(sum(int(n) for n in num_layer_list))
+    if len(widths) == total_layers:
+        return widths
+    return [int(fallback_width) for _ in range(total_layers)]
+
+
+def _local_layer_row_segments(
+    block_dim: int,
+    layer_width: int,
+    *,
+    spin: Literal["up", "down", "all"],
+) -> list[tuple[int, int]]:
+    if spin != "all":
+        return [(0, int(block_dim))]
+    width = int(layer_width)
+    if width > 0 and int(block_dim) == 2 * width:
+        return [(0, width), (width, 2 * width)]
+    if int(block_dim) % 2 == 0:
+        half = int(block_dim) // 2
+        return [(0, half), (half, int(block_dim))]
+    return [(0, int(block_dim))]
+
+
 def _complete_gamma_spinful_reference_terms(
     u_low: np.ndarray,
     selected_rows: list[int],
@@ -620,6 +650,85 @@ def _complete_gamma_spinful_reference_terms(
                 "partner_phase": _format_complex_for_report(phase),
                 "pair_score": float(score),
                 "partner_scope": partner_scope,
+                "leverage_relative_difference": float(leverage_rel),
+                "row_magnitude_relative_difference": float(magnitude_rel),
+            }
+        )
+    return references, details, warnings
+
+
+def _complete_adjacent_chiral_reference_terms(
+    u_low: np.ndarray,
+    selected_rows: list[int],
+    *,
+    segments: list[tuple[int, int]],
+    conjugate: bool = False,
+    primary: Literal["selected", "higher"] = "selected",
+    partner_policy: Literal["best_adjacent", "lower"] = "best_adjacent",
+    leverage_rtol: float | None = None,
+    magnitude_rtol: float | None = None,
+) -> tuple[list[list[tuple[int, complex]]], list[dict[str, Any]], list[str]]:
+    u = np.asarray(u_low, dtype=np.complex128)
+    leverage = np.real(np.sum(np.abs(u) ** 2, axis=1))
+    selected = {int(row) for row in selected_rows}
+    references: list[list[tuple[int, complex]]] = []
+    details: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    for row in selected_rows:
+        row = int(row)
+        row_mag = np.abs(u[row, :])
+        row_norm = max(float(np.linalg.norm(row_mag)), 1.0e-15)
+        segment_index = _segment_index_for_row(row, segments)
+        phase = -1.0j if segment_index is None or int(segment_index) % 2 == 0 else 1.0j
+        if conjugate:
+            phase = np.conjugate(phase)
+        choices: list[tuple[float, int, float, float, list[tuple[int, complex]]]] = []
+        partner_rows = (row - 1,) if partner_policy == "lower" else (row - 1, row + 1)
+        for partner in partner_rows:
+            if partner < 0 or partner >= u.shape[0] or partner in selected:
+                continue
+            if not _same_segment(row, partner, segments):
+                continue
+            lev_ref = max(float(abs(leverage[row])), float(abs(leverage[partner])), 1.0e-15)
+            leverage_rel = float(abs(leverage[row] - leverage[partner]) / lev_ref)
+            if leverage_rtol is not None and leverage_rel > float(leverage_rtol):
+                continue
+            partner_mag = np.abs(u[partner, :])
+            magnitude_rel = float(np.linalg.norm(row_mag - partner_mag) / row_norm)
+            if magnitude_rtol is not None and magnitude_rel > float(magnitude_rtol):
+                continue
+            if primary == "higher" and int(partner) > int(row):
+                terms = [(int(partner), 1.0 + 0.0j), (int(row), complex(phase))]
+            elif primary == "higher":
+                terms = [(int(row), 1.0 + 0.0j), (int(partner), complex(phase))]
+            elif primary == "selected":
+                terms = [(int(row), 1.0 + 0.0j), (int(partner), complex(phase))]
+            else:
+                raise ValueError(f"unknown adjacent chiral primary policy {primary!r}")
+            overlap = np.zeros(u.shape[1], dtype=np.complex128)
+            for term_row, coef in terms:
+                overlap += np.conjugate(complex(coef)) * u[int(term_row), :]
+            overlap /= np.sqrt(sum(abs(complex(coef)) ** 2 for _term_row, coef in terms))
+            choices.append((float(np.linalg.norm(overlap)), int(partner), leverage_rel, magnitude_rel, terms))
+        if not choices:
+            references.append(_auto_reference_terms(row))
+            warnings.append(f"auto gauge row {row} did not find a safe adjacent chiral partner")
+            details.append({"row": int(row), "partner_row": None, "partner_phase": None, "pair_score": None})
+            continue
+        score, partner, leverage_rel, magnitude_rel, terms = sorted(
+            choices,
+            key=lambda item: (-float(item[0]), abs(int(item[1]) - row), int(item[1])),
+        )[0]
+        references.append(terms)
+        details.append(
+            {
+                "row": int(row),
+                "partner_row": int(partner),
+                "partner_phase": _format_complex_for_report(complex(terms[1][1])),
+                "pair_score": float(score),
+                "partner_scope": "adjacent_same_segment",
+                "primary_policy": primary,
+                "partner_policy": partner_policy,
                 "leverage_relative_difference": float(leverage_rel),
                 "row_magnitude_relative_difference": float(magnitude_rel),
             }
@@ -804,6 +913,213 @@ def _gamma_candidate_from_references(
         resolved_norb_fix_list=resolved,
         selections=[selection_row],
         warnings=[] if warnings is None else list(warnings),
+        config=config,
+    )
+    return ProjectGaugeAnchorCandidate(
+        candidate_id=candidate_id,
+        resolved_norb_fix_list=resolved,
+        report=report,
+        priority=int(priority),
+    )
+
+
+def _non_gamma_candidate_from_kind(
+    *,
+    candidate_id: str,
+    kind: str,
+    h_vec_blk: list[np.ndarray],
+    q_count: int,
+    nlow_state_list: list[list[int]],
+    layer_widths: list[int],
+    total_layers: int,
+    spin: Literal["up", "down", "all"],
+    config: AutoGaugeConfig,
+    ref_q: int,
+    priority: int,
+) -> ProjectGaugeAnchorCandidate | None:
+    resolved: list[Any] = [[] for _ in range(total_layers)]
+    selections: list[dict[str, Any]] = []
+    warnings: list[str] = []
+    any_layer = False
+    template_references: list[list[tuple[int, complex]]] | None = None
+    for layer, bands in enumerate(nlow_state_list):
+        layer_bands = [int(band) for band in bands]
+        if not layer_bands:
+            continue
+        any_layer = True
+        block_index = int(layer) * int(q_count) + int(ref_q)
+        vec = np.asarray(h_vec_blk[block_index], dtype=np.complex128)
+        u_low = vec[:, np.asarray(layer_bands, dtype=np.intp)]
+        selection = select_anchor_rows_qrcp(
+            u_low,
+            n_anchors=len(layer_bands),
+            basis_is_orthonormal=config.basis_is_orthonormal,
+        )
+        if selection.sigma_min < config.min_sigma:
+            raise ValueError(
+                f"auto gauge candidate {candidate_id!r} layer {layer} sigma_min={selection.sigma_min:.3e} "
+                f"below min_sigma={config.min_sigma:.3e}"
+            )
+        if selection.condition_number > config.max_condition:
+            raise ValueError(
+                f"auto gauge candidate {candidate_id!r} layer {layer} condition_number="
+                f"{selection.condition_number:.3e} exceeds max_condition={config.max_condition:.3e}"
+            )
+        segments = _local_layer_row_segments(
+            u_low.shape[0],
+            layer_widths[int(layer)] if int(layer) < len(layer_widths) else u_low.shape[0],
+            spin=spin,
+        )
+        completion_details: list[dict[str, Any]] = []
+        if kind == "raw":
+            references = [_auto_reference_terms(int(row)) for row in selection.selected_rows]
+            reference_score_mode = "assigned_overlap"
+        elif kind == "best_overlap":
+            references, completion_details, completion_warnings = _complete_gamma_spinful_reference_terms(
+                u_low,
+                selection.selected_rows,
+                segments=segments,
+            )
+            warnings.extend(completion_warnings)
+            reference_score_mode = "best_local_pair_overlap"
+        elif kind == "spin_chiral":
+            references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
+                u_low,
+                selection.selected_rows,
+                segments=segments,
+                conjugate=False,
+                primary="selected",
+            )
+            warnings.extend(completion_warnings)
+            reference_score_mode = "spin_chiral_adjacent_pair"
+        elif kind == "spin_chiral_conjugate":
+            references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
+                u_low,
+                selection.selected_rows,
+                segments=segments,
+                conjugate=True,
+                primary="selected",
+            )
+            warnings.extend(completion_warnings)
+            reference_score_mode = "spin_chiral_adjacent_pair_conjugate"
+        elif kind == "spin_chiral_high_row":
+            references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
+                u_low,
+                selection.selected_rows,
+                segments=segments,
+                conjugate=False,
+                primary="higher",
+            )
+            warnings.extend(completion_warnings)
+            reference_score_mode = "spin_chiral_adjacent_pair_high_row_primary"
+        elif kind == "spin_chiral_high_row_model_frame":
+            references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
+                u_low,
+                selection.selected_rows,
+                segments=segments,
+                conjugate=False,
+                primary="higher",
+            )
+            references = _order_gamma_references_for_model_basis(references, segments=segments)
+            warnings.extend(completion_warnings)
+            reference_score_mode = "spin_chiral_adjacent_pair_high_row_model_frame"
+        elif kind == "spin_chiral_high_row_lower_template":
+            if template_references is None:
+                references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
+                    u_low,
+                    selection.selected_rows,
+                    segments=segments,
+                    conjugate=False,
+                    primary="higher",
+                    partner_policy="lower",
+                )
+                if spin == "all":
+                    references = _order_gamma_references_for_model_basis(references, segments=segments)
+                template_references = [list(ref) for ref in references]
+                warnings.extend(completion_warnings)
+            else:
+                references = [list(ref) for ref in template_references]
+                completion_details = [
+                    {
+                        "template_source": "first_nonempty_layer",
+                        "template_reference_index": int(index),
+                    }
+                    for index, _ref in enumerate(references)
+                ]
+            reference_score_mode = "spin_chiral_high_row_lower_template"
+        elif kind == "spin_chiral_high_row_conjugate":
+            references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
+                u_low,
+                selection.selected_rows,
+                segments=segments,
+                conjugate=True,
+                primary="higher",
+            )
+            warnings.extend(completion_warnings)
+            reference_score_mode = "spin_chiral_adjacent_pair_high_row_primary_conjugate"
+        elif kind == "spin_chiral_high_row_conjugate_model_frame":
+            references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
+                u_low,
+                selection.selected_rows,
+                segments=segments,
+                conjugate=True,
+                primary="higher",
+            )
+            references = _order_gamma_references_for_model_basis(references, segments=segments)
+            warnings.extend(completion_warnings)
+            reference_score_mode = "spin_chiral_adjacent_pair_high_row_conjugate_model_frame"
+        else:
+            raise ValueError(f"unknown non-gamma auto gauge candidate kind {kind!r}")
+
+        if kind.endswith("_model_frame") and spin == "all":
+            references_by_band = [list(ref) for ref in references]
+            scores = _reference_overlap_scores(u_low, references_by_band)
+            assigned_scores = [float(np.max(scores[index, :])) for index in range(scores.shape[0])]
+            reference_ordering = "local_model_frame"
+        else:
+            references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
+            reference_ordering = "overlap_assignment"
+        reference_singular_values = _reference_overlap_singular_values(u_low, references_by_band)
+        reference_sigma_min = float(np.min(reference_singular_values)) if reference_singular_values.size else 0.0
+        reference_sigma_max = float(np.max(reference_singular_values)) if reference_singular_values.size else 0.0
+        reference_condition = float("inf") if reference_sigma_min <= 0.0 else float(reference_sigma_max / reference_sigma_min)
+        if reference_sigma_min < config.min_sigma:
+            raise ValueError(
+                f"auto gauge candidate {candidate_id!r} layer {layer} reference sigma_min={reference_sigma_min:.3e} "
+                f"below min_sigma={config.min_sigma:.3e}"
+            )
+        if reference_condition > config.max_condition:
+            raise ValueError(
+                f"auto gauge candidate {candidate_id!r} layer {layer} reference condition_number="
+                f"{reference_condition:.3e} exceeds max_condition={config.max_condition:.3e}"
+            )
+        resolved[int(layer)] = [_format_auto_reference_terms(terms) for terms in references_by_band]
+        selection_row = _selection_dict(
+            scope="physical_layer",
+            layer=int(layer),
+            bands=layer_bands,
+            selection=selection,
+            q_index=ref_q,
+        )
+        selection_row["candidate_id"] = candidate_id
+        selection_row["resolved_references_by_band"] = [
+            _format_auto_reference_terms(terms) for terms in references_by_band
+        ]
+        selection_row["assigned_reference_scores"] = [float(score) for score in assigned_scores]
+        selection_row["reference_ordering"] = reference_ordering
+        selection_row["reference_score_mode"] = reference_score_mode
+        selection_row["reference_singular_values"] = [float(value) for value in reference_singular_values.tolist()]
+        selection_row["reference_sigma_min"] = float(reference_sigma_min)
+        selection_row["reference_condition_number"] = float(reference_condition)
+        selection_row["anchor_completion"] = completion_details
+        selections.append(selection_row)
+        warnings.extend(selection.warnings)
+    if not any_layer:
+        return None
+    report = _auto_gauge_report(
+        resolved_norb_fix_list=resolved,
+        selections=selections,
+        warnings=warnings,
         config=config,
     )
     return ProjectGaugeAnchorCandidate(
@@ -1111,7 +1427,7 @@ def resolve_project_gauge_anchor_candidates(
         else "qrcp_overlap_assignment"
     )
     candidates = [ProjectGaugeAnchorCandidate(primary_id, resolved, report, priority=0)]
-    if report.gauge_mode != "auto_scdm" or mode_lower != "gamma" or spin != "all":
+    if report.gauge_mode != "auto_scdm":
         return candidates
     if nlow_state_list is None:
         return candidates
@@ -1123,6 +1439,66 @@ def resolve_project_gauge_anchor_candidates(
         Qlayer_list = [[np.arange(q_count) for _ in range(n)] for n in num_layer_list]
     if num_orb_per_layer_list is None:
         num_orb_per_layer_list = [[int(orb_per_layer0) for _ in range(n)] for n in num_layer_list]
+    seen = {_canonical_resolved_anchor_key(resolved)}
+    if mode_lower != "gamma":
+        _, h_vec_blk, _, _ = get_H_block(
+            np.asarray(hamk_reference, dtype=np.complex128),
+            Qlayer_list,
+            num_layer_list,
+            num_orb_per_layer_list,
+            nlow_state_list,
+            [],
+            spin=spin,
+            mode=mode_lower,
+            selected_bands_by_layer=nlow_state_list,
+        )
+        layer_widths = _physical_layer_widths(
+            num_layer_list,
+            num_orb_per_layer_list,
+            fallback_width=orb_per_layer0,
+        )
+        candidate_defs = [
+            ("local_completed_overlap_assignment", "best_overlap", 1),
+            ("local_spin_chiral_high_row_lower_template_assignment", "spin_chiral_high_row_lower_template", 2),
+            ("local_spin_chiral_high_row_model_frame_assignment", "spin_chiral_high_row_model_frame", 3),
+            (
+                "local_spin_chiral_high_row_conjugate_model_frame_assignment",
+                "spin_chiral_high_row_conjugate_model_frame",
+                4,
+            ),
+            ("local_spin_chiral_high_row_assignment", "spin_chiral_high_row", 5),
+            ("local_spin_chiral_high_row_conjugate_assignment", "spin_chiral_high_row_conjugate", 6),
+            ("local_spin_chiral_assignment", "spin_chiral", 7),
+            ("local_spin_chiral_conjugate_assignment", "spin_chiral_conjugate", 8),
+            ("qrcp_delta_overlap_assignment", "raw", 9),
+        ]
+        for candidate_id, kind, priority in candidate_defs:
+            try:
+                candidate = _non_gamma_candidate_from_kind(
+                    candidate_id=candidate_id,
+                    kind=kind,
+                    h_vec_blk=h_vec_blk,
+                    q_count=q_count,
+                    nlow_state_list=nlow_state_list,
+                    layer_widths=layer_widths,
+                    total_layers=total_layers,
+                    spin=spin,
+                    config=config,
+                    ref_q=ref_q,
+                    priority=priority,
+                )
+            except ValueError:
+                continue
+            if candidate is None:
+                continue
+            key = _canonical_resolved_anchor_key(candidate.resolved_norb_fix_list)
+            if key in seen:
+                continue
+            seen.add(key)
+            candidates.append(candidate)
+        return candidates
+    if spin != "all":
+        return candidates
     _, h_vec_blk, _, _ = get_H_block(
         np.asarray(hamk_reference, dtype=np.complex128),
         Qlayer_list,
@@ -1181,7 +1557,6 @@ def resolve_project_gauge_anchor_candidates(
             2,
         ),
     ]
-    seen = {_canonical_resolved_anchor_key(resolved)}
     for candidate_id, references, ordering, completion, candidate_warnings, priority in candidate_defs:
         try:
             references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)

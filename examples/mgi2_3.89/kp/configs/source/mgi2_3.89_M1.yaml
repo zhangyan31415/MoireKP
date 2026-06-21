@@ -68,11 +68,7 @@ project:
   #     - [[19,1]]
 
   nlow_state_list: [[11],[11]]
-  norb_fix_list:
-    -  # bottom
-      - [[19,1]]
-    -  # top
-      - [[65,1]]
+  gauge: auto
 
 
 symm:

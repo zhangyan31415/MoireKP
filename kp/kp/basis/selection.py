@@ -297,6 +297,10 @@ def select_gauge_candidate_by_symmetry(
     if ambiguity_exactification_tolerance < 0.0:
         raise ValueError("ambiguity_exactification_tolerance must be non-negative")
 
+    def distance_is_hard_gate(operation: str) -> bool:
+        op = str(operation)
+        return not (op == "T" or op == "TR" or op.endswith("T"))
+
     ranked: list[dict[str, Any]] = []
     valid: list[tuple[tuple[int, float, float, int, int, float, str], GaugeCandidateSymmetryMetrics, dict[str, Any]]] = []
     for candidate in candidate_list:
@@ -317,6 +321,16 @@ def select_gauge_candidate_by_symmetry(
         finite_distances = [
             value for value in distances.values() if np.isfinite(value) and value >= 0.0
         ]
+        hard_gate_distances = [
+            value
+            for op, value in distances.items()
+            if distance_is_hard_gate(op) and np.isfinite(value) and value >= 0.0
+        ]
+        antiunitary_distances = [
+            value
+            for op, value in distances.items()
+            if not distance_is_hard_gate(op) and np.isfinite(value) and value >= 0.0
+        ]
         finite_phase = [
             value for value in phase_distances.values() if np.isfinite(value) and value >= 0.0
         ]
@@ -331,10 +345,14 @@ def select_gauge_candidate_by_symmetry(
         if len(finite_support) != len(support_off):
             reasons.append("invalid_support_off_metric")
         max_distance = max(finite_distances) if finite_distances else None
+        max_hard_gate_distance = max(hard_gate_distances) if hard_gate_distances else max_distance
         max_phase = max(finite_phase) if finite_phase else None
         max_support = max(finite_support) if finite_support else None
-        if max_distance is not None and max_distance > float(max_exactification_distance):
+        if max_hard_gate_distance is not None and max_hard_gate_distance > float(max_exactification_distance):
             reasons.append("exactification_distance_exceeds_threshold")
+        max_antiunitary_distance = max(antiunitary_distances) if antiunitary_distances else None
+        if max_antiunitary_distance is not None and max_antiunitary_distance > 1.0:
+            reasons.append("antiunitary_exactification_distance_exceeds_ceiling")
         active_term_count = candidate.active_term_count
         if active_term_count is not None:
             active_term_count = int(active_term_count)
@@ -350,6 +368,8 @@ def select_gauge_candidate_by_symmetry(
             "status": status,
             "reasons": reasons,
             "max_exactification_distance": max_distance,
+            "max_hard_gate_exactification_distance": max_hard_gate_distance,
+            "max_antiunitary_exactification_distance": max_antiunitary_distance,
             "max_phase_branch_distance": max_phase,
             "max_support_off": max_support,
             "exactification_distance_by_op": distances,
@@ -360,7 +380,7 @@ def select_gauge_candidate_by_symmetry(
             "metadata": metadata,
         }
         active_sort = active_term_count if active_term_count is not None else 10**18
-        distance_sort = max_distance if max_distance is not None else float("inf")
+        distance_sort = max_hard_gate_distance if max_hard_gate_distance is not None else float("inf")
         phase_sort = max_phase if max_phase is not None else float("inf")
         support_sort = max_support if max_support is not None else float("inf")
         if np.isfinite(distance_sort) and ambiguity_exactification_tolerance > 0.0:
