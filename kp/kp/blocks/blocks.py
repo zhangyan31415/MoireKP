@@ -859,6 +859,157 @@ def _resolved_from_references(
     return resolved
 
 
+def _parse_formatted_complex(value: Any) -> complex:
+    if isinstance(value, Mapping):
+        return complex(float(value.get("real", 0.0)), float(value.get("imag", 0.0)))
+    if isinstance(value, str):
+        if value == "1j":
+            return 1.0j
+        if value == "-1j":
+            return -1.0j
+        return complex(value)
+    return complex(value)
+
+
+def _parse_formatted_reference_terms(value: Any) -> list[tuple[int, complex]]:
+    if value is None or value == []:
+        return []
+    if isinstance(value, (int, np.integer)):
+        return [(int(value), 1.0 + 0.0j)]
+    if isinstance(value, tuple):
+        value = list(value)
+    if not isinstance(value, list):
+        raise ValueError(f"cannot parse formatted reference terms from {value!r}")
+    if value and not isinstance(value[0], (list, tuple)):
+        row = int(value[0])
+        coef = _parse_formatted_complex(value[1]) if len(value) > 1 else 1.0 + 0.0j
+        return [(row, coef)]
+    terms: list[tuple[int, complex]] = []
+    for term in value:
+        if not isinstance(term, (list, tuple)) or not term:
+            raise ValueError(f"cannot parse formatted reference term {term!r}")
+        row = int(term[0])
+        coef = _parse_formatted_complex(term[1]) if len(term) > 1 else 1.0 + 0.0j
+        terms.append((row, coef))
+    return terms
+
+
+def _references_by_layer_from_resolved(resolved: list[Any], *, total_layers: int) -> list[list[list[tuple[int, complex]]]]:
+    out: list[list[list[tuple[int, complex]]]] = [[] for _ in range(total_layers)]
+    for layer in range(total_layers):
+        if layer >= len(resolved) or resolved[layer] in (None, []):
+            continue
+        if not isinstance(resolved[layer], list):
+            raise ValueError(f"resolved anchors for layer {layer} must be a list")
+        out[layer] = [_parse_formatted_reference_terms(anchor) for anchor in resolved[layer]]
+    return out
+
+
+def _source_group_layer_ranges(num_layer_list: list[int]) -> list[tuple[int, int, int]]:
+    ranges: list[tuple[int, int, int]] = []
+    cursor = 0
+    for group_index, n_layers in enumerate(num_layer_list):
+        n_layers = int(n_layers)
+        ranges.append((int(group_index), cursor, cursor + n_layers))
+        cursor += n_layers
+    return ranges
+
+
+def _translate_gamma_reference_terms_between_layers(
+    terms: list[tuple[int, complex]],
+    *,
+    source_layer: int,
+    target_layer: int,
+    segments: list[tuple[int, int]],
+) -> list[tuple[int, complex]]:
+    if not terms:
+        return []
+    if len(segments) < 2 or len(segments) % 2 != 0:
+        raise ValueError("gamma source-group translation requires spin-resolved layer segments")
+    layer_count = len(segments) // 2
+    if source_layer < 0 or source_layer >= layer_count or target_layer < 0 or target_layer >= layer_count:
+        raise ValueError("gamma source-group translation layer index is outside segment layout")
+    translated: list[tuple[int, complex]] = []
+    for row, coef in terms:
+        row = int(row)
+        segment_index = _segment_index_for_row(row, segments)
+        if segment_index is None:
+            raise ValueError(f"gamma source-group translation row {row} is outside segment layout")
+        spin_index = int(segment_index) // layer_count
+        layer_index = int(segment_index) % layer_count
+        if layer_index != int(source_layer):
+            raise ValueError(
+                f"gamma source-group translation expected row {row} on layer {source_layer}, "
+                f"got layer {layer_index}"
+            )
+        start, stop = segments[int(segment_index)]
+        local_offset = row - int(start)
+        target_segment = spin_index * layer_count + int(target_layer)
+        target_start, target_stop = segments[target_segment]
+        if local_offset < 0 or int(target_start) + local_offset >= int(target_stop):
+            raise ValueError(
+                f"gamma source-group translation local row offset {local_offset} from layer {source_layer} "
+                f"does not fit target layer {target_layer}"
+            )
+        translated.append((int(target_start) + int(local_offset), complex(coef)))
+    return translated
+
+
+def _gamma_source_group_translated_references(
+    resolved: list[Any],
+    owners: list[tuple[int, int]],
+    *,
+    num_layer_list: list[int],
+    segments: list[tuple[int, int]],
+) -> tuple[list[list[tuple[int, complex]]], list[dict[str, Any]]]:
+    total_layers = int(sum(int(n) for n in num_layer_list))
+    by_layer = _references_by_layer_from_resolved(resolved, total_layers=total_layers)
+    changed = False
+    details: list[dict[str, Any]] = []
+    for group_index, start, stop in _source_group_layer_ranges(num_layer_list):
+        active_layers = [layer for layer in range(start, stop) if by_layer[layer]]
+        if len(active_layers) < 2:
+            continue
+        template_layer = int(active_layers[0])
+        template_refs = by_layer[template_layer]
+        for target_layer in active_layers[1:]:
+            if len(by_layer[target_layer]) != len(template_refs):
+                raise ValueError(
+                    f"gamma source-group translation requires equal anchor counts inside source group {group_index}"
+                )
+            translated_refs: list[list[tuple[int, complex]]] = []
+            for band_pos, terms in enumerate(template_refs):
+                translated = _translate_gamma_reference_terms_between_layers(
+                    terms,
+                    source_layer=template_layer,
+                    target_layer=int(target_layer),
+                    segments=segments,
+                )
+                translated_refs.append(translated)
+                details.append(
+                    {
+                        "source_group": int(group_index),
+                        "template_layer": int(template_layer),
+                        "target_layer": int(target_layer),
+                        "band_position": int(band_pos),
+                        "source_terms": _format_auto_reference_terms(terms),
+                        "translated_terms": _format_auto_reference_terms(translated),
+                    }
+                )
+            by_layer[int(target_layer)] = translated_refs
+            changed = True
+    if not changed:
+        raise ValueError("gamma source-group translation did not change any anchors")
+    references_by_band: list[list[tuple[int, complex]]] = []
+    for layer, band_pos in owners:
+        layer = int(layer)
+        band_pos = int(band_pos)
+        if layer >= len(by_layer) or band_pos >= len(by_layer[layer]):
+            raise ValueError("gamma source-group translation does not cover all low-state owners")
+        references_by_band.append(list(by_layer[layer][band_pos]))
+    return references_by_band, details
+
+
 def _gamma_candidate_from_references(
     *,
     candidate_id: str,
@@ -1539,14 +1690,50 @@ def resolve_project_gauge_anchor_candidates(
         segments=segments,
     )
 
-    candidate_defs: list[tuple[str, list[list[tuple[int, complex]]], str, list[dict[str, Any]], list[str], int]] = [
+    candidate_defs: list[
+        tuple[
+            str,
+            list[list[tuple[int, complex]]],
+            str,
+            list[dict[str, Any]],
+            list[str],
+            int,
+            bool,
+            str,
+        ]
+    ] = []
+    try:
+        translated_references, translation_details = _gamma_source_group_translated_references(
+            resolved,
+            owners,
+            num_layer_list=[int(n) for n in num_layer_list],
+            segments=segments,
+        )
+        candidate_defs.append(
+            (
+                "gamma_source_group_translated_model_frame",
+                translated_references,
+                "source_group_translated_model_frame",
+                translation_details,
+                list(report.warnings) + list(selection.warnings),
+                1,
+                True,
+                "source_group_layer_translation",
+            )
+        )
+    except ValueError:
+        pass
+    candidate_defs.extend(
+        [
         (
             "gamma_completed_overlap_assignment",
             completed_references,
             "overlap_assignment",
             completion_details,
-            completion_warnings,
-            1,
+            list(completion_warnings) + list(selection.warnings),
+            2,
+            False,
+            "assigned_overlap",
         ),
         (
             "qrcp_delta_overlap_assignment",
@@ -1554,12 +1741,29 @@ def resolve_project_gauge_anchor_candidates(
             "overlap_assignment",
             [],
             list(selection.warnings),
-            2,
+            3,
+            False,
+            "assigned_overlap",
         ),
-    ]
-    for candidate_id, references, ordering, completion, candidate_warnings, priority in candidate_defs:
+        ]
+    )
+    for (
+        candidate_id,
+        references,
+        ordering,
+        completion,
+        candidate_warnings,
+        priority,
+        preassigned,
+        reference_score_mode,
+    ) in candidate_defs:
         try:
-            references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
+            if preassigned:
+                references_by_band = [list(ref) for ref in references]
+                scores = _reference_overlap_scores(u_low, references_by_band)
+                assigned_scores = [float(np.max(scores[index, :])) for index in range(scores.shape[0])]
+            else:
+                references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
             candidate = _gamma_candidate_from_references(
                 candidate_id=candidate_id,
                 u_low=u_low,
@@ -1572,7 +1776,7 @@ def resolve_project_gauge_anchor_candidates(
                 config=config,
                 ref_q=ref_q,
                 reference_ordering=ordering,
-                reference_score_mode="assigned_overlap",
+                reference_score_mode=reference_score_mode,
                 anchor_completion=completion,
                 warnings=candidate_warnings,
                 priority=priority,
