@@ -1,0 +1,2129 @@
+from __future__ import annotations
+
+import hashlib
+import json
+import shutil
+from dataclasses import dataclass
+from fractions import Fraction
+from io import BytesIO
+from pathlib import Path
+from typing import Any, Mapping, Sequence
+
+import numpy as np
+import yaml
+
+from .core import (
+    ContinuumModelBuilder,
+    ContinuumTerm,
+    ContinuumTermKey,
+    _compute_one_k,
+    _prepare_band_state,
+    clear_symmetry_caches,
+)
+from .pipeline import build_moire_config_from_file
+
+SCHEMA_VERSION = "standalone-kp-model-v1"
+EXPORTER_VERSION = "0.1"
+P_MATCH_TOLERANCE = 1.0e-5
+FORBIDDEN_PRODUCTION_OPERATION_NAMES = {"C2x", "C2y", "C2yT", "mirror_x", "mirror_y"}
+DEFAULT_TOP_LEVEL_FILES = {"README.md", "MODEL.md", "evaluate.py", "model.json", "model_data.npz"}
+SUPPORTED_VALLEY_TYPES = {"K", "M", "Gamma"}
+SUPPORTED_SPIN_CONVENTIONS = {"spin_up_projected", "spin_down_projected", "spinful", "spinless_effective", "spinless"}
+
+
+@dataclass
+class _StandaloneExport:
+    model_json: dict[str, Any]
+    model_data: dict[str, np.ndarray]
+    readme: str
+    model_doc: str
+    evaluate_py: str
+    debug_files: dict[str, bytes | str]
+
+
+def export_standalone_model(
+    model_output_dir: str | Path,
+    output_dir: str | Path,
+    *,
+    force: bool = False,
+    debug_files: bool = False,
+) -> Path:
+    """Export a fitted configured model as a minimal NumPy-only standalone package."""
+    model_output = Path(model_output_dir).resolve()
+    out = Path(output_dir).resolve()
+    if not model_output.is_dir():
+        raise FileNotFoundError(f"model_output_dir does not exist: {model_output}")
+    if out.exists() and any(out.iterdir()) and not force:
+        raise FileExistsError(f"output_dir already exists and is not empty: {out}")
+    if out.exists() and force:
+        shutil.rmtree(out)
+    out.mkdir(parents=True, exist_ok=True)
+
+    package = _build_standalone_export(model_output, include_debug=debug_files)
+    _assert_clean_text("model.json", json.dumps(package.model_json, sort_keys=True))
+    _assert_clean_text("README.md", package.readme)
+    _assert_clean_text("MODEL.md", package.model_doc)
+
+    (out / "README.md").write_text(package.readme, encoding="utf-8")
+    (out / "MODEL.md").write_text(package.model_doc, encoding="utf-8")
+    (out / "evaluate.py").write_text(package.evaluate_py, encoding="utf-8")
+    (out / "model.json").write_text(
+        json.dumps(package.model_json, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        encoding="utf-8",
+    )
+    _write_npz(out / "model_data.npz", package.model_data)
+
+    if debug_files:
+        for rel, payload in package.debug_files.items():
+            path = out / "debug" / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(payload, bytes):
+                path.write_bytes(payload)
+            else:
+                path.write_text(payload, encoding="utf-8")
+
+    extra = {path.name for path in out.iterdir()} - DEFAULT_TOP_LEVEL_FILES - ({"debug"} if debug_files else set())
+    if extra:
+        raise RuntimeError(f"unexpected files in standalone export: {sorted(extra)}")
+    return out
+
+
+def export_all_standalone_models(
+    examples_root: str | Path,
+    output_root: str | Path,
+    *,
+    force: bool = False,
+    debug_files: bool = False,
+    dry_run: bool = False,
+) -> dict[str, list[dict[str, Any]]]:
+    """Export or inventory all standalone-capable model outputs under examples_root."""
+    examples = Path(examples_root)
+    out_root = Path(output_root)
+    candidates = sorted(path for path in examples.glob("**/kp/outputs/model/*") if path.is_dir())
+    report: dict[str, list[dict[str, Any]]] = {"exportable": [], "blocked": [], "exported": []}
+    for model_output in candidates:
+        out_dir = out_root / f"{model_output.name}_numpy"
+        try:
+            if dry_run:
+                _build_standalone_export(model_output.resolve(), include_debug=debug_files)
+                report["exportable"].append(
+                    {"model_output_dir": str(model_output.resolve()), "output_dir": str(out_dir)}
+                )
+            else:
+                path = export_standalone_model(model_output, out_dir, force=force, debug_files=debug_files)
+                report["exported"].append(
+                    {"model_output_dir": str(model_output.resolve()), "output_dir": str(path)}
+                )
+        except Exception as exc:  # noqa: BLE001 - inventory must report every blocker.
+            report["blocked"].append(
+                {
+                    "model_output_dir": str(model_output.resolve()),
+                    "output_dir": str(out_dir),
+                    "reason": str(exc),
+                    "exception_type": type(exc).__name__,
+                }
+            )
+    return report
+
+
+def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _StandaloneExport:
+    clear_symmetry_caches()
+    _ORBIT_RECORD_CACHE.clear()
+    case_id = model_output.name
+    config_path = _infer_model_config_path(model_output)
+
+    active_terms_path = model_output / "active_terms.json"
+    if not active_terms_path.exists():
+        raise FileNotFoundError(f"active_terms.json is required: {active_terms_path}")
+    active_terms_text = active_terms_path.read_text(encoding="utf-8")
+    active_terms = json.loads(active_terms_text)
+    if not isinstance(active_terms, list) or not active_terms:
+        raise ValueError(f"active_terms.json must contain a non-empty list: {active_terms_path}")
+
+    moire_config, model_config = build_moire_config_from_file(config_path)
+    _validate_supported_export_model(model_config, moire_config)
+
+    qsets = _qset_arrays(moire_config)
+    n_orb_by_qset = _n_orb_by_qset(moire_config)
+    basis_blocks = _basis_blocks(qsets, n_orb_by_qset)
+    dim = sum(int(block["dim"]) for block in basis_blocks)
+    exactified = _load_exactified_matrices(model_config, dim)
+    semantic_terms, runtime_terms = _runtime_terms_from_active_terms(active_terms, moire_config)
+    operator_data = _expand_operator_recipe(runtime_terms, moire_config, dim)
+
+    reference_eigvals = _load_required_array(model_output / "eigvals.npy", "model reference eigenvalues")
+    reference_kpoints = np.asarray(moire_config.kpoints, dtype=float)
+    if reference_kpoints.ndim != 2 or reference_kpoints.shape[1] != 2:
+        raise ValueError(f"reference kpoints must have shape (Nk, 2), got {reference_kpoints.shape}")
+    if reference_eigvals.shape[0] != reference_kpoints.shape[0]:
+        raise ValueError(
+            f"reference eigvals/kpoints length mismatch: {reference_eigvals.shape[0]} vs {reference_kpoints.shape[0]}"
+        )
+    reference_heff_eig = None
+    if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
+        reference_heff_eig = np.load(model_config.heff_eig_file, allow_pickle=False)
+
+    run_summary = _load_json_if_exists(model_output / "run_summary.json")
+    if not isinstance(run_summary, Mapping):
+        run_summary = {}
+    diagnostics_dir = model_output / "diagnostics"
+    comparison = (
+        _load_json_if_exists(model_output / "comparison.json")
+        or _load_json_if_exists(diagnostics_dir / "comparison.json")
+        or run_summary.get("comparison")
+    )
+    comparison_plot = (
+        _load_json_if_exists(model_output / "comparison_plot.json")
+        or _load_json_if_exists(diagnostics_dir / "comparison_plot.json")
+        or run_summary.get("plot_comparison")
+    )
+    validation = _validation_summary(
+        comparison,
+        comparison_plot,
+        reference_heff_eig is not None,
+        reference_heff_eig_shape=None if reference_heff_eig is None else tuple(reference_heff_eig.shape),
+    )
+
+    model_data: dict[str, np.ndarray] = {
+        "qset1": qsets["qset1"],
+        "qset2": qsets["qset2"],
+        "qset_layer1": qsets["qset1"],
+        "qset_layer2": qsets["qset2"],
+        "operator_term_index": operator_data["term_index"],
+        "operator_row": operator_data["row"],
+        "operator_col": operator_data["col"],
+        "operator_mz": operator_data["mz"],
+        "operator_mz_star": operator_data["mz_star"],
+        "operator_q_center": operator_data["q_center"],
+        "operator_prefactor_real": operator_data["prefactor_real"],
+        "operator_prefactor_imag": operator_data["prefactor_imag"],
+        "reference_kpoints": reference_kpoints,
+        "reference_eigvals": np.asarray(reference_eigvals, dtype=float),
+    }
+    for name, matrix in exactified.items():
+        model_data[f"exactified_{name}"] = matrix
+    if reference_heff_eig is not None:
+        model_data["reference_heff_eig"] = np.asarray(reference_heff_eig, dtype=float)
+
+    operations = _portable_operations(model_config, exactified)
+    coordinate_payload = _resolve_standalone_kpath_metadata(model_output, model_config, moire_config)
+    array_hashes, combined_array_hash = _model_data_array_hashes(model_data)
+    model_id = _model_name(case_id, model_config)
+    model_json = {
+        "schema_version": SCHEMA_VERSION,
+        "exporter_version": EXPORTER_VERSION,
+        "model_id": model_id,
+        "model_name": model_id,
+        "material": {"name": str(model_config.source_raw.get("material", {}).get("name", ""))},
+        "valley": str(model_config.raw.get("valley", model_config.valley_model.get("active_valleys", ["K1"])[0])),
+        "spin_convention": str(model_config.valley_model.get("spin_convention", "")),
+        "valley_model": _json_safe(model_config.valley_model),
+        "energy_unit": str(model_config.source_raw.get("material", {}).get("energy_unit", "eV")),
+        "dimension": {
+            "dim": int(dim),
+            "n_orb": {"qset1": int(n_orb_by_qset["qset1"]), "qset2": int(n_orb_by_qset["qset2"])},
+            "q_count": {"qset1": int(len(qsets["qset1"])), "qset2": int(len(qsets["qset2"]))},
+            "q_count_by_qset": {"qset1": int(len(qsets["qset1"])), "qset2": int(len(qsets["qset2"]))},
+            "n_orb_by_qset": {key: int(value) for key, value in n_orb_by_qset.items()},
+            "basis_blocks": basis_blocks,
+        },
+        "basis": {
+            "order": "qset-slot-major, orbital-major within qset slot, q-index fastest",
+            "index_formula": {
+                "qset1": "index = basis_blocks['qset1'].offset + orbital_zero_based * Nq1 + q_index",
+                "qset2": "index = basis_blocks['qset2'].offset + orbital_zero_based * Nq2 + q_index",
+            },
+        },
+        "qsets": [
+            {"name": "qset1", "array_key": "qset1", "slot": 1, "friendly_array_key": "qset_layer1"},
+            {"name": "qset2", "array_key": "qset2", "slot": 2, "friendly_array_key": "qset_layer2"},
+        ],
+        "sectors": _portable_sectors(getattr(moire_config, "sectors", [])),
+        "coordinate_convention": coordinate_payload["coordinate_convention"],
+        "high_symmetry_points": coordinate_payload["high_symmetry_points"],
+        "default_kpath": coordinate_payload["default_kpath"],
+        "points_per_segment": coordinate_payload["points_per_segment"],
+        "default_band_slice": coordinate_payload["default_band_slice"],
+        "energy_reference": _energy_reference(validation),
+        "runtime": {"hermitianize_before_eigvalsh": True, "max_antihermitian_norm": 1.0e-8},
+        "p_match_tolerance": P_MATCH_TOLERANCE,
+        "runtime_recipe": {
+            "array_file": "model_data.npz",
+            "kind": "preexpanded_global_z_zstar_polynomial",
+            "formula": (
+                "H[row,col] += r_real[t] * prefactor_real[c] * z(k)**mz[c] * z*(k)**mz_star[c] "
+                "+ r_imag[t] * prefactor_imag[c] * z(k)**mz[c] * z*(k)**mz_star[c]"
+            ),
+        },
+        "terms": semantic_terms,
+        "operations": operations,
+        "validation": validation,
+        "hashes": {
+            "active_terms_sha256": hashlib.sha256(active_terms_text.encode("utf-8")).hexdigest(),
+            "model_data_arrays": array_hashes,
+            "model_data_arrays_combined_sha256": combined_array_hash,
+        },
+    }
+    model_json["hashes"]["model_json_canonical_sha256"] = _canonical_json_hash(
+        _model_json_for_hash(model_json)
+    )
+    _assert_strict_json("model.json", model_json)
+    _assert_no_forbidden_production_operations(model_json["operations"])
+
+    readme = _render_readme(model_json)
+    model_doc = _render_model_doc(model_json, model_data)
+    debug_payloads: dict[str, bytes | str] = {}
+    if include_debug:
+        debug_payloads = _debug_payloads(
+            model_json=model_json,
+            active_terms=semantic_terms,
+            operations=operations,
+            comparison=comparison or {},
+            model_data=model_data,
+        )
+
+    return _StandaloneExport(
+        model_json=model_json,
+        model_data=model_data,
+        readme=readme,
+        model_doc=model_doc,
+        evaluate_py=_evaluate_py_template(model_json),
+        debug_files=debug_payloads,
+    )
+
+
+def _infer_model_config_path(model_output: Path) -> Path:
+    case_id = model_output.name
+    if model_output.parent.name != "model" or model_output.parent.parent.name != "outputs":
+        raise FileNotFoundError(
+            "Unable to infer model config path. Expected model_output_dir like outputs/model/<case>."
+        )
+    kp_root = model_output.parent.parent.parent
+    candidate = kp_root / "configs" / "model" / f"{case_id}.yaml"
+    if not candidate.exists():
+        raise FileNotFoundError(f"model config is required for standalone export: {candidate}")
+    return candidate
+
+
+def _validate_supported_export_model(model_config: Any, moire_config: Any) -> None:
+    valley_type = str(model_config.valley_model.get("valley_type", ""))
+    mode = str(model_config.valley_model.get("mode", ""))
+    spin = str(model_config.valley_model.get("spin_convention", ""))
+    if valley_type not in SUPPORTED_VALLEY_TYPES:
+        raise NotImplementedError(f"standalone export does not support valley_type={valley_type!r}")
+    if mode != "single_valley":
+        raise NotImplementedError(f"standalone export currently supports only single_valley mode, got {mode!r}")
+    if spin not in SUPPORTED_SPIN_CONVENTIONS:
+        raise NotImplementedError(f"standalone export does not support spin_convention={spin!r}")
+    qsets = _qset_arrays(moire_config)
+    for name, array in qsets.items():
+        if array.ndim != 2 or array.shape[1] != 2:
+            raise ValueError(f"{name} must have shape (N, 2), got {array.shape}")
+    n_orb = _n_orb_by_qset(moire_config)
+    if any(value < 0 for value in n_orb.values()):
+        raise ValueError(f"n_orb values must be non-negative, got {n_orb}")
+    if sum(qsets[key].shape[0] * n_orb[key] for key in ("qset1", "qset2")) <= 0:
+        raise ValueError("standalone export requires at least one active basis state")
+    kpoints = np.asarray(getattr(moire_config, "kpoints", None), dtype=float)
+    if kpoints.ndim != 2 or kpoints.shape[1] != 2:
+        raise ValueError(f"reference kpoints must have shape (Nk, 2), got {kpoints.shape}")
+
+
+def _resolve_standalone_kpath_metadata(model_output: Path, model_config: Any, moire_config: Any) -> dict[str, Any]:
+    """Resolve explicit user-facing coordinate and default kpath metadata."""
+    for filename in ("standalone_export.json", "standalone_export.yaml", "standalone_export.yml"):
+        payload = _load_mapping_file_if_exists(model_output / filename)
+        if payload is not None:
+            resolved = _standalone_payload_from_mapping(
+                payload, model_config, moire_config, source=f"model output {filename}"
+            )
+            if resolved is not None:
+                return resolved
+    raw = getattr(model_config, "raw", {})
+    if isinstance(raw, Mapping) and isinstance(raw.get("standalone_export"), Mapping):
+        resolved = _standalone_payload_from_mapping(
+            raw["standalone_export"], model_config, moire_config, source="model config standalone_export"
+        )
+        if resolved is not None:
+            return resolved
+    from_kpath = _standalone_payload_from_kpath_config(model_config, moire_config)
+    if from_kpath is not None:
+        return from_kpath
+    manifest = _load_mapping_file_if_exists(model_config.path.parents[1] / "data-manifest.yaml")
+    if manifest is not None and isinstance(manifest.get("standalone_export"), Mapping):
+        resolved = _standalone_payload_from_mapping(
+            manifest["standalone_export"], model_config, moire_config, source="example manifest standalone_export"
+        )
+        if resolved is not None:
+            return resolved
+    for filename in ("standalone_export.yaml", "standalone_export.yml", "standalone_export.json"):
+        payload = _load_mapping_file_if_exists(model_config.path.parent / filename)
+        if payload is not None:
+            resolved = _standalone_payload_from_mapping(
+                payload, model_config, moire_config, source=f"model config directory {filename}"
+            )
+            if resolved is not None:
+                return resolved
+
+    raise ValueError(
+        "standalone export requires explicit coordinate convention, high_symmetry_points, and default_kpath "
+        f"for {model_config.path}; add standalone_export.yaml near the model config or a complete kpath section"
+    )
+
+
+def _load_mapping_file_if_exists(path: Path) -> Mapping[str, Any] | None:
+    if not path.exists():
+        return None
+    if path.suffix.lower() == ".json":
+        data = json.loads(path.read_text(encoding="utf-8"))
+    else:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    if data is None:
+        return None
+    if not isinstance(data, Mapping):
+        raise ValueError(f"{path} must contain a mapping")
+    return data
+
+
+def _standalone_payload_from_mapping(
+    payload: Mapping[str, Any],
+    model_config: Any,
+    moire_config: Any,
+    *,
+    source: str,
+) -> dict[str, Any] | None:
+    coord = payload.get("coordinate_convention")
+    hsp = payload.get("high_symmetry_points")
+    kpath = payload.get("default_kpath")
+    if coord is None and hsp is None and kpath is None:
+        return None
+    if not isinstance(coord, Mapping):
+        raise ValueError(f"{source} is missing coordinate_convention mapping")
+    if not isinstance(hsp, Mapping) or not hsp:
+        raise ValueError(f"{source} is missing high_symmetry_points mapping")
+    if not isinstance(kpath, Sequence) or isinstance(kpath, (str, bytes)) or not kpath:
+        raise ValueError(f"{source} is missing default_kpath list")
+    return _normalise_standalone_kpath_payload(
+        coord,
+        hsp,
+        kpath,
+        payload.get("points_per_segment", 80),
+        payload.get("default_band_slice", None),
+        moire_config,
+        source=source,
+    )
+
+
+def _standalone_payload_from_kpath_config(model_config: Any, moire_config: Any) -> dict[str, Any] | None:
+    kpath = getattr(model_config, "kpath_config", {})
+    if not isinstance(kpath, Mapping) or not kpath:
+        return None
+    file_raw = kpath.get("file")
+    if file_raw is None:
+        return None
+    path = Path(str(file_raw))
+    if not path.is_absolute():
+        path = (model_config.path.parent / path).resolve()
+    if not path.exists():
+        return None
+    hsp, labels, default_points = _parse_line_mode_kpath_file(path)
+    if not hsp or len(labels) < 2:
+        return None
+    points_per_segment = kpath.get("segment_points", default_points or 80)
+    coord = {
+        "type": "fractional_model_basis",
+        "k_units": "fractional coordinates in bM1/bM2 basis",
+        "q_units": "same as k",
+        "hsp_coordinates_are": "fractional_model_basis",
+    }
+    return _normalise_standalone_kpath_payload(
+        coord,
+        hsp,
+        labels,
+        points_per_segment,
+        getattr(model_config, "band_slice", None),
+        moire_config,
+        source=f"kpath file {path.name}",
+    )
+
+
+def _parse_line_mode_kpath_file(path: Path) -> tuple[dict[str, list[float]], list[str], int | None]:
+    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    default_points = None
+    for line in lines[:4]:
+        try:
+            default_points = int(line.strip().split()[0])
+            break
+        except Exception:
+            continue
+    hsp: dict[str, list[float]] = {}
+    sequence: list[str] = []
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 4:
+            continue
+        try:
+            coords = [float(parts[0]), float(parts[1])]
+        except ValueError:
+            continue
+        label = _normalise_kpath_label(parts[3])
+        hsp.setdefault(label, coords)
+        sequence.append(label)
+    collapsed: list[str] = []
+    for label in sequence:
+        if not collapsed or collapsed[-1] != label:
+            collapsed.append(label)
+    return hsp, collapsed, default_points
+
+
+def _normalise_kpath_label(label: Any) -> str:
+    text = str(label).strip()
+    if text.lower() in {"gamma", "gam", "g"}:
+        return "G"
+    return text
+
+
+def _normalise_standalone_kpath_payload(
+    coord: Mapping[str, Any],
+    hsp: Mapping[str, Any],
+    kpath: Sequence[Any],
+    points_per_segment: Any,
+    default_band_slice: Any,
+    moire_config: Any,
+    *,
+    source: str,
+) -> dict[str, Any]:
+    coord_type = str(coord.get("type", ""))
+    if coord_type != "fractional_model_basis":
+        raise ValueError(f"{source} coordinate_convention.type must be 'fractional_model_basis', got {coord_type!r}")
+    hsp_out: dict[str, list[float]] = {}
+    for raw_label, raw_point in hsp.items():
+        arr = np.asarray(raw_point, dtype=float).ravel()
+        if arr.shape[0] < 2:
+            raise ValueError(f"{source} high_symmetry_points.{raw_label} must have at least two coordinates")
+        hsp_out[_normalise_kpath_label(raw_label)] = [float(arr[0]), float(arr[1])]
+    kpath_out = [_normalise_kpath_label(label) for label in kpath]
+    missing = [label for label in kpath_out if label not in hsp_out]
+    if missing:
+        raise ValueError(f"{source} default_kpath references missing high_symmetry_points labels: {missing}")
+    segment_count = int(points_per_segment)
+    if segment_count <= 0:
+        raise ValueError(f"{source} points_per_segment must be positive, got {points_per_segment!r}")
+    bM1 = np.asarray(getattr(moire_config, "bM1", None), dtype=float).ravel()
+    bM2 = np.asarray(getattr(moire_config, "bM2", None), dtype=float).ravel()
+    if bM1.shape[0] < 2 or bM2.shape[0] < 2:
+        raise ValueError(f"{source} requires bM1/bM2 to record fractional_model_basis coordinates")
+    coord_out = {
+        "type": "fractional_model_basis",
+        "k_units": str(coord.get("k_units", "fractional coordinates in bM1/bM2 basis")),
+        "q_units": str(coord.get("q_units", "same as k")),
+        "bM1": [float(bM1[0]), float(bM1[1])],
+        "bM2": [float(bM2[0]), float(bM2[1])],
+        "hsp_coordinates_are": str(coord.get("hsp_coordinates_are", "fractional_model_basis")),
+        "source": source,
+    }
+    if coord_out["hsp_coordinates_are"] != coord_out["type"]:
+        raise ValueError(
+            f"{source} hsp_coordinates_are={coord_out['hsp_coordinates_are']!r} does not match "
+            f"coordinate_convention.type={coord_out['type']!r}"
+        )
+    band_slice = None if default_band_slice is None else [int(x) for x in default_band_slice]
+    if band_slice is not None and len(band_slice) != 2:
+        raise ValueError(f"{source} default_band_slice must be null or [start, stop], got {default_band_slice!r}")
+    return {
+        "coordinate_convention": coord_out,
+        "high_symmetry_points": hsp_out,
+        "default_kpath": kpath_out,
+        "points_per_segment": segment_count,
+        "default_band_slice": band_slice,
+    }
+
+
+def _qset_arrays(moire_config: Any) -> dict[str, np.ndarray]:
+    if getattr(moire_config, "Q_set1", None) is None or getattr(moire_config, "Q_set2", None) is None:
+        raise ValueError("standalone export requires two-qset MoireConfig with Q_set1 and Q_set2")
+    return {
+        "qset1": np.asarray(moire_config.Q_set1, dtype=float),
+        "qset2": np.asarray(moire_config.Q_set2, dtype=float),
+    }
+
+
+def _n_orb_by_qset(moire_config: Any) -> dict[str, int]:
+    return {"qset1": int(moire_config.n_orb1), "qset2": int(moire_config.n_orb2)}
+
+
+def _basis_blocks(qsets: Mapping[str, np.ndarray], n_orb_by_qset: Mapping[str, int]) -> list[dict[str, int | str]]:
+    blocks: list[dict[str, int | str]] = []
+    offset = 0
+    for qset_name in ("qset1", "qset2"):
+        q_count = int(np.asarray(qsets[qset_name]).shape[0])
+        n_orb = int(n_orb_by_qset[qset_name])
+        dim = q_count * n_orb
+        blocks.append({"qset": qset_name, "offset": int(offset), "q_count": q_count, "n_orb": n_orb, "dim": int(dim)})
+        offset += dim
+    return blocks
+
+
+def _portable_sectors(sectors: Any) -> list[dict[str, Any]]:
+    if not isinstance(sectors, Sequence) or isinstance(sectors, (str, bytes)):
+        return []
+    rows = []
+    for item in sectors:
+        if not isinstance(item, Mapping):
+            continue
+        row = {
+            "name": str(item.get("name", "")),
+            "qset": str(item.get("qset", "")),
+            "q_offset": [float(x) for x in np.asarray(item.get("q_offset", [0.0, 0.0]), dtype=float).ravel()[:2]],
+            "n_orb": int(item.get("n_orb", 0)),
+        }
+        rows.append(row)
+    return rows
+
+
+def _load_exactified_matrices(model_config: Any, dim: int) -> dict[str, np.ndarray]:
+    out: dict[str, np.ndarray] = {}
+    source_path = model_config.symmetry_source_config.get("path")
+    if source_path is None:
+        raise FileNotFoundError("symmetry_source.path is required for standalone export")
+    symm_dir = Path(str(source_path))
+    if not symm_dir.is_absolute():
+        symm_dir = (model_config.path.parent / symm_dir).resolve()
+    if not symm_dir.is_dir():
+        raise FileNotFoundError(f"symmetry_source.path does not exist: {symm_dir}")
+
+    requested = _production_operation_names(model_config, symm_dir)
+    available: dict[str, Path] = {}
+    for path in symm_dir.glob("exactified_*.npy"):
+        raw_name = path.stem.removeprefix("exactified_")
+        available.setdefault(_operation_family_name(raw_name), path)
+    names = requested or sorted(available)
+    for name in names:
+        if name in FORBIDDEN_PRODUCTION_OPERATION_NAMES:
+            raise ValueError(f"forbidden production operation name in standalone export: {name}")
+        path = available.get(name, symm_dir / f"exactified_{name}.npy")
+        if path.exists():
+            matrix = np.load(path, allow_pickle=False)
+            if matrix.shape != (dim, dim):
+                raise ValueError(f"{path.name} shape {matrix.shape} does not match model dim {dim}")
+            out[name] = np.asarray(matrix, dtype=np.complex128)
+        else:
+            raise FileNotFoundError(f"exactified production symmetry matrix is required: {path}")
+    return out
+
+
+def _production_operation_names(model_config: Any, symm_dir: Path) -> list[str]:
+    names: list[str] = []
+
+    def add_from_record(record: Any) -> None:
+        if not isinstance(record, Mapping):
+            return
+        raw_name = str(record.get("canonical_operation", record.get("name", record.get("operation", ""))))
+        name = _operation_family_name(raw_name)
+        if name and name not in names:
+            names.append(name)
+
+    registry = _load_json_if_exists(model_config.output_dir / "operation_registry.json") if model_config.output_dir else None
+    if isinstance(registry, list):
+        for item in registry:
+            add_from_record(item)
+    for item in model_config.symmetry_source_metadata.get("operations", []):
+        add_from_record(item)
+    configured = model_config.symmetry_source_config.get("operations", [])
+    if isinstance(configured, Mapping):
+        configured = list(configured.values())
+    if isinstance(configured, Sequence) and not isinstance(configured, (str, bytes)):
+        for item in configured:
+            if isinstance(item, str):
+                name = _operation_family_name(item)
+                if name and name not in names:
+                    names.append(name)
+            else:
+                add_from_record(item)
+    if not names:
+        manifest = _load_json_if_exists(symm_dir / "manifest.json")
+        if isinstance(manifest, Mapping):
+            for item in manifest.get("operations", []):
+                add_from_record(item)
+    return names
+
+
+def _operation_family_name(name: str) -> str:
+    raw = str(name).strip()
+    if raw in {"C2x", "C2y", "mirror_x", "mirror_y"}:
+        return "C2"
+    if raw == "C2yT":
+        return "C2T"
+    if raw in {"T", "time_reversal"}:
+        return "TR"
+    return raw
+
+
+def _operation_aliases(name: str, raw_operation: str | None = None) -> list[str]:
+    family = _operation_family_name(name)
+    aliases: list[str] = []
+    if family == "TR":
+        aliases.extend(["T", "time_reversal"])
+    if raw_operation:
+        aliases.append(str(raw_operation))
+    aliases.append(str(name))
+    out: list[str] = []
+    for item in aliases:
+        if item and item not in out:
+            out.append(item)
+    return out
+
+
+def _runtime_terms_from_active_terms(active_terms: list[Mapping[str, Any]], moire_config: Any) -> tuple[list[dict[str, Any]], list[ContinuumTerm]]:
+    semantic: list[dict[str, Any]] = []
+    runtime: list[ContinuumTerm] = []
+    for index, row in enumerate(active_terms):
+        key_data = row.get("key")
+        if not isinstance(key_data, Mapping):
+            raise ValueError(f"active term {index} is missing key")
+        key = _term_key_from_dict(key_data)
+        metadata = _compact_term_metadata(row.get("registry_metadata", {}))
+        sym_ops = row.get("symmetry_ops", [])
+        if not isinstance(sym_ops, Sequence) or isinstance(sym_ops, (str, bytes)):
+            raise ValueError(f"active term {index} has invalid symmetry_ops")
+        operation_names = [str(op.get("name")) for op in sym_ops if isinstance(op, Mapping) and op.get("name") is not None]
+        y_basis = ContinuumModelBuilder.make_Y_basis_function(
+            key,
+            np.asarray(moire_config.Q_set1, dtype=float),
+            np.asarray(moire_config.Q_set2, dtype=float),
+            int(moire_config.n_orb1),
+            int(moire_config.n_orb2),
+            tol=P_MATCH_TOLERANCE,
+        )
+        term = ContinuumTerm(
+            key=key,
+            Y_basis=y_basis,
+            r_value_real=float(np.real(row.get("r_value_real", 0.0))),
+            r_value_imag=float(np.real(row.get("r_value_imag", 0.0))),
+            active=True,
+            tag=str(row.get("tag", "")),
+            symmetry_ops=[dict(op) for op in sym_ops if isinstance(op, Mapping)],
+            registry_metadata=metadata,
+        )
+        runtime.append(term)
+        semantic.append(
+            {
+                "index": index,
+                "key": _term_key_to_json(key),
+                "tag": term.tag,
+                "r_value_real": term.r_value_real,
+                "r_value_imag": term.r_value_imag,
+                "operation_names": operation_names,
+                "metadata": metadata,
+            }
+        )
+    return semantic, runtime
+
+
+def _term_key_from_dict(data: Mapping[str, Any]) -> ContinuumTermKey:
+    return ContinuumTermKey(
+        int(data["Mz"]),
+        int(data["Mz_star"]),
+        int(data["layer_from"]),
+        int(data["layer_to"]),
+        int(data["orbital_from"]),
+        int(data["orbital_to"]),
+        tuple(float(x) for x in data["p"]),
+    )
+
+
+def _term_key_to_json(key: ContinuumTermKey) -> dict[str, Any]:
+    return {
+        "Mz": int(key.Mz),
+        "Mz_star": int(key.Mz_star),
+        "layer_from": int(key.layer_from),
+        "layer_to": int(key.layer_to),
+        "orbital_from": int(key.orbital_from),
+        "orbital_to": int(key.orbital_to),
+        "p": [float(x) for x in key.p],
+    }
+
+
+def _compact_term_metadata(metadata: Any) -> dict[str, Any]:
+    if not isinstance(metadata, Mapping):
+        return {}
+    keep = (
+        "term_name",
+        "term_kind",
+        "sector_pair",
+        "orbital_pair",
+        "harmonic_id",
+        "harmonic_kind",
+        "harmonic_vector",
+        "harmonics_source",
+        "monomial",
+        "coefficient_unit",
+        "coefficient_role",
+    )
+    return {key: _json_safe(metadata[key]) for key in keep if key in metadata}
+
+
+_DENSE_ACTION_ENTRY_TOL = 1.0e-13
+_ORBIT_RECORD_CACHE: dict[tuple[int, tuple[Any, ...]], list[tuple[np.ndarray, Mapping[str, Any] | None]]] = {}
+
+
+def _expand_operator_recipe(runtime_terms: Sequence[ContinuumTerm], moire_config: Any, dim: int) -> dict[str, np.ndarray]:
+    term_index: list[int] = []
+    row: list[int] = []
+    col: list[int] = []
+    mz_values: list[int] = []
+    mz_star_values: list[int] = []
+    q_center: list[tuple[float, float]] = []
+    prefactor_real: list[complex] = []
+    prefactor_imag: list[complex] = []
+
+    for idx, term in enumerate(runtime_terms):
+        if not hasattr(term.Y_basis, "eval_sparse"):
+            raise NotImplementedError("standalone export requires sparse term basis metadata")
+
+        rows = np.asarray(getattr(term.Y_basis, "_moire_sparse_rows"), dtype=int)
+        cols = np.asarray(getattr(term.Y_basis, "_moire_sparse_cols"), dtype=int)
+        row_q_idx = np.asarray(getattr(term.Y_basis, "_moire_sparse_row_q_idx"), dtype=int)
+        q_rows = np.asarray(getattr(term.Y_basis, "_moire_sparse_Q_rows"), dtype=float)
+        hermitize_in_basis = bool(getattr(term.Y_basis, "_moire_sparse_hermitize_in_basis", False))
+        if rows.size == 0:
+            continue
+
+        orbit_records = _orbit_records(term.symmetry_ops, moire_config.symmetry_gen)
+        base_components = [(int(term.key.Mz), int(term.key.Mz_star), 1.0 + 0.0j)]
+        if hermitize_in_basis:
+            base_components.append((int(term.key.Mz_star), int(term.key.Mz), 1.0 + 0.0j))
+
+        term_contributions: list[tuple[int, int, int, int, np.ndarray, complex, complex]] = []
+        for transform, action in orbit_records:
+            for sparse_pos, r_out, c_out, matrix_factor, is_anti_total in _iter_transformed_sparse_entries(
+                action,
+                rows,
+                cols,
+            ):
+                q_base = q_rows[row_q_idx[sparse_pos]]
+                for mz_base, mz_star_base, component_prefactor in base_components:
+                    mz_new, mz_star_new, q_new, transform_prefactor = _transform_monomial(
+                        transform,
+                        q_base,
+                        mz_base,
+                        mz_star_base,
+                    )
+                    prefactor = component_prefactor * transform_prefactor
+                    if is_anti_total:
+                        prefactor = np.conjugate(prefactor)
+                        mz_new, mz_star_new = mz_star_new, mz_new
+                    prefactor *= matrix_factor
+                    real_pref = prefactor
+                    imag_pref = (1j * (-1.0 if is_anti_total else 1.0)) * prefactor
+                    term_contributions.append(
+                        (
+                            int(r_out),
+                            int(c_out),
+                            int(mz_new),
+                            int(mz_star_new),
+                            np.asarray(q_new, dtype=float),
+                            complex(real_pref),
+                            complex(imag_pref),
+                        )
+                    )
+        needs_herm_real, needs_herm_imag = _hermitize_flags_from_operator_contributions(
+            term_contributions,
+            dim,
+        )
+        for r_out, c_out, mz_new, mz_star_new, q_new, real_pref, imag_pref in term_contributions:
+            _append_operator_contribution(
+                idx,
+                int(r_out),
+                int(c_out),
+                mz_new,
+                mz_star_new,
+                q_new,
+                real_pref,
+                imag_pref,
+                term_index,
+                row,
+                col,
+                mz_values,
+                mz_star_values,
+                q_center,
+                prefactor_real,
+                prefactor_imag,
+            )
+            herm_real_pref = np.conjugate(real_pref) if needs_herm_real else 0.0j
+            herm_imag_pref = np.conjugate(imag_pref) if needs_herm_imag else 0.0j
+            if herm_real_pref != 0.0j or herm_imag_pref != 0.0j:
+                _append_operator_contribution(
+                    idx,
+                    int(c_out),
+                    int(r_out),
+                    mz_star_new,
+                    mz_new,
+                    q_new,
+                    herm_real_pref,
+                    herm_imag_pref,
+                    term_index,
+                    row,
+                    col,
+                    mz_values,
+                    mz_star_values,
+                    q_center,
+                    prefactor_real,
+                    prefactor_imag,
+                )
+
+    if not term_index:
+        raise ValueError("runtime recipe expansion produced no operator contributions")
+    return {
+        "term_index": np.asarray(term_index, dtype=np.int64),
+        "row": np.asarray(row, dtype=np.int64),
+        "col": np.asarray(col, dtype=np.int64),
+        "mz": np.asarray(mz_values, dtype=np.int64),
+        "mz_star": np.asarray(mz_star_values, dtype=np.int64),
+        "q_center": np.asarray(q_center, dtype=float),
+        "prefactor_real": np.asarray(prefactor_real, dtype=np.complex128),
+        "prefactor_imag": np.asarray(prefactor_imag, dtype=np.complex128),
+    }
+
+
+def _hermitize_flags_from_operator_contributions(
+    contributions: Sequence[tuple[int, int, int, int, np.ndarray, complex, complex]],
+    dim: int,
+) -> tuple[bool, bool]:
+    if not contributions:
+        return False, False
+    probe_k = np.array([0.137, -0.219], dtype=float)
+    real_matrix = np.zeros((int(dim), int(dim)), dtype=np.complex128)
+    imag_matrix = np.zeros_like(real_matrix)
+    for row_idx, col_idx, mz, mz_star, q, real_pref, imag_pref in contributions:
+        z = (probe_k[0] - float(q[0])) + 1j * (probe_k[1] - float(q[1]))
+        monomial = (z ** int(mz)) * (np.conjugate(z) ** int(mz_star))
+        real_matrix[int(row_idx), int(col_idx)] += complex(real_pref) * monomial
+        imag_matrix[int(row_idx), int(col_idx)] += complex(imag_pref) * monomial
+    return (not np.allclose(real_matrix, real_matrix.conj().T), not np.allclose(imag_matrix, imag_matrix.conj().T))
+
+
+def _append_operator_contribution(
+    term_idx: int,
+    row_idx: int,
+    col_idx: int,
+    mz: int,
+    mz_star: int,
+    q: np.ndarray,
+    real_prefactor: complex,
+    imag_prefactor: complex,
+    term_index: list[int],
+    rows: list[int],
+    cols: list[int],
+    mz_values: list[int],
+    mz_star_values: list[int],
+    q_center: list[tuple[float, float]],
+    prefactor_real: list[complex],
+    prefactor_imag: list[complex],
+) -> None:
+    if abs(real_prefactor) <= 1.0e-13 and abs(imag_prefactor) <= 1.0e-13:
+        return
+    term_index.append(int(term_idx))
+    rows.append(int(row_idx))
+    cols.append(int(col_idx))
+    mz_values.append(int(mz))
+    mz_star_values.append(int(mz_star))
+    q_center.append((float(q[0]), float(q[1])))
+    prefactor_real.append(complex(real_prefactor))
+    prefactor_imag.append(complex(imag_prefactor))
+
+
+def _iter_transformed_sparse_entries(
+    action: Mapping[str, Any] | None,
+    rows: np.ndarray,
+    cols: np.ndarray,
+):
+    if action is None:
+        for sparse_pos, (r_out, c_out) in enumerate(zip(rows, cols)):
+            yield sparse_pos, int(r_out), int(c_out), 1.0 + 0.0j, False
+        return
+
+    kind = str(action.get("kind", ""))
+    if kind == "monomial":
+        perm = np.asarray(action["perm"], dtype=int)
+        vals = np.asarray(action["vals"], dtype=np.complex128)
+        inv_vals = np.asarray(action["inv_vals"], dtype=np.complex128)
+        inv_perm = np.empty_like(perm)
+        inv_perm[perm] = np.arange(perm.shape[0], dtype=int)
+        rr = inv_perm[rows]
+        cc = inv_perm[cols]
+        matrix_factor = vals[rr] * inv_vals[cc]
+        is_anti_total = bool(action.get("is_anti_total", False))
+        for sparse_pos, (r_out, c_out, factor) in enumerate(zip(rr, cc, matrix_factor)):
+            yield sparse_pos, int(r_out), int(c_out), complex(factor), is_anti_total
+        return
+
+    if kind == "dense":
+        left = np.asarray(action["left"], dtype=np.complex128)
+        right = np.asarray(action["right"], dtype=np.complex128)
+        is_anti_total = bool(action.get("is_anti_total", False))
+        for sparse_pos, (row_in, col_in) in enumerate(zip(rows, cols)):
+            left_col = left[:, int(row_in)]
+            right_row = right[int(col_in), :]
+            out_rows = np.flatnonzero(np.abs(left_col) > _DENSE_ACTION_ENTRY_TOL)
+            out_cols = np.flatnonzero(np.abs(right_row) > _DENSE_ACTION_ENTRY_TOL)
+            for r_out in out_rows:
+                left_value = left_col[int(r_out)]
+                for c_out in out_cols:
+                    factor = left_value * right_row[int(c_out)]
+                    if abs(factor) <= _DENSE_ACTION_ENTRY_TOL:
+                        continue
+                    yield sparse_pos, int(r_out), int(c_out), complex(factor), is_anti_total
+        return
+
+    raise ValueError(f"unknown standalone export symmetry action kind {kind!r}")
+
+
+def _orbit_records(sym_ops: Sequence[Mapping[str, Any]], symmetry_gen: Any) -> list[tuple[np.ndarray, Mapping[str, Any] | None]]:
+    if not sym_ops:
+        return [(np.eye(2, dtype=float), None)]
+    sym_ops_list = [dict(op) for op in sym_ops if isinstance(op, Mapping)]
+    cache_key = (id(symmetry_gen), ContinuumModelBuilder._sym_ops_cache_key(sym_ops_list))
+    cached = _ORBIT_RECORD_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
+    _points, op_seqs = ContinuumModelBuilder._generate_symmetry_orbit(np.zeros(2, dtype=float), sym_ops_list)
+    records = []
+    for op_seq in op_seqs:
+        transform = _linear_transform_for_op_seq(op_seq, sym_ops_list)
+        if not op_seq:
+            records.append((transform, None))
+            continue
+        op_seq_applied = tuple(reversed(op_seq))
+        action = ContinuumModelBuilder._get_composed_symmetry_action(symmetry_gen, op_seq_applied)
+        if action is not None and ContinuumModelBuilder._validate_composed_symmetry_action_once(
+            symmetry_gen,
+            op_seq_applied,
+            action,
+        ):
+            perm, vals, inv_vals, is_anti_total = action
+            records.append(
+                (
+                    transform,
+                    {
+                        "kind": "monomial",
+                        "perm": perm,
+                        "vals": vals,
+                        "inv_vals": inv_vals,
+                        "is_anti_total": bool(is_anti_total),
+                    },
+                )
+            )
+            continue
+        records.append((transform, _dense_composed_symmetry_action(symmetry_gen, op_seq_applied)))
+    _ORBIT_RECORD_CACHE[cache_key] = records
+    return records
+
+
+def _dense_composed_symmetry_action(symmetry_gen: Any, op_seq_applied: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+    if symmetry_gen is None:
+        raise ValueError("standalone export requires symmetry_gen when sym_ops is non-empty")
+    left_total: np.ndarray | None = None
+    right_total: np.ndarray | None = None
+    is_anti_total = False
+    dim: int | None = None
+    for op_name, param in op_seq_applied:
+        left_op, right_op, is_anti_op = _dense_single_symmetry_action(symmetry_gen, str(op_name), param)
+        left_op = np.asarray(left_op, dtype=np.complex128)
+        right_op = np.asarray(right_op, dtype=np.complex128)
+        if left_op.ndim != 2 or left_op.shape[0] != left_op.shape[1]:
+            raise ValueError(f"symmetry operator {op_name!r} must be square, got {left_op.shape}")
+        if right_op.shape != left_op.shape:
+            raise ValueError(
+                f"right action for symmetry operator {op_name!r} has shape {right_op.shape}, "
+                f"expected {left_op.shape}"
+            )
+        if dim is None:
+            dim = int(left_op.shape[0])
+            left_total = np.eye(dim, dtype=np.complex128)
+            right_total = np.eye(dim, dtype=np.complex128)
+        elif left_op.shape != (dim, dim):
+            raise ValueError(f"symmetry operator {op_name!r} shape {left_op.shape} does not match {(dim, dim)}")
+        assert left_total is not None and right_total is not None
+        if is_anti_op:
+            left_total = left_op @ left_total.conj()
+            right_total = right_total.conj() @ right_op
+            is_anti_total = not is_anti_total
+        else:
+            left_total = left_op @ left_total
+            right_total = right_total @ right_op
+    if left_total is None or right_total is None:
+        raise ValueError("dense composed symmetry action requires at least one operation")
+    return {
+        "kind": "dense",
+        "left": left_total,
+        "right": right_total,
+        "is_anti_total": bool(is_anti_total),
+    }
+
+
+def _dense_single_symmetry_action(symmetry_gen: Any, op_name: str, param: Any) -> tuple[np.ndarray, np.ndarray, bool]:
+    if op_name == "C3z":
+        left = symmetry_gen.get_operator(op_name, param)
+        right = symmetry_gen.get_operator(op_name, -int(param))
+        return left, right, False
+    if op_name in ContinuumModelBuilder._SYMM_ANTIUNITARY_OPS:
+        left = symmetry_gen.get_operator(op_name, param)
+        return left, np.asarray(left).conj().T, True
+    if op_name in ContinuumModelBuilder._SYMM_UNITARY_OPS:
+        left = symmetry_gen.get_operator(op_name, param)
+        return left, np.asarray(left).conj().T, False
+    raise ValueError(f"Unknown symmetry operation: {op_name}")
+
+
+def _linear_transform_for_op_seq(op_seq: Sequence[tuple[str, Any]], sym_ops: Sequence[Mapping[str, Any]]) -> np.ndarray:
+    op_by_name = {str(op["name"]): op for op in sym_ops if isinstance(op, Mapping) and "name" in op}
+    basis = np.eye(2, dtype=float)
+    columns = []
+    for vector in basis:
+        out = np.asarray(vector, dtype=float)
+        for op_name, param in op_seq:
+            operation = op_by_name[str(op_name)]
+            out = ContinuumModelBuilder._apply_k_map_to_vector(
+                out,
+                operation,
+                power=None if param is None else int(param),
+            )
+        columns.append(out)
+    return np.column_stack(columns)
+
+
+def _transform_monomial(transform: np.ndarray, q_base: np.ndarray, mz: int, mz_star: int) -> tuple[int, int, np.ndarray, complex]:
+    q_center = np.linalg.solve(transform, np.asarray(q_base, dtype=float))
+    z_e1 = complex(transform[0, 0], transform[1, 0])
+    z_e2 = complex(transform[0, 1], transform[1, 1])
+    det = float(np.linalg.det(transform))
+    if det > 0:
+        alpha = z_e1
+        if not np.allclose(z_e2, 1j * alpha, atol=1.0e-8, rtol=0.0):
+            raise NotImplementedError("standalone export supports only conformal rotation k maps")
+        prefactor = (alpha**mz) * (np.conjugate(alpha) ** mz_star)
+        return int(mz), int(mz_star), q_center, complex(prefactor)
+    alpha = z_e1
+    if not np.allclose(z_e2, -1j * alpha, atol=1.0e-8, rtol=0.0):
+        raise NotImplementedError("standalone export supports only reflection k maps")
+    prefactor = (alpha**mz) * (np.conjugate(alpha) ** mz_star)
+    return int(mz_star), int(mz), q_center, complex(prefactor)
+
+
+def _portable_operations(model_config: Any, exactified: Mapping[str, np.ndarray]) -> list[dict[str, Any]]:
+    rows = []
+    registry = _load_json_if_exists(model_config.output_dir / "operation_registry.json") if model_config.output_dir else None
+    source = registry if isinstance(registry, list) else model_config.symmetry_source_metadata.get("operations", [])
+    for item in source:
+        if not isinstance(item, Mapping):
+            continue
+        raw_name = str(item.get("canonical_operation", item.get("name", item.get("operation", ""))))
+        name = _operation_family_name(raw_name)
+        if not name or name not in exactified:
+            continue
+        raw_operation = str(item.get("source_operation", item.get("operation", raw_name)))
+        rows.append(
+            {
+                "name": name,
+                "family": "T" if name == "TR" else name,
+                "aliases": _operation_aliases(name, raw_operation),
+                "operation": raw_operation,
+                "antiunitary": bool(item.get("antiunitary", False)),
+                "k_map": _json_safe(item.get("k_map", item.get("internal_resolved_action", {}).get("k_map"))),
+                "q_map": _json_safe(item.get("q_map", item.get("internal_resolved_action", {}).get("q_map"))),
+                "sector_map": _json_safe(item.get("sector_map", item.get("internal_resolved_action", {}).get("sector_map"))),
+                "matrix_array_key": f"exactified_{name}",
+                "matrix_kind": str(item.get("matrix_kind", "continuum_internal_rep_exact")),
+                "target_role": str(item.get("target_role", "continuum_internal_rep")),
+            }
+        )
+    if not rows:
+        for name in exactified:
+            rows.append(
+                {
+                    "name": name,
+                    "family": "T" if name == "TR" else name,
+                    "aliases": _operation_aliases(name, name),
+                    "operation": name,
+                    "antiunitary": name in {"C2T", "TR"},
+                    "matrix_array_key": f"exactified_{name}",
+                    "matrix_kind": "continuum_internal_rep_exact",
+                    "target_role": "continuum_internal_rep",
+                }
+            )
+    return rows
+
+
+def _assert_no_forbidden_production_operations(operations: Sequence[Mapping[str, Any]]) -> None:
+    for op in operations:
+        name = str(op.get("name", ""))
+        if name in FORBIDDEN_PRODUCTION_OPERATION_NAMES:
+            raise ValueError(f"forbidden production operation name in standalone export: {name}")
+
+
+def _validation_summary(
+    comparison: Any,
+    comparison_plot: Any,
+    has_heff_eig: bool,
+    *,
+    reference_heff_eig_shape: Sequence[int] | None = None,
+) -> dict[str, Any]:
+    comparison_record = comparison_plot if isinstance(comparison_plot, Mapping) else comparison
+    if not isinstance(comparison_record, Mapping):
+        comparison_record = {}
+    band_window = comparison_record.get("band_slice")
+    compared_band_count = comparison_record.get("num_bands")
+    kpoint_count = comparison_record.get("num_kpoints")
+    rms_mev = comparison_record.get("rms_error_mev", comparison_record.get("aligned_rms_error_meV"))
+    max_mev = comparison_record.get("max_abs_error_mev", comparison_record.get("aligned_max_abs_error_meV"))
+    reference_arrays = {"eigvals": "model_data.npz:reference_eigvals"}
+    if has_heff_eig:
+        reference_arrays["heff_eig"] = "model_data.npz:reference_heff_eig"
+    summary: dict[str, Any] = {
+        "reference_kind": str(comparison_record.get("reference_kind", "packaged_reference_eigvals")),
+        "band_window": None if band_window is None else [int(x) for x in band_window],
+        "compared_band_count": None if compared_band_count is None else int(compared_band_count),
+        "kpoint_count": None if kpoint_count is None else int(kpoint_count),
+        "alignment": comparison_record.get("align", comparison_record.get("alignment")),
+        "rms_error_mev": None if rms_mev is None else float(rms_mev),
+        "max_error_mev": None if max_mev is None else float(max_mev),
+        "reference_arrays": reference_arrays,
+        "reference_heff_eig_shape": None if reference_heff_eig_shape is None else [int(x) for x in reference_heff_eig_shape],
+        "is_full_tapw_validation": False,
+    }
+    if isinstance(comparison, Mapping):
+        summary["comparison_raw"] = _json_safe(comparison)
+    if isinstance(comparison_plot, Mapping):
+        summary["plot_comparison_raw"] = _json_safe(comparison_plot)
+    return summary
+
+
+def _energy_reference(validation: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        "output_bands": "raw_model_eigenvalues",
+        "zero_eV": None,
+        "validation_alignment": validation.get("alignment"),
+        "alignment_applied_to_output": False,
+    }
+
+
+def _model_name(case_id: str, model_config: Any) -> str:
+    spin = str(model_config.valley_model.get("spin_convention", ""))
+    return f"{case_id}_{spin}".strip("_")
+
+
+def _load_required_array(path: Path, description: str) -> np.ndarray:
+    if not path.exists():
+        raise FileNotFoundError(f"{description} is required: {path}")
+    return np.load(path, allow_pickle=False)
+
+
+def _load_json_if_exists(path: Path) -> Any:
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _array_payload_hash(key: str, value: np.ndarray) -> str:
+    arr = np.ascontiguousarray(np.asarray(value))
+    h = hashlib.sha256()
+    h.update(str(key).encode("utf-8"))
+    h.update(b"\0")
+    h.update(arr.dtype.str.encode("ascii"))
+    h.update(b"\0")
+    h.update(json.dumps([int(x) for x in arr.shape], separators=(",", ":")).encode("ascii"))
+    h.update(b"\0")
+    h.update(arr.tobytes(order="C"))
+    return h.hexdigest()
+
+
+def _model_data_array_hashes(arrays: Mapping[str, np.ndarray]) -> tuple[dict[str, str], str]:
+    per_key = {key: _array_payload_hash(key, np.asarray(arrays[key])) for key in sorted(arrays)}
+    combined = hashlib.sha256()
+    for key in sorted(per_key):
+        combined.update(key.encode("utf-8"))
+        combined.update(b"\0")
+        combined.update(per_key[key].encode("ascii"))
+        combined.update(b"\0")
+    return per_key, combined.hexdigest()
+
+
+def _model_json_for_hash(model_json: Mapping[str, Any]) -> dict[str, Any]:
+    safe = _json_safe(model_json)
+    hashes = dict(safe.get("hashes", {}))
+    hashes.pop("model_json_canonical_sha256", None)
+    safe["hashes"] = hashes
+    return safe
+
+
+def _canonical_json_text(value: Mapping[str, Any]) -> str:
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _canonical_json_hash(value: Mapping[str, Any]) -> str:
+    return hashlib.sha256(_canonical_json_text(value).encode("utf-8")).hexdigest()
+
+
+def _assert_strict_json(name: str, value: Any) -> None:
+    try:
+        json.dumps(value, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} contains non-strict JSON value: {exc}") from exc
+
+
+def _write_npz(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
+    np.savez(path, **{key: np.asarray(value) for key, value in arrays.items()})
+
+
+def _debug_payloads(
+    *,
+    model_json: Mapping[str, Any],
+    active_terms: Sequence[Mapping[str, Any]],
+    operations: Sequence[Mapping[str, Any]],
+    comparison: Mapping[str, Any],
+    model_data: Mapping[str, np.ndarray],
+) -> dict[str, bytes | str]:
+    payloads: dict[str, bytes | str] = {
+        "manifest.json": json.dumps(model_json, indent=2, sort_keys=True, allow_nan=False) + "\n",
+        "terms.json": json.dumps(list(active_terms), indent=2, sort_keys=True, allow_nan=False) + "\n",
+        "operations.json": json.dumps(list(operations), indent=2, sort_keys=True, allow_nan=False) + "\n",
+        "comparison.json": json.dumps(dict(comparison), indent=2, sort_keys=True, allow_nan=False) + "\n",
+        "operator_terms_schema.md": _render_operator_terms_schema(),
+        "symmetry_reconstruction.md": "# Symmetry Reconstruction\n\n" + _render_symmetry_reconstruction(model_json, model_data) + "\n",
+    }
+    return payloads
+
+
+def _render_operator_terms_schema() -> str:
+    return """# Operator Terms Schema
+
+Runtime evaluation reads the pre-expanded arrays in `model_data.npz`:
+
+- `operator_term_index`
+- `operator_row`
+- `operator_col`
+- `operator_mz`
+- `operator_mz_star`
+- `operator_q_center`
+- `operator_prefactor_real`
+- `operator_prefactor_imag`
+
+For contribution `c`, `operator_term_index[c]` selects the fitted coefficient
+in `model.json["terms"]`; row/col select the matrix element; `mz/mz_star` and
+`q_center` define the monomial; prefactors multiply the real and imaginary
+coefficient channels.
+"""
+
+
+def _render_readme(model: Mapping[str, Any]) -> str:
+    name = model["model_id"]
+    return f"""# {name}
+
+This directory contains a NumPy-only evaluator for `{name}`.
+
+## Requirements
+
+Python 3 and NumPy.
+
+## Run
+
+```bash
+python evaluate.py
+```
+
+This writes:
+
+- `kpoints.npy`
+- `bands.npy`
+- `kdist.npy`
+- `kpath_ticks.json`
+
+## Edit the k path
+
+Open `evaluate.py` and edit:
+
+- `HIGH_SYMMETRY_POINTS`
+- `KPATH`
+- `POINTS_PER_SEGMENT`
+- `BAND_SLICE`
+
+## Files
+
+- `evaluate.py`: standalone evaluator
+- `model.json`: model metadata and coefficients
+- `model_data.npz`: arrays used by the evaluator
+- `MODEL.md`: model formula and basis notes
+"""
+
+
+def _material_display(model: Mapping[str, Any]) -> str:
+    material = model.get("material", {})
+    name = str(material.get("name", "")).strip() if isinstance(material, Mapping) else ""
+    return name if name else "not recorded in model.json"
+
+
+def _operation_names_text(model: Mapping[str, Any]) -> str:
+    names = [str(op.get("name", "")).strip() for op in model.get("operations", []) if isinstance(op, Mapping)]
+    names = [name for name in names if name]
+    if not names:
+        return "not recorded"
+    if len(names) == 1:
+        return f"`{names[0]}`"
+    if len(names) == 2:
+        return f"`{names[0]}` and `{names[1]}`"
+    return ", ".join(f"`{name}`" for name in names[:-1]) + f", and `{names[-1]}`"
+
+
+def _format_float(value: float) -> str:
+    if abs(value) < 5.0e-13:
+        value = 0.0
+    return f"{value:.12g}"
+
+
+def _format_vector(values: Any) -> str:
+    arr = np.asarray(values, dtype=float).ravel()
+    return "[" + ", ".join(_format_float(float(x)) for x in arr) + "]"
+
+
+def _format_matrix(matrix: np.ndarray) -> str:
+    return "[" + "; ".join("[" + ", ".join(_format_float(float(x)) for x in row) + "]" for row in matrix) + "]"
+
+
+def _linear_map_matrix(map_metadata: Any) -> np.ndarray | None:
+    if not isinstance(map_metadata, Mapping):
+        return None
+    map_type = str(map_metadata.get("type", "")).lower()
+    if map_type == "identity":
+        return np.eye(2, dtype=float)
+    if map_type == "negation":
+        return -np.eye(2, dtype=float)
+    if map_type == "rotation":
+        angle = -np.deg2rad(float(map_metadata.get("angle_deg", 0.0)))
+        c = np.cos(angle)
+        s = np.sin(angle)
+        return np.array([[c, -s], [s, c]], dtype=float)
+    if map_type == "reflection":
+        theta = np.deg2rad(float(map_metadata.get("axis_deg", 0.0)))
+        axis = np.array([np.cos(theta), np.sin(theta)], dtype=float)
+        return 2.0 * np.outer(axis, axis) - np.eye(2, dtype=float)
+    return None
+
+
+def _render_linear_action(map_metadata: Any, *, symbol: str) -> str:
+    matrix = _linear_map_matrix(map_metadata)
+    if matrix is None:
+        return "metadata missing"
+    return f"{symbol}' = {_format_matrix(matrix)} {symbol}"
+
+
+def _coordinate_kind(model: Mapping[str, Any]) -> str:
+    coord = model.get("coordinate_convention", {})
+    if not isinstance(coord, Mapping):
+        return "missing"
+    text = " ".join(str(coord.get(key, "")) for key in ("frame", "k_units", "q_units", "coordinate_type", "units")).lower()
+    if "dimensionless" in text or "fractional" in text:
+        return "dimensionless"
+    if "cartesian" in text or "inverse-length" in text or "1/" in text or "angstrom" in text:
+        return "physical"
+    return "unknown"
+
+
+def _render_coordinate_section(model: Mapping[str, Any]) -> str:
+    coord = model.get("coordinate_convention", {})
+    if not isinstance(coord, Mapping) or not coord:
+        return (
+            "Coordinate convention: not recorded; do not use custom k-points until this metadata is added.\n"
+            "\n`evaluate.py` expects k-points with shape `(Nk, 2)` when a convention is available."
+        )
+    frame = str(coord.get("frame", "not recorded"))
+    k_units = str(coord.get("k_units", "not recorded"))
+    q_units = str(coord.get("q_units", "not recorded"))
+    kind = _coordinate_kind(model)
+    lines = [
+        "`evaluate.py` expects k-points as a NumPy array with shape `(Nk, 2)`.",
+        "Column 0 is the first recorded model-frame coordinate; column 1 is the second recorded model-frame coordinate.",
+        f"Recorded frame: `{frame}`.",
+        f"Recorded k units: `{k_units}`.",
+        f"Recorded Q units: `{q_units}`.",
+    ]
+    bM1 = coord.get("bM1")
+    bM2 = coord.get("bM2")
+    if bM1 is not None and bM2 is not None:
+        lines.extend(
+            [
+                f"Recorded reciprocal basis vectors: `bM1 = {_format_vector(bM1)}`, `bM2 = {_format_vector(bM2)}`.",
+                "`k_phys = k[0] * bM1 + k[1] * bM2` for fractional model-frame coordinates.",
+            ]
+        )
+    if kind == "dimensionless":
+        lines.append("Coordinate type: dimensionless model-frame coordinates.")
+    elif kind == "physical":
+        lines.append("Coordinate type: physical inverse-length coordinates.")
+    else:
+        lines.append(
+            "Coordinate type: not explicitly recorded as dimensionless or Cartesian; do not use custom k-points unless they follow the same convention as `reference_kpoints`."
+        )
+    return "\n".join(lines)
+
+
+def _render_coefficient_units(model: Mapping[str, Any]) -> str:
+    kind = _coordinate_kind(model)
+    if kind == "dimensionless":
+        return "The exported k/Q coordinates are recorded as dimensionless model-frame coordinates, so stored coefficients are in the model energy unit."
+    if kind == "physical":
+        return (
+            "The exported k/Q coordinates are recorded as physical inverse-length coordinates. "
+            "Polynomial coefficient units depend on the total monomial order `Mz + Mz_star`."
+        )
+    return (
+        "Coefficient units follow the exported coordinate convention and monomial order. "
+        "Constant onsite terms are energy-like; polynomial terms require the recorded k/Q coordinate convention to assign physical units."
+    )
+
+
+def _render_operation_table(model: Mapping[str, Any]) -> str:
+    rows = []
+    for op in model.get("operations", []):
+        if not isinstance(op, Mapping):
+            continue
+        name = str(op.get("name", "unknown"))
+        antiunitary = "yes" if op.get("antiunitary") else "no"
+        matrix_key = str(op.get("matrix_array_key", "not recorded"))
+        k_action = _render_linear_action(op.get("k_map"), symbol="k")
+        q_action = _render_linear_action(op.get("q_map"), symbol="Q")
+        sector_map = json.dumps(_json_safe(op.get("sector_map", "not recorded")), sort_keys=True)
+        rows.append(f"| `{name}` | {antiunitary} | `{matrix_key}` | `{k_action}` | `{q_action}` | `{sector_map}` |")
+    if not rows:
+        return "| none | n/a | n/a | metadata missing | metadata missing | n/a |"
+    return "\n".join(rows)
+
+
+def _format_complex(value: complex) -> str:
+    real = float(np.real(value))
+    imag = float(np.imag(value))
+    if abs(real) < 5.0e-13:
+        real = 0.0
+    if abs(imag) < 5.0e-13:
+        imag = 0.0
+    if imag < 0:
+        return f"{_format_float(real)} - {_format_float(abs(imag))}i"
+    return f"{_format_float(real)} + {_format_float(imag)}i"
+
+
+def _format_pi_angle(angle: float) -> str:
+    coeff = angle / np.pi
+    fraction = Fraction(float(coeff)).limit_denominator(12)
+    if abs(float(fraction) - coeff) < 1.0e-10:
+        numerator = fraction.numerator
+        denominator = fraction.denominator
+        if numerator == 0:
+            return "0"
+        sign = "-" if numerator < 0 else ""
+        numerator = abs(numerator)
+        if denominator == 1:
+            factor = "" if numerator == 1 else f"{numerator}*"
+            return f"{sign}{factor}pi"
+        factor = "" if numerator == 1 else f"{numerator}*"
+        return f"{sign}{factor}pi/{denominator}"
+    return f"{_format_float(angle)} rad"
+
+
+def _format_phase(value: complex) -> str:
+    magnitude = abs(value)
+    angle = float(np.angle(value))
+    angle_text = _format_pi_angle(angle)
+    if abs(magnitude - 1.0) < 1.0e-10:
+        if angle_text == "0":
+            return "0"
+        return angle_text
+    return f"{angle_text}; non-unit |phase|={_format_float(magnitude)}"
+
+
+def _format_angle_latex(angle_text: str) -> str:
+    if angle_text.endswith(" rad"):
+        return angle_text[:-4] + r"\,\mathrm{rad}"
+    return angle_text.replace("*", "").replace("pi", r"\pi")
+
+
+def _format_phase_latex(value: complex) -> str:
+    magnitude = abs(value)
+    angle_text = _format_pi_angle(float(np.angle(value)))
+    angle_latex = _format_angle_latex(angle_text)
+    if abs(magnitude - 1.0) < 1.0e-10:
+        if angle_text == "0":
+            return "1"
+        return f"e^{{i({angle_latex})}}"
+    return f"{_format_float(magnitude)} e^{{i({angle_latex})}}"
+
+
+def _math_label(value: str) -> str:
+    return r"\mathrm{" + value.replace("_", r"\_") + "}"
+
+
+def _basis_block_for_index(index: int, blocks: Sequence[Mapping[str, Any]]) -> tuple[str, int, int]:
+    for block in blocks:
+        offset = int(block.get("offset", 0))
+        q_count = int(block.get("q_count", 0))
+        dim = int(block.get("dim", 0))
+        if offset <= index < offset + dim and q_count > 0:
+            local = index - offset
+            return str(block.get("qset", "unknown")), int(local // q_count), int(local % q_count)
+    raise ValueError(f"basis index {index} is outside recorded basis blocks")
+
+
+def _render_q_permutation(pairs: Sequence[tuple[int, int]]) -> str:
+    return ", ".join(f"{col_q}\\mapsto {row_q}" for row_q, col_q in sorted(pairs, key=lambda item: item[1]))
+
+
+def _render_symmetry_reconstruction(
+    model: Mapping[str, Any],
+    model_data: Mapping[str, np.ndarray],
+    *,
+    include_q_permutation: bool = True,
+) -> str:
+    blocks = list(model.get("dimension", {}).get("basis_blocks", []))
+    if not blocks:
+        return "Basis block metadata is missing, so `MODEL.md` cannot spell out matrix reconstruction rules."
+
+    if include_q_permutation:
+        reconstruction_note = (
+            "The rules below are sufficient to reconstruct the full matrix without reading `model_data.npz`."
+        )
+        permutation_note = (
+            "The listed permutation is \\(q'\\mapsto q=\\pi(q')\\). `sector_map` is only "
+            "descriptive metadata; the equations below, or the `exactified_*` array, define "
+            "the actual representation including phase angle, orbital exchange, spin exchange, "
+            "and the projection gauge."
+        )
+    else:
+        reconstruction_note = (
+            "The rules below give the nonzero block structure and phase angles. "
+            "The full q-index permutation is intentionally not expanded in this user-facing "
+            "document; the `exactified_*` array is the authoritative matrix."
+        )
+        permutation_note = (
+            "`sector_map` is descriptive metadata. The equations below, or the `exactified_*` "
+            "array, define the actual representation including phase angle, orbital exchange, "
+            "spin exchange, and the projection gauge."
+        )
+
+    sections = [
+        "The table above gives the geometric action. The exact continuum representation "
+        "`rho_g` is the matrix stored under the listed `exactified_*` key. Some spinful "
+        f"or projected gauges produce dense representations; the array is authoritative. {reconstruction_note}",
+        "",
+        "Use the basis label \\(i=(\\alpha,a,q)\\), where \\(\\alpha\\) is the qset slot, "
+        "\\(a\\) is the orbital index, and \\(q\\) is the Q-index inside that qset. "
+        "The flat basis index is",
+        "",
+        "$$",
+        "i(\\alpha,a,q)=\\mathrm{offset}(\\alpha)+aN_Q(\\alpha)+q.",
+        "$$",
+        "",
+        "Each nonzero block rule has the form",
+        "",
+        "$$",
+        "[\\rho_g]_{(\\alpha,a,q),(\\beta,b,q')} =",
+        "e^{i\\theta^g_{\\alpha a,\\beta b}}\\,",
+        "\\delta_{q,\\pi^g_{\\alpha a\\leftarrow\\beta b}(q')}.",
+        "$$",
+        "",
+        "All omitted matrix elements are zero.",
+        "",
+        permutation_note,
+    ]
+
+    for op in model.get("operations", []):
+        if not isinstance(op, Mapping):
+            continue
+        name = str(op.get("name", "unknown"))
+        matrix_key = str(op.get("matrix_array_key", ""))
+        matrix = model_data.get(matrix_key)
+        if matrix is None:
+            sections.extend(["", f"### `{name}`", f"Matrix key `{matrix_key}` is missing from `model_data.npz`."])
+            continue
+        array = np.asarray(matrix)
+        rows, cols = np.nonzero(np.abs(array) > 1.0e-10)
+        row_counts = np.sum(np.abs(array) > 1.0e-10, axis=1)
+        col_counts = np.sum(np.abs(array) > 1.0e-10, axis=0)
+        phase_permutation = bool(np.all(row_counts == 1) and np.all(col_counts == 1))
+        groups: dict[tuple[str, int, str, int, complex], list[tuple[int, int]]] = {}
+        for row, col in zip(rows, cols):
+            row_qset, row_orb, row_q = _basis_block_for_index(int(row), blocks)
+            col_qset, col_orb, col_q = _basis_block_for_index(int(col), blocks)
+            value = array[int(row), int(col)]
+            rounded = complex(round(float(np.real(value)), 12), round(float(np.imag(value)), 12))
+            key = (row_qset, row_orb, col_qset, col_orb, rounded)
+            groups.setdefault(key, []).append((row_q, col_q))
+        sections.extend(
+            [
+                "",
+                f"### `{name}`",
+                f"Matrix key: `{matrix_key}`; shape `{tuple(array.shape)}`; nonzero entries `{len(rows)}`.",
+                f"Phase-permutation form: `{'yes' if phase_permutation else 'no'}`.",
+                "",
+            ]
+        )
+        for key in sorted(groups, key=lambda item: (item[0], item[1], item[2], item[3], item[4].real, item[4].imag)):
+            row_qset, row_orb, col_qset, col_orb, phase = key
+            pairs = sorted(groups[key])
+            op_label = _math_label(name)
+            row_label = _math_label(row_qset)
+            col_label = _math_label(col_qset)
+            phase_latex = _format_phase_latex(phase)
+            phase_angle = _format_phase(phase)
+            block_lines = [
+                f"- Nonzero block: `({col_qset}, orbital {col_orb}) -> ({row_qset}, orbital {row_orb})`; "
+                f"phase angle `{phase_angle}`; count `{len(pairs)}`.",
+                "",
+                "  $$",
+                f"  [\\rho_{{{op_label}}}]_{{({row_label},{row_orb},q),({col_label},{col_orb},q')}} =",
+                f"  {phase_latex}\\,\\delta_{{q,\\pi(q')}}.",
+                "  $$",
+            ]
+            if include_q_permutation:
+                permutation = _render_q_permutation(pairs)
+                block_lines.extend(
+                    [
+                        "",
+                        "  $$",
+                        f"  \\pi:\\quad {permutation}.",
+                        "  $$",
+                    ]
+                )
+            sections.extend(block_lines)
+    return "\n".join(sections)
+
+
+def _render_validation_section(model: Mapping[str, Any]) -> str:
+    validation = model.get("validation_summary", {})
+    if not isinstance(validation, Mapping):
+        validation = {}
+    comparison = validation.get("plot_comparison") or validation.get("comparison") or {}
+    if not isinstance(comparison, Mapping):
+        comparison = {}
+    reference_source = str(comparison.get("reference_source", comparison.get("source", "not recorded")))
+    reference_note = (
+        "archived `reference_eigvals` shipped in `model_data.npz`; original source is not separately recorded"
+        if reference_source == "not recorded"
+        else reference_source
+    )
+    band_slice = comparison.get("band_slice", "not recorded")
+    num_bands = comparison.get("num_bands", "not recorded")
+    num_kpoints = comparison.get("num_kpoints", "not recorded")
+    align = comparison.get("align", comparison.get("reference_kind", "not recorded"))
+    rms = comparison.get("rms_error_mev", comparison.get("aligned_rms_error_meV", "not recorded"))
+    max_abs = comparison.get("max_abs_error_mev", comparison.get("aligned_max_abs_error_meV", "not recorded"))
+    heff_shape = validation.get("reference_heff_eig_shape")
+    if heff_shape is None and validation.get("reference_heff_eig_available"):
+        heff_text = "`reference_heff_eig` is present; shape was not recorded in `model.json`."
+    elif heff_shape is not None:
+        heff_text = f"`reference_heff_eig` is present with shape `{heff_shape}`. It is compact validation data, not the raw `heff_list.npy`."
+    else:
+        heff_text = "`reference_heff_eig` is not included."
+    return f"""Reference source: {reference_note}.
+Compared band slice/window: `{band_slice}`; compared bands: `{num_bands}`; k-point count: `{num_kpoints}`.
+Alignment convention: `{align}`.
+RMS error: `{rms}` meV; max error: `{max_abs}` meV.
+Standalone runtime validation uses the packaged `reference_*` arrays when they are present.
+{heff_text}
+
+This check validates the standalone export against the archived reference arrays shipped in this package. It is not a substitute for full TAPW-to-KP validation unless the reference source is recorded as TAPW/heff-derived."""
+
+
+def _render_model_doc(model: Mapping[str, Any], model_data: Mapping[str, np.ndarray] | None = None) -> str:
+    dim = int(model["dimension"]["dim"])
+    q_counts = model["dimension"].get("q_count_by_qset", model["dimension"].get("q_count", {}))
+    n_orb = model["dimension"].get("n_orb_by_qset", model["dimension"].get("n_orb", {}))
+    block_rows = [
+        f"| `{block.get('qset')}` | {block.get('offset')} | {block.get('q_count')} | {block.get('n_orb')} | {block.get('dim')} |"
+        for block in model["dimension"].get("basis_blocks", [])
+    ]
+    block_table = "\n".join(block_rows) if block_rows else "| n/a | n/a | n/a | n/a | n/a |"
+    terms = list(model.get("terms", []))
+    term_counts: dict[str, int] = {}
+    for term in terms:
+        tag = str(term.get("tag", "unknown"))
+        term_counts[tag] = term_counts.get(tag, 0) + 1
+    count_text = ", ".join(f"`{tag}` {term_counts.get(tag, 0)}" for tag in ["Kinect", "Onsite", "intra", "inter"])
+    coord = model.get("coordinate_convention", {})
+    validation = model.get("validation", {})
+    energy = model.get("energy_reference", {})
+    operations_text = _operation_names_text(model)
+    operation_table = _render_operation_table(model)
+    symmetry_rules = _render_symmetry_reconstruction(model, model_data or {}, include_q_permutation=False)
+    return f"""# Model Description
+
+## Scope
+
+Standalone NumPy evaluator for `{model['model_id']}`.
+
+- Material: {_material_display(model)}
+- Valley: `{model.get('valley', 'not recorded')}`
+- Spin convention: `{model.get('spin_convention', 'not recorded')}`
+- Dimension: `{dim}`
+- Energy unit: `{model.get('energy_unit', 'eV')}`
+
+Files: `evaluate.py` runs the model; `model.json` stores metadata and fitted
+coefficients; `model_data.npz` stores q sets, exactified symmetry matrices,
+operator arrays, and compact reference arrays.
+
+## Basis And Q Sets
+
+Basis order is qset-slot major, then orbital index, then q index:
+
+```text
+index = offset(qset) + orbital_zero_based * Nq(qset) + q_index
+```
+
+| Q-set | Offset | Q count | Orbitals | Block dim |
+| --- | ---: | ---: | ---: | ---: |
+{block_table}
+
+Q sets are `qset1` and `qset2` in `model_data.npz`; friendly aliases
+`qset_layer1` and `qset_layer2` may also be present.
+
+## Coordinate Convention
+
+`evaluate.py` expects k-points with shape `(Nk, 2)`.
+Coordinate type: `{coord.get('type', 'not recorded')}`.
+The high-symmetry points in `evaluate.py` use `{coord.get('hsp_coordinates_are', 'not recorded')}` coordinates.
+
+$$
+k_{{\\rm phys}} = k_1 b_{{M1}} + k_2 b_{{M2}}.
+$$
+
+- `bM1 = {_format_vector(coord.get('bM1', []))}`
+- `bM2 = {_format_vector(coord.get('bM2', []))}`
+- Default k path: `{model.get('default_kpath', [])}`
+- Points per segment: `{model.get('points_per_segment', 'not recorded')}`
+
+## Hamiltonian And Runtime Recipe
+
+The exported Hamiltonian is evaluated by category:
+
+$$
+H_X(k)=
+\\sum_{{t\\in T_X}}
+\\sum_{{c\\in C_t}}
+\\left[
+r_t^R P_c^R+r_t^I P_c^I
+\\right]
+\\phi_c(k)|i_c\\rangle\\langle j_c|.
+$$
+
+$$
+\\phi_c(k)=z(k-q_c)^{{m_c}}\\bar z(k-q_c)^{{\\bar m_c}},
+\\qquad z(u)=u_x+i u_y.
+$$
+
+Runtime mapping: `operator_term_index -> t`, `operator_row/col -> i_c/j_c`,
+`operator_mz/operator_mz_star -> m_c/\\bar m_c`, `operator_q_center -> q_c`,
+and `operator_prefactor_real/imag -> P_c^R/P_c^I`.
+`evaluate.py` combines these arrays with `r_value_real` and `r_value_imag`
+from `model.json["terms"]`.
+
+Output bands are `{energy.get('output_bands', 'not recorded')}`.
+Validation alignment is `{energy.get('validation_alignment')}` and is applied
+to output bands: `{energy.get('alignment_applied_to_output', False)}`.
+
+## Terms
+
+Active term counts: {count_text}; total `{len(terms)}`.
+Kinetic (`"Kinect"` tag in `model.json`) terms, `Onsite`, `intra`, and `inter`
+terms share the same runtime recipe. Semantic fields such as `key.Mz`,
+`key.p`, `operation_names`, and `metadata.term_name` explain the source term
+before export. Editing them does not rebuild `operator_*`; re-export with `kp`
+if the term structure changes.
+
+## Symmetry
+
+Production operations: {operations_text}. The standalone evaluator does not
+apply these operations dynamically; their effects are already folded into
+`operator_*`.
+
+| Operation | Antiunitary | Matrix | k action | Q action | Sector map |
+| --- | --- | --- | --- | --- | --- |
+{operation_table}
+
+Compact matrix-element form:
+
+$$
+[\\rho_g]_{{(\\alpha,a,q),(\\beta,b,q')}} =
+e^{{i\\theta^g_{{\\alpha a,\\beta b}}}}
+\\delta_{{q,\\pi^g_{{\\alpha a\\leftarrow\\beta b}}(q')}}.
+$$
+
+For this exported model, the actual nonzero \\(\\rho_g\\) rules are:
+
+{symmetry_rules}
+
+## Validation
+
+- Reference kind: `{validation.get('reference_kind')}`
+- Band window: `{validation.get('band_window')}`
+- Compared bands: `{validation.get('compared_band_count')}`
+- K points: `{validation.get('kpoint_count')}`
+- Alignment: `{validation.get('alignment')}`
+- RMS error: `{validation.get('rms_error_mev')}` meV
+- Max error: `{validation.get('max_error_mev')}` meV
+- Full TAPW validation: `{validation.get('is_full_tapw_validation')}`
+
+Missing fields are recorded as `null` in `model.json`; no validation numbers are
+invented during export.
+
+## Limitations
+
+This package uses the current two-qset KP core. Custom k-points must use the
+recorded coordinate convention. Exactified matrices are included for diagnostics;
+runtime evaluation uses the pre-expanded `operator_*` arrays. The default
+`MODEL.md` includes the compact phase-permutation rules needed to reconstruct
+the exported symmetry matrices. Use `debug_files=True` only for separated
+developer-facing metadata files.
+"""
+
+
+def _evaluate_py_template(model: Mapping[str, Any]) -> str:
+    coord = model.get("coordinate_convention", {})
+    hsp = json.dumps(model.get("high_symmetry_points", {}), indent=4, sort_keys=True)
+    kpath = repr(list(model.get("default_kpath", [])))
+    points_per_segment = int(model.get("points_per_segment", 80))
+    band_slice = repr(model.get("default_band_slice", None))
+    bM1 = repr(list(coord.get("bM1", []))) if isinstance(coord, Mapping) else "[]"
+    bM2 = repr(list(coord.get("bM2", []))) if isinstance(coord, Mapping) else "[]"
+    coord_type = str(coord.get("type", "not recorded")) if isinstance(coord, Mapping) else "not recorded"
+    return f'''from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import numpy as np
+
+# Run this standalone evaluator with:
+#   python evaluate.py
+#
+# Edit HIGH_SYMMETRY_POINTS, KPATH, POINTS_PER_SEGMENT, and BAND_SLICE to change
+# the path or selected bands. Coordinates are {coord_type}.
+
+# =========================
+# User-editable settings
+# =========================
+
+HIGH_SYMMETRY_POINTS = {hsp}
+
+KPATH = {kpath}
+POINTS_PER_SEGMENT = {points_per_segment}
+BAND_SLICE = {band_slice}
+
+BM1 = {bM1}
+BM2 = {bM2}
+
+OUT_KPOINTS = "kpoints.npy"
+OUT_BANDS = "bands.npy"
+OUT_KDIST = "kdist.npy"
+OUT_TICKS = "kpath_ticks.json"
+
+# End user-editable settings
+
+
+class StandaloneModel:
+    def __init__(self, root):
+        self.root = Path(root).resolve()
+        with (self.root / "model.json").open("r", encoding="utf-8") as handle:
+            self.metadata = json.load(handle)
+        self.data = np.load(self.root / "model_data.npz", allow_pickle=False)
+        self.dim = int(self.metadata["dimension"]["dim"])
+        self.terms = list(self.metadata["terms"])
+        self.r_real = np.asarray([float(term["r_value_real"]) for term in self.terms], dtype=float)
+        self.r_imag = np.asarray([float(term["r_value_imag"]) for term in self.terms], dtype=float)
+        runtime = self.metadata.get("runtime", {{}})
+        self.hermitianize_before_eigvalsh = bool(runtime.get("hermitianize_before_eigvalsh", True))
+        self.max_antihermitian_norm = float(runtime.get("max_antihermitian_norm", 1.0e-10))
+        self._required = [
+            "operator_term_index",
+            "operator_row",
+            "operator_col",
+            "operator_mz",
+            "operator_mz_star",
+            "operator_q_center",
+            "operator_prefactor_real",
+            "operator_prefactor_imag",
+        ]
+        missing = [key for key in self._required if key not in self.data.files]
+        if missing:
+            raise KeyError(f"model_data.npz is missing runtime keys: {{missing}}")
+
+    def hamiltonian(self, k):
+        k = np.asarray(k, dtype=float)
+        if k.shape != (2,):
+            raise ValueError(f"k must have shape (2,), got {{k.shape}}")
+        term_index = np.asarray(self.data["operator_term_index"], dtype=np.int64)
+        rows = np.asarray(self.data["operator_row"], dtype=np.int64)
+        cols = np.asarray(self.data["operator_col"], dtype=np.int64)
+        mz = np.asarray(self.data["operator_mz"], dtype=np.int64)
+        mz_star = np.asarray(self.data["operator_mz_star"], dtype=np.int64)
+        q_center = np.asarray(self.data["operator_q_center"], dtype=float)
+        prefactor_real = np.asarray(self.data["operator_prefactor_real"], dtype=np.complex128)
+        prefactor_imag = np.asarray(self.data["operator_prefactor_imag"], dtype=np.complex128)
+        if q_center.ndim != 2 or q_center.shape[1] != 2:
+            raise ValueError(f"operator_q_center must have shape (N, 2), got {{q_center.shape}}")
+        z = (k[0] - q_center[:, 0]) + 1j * (k[1] - q_center[:, 1])
+        monomial = (z ** mz) * (np.conjugate(z) ** mz_star)
+        coeff = self.r_real[term_index] * prefactor_real + self.r_imag[term_index] * prefactor_imag
+        h = np.zeros((self.dim, self.dim), dtype=np.complex128)
+        np.add.at(h, (rows, cols), coeff * monomial)
+        return h
+
+    def _hamiltonian_for_eigvalsh(self, k):
+        h = self.hamiltonian(k)
+        denom = max(float(np.linalg.norm(h)), 1.0)
+        residual = float(np.linalg.norm(h - h.conj().T) / denom)
+        if residual > self.max_antihermitian_norm:
+            raise ValueError(
+                f"H(k) anti-Hermitian residual {{residual:.6e}} exceeds "
+                f"tolerance {{self.max_antihermitian_norm:.6e}}"
+            )
+        if self.hermitianize_before_eigvalsh:
+            return 0.5 * (h + h.conj().T)
+        return h
+
+    def bands(self, kpoints, band_slice=None):
+        kpoints = np.asarray(kpoints, dtype=float)
+        if kpoints.ndim != 2 or kpoints.shape[1] != 2:
+            raise ValueError(f"kpoints must have shape (Nk, 2), got {{kpoints.shape}}")
+        out = np.empty((kpoints.shape[0], self.dim), dtype=float)
+        for i, k in enumerate(kpoints):
+            out[i] = np.linalg.eigvalsh(self._hamiltonian_for_eigvalsh(k))
+        if band_slice is not None:
+            if len(band_slice) != 2:
+                raise ValueError(f"band_slice must be [start, stop], got {{band_slice!r}}")
+            out = out[:, int(band_slice[0]):int(band_slice[1])]
+        return out
+
+
+def load_model(root="."):
+    return StandaloneModel(root)
+
+
+def _resolve_path(root, path):
+    path = Path(path)
+    if path.is_absolute():
+        return path
+    return Path(root).resolve() / path
+
+
+def _load_kpoints(path, root):
+    arr = np.load(_resolve_path(root, path), allow_pickle=False)
+    arr = np.asarray(arr, dtype=float)
+    if arr.ndim != 2 or arr.shape[1] != 2:
+        raise ValueError(f"kpoints must have shape (Nk, 2), got {{arr.shape}}")
+    return arr
+
+
+def _generate_kpath():
+    if len(KPATH) < 2:
+        raise ValueError("KPATH must contain at least two labels")
+    b1 = np.asarray(BM1, dtype=float)
+    b2 = np.asarray(BM2, dtype=float)
+    if b1.shape != (2,) or b2.shape != (2,):
+        raise ValueError("BM1 and BM2 must each contain two numbers")
+    points = {{label: np.asarray(value, dtype=float) for label, value in HIGH_SYMMETRY_POINTS.items()}}
+    missing = [label for label in KPATH if label not in points]
+    if missing:
+        raise ValueError(f"KPATH contains labels missing from HIGH_SYMMETRY_POINTS: {{missing}}")
+    kpoints = []
+    kdist = []
+    tick_positions = [0.0]
+    distance = 0.0
+    for iseg, (start_label, stop_label) in enumerate(zip(KPATH[:-1], KPATH[1:])):
+        start = points[start_label]
+        stop = points[stop_label]
+        if start.shape != (2,) or stop.shape != (2,):
+            raise ValueError("high-symmetry points must be two-component coordinates")
+        n = int(POINTS_PER_SEGMENT)
+        if n <= 0:
+            raise ValueError("POINTS_PER_SEGMENT must be positive")
+        for i in range(n):
+            if iseg > 0 and i == 0:
+                continue
+            t = i / float(n)
+            k = (1.0 - t) * start + t * stop
+            if kpoints:
+                prev = kpoints[-1]
+                dk = k - prev
+                distance += float(np.linalg.norm(dk[0] * b1 + dk[1] * b2))
+            kpoints.append(k)
+            kdist.append(distance)
+        if not np.allclose(kpoints[-1], stop):
+            dk = stop - kpoints[-1]
+            distance += float(np.linalg.norm(dk[0] * b1 + dk[1] * b2))
+            kpoints.append(stop)
+            kdist.append(distance)
+        tick_positions.append(distance)
+    return np.asarray(kpoints, dtype=float), np.asarray(kdist, dtype=float), {{"labels": list(KPATH), "positions": tick_positions}}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Evaluate standalone NumPy continuum model bands.")
+    parser.add_argument("--model-root", default=".", help="Standalone package root")
+    parser.add_argument("--kpoints", default=None, help="Optional .npy kpoints file with shape (Nk, 2)")
+    parser.add_argument("--out", default=None, help="Output .npy file for computed bands")
+    args = parser.parse_args(argv)
+
+    root = Path(args.model_root).resolve()
+    model = load_model(root)
+    if args.kpoints is None:
+        kpoints, kdist, ticks = _generate_kpath()
+    else:
+        kpoints = _load_kpoints(args.kpoints, root)
+        kdist = np.arange(kpoints.shape[0], dtype=float)
+        ticks = {{"labels": [], "positions": []}}
+    bands = model.bands(kpoints, band_slice=BAND_SLICE)
+    np.save(_resolve_path(root, OUT_KPOINTS), kpoints)
+    np.save(_resolve_path(root, args.out or OUT_BANDS), bands)
+    np.save(_resolve_path(root, OUT_KDIST), kdist)
+    with _resolve_path(root, OUT_TICKS).open("w", encoding="utf-8") as handle:
+        json.dump(ticks, handle, indent=2, allow_nan=False)
+        handle.write("\\n")
+    print(f"wrote {{kpoints.shape[0]}} k-points and {{bands.shape[1]}} bands")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+'''
+
+
+def _assert_clean_text(name: str, text: str) -> None:
+    forbidden = (
+        "/data/work",
+        "/data/home",
+        "review_bundles",
+        "review_outputs",
+        "review_packages",
+        "validation_runs",
+        "prompt",
+        "raw TAPW",
+        "hamk_file",
+        "qset1_file",
+        "qset2_file",
+    )
+    hits = [item for item in forbidden if item in text]
+    if hits:
+        raise ValueError(f"{name} contains forbidden local/export text: {hits}")
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, Mapping):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    if isinstance(value, (np.integer, np.floating)):
+        return value.item()
+    if isinstance(value, complex):
+        return {"real": float(np.real(value)), "imag": float(np.imag(value))}
+    return value

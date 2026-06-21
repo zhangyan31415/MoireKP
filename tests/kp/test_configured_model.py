@@ -301,7 +301,7 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
     model_output = tmp_path / "model_out"
-    seen: dict[str, str] = {}
+    seen: dict[str, object] = {}
 
     class FakeModelConfig:
         output_dir = model_output
@@ -310,8 +310,9 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
         seen["path"] = path
         return {"configured_model": FakeModelConfig(), "comparison": {"rms_error": 0.0, "max_abs_error": 0.0}}
 
-    def fake_export(*_args, **_kwargs):
-        raise AssertionError("standalone export should require explicit --export-standalone")
+    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+        seen["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
+        return Path(output_dir)
 
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
@@ -319,6 +320,7 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
     cli.main(["model", "--config", str(cfg_path)])
 
     assert seen["path"] == str(cfg_path)
+    assert seen["export"] == (model_output, tmp_path / "model_out_standalone", True, False)
 
 
 def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -340,8 +342,8 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
             "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
         }
 
-    def fake_export(*_args, **_kwargs):
-        raise AssertionError("standalone export should require explicit --export-standalone")
+    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+        return Path(output_dir)
 
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
@@ -380,6 +382,35 @@ def test_cli_model_subcommand_uses_explicit_standalone_export_path(monkeypatch, 
 
     assert calls["run"] == str(cfg_path)
     assert calls["export"] == (model_output, export_output, True, False)
+
+
+def test_standalone_export_dense_symmetry_action_expands_sparse_entries() -> None:
+    from kp.model.export import _dense_composed_symmetry_action, _iter_transformed_sparse_entries
+
+    class DenseGenerator:
+        def __init__(self) -> None:
+            self.matrix = np.array([[1.0, 1.0], [1.0, -1.0]], dtype=np.complex128) / np.sqrt(2.0)
+
+        def get_operator(self, name: str, params=None):
+            assert name == "C3z"
+            assert params in {1, -1}
+            return self.matrix
+
+    action = _dense_composed_symmetry_action(DenseGenerator(), (("C3z", 1),))
+    entries = list(
+        _iter_transformed_sparse_entries(
+            action,
+            np.array([0], dtype=int),
+            np.array([1], dtype=int),
+        )
+    )
+
+    observed = {(row, col): value for _pos, row, col, value, is_anti in entries if not is_anti}
+    assert set(observed) == {(0, 0), (0, 1), (1, 0), (1, 1)}
+    assert observed[(0, 0)] == pytest.approx(0.5 + 0.0j)
+    assert observed[(0, 1)] == pytest.approx(-0.5 + 0.0j)
+    assert observed[(1, 0)] == pytest.approx(0.5 + 0.0j)
+    assert observed[(1, 1)] == pytest.approx(-0.5 + 0.0j)
 
 
 def test_cli_project_rejects_unimplemented_qdpt2() -> None:

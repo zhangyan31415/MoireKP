@@ -34,6 +34,10 @@ from .symmetry.projection import run_symmetry_projection_from_config
 HARTREE_TO_EV = 27.2113845
 
 
+def _default_standalone_export_dir(model_output_dir: Path) -> Path:
+    return model_output_dir.with_name(f"{model_output_dir.name}_standalone")
+
+
 def _record_standalone_export(model_output_dir: Path, export_path: Path) -> None:
     summary_path = model_output_dir / "run_summary.json"
     summary_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1678,19 +1682,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"[kp model]   plot bands RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})")
             if plot_comparison.get("model_alignment_shift_meV") is not None:
                 print(f"[kp model]   plot alignment shift: {float(plot_comparison['model_alignment_shift_meV']):.3f} meV")
-        if args.export_standalone:
-            if model_cfg is None:
-                raise RuntimeError("standalone export requires configured model results")
-            from .model.export import export_standalone_model
+        if model_cfg is None:
+            raise RuntimeError("standalone export requires configured model results")
+        from .model.export import export_standalone_model
 
-            export_path = export_standalone_model(
-                model_cfg.output_dir,
-                Path(args.export_standalone),
-                force=True,
-                debug_files=bool(args.debug_files),
-            )
-            _record_standalone_export(Path(model_cfg.output_dir), Path(export_path))
-            print(f"[kp model]   standalone export: {export_path}")
+        standalone_dir = (
+            Path(args.export_standalone)
+            if args.export_standalone
+            else _default_standalone_export_dir(Path(model_cfg.output_dir))
+        )
+        export_path = export_standalone_model(
+            model_cfg.output_dir,
+            standalone_dir,
+            force=True,
+            debug_files=bool(args.debug_files),
+        )
+        _record_standalone_export(Path(model_cfg.output_dir), Path(export_path))
+        print(f"[kp model]   standalone export: {export_path}")
     else:
         raise SystemExit(2)
 
