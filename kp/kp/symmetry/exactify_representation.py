@@ -607,6 +607,144 @@ def _phase_class_key_for_mapping(
     return _phase_class_key(label, phase_classes)
 
 
+def _unit_phase(value: complex) -> complex:
+    z = complex(value)
+    if abs(z) == 0.0:
+        return 1.0 + 0.0j
+    return z / abs(z)
+
+
+def _exactify_antiunitary_monomial_phases(
+    arr: np.ndarray,
+    perm_arr: np.ndarray,
+    *,
+    allowed_roots: Sequence[complex],
+    central_phase: complex,
+) -> tuple[np.ndarray, dict[str, list[float]], list[str]]:
+    roots = [complex(root) for root in allowed_roots] or roots_of_unity_up_to(12)
+    if not roots:
+        roots = [1.0 + 0.0j]
+    exact = np.zeros_like(arr, dtype=complex)
+    selected_roots: dict[str, list[float]] = {}
+    notes: list[str] = ["antiunitary_pair_phase_exactification"]
+    visited: set[int] = set()
+    central = complex(central_phase)
+    for src_idx, tgt_idx_raw in enumerate(perm_arr):
+        if src_idx in visited:
+            continue
+        tgt_idx = int(tgt_idx_raw)
+        reverse_tgt = int(perm_arr[tgt_idx])
+        if reverse_tgt != src_idx:
+            raise ValueError("antiunitary monomial exactification requires two-cycle support")
+        if src_idx == tgt_idx:
+            if abs(central - 1.0) > 1.0e-10:
+                raise ValueError("antiunitary fixed-point support cannot realize a nontrivial square phase")
+            value = _unit_phase(arr[tgt_idx, src_idx])
+            root, residual = nearest_root_of_unity(value, roots)
+            exact[tgt_idx, src_idx] = root
+            selected_roots[f"entry:{tgt_idx}:{src_idx}"] = [float(root.real), float(root.imag), float(residual)]
+            visited.add(src_idx)
+            continue
+
+        forward = _unit_phase(arr[tgt_idx, src_idx])
+        backward = _unit_phase(arr[src_idx, tgt_idx])
+        best_alpha = roots[0]
+        best_beta = np.conjugate(central / best_alpha)
+        best_residual = float("inf")
+        for alpha in roots:
+            if abs(alpha) == 0.0:
+                continue
+            beta = np.conjugate(central / alpha)
+            residual = float(abs(forward - alpha) + abs(backward - beta))
+            if residual < best_residual:
+                best_alpha = alpha
+                best_beta = beta
+                best_residual = residual
+        exact[tgt_idx, src_idx] = best_alpha
+        exact[src_idx, tgt_idx] = best_beta
+        selected_roots[f"entry:{tgt_idx}:{src_idx}"] = [
+            float(best_alpha.real),
+            float(best_alpha.imag),
+            float(abs(forward - best_alpha)),
+        ]
+        selected_roots[f"entry:{src_idx}:{tgt_idx}"] = [
+            float(best_beta.real),
+            float(best_beta.imag),
+            float(abs(backward - best_beta)),
+        ]
+        visited.add(src_idx)
+        visited.add(tgt_idx)
+    return exact, selected_roots, notes
+
+
+def _exactify_order2_monomial_pair_phases(
+    arr: np.ndarray,
+    perm_arr: np.ndarray,
+    *,
+    allowed_roots: Sequence[complex],
+    central_phase: complex,
+) -> tuple[np.ndarray, dict[str, list[float]], list[str]]:
+    roots = [complex(root) for root in allowed_roots]
+    exact = np.zeros_like(arr, dtype=complex)
+    selected_roots: dict[str, list[float]] = {}
+    notes: list[str] = ["order2_pair_phase_exactification"]
+    visited: set[int] = set()
+    central = complex(central_phase)
+    for src_idx, tgt_idx_raw in enumerate(perm_arr):
+        if src_idx in visited:
+            continue
+        tgt_idx = int(tgt_idx_raw)
+        reverse_tgt = int(perm_arr[tgt_idx])
+        if reverse_tgt != src_idx:
+            raise ValueError("order-2 monomial exactification requires two-cycle support")
+        if src_idx == tgt_idx:
+            value = _unit_phase(arr[tgt_idx, src_idx])
+            candidate_roots = roots or _roots_for_power_phase(2, central)
+            root, residual = nearest_root_of_unity(value, candidate_roots)
+            exact[tgt_idx, src_idx] = root
+            selected_roots[f"entry:{tgt_idx}:{src_idx}"] = [float(root.real), float(root.imag), float(residual)]
+            visited.add(src_idx)
+            continue
+
+        forward = _unit_phase(arr[tgt_idx, src_idx])
+        backward = _unit_phase(arr[src_idx, tgt_idx])
+        if roots:
+            best_alpha = roots[0]
+            best_beta = central / best_alpha
+            best_residual = float("inf")
+            for alpha in roots:
+                if abs(alpha) == 0.0:
+                    continue
+                beta = central / alpha
+                residual = float(abs(forward - alpha) + abs(backward - beta))
+                if residual < best_residual:
+                    best_alpha = alpha
+                    best_beta = beta
+                    best_residual = residual
+        else:
+            product = forward * backward
+            correction_roots = _roots_for_power_phase(2, central / product)
+            correction = min(correction_roots, key=lambda root: abs(root - 1.0))
+            best_alpha = forward * correction
+            best_beta = backward * correction
+            best_residual = float(abs(forward - best_alpha) + abs(backward - best_beta))
+        exact[tgt_idx, src_idx] = best_alpha
+        exact[src_idx, tgt_idx] = best_beta
+        selected_roots[f"entry:{tgt_idx}:{src_idx}"] = [
+            float(best_alpha.real),
+            float(best_alpha.imag),
+            float(abs(forward - best_alpha)),
+        ]
+        selected_roots[f"entry:{src_idx}:{tgt_idx}"] = [
+            float(best_beta.real),
+            float(best_beta.imag),
+            float(abs(backward - best_beta)),
+        ]
+        visited.add(src_idx)
+        visited.add(tgt_idx)
+    return exact, selected_roots, notes
+
+
 def exactify_1d_monomial_phases(
     D_num: np.ndarray,
     perm: Sequence[int],
@@ -638,28 +776,69 @@ def exactify_1d_monomial_phases(
             f"{reject_if_amplitude_deviation_gt:.3e}"
         )
 
-    by_class: dict[str, list[complex]] = {}
-    class_members: dict[str, list[tuple[int, int]]] = {}
-    for src_idx, tgt_idx in enumerate(perm_arr):
-        key = _phase_class_key_for_mapping(labels[src_idx], phase_classes, src_idx=src_idx, tgt_idx=int(tgt_idx))
-        by_class.setdefault(key, []).append(arr[tgt_idx, src_idx] / abs(arr[tgt_idx, src_idx]))
-        class_members.setdefault(key, []).append((tgt_idx, src_idx))
+    if antiunitary:
+        exact, selected_roots, notes = _exactify_antiunitary_monomial_phases(
+            arr,
+            perm_arr,
+            allowed_roots=allowed_roots,
+            central_phase=central_phase,
+        )
+    elif int(power) == 2:
+        exact, selected_roots, notes = _exactify_order2_monomial_pair_phases(
+            arr,
+            perm_arr,
+            allowed_roots=allowed_roots,
+            central_phase=central_phase,
+        )
+    else:
+        by_class: dict[str, list[complex]] = {}
+        class_members: dict[str, list[tuple[int, int]]] = {}
+        for src_idx, tgt_idx in enumerate(perm_arr):
+            key = _phase_class_key_for_mapping(labels[src_idx], phase_classes, src_idx=src_idx, tgt_idx=int(tgt_idx))
+            by_class.setdefault(key, []).append(arr[tgt_idx, src_idx] / abs(arr[tgt_idx, src_idx]))
+            class_members.setdefault(key, []).append((tgt_idx, src_idx))
 
-    exact = np.zeros_like(arr, dtype=complex)
-    selected_roots: dict[str, list[float]] = {}
-    for key, values in by_class.items():
-        avg = np.sum(np.asarray(values, dtype=complex))
-        avg = avg / abs(avg)
-        root, residual = nearest_root_of_unity(avg, allowed_roots)
-        selected_roots[key] = [float(root.real), float(root.imag), float(residual)]
-        for tgt_idx, src_idx in class_members[key]:
-            exact[tgt_idx, src_idx] = root
+        exact = np.zeros_like(arr, dtype=complex)
+        selected_roots = {}
+        notes = []
+        split_phase_class_chord_tol = 0.25
+        for key, values in by_class.items():
+            class_values = np.asarray(values, dtype=complex)
+            avg = np.sum(class_values)
+            split_class = False
+            if abs(avg) == 0.0:
+                split_class = True
+            else:
+                avg = avg / abs(avg)
+                root, residual = nearest_root_of_unity(avg, allowed_roots)
+                max_chord_residual = float(np.max(np.abs(class_values - root)))
+                split_class = bool(max_chord_residual > split_phase_class_chord_tol and len(class_values) > 1)
+
+            if split_class:
+                notes.append("split_phase_class")
+                for tgt_idx, src_idx in class_members[key]:
+                    value = arr[tgt_idx, src_idx] / abs(arr[tgt_idx, src_idx])
+                    root, residual = nearest_root_of_unity(value, allowed_roots)
+                    selected_roots[f"{key}|entry:{int(tgt_idx)}:{int(src_idx)}"] = [
+                        float(root.real),
+                        float(root.imag),
+                        float(residual),
+                    ]
+                    exact[tgt_idx, src_idx] = root
+            else:
+                selected_roots[key] = [float(root.real), float(root.imag), float(residual)]
+                for tgt_idx, src_idx in class_members[key]:
+                    exact[tgt_idx, src_idx] = root
 
     ident = np.eye(exact.shape[0], dtype=complex)
     if antiunitary:
         power_residual = antiunitary_square_residual(exact, central_phase)
     else:
         power_residual = float(np.linalg.norm(np.linalg.matrix_power(exact, int(power)) - complex(central_phase) * ident) / np.sqrt(exact.shape[0]))
+    if power_residual > 1.0e-8:
+        raise ValueError(
+            f"{operation_name} exactification failed: group power residual {power_residual:.3e} exceeds 1.000e-08"
+        )
     alpha = np.vdot(exact, arr) / np.vdot(exact, exact)
     alpha = alpha / abs(alpha)
     distance = float(np.linalg.norm(arr - alpha * exact) / max(np.linalg.norm(exact), 1.0))
@@ -682,6 +861,7 @@ def exactify_1d_monomial_phases(
             "input_off_support_rel": float(input_report.off_support_rel),
             "input_off_support_max": float(input_report.off_support_max),
         },
+        notes=sorted(set(notes)),
     )
     return exact, report
 
@@ -791,6 +971,10 @@ def exactify_block_monomial_representation(
         power_residual = antiunitary_square_residual(U_exact, central_phase)
     else:
         power_residual = float(np.linalg.norm(np.linalg.matrix_power(U_exact, int(power)) - complex(central_phase) * np.eye(U_exact.shape[0])) / np.sqrt(U_exact.shape[0]))
+    if power_residual > 1.0e-8:
+        raise ValueError(
+            f"{operation_name} block exactification failed: group power residual {power_residual:.3e} exceeds 1.000e-08"
+        )
     alpha = np.vdot(exact, arr) / np.vdot(exact, exact)
     alpha = alpha / abs(alpha)
     distance = float(np.linalg.norm(arr - alpha * exact) / max(np.linalg.norm(exact), 1.0))
@@ -1231,6 +1415,20 @@ def exactify_loaded_symmetry_source(
         if support_mode not in {"auto", "monomial", "block", "block_monomial"}:
             raise ValueError(f"Unsupported support_mode for {name}: {support_mode!r}")
         preferred_mode = candidate["preferred_mode"]
+        reject_off = float(op_cfg.get("reject_if_off_support_rel_gt", exact_cfg.get("reject_if_off_support_rel_gt", 1.0e-6)))
+        reject_amp = float(op_cfg.get("reject_if_amplitude_deviation_gt", exact_cfg.get("reject_if_amplitude_deviation_gt", 2.0e-2)))
+        monomial_report = candidate["monomial_report"]
+        monomial_amp_dev = max(
+            abs(float(monomial_report.amplitude_min) - 1.0),
+            abs(float(monomial_report.amplitude_max) - 1.0),
+        )
+        if (
+            support_mode == "auto"
+            and not monomial_report.support_mismatch_count
+            and float(monomial_report.off_support_rel) <= reject_off
+            and monomial_amp_dev <= reject_amp
+        ):
+            preferred_mode = "monomial"
         if support_mode == "monomial":
             preferred_mode = "monomial"
         elif support_mode == "block":
@@ -1260,10 +1458,9 @@ def exactify_loaded_symmetry_source(
             phase_classes = exact_cfg.get("phase_classes", "global")
             if isinstance(phase_classes, Mapping):
                 phase_classes = phase_classes.get(name, "global")
-        reject_off = float(op_cfg.get("reject_if_off_support_rel_gt", exact_cfg.get("reject_if_off_support_rel_gt", 1.0e-6)))
-        reject_amp = float(op_cfg.get("reject_if_amplitude_deviation_gt", exact_cfg.get("reject_if_amplitude_deviation_gt", 2.0e-2)))
         if preferred_mode == "monomial":
-            allowed_roots = allowed_roots or _roots_for_power_phase(power, central_phase)
+            if not allowed_roots and not (int(power) == 2 and not op.antiunitary):
+                allowed_roots = _roots_for_power_phase(power, central_phase)
             D_exact, report = exactify_1d_monomial_phases(
                 D_num,
                 label_action.perm,

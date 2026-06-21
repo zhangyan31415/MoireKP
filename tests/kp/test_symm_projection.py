@@ -28,6 +28,7 @@ from kp.symmetry.projection import (
     _projectors_for_k,
     _resolve_projected_model_action,
     _select_operation_matrix_kind,
+    _sector_orbital_counts,
     _source_manifest_operation_name,
     _validate_operation_label,
 )
@@ -51,7 +52,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         def fake_get_h_block(*_args, **_kwargs):
             return None, [np.eye(2, dtype=np.complex128), np.eye(2, dtype=np.complex128)], None, None
 
-        def fake_calculate_energy_lists(*_args, **kwargs):
+        def fake_assemble_gamma_projectors(*_args, **kwargs):
             calls["include_high"] = kwargs.get("include_high")
             return u_low, u_high
 
@@ -63,7 +64,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
         with (
             patch.object(projection_mod, "get_H_block", side_effect=fake_get_h_block),
-            patch.object(projection_mod, "calculate_energy_lists", side_effect=fake_calculate_energy_lists),
+            patch.object(projection_mod, "_assemble_gamma_projectors_from_block_eigenvectors", side_effect=fake_assemble_gamma_projectors),
             patch.object(projection_mod, "downfold_from_projectors", side_effect=fake_downfold_from_projectors),
         ):
             state = projection_mod._projectors_for_k(
@@ -72,7 +73,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 np.array([[0.0, 0.0]], dtype=float),
                 orb0=1,
                 spin="up",
-                mode="K1",
+                mode="gamma",
                 nlow_state_list=[[0], [0]],
                 norb_fix_list=[[0], [0]],
                 method="fixed_schur",
@@ -86,7 +87,166 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertFalse(calls["u_high_is_none"])
         np.testing.assert_allclose(state.heff, [[2.0]])
 
-    def test_action_resolution_infers_sector_orbitals_from_low_dim_for_single_nlow_list(self) -> None:
+    def test_projectors_for_k_uses_full_row_order_for_multilayer_k_mode(self) -> None:
+        ham = np.diag(np.arange(6, dtype=float)).astype(np.complex128)
+        captured = {}
+
+        def fake_downfold_from_projectors(_ham, u_low, u_high, options):
+            captured["u_low"] = np.asarray(u_low)
+            captured["u_high"] = None if u_high is None else np.asarray(u_high)
+            captured["method"] = options.method
+            return SimpleNamespace(heff=np.eye(u_low.shape[1], dtype=np.complex128))
+
+        with patch.object(projection_mod, "downfold_from_projectors", side_effect=fake_downfold_from_projectors):
+            projection_mod._projectors_for_k(
+                ham,
+                np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float),
+                np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float),
+                orb0=1,
+                num_layer_list=[1, 2],
+                num_orb_per_layer_list=[[1], [1, 1]],
+                spin="up",
+                mode="K1",
+                nlow_state_list=[[0], [0], [0]],
+                norb_fix_list=[[0], [0], [0]],
+                method="fixed_schur",
+                e_ref=0.0,
+                project_cfg={},
+            )
+
+        nonzero_rows = [int(np.flatnonzero(np.abs(captured["u_low"][:, col]) > 1e-12)[0]) for col in range(6)]
+        self.assertEqual(nonzero_rows, [0, 1, 2, 4, 3, 5])
+        self.assertEqual(captured["method"], "fixed_schur")
+
+    def test_sector_orbital_counts_aggregate_physical_layers_by_source_group(self) -> None:
+        q1 = np.zeros((12, 2), dtype=float)
+        q2 = np.zeros((12, 2), dtype=float)
+
+        self.assertEqual(
+            _sector_orbital_counts(q1, q2, [[22], [22], []], low_dim=24, num_layer_list=[1, 2]),
+            (1, 1),
+        )
+        self.assertEqual(
+            _sector_orbital_counts(q1, q2, [[], [], [22]], low_dim=12, num_layer_list=[1, 2]),
+            (0, 1),
+        )
+        self.assertEqual(
+            _sector_orbital_counts(
+                q1,
+                q2,
+                [[], [134, 135], [136, 137]],
+                low_dim=48,
+                num_layer_list=[1, 2],
+            ),
+            (0, 4),
+        )
+        self.assertEqual(
+            _sector_orbital_counts(
+                q1,
+                q2,
+                [[134, 135], [136, 137], []],
+                low_dim=48,
+                num_layer_list=[1, 2],
+            ),
+            (2, 2),
+        )
+
+    def test_gamma_projectors_resolve_physical_layers_to_source_group_bands(self) -> None:
+        ham = np.eye(6, dtype=np.complex128)
+        captured = {}
+
+        def fake_get_h_block(*_args, **_kwargs):
+            vecs = np.empty(1, dtype=object)
+            vecs[0] = np.eye(3, dtype=np.complex128)
+            return None, vecs, None, None
+
+        def fake_assemble_gamma_projectors(_vecs, _idx_list, nlow_state_list, **_kwargs):
+            captured["nlow_state_list"] = nlow_state_list
+            return np.eye(6, 4, dtype=np.complex128), np.eye(6, 2, k=4, dtype=np.complex128)
+
+        def fake_downfold_from_projectors(_ham, u_low, _u_high, _options):
+            return SimpleNamespace(heff=np.eye(u_low.shape[1], dtype=np.complex128))
+
+        with (
+            patch.object(projection_mod, "get_H_block", side_effect=fake_get_h_block),
+            patch.object(projection_mod, "_assemble_gamma_projectors_from_block_eigenvectors", side_effect=fake_assemble_gamma_projectors),
+            patch.object(projection_mod, "downfold_from_projectors", side_effect=fake_downfold_from_projectors),
+        ):
+            projection_mod._projectors_for_k(
+                ham,
+                np.array([[0.0, 0.0]], dtype=float),
+                np.array([[0.0, 0.0]], dtype=float),
+                orb0=1,
+                num_layer_list=[1, 2],
+                num_orb_per_layer_list=[[1], [1, 1]],
+                spin="up",
+                mode="gamma",
+                nlow_state_list=[[], [0, 1], [2, 3]],
+                norb_fix_list=[[], [[[0, 1.0]], [[1, 1.0]]], [[[2, 1.0]], [[0, 1.0]]]],
+                method="fixed_schur",
+                e_ref=0.0,
+                project_cfg={},
+            )
+
+        self.assertEqual(captured["nlow_state_list"], [[], [0, 1, 2, 3]])
+
+    def test_gamma_projectors_reject_legacy_source_group_rows_with_num_layer_list(self) -> None:
+        ham = np.eye(6, dtype=np.complex128)
+
+        with self.assertRaisesRegex(ValueError, "physical-layer rows"):
+            projection_mod._projectors_for_k(
+                ham,
+                np.array([[0.0, 0.0]], dtype=float),
+                np.array([[0.0, 0.0]], dtype=float),
+                orb0=1,
+                num_layer_list=[1, 2],
+                num_orb_per_layer_list=[[1], [1, 1]],
+                spin="up",
+                mode="gamma",
+                nlow_state_list=[[0], [1, 2]],
+                norb_fix_list=[[[[0, 1.0]]], [[[1, 1.0]], [[2, 1.0]]]],
+                method="fixed_schur",
+                e_ref=0.0,
+                project_cfg={},
+            )
+
+    def test_projectors_reject_mismatched_norb_fix_layer_rows(self) -> None:
+        with self.assertRaisesRegex(ValueError, "norb_fix_list.*same number of rows"):
+            projection_mod._projectors_for_k(
+                np.eye(6, dtype=np.complex128),
+                np.array([[0.0, 0.0]], dtype=float),
+                np.array([[0.0, 0.0]], dtype=float),
+                orb0=1,
+                num_layer_list=[1, 2],
+                num_orb_per_layer_list=[[1], [1, 1]],
+                spin="up",
+                mode="gamma",
+                nlow_state_list=[[], [0], [1]],
+                norb_fix_list=[[], [[[0, 1.0]]]],
+                method="fixed_schur",
+                e_ref=0.0,
+                project_cfg={},
+            )
+
+    def test_projectors_reject_mismatched_norb_fix_references_per_layer(self) -> None:
+        with self.assertRaisesRegex(ValueError, "layer 1 has 2 bands.*1 references"):
+            projection_mod._projectors_for_k(
+                np.eye(6, dtype=np.complex128),
+                np.array([[0.0, 0.0]], dtype=float),
+                np.array([[0.0, 0.0]], dtype=float),
+                orb0=1,
+                num_layer_list=[1, 2],
+                num_orb_per_layer_list=[[1], [1, 1]],
+                spin="up",
+                mode="gamma",
+                nlow_state_list=[[], [0, 1], []],
+                norb_fix_list=[[], [[[0, 1.0]]], []],
+                method="fixed_schur",
+                e_ref=0.0,
+                project_cfg={},
+            )
+
+    def test_action_resolution_rejects_single_nlow_row_instead_of_inferring_from_low_dim(self) -> None:
         q = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
         action = {
             "antiunitary": False,
@@ -100,22 +260,18 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         representation[4:, :4] = np.eye(4, dtype=np.complex128)
         representation[:4, 4:] = np.eye(4, dtype=np.complex128)
 
-        resolved, basis_action = _resolve_projected_model_action(
-            D_low=raw_action,
-            support_matrices=[("raw_action", raw_action), ("representation", representation)],
-            model_action=action,
-            q_model1=q,
-            q_model2=q.copy(),
-            nlow_state_list=[[10, 11, 12, 13]],
-            tol=1.0e-8,
-            discover_action_candidates=True,
-            accept_support_resolved_action=True,
-        )
-
-        self.assertEqual(resolved["sector_map"], "layer_exchange")
-        self.assertTrue(basis_action["complete"])
-        self.assertTrue(basis_action["support_resolution"]["action_mismatch"])
-        self.assertEqual(basis_action["support_resolution"]["support_matrix_source"], "representation")
+        with self.assertRaisesRegex(ValueError, "nlow_state_list must have two qset rows"):
+            _resolve_projected_model_action(
+                D_low=raw_action,
+                support_matrices=[("raw_action", raw_action), ("representation", representation)],
+                model_action=action,
+                q_model1=q,
+                q_model2=q.copy(),
+                nlow_state_list=[[10, 11, 12, 13]],
+                tol=1.0e-8,
+                discover_action_candidates=True,
+                accept_support_resolved_action=True,
+            )
 
     def test_projectors_for_k_uses_configured_downfold_method_and_e_ref(self) -> None:
         q = np.array([[0.0, 0.0]], dtype=float)

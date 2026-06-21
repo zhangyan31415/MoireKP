@@ -76,30 +76,36 @@ def test_minimal_symmetry_candidates_include_only_spatial_c2_without_duplicates(
         valley=5,
         valley_label="Gamma",
     )
+    c2_operation = {
+        "index": 11,
+        "rotation_cart": np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=float),
+        "translation_cart": np.zeros(3, dtype=float),
+    }
     operations = [
         {
             "index": 10,
-            "rotation_cart": np.array([[-0.5, 0.8660254, 0.0], [0.8660254, 0.5, 0.0], [0.0, 0.0, -1.0]], dtype=float),
+            "rotation_cart": symmetry_analysis._rotation_z_cart(120.0),
             "translation_cart": np.zeros(3, dtype=float),
         },
-        {
-            "index": 11,
-            "rotation_cart": np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=float),
-            "translation_cart": np.zeros(3, dtype=float),
-        },
+        c2_operation,
         {
             "index": 12,
-            "rotation_cart": np.array([[-0.5, -0.8660254, 0.0], [-0.8660254, 0.5, 0.0], [0.0, 0.0, -1.0]], dtype=float),
+            "rotation_cart": symmetry_analysis._rotation_z_cart(240.0),
             "translation_cart": np.zeros(3, dtype=float),
         },
         {
             "index": 13,
-            "rotation_cart": np.array([[-0.5, 0.8660254, 0.0], [0.8660254, 0.5, 0.0], [0.0, 0.0, -1.0]], dtype=float),
+            "rotation_cart": np.array([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], dtype=float),
             "translation_cart": np.zeros(3, dtype=float),
         },
     ]
 
-    candidates = helper(valley_ctx, "hex", spatial_operations=operations)
+    candidates = helper(
+        valley_ctx,
+        "hex",
+        spatial_operations=operations,
+        selected_c2_operation=c2_operation,
+    )
     names = [candidate["name"] for candidate in candidates]
 
     assert "E" in names
@@ -127,7 +133,12 @@ def test_minimal_symmetry_candidates_keep_k_c2_as_inter_valley_source_operation(
         },
     ]
 
-    candidates = helper(valley_ctx, "hex", spatial_operations=operations, structure=object())
+    candidates = helper(
+        valley_ctx,
+        "hex",
+        spatial_operations=operations,
+        selected_c2_operation=operations[0],
+    )
     by_name = {candidate["name"]: candidate for candidate in candidates}
 
     assert by_name["C2"]["target_valley_label"] == "K2"
@@ -185,7 +196,7 @@ def test_minimal_symmetry_candidates_include_generic_layer_exchange_c2_for_gamma
     assert int(c2_candidates[0]["index"]) == 23
 
 
-def test_minimal_symmetry_candidates_include_canonical_c2t_for_k_valley():
+def test_minimal_symmetry_candidates_do_not_include_canonical_c2t_for_k_valley_without_spglib_c2():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -196,13 +207,10 @@ def test_minimal_symmetry_candidates_include_canonical_c2t_for_k_valley():
     candidates = helper(valley_ctx, "hex", spatial_operations=[])
     names = [candidate["name"] for candidate in candidates]
 
-    assert "C2T" in names
-    c2t = next(candidate for candidate in candidates if candidate["name"] == "C2T")
-    assert c2t["transport_backend"] == symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_ANTIUNITARY
-    assert c2t["spatial_parent"] == "C2"
+    assert "C2T" not in names
 
 
-def test_minimal_symmetry_candidates_include_c3_for_supported_k_valley():
+def test_minimal_symmetry_candidates_do_not_include_c3_for_k_valley_without_spglib_c3():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -212,12 +220,39 @@ def test_minimal_symmetry_candidates_include_c3_for_supported_k_valley():
     )
     candidates = helper(valley_ctx, "hex", spatial_operations=[])
     names = [candidate["name"] for candidate in candidates]
+
+    assert "C3z" not in names
+    assert "C3z^2" not in names
+
+
+def test_minimal_symmetry_candidates_match_slightly_tilted_spglib_c3_rotation():
+    helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
+    assert helper is not None
+
+    valley_ctx = SimpleNamespace(
+        valley=5,
+        valley_label="Gamma",
+    )
+    c3 = symmetry_analysis._rotation_z_cart(120.0).copy()
+    c3[0, 0] += 3.0e-5
+    c3[0, 1] += 2.0e-5
+    operations = [
+        {
+            "index": 10,
+            "rotation_cart": c3,
+            "translation_cart": np.zeros(3, dtype=float),
+        },
+    ]
+
+    candidates = helper(valley_ctx, "hex", spatial_operations=operations)
+    names = [candidate["name"] for candidate in candidates]
+    c3_candidate = next(candidate for candidate in candidates if candidate["name"] == "C3z")
 
     assert "C3z" in names
-    assert "C3z^2" in names
+    assert symmetry_analysis._candidate_spglib_index(c3_candidate) == 10
 
 
-def test_minimal_symmetry_candidates_include_canonical_c2_for_m_valley():
+def test_minimal_symmetry_candidates_do_not_include_canonical_c2_for_m_valley_without_spglib_c2():
     helper = getattr(symmetry_analysis, "_minimal_symmetry_candidates_for_valley", None)
     assert helper is not None
 
@@ -228,9 +263,7 @@ def test_minimal_symmetry_candidates_include_canonical_c2_for_m_valley():
     candidates = helper(valley_ctx, "hex", spatial_operations=[])
     names = [candidate["name"] for candidate in candidates]
 
-    assert "C2" in names
-    c2 = next(candidate for candidate in candidates if candidate["name"] == "C2")
-    assert c2["transport_backend"] == symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_UNITARY
+    assert "C2" not in names
 
 
 def test_transport_backend_ids_do_not_encode_valley_or_effective_names():

@@ -28,14 +28,23 @@ def test_can_reuse_m_valley_c3_band_outputs_is_disabled_by_default():
     assert can_reuse_m_valley_c3_band_outputs(cfg) is False
 
 
-def test_resolve_qshell_dir_name_adds_symm_suffix_only_for_symmetrized_runs():
-    cfg = SimpleNamespace(n_g=3)
+def test_resolve_qshell_dir_name_adds_symm_suffix_for_runtime_or_source_symmetrized_runs():
+    cfg = SimpleNamespace(
+        compute=SimpleNamespace(n_g=3, TAPW=True),
+        paths=SimpleNamespace(H_file="H.npz", S_file="S.npz"),
+    )
 
     legacy = SimpleNamespace(uses_hamiltonian_symmetrization=False)
     symm = SimpleNamespace(uses_hamiltonian_symmetrization=True)
+    source_symm = SimpleNamespace(uses_hamiltonian_symmetrization=False)
+    source_cfg = SimpleNamespace(
+        compute=SimpleNamespace(n_g=3, TAPW=True),
+        paths=SimpleNamespace(H_file="H_symm.npz", S_file="S_symm.npz"),
+    )
 
     assert resolve_qshell_dir_name(cfg, legacy) == "Q_shell_3"
     assert resolve_qshell_dir_name(cfg, symm) == "Q_shell_3_symm"
+    assert resolve_qshell_dir_name(source_cfg, source_symm) == "Q_shell_3_symm"
 
 
 def test_copy_reused_m_valley_band_outputs_renames_reference_files(tmp_path: Path):

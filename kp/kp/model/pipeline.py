@@ -5,6 +5,7 @@ import copy
 import contextlib
 import hashlib
 import json
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -47,7 +48,7 @@ from .core import (
 DEFAULT_MAX_ORDER = {"Kinect": 2, "intra": 0, "inter": 0}
 GAMMA_LEGACY_ORDER_ALIASES = {
     "tunneling_zero": "inter",
-    "tunneling_nonzero": "intra",
+    "tunneling_nonzero": "inter",
     "moire_intra_zero": "intra",
     "moire_intra_nonzero": "intra",
     "kinetic": "Kinect",
@@ -61,6 +62,23 @@ SOURCE_META_KEYS = (
     "spin_map",
     "valley_map",
 )
+_MODEL_DEBUG_OUTPUT_FILES = {
+    "terms.json",
+    "discarded_terms.json",
+    "coefficients.json",
+    "fit_diagnostics.json",
+    "orthogonalization.json",
+    "matrix_residuals.json",
+    "block_residuals.json",
+    "wavefunction_overlap.json",
+    "symmetry_residuals.json",
+    "operation_registry.json",
+    "bM_diagnostic.json",
+    "harmonics_diagnostic.json",
+    "harmonics_diagnostic.png",
+    "comparison.json",
+    "comparison_plot.json",
+}
 
 
 @dataclass
@@ -85,6 +103,7 @@ class ConfiguredModel:
     max_order: dict[str, int]
     symmetry_map: dict[str, list[dict[str, Any]]]
     coeff_tol: float
+    coeff_prune_threshold: float
     compare_to_heff: bool
     kpath_config: dict[str, Any] = field(default_factory=dict)
     valley_model: dict[str, Any] = field(default_factory=dict)
@@ -92,11 +111,13 @@ class ConfiguredModel:
     symmetry_source_metadata: dict[str, Any] = field(default_factory=dict)
     sectors_config: list[dict[str, Any]] = field(default_factory=list)
     term_templates: list[dict[str, Any]] = field(default_factory=list)
+    term_template_metadata: dict[str, Any] = field(default_factory=dict)
     output_config: dict[str, Any] = field(default_factory=dict)
     band_slice: list[int] | None = None
     band_plot_config: dict[str, Any] = field(default_factory=dict)
     bM_diagnostics: dict[str, Any] = field(default_factory=dict)
     harmonics_diagnostics: dict[str, Any] = field(default_factory=dict)
+    orbital_count_metadata: dict[str, Any] = field(default_factory=dict)
     validation_config: dict[str, Any] = field(default_factory=dict)
 
 
@@ -131,6 +152,90 @@ def _as_int_list(value: Any, *, name: str) -> list[int]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
         raise ValueError(f"{name} must be a list of integers, got {value!r}")
     return [int(item) for item in value]
+
+
+def _num_layer_list_from_material(material: Mapping[str, Any]) -> list[int]:
+    raw = material.get("num_layer_list")
+    if raw is not None:
+        layers = _as_int_list(raw, name="source_config.material.num_layer_list")
+        if not layers or any(value <= 0 for value in layers):
+            raise ValueError(f"source_config material.num_layer_list must contain positive integers, got {raw!r}")
+        return layers
+    num_layers = int(material.get("num_layers", 2))
+    if num_layers <= 0:
+        raise ValueError(f"source_config material.num_layers must be positive, got {num_layers}")
+    if num_layers == 1:
+        return [1, 0]
+    return [1, num_layers - 1]
+
+
+def _layer_groups_metadata(num_layer_list: Sequence[int], values: Sequence[int]) -> list[dict[str, Any]]:
+    groups: list[dict[str, Any]] = []
+    layer_start = 1
+    for group_index, layer_count_raw in enumerate(num_layer_list):
+        layer_count = int(layer_count_raw)
+        layer_stop = layer_start + layer_count
+        group_values = [int(item) for item in values[layer_start - 1 : layer_stop - 1]]
+        groups.append(
+            {
+                "qset": f"qset{group_index + 1}",
+                "source_group": group_index + 1,
+                "layers": list(range(layer_start, layer_stop)),
+                "values": group_values,
+                "total": int(sum(group_values)),
+            }
+        )
+        layer_start = layer_stop
+    return groups
+
+
+def _resolve_layerwise_counts(
+    values: Sequence[int],
+    *,
+    name: str,
+    num_layer_list: Sequence[int],
+    default_from: str | None = None,
+) -> tuple[list[int], dict[str, Any]]:
+    raw_values = [int(value) for value in values]
+    qset_count = 2
+    total_layers = int(sum(int(value) for value in num_layer_list))
+    metadata: dict[str, Any] = {
+        "raw": list(raw_values),
+        "num_layer_list": [int(value) for value in num_layer_list],
+        "total_layers": total_layers,
+    }
+    if default_from is not None:
+        metadata["default_from"] = default_from
+
+    if len(raw_values) == qset_count and (total_layers == qset_count or default_from is not None):
+        metadata.update(
+            {
+                "input_kind": "default_from_n_orb" if default_from is not None else "legacy_qset",
+                "resolved_qset": list(raw_values),
+            }
+        )
+        return raw_values, metadata
+    if len(raw_values) != total_layers:
+        raise ValueError(
+            f"{name} must have {total_layers} physical-layer entries "
+            f"(sum(source_config material.num_layer_list)); got {len(raw_values)} values: {raw_values}"
+        )
+    if len(num_layer_list) != qset_count:
+        raise ValueError(
+            f"{name} physical-layer counts require exactly two source groups for qset1/qset2 resolution, "
+            f"got source_config material.num_layer_list={list(num_layer_list)}"
+        )
+
+    groups = _layer_groups_metadata(num_layer_list, raw_values)
+    qset_values = [int(group["total"]) for group in groups]
+    metadata.update(
+        {
+            "input_kind": "default_from_n_orb" if default_from is not None else "physical_layer",
+            "resolved_qset": list(qset_values),
+            "groups": groups,
+        }
+    )
+    return qset_values, metadata
 
 
 def _model_section(raw: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -614,6 +719,42 @@ def _rotation_deg_from_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) 
     return None
 
 
+def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, Any]:
+    symmetry_source = raw.get("symmetry_source", {})
+    if not isinstance(symmetry_source, Mapping) or str(symmetry_source.get("type", "")) != "kp_symm_output":
+        return {}
+    path_raw = symmetry_source.get("path")
+    if path_raw is None:
+        return {}
+    path = Path(str(path_raw))
+    if not path.is_absolute():
+        path = (base / path).resolve()
+    for filename in ("manifest.json", "summary.json"):
+        manifest_path = path / filename
+        if manifest_path.exists():
+            manifest = _load_yaml(manifest_path)
+            return dict(manifest) if isinstance(manifest, Mapping) else {}
+    return {}
+
+
+def _symmetry_operations_for_default_templates(raw: Mapping[str, Any], *, base: Path) -> list[Mapping[str, Any]]:
+    operations: list[Mapping[str, Any]] = []
+    symmetry_source = raw.get("symmetry_source", {})
+    if isinstance(symmetry_source, Mapping):
+        raw_operations = symmetry_source.get("operations", [])
+        if isinstance(raw_operations, Mapping):
+            raw_operations = [
+                {**(dict(value) if isinstance(value, Mapping) else {}), "name": str(key)}
+                for key, value in raw_operations.items()
+            ]
+        if isinstance(raw_operations, Sequence) and not isinstance(raw_operations, (str, bytes)):
+            operations.extend(dict(item) for item in raw_operations if isinstance(item, Mapping))
+    manifest_operations = _load_symmetry_manifest(raw, base=base).get("operations", [])
+    if isinstance(manifest_operations, Sequence) and not isinstance(manifest_operations, (str, bytes)):
+        operations.extend(dict(item) for item in manifest_operations if isinstance(item, Mapping))
+    return operations
+
+
 def _rotation_deg_from_config(raw: Mapping[str, Any], *, base: Path) -> float:
     if "coordinate_frame" in raw:
         raise ValueError("coordinate_frame is not a supported model input; use the kp_symm manifest frame")
@@ -635,6 +776,9 @@ def _rotation_deg_from_config(raw: Mapping[str, Any], *, base: Path) -> float:
     manifest_rotation = _rotation_deg_from_symmetry_manifest(raw, base=base)
     if manifest_rotation is not None:
         return manifest_rotation
+    symmetry_source = raw.get("symmetry_source", {})
+    if isinstance(symmetry_source, Mapping) and str(symmetry_source.get("type", "")) == "toy_generator":
+        return 0.0
     raise ValueError(
         "Configured model YAML requires a kp_symm symmetry manifest frame rotation. "
         "Rerun `kp symm` with automatic frame inference; do not hand-write model frame rotations."
@@ -663,6 +807,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     plot = source_raw.get("plot", {})
     if not isinstance(material, Mapping) or not isinstance(project, Mapping) or not isinstance(plot, Mapping):
         raise ValueError("source_config must contain mapping sections: material, project, plot")
+    num_layer_list = _num_layer_list_from_material(material)
 
     qset1_file = _resolve_path(material.get("qset1_file"), source_base)
     qset2_file = _resolve_path(material.get("qset2_file"), source_base)
@@ -710,18 +855,49 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     raw = _normalize_kp_symm_source(raw)
 
     model = _model_section(raw)
+    model_raw = dict(model)
     if "n_orb" in model:
         n_orb_raw = model["n_orb"]
     elif "n_orb1" in model or "n_orb2" in model:
         n_orb_raw = [model.get("n_orb1", 2), model.get("n_orb2", 2)]
     else:
         n_orb_raw = _infer_n_orb_pair_from_arrays(qset1_file, qset2_file, heff_file)
-    n_orb_values = _as_int_list(n_orb_raw, name="model.n_orb")
+    n_orb_input = _as_int_list(n_orb_raw, name="model.n_orb")
+    n_orb_values, n_orb_resolution = _resolve_layerwise_counts(
+        n_orb_input,
+        name="model.n_orb",
+        num_layer_list=num_layer_list,
+    )
+    nlow_state_default_from_n_orb = "nlow_state" not in model
+    nlow_state_input = _as_int_list(model.get("nlow_state", n_orb_input), name="model.nlow_state")
+    nlow_state, nlow_state_resolution = _resolve_layerwise_counts(
+        nlow_state_input,
+        name="model.nlow_state",
+        num_layer_list=num_layer_list,
+        default_from="model.n_orb" if nlow_state_default_from_n_orb else None,
+    )
     if len(n_orb_values) != 2:
-        raise ValueError(f"model.n_orb must have length 2, got {n_orb_values}")
-    nlow_state = _as_int_list(model.get("nlow_state", n_orb_values), name="model.nlow_state")
+        raise ValueError(f"model.n_orb must resolve to two qset counts, got {n_orb_values}")
     if len(nlow_state) != 2:
-        raise ValueError(f"model.nlow_state must have length 2, got {nlow_state}")
+        raise ValueError(f"model.nlow_state must resolve to two qset counts, got {nlow_state}")
+    model_raw["n_orb"] = list(n_orb_values)
+    model_raw["nlow_state"] = list(nlow_state)
+    model_raw["n_orb_resolution"] = n_orb_resolution
+    model_raw["nlow_state_resolution"] = nlow_state_resolution
+    if "groups" in n_orb_resolution:
+        model_raw["n_orb_layerwise"] = n_orb_resolution["raw"]
+        model_raw["n_orb_resolved_qset"] = n_orb_resolution["resolved_qset"]
+    if "groups" in nlow_state_resolution:
+        model_raw["nlow_state_layerwise"] = nlow_state_resolution["raw"]
+        model_raw["nlow_state_resolved_qset"] = nlow_state_resolution["resolved_qset"]
+    raw["model"] = model_raw
+    model = _model_section(raw)
+    orbital_count_metadata = {
+        "num_layer_list": [int(value) for value in num_layer_list],
+        "total_layers": int(sum(int(value) for value in num_layer_list)),
+        "n_orb": n_orb_resolution,
+        "nlow_state": nlow_state_resolution,
+    }
     max_order_values = _max_derivative_order_values(model)
 
     fit = raw.get("fit", {})
@@ -762,12 +938,20 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         raise ValueError("sectors must be a list when provided")
     _validate_sector_orbital_counts(sectors, n_orb_values)
     term_templates = model.get("term_templates", raw.get("term_templates"))
+    template_symmetry_operations = _symmetry_operations_for_default_templates(raw, base=base)
+    term_template_metadata: dict[str, Any] = {"input_kind": "explicit"}
     if term_templates is None:
         term_templates = _default_term_templates_for_model(
             valley_model=valley_model if isinstance(valley_model, Mapping) else {},
             n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
             max_order=max_order_values,
             harmonic_counts=harmonic_count_limits,
+            symmetry_operations=template_symmetry_operations,
+        )
+        term_template_metadata = _default_term_template_profile_metadata(
+            valley_model=valley_model if isinstance(valley_model, Mapping) else {},
+            n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
+            symmetry_operations=template_symmetry_operations,
         )
     if not isinstance(term_templates, Sequence) or isinstance(term_templates, (str, bytes)):
         raise ValueError("term_templates must be a list when provided")
@@ -777,11 +961,28 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
             max_order=max_order_values,
             harmonic_counts=harmonic_count_limits,
+            symmetry_operations=template_symmetry_operations,
+        )
+        term_template_metadata = _default_term_template_profile_metadata(
+            valley_model=valley_model if isinstance(valley_model, Mapping) else {},
+            n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
+            symmetry_operations=template_symmetry_operations,
         )
 
     symmetry_source_metadata = {}
     if isinstance(symmetry_source, Mapping) and bool(symmetry_source.get("inferred_from_source_config", False)):
         symmetry_source_metadata["inferred_from_source_config"] = True
+
+    coeff_prune_threshold = float(fit.get("coeff_prune_threshold", 0.0))
+    if coeff_prune_threshold < 0.0:
+        raise ValueError(f"fit.coeff_prune_threshold must be non-negative, got {coeff_prune_threshold}")
+    output_profile = str(output_section.get("profile", "release")).strip().lower()
+    if output_profile in {"", "default"}:
+        output_profile = "release"
+    if output_profile not in {"release", "debug"}:
+        raise ValueError(f"output.profile must be 'release' or 'debug', got {output_profile!r}")
+    output_section = dict(output_section)
+    output_section["profile"] = output_profile
 
     return ConfiguredModel(
         path=cfg_path,
@@ -804,6 +1005,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         max_order=max_order_values,
         symmetry_map={str(key): list(value) for key, value in dict(symmetry_map).items()},
         coeff_tol=float(fit.get("coeff_tol", 1.0e-6)),
+        coeff_prune_threshold=coeff_prune_threshold,
         compare_to_heff=bool(bands.get("compare_to_heff", True)),
         kpath_config=dict(kpath_config),
         valley_model=dict(valley_model),
@@ -811,9 +1013,11 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         symmetry_source_metadata=symmetry_source_metadata,
         sectors_config=[dict(item) for item in sectors],
         term_templates=[dict(item) for item in term_templates],
+        term_template_metadata=term_template_metadata,
         output_config=dict(output_section),
         band_slice=band_slice,
         band_plot_config=dict(band_plot),
+        orbital_count_metadata=orbital_count_metadata,
         validation_config=dict(raw.get("validation", {})),
     )
 
@@ -903,6 +1107,8 @@ def _harmonic_count_limits(harmonics: Mapping[str, Any]) -> dict[str, int]:
         raw = harmonics.get(kind)
         if _is_auto_harmonic_spec(raw):
             limits[kind] = _auto_harmonic_count(raw, name=f"model.harmonics.{kind}")
+        elif isinstance(raw, Mapping):
+            limits[kind] = max((int(key) for key in raw.keys()), default=0)
     return limits
 
 
@@ -994,6 +1200,38 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
     ),
     _TermTemplateProfile(
         valley_type="Gamma",
+        n_orb=(1, 1),
+        templates=(
+            _term_template_row("gamma_1x1_kinetic", "diagonal_kp", [[1, 1], [2, 2]], [[1, 1]], max_order_from="Kinect"),
+            _term_template_row("gamma_1x1_onsite", "onsite", [[1, 1], [2, 2]], [[1, 1]], max_order=0),
+            _term_template_row(
+                "gamma_1x1_intra_nonzero",
+                "moire_potential",
+                [[1, 1], [2, 2]],
+                [[1, 1]],
+                harmonic_filter={"kind": "intra", "indices": "nonzero", "start": 2, "fallback_count": 4},
+                max_order_from="moire_intra_nonzero",
+            ),
+            _term_template_row(
+                "gamma_1x1_inter_zero",
+                "tunneling",
+                [[2, 1], [1, 2]],
+                [[1, 1]],
+                harmonic_filter=_harmonic_filter("inter", [1]),
+                max_order_from="tunneling_zero",
+            ),
+            _term_template_row(
+                "gamma_1x1_inter_nonzero",
+                "tunneling",
+                [[2, 1], [1, 2]],
+                [[1, 1]],
+                harmonic_filter={"kind": "inter", "indices": "nonzero", "start": 2, "fallback_count": 4},
+                max_order_from="tunneling_nonzero",
+            ),
+        ),
+    ),
+    _TermTemplateProfile(
+        valley_type="Gamma",
         n_orb=(2, 2),
         templates=(
             _term_template_row("gamma_kinetic", "diagonal_kp", [[1, 1]], [[1, 1]], max_order_from="Kinect"),
@@ -1007,11 +1245,20 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 max_order_from="moire_intra_zero",
             ),
             _term_template_row(
+                "gamma_intra_zero_kdependent",
+                "moire_potential",
+                [[1, 1]],
+                [[1, 2], [2, 1]],
+                harmonic_filter=_harmonic_filter("intra", [1]),
+                max_order_from="moire_intra_nonzero",
+                monomial_constraints={"exclude_m_sum_zero": True},
+            ),
+            _term_template_row(
                 "gamma_intra_nonzero",
                 "moire_potential",
                 [[1, 1]],
                 [[1, 1], [1, 2], [2, 1]],
-                harmonic_filter=_harmonic_filter("intra", [2, 3, 4]),
+                harmonic_filter={"kind": "intra", "indices": "nonzero", "start": 2, "fallback_count": 4},
                 max_order_from="moire_intra_nonzero",
             ),
             _term_template_row(
@@ -1027,7 +1274,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 "tunneling",
                 [[2, 1]],
                 [[1, 1], [2, 1]],
-                harmonic_filter=_harmonic_filter("inter", [2, 3, 4]),
+                harmonic_filter={"kind": "inter", "indices": "nonzero", "start": 2, "fallback_count": 4},
                 max_order_from="tunneling_nonzero",
             ),
             _term_template_row(
@@ -1035,7 +1282,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
                 "tunneling",
                 [[2, 1]],
                 [[1, 1]],
-                harmonic_filter=_harmonic_filter("inter", [2, 3, 4], sign=-1.0),
+                harmonic_filter={"kind": "inter", "indices": "nonzero", "start": 2, "fallback_count": 4, "sign": -1.0},
                 max_order_from="tunneling_nonzero",
             ),
         ),
@@ -1069,7 +1316,12 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
 def _clamp_harmonic_filter(filter_spec: Mapping[str, Any], harmonic_counts: Mapping[str, int] | None) -> dict[str, Any]:
     out = copy.deepcopy(dict(filter_spec))
     kind = str(out["kind"])
-    if harmonic_counts and kind in harmonic_counts:
+    if out.get("indices") == "nonzero":
+        start = int(out.pop("start", 2))
+        fallback_count = int(out.pop("fallback_count", 4))
+        count = int(harmonic_counts.get(kind, fallback_count)) if harmonic_counts and kind in harmonic_counts else fallback_count
+        out["indices"] = list(range(start, count + 1))
+    elif harmonic_counts and kind in harmonic_counts:
         count = int(harmonic_counts[kind])
         out["indices"] = [int(index) for index in out.get("indices", []) if int(index) <= count]
     return out
@@ -1109,21 +1361,130 @@ def _term_template_profile_for(valley_type: str, n_orb: tuple[int, int]) -> tupl
     return tuple(matches)
 
 
+def _default_term_template_profile_metadata(
+    *,
+    valley_model: Mapping[str, Any],
+    n_orb: tuple[int, int],
+    symmetry_operations: Sequence[Mapping[str, Any]] | None,
+) -> dict[str, Any]:
+    valley_type = str(valley_model.get("valley_type", ""))
+    profiles = _term_template_profile_for(valley_type, n_orb)
+    profile_names: list[str] = []
+    for profile in profiles:
+        if profile.valley_type == "Gamma" and profile.n_orb == (2, 2):
+            if _gamma_2x2_sector_diagonal_pairs(symmetry_operations) == [[1, 1]]:
+                profile_names.append("gamma_2x2_symmetry_aware")
+            else:
+                profile_names.append("gamma_2x2_independent_sectors")
+        elif profile.n_orb is None:
+            profile_names.append(f"{profile.valley_type.lower()}_default")
+        else:
+            profile_names.append(
+                f"{profile.valley_type.lower()}_{'x'.join(str(value) for value in profile.n_orb)}"
+            )
+    metadata: dict[str, Any] = {
+        "input_kind": "default",
+        "valley_type": valley_type,
+        "n_orb": [int(n_orb[0]), int(n_orb[1])],
+        "profiles": profile_names,
+    }
+    if valley_type == "Gamma" and n_orb == (2, 2):
+        metadata["gamma_2x2_sector_diagonal_pairs"] = _gamma_2x2_sector_diagonal_pairs(symmetry_operations)
+    return metadata
+
+
+_GAMMA_2X2_SECTOR_DIAGONAL_TEMPLATE_NAMES = {
+    "gamma_kinetic",
+    "gamma_onsite",
+    "gamma_intra_zero",
+    "gamma_intra_zero_kdependent",
+    "gamma_intra_nonzero",
+}
+_GAMMA_1X1_SECTOR_DIAGONAL_TEMPLATE_NAMES = {
+    "gamma_1x1_kinetic",
+    "gamma_1x1_onsite",
+    "gamma_1x1_intra_nonzero",
+}
+_GAMMA_SECTOR_DIAGONAL_TEMPLATE_NAMES = (
+    _GAMMA_2X2_SECTOR_DIAGONAL_TEMPLATE_NAMES | _GAMMA_1X1_SECTOR_DIAGONAL_TEMPLATE_NAMES
+)
+
+
+def _sector_map_exchanges_model_sectors(sector_map: Any) -> bool:
+    if isinstance(sector_map, str):
+        return sector_map.lower() in {"layer_exchange", "sector_exchange", "exchange", "swap"}
+    if isinstance(sector_map, Mapping):
+        normalized = {str(key): str(value) for key, value in sector_map.items()}
+        if len(normalized) == 2 and all(
+            key != value and normalized.get(value) == key for key, value in normalized.items()
+        ):
+            return True
+        return (
+            normalized.get("1") == "2"
+            and normalized.get("2") == "1"
+        ) or (
+            normalized.get("L1") == "L2"
+            and normalized.get("L2") == "L1"
+        )
+    return False
+
+
+def _operation_exchanges_model_sectors(operation: Mapping[str, Any]) -> bool:
+    candidates: list[Any] = [operation]
+    for key in ("model_action", "internal_resolved_action", "declared_model_action"):
+        value = operation.get(key)
+        if isinstance(value, Mapping):
+            candidates.append(value)
+    return any(
+        isinstance(candidate, Mapping) and _sector_map_exchanges_model_sectors(candidate.get("sector_map"))
+        for candidate in candidates
+    )
+
+
+def _gamma_2x2_sector_diagonal_pairs(symmetry_operations: Sequence[Mapping[str, Any]] | None) -> list[list[int]]:
+    if symmetry_operations and any(_operation_exchanges_model_sectors(operation) for operation in symmetry_operations):
+        return [[1, 1]]
+    return [[1, 1], [2, 2]]
+
+
+def _apply_gamma_2x2_sector_policy(
+    templates: list[dict[str, Any]],
+    *,
+    valley_type: str,
+    n_orb: tuple[int, int],
+    symmetry_operations: Sequence[Mapping[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    if str(valley_type) != "Gamma" or tuple(n_orb) != (2, 2):
+        return templates
+    sector_pairs = _gamma_2x2_sector_diagonal_pairs(symmetry_operations)
+    for row in templates:
+        if row.get("name") in _GAMMA_SECTOR_DIAGONAL_TEMPLATE_NAMES:
+            row["sector_pairs"] = copy.deepcopy(sector_pairs)
+    return templates
+
+
 def _default_term_templates_for_model(
     *,
     valley_model: Mapping[str, Any],
     n_orb: tuple[int, int],
     max_order: Mapping[str, int],
     harmonic_counts: Mapping[str, int] | None = None,
+    symmetry_operations: Sequence[Mapping[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     valley_type = str(valley_model.get("valley_type", ""))
     profiles = _term_template_profile_for(valley_type, n_orb)
     if profiles:
-        return [
+        templates = [
             _expand_term_template_profile(template, max_order, harmonic_counts=harmonic_counts)
             for profile in profiles
             for template in profile.templates
         ]
+        return _apply_gamma_2x2_sector_policy(
+            templates,
+            valley_type=valley_type,
+            n_orb=n_orb,
+            symmetry_operations=symmetry_operations,
+        )
     return []
 
 
@@ -1280,7 +1641,12 @@ def _representative_score(vector: np.ndarray) -> tuple[float, float, float]:
         wedge_distance = 0.0
     if circular_angle < 1.0e-8:
         circular_angle = 0.0
-    return (wedge_distance, circular_angle, theta, float(np.linalg.norm(vector)))
+    return (
+        round(wedge_distance, 12),
+        round(circular_angle, 12),
+        round(theta, 12),
+        round(float(np.linalg.norm(vector)), 12),
+    )
 
 
 def _select_star_representative(records: list[dict[str, Any]], indices: list[int]) -> int:
@@ -1325,9 +1691,23 @@ def _harmonic_action_key(action: Mapping[str, Any]) -> tuple[Any, ...]:
     )
 
 
+def _named_operation_harmonic_action(name: Any) -> dict[str, Any] | None:
+    operation_name = str(name)
+    if operation_name in {"C3z", "C3"}:
+        return {"name": "C3z", "type": "rotation", "angle_deg": 120.0}
+    if operation_name in {"TR", "C2", "C2z"}:
+        return {"name": operation_name, "type": "negation"}
+    return None
+
+
 def _operation_to_harmonic_action(operation: Mapping[str, Any]) -> dict[str, Any] | None:
     q_map = operation.get("q_map", operation.get("k_map"))
     if not isinstance(q_map, Mapping):
+        for key in ("name", "operation"):
+            if key in operation:
+                action = _named_operation_harmonic_action(operation[key])
+                if action is not None:
+                    return action
         return None
     map_type = str(q_map.get("type", "")).lower()
     if map_type not in {"identity", "negation", "rotation", "reflection", "mirror"}:
@@ -2060,6 +2440,7 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     moire_config.sectors = sectors
     moire_config.symmetry_source_metadata = loaded_symmetry.metadata
     moire_config.bM_diagnostics = bM_diagnostics
+    moire_config.orbital_count_metadata = dict(config.orbital_count_metadata)
     setattr(moire_config, "_harmonics_diagnostics", harmonics_diagnostics)
     return moire_config, config
 
@@ -2394,6 +2775,33 @@ def _cleanup_stale_band_outputs(output_dir: Path) -> None:
             path.unlink()
 
 
+def _model_output_profile(model_config: ConfiguredModel) -> str:
+    profile = str(model_config.output_config.get("profile", "release")).strip().lower()
+    if profile in {"", "default"}:
+        return "release"
+    if profile not in {"release", "debug"}:
+        raise ValueError(f"output.profile must be 'release' or 'debug', got {profile!r}")
+    return profile
+
+
+def _model_diagnostics_dir(output_dir: Path) -> Path:
+    return output_dir / "diagnostics"
+
+
+def _cleanup_stale_model_debug_outputs(output_dir: Path) -> None:
+    for filename in _MODEL_DEBUG_OUTPUT_FILES:
+        path = output_dir / filename
+        if path.exists() and path.is_file():
+            path.unlink()
+    for pattern in ("comparison_top*.json", "comparison_bottom*.json"):
+        for path in output_dir.glob(pattern):
+            if path.is_file():
+                path.unlink()
+    diagnostics_dir = _model_diagnostics_dir(output_dir)
+    if diagnostics_dir.exists():
+        shutil.rmtree(diagnostics_dir)
+
+
 def _plot_axis_from_kpath(config: ConfiguredModel, npoints: int) -> tuple[np.ndarray, list[float] | None, list[str] | None]:
     if not config.kpath_config:
         return np.arange(npoints, dtype=float), None, None
@@ -2452,8 +2860,10 @@ def save_band_comparison_plot(
     nbands = min(model.shape[1], heff.shape[1])
     plot_options = dict(plot_config or {})
     start, stop = _resolve_plot_band_slice(nbands=nbands, metric_band_slice=band_slice, plot_config=plot_options)
-    model_sel = np.sort(model, axis=1)[:, start:stop]
-    heff_sel = np.sort(heff, axis=1)[:, start:stop]
+    model_sorted = np.sort(model, axis=1)[:, :nbands]
+    heff_sorted = np.sort(heff, axis=1)[:, :nbands]
+    model_sel = model_sorted[:, start:stop]
+    heff_sel = heff_sorted[:, start:stop]
     align = str(plot_options.get("align", "none")).lower()
     model_ref = 0.0
     heff_ref = 0.0
@@ -2469,6 +2879,13 @@ def save_band_comparison_plot(
         heff_sel = heff_sel - heff_ref
     elif align not in {"none", "false", "0"}:
         raise ValueError(f"Unsupported bands.plot.align={plot_options.get('align')!r}; expected 'none', 'top', or 'bottom'")
+    plot_all_bands = bool(plot_options.get("plot_all_bands", plot_options.get("show_all_bands", False)))
+    if plot_all_bands:
+        model_plot = model_sorted - model_ref
+        heff_plot = heff_sorted - heff_ref
+    else:
+        model_plot = model_sel
+        heff_plot = heff_sel
 
     import matplotlib
 
@@ -2478,18 +2895,18 @@ def save_band_comparison_plot(
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
-    x_values = np.asarray(x, dtype=float) if x is not None else np.arange(model_sel.shape[0], dtype=float)
-    if x_values.shape[0] != model_sel.shape[0]:
+    x_values = np.asarray(x, dtype=float) if x is not None else np.arange(model_plot.shape[0], dtype=float)
+    if x_values.shape[0] != model_plot.shape[0]:
         raise ValueError(f"plot x-axis length {x_values.shape[0]} does not match k-point count {model_sel.shape[0]}")
     figsize_raw = plot_options.get("figsize", [3.2, 5.8])
     if not isinstance(figsize_raw, Sequence) or isinstance(figsize_raw, (str, bytes)) or len(figsize_raw) != 2:
         raise ValueError(f"bands.plot.figsize must be [width, height], got {figsize_raw!r}")
     dpi = int(plot_options.get("dpi", 220))
     fig, ax = plt.subplots(figsize=(float(figsize_raw[0]), float(figsize_raw[1])), dpi=dpi)
-    for ib in range(heff_sel.shape[1]):
-        ax.plot(x_values, heff_sel[:, ib], color="0.20", linewidth=0.9, alpha=0.9)
-    for ib in range(model_sel.shape[1]):
-        ax.plot(x_values, model_sel[:, ib], color="#d7263d", linewidth=1.0, alpha=0.92)
+    for ib in range(heff_plot.shape[1]):
+        ax.plot(x_values, heff_plot[:, ib], color="0.20", linewidth=0.9, alpha=0.9)
+    for ib in range(model_plot.shape[1]):
+        ax.plot(x_values, model_plot[:, ib], color="#d7263d", linewidth=1.0, alpha=0.92)
     if x_ticks is not None and x_ticklabels is not None and len(x_ticks) == len(x_ticklabels):
         ax.set_xticks([float(item) for item in x_ticks])
         ax.set_xticklabels(list(x_ticklabels))
@@ -3037,9 +3454,11 @@ def _build_run_summary(
     operation_registry: Sequence[Mapping[str, Any]],
     validation_summary: Mapping[str, Any],
     active_terms_hash: str | None = None,
+    output_profile: str = "release",
 ) -> dict[str, Any]:
     uses_toy = model_config.symmetry_source_config.get("type") == "toy_generator"
     summary = {
+        "output_profile": output_profile,
         "symmetry_integrity": _symmetry_integrity(model_config),
         "symmetry_source_type": str(model_config.symmetry_source_config.get("type", "none")),
         "uses_toy_generator": bool(uses_toy),
@@ -3047,11 +3466,15 @@ def _build_run_summary(
         "valley_type": str(model_config.valley_model.get("valley_type", "")),
         "valley_mode": str(model_config.valley_model.get("mode", "")),
         "spin_convention": str(model_config.valley_model.get("spin_convention", "")),
-        "operation_registry_file": "operation_registry.json",
         "comparison": _json_safe(results.get("comparison")),
         "plot_comparison": _json_safe(results.get("plot_comparison")),
+        "coefficient_pruning": _json_safe(results.get("coefficient_pruning")),
+        "orbital_counts": _json_safe(model_config.orbital_count_metadata),
+        "term_template_profile": _json_safe(model_config.term_template_metadata),
         "operations": list(operation_registry),
     }
+    if output_profile == "debug":
+        summary["operation_registry_file"] = "diagnostics/operation_registry.json"
     if active_terms_hash is not None:
         summary["active_terms_hash"] = active_terms_hash
         summary["active_terms_hash_file"] = "active_terms.sha256"
@@ -3065,44 +3488,48 @@ def _write_model_registry_outputs(
     model_config: ConfiguredModel,
     validations: Mapping[str, Any],
     validation_summary: Mapping[str, Any],
+    diagnostics_dir: Path | None = None,
 ) -> None:
     model = results.get("model")
     terms = list(getattr(model, "terms", {}).values()) if model is not None else []
     rows = [_term_to_dict(term) for term in terms]
     active = [row for row in rows if row["active"]]
     discarded = [row for row in rows if not row["active"]]
-    with (output_dir / "terms.json").open("w", encoding="utf-8") as handle:
-        json.dump(rows, handle, indent=2)
     active_terms_text = json.dumps(_json_safe(active), indent=2)
     with (output_dir / "active_terms.json").open("w", encoding="utf-8") as handle:
         handle.write(active_terms_text)
     active_terms_hash = hashlib.sha256(active_terms_text.encode("utf-8")).hexdigest()
     with (output_dir / "active_terms.sha256").open("w", encoding="utf-8") as handle:
         handle.write(f"{active_terms_hash}\n")
-    with (output_dir / "discarded_terms.json").open("w", encoding="utf-8") as handle:
-        json.dump(discarded, handle, indent=2)
-    with (output_dir / "coefficients.json").open("w", encoding="utf-8") as handle:
-        json.dump(
-            [
-                {
-                    "key": row["key"],
-                    "tag": row["tag"],
-                    "r_value_real": row["r_value_real"],
-                    "r_value_imag": row["r_value_imag"],
-                }
-                for row in active
-            ],
-            handle,
-            indent=2,
-        )
-    with (output_dir / "fit_diagnostics.json").open("w", encoding="utf-8") as handle:
-        json.dump(_json_safe(results.get("diagnostics", {})), handle, indent=2)
-    for name in ("orthogonalization", "matrix_residuals", "block_residuals", "wavefunction_overlap", "symmetry_residuals"):
-        with (output_dir / f"{name}.json").open("w", encoding="utf-8") as handle:
-            json.dump(_json_safe(validations.get(name, {"available": False, "reason": "missing"})), handle, indent=2)
     operation_registry = _build_operation_registry(model_config)
-    with (output_dir / "operation_registry.json").open("w", encoding="utf-8") as handle:
-        json.dump(_json_safe(operation_registry), handle, indent=2)
+    output_profile = "debug" if diagnostics_dir is not None else "release"
+    if diagnostics_dir is not None:
+        diagnostics_dir.mkdir(parents=True, exist_ok=True)
+        with (diagnostics_dir / "terms.json").open("w", encoding="utf-8") as handle:
+            json.dump(rows, handle, indent=2)
+        with (diagnostics_dir / "discarded_terms.json").open("w", encoding="utf-8") as handle:
+            json.dump(discarded, handle, indent=2)
+        with (diagnostics_dir / "coefficients.json").open("w", encoding="utf-8") as handle:
+            json.dump(
+                [
+                    {
+                        "key": row["key"],
+                        "tag": row["tag"],
+                        "r_value_real": row["r_value_real"],
+                        "r_value_imag": row["r_value_imag"],
+                    }
+                    for row in active
+                ],
+                handle,
+                indent=2,
+            )
+        with (diagnostics_dir / "fit_diagnostics.json").open("w", encoding="utf-8") as handle:
+            json.dump(_json_safe(results.get("diagnostics", {})), handle, indent=2)
+        for name in ("orthogonalization", "matrix_residuals", "block_residuals", "wavefunction_overlap", "symmetry_residuals"):
+            with (diagnostics_dir / f"{name}.json").open("w", encoding="utf-8") as handle:
+                json.dump(_json_safe(validations.get(name, {"available": False, "reason": "missing"})), handle, indent=2)
+        with (diagnostics_dir / "operation_registry.json").open("w", encoding="utf-8") as handle:
+            json.dump(_json_safe(operation_registry), handle, indent=2)
     with (output_dir / "run_summary.json").open("w", encoding="utf-8") as handle:
         json.dump(
             _json_safe(
@@ -3112,6 +3539,7 @@ def _write_model_registry_outputs(
                     operation_registry=operation_registry,
                     validation_summary=validation_summary,
                     active_terms_hash=active_terms_hash,
+                    output_profile=output_profile,
                 )
             ),
             handle,
@@ -3149,6 +3577,28 @@ def _progress_line(message: str, *, enabled: bool) -> None:
         print(f"[kp model] {message}", flush=True)
 
 
+def _prune_small_coefficients(model: Any, threshold: float) -> dict[str, Any]:
+    threshold = float(threshold)
+    if threshold <= 0.0:
+        return {"enabled": False, "threshold": threshold, "dropped": 0, "kept": None}
+    terms = list(getattr(model, "terms", {}).values())
+    dropped = 0
+    kept = 0
+    for term in terms:
+        if not bool(getattr(term, "active", True)):
+            continue
+        real = float(getattr(term, "r_value_real", 0.0) or 0.0)
+        imag = float(getattr(term, "r_value_imag", 0.0) or 0.0)
+        if float(np.hypot(real, imag)) < threshold:
+            term.active = False
+            term.r_value_real = 0.0
+            term.r_value_imag = 0.0
+            dropped += 1
+        else:
+            kept += 1
+    return {"enabled": True, "threshold": threshold, "dropped": dropped, "kept": kept}
+
+
 def _run_model_pipeline(
     moire_config: MoireConfig,
     model_config: ConfiguredModel,
@@ -3173,15 +3623,22 @@ def _run_model_pipeline(
 
     model = run_stage("building continuum terms", lambda: build_model(moire_config))
     diagnostics = None
+    pruning = {"enabled": False, "threshold": 0.0, "dropped": 0, "kept": None}
     if moire_config.heff is not None and moire_config.kpoints_fit is not None:
         model, diagnostics = run_stage("fitting coefficients", lambda: compute_coefficients(moire_config, model))
+        pruning = _prune_small_coefficients(model, model_config.coeff_prune_threshold)
+        if pruning["enabled"]:
+            _progress_line(
+                "coefficient pruning: threshold={threshold:g}, kept={kept}, dropped={dropped}".format(**pruning),
+                enabled=progress,
+            )
     if moire_config.kpoints is None:
         raise ValueError("config.kpoints must be provided for band computation.")
     eigvals = run_stage(
         f"computing bands on {len(moire_config.kpoints)} k-points",
         lambda: compute_bands(moire_config, model, moire_config.kpoints, return_eigvecs=moire_config.save_eigvecs),
     )
-    return {"model": model, "eigvals": eigvals, "diagnostics": diagnostics}
+    return {"model": model, "eigvals": eigvals, "diagnostics": diagnostics, "coefficient_pruning": pruning}
 
 
 def run_configured_model(path: str | Path) -> dict[str, Any]:
@@ -3189,11 +3646,15 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     print("[kp model] loading configuration ...", flush=True)
     moire_config, model_config = build_moire_config_from_file(path)
     output_dir = model_config.output_dir
+    output_profile = _model_output_profile(model_config)
+    diagnostics_dir = _model_diagnostics_dir(output_dir) if output_profile == "debug" else None
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[kp model] output directory: {output_dir}", flush=True)
     _cleanup_stale_band_outputs(output_dir)
-    save_bM_diagnostics(model_config=model_config, output_dir=output_dir)
-    save_harmonics_diagnostics(moire_config=moire_config, model_config=model_config, output_dir=output_dir)
+    _cleanup_stale_model_debug_outputs(output_dir)
+    if diagnostics_dir is not None:
+        save_bM_diagnostics(model_config=model_config, output_dir=diagnostics_dir)
+        save_harmonics_diagnostics(moire_config=moire_config, model_config=model_config, output_dir=diagnostics_dir)
     verbose = bool(model_config.output_config.get("verbose", False))
     progress = bool(model_config.output_config.get("progress", True))
     log_name = str(model_config.output_config.get("log_file", "model_run.log"))
@@ -3222,8 +3683,10 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             heff_eig = np.linalg.eigvalsh(np.load(model_config.heff_file, mmap_mode="r"))
         heff_selected = _select_rows(heff_eig, model_config.band_indices)
         comparison = compare_bands(eigvals_array, heff_selected, band_slice=model_config.band_slice)
-        with (output_dir / "comparison.json").open("w", encoding="utf-8") as handle:
-            json.dump(comparison, handle, indent=2)
+        if diagnostics_dir is not None:
+            diagnostics_dir.mkdir(parents=True, exist_ok=True)
+            with (diagnostics_dir / "comparison.json").open("w", encoding="utf-8") as handle:
+                json.dump(comparison, handle, indent=2)
         plot_comparison = compare_bands_for_plot(
             eigvals_array,
             heff_selected,
@@ -3231,10 +3694,11 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             plot_config=model_config.band_plot_config,
         )
         plot_comparison_name = _plot_comparison_filename(model_config.band_plot_config)
-        with (output_dir / "comparison_plot.json").open("w", encoding="utf-8") as handle:
-            json.dump(plot_comparison, handle, indent=2)
-        with (output_dir / plot_comparison_name).open("w", encoding="utf-8") as handle:
-            json.dump(plot_comparison, handle, indent=2)
+        if diagnostics_dir is not None:
+            with (diagnostics_dir / "comparison_plot.json").open("w", encoding="utf-8") as handle:
+                json.dump(plot_comparison, handle, indent=2)
+            with (diagnostics_dir / plot_comparison_name).open("w", encoding="utf-8") as handle:
+                json.dump(plot_comparison, handle, indent=2)
         x_values, x_ticks, x_ticklabels = _plot_axis_from_kpath(model_config, np.asarray(eigvals_array).shape[0])
         band_plot_path = save_band_comparison_plot(
             eigvals_array,
@@ -3266,6 +3730,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         model_config=model_config,
         validations=validations,
         validation_summary=validation_summary,
+        diagnostics_dir=diagnostics_dir,
     )
     results["model_log"] = str(log_path)
     results["runtime_s"] = float(time.perf_counter() - started)

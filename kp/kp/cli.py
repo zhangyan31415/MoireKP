@@ -1,18 +1,19 @@
 from __future__ import annotations
 
 import argparse
+import inspect
+import json
 import os
 import sys
+import uuid
+from pathlib import Path
 from typing import Any, Dict, List, Sequence
 
 import yaml
 import numpy as np
-import matplotlib
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 from .io.tapw_loader import load_hamk, load_Q_sets
-from .blocks import get_H_block, project_heff_full#, get_h_dft_low
+from .blocks import get_H_block, project_heff_full, set_projector_blas_threads#, get_h_dft_low
 # Reporting-only downfold helpers were removed from the active core. Keep the
 # old imports here as a reference while the workflow is simplified.
 # from .blocks.downfold import (
@@ -25,6 +26,26 @@ from .blocks import get_H_block, project_heff_full#, get_h_dft_low
 from .symmetry.projection import run_symmetry_projection_from_config
 
 HARTREE_TO_EV = 27.2113845
+
+
+def _default_standalone_export_dir(model_output_dir: Path) -> Path:
+    return model_output_dir.with_name(f"{model_output_dir.name}_standalone")
+
+
+def _record_standalone_export(model_output_dir: Path, export_path: Path) -> None:
+    summary_path = model_output_dir / "run_summary.json"
+    summary_path.parent.mkdir(parents=True, exist_ok=True)
+    if summary_path.exists():
+        try:
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            summary = {}
+    else:
+        summary = {}
+    if not isinstance(summary, dict):
+        summary = {}
+    summary["standalone_export"] = str(export_path.resolve())
+    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
 def _energy_scale_from_material(material: dict[str, Any]) -> float:
@@ -40,7 +61,33 @@ def _energy_scale_from_material(material: dict[str, Any]) -> float:
 
 
 def _load_hamk_with_energy_unit(path: str, material: dict[str, Any], *, mmap_mode: str | None = "r") -> np.ndarray:
-    return load_hamk(path, mmap_mode=mmap_mode) * _energy_scale_from_material(material)
+    hamk = load_hamk(path, mmap_mode=mmap_mode)
+    scale = _energy_scale_from_material(material)
+    if scale == 1.0:
+        return hamk
+    return hamk * scale
+
+
+def _selected_spin_block_for_projection(hamk2d: np.ndarray, spin: str) -> tuple[np.ndarray, str]:
+    spin_norm = str(spin).lower()
+    if spin_norm == "all":
+        return hamk2d, "all"
+    if spin_norm not in {"up", "down"}:
+        raise ValueError(f"Unsupported spin value {spin!r}; expected 'up', 'down', or 'all'")
+    if hamk2d.ndim != 2 or hamk2d.shape[0] != hamk2d.shape[1]:
+        raise ValueError(f"Spin projection requires a square Hamiltonian block, got shape={hamk2d.shape}")
+    if hamk2d.shape[0] % 2 != 0:
+        raise ValueError(f"Spin projection requires an even Hamiltonian dimension, got {hamk2d.shape[0]}")
+    half = hamk2d.shape[0] // 2
+    if spin_norm == "up":
+        return hamk2d[:half, :half], "up"
+    return hamk2d[half:, half:], "up"
+
+
+def _selected_spin_project_input(hamk2d: np.ndarray, spin: str) -> np.ndarray:
+    block, _ = _selected_spin_block_for_projection(hamk2d, spin)
+    return np.asarray(block, dtype=np.complex128)
+
 
 def load_efermi_from_vbm_txt(path: str) -> float:
     """Load VBM text file and return max energy as efermi (in eV)."""
@@ -56,6 +103,46 @@ def load_efermi_from_vbm_txt(path: str) -> float:
     if not vals:
         raise ValueError(f"No numeric values found in {path}")
     return max(vals)
+
+
+def _plot_report_layer_for_ref_q(
+    ref_q: int,
+    *,
+    num_layer_list: Sequence[int],
+    q_lengths: Sequence[int],
+    index_order: Sequence[int] | np.ndarray | None,
+) -> int:
+    """Return the physical layer for a non-gamma plot reference block."""
+    if index_order is not None:
+        if ref_q < 0 or ref_q >= len(index_order):
+            raise IndexError(f"ref_q_index {ref_q} is outside ordered block range 0..{len(index_order) - 1}")
+        block_index = int(index_order[ref_q])
+    else:
+        block_index = int(ref_q)
+    if block_index < 0:
+        raise IndexError(f"ref_q_index maps to negative block index {block_index}")
+
+    offset = 0
+    physical_layer_offset = 0
+    for group_index, n_layers_raw in enumerate(num_layer_list):
+        if group_index >= len(q_lengths):
+            raise ValueError(
+                f"q_lengths has {len(q_lengths)} entries but num_layer_list needs group {group_index}"
+            )
+        n_layers = int(n_layers_raw)
+        q_len = int(q_lengths[group_index])
+        if n_layers < 0 or q_len <= 0:
+            raise ValueError(f"invalid non-gamma layout: n_layers={n_layers}, q_len={q_len}")
+
+        group_block_count = n_layers * q_len
+        if block_index < offset + group_block_count:
+            local_index = block_index - offset
+            return physical_layer_offset + int(local_index // q_len)
+
+        offset += group_block_count
+        physical_layer_offset += n_layers
+
+    raise IndexError(f"ref_q_index maps to block {block_index}, outside non-gamma block count {offset}")
 
 
 def infer_orbitals_per_layer(
@@ -81,6 +168,55 @@ def infer_orbitals_per_layer(
     return base // (q_count * num_layers)
 
 
+def _num_layer_list_from_material(material: dict[str, Any]) -> list[int]:
+    raw = material.get("num_layer_list")
+    if raw is not None:
+        layers = [int(x) for x in raw]
+        if not layers or any(x <= 0 for x in layers):
+            raise ValueError(f"material.num_layer_list must contain positive integers, got {raw!r}")
+        return layers
+    return [1 for _ in range(int(material.get("num_layers", 2)))]
+
+
+def _orbital_layout_from_material(
+    material: dict[str, Any],
+    hamk2d: np.ndarray,
+    q_count: int,
+    *,
+    spin: str,
+    mode: str,
+) -> tuple[list[int], int, list[list[int]]]:
+    num_layer_list = _num_layer_list_from_material(material)
+    total_layers = sum(num_layer_list)
+    raw = material.get("num_orb_per_layer")
+    if raw:
+        vals = [int(x) for x in raw]
+        if len(vals) == 1:
+            orb0 = vals[0]
+            return num_layer_list, orb0, [[orb0 for _ in range(n)] for n in num_layer_list]
+        if len(vals) == len(num_layer_list):
+            if len(set(vals)) != 1:
+                raise ValueError("This release requires equal orbital counts for each physical layer.")
+            orb0 = vals[0]
+            return num_layer_list, orb0, [[vals[i] for _ in range(n)] for i, n in enumerate(num_layer_list)]
+        if len(vals) == total_layers:
+            if len(set(vals)) != 1:
+                raise ValueError("This release requires equal orbital counts for each physical layer.")
+            orb0 = vals[0]
+            out: list[list[int]] = []
+            pos = 0
+            for n in num_layer_list:
+                out.append(vals[pos:pos + n])
+                pos += n
+            return num_layer_list, orb0, out
+        raise ValueError(
+            "material.num_orb_per_layer must have length 1, len(num_layer_list), "
+            f"or sum(num_layer_list); got {len(vals)} values for {num_layer_list}"
+        )
+    orb0 = infer_orbitals_per_layer(hamk2d, q_count, total_layers, spin=spin, mode=mode)
+    return num_layer_list, orb0, [[orb0 for _ in range(n)] for n in num_layer_list]
+
+
 def plot_eigs_scatter(
     eigs_list: Sequence[np.ndarray],
     efermi: float | None,
@@ -98,6 +234,10 @@ def plot_eigs_scatter(
 
     If index_order is provided, reorder Q indices before plotting.
     """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     def stack_rows(rows: Sequence[np.ndarray]) -> np.ndarray:
         arrs = [np.asarray(ev, dtype=float).ravel() for ev in rows]
         if not arrs:
@@ -133,18 +273,14 @@ def plot_eigs_scatter(
                 zorder=1,
                 label="Original" if i == 0 else "_nolegend_",
             )
-    colors = list(plt.get_cmap("tab10").colors)
+    heff_color = "#1f77b4"
     for i in range(E.shape[1]):
-        color = colors[i % len(colors)]
         ax.plot(
             x,
             E[:, i] - shift,
-            lw=1.2,
+            lw=0.95,
             alpha=0.95,
-            color=color,
-            marker='o',
-            markersize=3.3,
-            markeredgewidth=0.0,
+            color=heff_color,
             zorder=2,
             label="Heff" if i == 0 else "_nolegend_",
         )
@@ -238,13 +374,112 @@ def _apply_project_overrides(project_cfg: dict[str, Any], overrides: dict[str, A
     return cfg
 
 
+def _project_heff_full_kwargs_supports(name: str) -> bool:
+    try:
+        sig = inspect.signature(project_heff_full)
+    except (TypeError, ValueError):
+        return False
+    if name in sig.parameters:
+        return True
+    return any(param.kind == inspect.Parameter.VAR_KEYWORD for param in sig.parameters.values())
+
+
+_PROJECT_WORKER_CONTEXT: dict[str, Any] | None = None
+
+
+def _project_batches(indices: Sequence[int], workers: int, batch_size: int | str | None) -> list[list[int]]:
+    values = [int(i) for i in indices]
+    if not values:
+        return []
+    if isinstance(batch_size, str) and batch_size.lower() == "auto":
+        batch_size = None
+    if batch_size is None:
+        effective_workers = max(1, min(int(workers), len(values)))
+        batch_size = max(1, int(np.ceil(len(values) / (2 * effective_workers))))
+    batch_size = max(1, int(batch_size))
+    return [values[i:i + batch_size] for i in range(0, len(values), batch_size)]
+
+
+def _project_blas_threads(project_cfg: dict[str, Any], workers: int) -> int:
+    configured = project_cfg.get("blas_threads")
+    if configured is not None:
+        return max(1, int(configured))
+    cores = os.cpu_count() or 1
+    return max(1, min(8, int(cores) // max(1, int(workers))))
+
+
+def _init_project_worker(context: dict[str, Any]) -> None:
+    global _PROJECT_WORKER_CONTEXT
+    worker_context = dict(context)
+    set_projector_blas_threads(worker_context.get("blas_threads", 1))
+    if "hamk" not in worker_context:
+        worker_context["hamk"] = load_hamk(worker_context["hamk_file"], mmap_mode="r")
+        worker_context["hamk_is_scaled"] = False
+    _PROJECT_WORKER_CONTEXT = worker_context
+
+
+def _project_one_from_context(k_index: int, context: dict[str, Any]) -> tuple[Any, ...]:
+    hamk_data = context["hamk"]
+    ham_for_projection = hamk_data[int(k_index)] if hamk_data.ndim == 3 else hamk_data
+    ham_for_projection = _selected_spin_project_input(ham_for_projection, context["spin"])
+    if not context.get("hamk_is_scaled", True):
+        energy_scale = float(context.get("energy_scale", 1.0))
+        if energy_scale != 1.0:
+            ham_for_projection = ham_for_projection * energy_scale
+    kwargs = {
+        "spin": context["projection_spin"],
+        "bands": context["nlow_state_list"],
+        "comps": context["norb_fix_list"],
+        "Qlayer_list": [[context["q1"]], [context["q2"]]],
+        "num_orb_per_layer_list": context["num_orb_per_layer_list"],
+        "nlow_state_list": context["nlow_state_list"],
+        "norb_fix_list": context["norb_fix_list"],
+        "downfold_method": context["method"],
+        "E_ref": context["e_ref"],
+        "pole_warning_mev": context["pole_warning_mev"],
+        "pole_danger_mev": context["pole_danger_mev"],
+        "fail_on_near_pole": context["fail_on_near_pole"],
+        "return_diagnostics": True,
+        "mode": context["mode"],
+    }
+    if context["supports_compute_condition_number"]:
+        kwargs["compute_condition_number"] = context["compute_condition_number"]
+    if context["supports_compute_pole_diagnostics"]:
+        kwargs["compute_pole_diagnostics"] = context["compute_pole_diagnostics"]
+    return project_heff_full(
+        ham_for_projection,
+        context["q_count"],
+        context["orb0"],
+        context["num_layer_list"],
+        **kwargs,
+    )
+
+
+def _project_batch_from_worker_context(indices: Sequence[int]) -> list[tuple[int, tuple[Any, ...]]]:
+    if _PROJECT_WORKER_CONTEXT is None:
+        raise RuntimeError("KP project worker context is not initialized")
+    return [(int(i), _project_one_from_context(int(i), _PROJECT_WORKER_CONTEXT)) for i in indices]
+
+
+def _project_batch_from_context(
+    indices: Sequence[int],
+    context: dict[str, Any],
+) -> list[tuple[int, tuple[Any, ...]]]:
+    if (
+        _PROJECT_WORKER_CONTEXT is None
+        or _PROJECT_WORKER_CONTEXT.get("context_id") != context.get("context_id")
+    ):
+        _init_project_worker(context)
+    return _project_batch_from_worker_context(indices)
+
+
 def _active_indices_from_project_cfg(project_cfg: dict[str, Any]) -> list[int]:
     active = project_cfg.get("active_indices")
     if active is not None:
         return parse_int_list(active)
     nlow_state_list = project_cfg.get("nlow_state_list", [])
     if nlow_state_list and isinstance(nlow_state_list[0], (list, tuple)):
-        return [int(x) for x in nlow_state_list[0]]
+        return sorted({int(x) for layer_bands in nlow_state_list for x in layer_bands})
     if nlow_state_list:
         return [int(x) for x in nlow_state_list]
     return []
@@ -420,17 +655,17 @@ def cmd_plot_from_config(cfg_path: str) -> None:
 
         print(f"[kp] spin={spin}, num_layers={num_layers}")
 
-        # determine orbitals per layer per Q (single spin)
-        if "num_orb_per_layer" in material and material["num_orb_per_layer"]:
-            orb0 = int(material["num_orb_per_layer"][0])
-        else:
-            orb0 = infer_orbitals_per_layer(hamk2d, len(q1), num_layers, spin=spin,mode=mode)
+        num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
+            material,
+            hamk2d,
+            len(q1),
+            spin=spin,
+            mode=mode,
+        )
         print(f"[kp] inferred per-layer orbitals per Q (single spin) = {orb0}")
 
 
         Qlayer_list = [[q1], [q2]]
-        num_layer_list = [1, 1]
-        num_orb_per_layer_list = [[orb0], [orb0]]
         print(f"[kp] num_layer_list = {num_layer_list}")
         print(f"[kp] num_orb_per_layer_list = {num_orb_per_layer_list}")
         block_n = (sum(num_layer_list) * orb0) * (2 if spin == "all" else 1)
@@ -445,10 +680,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         print("[kp] nlow_state_list = ",nlow_state_list)
         print("[kp] norb_fix_list = ",norb_fix_list)
         print(f"[kp] Using mode: {mode}")
-        if spin == "up":
-            hamk2d = hamk2d[:hamk2d.shape[0]//2,:hamk2d.shape[0]//2]
-        elif spin == "down":
-            hamk2d = hamk2d[hamk2d.shape[0]//2:,hamk2d.shape[0]//2:]
+        hamk2d, block_spin = _selected_spin_block_for_projection(hamk2d, spin)
 
         print(f"[kp] q1 shape = {q1.shape}, q2 shape = {q2.shape}")
         print(f"[kp] hamk2d shape = {hamk2d.shape}")
@@ -461,7 +693,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
             num_orb_per_layer_list,
             nlow_state_list,
             norb_fix_list,
-            spin=spin,
+            spin=block_spin,
             mode=mode,
         )
         eigs_list = [np.asarray(ev, dtype=np.float64) for ev in H_eig]
@@ -515,12 +747,18 @@ def cmd_plot_from_config(cfg_path: str) -> None:
             # gamma mode: eigs_list length = len(q1) (one block per Q combining all layers)
             index_order = np.argsort(np.linalg.norm(Q_set1, axis=1))
         else:
-            # non-gamma mode: eigs_list length = len(q1) + len(q2)
-            # Structure: [layer0_Q0, layer0_Q1, ..., layer0_Qn, layer1_Q0, layer1_Q1, ..., layer1_Qn]
+            # non-gamma mode: eigs_list is grouped by physical layer, then Q.
             index_order1 = np.argsort(np.linalg.norm(Q_set1, axis=1))
             index_order2 = np.argsort(np.linalg.norm(Q_set2, axis=1))
-            # For non-gamma mode, blocks are ordered as: all layer0 blocks, then all layer1 blocks
-            index_order = np.concatenate([index_order1, len(q1) + index_order2])
+            pieces = []
+            offset = 0
+            for group_index, n_layers in enumerate(num_layer_list):
+                order = index_order1 if group_index == 0 else index_order2
+                q_len = len(q1) if group_index == 0 else len(q2)
+                for layer_in_group in range(n_layers):
+                    pieces.append(offset + layer_in_group * q_len + order)
+                offset += n_layers * q_len
+            index_order = np.concatenate(pieces)
         print(f"[kp] Using Q-norm sort with rotation {q_rotation_deg} deg. Mode: {mode}")
 
     # H_eig is an array of object vectors; normalize to list
@@ -728,13 +966,21 @@ def cmd_plot_from_config(cfg_path: str) -> None:
 
             block_dim, nBands = Vq.shape
             half = block_dim // 2 if spin == 'all' else block_dim
+            report_block_layer = None
+            if mode != "gamma" and q1 is not None and q2 is not None:
+                report_block_layer = _plot_report_layer_for_ref_q(
+                    ref_q,
+                    num_layer_list=num_layer_list,
+                    q_lengths=[len(q1), len(q2)],
+                    index_order=index_order,
+                )
 
             def map_index(idx: int, block_layer: int | None = None):
                 """将平面波/原子轨道基底索引 -> (spin_tag, layer, orb_local, label)
 
                 Args:
-                    idx: 轨道索引
-                    block_layer: 对于非gamma mode，指定该块属于哪个layer (0或1)
+                    idx: Orbital index within the reported block.
+                    block_layer: Physical layer for non-gamma single-layer blocks.
                 """
                 if spin == 'all':
                     spin_tag = 'up' if idx < half else 'down'
@@ -751,8 +997,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
                     if block_layer is not None:
                         layer = block_layer
                     else:
-                        # Infer from ref_q index: if ref_q < len(q1), it's layer 0, else layer 1
-                        layer = 0 if ref_q < len(q1) else 1
+                        layer = 0
 
                 orb_local = idx0 % orb0
                 label = None
@@ -774,12 +1019,6 @@ def cmd_plot_from_config(cfg_path: str) -> None:
                 w_top = w[top_idx]
                 frac = w_top / tot
 
-                # Determine block layer for non-gamma mode
-                block_layer = None
-                if mode != "gamma" and q1 is not None:
-                    # For non-gamma mode, ref_q indicates which (layer, Q) block
-                    block_layer = 0 if ref_q < len(q1) else 1
-
                 print(f"[kp] Band {b}: top-{top_n} orbital components ({ref_q} Q, mode={mode})")
                 # 列定义：rank idx spin layer orb coeff weight frac label
                 print("        rank   idx   spin  layer  orb        coeff (complex)       frac     label")
@@ -787,7 +1026,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
                     coeff = complex(vec[int(t)])
                     wt = float(w[int(t)])
                     fr = float(frac[rk-1])
-                    spin_tag, layer, orb_local, label = map_index(int(t), block_layer=block_layer)
+                    spin_tag, layer, orb_local, label = map_index(int(t), block_layer=report_block_layer)
                     # 与你示例的对齐风格一致（数值宽度匹配），coeff 另外增加一列
                     print(f"        {rk:>4}  {int(t):>5}  {spin_tag:<5}  {layer:>5}  {orb_local:>3}  {_format_complex(coeff)}   {fr*100:>7.2f}%   {label}")
 
@@ -830,7 +1069,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     qset1_file = resolve(material["qset1_file"])
     qset2_file = resolve(material["qset2_file"])
     spin = material.get("spin", "all")
-    num_layers = int(material.get("num_layers", 2))
 
     print("[kp] Loading input data")
     hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
@@ -854,37 +1092,42 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     pole_warning_mev = float(project_cfg.get("pole_warning_mev", 10.0))
     pole_danger_mev = float(project_cfg.get("pole_danger_mev", 1.0))
     fail_on_near_pole = _as_bool(project_cfg.get("fail_on_near_pole", False))
+    compute_pole_diagnostics = _as_bool(project_cfg.get("compute_pole_diagnostics", False))
+    compute_condition_number = _as_bool(project_cfg.get("compute_condition_number", False))
     verbose = _as_bool(project_cfg.get("verbose", False))
     print_k_diagnostics = _as_bool(project_cfg.get("print_k_diagnostics", False))
     # top_n_list = _top_n_list_from_project_cfg(project_cfg)
     if method in {"fixed_schur", "linearized_lowdin"} and e_ref is None:
         raise ValueError(f"project.downfold_method={method!r} requires project.e_ref")
 
-    # Determine orbitals per layer per Q (single spin)
-    if "num_orb_per_layer" in material and material["num_orb_per_layer"]:
-        orb0 = int(material["num_orb_per_layer"][0])
-    else:
-        orb0 = infer_orbitals_per_layer(hamk2d, len(q1), num_layers, spin=spin, mode=mode)
+    num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
+        material,
+        hamk2d,
+        len(q1),
+        spin=spin,
+        mode=mode,
+    )
 
     # For projection, we do not reorder Q to avoid changing Heff basis.
     q_count = len(q1)
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     nk = hamk3d.shape[0]
-    if spin == "up":
-        hamk3d_new = []
-        for i in range(len(hamk3d)):
-            hamk3d_new.append(hamk3d[i][:hamk3d[i].shape[0]//2,:hamk3d[i].shape[0]//2])
-        hamk3d = np.array(hamk3d_new)
-    elif spin == "down":
-        hamk3d_new = []
-        for i in range(len(hamk3d)):
-            hamk3d_new.append(hamk3d[i][hamk3d[i].shape[0]//2:,hamk3d[i].shape[0]//2:])
-        hamk3d = np.array(hamk3d_new)
+    has_explicit_k_indices = project_cfg.get("k_indices") is not None
+    project_indices = (
+        parse_int_list(project_cfg.get("k_indices"))
+        if has_explicit_k_indices
+        else list(range(nk))
+    )
+    for idx in project_indices:
+        if idx < 0 or idx >= nk:
+            raise IndexError(f"project.k_indices contains {idx}, but available k indices are 0..{nk - 1}")
     active_indices = _active_indices_from_project_cfg(project_cfg)
-    model_dim = q_count * len(active_indices)
+    model_dim = q_count * sum(len(layer_bands) for layer_bands in nlow_state_list)
     print("[kp] Project setup:")
     print(f"[kp]   material={material.get('name', 'unknown')}, mode={mode}, spin={spin}")
-    print(f"[kp]   k-points={nk}, Q-points={q_count}, orbitals/layer/Q={orb0}")
+    print(f"[kp]   k-points={len(project_indices)}/{nk}, Q-points={q_count}, orbitals/layer/Q={orb0}")
+    if len(project_indices) != nk:
+        print(f"[kp]   k-indices={project_indices}")
     print(f"[kp]   active bands={active_indices}, model dimension={model_dim}")
     method_line = f"[kp]   method={_downfold_method_label(method)}"
     if e_ref is not None:
@@ -912,70 +1155,95 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     if band_file:
         try:
             original_eigs_list = _load_bands_from_text(band_file)
+            if len(project_indices) != nk:
+                original_eigs_list = [original_eigs_list[i] for i in project_indices]
         except Exception as ex:
             print(f"[kp] Overlay warning: failed to load original bands from {band_file}: {ex}")
 
-    # Run projection for each k (first dim of hamk)
-    print(f"[kp] Running projection: {nk} k-points, workers={workers}")
+    projection_spin = "all" if str(spin).lower() == "all" else "up"
+    project_context_id = uuid.uuid4().hex
+    project_context = {
+        "context_id": project_context_id,
+        "hamk": hamk3d,
+        "hamk_file": hamk_file,
+        "hamk_is_scaled": True,
+        "energy_scale": _energy_scale_from_material(material),
+        "spin": spin,
+        "projection_spin": projection_spin,
+        "q1": q1,
+        "q2": q2,
+        "q_count": q_count,
+        "orb0": orb0,
+        "num_layer_list": num_layer_list,
+        "num_orb_per_layer_list": num_orb_per_layer_list,
+        "nlow_state_list": nlow_state_list,
+        "norb_fix_list": norb_fix_list,
+        "method": method,
+        "e_ref": e_ref,
+        "pole_warning_mev": pole_warning_mev,
+        "pole_danger_mev": pole_danger_mev,
+        "fail_on_near_pole": fail_on_near_pole,
+        "compute_condition_number": compute_condition_number,
+        "compute_pole_diagnostics": compute_pole_diagnostics,
+        "supports_compute_condition_number": _project_heff_full_kwargs_supports("compute_condition_number"),
+        "supports_compute_pole_diagnostics": _project_heff_full_kwargs_supports("compute_pole_diagnostics"),
+        "mode": mode,
+    }
 
-    try:
-        from joblib import Parallel, delayed
-        from tqdm import tqdm
-        results = Parallel(n_jobs=workers)(
-            delayed(project_heff_full)(
-                np.asarray(hamk3d[i], dtype=np.complex128),
-                q_count,
-                orb0,
-                [1, 1],
-                spin=spin,
-                bands=nlow_state_list,
-                comps=norb_fix_list,
-                Qlayer_list=[[q1], [q2]],
-                num_orb_per_layer_list=[[orb0], [orb0]],
-                nlow_state_list=nlow_state_list,
-                norb_fix_list=norb_fix_list,
-                downfold_method=method,
-                E_ref=e_ref,
-                pole_warning_mev=pole_warning_mev,
-                pole_danger_mev=pole_danger_mev,
-                fail_on_near_pole=fail_on_near_pole,
-                return_diagnostics=True,
-                mode=mode,
+    # Run projection for each k (first dim of hamk)
+    effective_workers = max(1, min(workers, len(project_indices)))
+    inner_blas_threads = _project_blas_threads(project_cfg, effective_workers)
+    set_projector_blas_threads(inner_blas_threads)
+    print(f"[kp] Running projection: {len(project_indices)} k-points, workers={workers}")
+    if workers > effective_workers:
+        print(f"[kp]   effective workers={effective_workers} (limited by k-point count)")
+    if verbose:
+        print(f"[kp]   BLAS threads per worker={inner_blas_threads}")
+
+    if workers <= 1:
+        results = [_project_one_from_context(i, project_context) for i in project_indices]
+    else:
+        try:
+            from joblib import Parallel, delayed
+            from tqdm import tqdm
+
+            parallel_context = dict(project_context)
+            parallel_context.pop("hamk", None)
+            parallel_context["blas_threads"] = inner_blas_threads
+            batches = _project_batches(project_indices, effective_workers, project_cfg.get("batch_size"))
+            if len(batches) != len(project_indices):
+                print(f"[kp]   parallel batches={len(batches)}, batch_size~{len(batches[0])}; progress counts completed k-points")
+            parallel_results = Parallel(
+                n_jobs=effective_workers,
+                backend="loky",
+                return_as="generator",
+                batch_size=1,
+                initializer=_init_project_worker,
+                initargs=(parallel_context,),
+            )(
+                delayed(_project_batch_from_context)(batch, parallel_context)
+                for batch in batches
             )
-            for i in tqdm(
-                range(nk),
+            progress = tqdm(
+                total=len(project_indices),
                 desc="[kp] project",
                 unit="k",
                 ncols=80,
-                leave=False,
+                leave=True,
                 disable=not sys.stderr.isatty(),
             )
-        )
-    except Exception as ex:
-        print(f"[kp] Parallel projection failed, falling back to serial: {ex}")
-        results = [
-            project_heff_full(
-                np.asarray(hamk3d[i], dtype=np.complex128),
-                q_count,
-                orb0,
-                [1, 1],
-                spin=spin,
-                bands=nlow_state_list,
-                comps=norb_fix_list,
-                Qlayer_list=[[q1], [q2]],
-                num_orb_per_layer_list=[[orb0], [orb0]],
-                nlow_state_list=nlow_state_list,
-                norb_fix_list=norb_fix_list,
-                downfold_method=method,
-                E_ref=e_ref,
-                pole_warning_mev=pole_warning_mev,
-                pole_danger_mev=pole_danger_mev,
-                fail_on_near_pole=fail_on_near_pole,
-                return_diagnostics=True,
-                mode=mode,
-            )
-            for i in range(nk)
-        ]
+            batch_results = []
+            try:
+                for batch in parallel_results:
+                    batch_results.append(batch)
+                    progress.update(len(batch))
+            finally:
+                progress.close()
+            result_by_index = {k_index: result for batch in batch_results for k_index, result in batch}
+            results = [result_by_index[int(i)] for i in project_indices]
+        except Exception as ex:
+            print(f"[kp] Parallel projection failed, falling back to serial: {ex}")
+            results = [_project_one_from_context(i, project_context) for i in project_indices]
 
     heff_list = [np.asarray(r[0], dtype=np.complex128) for r in results]  # (nk, M, M)
     heig_list = [np.asarray(r[1], dtype=np.float64) for r in results]      # (nk, M)
@@ -997,6 +1265,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     np.save(out_heff, heff_arr)
     np.save(out_eig, heig_arr)
     np.save(out_vec, hvec_arr)
+    if has_explicit_k_indices:
+        np.save(os.path.join(out_dir, "k_indices.npy"), np.asarray(project_indices, dtype=int))
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
         print(f"[kp] Heff shape: {heff_arr.shape}")
     print("[kp] Saved arrays:")
@@ -1078,10 +1348,11 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     workers = int(project_cfg.get("workers", 1))
     mode = project_cfg.get("mode", "gamma").lower()
     spin = material.get("spin", "all")
-    num_layers = int(material.get("num_layers", 2))
     pole_warning_mev = float(project_cfg.get("pole_warning_mev", 10.0))
     pole_danger_mev = float(project_cfg.get("pole_danger_mev", 1.0))
     fail_on_near_pole = _as_bool(project_cfg.get("fail_on_near_pole", False))
+    compute_pole_diagnostics = _as_bool(project_cfg.get("compute_pole_diagnostics", False))
+    compute_condition_number = _as_bool(project_cfg.get("compute_condition_number", False))
     nlow_state_list = _normalize_nlow_state_list(project_cfg)
     norb_fix_list = project_cfg.get("norb_fix_list", [])
 
@@ -1094,10 +1365,13 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
     hamk_index = int(plot_cfg.get("hamk_index", 0))
     hamk2d = hamk[hamk_index] if hamk.ndim == 3 else hamk
-    if "num_orb_per_layer" in material and material["num_orb_per_layer"]:
-        orb0 = int(material["num_orb_per_layer"][0])
-    else:
-        orb0 = infer_orbitals_per_layer(hamk2d, len(q1), num_layers, spin=spin, mode=mode)
+    num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
+        material,
+        hamk2d,
+        len(q1),
+        spin=spin,
+        mode=mode,
+    )
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     if k_indices is None:
         k_indices = list(range(hamk3d.shape[0]))
@@ -1109,55 +1383,45 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     for e_ref in e_ref_values:
         print(f"[kp] Sweeping E_ref={e_ref:.6f} eV over {len(k_indices)} k points")
         results = []
+
+        def sweep_one(k_index: int):
+            ham_for_projection = _selected_spin_project_input(hamk3d[k_index], spin)
+            projection_spin = "all" if str(spin).lower() == "all" else "up"
+            kwargs = {
+                "spin": projection_spin,
+                "Qlayer_list": [[q1], [q2]],
+                "num_orb_per_layer_list": num_orb_per_layer_list,
+                "nlow_state_list": nlow_state_list,
+                "norb_fix_list": norb_fix_list,
+                "downfold_method": "fixed_schur",
+                "E_ref": float(e_ref),
+                "pole_warning_mev": pole_warning_mev,
+                "pole_danger_mev": pole_danger_mev,
+                "fail_on_near_pole": fail_on_near_pole,
+                "return_diagnostics": True,
+                "mode": mode,
+            }
+            if _project_heff_full_kwargs_supports("compute_condition_number"):
+                kwargs["compute_condition_number"] = compute_condition_number
+            if _project_heff_full_kwargs_supports("compute_pole_diagnostics"):
+                kwargs["compute_pole_diagnostics"] = compute_pole_diagnostics
+            return project_heff_full(
+                ham_for_projection,
+                q_count,
+                orb0,
+                num_layer_list,
+                **kwargs,
+            )
+
         if workers > 1:
             try:
                 from joblib import Parallel, delayed
-                results = Parallel(n_jobs=workers)(
-                    delayed(project_heff_full)(
-                        np.asarray(hamk3d[i], dtype=np.complex128),
-                        q_count,
-                        orb0,
-                        [1, 1],
-                        spin=spin,
-                        Qlayer_list=[[q1], [q2]],
-                        num_orb_per_layer_list=[[orb0], [orb0]],
-                        nlow_state_list=nlow_state_list,
-                        norb_fix_list=norb_fix_list,
-                        downfold_method="fixed_schur",
-                        E_ref=float(e_ref),
-                        pole_warning_mev=pole_warning_mev,
-                        pole_danger_mev=pole_danger_mev,
-                        fail_on_near_pole=fail_on_near_pole,
-                        return_diagnostics=True,
-                        mode=mode,
-                    )
-                    for i in k_indices
-                )
+                results = Parallel(n_jobs=workers)(delayed(sweep_one)(i) for i in k_indices)
             except Exception as ex:
                 print(f"[kp] Parallel sweep failed, falling back to serial: {ex}")
                 results = []
         if not results:
-            results = [
-                project_heff_full(
-                    np.asarray(hamk3d[i], dtype=np.complex128),
-                    q_count,
-                    orb0,
-                    [1, 1],
-                    spin=spin,
-                    Qlayer_list=[[q1], [q2]],
-                    num_orb_per_layer_list=[[orb0], [orb0]],
-                    nlow_state_list=nlow_state_list,
-                    norb_fix_list=norb_fix_list,
-                    downfold_method="fixed_schur",
-                    E_ref=float(e_ref),
-                    pole_warning_mev=pole_warning_mev,
-                    pole_danger_mev=pole_danger_mev,
-                    fail_on_near_pole=fail_on_near_pole,
-                    return_diagnostics=True,
-                    mode=mode,
-                )
-                for i in k_indices
-            ]
+            results = [sweep_one(i) for i in k_indices]
         # heig_list = [np.asarray(r[1], dtype=np.float64) for r in results]
         diag_list = [r[3] for r in results if len(r) > 3]
         # metrics = compute_top_n_metrics(original_rows, heig_list, top_n_list)
@@ -1229,9 +1493,12 @@ def build_argparser() -> argparse.ArgumentParser:
     p_proj.add_argument("--downfold-method", choices=["first_order", "fixed_schur", "linearized_lowdin"])
     p_proj.add_argument("--e-ref", type=float, help="Reference energy for fixed_schur/linearized_lowdin in eV")
     p_proj.add_argument("--top-n", help="Comma-separated top-N values for diagnostics, e.g. 2,4,6,10,20")
+    p_proj.add_argument("--k-indices", help="Comma-separated k indices; default is all")
     p_proj.add_argument("--pole-warning-mev", type=float)
     p_proj.add_argument("--pole-danger-mev", type=float)
     p_proj.add_argument("--fail-on-near-pole", action="store_true")
+    p_proj.add_argument("--compute-pole-diagnostics", action="store_true")
+    p_proj.add_argument("--compute-condition-number", action="store_true")
 
     p_sweep = sub.add_parser("sweep", help="Sweep E_ref for fixed Schur downfolding")
     p_sweep.add_argument("-c", "--config", required=True, help="YAML config path")
@@ -1242,20 +1509,31 @@ def build_argparser() -> argparse.ArgumentParser:
     p_sweep.add_argument("--pole-warning-mev", type=float)
     p_sweep.add_argument("--pole-danger-mev", type=float)
     p_sweep.add_argument("--fail-on-near-pole", action="store_true")
+    p_sweep.add_argument("--compute-pole-diagnostics", action="store_true")
+    p_sweep.add_argument("--compute-condition-number", action="store_true")
 
     p_symm = sub.add_parser("symm", help="Project TAPW symmetry representations into the KP basis")
     p_symm.add_argument("-c", "--config", required=True, help="YAML config path")
     p_symm.add_argument("--developer-outputs", action="store_true", help="Write developer-only projection matrices under diagnostics/")
 
-    p_model = sub.add_parser("model", help="Build/fit a configured continuum model and compare to Heff")
-    p_model.add_argument("-c", "--config", required=True, help="YAML model config path")
+    p_model = sub.add_parser("model", help="Build/fit/export a configured continuum model")
+    p_model.add_argument("model_action", nargs="?", help="Optional action, e.g. export-standalone")
+    p_model.add_argument("model_args", nargs="*", help="Arguments for optional model action")
+    p_model.add_argument("-c", "--config", help="YAML model config path")
+    p_model.add_argument("--export-standalone", help="Write a minimal NumPy-only standalone model package")
+    p_model.add_argument("--all-examples", help="Inventory/export all examples under this root")
+    p_model.add_argument("--dry-run", action="store_true", help="Report standalone exportability without writing packages")
+    p_model.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")
+    p_model.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
 
     return p
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     p = build_argparser()
-    args = p.parse_args(argv)
+    args, extra_args = p.parse_known_args(argv)
+    if extra_args and not (args.cmd == "model" and args.model_action == "export-standalone"):
+        p.error(f"unrecognized arguments: {' '.join(extra_args)}")
     if args.cmd == "plot":
         cmd_plot_from_config(args.config)
     elif args.cmd == "project":
@@ -1264,9 +1542,12 @@ def main(argv: Sequence[str] | None = None) -> None:
             "downfold_method": args.downfold_method,
             "e_ref": args.e_ref,
             "top_n": args.top_n,
+            "k_indices": args.k_indices,
             "pole_warning_mev": args.pole_warning_mev,
             "pole_danger_mev": args.pole_danger_mev,
             "fail_on_near_pole": args.fail_on_near_pole if args.fail_on_near_pole else None,
+            "compute_pole_diagnostics": args.compute_pole_diagnostics if args.compute_pole_diagnostics else None,
+            "compute_condition_number": args.compute_condition_number if args.compute_condition_number else None,
         }
         cmd_project_from_config(args.config, overrides)
     elif args.cmd == "sweep":
@@ -1278,6 +1559,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             "pole_warning_mev": args.pole_warning_mev,
             "pole_danger_mev": args.pole_danger_mev,
             "fail_on_near_pole": args.fail_on_near_pole if args.fail_on_near_pole else None,
+            "compute_pole_diagnostics": args.compute_pole_diagnostics if args.compute_pole_diagnostics else None,
+            "compute_condition_number": args.compute_condition_number if args.compute_condition_number else None,
         }
         cmd_sweep_from_config(args.config, overrides)
     elif args.cmd == "symm":
@@ -1286,6 +1569,39 @@ def main(argv: Sequence[str] | None = None) -> None:
             developer_outputs=True if args.developer_outputs else None,
         )
     elif args.cmd == "model":
+        if args.model_action == "export-standalone":
+            from .model import export as export_mod
+            action_args = list(args.model_args) + list(extra_args)
+
+            if args.all_examples:
+                all_output_root = action_args[0] if action_args else None
+                if all_output_root is None:
+                    raise SystemExit("kp model export-standalone --all-examples requires <output_root>")
+                report = export_mod.export_all_standalone_models(
+                    args.all_examples,
+                    all_output_root,
+                    force=bool(args.force),
+                    debug_files=bool(args.debug_files),
+                    dry_run=bool(args.dry_run),
+                )
+                print(f"[kp model] standalone exportable: {len(report['exportable'])}")
+                print(f"[kp model] standalone exported: {len(report['exported'])}")
+                print(f"[kp model] standalone blocked: {len(report['blocked'])}")
+                for row in report["blocked"]:
+                    print(f"[kp model]   blocked: {row['model_output_dir']}: {row['reason']}")
+                return
+            if len(action_args) < 2:
+                raise SystemExit("kp model export-standalone requires <model_output_dir> <output_dir>")
+            export_path = export_mod.export_standalone_model(
+                Path(action_args[0]),
+                action_args[1],
+                force=bool(args.force),
+                debug_files=bool(args.debug_files),
+            )
+            print(f"[kp model]   standalone export: {export_path}")
+            return
+        if not args.config:
+            raise SystemExit("kp model requires --config unless using 'export-standalone'")
         from .model.pipeline import run_configured_model
 
         results = run_configured_model(args.config)
@@ -1304,7 +1620,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"[kp model]   basis: dim={dim}, Q=({q1}, {q2}), n_orb={model_cfg.n_orb}")
             print(f"[kp model]   fit k-points: {len(model_cfg.fit_indices)}, band k-points: {len(moire_cfg.kpoints)}")
             print(f"[kp model]   bM source: {model_cfg.bM_diagnostics.get('source', 'unknown')}")
-            print(f"[kp model]   harmonics: intra={len(moire_cfg.intra_harmonics_map)}, inter={len(moire_cfg.inter_harmonics_map)}")
+            intra_count = len(getattr(moire_cfg, "intra_harmonics_map", {}) or {})
+            inter_count = len(getattr(moire_cfg, "inter_harmonics_map", {}) or {})
+            print(f"[kp model]   harmonics: intra={intra_count}, inter={inter_count}")
             if sym_ops:
                 print(f"[kp model]   symmetry: {', '.join(str(op) for op in sym_ops)}")
             if results.get("model_log"):
@@ -1326,6 +1644,19 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"[kp model]   plot bands RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})")
             if plot_comparison.get("model_alignment_shift_meV") is not None:
                 print(f"[kp model]   plot alignment shift: {float(plot_comparison['model_alignment_shift_meV']):.3f} meV")
+        if model_cfg is None:
+            raise RuntimeError("standalone export requires configured model results")
+        from .model.export import export_standalone_model
+
+        standalone_dir = Path(args.export_standalone) if args.export_standalone else _default_standalone_export_dir(Path(model_cfg.output_dir))
+        export_path = export_standalone_model(
+            model_cfg.output_dir,
+            standalone_dir,
+            force=True,
+            debug_files=bool(args.debug_files),
+        )
+        _record_standalone_export(Path(model_cfg.output_dir), Path(export_path))
+        print(f"[kp model]   standalone export: {export_path}")
     else:
         raise SystemExit(2)
 

@@ -1,11 +1,15 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from typing import Any, Sequence
 
 import numpy as np
+import scipy.linalg
 
 
 MEV_PER_EV = 1000.0
+PROJECTOR_BLAS_THREADS = 8
 
 
 class NearPoleError(RuntimeError):
@@ -19,6 +23,8 @@ class DownfoldingOptions:
     pole_warning_mev: float = 10.0
     pole_danger_mev: float = 1.0
     fail_on_near_pole: bool = False
+    compute_pole_diagnostics: bool = False
+    compute_condition_number: bool = False
 
 
 @dataclass
@@ -34,6 +40,20 @@ class DownfoldingResult:
     b_min_eig: float | None = None
     b_condition_number: float | None = None
     warnings: list[str] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class _ProjectorGroup:
+    rows: np.ndarray
+    cols: np.ndarray
+    local: np.ndarray
+    local_h: np.ndarray
+
+
+@dataclass(frozen=True)
+class _ProjectorGroups:
+    n_columns: int
+    groups: tuple[_ProjectorGroup, ...]
 
 
 # Reporting-only helpers kept here for reference, but intentionally not part of
@@ -72,6 +92,31 @@ def _hermiticity_residual(matrix: np.ndarray) -> float:
     return float(np.linalg.norm(mat - mat.conj().T) / denom)
 
 
+def _bounded_blas_threads() -> Any:
+    try:
+        from threadpoolctl import threadpool_limits
+    except Exception:  # pragma: no cover - optional runtime dependency
+        return nullcontext()
+    return threadpool_limits(limits=PROJECTOR_BLAS_THREADS, user_api="blas")
+
+
+def set_projector_blas_threads(threads: int) -> None:
+    global PROJECTOR_BLAS_THREADS
+    PROJECTOR_BLAS_THREADS = max(1, int(threads))
+
+
+def _shifted_hamiltonian_matrix(h_hh: np.ndarray, e_ref: float) -> np.ndarray:
+    a = -np.array(h_hh, dtype=np.complex128, copy=True)
+    a.ravel()[:: a.shape[0] + 1] += float(e_ref)
+    return a
+
+
+def _solve_hermitian_shifted(h_hh: np.ndarray, rhs: np.ndarray, e_ref: float) -> np.ndarray:
+    a = _shifted_hamiltonian_matrix(h_hh, e_ref)
+    with _bounded_blas_threads():
+        return np.linalg.solve(a, rhs)
+
+
 def _pole_diagnostics(
     e_ref: float,
     h_hh: np.ndarray,
@@ -79,28 +124,269 @@ def _pole_diagnostics(
     pole_warning_mev: float,
     pole_danger_mev: float,
     fail_on_near_pole: bool,
-) -> tuple[float, float, bool, bool, list[str]]:
-    h_hh = _hermitize(h_hh)
-    high_eigs = np.linalg.eigvalsh(h_hh)
-    min_distance_mev = float(np.min(np.abs(e_ref - high_eigs)) * MEV_PER_EV)
-    a = e_ref * np.eye(h_hh.shape[0], dtype=np.complex128) - h_hh
-    cond = float(np.linalg.cond(a))
-    near = min_distance_mev < pole_warning_mev
-    danger = min_distance_mev < pole_danger_mev
+    compute_pole_diagnostics: bool,
+    compute_condition_number: bool,
+) -> tuple[float | None, float | None, bool, bool, list[str]]:
+    min_distance_mev: float | None = None
+    near = False
+    danger = False
     warnings: list[str] = []
-    if danger:
-        warnings.append(
-            f"DANGER: min |E_ref - E_high| = {min_distance_mev:.3f} meV "
-            f"is below {pole_danger_mev:.3f} meV"
-        )
-    elif near:
-        warnings.append(
-            f"WARNING: min |E_ref - E_high| = {min_distance_mev:.3f} meV "
-            f"is below {pole_warning_mev:.3f} meV"
-        )
-    if fail_on_near_pole and near:
-        raise NearPoleError(warnings[-1])
+    if compute_pole_diagnostics or fail_on_near_pole:
+        h_hh = _hermitize(h_hh)
+        with _bounded_blas_threads():
+            high_eigs = np.linalg.eigvalsh(h_hh)
+        min_distance_mev = float(np.min(np.abs(e_ref - high_eigs)) * MEV_PER_EV)
+        near = min_distance_mev < pole_warning_mev
+        danger = min_distance_mev < pole_danger_mev
+        if danger:
+            warnings.append(
+                f"DANGER: min |E_ref - E_high| = {min_distance_mev:.3f} meV "
+                f"is below {pole_danger_mev:.3f} meV"
+            )
+        elif near:
+            warnings.append(
+                f"WARNING: min |E_ref - E_high| = {min_distance_mev:.3f} meV "
+                f"is below {pole_warning_mev:.3f} meV"
+            )
+        if fail_on_near_pole and near:
+            raise NearPoleError(warnings[-1])
+
+    cond = None
+    if compute_condition_number:
+        a = _shifted_hamiltonian_matrix(h_hh, e_ref)
+        with _bounded_blas_threads():
+            cond = float(np.linalg.cond(a))
     return min_distance_mev, cond, near, danger, warnings
+
+
+def _projected_hamiltonian(
+    ham: np.ndarray,
+    u_left: np.ndarray,
+    u_right: np.ndarray | None = None,
+    *,
+    chunk_cols: int = 512,
+    chunk_rows: int = 512,
+) -> np.ndarray:
+    """Compute U_left^dagger H U_right with bounded GEMM workspace."""
+    if u_right is None:
+        u_right = u_left
+    if chunk_cols <= 0:
+        raise ValueError(f"chunk_cols must be positive, got {chunk_cols}")
+    if chunk_rows <= 0:
+        raise ValueError(f"chunk_rows must be positive, got {chunk_rows}")
+
+    ham = np.asarray(ham, dtype=np.complex128)
+    u_left = np.asarray(u_left, dtype=np.complex128)
+    u_right = np.asarray(u_right, dtype=np.complex128)
+    hu = _left_multiply_hamiltonian(
+        ham,
+        u_right,
+        chunk_cols=chunk_cols,
+        chunk_rows=chunk_rows,
+    )
+    with _bounded_blas_threads():
+        return u_left.conj().T @ hu
+
+
+def _left_multiply_hamiltonian(
+    ham: np.ndarray,
+    basis: np.ndarray,
+    *,
+    chunk_cols: int = 512,
+    chunk_rows: int = 512,
+) -> np.ndarray:
+    ham = np.asarray(ham, dtype=np.complex128)
+    basis = np.asarray(basis, dtype=np.complex128)
+    if ham.ndim != 2 or ham.shape[0] != ham.shape[1]:
+        raise ValueError(f"ham must be a square matrix, got shape={ham.shape}")
+    if basis.ndim != 2 or basis.shape[0] != ham.shape[1]:
+        raise ValueError(f"basis shape {basis.shape} is incompatible with ham shape {ham.shape}")
+    out = np.empty((ham.shape[0], basis.shape[1]), dtype=np.complex128)
+    with _bounded_blas_threads():
+        for col_start in range(0, basis.shape[1], chunk_cols):
+            col_stop = min(col_start + chunk_cols, basis.shape[1])
+            basis_block = basis[:, col_start:col_stop]
+            for row_start in range(0, ham.shape[0], chunk_rows):
+                row_stop = min(row_start + chunk_rows, ham.shape[0])
+                out[row_start:row_stop, col_start:col_stop] = (
+                    ham[row_start:row_stop, :] @ basis_block
+                )
+    return out
+
+
+def _build_projector_groups(basis: np.ndarray) -> _ProjectorGroups:
+    """Group projector columns that have identical nonzero row support."""
+    basis = np.asarray(basis, dtype=np.complex128)
+    if basis.ndim != 2:
+        raise ValueError(f"basis must be a matrix, got shape={basis.shape}")
+
+    by_rows: dict[tuple[int, ...], list[int]] = {}
+    nz_cols, nz_rows = np.nonzero(basis.T)
+    if nz_cols.size:
+        starts = np.r_[0, np.flatnonzero(np.diff(nz_cols)) + 1]
+        stops = np.r_[starts[1:], nz_cols.size]
+        for start, stop in zip(starts, stops):
+            col = int(nz_cols[start])
+            rows = tuple(int(row) for row in nz_rows[start:stop])
+            by_rows.setdefault(rows, []).append(col)
+
+    groups: list[_ProjectorGroup] = []
+    for row_tuple, col_list in by_rows.items():
+        if not row_tuple:
+            continue
+        rows = np.array(row_tuple, dtype=int)
+        cols = np.array(col_list, dtype=int)
+        local = np.ascontiguousarray(basis[np.ix_(rows, cols)], dtype=np.complex128)
+        groups.append(_ProjectorGroup(rows=rows, cols=cols, local=local, local_h=local.conj().T))
+    return _ProjectorGroups(n_columns=int(basis.shape[1]), groups=tuple(groups))
+
+
+def _projector_column_groups(basis: np.ndarray) -> list[tuple[np.ndarray, np.ndarray, np.ndarray]]:
+    return [(group.rows, group.cols, group.local) for group in _build_projector_groups(basis).groups]
+
+
+def projector_groups_from_block_columns(
+    block_indices: Sequence[np.ndarray],
+    local_columns: Sequence[np.ndarray],
+    column_indices: Sequence[np.ndarray],
+    *,
+    n_columns: int,
+) -> _ProjectorGroups:
+    groups: list[_ProjectorGroup] = []
+    for rows_raw, local_raw, cols_raw in zip(block_indices, local_columns, column_indices):
+        rows = np.asarray(rows_raw, dtype=int)
+        cols = np.asarray(cols_raw, dtype=int)
+        local = np.ascontiguousarray(local_raw, dtype=np.complex128)
+        if cols.size == 0:
+            continue
+        if rows.ndim != 1 or cols.ndim != 1:
+            raise ValueError("projector group rows and columns must be one-dimensional")
+        if local.shape != (rows.size, cols.size):
+            raise ValueError(
+                f"projector local block shape {local.shape} does not match "
+                f"rows={rows.size}, cols={cols.size}"
+            )
+        groups.append(_ProjectorGroup(rows=rows, cols=cols, local=local, local_h=local.conj().T))
+    return _ProjectorGroups(n_columns=int(n_columns), groups=tuple(groups))
+
+
+def _grouped_projected_hamiltonian_from_groups(
+    ham: np.ndarray,
+    left: _ProjectorGroups,
+    right: _ProjectorGroups | None = None,
+    *,
+    assume_hermitian: bool = False,
+) -> np.ndarray:
+    if right is None:
+        right = left
+    out = np.zeros((left.n_columns, right.n_columns), dtype=np.complex128)
+    with _bounded_blas_threads():
+        if assume_hermitian and right is left:
+            for left_pos, left_group in enumerate(left.groups):
+                for right_pos in range(left_pos, len(left.groups)):
+                    right_group = left.groups[right_pos]
+                    block = (
+                        left_group.local_h
+                        @ ham[np.ix_(left_group.rows, right_group.rows)]
+                        @ right_group.local
+                    )
+                    if right_pos == left_pos:
+                        block = _hermitize(block)
+                    out[np.ix_(left_group.cols, right_group.cols)] = block
+                    if right_pos != left_pos:
+                        out[np.ix_(right_group.cols, left_group.cols)] = block.conj().T
+            return out
+
+        for left_group in left.groups:
+            for right_group in right.groups:
+                out[np.ix_(left_group.cols, right_group.cols)] = (
+                    left_group.local_h
+                    @ ham[np.ix_(left_group.rows, right_group.rows)]
+                    @ right_group.local
+                )
+    return out
+
+
+def _grouped_projected_hamiltonian(
+    ham: np.ndarray,
+    u_left: np.ndarray,
+    u_right: np.ndarray | None = None,
+) -> np.ndarray:
+    """Compute U_left^dagger H U_right using block-sparse projector support."""
+    if u_right is None:
+        ham = np.asarray(ham, dtype=np.complex128)
+        u_left = np.asarray(u_left, dtype=np.complex128)
+        groups = _build_projector_groups(u_left)
+        return _grouped_projected_hamiltonian_from_groups(ham, groups)
+
+    ham = np.asarray(ham, dtype=np.complex128)
+    u_left = np.asarray(u_left, dtype=np.complex128)
+    u_right = np.asarray(u_right, dtype=np.complex128)
+    left_groups = _build_projector_groups(u_left)
+    right_groups = left_groups if u_right is u_left else _build_projector_groups(u_right)
+    return _grouped_projected_hamiltonian_from_groups(
+        ham,
+        left_groups,
+        right_groups,
+    )
+
+
+def _matching_projector_groups(left: _ProjectorGroups, right: _ProjectorGroups) -> bool:
+    if len(left.groups) != len(right.groups):
+        return False
+    return all(
+        np.array_equal(left_group.rows, right_group.rows)
+        for left_group, right_group in zip(left.groups, right.groups)
+    )
+
+
+def _downfold_blocks_from_matching_projector_groups(
+    ham: np.ndarray,
+    low: _ProjectorGroups,
+    high: _ProjectorGroups,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    h_pp = np.zeros((low.n_columns, low.n_columns), dtype=np.complex128)
+    h_ph = np.zeros((low.n_columns, high.n_columns), dtype=np.complex128)
+    h_hh = np.zeros((high.n_columns, high.n_columns), dtype=np.complex128)
+
+    with _bounded_blas_threads():
+        for left_pos, (low_left, high_left) in enumerate(zip(low.groups, high.groups)):
+            left_h = np.ascontiguousarray(
+                np.vstack((low_left.local_h, high_left.local_h)),
+                dtype=np.complex128,
+            )
+            low_left_n = low_left.cols.size
+            for right_pos in range(left_pos, len(low.groups)):
+                low_right = low.groups[right_pos]
+                high_right = high.groups[right_pos]
+                right_basis = np.ascontiguousarray(
+                    np.hstack((low_right.local, high_right.local)),
+                    dtype=np.complex128,
+                )
+                low_right_n = low_right.cols.size
+                projected = (
+                    left_h
+                    @ ham[np.ix_(low_left.rows, low_right.rows)]
+                    @ right_basis
+                )
+
+                ll = projected[:low_left_n, :low_right_n]
+                lh = projected[:low_left_n, low_right_n:]
+                hl = projected[low_left_n:, :low_right_n]
+                hh = projected[low_left_n:, low_right_n:]
+
+                if right_pos == left_pos:
+                    ll = _hermitize(ll)
+                    hh = _hermitize(hh)
+                h_pp[np.ix_(low_left.cols, low_right.cols)] = ll
+                h_ph[np.ix_(low_left.cols, high_right.cols)] = lh
+                h_hh[np.ix_(high_left.cols, high_right.cols)] = hh
+                if right_pos != left_pos:
+                    h_pp[np.ix_(low_right.cols, low_left.cols)] = ll.conj().T
+                    h_ph[np.ix_(low_right.cols, high_left.cols)] = hl.conj().T
+                    h_hh[np.ix_(high_right.cols, high_left.cols)] = hh.conj().T
+
+    return h_pp, h_ph, h_hh
 
 
 def downfold_blocks(
@@ -108,6 +394,8 @@ def downfold_blocks(
     h_ph: np.ndarray | None,
     h_hh: np.ndarray | None,
     options: DownfoldingOptions,
+    *,
+    assume_hermitian_blocks: bool = False,
 ) -> DownfoldingResult:
     """Build a static effective Hamiltonian from P/H block matrices.
 
@@ -119,7 +407,7 @@ def downfold_blocks(
     Energies are in eV. Diagnostics report pole distances in meV.
     """
     method = options.method.lower()
-    h_pp = _hermitize(h_pp)
+    h_pp = np.asarray(h_pp, dtype=np.complex128) if assume_hermitian_blocks else _hermitize(h_pp)
 
     if method == "first_order":
         heff = _hermitize(h_pp)
@@ -136,7 +424,7 @@ def downfold_blocks(
         raise ValueError(f"method={method!r} requires configurable e_ref")
 
     h_ph = np.asarray(h_ph, dtype=np.complex128)
-    h_hh = _hermitize(h_hh)
+    h_hh = np.asarray(h_hh, dtype=np.complex128) if assume_hermitian_blocks else _hermitize(h_hh)
     h_hp = h_ph.conj().T
     e_ref = float(options.e_ref)
     pole_min, pole_cond, near, danger, warnings = _pole_diagnostics(
@@ -145,12 +433,13 @@ def downfold_blocks(
         pole_warning_mev=float(options.pole_warning_mev),
         pole_danger_mev=float(options.pole_danger_mev),
         fail_on_near_pole=bool(options.fail_on_near_pole),
+        compute_pole_diagnostics=bool(options.compute_pole_diagnostics),
+        compute_condition_number=bool(options.compute_condition_number),
     )
-    a = e_ref * np.eye(h_hh.shape[0], dtype=np.complex128) - h_hh
-
     if method == "fixed_schur":
-        y = np.linalg.solve(a, h_hp)
-        heff = _hermitize(h_pp + h_ph @ y)
+        y = _solve_hermitian_shifted(h_hh, h_hp, e_ref)
+        with _bounded_blas_threads():
+            heff = _hermitize(h_pp + h_ph @ y)
         return DownfoldingResult(
             heff=heff,
             method=method,
@@ -164,15 +453,20 @@ def downfold_blocks(
         )
 
     if method == "linearized_lowdin":
-        y = np.linalg.solve(a, h_hp)
-        sigma0 = h_ph @ y
+        a = _shifted_hamiltonian_matrix(h_hh, e_ref)
+        with _bounded_blas_threads():
+            lu, piv = scipy.linalg.lu_factor(a, check_finite=False, overwrite_a=True)
+            y = scipy.linalg.lu_solve((lu, piv), h_hp, check_finite=False)
+            sigma0 = h_ph @ y
         # d/dE (E I - H_HH)^(-1) = - (E I - H_HH)^(-2).
         # Therefore Sigma1 = dSigma/dE = -H_PH A^{-2} H_HP.
-        y2 = np.linalg.solve(a, y)
-        sigma1 = -(h_ph @ y2)
+        with _bounded_blas_threads():
+            y2 = scipy.linalg.lu_solve((lu, piv), y, check_finite=False)
+            sigma1 = -(h_ph @ y2)
         big_a = _hermitize(h_pp + sigma0 - e_ref * sigma1)
         big_b = _hermitize(np.eye(h_pp.shape[0], dtype=np.complex128) - sigma1)
-        b_eigs, b_vecs = np.linalg.eigh(big_b)
+        with _bounded_blas_threads():
+            b_eigs, b_vecs = np.linalg.eigh(big_b)
         b_min = float(np.min(b_eigs))
         if b_min <= 0.0:
             msg = f"linearized_lowdin B is not positive definite; min eig={b_min:.6e}"
@@ -184,8 +478,9 @@ def downfold_blocks(
             # Fall back to generalized eigensolver for diagnostics, but the returned
             # static matrix is intentionally not produced for non-positive B.
             raise ValueError(warnings[-1])
-        inv_sqrt = (b_vecs * (1.0 / np.sqrt(b_eigs))) @ b_vecs.conj().T
-        heff = _hermitize(inv_sqrt @ big_a @ inv_sqrt)
+        with _bounded_blas_threads():
+            inv_sqrt = (b_vecs * (1.0 / np.sqrt(b_eigs))) @ b_vecs.conj().T
+            heff = _hermitize(inv_sqrt @ big_a @ inv_sqrt)
         return DownfoldingResult(
             heff=heff,
             method=method,
@@ -214,16 +509,43 @@ def downfold_from_projectors(
 ) -> DownfoldingResult:
     ham = np.asarray(hamk_full, dtype=np.complex128)
     u_low = np.asarray(u_low, dtype=np.complex128)
-    h_pp = u_low.conj().T @ ham @ u_low
+    low_groups = _build_projector_groups(u_low)
     if options.method.lower() == "first_order":
-        return downfold_blocks(h_pp, None, None, options)
+        h_pp = _grouped_projected_hamiltonian_from_groups(ham, low_groups, assume_hermitian=True)
+        return downfold_blocks(h_pp, None, None, options, assume_hermitian_blocks=True)
     if u_high is None:
         raise ValueError(f"method={options.method!r} requires high-space projectors")
     u_high = np.asarray(u_high, dtype=np.complex128)
-    x = ham @ u_high
-    h_hh = u_high.conj().T @ x
-    h_ph = u_low.conj().T @ x
-    return downfold_blocks(h_pp, h_ph, h_hh, options)
+    high_groups = _build_projector_groups(u_high)
+    h_pp = _grouped_projected_hamiltonian_from_groups(ham, low_groups, assume_hermitian=True)
+    h_ph = _grouped_projected_hamiltonian_from_groups(ham, low_groups, high_groups)
+    h_hh = _grouped_projected_hamiltonian_from_groups(ham, high_groups, assume_hermitian=True)
+    return downfold_blocks(h_pp, h_ph, h_hh, options, assume_hermitian_blocks=True)
+
+
+def downfold_from_projector_groups(
+    hamk_full: np.ndarray,
+    low_groups: _ProjectorGroups,
+    high_groups: _ProjectorGroups | None,
+    options: DownfoldingOptions,
+) -> DownfoldingResult:
+    ham = np.asarray(hamk_full, dtype=np.complex128)
+    if options.method.lower() == "first_order":
+        h_pp = _grouped_projected_hamiltonian_from_groups(ham, low_groups, assume_hermitian=True)
+        return downfold_blocks(h_pp, None, None, options, assume_hermitian_blocks=True)
+    if high_groups is None:
+        raise ValueError(f"method={options.method!r} requires high-space projectors")
+    if _matching_projector_groups(low_groups, high_groups):
+        h_pp, h_ph, h_hh = _downfold_blocks_from_matching_projector_groups(
+            ham,
+            low_groups,
+            high_groups,
+        )
+    else:
+        h_pp = _grouped_projected_hamiltonian_from_groups(ham, low_groups, assume_hermitian=True)
+        h_ph = _grouped_projected_hamiltonian_from_groups(ham, low_groups, high_groups)
+        h_hh = _grouped_projected_hamiltonian_from_groups(ham, high_groups, assume_hermitian=True)
+    return downfold_blocks(h_pp, h_ph, h_hh, options, assume_hermitian_blocks=True)
 
 
 # def parse_int_list(value: str | Sequence[int] | None) -> list[int]:

@@ -59,7 +59,6 @@ bands:
     num_bands: 16
 output:
   dir: ../../outputs/model/mgi2_3.89_M1_spinful
-  save_coefficients: true
   verbose: false
   progress: true
 heff_eig_file: ../../outputs/project/mgi2_3.89_M1_spinful/heff_eig.npy

@@ -15,8 +15,10 @@ from kp.model.pipeline import (  # noqa: E402
     _auto_harmonics_from_q_sets,
     _auto_harmonics_from_support,
     _build_operation_registry,
+    _default_term_template_profile_metadata,
     _default_term_templates_for_model,
     _max_derivative_order_values,
+    _representative_score,
     _symmetry_operation_index,
     ConfiguredModel,
     build_moire_config_from_file,
@@ -26,6 +28,7 @@ from kp.model.pipeline import (  # noqa: E402
     load_model_config,
     matrix_residual,
     run_configured_model,
+    save_band_comparison_plot,
 )
 import kp.model.core as model_core  # noqa: E402
 from kp.model.core import (  # noqa: E402
@@ -133,6 +136,80 @@ def test_clear_symmetry_caches_clears_orbit_and_kz_caches():
     assert not ContinuumModelBuilder._KZ_POW_CACHE
 
 
+def test_term_template_harmonic_filter_is_honored_by_core_builder():
+    qset = _triangular_q_shell()
+    intra = {
+        1: np.array([0.0, 0.0]),
+        2: np.array([1.0, 0.0]),
+        3: np.array([0.5, np.sqrt(3.0) / 2.0]),
+    }
+    builder = ContinuumModelBuilder(
+        qset,
+        qset,
+        1,
+        1,
+        np.array([1.0, 0.0]),
+        np.array([0.5, np.sqrt(3.0) / 2.0]),
+        intra,
+        {},
+        {"intra": 0},
+        SymmetryGenerator(qset, qset, [1, 1]),
+        {"intra": []},
+        [
+            {
+                "name": "filtered_intra",
+                "source": "moire_potential",
+                "tag": "intra",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "diagonal",
+                "harmonic_filter": {"kind": "intra", "indices": [2], "sign": -1.0},
+                "max_order": 0,
+            }
+        ],
+    )
+
+    builder.build_terms()
+
+    assert list(builder.model.terms) == [
+        ContinuumTermKey(Mz=0, Mz_star=0, layer_from=1, layer_to=1, orbital_from=1, orbital_to=1, p=(-1.0, -0.0))
+    ]
+    term = next(iter(builder.model.terms.values()))
+    assert term.registry_metadata["harmonic_id"] == 2
+    assert term.registry_metadata["harmonics_source"] == "explicit_indices"
+
+
+def test_term_template_rejects_harmonics_and_harmonic_filter_together():
+    qset = _triangular_q_shell()
+    builder = ContinuumModelBuilder(
+        qset,
+        qset,
+        1,
+        1,
+        np.array([1.0, 0.0]),
+        np.array([0.5, np.sqrt(3.0) / 2.0]),
+        {1: np.array([0.0, 0.0])},
+        {},
+        {"intra": 0},
+        SymmetryGenerator(qset, qset, [1, 1]),
+        {"intra": []},
+        [
+            {
+                "name": "ambiguous_intra",
+                "source": "moire_potential",
+                "tag": "intra",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "diagonal",
+                "harmonics": "intra",
+                "harmonic_filter": {"kind": "intra", "indices": [1]},
+                "max_order": 0,
+            }
+        ],
+    )
+
+    with pytest.raises(ValueError, match="use either harmonics or harmonic_filter"):
+        builder.build_terms()
+
+
 def _write_auto_fixture(tmp_path: Path) -> Path:
     qset = _triangular_q_shell()
     kpoints = np.array([[0.0, 0.0], [0.1, 0.0]], dtype=float)
@@ -218,17 +295,26 @@ def _write_symm_frame_manifest(tmp_path: Path, *, rotation_deg: float, path_name
 
 def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: Path) -> None:
     import kp.cli as cli
+    import kp.model.export as export_mod
     import kp.model.pipeline as configured
 
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
+    model_output = tmp_path / "model_out"
     seen: dict[str, str] = {}
+
+    class FakeModelConfig:
+        output_dir = model_output
 
     def fake_run(path: str) -> dict:
         seen["path"] = path
-        return {"comparison": {"rms_error": 0.0, "max_abs_error": 0.0}}
+        return {"configured_model": FakeModelConfig(), "comparison": {"rms_error": 0.0, "max_abs_error": 0.0}}
+
+    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+        return Path(output_dir)
 
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
+    monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
 
     cli.main(["model", "--config", str(cfg_path)])
 
@@ -237,19 +323,28 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
 
 def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path, capsys) -> None:
     import kp.cli as cli
+    import kp.model.export as export_mod
     import kp.model.pipeline as configured
 
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
     plot_path = tmp_path / "model_out" / "band_comparison.png"
 
+    class FakeModelConfig:
+        output_dir = tmp_path / "model_out"
+
     def fake_run(path: str) -> dict:
         return {
+            "configured_model": FakeModelConfig(),
             "band_plot": str(plot_path.resolve()),
             "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
         }
 
+    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+        return Path(output_dir)
+
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
+    monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
 
     cli.main(["model", "--config", str(cfg_path)])
 
@@ -391,6 +486,7 @@ def _write_fixture(tmp_path: Path) -> Path:
         "fit": {
             "indices": [0, 2],
             "coeff_tol": 1.0e-8,
+            "coeff_prune_threshold": 2.0e-4,
         },
         "bands": {
             "indices": [0, 1, 2],
@@ -416,7 +512,18 @@ def test_load_model_config_resolves_paths_relative_to_yaml(tmp_path: Path) -> No
     assert cfg.heff_file == tmp_path / "project" / "heff_list.npy"
     assert cfg.output_dir == tmp_path / "model_out"
     assert cfg.fit_indices == [0, 2]
+    assert cfg.coeff_prune_threshold == 2.0e-4
     assert cfg.band_indices == [0, 1, 2]
+
+
+def test_load_model_config_rejects_negative_coeff_prune_threshold(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["coeff_prune_threshold"] = -1.0e-3
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="coeff_prune_threshold"):
+        load_model_config(cfg_path)
 
 
 def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> None:
@@ -447,6 +554,62 @@ def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> Non
     assert cfg.max_order["tunneling_zero"] == 0
     assert cfg.max_order["tunneling_nonzero"] == 0
     assert len(model.terms) < 30
+
+
+def test_load_model_config_resolves_layerwise_n_orb_from_num_layer_list(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    source_path = tmp_path / "source.yaml"
+    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    source_raw["material"]["num_layer_list"] = [1, 2]
+    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw["model"]["n_orb"] = [1, 1, 0]
+    raw["model"].pop("nlow_state", None)
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (1, 1)
+    assert cfg.nlow_state == [1, 1]
+    assert cfg.orbital_count_metadata["num_layer_list"] == [1, 2]
+    assert cfg.orbital_count_metadata["n_orb"]["input_kind"] == "physical_layer"
+    assert cfg.orbital_count_metadata["n_orb"]["raw"] == [1, 1, 0]
+    assert cfg.orbital_count_metadata["n_orb"]["resolved_qset"] == [1, 1]
+    assert cfg.orbital_count_metadata["n_orb"]["groups"] == [
+        {"qset": "qset1", "source_group": 1, "layers": [1], "values": [1], "total": 1},
+        {"qset": "qset2", "source_group": 2, "layers": [2, 3], "values": [1, 0], "total": 1},
+    ]
+    assert cfg.orbital_count_metadata["nlow_state"]["input_kind"] == "default_from_n_orb"
+
+
+def test_load_model_config_resolves_layerwise_nlow_state_independently(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    source_path = tmp_path / "source.yaml"
+    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    source_raw["material"]["num_layer_list"] = [1, 2]
+    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw["model"]["n_orb"] = [2, 2, 0]
+    raw["model"]["nlow_state"] = [0, 2, 2]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (2, 2)
+    assert cfg.nlow_state == [0, 4]
+    assert cfg.orbital_count_metadata["n_orb"]["resolved_qset"] == [2, 2]
+    assert cfg.orbital_count_metadata["nlow_state"]["resolved_qset"] == [0, 4]
+
+
+def test_load_model_config_rejects_legacy_two_entry_n_orb_with_num_layer_list(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    source_path = tmp_path / "source.yaml"
+    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    source_raw["material"]["num_layer_list"] = [1, 2]
+    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model.n_orb"):
+        load_model_config(cfg_path)
 
 
 def test_short_spinless_label_is_rejected_as_ambiguous(tmp_path: Path) -> None:
@@ -632,7 +795,7 @@ def test_model_max_order_overrides_safe_defaults(tmp_path: Path) -> None:
         "inter": 0,
     }
     assert cfg.max_order["tunneling_zero"] == 0
-    assert cfg.max_order["tunneling_nonzero"] == 1
+    assert cfg.max_order["tunneling_nonzero"] == 0
 
 
 def test_evaluate_vector_expression_supports_bM_symbols() -> None:
@@ -675,8 +838,92 @@ def test_default_term_templates_are_profile_driven_and_preserve_k_gamma_m_behavi
         "gamma_inter_nonzero",
         "gamma_inter_nonzero_negative",
     ]
-    assert gamma_templates[-2]["max_order"] == 4
-    assert gamma_templates[-1]["max_order"] == 4
+    gamma_by_name = {row["name"]: row for row in gamma_templates}
+    for name in ["gamma_kinetic", "gamma_onsite", "gamma_intra_zero", "gamma_intra_zero_kdependent", "gamma_intra_nonzero"]:
+        assert gamma_by_name[name]["sector_pairs"] == [[1, 1], [2, 2]]
+    assert gamma_by_name["gamma_intra_zero_kdependent"]["harmonics"] == {"kind": "intra", "indices": [1]}
+    assert gamma_by_name["gamma_intra_zero_kdependent"]["max_order"] == 4
+    assert gamma_by_name["gamma_intra_zero_kdependent"]["monomial_constraints"]["exclude_m_sum_zero"] is True
+    assert gamma_templates[-2]["max_order"] == 3
+    assert gamma_templates[-1]["max_order"] == 3
+
+
+def test_gamma_2x2_term_templates_collapse_only_with_sector_exchange_symmetry() -> None:
+    max_order = _max_derivative_order_values({"max_order": {"Kinect": 10, "intra": 4, "inter": 3}})
+
+    gamma_1x1 = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(1, 1),
+        max_order=max_order,
+        symmetry_operations=[{"name": "C2", "sector_map": "layer_exchange"}],
+    )
+    gamma_1x1_by_name = {row["name"]: row for row in gamma_1x1}
+    assert [row["name"] for row in gamma_1x1] == [
+        "gamma_1x1_kinetic",
+        "gamma_1x1_onsite",
+        "gamma_1x1_intra_nonzero",
+        "gamma_1x1_inter_zero",
+        "gamma_1x1_inter_nonzero",
+    ]
+    for name in ["gamma_1x1_kinetic", "gamma_1x1_onsite", "gamma_1x1_intra_nonzero"]:
+        assert gamma_1x1_by_name[name]["sector_pairs"] == [[1, 1], [2, 2]]
+    assert gamma_1x1_by_name["gamma_1x1_intra_nonzero"]["harmonics"] == {"kind": "intra", "indices": [2, 3, 4]}
+    assert gamma_1x1_by_name["gamma_1x1_inter_zero"]["sector_pairs"] == [[2, 1], [1, 2]]
+    assert gamma_1x1_by_name["gamma_1x1_inter_nonzero"]["sector_pairs"] == [[2, 1], [1, 2]]
+    assert gamma_1x1_by_name["gamma_1x1_inter_zero"]["max_order"] == 3
+    assert gamma_1x1_by_name["gamma_1x1_inter_nonzero"]["max_order"] == 3
+    assert all(
+        row["source"] != "moire_potential" or 1 not in row.get("harmonics", {}).get("indices", [])
+        for row in gamma_1x1
+    )
+
+    gamma_1x1_non_exchanged = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(1, 1),
+        max_order=max_order,
+        symmetry_operations=[{"name": "TR", "sector_map": "identity"}, {"name": "C3z", "sector_map": "identity"}],
+    )
+    gamma_1x1_non_exchanged_by_name = {row["name"]: row for row in gamma_1x1_non_exchanged}
+    for name in ["gamma_1x1_kinetic", "gamma_1x1_onsite", "gamma_1x1_intra_nonzero"]:
+        assert gamma_1x1_non_exchanged_by_name[name]["sector_pairs"] == [[1, 1], [2, 2]]
+
+    exchanged = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        max_order=max_order,
+        symmetry_operations=[{"name": "C2", "sector_map": "layer_exchange"}],
+    )
+    exchanged_by_name = {row["name"]: row for row in exchanged}
+    for name in ["gamma_kinetic", "gamma_onsite", "gamma_intra_zero", "gamma_intra_zero_kdependent", "gamma_intra_nonzero"]:
+        assert exchanged_by_name[name]["sector_pairs"] == [[1, 1]]
+
+    generic_exchanged = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        max_order=max_order,
+        symmetry_operations=[{"name": "C2", "sector_map": {"bottom": "top", "top": "bottom"}}],
+    )
+    generic_exchanged_by_name = {row["name"]: row for row in generic_exchanged}
+    for name in ["gamma_kinetic", "gamma_onsite", "gamma_intra_zero", "gamma_intra_zero_kdependent", "gamma_intra_nonzero"]:
+        assert generic_exchanged_by_name[name]["sector_pairs"] == [[1, 1]]
+
+    non_exchanged = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        max_order=max_order,
+        symmetry_operations=[{"name": "TR", "sector_map": "identity"}, {"name": "C3z", "sector_map": "identity"}],
+    )
+    non_exchanged_by_name = {row["name"]: row for row in non_exchanged}
+    for name in ["gamma_kinetic", "gamma_onsite", "gamma_intra_zero", "gamma_intra_zero_kdependent", "gamma_intra_nonzero"]:
+        assert non_exchanged_by_name[name]["sector_pairs"] == [[1, 1], [2, 2]]
+
+    metadata = _default_term_template_profile_metadata(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        symmetry_operations=[{"name": "C2", "sector_map": "layer_exchange"}],
+    )
+    assert metadata["profiles"] == ["gamma_2x2_symmetry_aware"]
+    assert metadata["gamma_2x2_sector_diagonal_pairs"] == [[1, 1]]
 
     m_templates = _default_term_templates_for_model(
         valley_model={"valley_type": "M"},
@@ -726,6 +973,17 @@ def test_default_term_templates_clamp_profile_harmonics_to_requested_count() -> 
     assert k_templates[3]["harmonics"] == {"kind": "inter", "indices": [1, 2]}
     assert k_templates[4]["harmonics"] == {"kind": "inter", "indices": [2], "sign": -1.0}
 
+    gamma_templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        max_order=max_order,
+        harmonic_counts={"intra": 7, "inter": 6},
+    )
+    gamma_by_name = {row["name"]: row for row in gamma_templates}
+    assert gamma_by_name["gamma_intra_nonzero"]["harmonics"] == {"kind": "intra", "indices": [2, 3, 4, 5, 6, 7]}
+    assert gamma_by_name["gamma_inter_nonzero"]["harmonics"] == {"kind": "inter", "indices": [2, 3, 4, 5, 6]}
+    assert gamma_by_name["gamma_inter_nonzero_negative"]["harmonics"] == {"kind": "inter", "indices": [2, 3, 4, 5, 6], "sign": -1.0}
+
 
 def test_auto_harmonics_are_generated_from_qset_symmetry_orbits() -> None:
     bM1 = np.array([1.0, 0.0], dtype=float)
@@ -771,6 +1029,28 @@ def test_auto_harmonics_are_generated_from_qset_symmetry_orbits() -> None:
     assert intra_c3_diag["orbit_generators"] == ["HermitianPair", "C3z"]
     assert intra_c3_diag["selected"][1]["orbit_size"] > intra_diag["selected"][1]["orbit_size"]
     np.testing.assert_allclose(intra_with_c3[1], [0.0, 0.0], atol=1.0e-12)
+
+    intra_with_named_c3, named_c3_diag = _auto_harmonics_from_support(
+        raw=4,
+        kind="intra",
+        count=4,
+        sectors=sectors,
+        Q_set1=qset,
+        Q_set2=qset,
+        bM1=bM1,
+        bM2=bM2,
+        symmetry_operations=[{"name": "C3z"}],
+    )
+    assert named_c3_diag["orbit_generators"] == ["HermitianPair", "C3z"]
+    for index, vector in intra_with_c3.items():
+        np.testing.assert_allclose(intra_with_named_c3[index], vector, atol=1.0e-12)
+
+
+def test_harmonic_representative_score_ignores_roundoff_tie_breaks() -> None:
+    positive = np.array([0.17855031287009285, 0.10308607119637303])
+    negative = np.array([-0.17855031287009285, -0.103086071196373])
+
+    assert _representative_score(positive) < _representative_score(negative)
 
 
 def test_symmetry_operation_index_rotates_q_map_when_model_action_absent() -> None:
@@ -853,6 +1133,30 @@ def test_kp_symm_exactification_uses_manifest_actions_without_model_discovery() 
 
 def test_kp_symm_exactification_tolerance_is_not_valley_dependent() -> None:
     assert _kp_symm_exactification_config() == _kp_symm_exactification_config()
+
+
+def test_kp_symm_exactification_allows_explicit_projection_noise_override() -> None:
+    exact_cfg = _kp_symm_exactification_config({"reject_if_off_support_rel_gt": 5.0e-3})
+
+    assert exact_cfg["reject_if_off_support_rel_gt"] == pytest.approx(5.0e-3)
+    assert _kp_symm_exactification_config()["reject_if_off_support_rel_gt"] == pytest.approx(1.0e-5)
+
+
+def test_kp_symm_exactification_preserves_operation_overrides() -> None:
+    exact_cfg = _kp_symm_exactification_config(
+        {
+            "support_mode": "monomial",
+            "operations": {"TR": {"support_mode": "monomial"}},
+        }
+    )
+
+    assert exact_cfg["support_mode"] == "monomial"
+    assert exact_cfg["operations"] == {"TR": {"support_mode": "monomial"}}
+
+
+def test_kp_symm_exactification_rejects_unknown_override_keys() -> None:
+    with pytest.raises(ValueError, match="Unsupported symm.exactification keys"):
+        _kp_symm_exactification_config({"discover_action_candidates": True})
 
 
 def test_kp_symm_operation_group_relations_are_manifest_metadata() -> None:
@@ -1085,6 +1389,18 @@ def test_noncanonical_internal_operation_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="Unsupported internal symmetry operation names"):
         load_model_config(cfg_path)
+
+
+def test_toy_generator_uses_current_q_frame_without_kp_symm_manifest(tmp_path: Path) -> None:
+    cfg_path = _write_auto_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["symmetry_source"] = {"type": "toy_generator", "allow": True, "basis_template": "Gamma_four_orbital"}
+    raw["model"]["symmetry_map"] = {"Kinect": [], "intra": [], "inter": []}
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.rotation_deg == pytest.approx(0.0)
 
 
 def test_C2_template_generator_requires_template() -> None:
@@ -1756,6 +2072,39 @@ def test_fit_reuses_stacked_term_matrices_between_duplicate_filter_and_orthogona
     assert len(calls) == len(builder.model.terms) * len(k_points)
 
 
+def test_joint_fit_does_not_double_count_duplicate_diagonal_terms_across_tags() -> None:
+    q1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    q2 = np.zeros((0, 2), dtype=float)
+    k_points = np.array([[0.0, 0.0]], dtype=float)
+    target = np.diag([1.0, -1.0]).astype(complex)
+    builder = ContinuumModelBuilder(
+        q1,
+        q2,
+        1,
+        0,
+        np.array([1.0, 0.0], dtype=float),
+        np.array([0.0, 1.0], dtype=float),
+        {},
+        {},
+        {"Kinect": 0, "intra": 0},
+        SymmetryGenerator(q1, q2, [1, 0]),
+        {"Kinect": [], "intra": []},
+    )
+
+    for tag, key in [
+        ("Kinect", ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))),
+        ("intra", ContinuumTermKey(1, 1, 1, 1, 1, 1, (0.0, 0.0))),
+    ]:
+        builder.model.add_term(key, lambda _k, matrix=target: matrix.copy(), tag=tag, symmetry_ops=[])
+
+    builder.compute_coefficients_by_tag(target, k_points, tol=1.0e-12)
+
+    h_model = builder.model.assemble_hamiltonian(k_points[0], builder.symmetry_gen)
+    np.testing.assert_allclose(h_model, target, atol=1.0e-12)
+    coeff_sum = sum(float(term.r_value_real) for term in builder.model.terms.values())
+    assert coeff_sum == pytest.approx(1.0, abs=1.0e-12)
+
+
 def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
@@ -1772,22 +2121,53 @@ def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> 
 
     run_configured_model(cfg_path)
 
-    assert (tmp_path / "model_out" / "coefficients.json").exists()
-    assert (tmp_path / "model_out" / "terms.json").exists()
-    assert (tmp_path / "model_out" / "fit_diagnostics.json").exists()
-    assert (tmp_path / "model_out" / "operation_registry.json").exists()
     assert (tmp_path / "model_out" / "run_summary.json").exists()
     assert (tmp_path / "model_out" / "active_terms.sha256").exists()
+    assert not (tmp_path / "model_out" / "coefficients.json").exists()
+    assert not (tmp_path / "model_out" / "terms.json").exists()
+    assert not (tmp_path / "model_out" / "fit_diagnostics.json").exists()
+    assert not (tmp_path / "model_out" / "operation_registry.json").exists()
 
     active_terms_bytes = (tmp_path / "model_out" / "active_terms.json").read_bytes()
     active_terms_hash = (tmp_path / "model_out" / "active_terms.sha256").read_text(encoding="utf-8").strip()
-    registry = json.loads((tmp_path / "model_out" / "operation_registry.json").read_text(encoding="utf-8"))
     summary = json.loads((tmp_path / "model_out" / "run_summary.json").read_text(encoding="utf-8"))
     assert active_terms_hash == hashlib.sha256(active_terms_bytes).hexdigest()
     assert summary["active_terms_hash"] == active_terms_hash
+    assert summary["term_template_profile"]["input_kind"] == "default"
     assert "production" + "_level" not in summary
     assert "validation_incomplete" in summary
-    assert all("user_operation" in row and "canonical_operation" in row for row in registry)
+    assert all("user_operation" in row and "canonical_operation" in row for row in summary["operations"])
+
+
+def test_debug_output_profile_writes_diagnostics_subdir(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["output"]["profile"] = "debug"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
+        return {
+            "eigvals": expected_eigvals,
+            "diagnostics": {"fit_rank": 1},
+            "model": type("Model", (), {"terms": {key: type("Term", (), {"key": key, "tag": "Kinect", "active": True, "r_value_real": 1.0, "r_value_imag": 0.0, "symmetry_ops": []})()}})(),
+        }
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+
+    run_configured_model(cfg_path)
+
+    diagnostics = tmp_path / "model_out" / "diagnostics"
+    assert (diagnostics / "coefficients.json").exists()
+    assert (diagnostics / "terms.json").exists()
+    assert (diagnostics / "fit_diagnostics.json").exists()
+    assert (diagnostics / "operation_registry.json").exists()
+    assert (diagnostics / "comparison.json").exists()
+    assert (diagnostics / "comparison_plot.json").exists()
+    assert (diagnostics / "bM_diagnostic.json").exists()
+    assert (diagnostics / "harmonics_diagnostic.json").exists()
+    assert not (tmp_path / "model_out" / "coefficients.json").exists()
 
 
 def test_run_configured_model_quiet_writes_detailed_log(monkeypatch, capsys, tmp_path: Path) -> None:
@@ -2614,8 +2994,16 @@ def test_run_configured_model_saves_auto_harmonics_diagnostic_plot(monkeypatch, 
 
     run_configured_model(cfg_path)
 
-    assert (tmp_path / "model_out" / "harmonics_diagnostic.png").exists()
-    assert (tmp_path / "model_out" / "harmonics_diagnostic.json").exists()
+    assert not (tmp_path / "model_out" / "harmonics_diagnostic.png").exists()
+    assert not (tmp_path / "model_out" / "harmonics_diagnostic.json").exists()
+
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["output"]["profile"] = "debug"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    run_configured_model(cfg_path)
+
+    assert (tmp_path / "model_out" / "diagnostics" / "harmonics_diagnostic.png").exists()
+    assert (tmp_path / "model_out" / "diagnostics" / "harmonics_diagnostic.json").exists()
 
 
 def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monkeypatch, tmp_path: Path) -> None:
@@ -2633,9 +3021,13 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
     assert results["comparison"]["max_abs_error"] == 0.0
     assert results["moire_config"].output_dir == tmp_path / "model_out"
     assert (tmp_path / "model_out" / "eigvals.npy").exists()
-    assert (tmp_path / "model_out" / "comparison.json").exists()
+    assert not (tmp_path / "model_out" / "comparison.json").exists()
+    assert not (tmp_path / "model_out" / "comparison_plot.json").exists()
     assert (tmp_path / "model_out" / "band_comparison.png").exists()
     assert results["band_plot"] == str((tmp_path / "model_out" / "band_comparison.png").resolve())
+    summary = json.loads((tmp_path / "model_out" / "run_summary.json").read_text(encoding="utf-8"))
+    assert summary["comparison"]["max_abs_error"] == 0.0
+    assert summary["plot_comparison"]["max_abs_error"] == 0.0
 
 
 def test_compare_bands_reports_rms_and_max_error() -> None:
@@ -2665,6 +3057,50 @@ def test_compare_bands_for_plot_supports_bottom_bands_with_bottom_alignment() ->
     assert metrics["num_bands"] == 2
     assert metrics["aligned_rms_error_meV"] == pytest.approx(187.08286933869707)
     assert metrics["model_alignment_shift_meV"] == pytest.approx(200.0)
+
+
+def test_save_band_comparison_plot_can_plot_all_bands_with_top_band_window(monkeypatch, tmp_path: Path) -> None:
+    import matplotlib.axes
+
+    model = np.array(
+        [
+            [-100.0, -1.0, 0.0, 2.0, 3.0],
+            [-99.0, -0.8, 0.2, 2.2, 3.2],
+        ]
+    )
+    heff = model + 0.01
+    plotted_colors: list[str] = []
+    ylims: list[tuple[float, float]] = []
+
+    original_plot = matplotlib.axes.Axes.plot
+    original_set_ylim = matplotlib.axes.Axes.set_ylim
+
+    def spy_plot(self, *args, **kwargs):
+        color = kwargs.get("color")
+        if color in {"0.20", "#d7263d"}:
+            plotted_colors.append(str(color))
+        return original_plot(self, *args, **kwargs)
+
+    def spy_set_ylim(self, bottom=None, top=None, *args, **kwargs):
+        if bottom is not None and top is not None:
+            ylims.append((float(bottom), float(top)))
+        return original_set_ylim(self, bottom, top, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", spy_plot)
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_ylim", spy_set_ylim)
+
+    save_band_comparison_plot(
+        model,
+        heff,
+        tmp_path / "bands.png",
+        plot_config={"top_bands": 2, "plot_all_bands": True},
+    )
+
+    assert plotted_colors.count("0.20") == 5
+    assert plotted_colors.count("#d7263d") == 5
+    assert ylims
+    assert ylims[-1][0] > 1.0
+    assert ylims[-1][1] < 3.5
 
 
 def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_path: Path) -> None:

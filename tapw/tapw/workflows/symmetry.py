@@ -212,6 +212,40 @@ def _operation_markdown_label(entry: dict[str, Any]) -> str:
     return name
 
 
+def _entry_candidate_source(entry: dict[str, Any]) -> str:
+    spglib_index = entry.get("spglib_index")
+    if spglib_index not in (None, ""):
+        return f"spglib:{spglib_index}"
+    name = displayed_operation_name(entry.get("operation", "unknown"))
+    if name in {"E", "TR"}:
+        return "built-in"
+    return "template"
+
+
+def _entry_status(entry: dict[str, Any]) -> str:
+    status = entry.get("status")
+    if status:
+        return str(status)
+    return "supported" if bool(entry.get("supported", False)) else "not_supported"
+
+
+def _entry_reason(entry: dict[str, Any]) -> str:
+    return str(entry.get("not_supported_reason") or "")
+
+
+def _generator_text_for_markdown(generators: list[Any]) -> str:
+    if not generators:
+        return "E only (implicit)"
+    return f"{', '.join(str(name) for name in generators)} (E implicit)"
+
+
+def _spglib_symprec_from_config(symmetry_config, tolerance: float) -> float:
+    configured = getattr(symmetry_config, "spglib_symprec", None)
+    if configured is None:
+        return float(tolerance)
+    return float(configured)
+
+
 def _minimal_generators_by_valley(operations_summary: dict[str, list[dict[str, Any]]]) -> dict[str, list[str]]:
     generators: dict[str, list[str]] = {}
     for valley, entries in operations_summary.items():
@@ -497,6 +531,28 @@ def _select_template_c2_operation(family: str, structure, spatial_operations: li
         if _is_standard_layer_exchange_c2_rotation(np.asarray(operation["rotation_cart"], dtype=float)):
             return operation
     return None
+
+
+def _spglib_operation_matching_rotation(
+    spatial_operations: list[dict[str, Any]],
+    rotation_cart: np.ndarray,
+    *,
+    tol: float = 1.0e-4,
+):
+    target = np.asarray(rotation_cart, dtype=float)
+    for operation in spatial_operations or []:
+        op_rotation = np.asarray(operation.get("rotation_cart", np.eye(3, dtype=float)), dtype=float)
+        if np.linalg.norm(op_rotation - target) <= tol:
+            return operation
+    return None
+
+
+def _copy_spglib_operation_metadata(candidate: dict[str, Any], operation: dict[str, Any]) -> None:
+    candidate["index"] = int(operation["index"])
+    candidate["rotation_frac"] = np.asarray(operation.get("rotation_frac", np.eye(3, dtype=float)), dtype=float)
+    candidate["translation_frac"] = np.asarray(operation.get("translation_frac", np.zeros(3, dtype=float)), dtype=float)
+    candidate["rotation_cart"] = np.asarray(operation["rotation_cart"], dtype=float)
+    candidate["translation_cart"] = np.asarray(operation.get("translation_cart", np.zeros(3, dtype=float)), dtype=float)
 
 
 def _rotated_m_valley_label(source_label: str, power: int) -> str:
@@ -918,7 +974,7 @@ def build_c3_g_transport_from_tapw_convention(
     g_target: np.ndarray,
     layer_center: np.ndarray,
     angle_deg: float,
-    tol: float = 1.0e-8,
+    tol: float = 1.0e-6,
 ):
     g_source = np.asarray(g_source, dtype=float)
     g_target = np.asarray(g_target, dtype=float)
@@ -1420,6 +1476,7 @@ def _minimal_symmetry_candidates_for_valley(
     bravais: str,
     spatial_operations: list[dict[str, Any]] | None = None,
     structure=None,
+    selected_c2_operation: dict[str, Any] | None = None,
 ):
     source_label = str(valley_ctx.valley_label)
     valley = int(valley_ctx.valley)
@@ -1435,7 +1492,11 @@ def _minimal_symmetry_candidates_for_valley(
     c2_translation_cart = None
     c2_translation_frac = None
     c2_index = 11
-    selected_operation = _select_template_c2_operation(family, structure, spatial_operations)
+    selected_operation = selected_c2_operation
+    if selected_operation is None:
+        selected_operation = _select_template_c2_operation(family, structure, spatial_operations)
+    if selected_operation is None and structure is not None:
+        selected_operation = find_layer_exchange_c2_spatial_operation(structure, spatial_operations)
     if selected_operation is not None:
         c2_index = int(selected_operation["index"])
         c2_rotation_frac = np.asarray(selected_operation.get("rotation_frac", np.eye(3, dtype=float)), dtype=float)
@@ -1453,6 +1514,19 @@ def _minimal_symmetry_candidates_for_valley(
     )
     candidates = []
     for template in templates:
+        operation_name = displayed_operation_name(template["name"])
+        if operation_name in {"C3z", "C3z^2"}:
+            spglib_operation = _spglib_operation_matching_rotation(
+                spatial_operations,
+                np.asarray(template["rotation_cart"], dtype=float),
+            )
+            if spglib_operation is None:
+                continue
+            _copy_spglib_operation_metadata(template, spglib_operation)
+        elif operation_name in {"C2", "C2T"}:
+            if selected_operation is None:
+                continue
+            _copy_spglib_operation_metadata(template, selected_operation)
         target_label, role = _classify_source_valley_action(source_label, valley, template["name"])
         candidate = dict(template)
         candidate["source_operation_name"] = displayed_operation_name(template["name"])
@@ -1594,7 +1668,7 @@ def _candidate_spglib_index(candidate: dict[str, Any]):
         return int(candidate["spglib_layer_exchange_c2"]["index"])
     if candidate.get("spglib_m_c2_operation") is not None:
         return int(candidate["spglib_m_c2_operation"]["index"])
-    if candidate.get("name") == "C2" and "rotation_frac" in candidate:
+    if "rotation_frac" in candidate:
         return int(candidate["index"])
     return ""
 
@@ -1659,6 +1733,11 @@ def _build_atom_mapping(structure, operation, tol: float = 5.0e-6):
     df = _sorted_structure_df(structure)
     positions_cart = df[["x", "y", "z"]].to_numpy(dtype=float)
     positions_frac = _cartesian_positions_to_fractional(lattice, positions_cart)
+    if "rotation_frac" not in operation or "translation_frac" not in operation:
+        raise SymmetrySupportError(
+            "atom_mapping_missing",
+            "Spatial operation is missing fractional rotation/translation metadata.",
+        )
     rotation_frac = np.asarray(operation["rotation_frac"], dtype=float)
     translation_frac = np.asarray(operation["translation_frac"], dtype=float)
 
@@ -2366,7 +2445,7 @@ class SymmetryAnalysisRunner:
                 f"Generic C3 transport does not match legacy C3: residual={residual_c3:.3e}.",
             )
 
-        generic_power = legacy_c3
+        generic_power = generic_c3
         legacy_power = legacy_c3
         for _ in range(1, int(power)):
             generic_power = (generic_power @ legacy_c3).tocsr()
@@ -3642,10 +3721,9 @@ class SymmetryAnalysisRunner:
 
         if not candidate.get("antiunitary", False) and candidate.get("name") in {"C3z", "C3z^2"}:
             try:
-                power = 1 if candidate.get("name") == "C3z" else 2
                 transport = self._build_transport(candidate, valley, q_target, q_target)
                 diagnostics = dict(getattr(self, "_last_transport_diagnostics", {}) or {})
-                h_orbit = self._raw_c3_h_orbit(valley, q_target)
+                h_target, _ = self._raw_projected_hs(valley, q_target)
             except SymmetrySupportError as exc:
                 return self._make_detail_row(
                     valley_label=valley_label,
@@ -3670,9 +3748,7 @@ class SymmetryAnalysisRunner:
                     tolerance=tolerance,
                 )
 
-            h_target = h_orbit[0]
-            h_source = h_orbit[power]
-            h_cov = transport @ h_source @ transport.conj().T
+            h_cov = transport @ h_target @ transport.conj().T
             residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
             return self._make_detail_row(
                 valley_label=valley_label,
@@ -3884,6 +3960,7 @@ class SymmetryAnalysisRunner:
     def _analyze(self) -> dict[str, Any]:
         valleys = getattr(self.config.symmetry_analysis, "valleys", None) or getattr(self.config.compute, "valleys", [])
         tolerance = float(getattr(self.config.symmetry_analysis, "tolerance", 1.0e-2))
+        spglib_symprec = _spglib_symprec_from_config(self.config.symmetry_analysis, tolerance)
         if not getattr(self.config.compute, "TAPW", False):
             raise ValueError("Symmetry-analysis mode currently supports TAPW only.")
 
@@ -3892,7 +3969,7 @@ class SymmetryAnalysisRunner:
         representations: list[dict[str, Any]] = []
         validation_q_points = _default_validation_q_points()
 
-        spatial_operations = collect_spglib_spatial_operations(self.structure)
+        spatial_operations = collect_spglib_spatial_operations(self.structure, symprec=spglib_symprec)
 
         for valley in valleys:
             calculator = self._calculator_for_valley(int(valley))
@@ -3910,11 +3987,23 @@ class SymmetryAnalysisRunner:
                 spatial_operations,
                 tolerance,
             )
+            if source_c2_operation is None and family == "M":
+                source_c2_operation = self._select_unitary_c2_layer_exchange_spatial_operation(
+                    int(valley),
+                    spatial_operations,
+                )
+            if source_c2_operation is None:
+                source_c2_operation = _select_template_c2_operation(
+                    family,
+                    self.structure,
+                    spatial_operations,
+                )
             for candidate in _minimal_symmetry_candidates_for_valley(
                 valley_ctx,
                 getattr(self.config.twist, "bravais", "hex"),
                 spatial_operations=spatial_operations,
                 structure=self.structure,
+                selected_c2_operation=source_c2_operation,
             ):
                 candidate = dict(candidate)
                 candidate["index"] = int(candidate["index"])
@@ -3986,6 +4075,12 @@ class SymmetryAnalysisRunner:
                     candidate["closure_reason"] = str(closure["reason"])
                     candidate["reciprocal_shift"] = closure["reciprocal_shift"]
 
+                candidate_validation_q_points = validation_q_points
+                if (
+                    not candidate.get("antiunitary", False)
+                    and candidate.get("name") in {"C3z", "C3z^2"}
+                ):
+                    candidate_validation_q_points = validation_q_points[:1]
                 candidate_rows = [
                     self._candidate_rows_for_q(
                         candidate,
@@ -3995,7 +4090,7 @@ class SymmetryAnalysisRunner:
                         q_value,
                         tolerance,
                     )
-                    for q_label, q_value in validation_q_points
+                    for q_label, q_value in candidate_validation_q_points
                 ]
                 all_details.extend(candidate_rows)
 
@@ -4085,6 +4180,7 @@ class SymmetryAnalysisRunner:
             "summary": {
                 "valleys": list(valleys),
                 "tolerance": tolerance,
+                "spglib_symprec": spglib_symprec,
                 "m_valley_convention": (
                     "M1, M2, and M3 are related by C3z. "
                     "A single-M valley output exports only operations closed within the selected valley block."
@@ -4106,12 +4202,23 @@ class SymmetryAnalysisRunner:
     ) -> list[str]:
         valleys = summary.get("valleys", [])
         tolerance = summary.get("tolerance")
+        spglib_symprec = summary.get("spglib_symprec")
         operations = summary.get("operations", {})
         minimal_generators = summary.get("minimal_generators", {})
         output_schema = summary.get("output_schema", "tapw_source_symmetry/v2")
         active_valleys = list(operations.keys()) if operations else [str(v) for v in valleys]
         active_valley_text = ", ".join(str(v) for v in active_valleys) if active_valleys else "None"
         representations = list(representations or [])
+        exported_raw_h_keys = set()
+        for record in representations:
+            raw_h_matrix = record.get("raw_h_matrix")
+            raw_h_file = record.get("raw_h_operator_file")
+            if raw_h_matrix is None and not raw_h_file:
+                continue
+            valley_label = _display_valley_name(record.get("valley_label", record.get("valley", "unknown")))
+            target_valley = _display_valley_name(record.get("target_valley", valley_label))
+            operation = representation_operation_name(record.get("operation", "unknown"))
+            exported_raw_h_keys.add((valley_label, target_valley, operation))
 
         lines = [
             "# TAPW Source Symmetry Summary",
@@ -4121,13 +4228,16 @@ class SymmetryAnalysisRunner:
             f"- Active valleys: {active_valley_text}",
             "- Valleys analyzed: " + (", ".join(str(v) for v in valleys) if valleys else active_valley_text),
             f"- Tolerance: {tolerance}",
+            f"- spglib symprec: {spglib_symprec}",
             f"- Output schema: {output_schema}",
             "- Production matrix source: raw-H action only",
             "",
-            "## Valley Action",
+            "## Candidate Valley Actions",
             "",
-            "| operation | antiunitary | source valley | target valley | closed in active set | role |",
-            "|---|---:|---|---|---:|---|",
+            "- valley-map closed only means the operation maps into the selected active valley block; it does not mean the TAPW source action is supported or exported.",
+            "",
+            "| operation | candidate source | antiunitary | source valley | target valley | valley-map closed | supported | status | exported raw-H | role | reason |",
+            "|---|---|---:|---|---|---:|---:|---|---:|---|---|",
         ]
         if operations:
             for valley, entries in operations.items():
@@ -4135,29 +4245,41 @@ class SymmetryAnalysisRunner:
                     source = _display_valley_name(entry.get("source_valley", valley))
                     target = _display_valley_name(entry.get("target_valley", source))
                     role = _operation_role(entry, source, target)
+                    operation = _operation_markdown_label(entry)
+                    representation_name = representation_operation_name(entry.get("operation", "unknown"))
+                    explicit_export = entry.get("export_raw_h_matrix")
+                    exported = (
+                        bool(explicit_export)
+                        if explicit_export is not None
+                        else (source, target, representation_name) in exported_raw_h_keys
+                    )
                     lines.append(
-                        "| {operation} | {antiunitary} | {source} | {target} | {closed} | {role} |".format(
-                            operation=_operation_markdown_label(entry),
+                        "| {operation} | {candidate_source} | {antiunitary} | {source} | {target} | {closed} | {supported} | {status} | {exported} | {role} | {reason} |".format(
+                            operation=operation,
+                            candidate_source=_entry_candidate_source(entry),
                             antiunitary=_markdown_yes_no(_operation_is_antiunitary(entry)),
                             source=source,
                             target=target,
                             closed=_markdown_yes_no(_entry_closed_in_active_set(entry)),
+                            supported=_markdown_yes_no(entry.get("supported", False)),
+                            status=_entry_status(entry),
+                            exported=_markdown_yes_no(exported),
                             role=role,
+                            reason=_entry_reason(entry),
                         )
                     )
         else:
-            lines.append("| None | no | None | None | no | not-evaluated |")
+            lines.append("| None | none | no | None | None | no | no | not-evaluated | no | not-evaluated |  |")
         lines.extend(
             [
                 "",
-                "## Internal Generators For This Output",
+                "## Exported Internal Generators For KP",
                 "",
             ]
         )
         if minimal_generators:
             for valley, generators in minimal_generators.items():
-                generator_text = ", ".join(str(name) for name in generators) if generators else "None (identity only)"
-                lines.append(f"- {valley}: {generator_text}")
+                lines.append(f"- {valley}: {_generator_text_for_markdown(list(generators))}")
         else:
             lines.append("- None")
         lines.extend(
@@ -4222,7 +4344,7 @@ class SymmetryAnalysisRunner:
         )
         if minimal_generators:
             for valley, generators in minimal_generators.items():
-                generator_text = ", ".join(str(name) for name in generators) if generators else "identity only"
+                generator_text = _generator_text_for_markdown(list(generators))
                 lines.append(f"- Single-valley {valley} KP model may use: {generator_text}.")
         else:
             lines.append("- No single-valley KP model generators were exported.")

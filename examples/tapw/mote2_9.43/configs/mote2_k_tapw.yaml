@@ -19,7 +19,7 @@ compute:
   valleys: [1]
   efermi: -4.128442
   n_g: 3
-  num_processes: 4
+  num_processes: 61
   blas_threads: 0
   num_bands_cal: 20
   eigsh_cal: true

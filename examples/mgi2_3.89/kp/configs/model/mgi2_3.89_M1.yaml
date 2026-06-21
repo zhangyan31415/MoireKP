@@ -61,6 +61,5 @@ bands:
     - 0.16
 output:
   dir: ../../outputs/model/mgi2_3.89_M1
-  save_coefficients: true
   verbose: false
   progress: true

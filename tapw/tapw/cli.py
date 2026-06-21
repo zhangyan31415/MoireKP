@@ -6,7 +6,7 @@ import time
 from pathlib import Path
 import os
 import shutil
-from typing import Tuple
+from typing import Optional, Tuple
 
 from .config import Config
 from .workflows.band import BandStructureCalculator
@@ -100,11 +100,21 @@ def can_reuse_m_valley_c3_band_outputs(compute_cfg) -> bool:
     return False
 
 
-def resolve_qshell_dir_name(compute_cfg, calculator) -> str:
+def _source_hs_input_is_symmetrized(config_or_compute_cfg) -> bool:
+    paths = getattr(config_or_compute_cfg, "paths", None)
+    if paths is None:
+        return False
+    h_file = os.path.basename(str(getattr(paths, "H_file", "") or ""))
+    s_file = os.path.basename(str(getattr(paths, "S_file", "") or ""))
+    return h_file in {"H_symm.npz", "H_symm.dat"} or s_file in {"S_symm.npz", "S_symm.dat"}
+
+
+def resolve_qshell_dir_name(config_or_compute_cfg, calculator) -> str:
+    compute_cfg = getattr(config_or_compute_cfg, "compute", config_or_compute_cfg)
     if not bool(getattr(compute_cfg, "TAPW", True)):
         return "direct"
     qshell_name = f"Q_shell_{compute_cfg.n_g}"
-    uses_symm = bool(getattr(calculator, "uses_hamiltonian_symmetrization", False))
+    uses_symm = bool(getattr(calculator, "uses_hamiltonian_symmetrization", False)) or _source_hs_input_is_symmetrized(config_or_compute_cfg)
     if uses_symm:
         return qshell_name + "_symm"
     return qshell_name
@@ -160,27 +170,46 @@ def _resolve_hamiltonian_symmetrization_from_summary(config, payload) -> None:
     config.compute.resolved_hamiltonian_symmetry_operations_by_valley = resolved
 
 
-def shutdown_parallel_runtime() -> None:
+def shutdown_parallel_runtime(*, wait: bool = True, kill_workers: bool = False) -> None:
     try:
-        from joblib.externals.loky import get_reusable_executor
+        import joblib.externals.loky.reusable_executor as reusable_executor
     except Exception:
         return
-    get_reusable_executor().shutdown(wait=False, kill_workers=True)
+
+    executor = getattr(reusable_executor, "_executor", None)
+    if executor is None:
+        return
+
+    try:
+        terminate = getattr(executor, "terminate", None)
+        if callable(terminate):
+            terminate(kill_workers=kill_workers)
+        else:
+            executor.shutdown(wait=wait, kill_workers=kill_workers)
+    finally:
+        if getattr(reusable_executor, "_executor", None) is executor:
+            reusable_executor._executor = None
+            reusable_executor._executor_kwargs = None
 
 
-def exit_cli(code: int) -> None:
+def _coerce_exit_code(code: Optional[int]) -> int:
+    return 0 if code is None else int(code)
+
+
+def exit_cli(code: Optional[int]) -> None:
     shutdown_parallel_runtime()
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
-    raise SystemExit(int(code))
+    raise SystemExit(_coerce_exit_code(code))
 
 
-def finish_calculation_process(code: int) -> None:
+def finish_calculation_process(code: Optional[int]) -> None:
+    shutdown_parallel_runtime(wait=False, kill_workers=True)
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
-    raise SystemExit(int(code))
+    os._exit(_coerce_exit_code(code))
 
 
 def copy_reused_m_valley_band_outputs(qshell_path: Path, source_valley_flag: str, target_valley_flag: str) -> None:
@@ -357,9 +386,9 @@ def run_calc(args):
 
         if config.compute.mode == "symmetry":
             _run_symmetry_analysis(config, processor, hr, sr, logger)
-            shutdown_parallel_runtime()
+            shutdown_parallel_runtime(wait=False, kill_workers=True)
             logging.shutdown()
-            return
+            return 0
 
         if hamiltonian_symmetrization_requested(config.compute):
             payload = _run_symmetry_analysis(config, processor, hr, sr, logger)
@@ -396,7 +425,7 @@ def run_calc(args):
                 if getattr(calculator, "use_M_valley_threefold_symm", False):
                     reusable_m_valley_calculator = calculator
             
-            out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config.compute, calculator)
+            out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config, calculator)
             out_path.mkdir(exist_ok=True)
             
             if reuse_m_valley_band_outputs and reused_reference_valley_flag is not None:
@@ -425,28 +454,36 @@ def run_calc(args):
 
     except Exception as e:
         logger.error(f"Error during calculation: {str(e)}", exc_info=True)
+        shutdown_parallel_runtime(wait=False, kill_workers=True)
         logging.shutdown()
         sys.stdout.flush()
         sys.stderr.flush()
         return 1
 
     logger.info("Calculation completed successfully")
+    shutdown_parallel_runtime(wait=False, kill_workers=True)
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
     return 0
 
 
-def main_calc(argv=None, *, prog="tapw run"):
+def main_calc(argv=None, *, prog="tapw run", finalize: bool = True):
     """Run the TAPW calculator entry point."""
-    return run_calc(build_calc_parser(prog=prog).parse_args(argv))
+    code = _coerce_exit_code(run_calc(build_calc_parser(prog=prog).parse_args(argv)))
+    if finalize:
+        finish_calculation_process(code)
+    return code
 
 
-def main_chern(argv=None, *, prog="tapw chern"):
+def main_chern(argv=None, *, prog="tapw chern", finalize: bool = True):
     """Run TAPW Chern calculation with mode fixed to `chern`."""
     args = build_calc_parser(prog=prog, fixed_mode="chern").parse_args(argv)
     args.mode = "chern"
-    return run_calc(args)
+    code = _coerce_exit_code(run_calc(args))
+    if finalize:
+        finish_calculation_process(code)
+    return code
 
 
 def build_main_parser():

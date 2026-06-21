@@ -42,22 +42,59 @@ def test_unified_tapw_dispatches_to_tool_mains(monkeypatch):
     ]
 
 
-def test_unified_tapw_dispatches_calc_without_rewriting_algorithm(monkeypatch):
+def test_unified_tapw_dispatches_calc_and_finalizes_at_cli_boundary(monkeypatch):
     from tapw import cli
 
     calls = []
-    monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(args.config))
+    monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(("run", args.config)) or 0)
 
-    cli.main(["run", "--config", "config.yaml"])
+    class Finished(RuntimeError):
+        def __init__(self, code):
+            super().__init__(f"finished {code}")
+            self.code = code
 
-    assert calls == ["config.yaml"]
+    monkeypatch.setattr(
+        cli,
+        "finish_calculation_process",
+        lambda code: (_ for _ in ()).throw(Finished(code)),
+    )
+
+    with pytest.raises(Finished) as excinfo:
+        cli.main(["run", "--config", "config.yaml"])
+
+    assert excinfo.value.code == 0
+    assert calls == [("run", "config.yaml")]
+
+
+def test_unified_tapw_treats_none_calc_result_as_success(monkeypatch):
+    from tapw import cli
+
+    calls = []
+    monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(("run", args.config)) or None)
+
+    class Finished(RuntimeError):
+        def __init__(self, code):
+            super().__init__(f"finished {code}")
+            self.code = code
+
+    monkeypatch.setattr(
+        cli,
+        "finish_calculation_process",
+        lambda code: (_ for _ in ()).throw(Finished(code)),
+    )
+
+    with pytest.raises(Finished) as excinfo:
+        cli.main(["run", "--config", "config.yaml"])
+
+    assert excinfo.value.code == 0
+    assert calls == [("run", "config.yaml")]
 
 
 def test_exit_cli_raises_system_exit_without_os_exit(monkeypatch):
     from tapw import cli
 
     calls = []
-    monkeypatch.setattr(cli, "shutdown_parallel_runtime", lambda: calls.append("shutdown"))
+    monkeypatch.setattr(cli, "shutdown_parallel_runtime", lambda **kwargs: calls.append(("shutdown", kwargs)))
     monkeypatch.setattr(cli.logging, "shutdown", lambda: calls.append("logging"))
     monkeypatch.setattr(
         cli.os,
@@ -69,28 +106,81 @@ def test_exit_cli_raises_system_exit_without_os_exit(monkeypatch):
         cli.exit_cli(7)
 
     assert excinfo.value.code == 7
-    assert calls == ["shutdown", "logging"]
+    assert calls == [("shutdown", {}), "logging"]
 
 
-def test_finish_calculation_process_flushes_then_raises_system_exit(monkeypatch):
+def test_shutdown_parallel_runtime_terminates_existing_memmapping_executor(monkeypatch):
+    from tapw import cli
+    import joblib.externals.loky.reusable_executor as reusable_executor
+
+    calls = []
+
+    class Executor:
+        def terminate(self, *, kill_workers=False):
+            calls.append(("terminate", kill_workers))
+
+    monkeypatch.setattr(reusable_executor, "_executor", Executor())
+    monkeypatch.setattr(reusable_executor, "_executor_kwargs", {"old": "kwargs"})
+
+    cli.shutdown_parallel_runtime(kill_workers=True)
+
+    assert calls == [("terminate", True)]
+    assert reusable_executor._executor is None
+    assert reusable_executor._executor_kwargs is None
+
+
+def test_finish_calculation_process_shutdowns_runtime_and_exits_without_teardown(monkeypatch):
     from tapw import cli
 
     calls = []
 
+    class ProcessExit(RuntimeError):
+        def __init__(self, code):
+            super().__init__(f"os._exit({code})")
+            self.code = code
+
+    monkeypatch.setattr(cli, "shutdown_parallel_runtime", lambda **kwargs: calls.append(("shutdown", kwargs)))
     monkeypatch.setattr(cli.logging, "shutdown", lambda: calls.append("logging"))
     monkeypatch.setattr(cli.sys.stdout, "flush", lambda: calls.append("stdout"))
     monkeypatch.setattr(cli.sys.stderr, "flush", lambda: calls.append("stderr"))
     monkeypatch.setattr(
         cli.os,
         "_exit",
-        lambda code: (_ for _ in ()).throw(AssertionError("os._exit should not be used")),
+        lambda code: (_ for _ in ()).throw(ProcessExit(code)),
     )
 
-    with pytest.raises(SystemExit) as excinfo:
+    with pytest.raises(ProcessExit) as excinfo:
         cli.finish_calculation_process(5)
 
     assert excinfo.value.code == 5
-    assert calls == ["logging", "stdout", "stderr"]
+    assert calls == [("shutdown", {"wait": False, "kill_workers": True}), "logging", "stdout", "stderr"]
+
+
+def test_finish_calculation_process_treats_none_as_success(monkeypatch):
+    from tapw import cli
+
+    calls = []
+
+    class ProcessExit(RuntimeError):
+        def __init__(self, code):
+            super().__init__(f"os._exit({code})")
+            self.code = code
+
+    monkeypatch.setattr(cli, "shutdown_parallel_runtime", lambda **kwargs: calls.append(("shutdown", kwargs)))
+    monkeypatch.setattr(cli.logging, "shutdown", lambda: calls.append("logging"))
+    monkeypatch.setattr(cli.sys.stdout, "flush", lambda: calls.append("stdout"))
+    monkeypatch.setattr(cli.sys.stderr, "flush", lambda: calls.append("stderr"))
+    monkeypatch.setattr(
+        cli.os,
+        "_exit",
+        lambda code: (_ for _ in ()).throw(ProcessExit(code)),
+    )
+
+    with pytest.raises(ProcessExit) as excinfo:
+        cli.finish_calculation_process(None)
+
+    assert excinfo.value.code == 0
+    assert calls == [("shutdown", {"wait": False, "kill_workers": True}), "logging", "stdout", "stderr"]
 
 
 def test_tapw_run_help_lists_developer_outputs(capsys):

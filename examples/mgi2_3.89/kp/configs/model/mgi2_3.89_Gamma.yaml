@@ -40,6 +40,5 @@ bands:
     align: top
 output:
   dir: ../../outputs/model/mgi2_3.89_Gamma
-  save_coefficients: true
   verbose: false
   progress: true

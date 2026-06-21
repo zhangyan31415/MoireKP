@@ -9,7 +9,12 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import yaml
 
-from ..blocks.blocks import _assemble_projectors_from_block_eigenvectors, calculate_energy_lists, get_H_block
+from ..blocks.blocks import (
+    _assemble_gamma_projectors_from_block_eigenvectors,
+    _assemble_projectors_from_block_eigenvectors,
+    _layer_reference_entries,
+    get_H_block,
+)
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..io.tapw_loader import load_Q_sets, load_hamk
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
@@ -83,7 +88,11 @@ def _energy_scale_from_material(material: Mapping[str, Any]) -> float:
 
 
 def _load_hamk_with_energy_unit(path: str, material: Mapping[str, Any], *, mmap_mode: str | None = "r") -> np.ndarray:
-    return load_hamk(path, mmap_mode=mmap_mode) * _energy_scale_from_material(material)
+    hamk = load_hamk(path, mmap_mode=mmap_mode)
+    scale = _energy_scale_from_material(material)
+    if scale == 1.0:
+        return hamk
+    return hamk * scale
 
 
 def _validate_operation_label(label: str) -> str:
@@ -171,8 +180,8 @@ def _operation_power_relation(operation: str, *, spin_convention: str) -> dict[s
     }
 
 
-def _kp_symm_exactification_config() -> dict[str, Any]:
-    return {
+def _kp_symm_exactification_config(overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
+    config = {
         "support_source": "geometry",
         "require_group_relations": True,
         "phase_classes": "global",
@@ -181,6 +190,26 @@ def _kp_symm_exactification_config() -> dict[str, Any]:
         "inferred": True,
         "source": "kp_symm",
     }
+    if overrides:
+        allowed = {
+            "accept_support_resolved_action",
+            "action_candidates",
+            "forbid_inferred_q_offset",
+            "reject_if_off_support_rel_gt",
+            "reject_if_amplitude_deviation_gt",
+            "monomial_cleanup_tol",
+            "monomial_root_order_max",
+            "operations",
+            "phase_classes",
+            "require_explicit_action_candidates",
+            "strict",
+            "support_mode",
+        }
+        unknown = sorted(set(overrides) - allowed)
+        if unknown:
+            raise ValueError(f"Unsupported symm.exactification keys: {unknown}")
+        config.update({key: overrides[key] for key in allowed if key in overrides})
+    return config
 
 
 def _normalize_nlow_state_list(project_cfg: dict[str, Any]) -> list[list[int]]:
@@ -193,6 +222,67 @@ def _normalize_nlow_state_list(project_cfg: dict[str, Any]) -> list[list[int]]:
     if nlow_state_list and not isinstance(nlow_state_list[0], (list, tuple)):
         return [[int(x) for x in nlow_state_list]]
     return [[int(x) for x in layer] for layer in nlow_state_list]
+
+
+def _source_group_nlow_state_list(
+    nlow_state_list: Sequence[Sequence[int]],
+    num_layer_list: Sequence[int] | None,
+) -> list[list[int]]:
+    rows = [[int(band) for band in row] for row in nlow_state_list]
+    if num_layer_list is None:
+        return rows
+    group_layers = [int(n) for n in num_layer_list]
+    total_layers = int(sum(group_layers))
+    if len(rows) != total_layers:
+        raise ValueError(
+            f"project.nlow_state_list must have {total_layers} physical-layer rows "
+            f"(sum(material.num_layer_list)); got {len(rows)}. "
+            "Use [] for layers that do not contribute."
+        )
+    grouped: list[list[int]] = []
+    offset = 0
+    for n_layers in group_layers:
+        bands: list[int] = []
+        for local in range(int(n_layers)):
+            bands.extend(rows[offset + local])
+        grouped.append(bands)
+        offset += int(n_layers)
+    return grouped
+
+
+def _validate_project_layer_lists(
+    nlow_state_list: Sequence[Sequence[int]],
+    norb_fix_list: Sequence[Any],
+    *,
+    num_layer_list: Sequence[int] | None,
+    context: str = "project",
+) -> None:
+    nlow_rows = [[int(band) for band in row] for row in nlow_state_list]
+    if not nlow_rows:
+        raise ValueError(f"{context}.nlow_state_list must not be empty")
+
+    if num_layer_list is not None:
+        total_layers = int(sum(int(n) for n in num_layer_list))
+        if len(nlow_rows) != total_layers:
+            raise ValueError(
+                f"{context}.nlow_state_list must have {total_layers} physical-layer rows "
+                f"(sum(material.num_layer_list)); got {len(nlow_rows)}. "
+                "Use [] for layers that do not contribute."
+            )
+
+    if len(norb_fix_list) != len(nlow_rows):
+        raise ValueError(
+            f"{context}.norb_fix_list must have the same number of rows as "
+            f"{context}.nlow_state_list; got {len(norb_fix_list)} vs {len(nlow_rows)}"
+        )
+
+    for layer, bands in enumerate(nlow_rows):
+        ref_entries = _layer_reference_entries(norb_fix_list[layer], len(bands))
+        if len(ref_entries) != len(bands):
+            raise ValueError(
+                f"{context}.nlow_state_list layer {layer} has {len(bands)} bands but "
+                f"{context}.norb_fix_list layer {layer} has {len(ref_entries)} references"
+            )
 
 
 def _downfold_method(project_cfg: dict[str, Any]) -> str:
@@ -212,6 +302,52 @@ def _infer_orbitals_per_layer(hamk2d: np.ndarray, q_count: int, num_layers: int)
     return base // divisor
 
 
+def _num_layer_list_from_material(material: Mapping[str, Any]) -> list[int]:
+    raw = material.get("num_layer_list")
+    if raw is not None:
+        layers = [int(x) for x in raw]
+        if not layers or any(x <= 0 for x in layers):
+            raise ValueError(f"material.num_layer_list must contain positive integers, got {raw!r}")
+        return layers
+    return [1 for _ in range(int(material.get("num_layers", 2)))]
+
+
+def _orbital_layout_from_material(
+    material: Mapping[str, Any],
+    hamk2d: np.ndarray,
+    q_count: int,
+) -> tuple[list[int], int, list[list[int]]]:
+    num_layer_list = _num_layer_list_from_material(material)
+    total_layers = sum(num_layer_list)
+    raw = material.get("num_orb_per_layer")
+    if raw:
+        vals = [int(x) for x in raw]
+        if len(vals) == 1:
+            orb0 = vals[0]
+            return num_layer_list, orb0, [[orb0 for _ in range(n)] for n in num_layer_list]
+        if len(vals) == len(num_layer_list):
+            if len(set(vals)) != 1:
+                raise ValueError("This release requires equal orbital counts for each physical layer.")
+            orb0 = vals[0]
+            return num_layer_list, orb0, [[vals[i] for _ in range(n)] for i, n in enumerate(num_layer_list)]
+        if len(vals) == total_layers:
+            if len(set(vals)) != 1:
+                raise ValueError("This release requires equal orbital counts for each physical layer.")
+            orb0 = vals[0]
+            out: list[list[int]] = []
+            pos = 0
+            for n in num_layer_list:
+                out.append(vals[pos:pos + n])
+                pos += n
+            return num_layer_list, orb0, out
+        raise ValueError(
+            "material.num_orb_per_layer must have length 1, len(num_layer_list), "
+            f"or sum(num_layer_list); got {len(vals)} values for {num_layer_list}"
+        )
+    orb0 = _infer_orbitals_per_layer(hamk2d, q_count, total_layers)
+    return num_layer_list, orb0, [[orb0 for _ in range(n)] for n in num_layer_list]
+
+
 def _spin_slice_hamk(hamk2d: np.ndarray, spin: str) -> np.ndarray:
     spin_lower = str(spin).lower()
     if spin_lower == "all":
@@ -222,6 +358,10 @@ def _spin_slice_hamk(hamk2d: np.ndarray, spin: str) -> np.ndarray:
     if spin_lower == "down":
         return np.asarray(hamk2d[half:, half:], dtype=np.complex128)
     raise ValueError(f"Unsupported spin value: {spin!r}")
+
+
+def _spin_label_for_sliced_block(spin: str) -> str:
+    return "all" if str(spin).lower() == "all" else "up"
 
 
 def _is_sparse(matrix: Any) -> bool:
@@ -615,20 +755,30 @@ def _sector_orbital_counts(
     nlow_state_list: list[list[int]],
     *,
     low_dim: int | None,
+    num_layer_list: Sequence[int] | None = None,
 ) -> tuple[int, int]:
-    if len(nlow_state_list) >= 2:
+    if num_layer_list is not None:
+        total_layers = int(sum(int(n) for n in num_layer_list))
+        if len(nlow_state_list) != total_layers:
+            raise ValueError(
+                f"project.nlow_state_list must have {total_layers} physical-layer rows "
+                f"(sum(material.num_layer_list)); got {len(nlow_state_list)}. "
+                "Use [] for layers that do not contribute."
+            )
+        counts: list[int] = []
+        offset = 0
+        for n_layers in list(num_layer_list)[:2]:
+            counts.append(sum(len(nlow_state_list[offset + local]) for local in range(int(n_layers))))
+            offset += int(n_layers)
+        while len(counts) < 2:
+            counts.append(0)
+        return int(counts[0]), int(counts[1])
+    if len(nlow_state_list) == 2:
         return len(nlow_state_list[0]), len(nlow_state_list[1])
-    if low_dim is not None:
-        q_total = int(len(q_model1) + len(q_model2))
-        if q_total > 0 and int(low_dim) % q_total == 0:
-            per_sector = int(low_dim) // q_total
-            return per_sector, per_sector
-    if nlow_state_list:
-        count = len(nlow_state_list[0])
-        if count % 2 == 0 and len(q_model1) == len(q_model2):
-            return count // 2, count // 2
-        return count, 0
-    return 0, 0
+    raise ValueError(
+        f"project.nlow_state_list must have two qset rows when material.num_layer_list is unavailable; "
+        f"got {len(nlow_state_list)} rows."
+    )
 
 
 def _model_basis_labels(
@@ -637,9 +787,16 @@ def _model_basis_labels(
     nlow_state_list: list[list[int]],
     *,
     low_dim: int | None = None,
+    num_layer_list: Sequence[int] | None = None,
 ) -> list[dict[str, Any]]:
     labels: list[dict[str, Any]] = []
-    n_orb1, n_orb2 = _sector_orbital_counts(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    n_orb1, n_orb2 = _sector_orbital_counts(
+        q_model1,
+        q_model2,
+        nlow_state_list,
+        low_dim=low_dim,
+        num_layer_list=num_layer_list,
+    )
     for sector, qset, bands in (
         ("L1", np.asarray(q_model1, dtype=float), range(n_orb1)),
         ("L2", np.asarray(q_model2, dtype=float), range(n_orb2)),
@@ -664,10 +821,17 @@ def _basis_action_for_candidate(
     q_model2: np.ndarray,
     nlow_state_list: list[list[int]],
     low_dim: int | None,
+    num_layer_list: Sequence[int] | None = None,
     tol: float,
 ) -> dict[str, Any]:
     qsets = {"L1": np.asarray(q_model1, dtype=float), "L2": np.asarray(q_model2, dtype=float)}
-    labels = _model_basis_labels(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    labels = _model_basis_labels(
+        q_model1,
+        q_model2,
+        nlow_state_list,
+        low_dim=low_dim,
+        num_layer_list=num_layer_list,
+    )
     target_index = {
         (str(label["sector"]), int(label["q_index"]), int(label["orbital"])): idx
         for idx, label in enumerate(labels)
@@ -756,6 +920,7 @@ def _resolve_projected_model_action(
     q_model1: np.ndarray,
     q_model2: np.ndarray,
     nlow_state_list: list[list[int]],
+    num_layer_list: Sequence[int] | None = None,
     tol: float,
     discover_action_candidates: bool = False,
     accept_support_resolved_action: bool = False,
@@ -765,13 +930,20 @@ def _resolve_projected_model_action(
         raise ValueError("model_action requires explicit sector_map metadata")
     matrix_options = list(support_matrices or [("raw", D_low)])
     low_dim = int(np.asarray(matrix_options[0][1]).shape[-1])
-    labels = _model_basis_labels(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    labels = _model_basis_labels(
+        q_model1,
+        q_model2,
+        nlow_state_list,
+        low_dim=low_dim,
+        num_layer_list=num_layer_list,
+    )
     declared_basis_action = _basis_action_for_candidate(
         action=model_action,
         q_model1=q_model1,
         q_model2=q_model2,
         nlow_state_list=nlow_state_list,
         low_dim=low_dim,
+        num_layer_list=num_layer_list,
         tol=tol,
     )
     declared_residuals: list[dict[str, Any]] = []
@@ -789,6 +961,7 @@ def _resolve_projected_model_action(
             q_model2=q_model2,
             nlow_state_list=nlow_state_list,
             low_dim=low_dim,
+            num_layer_list=num_layer_list,
             tol=tol,
         )
         residuals: list[dict[str, Any]] = []
@@ -1139,6 +1312,8 @@ def _projectors_for_k(
     q2: np.ndarray,
     *,
     orb0: int,
+    num_layer_list: list[int] | None = None,
+    num_orb_per_layer_list: list[list[int]] | None = None,
     spin: str,
     mode: str,
     nlow_state_list: list[list[int]],
@@ -1147,14 +1322,25 @@ def _projectors_for_k(
     e_ref: float | None,
     project_cfg: dict[str, Any],
 ) -> ProjectionState:
+    if num_layer_list is None:
+        num_layer_list = [1, 1]
+    if num_orb_per_layer_list is None:
+        num_orb_per_layer_list = [[int(orb0)] for _ in num_layer_list]
+    _validate_project_layer_lists(
+        nlow_state_list,
+        norb_fix_list,
+        num_layer_list=num_layer_list,
+        context="project",
+    )
     q_layers = [[q1], [q2]]
-    orb_layers = [[orb0], [orb0]]
+    orb_layers = num_orb_per_layer_list
     method = str(method).lower()
+    mode_lower = str(mode).lower()
     include_high = method != "first_order"
     _, h_vec_blk, _, _ = get_H_block(
         hamk_spin,
         q_layers,
-        [1, 1],
+        num_layer_list,
         orb_layers,
         nlow_state_list,
         norb_fix_list,
@@ -1162,28 +1348,60 @@ def _projectors_for_k(
         mode=mode,
         selected_bands_by_layer=None if include_high else nlow_state_list,
     )
-    if spin == "all" and mode.lower() != "gamma":
+    if mode_lower != "gamma":
         q_count = int(len(q1))
         shift = q_count * int(orb0)
         idx_list: list[np.ndarray] = []
-        for layer in range(2):
-            for iq in range(q_count):
-                base = np.arange(iq * int(orb0), (iq + 1) * int(orb0)) + shift * layer
-                idx_list.append(np.concatenate((base, base + hamk_spin.shape[0] // 2)))
+        layer_offset = 0
+        per_spin_offset = hamk_spin.shape[0] // 2
+        bands_by_physical_layer: list[list[int]] = []
+        for group_index, n_layers in enumerate(num_layer_list):
+            for layer_in_group in range(n_layers):
+                band_entry = len(bands_by_physical_layer)
+                bands_by_physical_layer.append([int(band) for band in nlow_state_list[band_entry]])
+                for iq in range(q_count):
+                    base = np.arange((iq * n_layers + layer_in_group) * int(orb0), (iq * n_layers + layer_in_group + 1) * int(orb0))
+                    base = base + shift * layer_offset
+                    if spin == "all":
+                        idx = np.concatenate((base, base + per_spin_offset))
+                    elif spin == "down":
+                        idx = base + per_spin_offset
+                    else:
+                        idx = base
+                    idx_list.append(idx)
+            layer_offset += n_layers
         u_low, u_high = _assemble_projectors_from_block_eigenvectors(
             h_vec_blk,
             idx_list,
-            nlow_state_list,
+            bands_by_physical_layer,
             include_high=include_high,
         )
     else:
-        u_low, u_high = calculate_energy_lists(
+        q_count = int(len(q1))
+        shift = q_count * int(orb0)
+        per_spin_offset = hamk_spin.shape[0] // 2
+        idx_list = []
+        for iq in range(q_count):
+            parts = []
+            layer_offset = 0
+            for group_index, n_layers in enumerate(num_layer_list):
+                for layer_in_group in range(n_layers):
+                    base = np.arange(
+                        (iq * n_layers + layer_in_group) * int(orb0),
+                        (iq * n_layers + layer_in_group + 1) * int(orb0),
+                    )
+                    parts.append(base + shift * layer_offset)
+                layer_offset += n_layers
+            idx = np.concatenate(parts)
+            if spin == "all":
+                idx = np.concatenate((idx, idx + per_spin_offset))
+            elif spin == "down":
+                idx = idx + per_spin_offset
+            idx_list.append(idx)
+        u_low, u_high = _assemble_gamma_projectors_from_block_eigenvectors(
             h_vec_blk,
-            nlow_state_list,
-            norb_fix_list,
-            q_layers,
-            orb_layers,
-            mode=mode,
+            idx_list,
+            _source_group_nlow_state_list(nlow_state_list, num_layer_list),
             include_high=include_high,
         )
     u_low = np.asarray(u_low, dtype=np.complex128)
@@ -1427,7 +1645,6 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     nk = int(hamk3d.shape[0])
     q_count = int(len(q1))
-    num_layers = int(material.get("num_layers", 2))
     mode = str(project_cfg.get("mode", "K1")).lower()
     method = _downfold_method(project_cfg)
     e_ref = _e_ref(project_cfg)
@@ -1435,10 +1652,17 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         raise ValueError(f"project.downfold_method={method!r} requires project.e_ref")
     nlow_state_list = _normalize_nlow_state_list(project_cfg)
     norb_fix_list = project_cfg.get("norb_fix_list", [])
-    if "num_orb_per_layer" in material and material["num_orb_per_layer"]:
-        orb0 = int(material["num_orb_per_layer"][0])
-    else:
-        orb0 = _infer_orbitals_per_layer(np.asarray(hamk3d[0]), q_count, num_layers)
+    num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
+        material,
+        np.asarray(hamk3d[0]),
+        q_count,
+    )
+    _validate_project_layer_lists(
+        nlow_state_list,
+        norb_fix_list,
+        num_layer_list=num_layer_list,
+        context="project",
+    )
 
     operation_entries: dict[str, dict[str, Any]] = {}
     all_pairs: set[tuple[int, int]] = set()
@@ -1537,13 +1761,16 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     source_states: dict[int, ProjectionState] = {}
     target_states: dict[int, ProjectionState] = {}
     if spin_sector_sewing is None:
+        block_spin = _spin_label_for_sliced_block(spin)
         for k_index in required_k:
             states[k_index] = _projectors_for_k(
                 hamk_source_by_k[k_index],
                 q1,
                 q2,
                 orb0=orb0,
-                spin=spin,
+                num_layer_list=num_layer_list,
+                num_orb_per_layer_list=num_orb_per_layer_list,
+                spin=block_spin,
                 mode=mode,
                 nlow_state_list=nlow_state_list,
                 norb_fix_list=norb_fix_list,
@@ -1563,6 +1790,8 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
                 q1,
                 q2,
                 orb0=orb0,
+                num_layer_list=num_layer_list,
+                num_orb_per_layer_list=num_orb_per_layer_list,
                 spin="up",
                 mode=mode,
                 nlow_state_list=nlow_state_list,
@@ -1576,6 +1805,8 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
                 q1,
                 q2,
                 orb0=orb0,
+                num_layer_list=num_layer_list,
+                num_orb_per_layer_list=num_orb_per_layer_list,
                 spin="up",
                 mode=mode,
                 nlow_state_list=nlow_state_list,
@@ -1615,7 +1846,25 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     }
 
     raw_low_matrices: dict[str, np.ndarray] = {}
-    n_orb_for_exactification = _sector_orbital_counts(q_model1, q_model2, nlow_state_list, low_dim=low_dim)
+    n_orb_for_exactification = _sector_orbital_counts(
+        q_model1,
+        q_model2,
+        nlow_state_list,
+        low_dim=low_dim,
+        num_layer_list=num_layer_list,
+    )
+    summary["project_basis"] = {
+        "nlow_state_list_layout": "physical_layer",
+        "num_layer_list": [int(n) for n in num_layer_list],
+        "resolved_sector_orbital_counts": {
+            "L1": int(n_orb_for_exactification[0]),
+            "L2": int(n_orb_for_exactification[1]),
+        },
+        "resolved_source_group_nlow_state_list": _source_group_nlow_state_list(
+            nlow_state_list,
+            num_layer_list,
+        ),
+    }
     spin_convention = _spin_convention_for_exactification(spin, n_orb_for_exactification, valley=valley)
     for request in operation_requests:
         operation = request["source"]
@@ -1675,6 +1924,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             q_model1=q_model1,
             q_model2=q_model2,
             nlow_state_list=nlow_state_list,
+            num_layer_list=num_layer_list,
             tol=max(float(tolerance), 1.0e-8),
         )
         _save_matrix_stack(output_dir / f"{output_operation}_low_raw.npy", raw_mats)
@@ -1797,7 +2047,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         bM1=bM1,
         bM2=bM2,
     )
-    exact_config = _kp_symm_exactification_config()
+    exact_config = _kp_symm_exactification_config(symm_cfg.get("exactification"))
     exact_matrices, exact_reports = exactify_loaded_symmetry_source(
         loaded_metadata=summary,
         matrices=raw_low_matrices,

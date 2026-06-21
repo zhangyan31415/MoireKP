@@ -35,6 +35,26 @@ def _make_runner(tmp_path: Path):
     )
 
 
+def test_c3_g_transport_accepts_moire_q_roundoff():
+    angles = np.deg2rad(np.arange(0, 360, 60))
+    g_vectors = np.array(
+        [[0.0, 0.0], *[[np.cos(angle), np.sin(angle)] for angle in angles]],
+        dtype=float,
+    )
+    g_target = g_vectors.copy()
+    g_target[2] += np.array([5.0e-8, -4.0e-8])
+
+    transport = symmetry_analysis.build_c3_g_transport_from_tapw_convention(
+        g_source=g_vectors,
+        g_target=g_target,
+        layer_center=np.zeros(2),
+        angle_deg=120.0,
+    )
+
+    assert transport.shape == (7, 7)
+    assert transport.nnz == 7
+
+
 def test_runner_writes_summary_markdown_json_and_details_csv(tmp_path):
     runner = _make_runner(tmp_path)
 
@@ -462,7 +482,7 @@ def test_runner_canonicalizes_time_reversal_outputs_to_tr(tmp_path):
         ]
     )
     assert "T_rawH.npz" not in text_outputs
-    assert "| TR | yes | M1 | M1 | yes | internal |" in text_outputs
+    assert "| TR | built-in | yes | M1 | M1 | yes | yes | exact | yes | internal |  |" in text_outputs
 
 
 def test_analyze_collects_only_minimal_supported_representation_generators(tmp_path, monkeypatch):
@@ -486,11 +506,11 @@ def test_analyze_collects_only_minimal_supported_representation_generators(tmp_p
         runner,
     )
     runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
-    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure: [])
+    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure, **_kwargs: [])
     monkeypatch.setattr(
         symmetry_analysis,
         "_minimal_symmetry_candidates_for_valley",
-        lambda valley_ctx, bravais, spatial_operations=None, structure=None: [
+        lambda valley_ctx, bravais, spatial_operations=None, structure=None, **_kwargs: [
             {"index": 0, "name": "E", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
             {"index": 2, "name": "C3z", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
             {"index": 3, "name": "C3z^2", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
@@ -569,7 +589,7 @@ def test_k_source_c2_and_internal_c2t_use_same_spglib_axis(tmp_path, monkeypatch
     )
     runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
     runner._select_antiunitary_c2_layer_exchange_spatial_operation = MethodType(lambda self, valley, spatial_operations, tolerance: spglib_c2, runner)
-    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure: [spglib_c2])
+    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure, **_kwargs: [spglib_c2])
     monkeypatch.setattr(symmetry_analysis, "_default_validation_q_points", lambda: [("Gamma", np.zeros(3))])
     runner._candidate_rows_for_q = MethodType(
         lambda self, candidate, valley, valley_label, q_label, q_target, tolerance: {
@@ -758,12 +778,12 @@ def test_summary_markdown_is_human_source_symmetry_report(tmp_path):
     assert "## Run" in text
     assert "- Active valleys: M1, Gamma" in text
     assert "- Production matrix source: raw-H action only" in text
-    assert "## Valley Action" in text
-    assert "| TR | yes | M1 | M1 | yes | internal |" in text
-    assert "| C3z | no | M1 | M2 | no | inter-valley |" in text
-    assert "## Internal Generators For This Output" in text
-    assert "- M1: TR, C2" in text
-    assert "- Gamma: TR, C3z" in text
+    assert "## Candidate Valley Actions" in text
+    assert "| TR | built-in | yes | M1 | M1 | yes | yes | exact | yes | internal |  |" in text
+    assert "| C3z | template | no | M1 | M2 | no | no | not_supported | no | inter-valley | valley_not_closed |" in text
+    assert "## Exported Internal Generators For KP" in text
+    assert "- M1: TR, C2 (E implicit)" in text
+    assert "- Gamma: TR, C3z (E implicit)" in text
     assert "## Inter-Valley Operations" in text
     assert "- C3z maps M1 -> M2" in text
     assert "not exported as a single-M1 internal matrix" in text
@@ -774,7 +794,7 @@ def test_summary_markdown_is_human_source_symmetry_report(tmp_path):
     assert "- Developer outputs: disabled" in text
     assert "D0/PG/Pin matrices are not production inputs." in text
     assert "## KP Model Guidance" in text
-    assert "- Single-valley M1 KP model may use: TR, C2." in text
+    assert "- Single-valley M1 KP model may use: TR, C2 (E implicit)." in text
     assert "- Do not use M1 C3z as a single-valley constraint from this output." in text
     assert "Minimal generators:" not in text
 
@@ -833,12 +853,68 @@ def test_summary_markdown_documents_single_k_internal_and_inter_valley_operation
         )
     )
 
-    assert "| C3z | no | K1 | K1 | yes | internal |" in text
-    assert "| C2T | yes | K1 | K1 | yes | internal |" in text
-    assert "| TR | yes | K1 | K2 | no | inter-valley |" in text
-    assert "| C2 | no | K1 | K2 | no | inter-valley |" in text
-    assert "- Single-valley K1 KP model may use: C3z, C2T." in text
+    assert "| C3z | template | no | K1 | K1 | yes | yes | supported | no | internal |  |" in text
+    assert "| C2T | template | yes | K1 | K1 | yes | yes | supported | no | internal |  |" in text
+    assert "| TR | built-in | yes | K1 | K2 | no | no | not_supported | no | inter-valley |  |" in text
+    assert "| C2 | template | no | K1 | K2 | no | no | not_supported | no | inter-valley |  |" in text
+    assert "- Single-valley K1 KP model may use: C3z, C2T (E implicit)." in text
     assert "- TR and C2 are source physical symmetries but are not single-K1 internal constraints in this output." in text
+
+
+def test_summary_markdown_separates_valley_closed_from_supported_candidates(tmp_path):
+    runner = _make_runner(tmp_path)
+    text = "\n".join(
+        runner._summary_markdown_lines(
+            {
+                "valleys": [5],
+                "tolerance": 2.0e-2,
+                "operations": {
+                    "Gamma": [
+                        {
+                            "operation": "TR",
+                            "antiunitary": True,
+                            "supported": True,
+                            "status": "exact",
+                            "source_valley": "Gamma",
+                            "target_valley": "Gamma",
+                            "closed_in_active_set": True,
+                            "role": "internal",
+                            "export_raw_h_matrix": True,
+                        },
+                        {
+                            "operation": "C2",
+                            "axis_angle_deg": 90.0,
+                            "antiunitary": False,
+                            "supported": False,
+                            "status": "not_supported",
+                            "not_supported_reason": "atom_mapping_missing",
+                            "spglib_index": "",
+                            "source_valley": "Gamma",
+                            "target_valley": "Gamma",
+                            "closed_in_active_set": True,
+                            "role": "internal",
+                            "export_raw_h_matrix": False,
+                        },
+                    ]
+                },
+                "minimal_generators": {"Gamma": ["TR"]},
+            },
+            representations=[],
+            developer_outputs=False,
+        )
+    )
+
+    assert "## Candidate Valley Actions" in text
+    assert "valley-map closed only means the operation maps into the selected active valley block" in text
+    assert (
+        "| operation | candidate source | antiunitary | source valley | target valley | valley-map closed | "
+        "supported | status | exported raw-H | role | reason |"
+    ) in text
+    assert "| TR | built-in | yes | Gamma | Gamma | yes | yes | exact | yes | internal |  |" in text
+    assert "| C2 (axis 90deg) | template | no | Gamma | Gamma | yes | no | not_supported | no | internal | atom_mapping_missing |" in text
+    assert "closed in active set" not in text
+    assert "## Exported Internal Generators For KP" in text
+    assert "- Gamma: TR (E implicit)" in text
 
 
 def test_summary_markdown_infers_antiunitary_for_legacy_t_and_c2t_entries(tmp_path):
@@ -860,12 +936,22 @@ def test_summary_markdown_infers_antiunitary_for_legacy_t_and_c2t_entries(tmp_pa
         )
     )
 
-    assert "| TR | yes | K1 | K1 | yes | internal |" in text
-    assert "| C2T | yes | K1 | K1 | yes | internal |" in text
-    assert "| C3z | no | K1 | K1 | yes | internal |" in text
+    assert "| TR | built-in | yes | K1 | K1 | yes | yes | supported | no | internal |  |" in text
+    assert "| C2T | template | yes | K1 | K1 | yes | yes | supported | no | internal |  |" in text
+    assert "| C3z | template | no | K1 | K1 | yes | yes | supported | no | internal |  |" in text
 
 
-def test_source_symmetry_candidates_include_m_inter_valley_c3_operations(tmp_path):
+def _fake_spglib_operation(index: int, rotation_cart):
+    return {
+        "index": int(index),
+        "rotation_frac": np.eye(3),
+        "translation_frac": np.zeros(3),
+        "rotation_cart": np.asarray(rotation_cart, dtype=float),
+        "translation_cart": np.zeros(3),
+    }
+
+
+def test_source_symmetry_candidates_include_m_inter_valley_c3_operations_from_spglib(tmp_path):
     valley_ctx = symmetry_analysis.ValleyContext(
         valley=31,
         valley_label="M1",
@@ -877,8 +963,19 @@ def test_source_symmetry_candidates_include_m_inter_valley_c3_operations(tmp_pat
         moire_reciprocal_basis=np.eye(2),
         calculator=None,
     )
+    c2_operation = _fake_spglib_operation(7, np.diag([-1.0, 1.0, -1.0]))
+    spatial_operations = [
+        _fake_spglib_operation(2, symmetry_analysis._rotation_z_cart(120.0)),
+        _fake_spglib_operation(3, symmetry_analysis._rotation_z_cart(240.0)),
+        c2_operation,
+    ]
 
-    candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(valley_ctx, "hex")
+    candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(
+        valley_ctx,
+        "hex",
+        spatial_operations=spatial_operations,
+        selected_c2_operation=c2_operation,
+    )
     by_name = {candidate["name"]: candidate for candidate in candidates}
 
     assert by_name["C3z"]["target_valley_label"] == "M2"
@@ -889,7 +986,7 @@ def test_source_symmetry_candidates_include_m_inter_valley_c3_operations(tmp_pat
     assert by_name["C2"]["transport_backend"] == symmetry_analysis.BACKEND_C2_LAYER_EXCHANGE_UNITARY
 
 
-def test_source_symmetry_candidates_include_k_inter_valley_tr_and_c2_operations(tmp_path):
+def test_source_symmetry_candidates_include_k_inter_valley_tr_and_spglib_c2_operations(tmp_path):
     valley_ctx = symmetry_analysis.ValleyContext(
         valley=1,
         valley_label="K1",
@@ -901,8 +998,14 @@ def test_source_symmetry_candidates_include_k_inter_valley_tr_and_c2_operations(
         moire_reciprocal_basis=np.eye(2),
         calculator=None,
     )
+    c2_operation = _fake_spglib_operation(7, np.diag([-1.0, 1.0, -1.0]))
 
-    candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(valley_ctx, "hex")
+    candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(
+        valley_ctx,
+        "hex",
+        spatial_operations=[c2_operation],
+        selected_c2_operation=c2_operation,
+    )
     by_name = {candidate["name"]: candidate for candidate in candidates}
 
     assert by_name["TR"]["antiunitary"] is True
@@ -917,7 +1020,7 @@ def test_source_symmetry_candidates_include_k_inter_valley_tr_and_c2_operations(
     assert np.allclose(by_name["C2"]["rotation_cart"], by_name["C2T"]["rotation_cart"])
 
 
-def test_source_symmetry_candidates_are_generated_from_common_source_operations(tmp_path):
+def test_source_symmetry_candidates_are_generated_from_spglib_source_operations(tmp_path):
     def _context(valley, label):
         return symmetry_analysis.ValleyContext(
             valley=valley,
@@ -931,13 +1034,29 @@ def test_source_symmetry_candidates_are_generated_from_common_source_operations(
             calculator=None,
         )
 
+    c2_operation = _fake_spglib_operation(7, np.diag([-1.0, 1.0, -1.0]))
+    spatial_operations = [
+        _fake_spglib_operation(2, symmetry_analysis._rotation_z_cart(120.0)),
+        _fake_spglib_operation(3, symmetry_analysis._rotation_z_cart(240.0)),
+        c2_operation,
+    ]
     expected_source_ops = {"E", "TR", "C3z", "C3z^2", "C2"}
     for valley, label in [(5, "Gamma"), (31, "M1"), (1, "K1")]:
-        candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(_context(valley, label), "hex")
+        candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(
+            _context(valley, label),
+            "hex",
+            spatial_operations=spatial_operations,
+            selected_c2_operation=c2_operation,
+        )
         displayed = {symmetry_analysis.displayed_operation_name(candidate["name"]) for candidate in candidates}
         assert expected_source_ops.issubset(displayed)
 
-    k_candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(_context(1, "K1"), "hex")
+    k_candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(
+        _context(1, "K1"),
+        "hex",
+        spatial_operations=spatial_operations,
+        selected_c2_operation=c2_operation,
+    )
     assert "C2T" in {candidate["name"] for candidate in k_candidates}
     assert "K" + "_C2T" not in {candidate["name"] for candidate in k_candidates}
 
@@ -959,6 +1078,41 @@ def test_minimal_generators_ignore_inter_valley_even_if_marked_supported():
 
 def test_inter_valley_reason_is_registered():
     assert "inter_valley_operation_not_exported_in_single_valley_block" in symmetry_analysis.NOT_SUPPORTED_REASONS
+
+
+def test_spglib_symprec_defaults_to_symmetry_analysis_tolerance():
+    config = SimpleNamespace(spglib_symprec=None)
+
+    assert symmetry_analysis._spglib_symprec_from_config(config, 2.0e-2) == pytest.approx(2.0e-2)
+
+
+def test_spglib_symprec_can_be_configured_independently():
+    config = SimpleNamespace(spglib_symprec=5.0e-3)
+
+    assert symmetry_analysis._spglib_symprec_from_config(config, 2.0e-2) == pytest.approx(5.0e-3)
+
+
+def test_source_symmetry_candidates_do_not_emit_spatial_templates_without_spglib_support():
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=5,
+        valley_label="Gamma",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=None,
+    )
+
+    candidates = symmetry_analysis._minimal_symmetry_candidates_for_valley(
+        valley_ctx,
+        "hex",
+        spatial_operations=[],
+        structure=None,
+    )
+
+    assert [candidate["name"] for candidate in candidates] == ["E", "TR"]
 
 
 def test_summary_markdown_uses_c2_display_name_axis_angle_and_generators(tmp_path):
@@ -1001,9 +1155,9 @@ def test_summary_markdown_uses_c2_display_name_axis_angle_and_generators(tmp_pat
     assert "K" + "_C2T" not in text
     assert "C2 (axis 30deg)" in text
     assert "C2T (axis 60deg)" in text
-    assert "Internal Generators For This Output" in text
-    assert "- Gamma: C3z, C2" in text
-    assert "- K1: C2T" in text
+    assert "Exported Internal Generators For KP" in text
+    assert "- Gamma: C3z, C2 (E implicit)" in text
+    assert "- K1: C2T (E implicit)" in text
 
 
 def test_displayed_operation_name_keeps_canonical_family_names():

@@ -1,8 +1,10 @@
 import numpy as np
 import scipy.sparse
 from types import SimpleNamespace
+from pathlib import Path
 
 import tapw.workflows.band as band_workflow
+from tapw.io.hr import HrSparseHandler
 
 
 def test_realspace_block_cache_reuses_preprocessed_metadata():
@@ -193,3 +195,87 @@ def test_block_cache_can_compress_raw_data_into_csr_without_duplicates():
     expected.sum_duplicates()
 
     assert np.allclose(actual.toarray(), expected.toarray())
+
+
+def _write_sparse_dat(path: Path, label: str, nwann: int, entries):
+    lines = [
+        f" ! Sparse format of {label}",
+        f" {len(entries)} ! Number of non-zeros lines of {label}mnR",
+        f" {nwann} ! Number of orbitals",
+        " 1 ! Number of R points",
+    ]
+    for rx, ry, rz, row, col, value in entries:
+        lines.append(f"{rx:5d}{ry:5d}{rz:5d}{row + 1:6d}{col + 1:6d}{value.real:16.8f}{value.imag:16.8f}")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_hr_sparse_handler_reads_openmx_symm_npz_with_same_basis_order_as_dat(tmp_path):
+    dat_path = tmp_path / "H_symm.dat"
+    npz_path = tmp_path / "H_symm.npz"
+    entries = [
+        (0, 0, 0, 0, 2, 1.0 + 0.5j),
+        (0, 0, 0, 2, 1, -0.25 + 0.75j),
+        (1, 0, 0, 1, 0, 2.0 - 0.1j),
+    ]
+    _write_sparse_dat(dat_path, "H", 3, entries)
+    np.savez(
+        npz_path,
+        **{
+            "(0, 0, 0)_row": np.array([0, 2], dtype=np.int32),
+            "(0, 0, 0)_col": np.array([2, 1], dtype=np.int32),
+            "(0, 0, 0)_val": np.array([1.0 + 0.5j, -0.25 + 0.75j], dtype=np.complex128),
+            "(1, 0, 0)_row": np.array([1], dtype=np.int32),
+            "(1, 0, 0)_col": np.array([0], dtype=np.int32),
+            "(1, 0, 0)_val": np.array([2.0 - 0.1j], dtype=np.complex128),
+        },
+    )
+
+    perm = scipy.sparse.csr_matrix(
+        np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+            ],
+            dtype=np.complex128,
+        )
+    )
+    dat_hr = HrSparseHandler(file_name=str(dat_path), npz_file_name="", A=perm, read_from_npz=False).get_hr_sparse()
+    npz_hr = HrSparseHandler(file_name="", npz_file_name=str(npz_path), A=perm, read_from_npz=True).get_hr_sparse()
+
+    assert set(npz_hr) == set(dat_hr)
+    for key in dat_hr:
+        assert np.array_equal(np.asarray(npz_hr[key]["row"]), np.asarray(dat_hr[key]["row"]))
+        assert np.array_equal(np.asarray(npz_hr[key]["col"]), np.asarray(dat_hr[key]["col"]))
+        assert np.allclose(np.asarray(npz_hr[key]["val"]), np.asarray(dat_hr[key]["val"]))
+
+
+def test_hr_sparse_handler_keeps_legacy_npz_path_for_plain_h_npz(tmp_path):
+    npz_path = tmp_path / "H.npz"
+    np.savez(
+        npz_path,
+        **{
+            "(0, 0, 0)_row": np.array([0, 2], dtype=np.int32),
+            "(0, 0, 0)_col": np.array([2, 1], dtype=np.int32),
+            "(0, 0, 0)_val": np.array([1.0 + 0.5j, -0.25 + 0.75j], dtype=np.complex128),
+        },
+    )
+    perm = scipy.sparse.csr_matrix(
+        np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+                [1.0, 0.0, 0.0],
+            ],
+            dtype=np.complex128,
+        )
+    )
+
+    npz_hr = HrSparseHandler(file_name="", npz_file_name=str(npz_path), A=perm, read_from_npz=True).get_hr_sparse()
+
+    assert np.array_equal(np.asarray(npz_hr[(0, 0, 0)]["row"]), np.array([0, 2], dtype=np.int64))
+    assert np.array_equal(np.asarray(npz_hr[(0, 0, 0)]["col"]), np.array([2, 1], dtype=np.int64))
+    assert np.allclose(
+        np.asarray(npz_hr[(0, 0, 0)]["val"]),
+        np.array([1.0 + 0.5j, -0.25 + 0.75j], dtype=np.complex128),
+    )

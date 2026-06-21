@@ -150,6 +150,7 @@ class SymmetryAnalysisConfig:
     enable: bool = False
     valleys: Optional[List[int]] = None
     tolerance: float = 1.0e-2
+    spglib_symprec: Optional[float] = None
     output_dir: str = "symmetry_analysis"
     debug: bool = False
     developer_outputs: bool = False

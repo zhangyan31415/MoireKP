@@ -1,21 +1,67 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from typing import Any, List, Tuple, Literal
 
 import numpy as np
 import scipy
 import scipy.linalg
 
-from .downfold import DownfoldingOptions, downfold_from_projectors
+from .downfold import (
+    DownfoldingOptions,
+    downfold_from_projector_groups,
+    downfold_from_projectors,
+    projector_groups_from_block_columns,
+    set_projector_blas_threads as _set_downfold_projector_blas_threads,
+)
+
+PROJECTOR_BLAS_THREADS = 8
+
+
+def _bounded_blas_threads():
+    try:
+        from threadpoolctl import threadpool_limits
+    except Exception:  # pragma: no cover - optional runtime dependency
+        return nullcontext()
+    return threadpool_limits(limits=PROJECTOR_BLAS_THREADS, user_api="blas")
+
+
+def set_projector_blas_threads(threads: int) -> None:
+    global PROJECTOR_BLAS_THREADS
+    PROJECTOR_BLAS_THREADS = max(1, int(threads))
+    _set_downfold_projector_blas_threads(PROJECTOR_BLAS_THREADS)
+
+
+def _extract_square_block(matrix: np.ndarray, index: np.ndarray) -> np.ndarray:
+    idx = np.asarray(index, dtype=np.intp)
+    if idx.ndim != 1:
+        raise ValueError("block index must be one-dimensional")
+    if idx.size == 0:
+        return np.zeros((0, 0), dtype=np.asarray(matrix).dtype)
+    start = int(idx[0])
+    stop = start + int(idx.size)
+    if np.array_equal(idx, np.arange(start, stop, dtype=np.intp)):
+        return matrix[start:stop, start:stop]
+    return matrix[np.ix_(idx, idx)]
+
+
+def _complement_indices(size: int, selected: list[int] | np.ndarray) -> np.ndarray:
+    selected_arr = np.asarray(selected, dtype=np.intp)
+    if selected_arr.size == 0:
+        return np.arange(size, dtype=np.intp)
+    mask = np.ones(size, dtype=bool)
+    mask[selected_arr] = False
+    return np.nonzero(mask)[0]
 
 
 def _hermitian_eigh(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    return scipy.linalg.eigh(
-        np.asarray(matrix, dtype=np.complex128),
-        check_finite=False,
-        overwrite_a=True,
-        driver="evr",
-    )
+    with _bounded_blas_threads():
+        return scipy.linalg.eigh(
+            np.asarray(matrix, dtype=np.complex128),
+            check_finite=False,
+            overwrite_a=True,
+            driver="evr",
+        )
 
 
 def _hermitian_eigh_columns(matrix: np.ndarray, columns: list[int] | None) -> tuple[np.ndarray, np.ndarray]:
@@ -29,19 +75,24 @@ def _hermitian_eigh_columns(matrix: np.ndarray, columns: list[int] | None) -> tu
     if unique_cols[0] < 0 or unique_cols[-1] >= size:
         raise IndexError(f"eigenvector column request {unique_cols} outside block size {size}")
     lo, hi = unique_cols[0], unique_cols[-1]
-    eig_window, vec_window = scipy.linalg.eigh(
-        np.asarray(matrix, dtype=np.complex128),
-        subset_by_index=(lo, hi),
-        check_finite=False,
-        overwrite_a=True,
-        driver="evr",
-    )
+    with _bounded_blas_threads():
+        eig_window, vec_window = scipy.linalg.eigh(
+            np.asarray(matrix, dtype=np.complex128),
+            subset_by_index=(lo, hi),
+            check_finite=False,
+            overwrite_a=True,
+            driver="evr",
+        )
     eig = np.zeros(size, dtype=float)
     vec = np.zeros((size, size), dtype=np.complex128)
-    for offset, band in enumerate(range(lo, hi + 1)):
-        if band in unique_cols:
-            eig[band] = float(eig_window[offset])
-            vec[:, band] = vec_window[:, offset]
+    if len(unique_cols) == hi - lo + 1:
+        eig[lo : hi + 1] = eig_window
+        vec[:, lo : hi + 1] = vec_window
+    else:
+        cols = np.asarray(unique_cols, dtype=np.intp)
+        window_cols = cols - lo
+        eig[cols] = eig_window[window_cols]
+        vec[:, cols] = vec_window[:, window_cols]
     return eig, vec
 
 
@@ -218,6 +269,37 @@ def _align_selected_eigenstates(
     vec[:, bands] = u_aligned
 
 
+def _physical_layer_entry_index(nlow_state_list: Any, num_layer_arr: np.ndarray, group_index: int, layer_in_group: int) -> int:
+    total_layers = int(np.sum(num_layer_arr))
+    if len(nlow_state_list) != total_layers:
+        raise ValueError(
+            f"nlow_state_list must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(nlow_state_list)}. "
+            "Use [] for layers that do not contribute."
+        )
+    return int(np.sum(num_layer_arr[:group_index]) + layer_in_group)
+
+
+def _source_group_band_lists(nlow_state_list: Any, num_layer_list: List[int]) -> list[list[int]]:
+    rows = [[int(band) for band in row] for row in nlow_state_list]
+    total_layers = int(sum(num_layer_list))
+    if len(rows) != total_layers:
+        raise ValueError(
+            f"nlow_state_list must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(rows)}. "
+            "Use [] for layers that do not contribute."
+        )
+    grouped: list[list[int]] = []
+    offset = 0
+    for n_layers in num_layer_list:
+        bands: list[int] = []
+        for local in range(int(n_layers)):
+            bands.extend(rows[offset + local])
+        grouped.append(bands)
+        offset += int(n_layers)
+    return grouped
+
+
 def get_H_block(
     Hamk_list: np.ndarray,
     Qlayer_list: List[np.ndarray],
@@ -249,6 +331,23 @@ def get_H_block(
     # Normalize list-like shapes
     num_layer_arr = np.array(num_layer_list)
     num_orb_per_layer = [np.array(x) for x in num_orb_per_layer_list]
+    total_layers = int(num_layer_arr.sum())
+    if len(nlow_state_list) != total_layers:
+        raise ValueError(
+            f"nlow_state_list must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(nlow_state_list)}. "
+            "Use [] for layers that do not contribute."
+        )
+    if norb_fix_list and len(norb_fix_list) != total_layers:
+        raise ValueError(
+            f"norb_fix_list must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(norb_fix_list)}."
+        )
+    if selected_bands_by_layer is not None and len(selected_bands_by_layer) != total_layers:
+        raise ValueError(
+            f"selected_bands_by_layer must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(selected_bands_by_layer)}."
+        )
     # Number of Q points per group
     num_q_list = [np.array([len(q_layer) for q_layer in q_group]) for q_group in Qlayer_list]
 
@@ -304,7 +403,7 @@ def get_H_block(
                 )
 
             same_q_index = apply_spin(same_q_index)
-            block = hamk[np.ix_(same_q_index, same_q_index)]
+            block = _extract_square_block(hamk, same_q_index)
             # print(block[10,20])
             selected_bands: list[int] | None = None
             if selected_bands_by_layer is not None:
@@ -361,18 +460,18 @@ def get_H_block(
                     same_q_index = base + shift * num_layer_arr[:ilx].sum()
                     same_q_index = apply_spin(same_q_index)
                     # print(f"ilx = {ilx}, j = {jj}, iq = {iq}, iqx = {iqx}, base = {base}, shift = {shift}, same_q_index = {same_q_index}")
-                    block = hamk[np.ix_(same_q_index, same_q_index)]
-                    selected_bands = None if selected_bands_by_layer is None else [int(band) for band in selected_bands_by_layer[int(ilx)]]
+                    block = _extract_square_block(hamk, same_q_index)
+                    entry_layer = _physical_layer_entry_index(nlow_state_list, num_layer_arr, int(ilx), int(jj))
+                    selected_bands = None if selected_bands_by_layer is None else [int(band) for band in selected_bands_by_layer[entry_layer]]
                     eig, vec = _hermitian_eigh_columns(block, selected_bands)
 
                     if nlow_state_list and norb_fix_list:
-                        layer = int(ilx)
                         layer_for_global = int(num_layer_arr[:ilx].sum() + jj)
-                        context = f"mode {mode} layer {layer} q {iq}"
+                        context = f"mode {mode} layer {entry_layer} q {iq}"
                         bands_flat, ref_flat = _reference_terms_for_layer(
                             nlow_state_list=nlow_state_list,
                             norb_fix_list=norb_fix_list,
-                            layer=layer,
+                            layer=entry_layer,
                             block_dim=vec.shape[0],
                             context=context,
                             allow_layer_global=spin != "all" and vec.shape[0] == orb_per_layer_0,
@@ -429,7 +528,9 @@ def calculate_energy_lists(
 
     theta_rot = 0
     U_low_proj = None
-    U_low_proj_list = []
+    layer_low_blocks = []
+    layer_row_dims = []
+    layer_low_col_dims = []
     Qlayer1, Qlayer2 = Qlayer_list
     Qlayer1 = Qlayer1[0]
     Qlayer2 = Qlayer2[0]
@@ -446,87 +547,119 @@ def calculate_energy_lists(
 
     for ilayer in range(len(nlow_state_list)):
         nlow_state = nlow_state_list[ilayer]
-        if nlow_state == []:
-            continue
-        norb_fix = norb_fix_list[ilayer]
         Qlayer = Qlayer1 if ilayer == 0 else Qlayer2
-        ULowEnergyList = [[] for _ in range(len(nlow_state))]
+        q_count_layer = len(Qlayer)
+        vec_probe_idx = 0 if mode_lower == "gamma" else ilayer * len(Qlayer1)
+        if vec_probe_idx >= len(H_vec_list):
+            raise IndexError(f"vec_probe_idx {vec_probe_idx} >= len(H_vec_list) {len(H_vec_list)} for ilayer={ilayer}")
+        vec_probe = np.asarray(H_vec_list[vec_probe_idx], dtype=np.complex128)
+        row_dim = vec_probe.shape[0] * q_count_layer
+        layer_row_dims.append(row_dim)
+        layer_low_col_dims.append(len(nlow_state) * q_count_layer)
+        if nlow_state == []:
+            layer_low_blocks.append(np.zeros((row_dim, 0), dtype=np.complex128))
+            continue
+        layer_low = np.zeros((row_dim, len(nlow_state) * q_count_layer), dtype=np.complex128)
 
-        for j in range(len(nlow_state)):
-            for i in range(len(Qlayer)):
-                # Index calculation depends on mode
-                if mode_lower == "gamma":
-                    # gamma mode: structure is [Q0_all_layers, Q1_all_layers, ...]
-                    # But get_H_block returns [Q0, Q1, ...] for gamma mode
-                    vec_idx = i
-                else:
-                    # non-gamma mode: structure is [layer0_Q0, layer0_Q1, ..., layer0_Qn, layer1_Q0, ...]
-                    # Index = layer_offset + Q_index
-                    # Assuming Qlayer1 and Qlayer2 have same length for simplicity
-                    layer_offset = ilayer * len(Qlayer1)
-                    vec_idx = layer_offset + i
+        bands_arr = np.asarray(nlow_state, dtype=np.intp)
+        col_base = np.arange(len(bands_arr), dtype=np.intp) * q_count_layer
+        for i in range(q_count_layer):
+            # Index calculation depends on mode
+            if mode_lower == "gamma":
+                # gamma mode: structure is [Q0_all_layers, Q1_all_layers, ...]
+                # But get_H_block returns [Q0, Q1, ...] for gamma mode
+                vec_idx = i
+            else:
+                # non-gamma mode: structure is [layer0_Q0, layer0_Q1, ..., layer0_Qn, layer1_Q0, ...]
+                # Index = layer_offset + Q_index
+                # Assuming Qlayer1 and Qlayer2 have same length for simplicity
+                layer_offset = ilayer * len(Qlayer1)
+                vec_idx = layer_offset + i
 
-                if vec_idx >= len(H_vec_list):
-                    raise IndexError(f"vec_idx {vec_idx} >= len(H_vec_list) {len(H_vec_list)} for ilayer={ilayer}, i={i}")
+            if vec_idx >= len(H_vec_list):
+                raise IndexError(f"vec_idx {vec_idx} >= len(H_vec_list) {len(H_vec_list)} for ilayer={ilayer}, i={i}")
 
-                # Ensure vec is a numpy array
-                vec = np.asarray(H_vec_list[vec_idx], dtype=np.complex128)
-                vecpart = vec[:, nlow_state[j]]
-                # vecpart = vecpart * ((vecpart[norb_fix[j]] / np.abs(vecpart[norb_fix[j]])) ** (-1)) * np.exp(-1j * 2 * theta_rot * np.pi / 180)
+            vec = np.asarray(H_vec_list[vec_idx], dtype=np.complex128)
+            row_start = i * vec.shape[0]
+            row_stop = row_start + vec.shape[0]
+            layer_low[row_start:row_stop, col_base + i] = vec[:, bands_arr]
+        layer_low_blocks.append(layer_low)
 
-                ULowEnergyList[j].append(vecpart)
-            ULowEnergyList[j] = scipy.linalg.block_diag(*ULowEnergyList[j])
-        U_low_proj_list.append(np.concatenate(ULowEnergyList,axis=0))
-    U_low_proj = scipy.linalg.block_diag(*U_low_proj_list).T
+    total_low_cols = sum(layer_low_col_dims)
+    U_low_proj = np.zeros((sum(layer_row_dims), total_low_cols), dtype=np.complex128)
+    row_offset = 0
+    col_offset = 0
+    for block, row_dim, col_dim in zip(layer_low_blocks, layer_row_dims, layer_low_col_dims):
+        if col_dim:
+            U_low_proj[row_offset:row_offset + row_dim, col_offset:col_offset + col_dim] = block
+        row_offset += row_dim
+        col_offset += col_dim
 
-    # The following reordering is only for gamma mode
-    # In gamma mode, the structure needs to be reordered for spin and layer separation
+    def gamma_full_row_order(block_dim: int, q_count: int, orb0: int) -> np.ndarray:
+        """Map q-major same-Q block rows back to the full Hamiltonian row order."""
+        group_layer_counts = [len(group) for group in num_orb_per_layer_list]
+        total_layers = sum(group_layer_counts)
+        per_spin_dim = total_layers * orb0
+        if block_dim == 2 * per_spin_dim:
+            spin_count = 2
+        elif block_dim == per_spin_dim:
+            spin_count = 1
+        else:
+            raise ValueError(
+                f"Cannot infer gamma row order from block_dim={block_dim}, "
+                f"orb0={orb0}, layers={group_layer_counts}"
+            )
+
+        order = []
+        spin_full_offset = q_count * per_spin_dim
+        for spin in range(spin_count):
+            q_block_spin_offset = spin * per_spin_dim
+            for group_index, layer_count in enumerate(group_layer_counts):
+                layer_offset = sum(group_layer_counts[:group_index])
+                for local in range(q_count * layer_count):
+                    q_index = local // layer_count
+                    layer_in_group = local % layer_count
+                    row_base = (
+                        q_index * block_dim
+                        + q_block_spin_offset
+                        + (layer_offset + layer_in_group) * orb0
+                    )
+                    order.extend(range(row_base, row_base + orb0))
+        if spin_count == 2:
+            down_start = q_count * per_spin_dim
+            if order[down_start:down_start + orb0] == order[:orb0]:
+                raise AssertionError("gamma row-order construction duplicated spin sectors")
+        return np.asarray(order, dtype=int)
+
+    # The following reordering is only for gamma mode. get_H_block returns rows
+    # as q-major same-Q blocks; full Hamk rows are grouped by source sector.
+    gamma_row_order = None
     if mode_lower == "gamma":
-        # spin_up = np.array([j for i in range(57) for j in range(i * 142, i * 142 + 71)])
-        # spin_down = np.array([j for i in range(57) for j in range(i * 142 + 71, i * 142 + 142)])
         n_g = len(Qlayer1)
-        nlayers = 2
         orb0 = num_orb_per_layer_list[0][0]
-        orb1 = num_orb_per_layer_list[1][0]
-        spin_up = np.array([j for i in range(n_g) for j in range(i * orb0 * 2 *nlayers, i * orb0 *2*nlayers + orb0*nlayers)])
-        spin_down = np.array([j for i in range(n_g) for j in range(i * orb0 * 2 *nlayers + orb0*nlayers, i * orb0 * 2*nlayers + orb0*2*nlayers)])
-        # print("max of spin_up = ",np.max(spin_up))
-        # print("max of spin_down = ",np.max(spin_down))
-        orb_layer1_up = np.array([j for i in range(n_g) for j in range(i * orb0*nlayers, i * orb0*nlayers + orb0)])
-        orb_layer1_down = orb_layer1_up+np.shape(U_low_proj)[0]//2
-        orb_layer2_up = np.array([j for i in range(n_g) for j in range(i * orb0*nlayers + orb0, i * orb0*nlayers + orb0*nlayers)])
-        orb_layer2_down = orb_layer2_up+np.shape(U_low_proj)[0]//2
-        # print(len(spin_up),len(spin_down),len(orb_layer1_up),len(orb_layer1_down),len(orb_layer2_up),len(orb_layer2_down))
-
-        # U_low_proj = np.concatenate((U_low_proj[orb_layer1_up], U_low_proj[orb_layer2_up], U_low_proj[orb_layer1_down], U_low_proj[orb_layer2_down]), axis=0)
-
-        # U_low_proj = np.concatenate((U_low_proj[spin_up], U_low_proj[spin_down]), axis=0)
-        # U_low_proj = np.concatenate((U_low_proj[orb_layer1_up], U_low_proj[orb_layer2_up]), axis=0)
-
-
-
-        U_low_proj = np.concatenate((U_low_proj[spin_up], U_low_proj[spin_down]), axis=0)
-        U_low_proj = np.concatenate((U_low_proj[orb_layer1_up], U_low_proj[orb_layer2_up], U_low_proj[orb_layer1_down], U_low_proj[orb_layer2_down]), axis=0)
-
-    if len(nlow_state_list) == 2:
-        if nlow_state_list[0] == []:
-            vec0_shape = np.asarray(H_vec_list[0], dtype=np.complex128).shape[0]
-            U_low_proj = np.concatenate((np.zeros((vec0_shape*len(Qlayer1),np.shape(U_low_proj)[1])),U_low_proj),axis=0)
-        if nlow_state_list[1] == []:
-            vec_last_shape = np.asarray(H_vec_list[-1], dtype=np.complex128).shape[0]
-            U_low_proj = np.concatenate((U_low_proj,np.zeros((vec_last_shape*len(Qlayer2),np.shape(U_low_proj)[1]))),axis=0)
+        block_dim0 = np.asarray(H_vec_list[0], dtype=np.complex128).shape[0]
+        gamma_row_order = gamma_full_row_order(block_dim0, n_g, int(orb0))
+        U_low_proj = U_low_proj[gamma_row_order]
 
     # print("shape of Uproj = ",np.shape(U_low_proj))
     if not include_high:
         return U_low_proj, None
 
     U_high_proj = None
-    UHighEnergyList = []
+    layer_high_blocks = []
+    layer_high_col_dims = []
     for ilayer in range(len(nlow_state_list)):
         nlow_state = nlow_state_list[ilayer]
-        if nlow_state == []:
-            continue
         Qlayer = Qlayer1 if ilayer == 0 else Qlayer2
+        q_count_layer = len(Qlayer)
+        vec_probe_idx = 0 if mode_lower == "gamma" else ilayer * len(Qlayer1)
+        vec_probe = np.asarray(H_vec_list[vec_probe_idx], dtype=np.complex128)
+        high_col_count = vec_probe.shape[1] - len(nlow_state)
+        high_block = np.zeros(
+            (vec_probe.shape[0] * q_count_layer, high_col_count * q_count_layer),
+            dtype=np.complex128,
+        )
+        high_bands = _complement_indices(vec_probe.shape[1], nlow_state)
         for i in range(len(Qlayer)):
             # Index calculation depends on mode
             if mode_lower == "gamma":
@@ -541,33 +674,30 @@ def calculate_energy_lists(
 
             # Ensure vec is a numpy array
             vec = np.asarray(H_vec_list[vec_idx], dtype=np.complex128)
-            orb_num = vec.shape[1]
-            vecpart = vec[:, np.delete(np.arange(orb_num), nlow_state)]
+            vecpart = vec[:, high_bands]
             # for j in range(vecpart.shape[1]):
             #     vecpart[:,j] = vecpart[:,j] * ((vecpart[norb_fix,j] / np.abs(vecpart[norb_fix,j])) ** (-1)) * np.exp(-1j * 2 * theta_rot * np.pi / 180)
-            vecpart_transposed = vecpart
-            UHighEnergyList.append(vecpart_transposed)
-    U_high_proj = scipy.linalg.block_diag(*UHighEnergyList)
+            row_start = i * vec.shape[0]
+            row_stop = row_start + vec.shape[0]
+            col_start = i * vecpart.shape[1]
+            col_stop = col_start + vecpart.shape[1]
+            high_block[row_start:row_stop, col_start:col_stop] = vecpart
+        layer_high_blocks.append(high_block)
+        layer_high_col_dims.append(high_block.shape[1])
+    total_high_cols = sum(layer_high_col_dims)
+    U_high_proj = np.zeros((sum(layer_row_dims), total_high_cols), dtype=np.complex128)
+    row_offset = 0
+    col_offset = 0
+    for block, row_dim, col_dim in zip(layer_high_blocks, layer_row_dims, layer_high_col_dims):
+        if col_dim:
+            U_high_proj[row_offset:row_offset + row_dim, col_offset:col_offset + col_dim] = block
+        row_offset += row_dim
+        col_offset += col_dim
 
     # The following reordering is only for gamma mode
     if mode_lower == "gamma":
-        # U_high_proj = np.concatenate((U_high_proj[orb_layer1], U_high_proj[orb_layer2]), axis=0)
-        # U_high_proj = np.concatenate((U_high_proj[orb_layer1_up], U_high_proj[orb_layer2_up], U_high_proj[orb_layer1_down], U_high_proj[orb_layer2_down]), axis=0)
+        U_high_proj = U_high_proj[gamma_row_order]
 
-        # U_high_proj = np.concatenate((U_high_proj[spin_up], U_high_proj[spin_down]), axis=0)
-        # U_high_proj = np.concatenate((U_high_proj[orb_layer1_up], U_high_proj[orb_layer2_up]), axis=0)
-
-
-        U_high_proj = np.concatenate((U_high_proj[spin_up], U_high_proj[spin_down]), axis=0)
-        U_high_proj = np.concatenate((U_high_proj[orb_layer1_up], U_high_proj[orb_layer2_up], U_high_proj[orb_layer1_down], U_high_proj[orb_layer2_down]), axis=0)
-
-    if len(nlow_state_list) == 2:
-        if nlow_state_list[0] == []:
-            vec0_shape = np.asarray(H_vec_list[0], dtype=np.complex128).shape[0]
-            U_high_proj = np.concatenate((np.zeros((vec0_shape*len(Qlayer1),np.shape(U_high_proj)[1])),U_high_proj),axis=0)
-        if nlow_state_list[1] == []:
-            vec_last_shape = np.asarray(H_vec_list[-1], dtype=np.complex128).shape[0]
-            U_high_proj = np.concatenate((U_high_proj,np.zeros((vec_last_shape*len(Qlayer2),np.shape(U_high_proj)[1]))),axis=0)
     # print("shape of U_high_proj = ",np.shape(U_high_proj))
     # ULowEnergyList = np.array(ULowEnergyList)
     # UHighEnergyList = np.array(UHighEnergyList)
@@ -624,6 +754,201 @@ def _assemble_projectors_from_block_eigenvectors(
     return U_low, U_high
 
 
+def _assemble_projector_groups_from_block_eigenvectors(
+    H_GM_diag_eig_vec,
+    idx_list: list[np.ndarray],
+    nlow_state_list,
+    *,
+    include_high: bool,
+):
+    """Assemble block-sparse projector groups in the projected basis order."""
+    H_vec_list = [np.asarray(v, dtype=np.complex128) for v in H_GM_diag_eig_vec.tolist()]
+    if len(H_vec_list) != len(idx_list):
+        raise ValueError(f"projector block count mismatch: {len(H_vec_list)} vectors vs {len(idx_list)} index blocks")
+    if not idx_list:
+        raise ValueError("projector assembly requires at least one index block")
+
+    bands_by_layer = [[int(band) for band in layer_bands] for layer_bands in nlow_state_list]
+    q_count = len(idx_list) // len(bands_by_layer)
+    if q_count * len(bands_by_layer) != len(idx_list):
+        raise ValueError("index blocks must be ordered by layer then Q")
+
+    low_offsets: list[int] = []
+    low_dim = 0
+    for bands in bands_by_layer:
+        low_offsets.append(low_dim)
+        low_dim += len(bands) * q_count
+
+    low_locals: list[np.ndarray] = []
+    low_cols: list[np.ndarray] = []
+    high_locals: list[np.ndarray] = []
+    high_cols: list[np.ndarray] = []
+    high_dim = 0
+
+    for block_idx, vec in enumerate(H_vec_list):
+        layer = block_idx // q_count
+        q_index = block_idx % q_count
+        bands = bands_by_layer[layer]
+        if bands:
+            bands_arr = np.asarray(bands, dtype=np.intp)
+            cols = np.asarray(
+                [low_offsets[layer] + band_slot * q_count + q_index for band_slot in range(len(bands))],
+                dtype=np.intp,
+            )
+            low_locals.append(np.ascontiguousarray(vec[:, bands_arr], dtype=np.complex128))
+            low_cols.append(cols)
+        else:
+            low_locals.append(np.zeros((vec.shape[0], 0), dtype=np.complex128))
+            low_cols.append(np.zeros(0, dtype=np.intp))
+
+        if include_high:
+            high_bands = _complement_indices(vec.shape[1], bands)
+            high_locals.append(np.ascontiguousarray(vec[:, high_bands], dtype=np.complex128))
+            high_cols.append(np.arange(high_dim, high_dim + high_bands.size, dtype=np.intp))
+            high_dim += int(high_bands.size)
+
+    low_groups = projector_groups_from_block_columns(
+        idx_list,
+        low_locals,
+        low_cols,
+        n_columns=low_dim,
+    )
+    if not include_high:
+        return low_groups, None
+    high_groups = projector_groups_from_block_columns(
+        idx_list,
+        high_locals,
+        high_cols,
+        n_columns=high_dim,
+    )
+    return low_groups, high_groups
+
+
+def _flatten_band_groups(nlow_state_list: Any) -> tuple[list[list[int]], list[int]]:
+    bands_by_group = [[int(band) for band in group] for group in nlow_state_list]
+    flat = [band for group in bands_by_group for band in group]
+    if len(flat) != len(set(flat)):
+        raise ValueError("Gamma same-Q projector bands must be unique across sector groups")
+    return bands_by_group, flat
+
+
+def _assemble_gamma_projectors_from_block_eigenvectors(
+    H_GM_diag_eig_vec,
+    idx_list: list[np.ndarray],
+    nlow_state_list,
+    *,
+    include_high: bool,
+):
+    """Assemble Gamma same-Q projectors without duplicating the full row space.
+
+    Gamma blocks contain all active sectors/layers for a given Q. A nested
+    nlow_state_list such as [[0, 1], [2, 3]] therefore describes sector labels
+    inside the same block, not independent block row spaces.
+    """
+    H_vec_list = [np.asarray(v, dtype=np.complex128) for v in H_GM_diag_eig_vec.tolist()]
+    if len(H_vec_list) != len(idx_list):
+        raise ValueError(f"Gamma projector block count mismatch: {len(H_vec_list)} vectors vs {len(idx_list)} index blocks")
+    if not idx_list:
+        raise ValueError("Gamma projector assembly requires at least one index block")
+
+    bands_by_group, flat_bands = _flatten_band_groups(nlow_state_list)
+    q_count = len(idx_list)
+    full_dim = max(int(np.max(idx)) for idx in idx_list) + 1
+
+    low_offsets: list[int] = []
+    low_dim = 0
+    for bands in bands_by_group:
+        low_offsets.append(low_dim)
+        low_dim += len(bands) * q_count
+
+    U_low = np.zeros((full_dim, low_dim), dtype=np.complex128)
+    high_dim = 0
+    high_bands_by_q: list[np.ndarray] = []
+    if include_high:
+        for vec in H_vec_list:
+            high_bands = _complement_indices(vec.shape[1], flat_bands)
+            high_bands_by_q.append(high_bands)
+            high_dim += int(high_bands.size)
+        U_high = np.zeros((full_dim, high_dim), dtype=np.complex128)
+    else:
+        U_high = None
+
+    high_col = 0
+    for q_index, (vec, idx) in enumerate(zip(H_vec_list, idx_list)):
+        idx = np.asarray(idx, dtype=np.intp)
+        for group_index, bands in enumerate(bands_by_group):
+            for band_slot, band in enumerate(bands):
+                col = low_offsets[group_index] + band_slot * q_count + q_index
+                U_low[idx, col] = vec[:, band]
+        if U_high is not None:
+            high_bands = high_bands_by_q[q_index]
+            U_high[idx, high_col : high_col + high_bands.size] = vec[:, high_bands]
+            high_col += int(high_bands.size)
+
+    return U_low, U_high
+
+
+def _assemble_gamma_projector_groups_from_block_eigenvectors(
+    H_GM_diag_eig_vec,
+    idx_list: list[np.ndarray],
+    nlow_state_list,
+    *,
+    include_high: bool,
+):
+    """Block-sparse variant of _assemble_gamma_projectors_from_block_eigenvectors."""
+    H_vec_list = [np.asarray(v, dtype=np.complex128) for v in H_GM_diag_eig_vec.tolist()]
+    if len(H_vec_list) != len(idx_list):
+        raise ValueError(f"Gamma projector block count mismatch: {len(H_vec_list)} vectors vs {len(idx_list)} index blocks")
+    if not idx_list:
+        raise ValueError("Gamma projector assembly requires at least one index block")
+
+    bands_by_group, flat_bands = _flatten_band_groups(nlow_state_list)
+    q_count = len(idx_list)
+
+    low_offsets: list[int] = []
+    low_dim = 0
+    for bands in bands_by_group:
+        low_offsets.append(low_dim)
+        low_dim += len(bands) * q_count
+
+    low_locals: list[np.ndarray] = []
+    low_cols: list[np.ndarray] = []
+    high_locals: list[np.ndarray] = []
+    high_cols: list[np.ndarray] = []
+    high_dim = 0
+
+    for q_index, vec in enumerate(H_vec_list):
+        cols: list[int] = []
+        local_band_order: list[int] = []
+        for group_index, bands in enumerate(bands_by_group):
+            for band_slot, band in enumerate(bands):
+                cols.append(low_offsets[group_index] + band_slot * q_count + q_index)
+                local_band_order.append(int(band))
+        low_cols.append(np.asarray(cols, dtype=np.intp))
+        low_locals.append(np.ascontiguousarray(vec[:, np.asarray(local_band_order, dtype=np.intp)], dtype=np.complex128))
+
+        if include_high:
+            high_bands = _complement_indices(vec.shape[1], flat_bands)
+            high_locals.append(np.ascontiguousarray(vec[:, high_bands], dtype=np.complex128))
+            high_cols.append(np.arange(high_dim, high_dim + high_bands.size, dtype=np.intp))
+            high_dim += int(high_bands.size)
+
+    low_groups = projector_groups_from_block_columns(
+        idx_list,
+        low_locals,
+        low_cols,
+        n_columns=low_dim,
+    )
+    if not include_high:
+        return low_groups, None
+    high_groups = projector_groups_from_block_columns(
+        idx_list,
+        high_locals,
+        high_cols,
+        n_columns=high_dim,
+    )
+    return low_groups, high_groups
+
 
 def project_heff_full(
     hamk_full: np.ndarray,
@@ -646,6 +971,8 @@ def project_heff_full(
     pole_warning_mev: float = 10.0,
     pole_danger_mev: float = 1.0,
     fail_on_near_pole: bool = False,
+    compute_pole_diagnostics: bool = False,
+    compute_condition_number: bool = False,
     return_diagnostics: bool = False,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Project full H(k) to Heff(k).
@@ -684,17 +1011,28 @@ def project_heff_full(
     # m_bands = bands_flat.size
     # Normalize mode to lowercase for consistent comparison
     mode_lower = mode.lower() if isinstance(mode, str) else mode
+    total_layers = int(sum(int(n) for n in num_layer_list))
+    if nlow_state_list is None:
+        raise ValueError("nlow_state_list must be provided")
+    if len(nlow_state_list) != total_layers:
+        raise ValueError(
+            f"nlow_state_list must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(nlow_state_list)}. "
+            "Use [] for layers that do not contribute."
+        )
+    if norb_fix_list is not None and len(norb_fix_list) != total_layers:
+        raise ValueError(
+            f"norb_fix_list must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(norb_fix_list)}."
+        )
     if mode_lower == "gamma":
-        m_bands = len(nlow_state_list[0])
-        bands_flat = np.array(nlow_state_list[0])
+        m_bands = sum(len(layer_bands) for layer_bands in nlow_state_list)
     else:
-        # non-gamma mode: each layer has its own bands
-        # For now, assume same bands for both layers, but structure allows per-layer bands
-        if len(nlow_state_list) >= 2 and len(nlow_state_list[0]) > 0:
-            m_bands = len(nlow_state_list[0])  # bands per layer
-            bands_flat = np.array(nlow_state_list[0])
+        nonempty_bands = [layer_bands for layer_bands in nlow_state_list if len(layer_bands) > 0]
+        if nonempty_bands:
+            m_bands = sum(len(layer_bands) for layer_bands in nlow_state_list)
         else:
-            raise ValueError("For non-gamma mode, nlow_state_list must have bands for at least layer 0")
+            raise ValueError("For non-gamma mode, nlow_state_list must contain at least one active band")
     if m_bands == 0:
         raise ValueError("Empty bands list for projection")
 
@@ -718,10 +1056,6 @@ def project_heff_full(
             elif spin == "down":
                 same_q_index = same_q_index + hamk_full.shape[0] // 2
             idx_list.append(same_q_index)
-
-        # 低能投影矩阵 U_low（N x M）
-        N = hamk_full.shape[0]
-        M = m_bands * q_count
     else:
         # non-gamma mode: each (layer, Q) pair is a separate block
         # Structure: [layer0_Q0, layer0_Q1, ..., layer0_Qn, layer1_Q0, layer1_Q1, ..., layer1_Qn]
@@ -737,15 +1071,8 @@ def project_heff_full(
                         same_q_index = same_q_index + hamk_full.shape[0] // 2
                     idx_list.append(same_q_index)
 
-        # 低能投影矩阵 U_low（N x M）
-        N = hamk_full.shape[0]
-        # For non-gamma mode: M = m_bands * total_blocks
-        M = m_bands * len(idx_list)
-
-    U_low_full = np.zeros((N, M), dtype=np.complex128)
-
-    # 为二阶准备的高能子空间收集器
-    high_parts: List[Tuple[np.ndarray, np.ndarray]] = []  # (block_global_idx, U_high_block)
+    method = (downfold_method or ("fixed_schur" if second_order else "first_order")).lower()
+    include_high = method != "first_order"
 
     # ---------- 若提供对齐所需信息，则先取对齐后的 vec（逐 Q） ----------
     aligned_vec_blocks: List[np.ndarray] | None = None
@@ -762,76 +1089,40 @@ def project_heff_full(
             Qlayer_list,
             num_layer_list,
             num_orb_per_layer_list,
-            nlow_state_list,                 # ← 两层/多层写法均可
+            nlow_state_list,
             norb_fix_list,                   # ← 线性组合 [[idx, coeff], ...]
             spin=spin,
             mode=mode_lower,
+            selected_bands_by_layer=None if include_high else nlow_state_list,
         )
         # 规范成列表（每个元素为该 Q 的对齐后 vec）
         aligned_vec_blocks = [np.asarray(v, dtype=np.complex128) for v in H_vec_blk.tolist()]
 
-    for iq, idx in enumerate(idx_list):
-        continue
-        # block = np.asarray(hamk_full[np.ix_(idx, idx)], dtype=np.complex128)
-        if aligned_vec_blocks is not None:
-            # 直接复用 get_H_block 的对齐后本征矢
-            vec = aligned_vec_blocks[iq]
-        # else:
-            # 回退：本地对角化（无对齐）
-        # _, vec = np.linalg.eigh(block)
-        # 处理负索引：映射到 [0, block_dim)
-        block_dim = vec.shape[0]
-        bands_pos = np.mod(bands_flat, block_dim)
-
-        # 低能矢量
-        U_low = vec[:, bands_pos]
-
-        # 填回全空间 U_low_full
-        for j in range(m_bands):
-            U_low_full[idx, iq * m_bands + j] = U_low[:, j]
-
-        # 若要二阶，下折需要高能正交补
-        if second_order:
-            all_cols = np.arange(block_dim)
-            high_cols = np.setdiff1d(all_cols, bands_pos, assume_unique=False)
-            U_high = vec[:, high_cols]  # 已正交（来自厄米对角化）
-            high_parts.append((idx, U_high))
-    method = (downfold_method or ("fixed_schur" if second_order else "first_order")).lower()
-    include_high = method != "first_order"
-
-    if spin == "all" and mode_lower != "gamma":
-        U_low_full, U_high_full = _assemble_projectors_from_block_eigenvectors(
+    options = DownfoldingOptions(
+        method=method,
+        e_ref=E_ref,
+        pole_warning_mev=float(pole_warning_mev),
+        pole_danger_mev=float(pole_danger_mev),
+        fail_on_near_pole=bool(fail_on_near_pole),
+        compute_pole_diagnostics=bool(compute_pole_diagnostics) or bool(fail_on_near_pole),
+        compute_condition_number=bool(compute_condition_number),
+    )
+    if mode_lower == "gamma":
+        low_groups, high_groups = _assemble_gamma_projector_groups_from_block_eigenvectors(
+            H_vec_blk,
+            idx_list,
+            _source_group_band_lists(nlow_state_list, num_layer_list),
+            include_high=include_high,
+        )
+        result = downfold_from_projector_groups(hamk_full, low_groups, high_groups, options)
+    else:
+        low_groups, high_groups = _assemble_projector_groups_from_block_eigenvectors(
             H_vec_blk,
             idx_list,
             nlow_state_list,
             include_high=include_high,
         )
-    else:
-        U_low_full,U_high_full = calculate_energy_lists(
-            H_vec_blk,
-            nlow_state_list,
-            norb_fix_list,
-            Qlayer_list,
-            num_orb_per_layer_list,
-            mode=mode_lower,
-            include_high=include_high,
-        )
-    U_low_full = np.array(U_low_full, dtype=np.complex128)
-    if U_high_full is not None:
-        U_high_full = np.array(U_high_full, dtype=np.complex128)
-
-    result = downfold_from_projectors(
-        hamk_full,
-        U_low_full,
-        U_high_full,
-        DownfoldingOptions(
-            method=method,
-            e_ref=E_ref,
-            pole_warning_mev=float(pole_warning_mev),
-            pole_danger_mev=float(pole_danger_mev),
-            fail_on_near_pole=bool(fail_on_near_pole),
-        ),
-    )
+        result = downfold_from_projector_groups(hamk_full, low_groups, high_groups, options)
 
     Heff = result.heff
     heig, hvec = _hermitian_eigh(Heff)

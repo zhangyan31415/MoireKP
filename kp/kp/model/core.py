@@ -1594,14 +1594,7 @@ class ContinuumModelBuilder:
         - is_anti: 该 orbit 元素对应的 antiunitary 总奇偶（用于 iY 的符号与统计）
         """
         k_key = tuple(float(x) for x in k)
-        sym_ops_key = tuple(
-            (
-                op["name"],
-                op.get("params", None),
-                json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
-            )
-            for op in sym_ops
-        )
+        sym_ops_key = ContinuumModelBuilder._sym_ops_cache_key(sym_ops)
         cache_key = (id(symmetry_gen), k_key, sym_ops_key)
         cached = ContinuumModelBuilder._SYMMETRIZE_ORBIT_CACHE.get(cache_key)
         if cached is not None:
@@ -1638,6 +1631,21 @@ class ContinuumModelBuilder:
         return orbit_actions
 
     @staticmethod
+    def _sym_ops_cache_key(sym_ops: List[Dict[str, Any]]) -> tuple[Any, ...]:
+        return tuple(
+            (
+                op.get("name"),
+                op.get("params", None),
+                json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
+                json.dumps(op.get("q_map", {}), sort_keys=True, default=str),
+                json.dumps(op.get("sector_map", None), sort_keys=True, default=str),
+                bool(op.get("antiunitary", False)),
+                json.dumps(op.get("internal_resolved_action", None), sort_keys=True, default=str),
+            )
+            for op in sym_ops
+        )
+
+    @staticmethod
     def symmetrize_Y_basis_static(Y_basis: Callable[[np.ndarray], np.ndarray],
                                   k: np.ndarray,
                                   sym_ops: List[Dict[str, Any]],
@@ -1656,14 +1664,7 @@ class ContinuumModelBuilder:
         if use_cache:
             Y_id = get_function_hash(Y_basis)
             k_key = tuple(float(x) for x in k)
-            sym_ops_key = tuple(
-                (
-                    op["name"],
-                    op.get("params", None),
-                    json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
-                )
-                for op in sym_ops
-            )
+            sym_ops_key = ContinuumModelBuilder._sym_ops_cache_key(sym_ops)
             term_key = None
             if isinstance(term, ContinuumTerm) and term.key is not None:
                 term_key = (
@@ -1761,14 +1762,7 @@ class ContinuumModelBuilder:
         if use_cache:
             Y_id = get_function_hash(Y_basis)
             k_key = tuple(float(x) for x in k)
-            sym_ops_key = tuple(
-                (
-                    op["name"],
-                    op.get("params", None),
-                    json.dumps(op.get("k_map", {}), sort_keys=True, default=str),
-                )
-                for op in sym_ops
-            )
+            sym_ops_key = ContinuumModelBuilder._sym_ops_cache_key(sym_ops)
             term_key = None
             if isinstance(term, ContinuumTerm) and term.key is not None:
                 term_key = (
@@ -2250,8 +2244,8 @@ class ContinuumModelBuilder:
         对于每个 term同时采样 real 与 imag 两部分（分别由 stack_Y_for_term 返回），
         将这两部分都添加到 initialterms 中（顺序为 term1_real, term1_imag, term2_real, term2_imag, ...）。
         
-        对于 onsite 或 Kinect 类项（tag=="Onsite"或tag=="Kinect"），还会在每个 k 点下对该部分做去迹处理，
-        并将对应子矩阵的 trace 用于 onsite 能量的校正。
+        拟合使用的 term 矩阵必须和后续组装/导出的 runtime term 矩阵一致；
+        因此这里不对特定 tag 做额外去迹或 residual 修正。
         
         返回：
         keys: 原 keys 列表（顺序不变）
@@ -2269,12 +2263,6 @@ class ContinuumModelBuilder:
                 term_matrix_cache=term_matrix_cache,
             )
             
-            # 若是 Kinect 项，则对每个 k 点对应的子块进行校正
-            if tag in ("Kinect",):
-                sub_block = self.get_mat_blocks([mat_real], key, len(k_points))[0]
-                block_dim = sub_block.shape[0]
-                onsite_energy = np.trace(sub_block) / block_dim
-                mat_real -= onsite_energy * np.eye(mat_real.shape[0])
             # 返回该 key 对应的两个矩阵
             return mat_real, mat_imag
 
@@ -2524,9 +2512,8 @@ class ContinuumModelBuilder:
     @timing_decorator_factory(0)
     def compute_coefficients_by_tag(self, heff: np.ndarray, k_points: List[np.ndarray], tol: float = 1e-8) -> Dict[str, Dict[Any, np.ndarray]]:
         """
-        先按照 tag 对模型中的 term 进行分组，
-        然后在每个 tag 内再按照 (layer_from, layer_to, orbital_from, orbital_to) 进行子分组，
-        分别求解每个子组的系数。
+        Fit all terms that share the same fit block together, then report the
+        fitted coefficients grouped by tag for diagnostics.
 
         返回的字典结构为：
         {
@@ -2535,138 +2522,100 @@ class ContinuumModelBuilder:
             ...
         }
         """
-        # 按 tag 分组
         tag_groups: Dict[str, List[ContinuumTermKey]] = {}
         for key, term in self.model.terms.items():
             tag_groups.setdefault(term.tag, []).append(key)
-        
-        coeffs_by_tag = {}
+
+        coeffs_by_tag: Dict[str, Dict[Any, np.ndarray]] = {tag: {} for tag in tag_groups}
         term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] = {}
-        
-        # 遍历每个 tag 组
+
+        print("\n" + "="*100)
+        print(f"Processing joint fit blocks. Time: {time.strftime('%H:%M:%S', time.localtime())}")
         for tag, keys in tag_groups.items():
-            # if tag not in ['Kinect', 'Onsite']:
-            #     continue
             symm = self.symmetry_map.get(tag, [])
-            print("\n" + "="*100)
+            print(f"  tag '{tag}': {len(keys)} terms, symmetry={summarize_symmetry_ops(symm)}")
+
+        keys = self._filter_duplicate_symmetry_seed_keys(
+            list(self.model.terms.keys()),
+            k_points,
+            tol=tol,
+            term_matrix_cache=term_matrix_cache,
+        )
+
+        subgroup_dict: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
+        for key in keys:
+            subgroup = self._fit_block_signature_for_key(key)
+            subgroup_dict.setdefault(subgroup, []).append(key)
+
+        for subgroup, sub_keys in subgroup_dict.items():
+            tag_counts: Dict[str, int] = {}
+            for key in sub_keys:
+                tag = self.model.terms[key].tag
+                tag_counts[tag] = tag_counts.get(tag, 0) + 1
+            tag_summary = ", ".join(f"{tag}:{count}" for tag, count in sorted(tag_counts.items()))
             print(
-                f"Processing tag '{tag}' with {len(keys)} terms, "
-                f"symmetry={summarize_symmetry_ops(symm)}. "
-                f"Time: {time.strftime('%H:%M:%S', time.localtime())}"
+                f"  Processing joint fit block with {len(sub_keys)} terms "
+                f"({tag_summary}). Time: {time.strftime('%H:%M:%S', time.localtime())}"
             )
-            
-            keys = self._filter_duplicate_symmetry_seed_keys(
-                keys,
+
+            orthogonalized = self.get_orthogonalized_terms_subset(
+                sub_keys,
                 k_points,
                 tol=tol,
+                tag=None,
                 term_matrix_cache=term_matrix_cache,
             )
+            if len(orthogonalized) == 4:
+                grp_keys, initialterms, finalterms, includinglist = orthogonalized
+                fit_support_idx = None
+            else:
+                grp_keys, initialterms, finalterms, includinglist, fit_support_idx = orthogonalized
+            print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
 
-            subgroup_dict: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
-            for key in keys:
-                subgroup = self._fit_block_signature_for_key(key)
-                subgroup_dict.setdefault(subgroup, []).append(key)
-            
-            coeffs_by_subgroup = {}
-            
-            # 遍历每个子组
-            for subgroup, sub_keys in subgroup_dict.items():
-                print(f"  Processing fit block with {len(sub_keys)} terms. Time: {time.strftime('%H:%M:%S', time.localtime())}")
-                raw_subgroups = {
-                    (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
-                    for key in sub_keys
-                }
+            raw_subgroups_by_tag: Dict[str, set[tuple[int, int, int, int]]] = {}
+            for key in sub_keys:
+                raw = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
+                raw_subgroups_by_tag.setdefault(self.model.terms[key].tag, set()).add(raw)
+
+            if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
+                for key in sub_keys:
+                    self.model.terms[key].r_value_real = 0.0
+                    self.model.terms[key].r_value_imag = 0.0
+                for tag, raw_subgroups in raw_subgroups_by_tag.items():
+                    diagnostics_key = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
+                    coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
+                print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
+                continue
+
+            heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
+            print(f'    before transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
+            coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
+            coeffs = np.real(coeffs)
+            print(f'    after transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
+
+            included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
+            coeffs_print = []
+            coeffs_print_by_tag: Dict[str, List[complex]] = {tag: [] for tag in raw_subgroups_by_tag}
+            for i in tqdm(range(len(sub_keys))):
+                idx_real = included.get(2 * i)
+                idx_imag = included.get(2 * i + 1)
+                r_real = coeffs[idx_real] if idx_real is not None else 0.0
+                r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
+                r = r_real + 1j * r_imag
+                coeffs_print.append(r)
+                tag = self.model.terms[sub_keys[i]].tag
+                coeffs_print_by_tag.setdefault(tag, []).append(r)
+                self.model.terms[sub_keys[i]].r_value_real = r_real
+                self.model.terms[sub_keys[i]].r_value_imag = r_imag
+
+            print(f"  Updated coefficients for subgroup {subgroup}: {summarize_coefficients(coeffs_print)}")
+            for tag, raw_subgroups in raw_subgroups_by_tag.items():
                 diagnostics_key = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
-                # 获取正交化结果（同时处理 real 与 imag 部分）
-                orthogonalized = self.get_orthogonalized_terms_subset(
-                    sub_keys,
-                    k_points,
-                    tol=tol,
-                    tag=tag,
-                    term_matrix_cache=term_matrix_cache,
-                )
-                if len(orthogonalized) == 4:
-                    grp_keys, initialterms, finalterms, includinglist = orthogonalized
-                    fit_support_idx = None
+                if len(raw_subgroups_by_tag) == 1:
+                    coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs)
                 else:
-                    grp_keys, initialterms, finalterms, includinglist, fit_support_idx = orthogonalized
-                print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
-                if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
-                    for key in sub_keys:
-                        self.model.terms[key].r_value_real = 0.0
-                        self.model.terms[key].r_value_imag = 0.0
-                    coeffs_by_subgroup[diagnostics_key] = np.array([], dtype=complex)
-                    print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
-                    continue
-                
-                coeffs_print = []
-                # heff_block = []
-                # for ik in enumerate(k_points):
-                #     heff_block.append(self.get_mat_blocks([heff[ik]], subgroup)[0])
-                # heff_block = scipy.linalg.block_diag(*heff_block)
-                
-                heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
-                if tag == "Onsite":
-                    H_dim = len(self.Q_set1)*self.n_orb1 + len(self.Q_set2)*self.n_orb2
-                    kinetic_blocks = []
-                    for k in k_points:
-                        H_kinetic = np.zeros((H_dim, H_dim), dtype=complex)
-                        for key, term in self.model.terms.items():
-                            if term.tag == "Kinect":
-                                self.add_symmetrized_term_to_matrix_static(
-                                    H_kinetic,
-                                    term.Y_basis,
-                                    k,
-                                    term.symmetry_ops,
-                                    term.r_value_real,
-                                    term.r_value_imag,
-                                    symmetry_gen=self.symmetry_gen,
-                                    term=term,
-                                )
-                        kinetic_blocks.append(H_kinetic)
-                    kinetic_block = scipy.linalg.block_diag(*kinetic_blocks)
-                    heff_block = heff_block - self.get_mat_blocks([kinetic_block], sub_keys[0], len(k_points))[0]
-                    coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
-                    coeffs = np.real(coeffs)
-
-                    included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
-                    for i in tqdm(range(len(sub_keys))):
-                        idx_real = included.get(2 * i)
-                        idx_imag = included.get(2 * i + 1)
-                        r_real = coeffs[idx_real] if idx_real is not None else 0.0
-                        r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
-                        r = r_real + 1j * r_imag
-                        coeffs_print.append(r)
-                        self.model.terms[sub_keys[i]].r_value_real = r_real
-                        self.model.terms[sub_keys[i]].r_value_imag = r_imag
-                else:
-                    # 对非 Onsite 项，构造 transfer matrix 并求解
-                    print(f'    before transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
-                    if tag == "Kinect":
-                        heff_block = heff_block - np.eye(heff_block.shape[0]) * np.trace(heff_block) / heff_block.shape[0]
-                        # initialterms = np.array([initialterms[i] - np.eye(initialterms[i].shape[0]) * np.trace(initialterms[i]) / initialterms[i].shape[0] for i in range(len(initialterms))])
-                    coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
-                    
-                    
-                    coeffs = np.real(coeffs)
-                    # print(f"diag of heff_block", np.diag(heff_block))
-                    # print(f"diag of initialterms", np.diag(initialterms[0]))
-                    # print(f"diag of finalterms", np.diag(finalterms[0]))
-                    print(f'    after transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
-                    included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
-                    for i in tqdm(range(len(sub_keys))):
-                        idx_real = included.get(2 * i)
-                        idx_imag = included.get(2 * i + 1)
-                        r_real = coeffs[idx_real] if idx_real is not None else 0.0
-                        r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
-                        r = r_real + 1j*r_imag
-                        coeffs_print.append(r)
-                        self.model.terms[sub_keys[i]].r_value_real = r_real
-                        self.model.terms[sub_keys[i]].r_value_imag = r_imag
-                print(f"  Updated coefficients for subgroup {subgroup}: {summarize_coefficients(coeffs_print)}")
-                coeffs_by_subgroup[diagnostics_key] = np.array(coeffs)
-            print("="*100)
-            coeffs_by_tag[tag] = coeffs_by_subgroup
+                    coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs_print_by_tag.get(tag, []))
+        print("="*100)
         return coeffs_by_tag
 
 
@@ -2830,7 +2779,16 @@ class ContinuumModelBuilder:
                     "source": "implicit_zero",
                 }
             ]
-        raw = template.get("harmonics", "intra" if source == "moire_potential" else "inter")
+        has_harmonics = "harmonics" in template
+        has_harmonic_filter = "harmonic_filter" in template
+        if has_harmonics and has_harmonic_filter:
+            name = template.get("name", source)
+            raise ValueError(f"{name}: use either harmonics or harmonic_filter, not both")
+        raw = (
+            template.get("harmonics")
+            if has_harmonics
+            else template.get("harmonic_filter", "intra" if source == "moire_potential" else "inter")
+        )
         sign = float(template.get("harmonic_sign", 1.0))
         indices = None
         if isinstance(raw, Mapping):

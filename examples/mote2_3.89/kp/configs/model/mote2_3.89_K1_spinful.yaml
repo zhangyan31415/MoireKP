@@ -53,7 +53,6 @@ bands:
     num_bands: 16
 output:
   dir: ../../outputs/model/mote2_3.89_K1_spinful
-  save_coefficients: true
   verbose: false
   progress: true
 heff_file: ../../outputs/project/mote2_3.89_K1_spinful/heff_list.npy

@@ -49,6 +49,5 @@ bands:
     - 5.8
 output:
   dir: ../../outputs/model/mote2_3.89_K1
-  save_coefficients: true
   verbose: false
   progress: true

@@ -12,6 +12,7 @@ from kp.symmetry.exactify_representation import (
     BasisLabel,
     OperationAction,
     analyze_monomial_support,
+    antiunitary_square_residual,
     build_label_action,
     compare_operation_convention,
     exactify_1d_monomial_phases,
@@ -155,6 +156,20 @@ def _make_exact_c2t_exchange_matrix(labels: list[BasisLabel]) -> np.ndarray:
     return mat
 
 
+def _make_spinful_tr_exchange_matrix(
+    labels: list[BasisLabel],
+    action: OperationAction,
+    b1: np.ndarray,
+    b2: np.ndarray,
+) -> np.ndarray:
+    label_action = build_label_action(labels, action, b1, b2, {"L1": np.zeros(2), "L2": np.zeros(2)}, tol=1.0e-8)
+    mat = np.zeros((len(labels), len(labels)), dtype=complex)
+    for label in labels:
+        phase = -1.0 if label.sector == "L1" else 1.0
+        mat[label_action.perm[label.index], label.index] = phase
+    return mat
+
+
 def _make_matrix_for_action(
     labels: list[BasisLabel],
     action: OperationAction,
@@ -246,6 +261,32 @@ def test_exactify_c3_noisy_root_phase() -> None:
     assert exact_report.group_residuals["power"] < 1.0e-14
 
 
+def test_exactify_c3_global_phase_preserves_orbital_dependent_roots() -> None:
+    labels = _k_basis_labels_two_orbital()
+    b1, b2 = _hex_bm()
+    action = _c3_action()
+    label_action = build_label_action(labels, action, b1, b2, {"L1": np.zeros(2), "L2": np.zeros(2)}, tol=1.0e-8)
+    raw = np.zeros((len(labels), len(labels)), dtype=complex)
+    for source, target in enumerate(label_action.perm):
+        phase = np.exp(1j * np.pi / 3.0) if labels[source].orbital == 1 else np.exp(-1j * np.pi / 3.0)
+        raw[target, source] = phase
+
+    exactified, exact_report = exactify_1d_monomial_phases(
+        raw,
+        label_action.perm,
+        labels=labels,
+        phase_classes="global",
+        allowed_roots=[np.exp(1j * (np.pi + 2.0 * np.pi * m) / 3.0) for m in range(3)],
+        operation_name="C3z",
+        power=3,
+        central_phase=-1.0,
+    )
+
+    np.testing.assert_allclose(exactified, raw, atol=1.0e-12)
+    assert exact_report.group_residuals["power"] < 1.0e-14
+    assert "split_phase_class" in exact_report.notes
+
+
 def test_exactify_rejects_bad_amplitude() -> None:
     labels = _k_basis_labels()
     exact, perm = _make_exact_c3_matrix(labels)
@@ -271,6 +312,71 @@ def test_exactify_rejects_bad_support() -> None:
     bad[0, 1] = 0.2
     report = analyze_monomial_support(bad, perm)
     assert report.off_support_rel > 1.0e-2
+
+
+def test_exactify_spinful_tr_exchange_preserves_antiunitary_square() -> None:
+    labels = _k_basis_labels()
+    b1, b2 = _hex_bm()
+    q1 = np.array([label.q_vector for label in labels if label.sector == "L1"], dtype=float)
+    q2 = np.array([label.q_vector for label in labels if label.sector == "L2"], dtype=float)
+    action = OperationAction(
+        name="TR",
+        canonical_name="TR",
+        antiunitary=True,
+        k_map={"type": "negation", "in_model_frame": True},
+        R=-np.eye(2, dtype=float),
+        sector_map="layer_exchange",
+        q_map={"type": "negation", "in_model_frame": True},
+        central_phase=-1.0 + 0.0j,
+        group_relations=[{"type": "power", "power": 2, "phase": -1.0, "name": "TR^2"}],
+        source="test",
+    )
+    raw = _make_spinful_tr_exchange_matrix(labels, action, b1, b2)
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "TR",
+                    "antiunitary": True,
+                    "k_map": {"type": "negation", "in_model_frame": True},
+                    "q_map": {"type": "negation", "in_model_frame": True},
+                    "sector_map": "layer_exchange",
+                    "group_relations": [{"type": "power", "power": 2, "phase": -1.0, "name": "TR^2"}],
+                }
+            ]
+        },
+        matrices={"TR": raw},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "operations": {
+                    "TR": {
+                        "action_candidates": [
+                            {
+                                "k_map": action.k_map,
+                                "q_map": action.q_map,
+                                "sector_map": action.sector_map,
+                                "antiunitary": True,
+                            }
+                        ],
+                    }
+                }
+            }
+        },
+    )
+
+    assert antiunitary_square_residual(exactified["TR"], -1.0) < 1.0e-14
+    assert reports["TR"]["report"]["group_residuals"]["power"] < 1.0e-14
 
 
 def test_compare_operation_convention_rejects_same_matrix_different_kmap() -> None:
@@ -1197,6 +1303,37 @@ def test_c2_block_monomial_cleanup_infers_exchange_phase_roots() -> None:
     np.testing.assert_allclose(exactified["C2"], raw, atol=1.0e-12)
     assert reports["C2"]["preferred_mode"] == "block_monomial"
     assert reports["C2"]["report"]["group_residuals"]["power"] < 1.0e-14
+
+
+def test_spinful_c2_monomial_exactification_preserves_two_cycle_pair_phase() -> None:
+    labels = [
+        BasisLabel(0, "L1", (0, 0), np.array([0.0, 0.0]), 1, None),
+        BasisLabel(1, "L2", (0, 0), np.array([0.0, 0.0]), 1, None),
+    ]
+    forward = np.exp(2.0j * np.pi / 3.0)
+    backward = np.exp(1.0j * np.pi / 3.0)
+    raw = np.array(
+        [
+            [0.0, backward],
+            [forward, 0.0],
+        ],
+        dtype=complex,
+    )
+
+    exact, report = exactify_1d_monomial_phases(
+        raw,
+        [1, 0],
+        labels=labels,
+        phase_classes="matrix_element",
+        allowed_roots=[],
+        operation_name="C2",
+        power=2,
+        central_phase=-1.0 + 0.0j,
+        antiunitary=False,
+    )
+
+    np.testing.assert_allclose(exact, raw, atol=1.0e-12)
+    assert report.group_residuals["power"] < 1.0e-14
 
 
 def test_exactify_layer_exchange_supports_bottom_top_sector_labels() -> None:
