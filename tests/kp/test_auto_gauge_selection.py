@@ -6,8 +6,10 @@ import pytest
 from kp.basis.selection import (
     build_reference_projectors_from_rows,
     compute_leverage_scores,
+    GaugeCandidateSymmetryMetrics,
     polar_align_low_subspace,
     select_anchor_rows_qrcp,
+    select_gauge_candidate_by_symmetry,
 )
 from kp.blocks.blocks import (
     _assign_anchor_references_to_bands,
@@ -148,3 +150,69 @@ def test_gamma_spinful_auto_gauge_falls_back_to_same_spin_layer_partner() -> Non
         [(5, 1.0 + 0.0j), (7, 1.0 + 0.0j)],
     ]
     np.testing.assert_allclose(singular_values, [1.0 / np.sqrt(2.0), 1.0 / np.sqrt(2.0)])
+
+
+def test_symmetry_scored_candidate_loop_selects_valid_low_complexity_candidate() -> None:
+    decision = select_gauge_candidate_by_symmetry(
+        [
+            GaugeCandidateSymmetryMetrics(
+                candidate_id="bad_branch",
+                exactification_distance_by_op={"TR": 1.414, "C3z": 0.0},
+                active_term_count=200,
+            ),
+            GaugeCandidateSymmetryMetrics(
+                candidate_id="good",
+                exactification_distance_by_op={"TR": 1.0e-11, "C3z": 8.0e-7},
+                active_term_count=216,
+            ),
+            GaugeCandidateSymmetryMetrics(
+                candidate_id="bloated",
+                exactification_distance_by_op={"TR": 2.0e-11, "C3z": 7.0e-7},
+                active_term_count=300,
+            ),
+        ],
+        max_exactification_distance=1.0e-3,
+    )
+
+    assert decision.selected.candidate_id == "good"
+    assert decision.rankings[0]["candidate_id"] == "good"
+    assert decision.rankings[-1]["candidate_id"] == "bad_branch"
+    assert decision.rankings[-1]["status"] == "rejected"
+
+
+def test_symmetry_scored_candidate_loop_fails_when_all_candidates_have_bad_residuals() -> None:
+    with pytest.raises(ValueError, match="No gauge candidate passed symmetry validation"):
+        select_gauge_candidate_by_symmetry(
+            [
+                GaugeCandidateSymmetryMetrics(
+                    candidate_id="bad_tr",
+                    exactification_distance_by_op={"TR": 1.414},
+                    active_term_count=100,
+                ),
+                GaugeCandidateSymmetryMetrics(
+                    candidate_id="bad_c2",
+                    exactification_distance_by_op={"C2": 1.0e-2},
+                    active_term_count=90,
+                ),
+            ],
+            max_exactification_distance=1.0e-3,
+        )
+
+
+def test_symmetry_scored_candidate_loop_fails_on_ambiguous_candidates() -> None:
+    with pytest.raises(ValueError, match="ambiguous"):
+        select_gauge_candidate_by_symmetry(
+            [
+                GaugeCandidateSymmetryMetrics(
+                    candidate_id="candidate_a",
+                    exactification_distance_by_op={"TR": 1.0e-10, "C3z": 5.0e-7},
+                    active_term_count=216,
+                ),
+                GaugeCandidateSymmetryMetrics(
+                    candidate_id="candidate_b",
+                    exactification_distance_by_op={"TR": 2.0e-10, "C3z": 5.1e-7},
+                    active_term_count=216,
+                ),
+            ],
+            max_exactification_distance=1.0e-3,
+        )

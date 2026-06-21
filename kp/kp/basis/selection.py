@@ -44,6 +44,22 @@ class AutoGaugeSelection:
 
 
 @dataclass(frozen=True)
+class GaugeCandidateSymmetryMetrics:
+    candidate_id: str
+    exactification_distance_by_op: Mapping[str, float]
+    active_term_count: int | None = None
+    phase_branch_distance_by_op: Mapping[str, float] = field(default_factory=dict)
+    support_off_by_op: Mapping[str, float] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class GaugeCandidateSymmetryDecision:
+    selected: GaugeCandidateSymmetryMetrics
+    rankings: list[Mapping[str, Any]]
+
+
+@dataclass(frozen=True)
 class GaugeAnchorReport:
     gauge_mode: str
     resolved_norb_fix_list: list[Any]
@@ -258,6 +274,97 @@ def select_anchor_rows_qrcp(
         candidates=candidates,
         warnings=warnings,
     )
+
+
+def select_gauge_candidate_by_symmetry(
+    candidates: Sequence[GaugeCandidateSymmetryMetrics],
+    *,
+    max_exactification_distance: float = 1.0e-3,
+    ambiguity_exactification_tolerance: float = 1.0e-6,
+) -> GaugeCandidateSymmetryDecision:
+    """Choose an auto-gauge candidate from symmetry validation metrics.
+
+    This is the small policy layer used after candidate anchors have been
+    projected through raw-H symmetry and exactified.  It deliberately treats
+    missing metrics as invalid instead of filling them with zero.
+    """
+
+    candidate_list = list(candidates)
+    if not candidate_list:
+        raise ValueError("No gauge candidates were provided for symmetry validation")
+    if max_exactification_distance <= 0.0:
+        raise ValueError("max_exactification_distance must be positive")
+    if ambiguity_exactification_tolerance < 0.0:
+        raise ValueError("ambiguity_exactification_tolerance must be non-negative")
+
+    ranked: list[dict[str, Any]] = []
+    valid: list[tuple[tuple[int, float, str], GaugeCandidateSymmetryMetrics, dict[str, Any]]] = []
+    for candidate in candidate_list:
+        if not candidate.candidate_id:
+            raise ValueError("gauge candidate id must be non-empty")
+        distances = {
+            str(op): float(value)
+            for op, value in dict(candidate.exactification_distance_by_op).items()
+        }
+        finite_distances = [
+            value for value in distances.values() if np.isfinite(value) and value >= 0.0
+        ]
+        reasons: list[str] = []
+        if len(finite_distances) != len(distances) or not finite_distances:
+            reasons.append("missing_or_invalid_exactification_distance")
+        max_distance = max(finite_distances) if finite_distances else None
+        if max_distance is not None and max_distance > float(max_exactification_distance):
+            reasons.append("exactification_distance_exceeds_threshold")
+        active_term_count = candidate.active_term_count
+        if active_term_count is not None:
+            active_term_count = int(active_term_count)
+            if active_term_count < 0:
+                reasons.append("active_term_count_is_negative")
+        status = "ok" if not reasons else "rejected"
+        row: dict[str, Any] = {
+            "candidate_id": candidate.candidate_id,
+            "status": status,
+            "reasons": reasons,
+            "max_exactification_distance": max_distance,
+            "exactification_distance_by_op": distances,
+            "active_term_count": active_term_count,
+            "phase_branch_distance_by_op": dict(candidate.phase_branch_distance_by_op),
+            "support_off_by_op": dict(candidate.support_off_by_op),
+            "metadata": dict(candidate.metadata),
+        }
+        active_sort = active_term_count if active_term_count is not None else 10**18
+        distance_sort = max_distance if max_distance is not None else float("inf")
+        sort_key = (int(active_sort), float(distance_sort), str(candidate.candidate_id))
+        row["sort_key"] = [sort_key[0], sort_key[1], sort_key[2]]
+        ranked.append(row)
+        if status == "ok":
+            valid.append((sort_key, candidate, row))
+
+    if not valid:
+        ranked.sort(key=lambda item: (item["status"] != "ok", item["sort_key"][0], item["sort_key"][1], item["sort_key"][2]))
+        raise ValueError(f"No gauge candidate passed symmetry validation: {ranked}")
+
+    valid.sort(key=lambda item: item[0])
+    best_key, best_candidate, _best_row = valid[0]
+    if len(valid) > 1:
+        next_key, next_candidate, _next_row = valid[1]
+        same_complexity = best_key[0] == next_key[0]
+        close_residual = abs(float(best_key[1]) - float(next_key[1])) <= float(ambiguity_exactification_tolerance)
+        if same_complexity and close_residual:
+            raise ValueError(
+                "ambiguous symmetry-validated gauge candidates: "
+                f"{best_candidate.candidate_id!r} and {next_candidate.candidate_id!r}"
+            )
+
+    ranked.sort(
+        key=lambda item: (
+            item["status"] != "ok",
+            item["sort_key"][0],
+            item["sort_key"][1],
+            item["sort_key"][2],
+        )
+    )
+    return GaugeCandidateSymmetryDecision(selected=best_candidate, rankings=ranked)
 
 
 def build_reference_projectors_from_rows(
