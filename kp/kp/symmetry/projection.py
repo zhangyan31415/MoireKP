@@ -14,8 +14,10 @@ from ..blocks.blocks import (
     _assemble_projectors_from_block_eigenvectors,
     _layer_reference_entries,
     get_H_block,
+    resolve_project_gauge_anchors,
 )
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
+from ..basis.selection import write_basis_selection_report
 from ..io.tapw_loader import load_Q_sets, load_hamk
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
 from .exactify_representation import exactify_loaded_symmetry_source
@@ -1651,17 +1653,11 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     if method in {"fixed_schur", "linearized_lowdin"} and e_ref is None:
         raise ValueError(f"project.downfold_method={method!r} requires project.e_ref")
     nlow_state_list = _normalize_nlow_state_list(project_cfg)
-    norb_fix_list = project_cfg.get("norb_fix_list", [])
+    norb_fix_list = project_cfg["norb_fix_list"] if "norb_fix_list" in project_cfg else None
     num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
         material,
         np.asarray(hamk3d[0]),
         q_count,
-    )
-    _validate_project_layer_lists(
-        nlow_state_list,
-        norb_fix_list,
-        num_layer_list=num_layer_list,
-        context="project",
     )
 
     operation_entries: dict[str, dict[str, Any]] = {}
@@ -1709,6 +1705,31 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             for k_index in required_k
         }
     full_dim = int(hamk_source_by_k[required_k[0]].shape[0])
+    output_dir = Path(_resolve(symm_cfg.get("output_dir", "symm_project"), cfg_dir) or "symm_project")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    resolver_spin = _spin_label_for_sliced_block(spin) if spin_sector_sewing is None else "up"
+    reference_k = default_k_index if default_k_index in hamk_source_by_k else required_k[0]
+    q2_for_projection = q2 if q2 is not None else q1
+    norb_fix_list, gauge_report = resolve_project_gauge_anchors(
+        hamk_source_by_k[reference_k],
+        q_count,
+        orb0,
+        num_layer_list,
+        spin=resolver_spin,
+        Qlayer_list=[[q1], [q2_for_projection]],
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        nlow_state_list=nlow_state_list,
+        norb_fix_list=norb_fix_list,
+        gauge_config=project_cfg.get("gauge"),
+        mode=mode,
+    )
+    _validate_project_layer_lists(
+        nlow_state_list,
+        norb_fix_list,
+        num_layer_list=num_layer_list,
+        context="project",
+    )
+    write_basis_selection_report(output_dir, gauge_report)
 
     operation_payloads: dict[str, dict[str, Any]] = {}
     for request in operation_requests:
@@ -1817,8 +1838,6 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             )
         first_state = source_states[required_k[0]]
     low_dim = int(first_state.u_low.shape[1])
-    output_dir = Path(_resolve(symm_cfg.get("output_dir", "symm_project"), cfg_dir) or "symm_project")
-    output_dir.mkdir(parents=True, exist_ok=True)
     q_model1, q_model2 = _model_q_sets(q1, q2, rotation_deg=q_rotation_deg)
     np.save(output_dir / "q_model_layer1.npy", q_model1)
     np.save(output_dir / "q_model_layer2.npy", q_model2)
@@ -1856,6 +1875,9 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     summary["project_basis"] = {
         "nlow_state_list_layout": "physical_layer",
         "num_layer_list": [int(n) for n in num_layer_list],
+        "gauge_mode": gauge_report.gauge_mode,
+        "resolved_norb_fix_list": gauge_report.resolved_norb_fix_list,
+        "basis_selection_report": "basis_selection.json",
         "resolved_sector_orbital_counts": {
             "L1": int(n_orb_for_exactification[0]),
             "L2": int(n_orb_for_exactification[1]),

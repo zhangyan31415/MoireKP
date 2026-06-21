@@ -13,7 +13,13 @@ import yaml
 import numpy as np
 
 from .io.tapw_loader import load_hamk, load_Q_sets
-from .blocks import get_H_block, project_heff_full, set_projector_blas_threads#, get_h_dft_low
+from .blocks import (
+    get_H_block,
+    project_heff_full,
+    resolve_project_gauge_anchors,
+    set_projector_blas_threads,
+)
+from .basis.selection import write_basis_selection_report
 # Reporting-only downfold helpers were removed from the active core. Keep the
 # old imports here as a reference while the workflow is simplified.
 # from .blocks.downfold import (
@@ -1084,7 +1090,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
 
     # Projection parameters
     nlow_state_list = _normalize_nlow_state_list(project_cfg)
-    norb_fix_list = project_cfg.get("norb_fix_list", [])
+    norb_fix_list = project_cfg["norb_fix_list"] if "norb_fix_list" in project_cfg else None
     workers = int(project_cfg.get("workers", 4))
     mode = project_cfg.get("mode", "gamma").lower()
     method = _downfold_method(project_cfg)
@@ -1110,6 +1116,9 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
 
     # For projection, we do not reorder Q to avoid changing Heff basis.
     q_count = len(q1)
+    out_dir = resolve(project_cfg.get("out_dir", "plots"))
+    if out_dir is None:
+        out_dir = os.path.join(cfg_dir, "plots")
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     nk = hamk3d.shape[0]
     has_explicit_k_indices = project_cfg.get("k_indices") is not None
@@ -1133,7 +1142,26 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     if e_ref is not None:
         method_line += f", E_ref={e_ref:.6f} eV"
     print(method_line)
-    print(f"[kp]   output directory={resolve(project_cfg.get('out_dir', 'plots'))}")
+    projection_spin = "all" if str(spin).lower() == "all" else "up"
+    q2_for_projection = q2 if q2 is not None else q1
+    resolved_norb_fix_list, gauge_report = resolve_project_gauge_anchors(
+        _selected_spin_project_input(np.asarray(hamk2d), spin),
+        q_count,
+        orb0,
+        num_layer_list,
+        spin=projection_spin,
+        Qlayer_list=[[q1], [q2_for_projection]],
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        nlow_state_list=nlow_state_list,
+        norb_fix_list=norb_fix_list,
+        gauge_config=project_cfg.get("gauge"),
+        mode=mode,
+    )
+    norb_fix_list = resolved_norb_fix_list
+    write_basis_selection_report(out_dir, gauge_report)
+    print(f"[kp]   gauge={gauge_report.gauge_mode}")
+    print(f"[kp]   basis selection report={os.path.join(out_dir, 'basis_selection.json')}")
+    print(f"[kp]   output directory={out_dir}")
     if verbose:
         print(f"[kp]   hamk={hamk_file}")
         print(f"[kp]   qset1={qset1_file}")
@@ -1142,9 +1170,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp]   nlow_state_list={nlow_state_list}")
         print(f"[kp]   norb_fix_list={norb_fix_list}")
     # Unified output directory for all artifacts
-    out_dir = resolve(project_cfg.get("out_dir", "plots"))
-    if out_dir is None:
-        out_dir = os.path.join(cfg_dir, "plots")
     out_heff = os.path.join(out_dir, "heff_list.npy")
     out_eig = os.path.join(out_dir, "heff_eig.npy")
     out_vec = os.path.join(out_dir, "heff_vec.npy")
@@ -1160,7 +1185,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         except Exception as ex:
             print(f"[kp] Overlay warning: failed to load original bands from {band_file}: {ex}")
 
-    projection_spin = "all" if str(spin).lower() == "all" else "up"
     project_context_id = uuid.uuid4().hex
     project_context = {
         "context_id": project_context_id,
@@ -1354,7 +1378,7 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     compute_pole_diagnostics = _as_bool(project_cfg.get("compute_pole_diagnostics", False))
     compute_condition_number = _as_bool(project_cfg.get("compute_condition_number", False))
     nlow_state_list = _normalize_nlow_state_list(project_cfg)
-    norb_fix_list = project_cfg.get("norb_fix_list", [])
+    norb_fix_list = project_cfg["norb_fix_list"] if "norb_fix_list" in project_cfg else None
 
     print(f"[kp] Sweep downfold_method = fixed_schur")
     print(f"[kp] active indices = {_active_indices_from_project_cfg(project_cfg)}")
@@ -1378,6 +1402,21 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     # original_rows_all = _load_bands_from_text(band_file)
     # original_rows = [original_rows_all[i] for i in k_indices]
     q_count = len(q1)
+    projection_spin = "all" if str(spin).lower() == "all" else "up"
+    q2_for_projection = q2 if q2 is not None else q1
+    norb_fix_list, _gauge_report = resolve_project_gauge_anchors(
+        _selected_spin_project_input(np.asarray(hamk2d), spin),
+        q_count,
+        orb0,
+        num_layer_list,
+        spin=projection_spin,
+        Qlayer_list=[[q1], [q2_for_projection]],
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        nlow_state_list=nlow_state_list,
+        norb_fix_list=norb_fix_list,
+        gauge_config=project_cfg.get("gauge"),
+        mode=mode,
+    )
 
     # rows: list[SweepRow] = []
     for e_ref in e_ref_values:
@@ -1386,7 +1425,6 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
 
         def sweep_one(k_index: int):
             ham_for_projection = _selected_spin_project_input(hamk3d[k_index], spin)
-            projection_spin = "all" if str(spin).lower() == "all" else "up"
             kwargs = {
                 "spin": projection_spin,
                 "Qlayer_list": [[q1], [q2]],

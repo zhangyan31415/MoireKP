@@ -93,6 +93,12 @@ clean-clone test:
 - `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW symmetry-analysis exports)
 - `kp model -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp project` and `kp symm` outputs)
 
+New source configs should use `project.gauge: auto` with an explicit
+`project.nlow_state_list`. Existing hand-written `project.norb_fix_list` entries
+remain valid as expert overrides, but they should not be required for ordinary
+finite-basis projection. Auto-gauge reports are written next to `heff_list.npy`
+as `basis_selection.json` and `basis_selection.md`.
+
 Dataset provenance and unresolved release metadata are tracked in
 `examples/data-manifest.yaml`. The release cannot be archived until every
 required external file has a public URL, license, DOI, checksum, runtime class,

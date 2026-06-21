@@ -64,6 +64,10 @@ kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # 
 kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 ```
 
+For new `kp project` configs, prefer `project.gauge: auto` instead of hand
+writing `project.norb_fix_list`. See `docs/project_auto_gauge.md` for the
+finite-basis auto-gauge anchor report and failure checks.
+
 See `examples/README.md` for the release-facing example layout and `examples/data-manifest.yaml` for the current dataset provenance status.
 
 ## Release Metadata

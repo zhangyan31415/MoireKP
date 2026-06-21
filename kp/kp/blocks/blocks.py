@@ -14,6 +14,7 @@ from .downfold import (
     projector_groups_from_block_columns,
     set_projector_blas_threads as _set_downfold_projector_blas_threads,
 )
+from kp.basis.selection import AutoGaugeConfig, GaugeAnchorReport, select_anchor_rows_qrcp
 
 PROJECTOR_BLAS_THREADS = 8
 
@@ -267,6 +268,281 @@ def _align_selected_eigenstates(
     u_low = vec[:, np.array(bands, dtype=int)]
     u_aligned, _ = align_eigenstates(u_low, phi_ref)
     vec[:, bands] = u_aligned
+
+
+def _is_auto_token(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower() in {"auto", "auto_scdm"}
+
+
+def _gauge_requests_auto(gauge_config: Any) -> bool:
+    if _is_auto_token(gauge_config):
+        return True
+    if isinstance(gauge_config, dict):
+        method = gauge_config.get("method", gauge_config.get("mode"))
+        return _is_auto_token(method)
+    return False
+
+
+def _auto_gauge_config(gauge_config: Any) -> AutoGaugeConfig:
+    if gauge_config is None or _is_auto_token(gauge_config):
+        return AutoGaugeConfig()
+    if not isinstance(gauge_config, dict):
+        raise ValueError(f"project.gauge must be 'auto' or a mapping, got {gauge_config!r}")
+    method = str(gauge_config.get("method", "auto_scdm")).lower()
+    if method != "auto_scdm":
+        raise ValueError(f"Unsupported project.gauge.method={method!r}; expected 'auto_scdm'")
+    anchor_scope = str(gauge_config.get("anchor_scope", "per_sector")).lower()
+    if anchor_scope != "per_sector":
+        raise ValueError("Phase 1 auto gauge only supports project.gauge.anchor_scope='per_sector'")
+    candidate_pool = str(gauge_config.get("candidate_pool", "all")).lower()
+    if candidate_pool != "all":
+        raise ValueError("Phase 1 auto gauge only supports project.gauge.candidate_pool='all'")
+    projected_anchors = bool(gauge_config.get("projected_anchors", False))
+    if projected_anchors:
+        raise ValueError("project.gauge.projected_anchors=true is not supported in Phase 1")
+    return AutoGaugeConfig(
+        method=method,
+        anchor_scope=anchor_scope,
+        candidate_pool=candidate_pool,
+        projected_anchors=projected_anchors,
+        min_sigma=float(gauge_config.get("min_sigma", 1.0e-6)),
+        max_condition=float(gauge_config.get("max_condition", 1.0e6)),
+        reference_q_index=int(gauge_config.get("reference_q_index", gauge_config.get("ref_q_index", 0))),
+        basis_is_orthonormal=bool(gauge_config.get("basis_is_orthonormal", True)),
+    )
+
+
+def _manual_gauge_report(norb_fix_list: Any) -> GaugeAnchorReport:
+    return GaugeAnchorReport(
+        gauge_mode="manual_norb_fix_list",
+        resolved_norb_fix_list=norb_fix_list,
+        selections=[],
+        metric={"type": "orthonormal", "basis_is_orthonormal": True},
+        state_selection_quality={
+            "status": "not_evaluated",
+            "reason": "manual gauge anchors were provided",
+        },
+        gauge_anchor_quality={
+            "status": "manual",
+            "sigma_min": None,
+            "condition_number": None,
+        },
+        symmetry_closure_quality={
+            "status": "not_available",
+            "subspace_leakage": None,
+            "reason": "symmetry validation is not available during gauge resolution",
+        },
+    )
+
+
+def _auto_reference_entry(row: int) -> list[list[float]]:
+    return [[int(row), 1.0]]
+
+
+def _selection_dict(
+    *,
+    scope: str,
+    bands: list[int],
+    selection,
+    layer: int | None = None,
+    q_index: int | None = None,
+) -> dict[str, Any]:
+    return {
+        "scope": scope,
+        "layer": None if layer is None else int(layer),
+        "q_index": None if q_index is None else int(q_index),
+        "bands": [int(band) for band in bands],
+        "selected_rows": [int(row) for row in selection.selected_rows],
+        "method": selection.method,
+        "rank": int(selection.rank),
+        "singular_values": [float(value) for value in selection.singular_values],
+        "sigma_min": float(selection.sigma_min),
+        "condition_number": float(selection.condition_number),
+        "selected_leverage_scores": [float(value) for value in selection.leverage_scores],
+        "top_leverage_rows": [
+            {
+                "row": int(candidate.row),
+                "leverage": float(candidate.leverage),
+                "selected": bool(candidate.selected),
+                "label": candidate.label,
+            }
+            for candidate in selection.candidates
+        ],
+        "warnings": list(selection.warnings),
+    }
+
+
+def resolve_project_gauge_anchors(
+    hamk_reference: np.ndarray,
+    q_count: int,
+    orb_per_layer0: int,
+    num_layer_list: List[int],
+    *,
+    spin: Literal["up", "down", "all"] = "up",
+    Qlayer_list: List[List[np.ndarray]] | None = None,
+    num_orb_per_layer_list: List[List[int]] | None = None,
+    nlow_state_list: List[List[int]] | None = None,
+    norb_fix_list: Any = None,
+    gauge_config: Any = None,
+    mode: str = "gamma",
+) -> tuple[list[Any], GaugeAnchorReport]:
+    """Resolve manual or automatic gauge anchors to legacy norb_fix_list format."""
+
+    if nlow_state_list is None:
+        raise ValueError("project.nlow_state_list must be provided before resolving gauge anchors")
+    total_layers = int(sum(int(n) for n in num_layer_list))
+    if len(nlow_state_list) != total_layers:
+        raise ValueError(
+            f"project.nlow_state_list must have {total_layers} physical-layer rows "
+            f"(sum(num_layer_list)); got {len(nlow_state_list)}"
+        )
+
+    auto_from_norb = _is_auto_token(norb_fix_list)
+    auto_from_gauge = _gauge_requests_auto(gauge_config)
+    has_manual = norb_fix_list is not None and not auto_from_norb
+    if has_manual and auto_from_gauge:
+        raise ValueError("manual norb_fix_list cannot be combined with project.gauge auto")
+    if has_manual:
+        if len(norb_fix_list) != total_layers:
+            raise ValueError(
+                f"project.norb_fix_list must have {total_layers} physical-layer rows "
+                f"(sum(num_layer_list)); got {len(norb_fix_list)}"
+            )
+        return norb_fix_list, _manual_gauge_report(norb_fix_list)
+    if not (auto_from_norb or auto_from_gauge):
+        raise ValueError(
+            "project.norb_fix_list is missing; write project.gauge: auto or provide manual norb_fix_list anchors"
+        )
+
+    config = _auto_gauge_config(gauge_config)
+    mode_lower = str(mode).lower()
+    ref_q = int(config.reference_q_index)
+    if ref_q < 0 or ref_q >= int(q_count):
+        raise IndexError(f"project.gauge.reference_q_index={ref_q} outside available Q range 0..{int(q_count) - 1}")
+    if Qlayer_list is None:
+        Qlayer_list = [[np.arange(q_count) for _ in range(n)] for n in num_layer_list]
+    if num_orb_per_layer_list is None:
+        num_orb_per_layer_list = [[int(orb_per_layer0) for _ in range(n)] for n in num_layer_list]
+
+    _, h_vec_blk, _, _ = get_H_block(
+        np.asarray(hamk_reference, dtype=np.complex128),
+        Qlayer_list,
+        num_layer_list,
+        num_orb_per_layer_list,
+        nlow_state_list,
+        [],
+        spin=spin,
+        mode=mode_lower,
+        selected_bands_by_layer=nlow_state_list,
+    )
+    resolved: list[Any] = [[] for _ in range(total_layers)]
+    selections: list[dict[str, Any]] = []
+    warnings: list[str] = []
+
+    if mode_lower == "gamma":
+        vec = np.asarray(h_vec_blk[ref_q], dtype=np.complex128)
+        bands_flat: list[int] = []
+        owners: list[tuple[int, int]] = []
+        for layer, bands in enumerate(nlow_state_list):
+            for band_pos, band in enumerate(bands):
+                bands_flat.append(int(band))
+                owners.append((int(layer), int(band_pos)))
+        if bands_flat:
+            if len(set(bands_flat)) != len(bands_flat):
+                raise ValueError("project.gauge auto cannot resolve duplicate gamma low-state band indices")
+            u_low = vec[:, np.asarray(bands_flat, dtype=np.intp)]
+            selection = select_anchor_rows_qrcp(
+                u_low,
+                n_anchors=len(bands_flat),
+                basis_is_orthonormal=config.basis_is_orthonormal,
+            )
+            if selection.sigma_min < config.min_sigma:
+                raise ValueError(
+                    f"auto gauge sigma_min={selection.sigma_min:.3e} below min_sigma={config.min_sigma:.3e}"
+                )
+            if selection.condition_number > config.max_condition:
+                raise ValueError(
+                    f"auto gauge condition_number={selection.condition_number:.3e} exceeds "
+                    f"max_condition={config.max_condition:.3e}"
+                )
+            for (layer, _band_pos), row in zip(owners, selection.selected_rows):
+                resolved[layer].append(_auto_reference_entry(int(row)))
+            selections.append(
+                _selection_dict(
+                    scope="gamma_same_q",
+                    bands=bands_flat,
+                    selection=selection,
+                    q_index=ref_q,
+                )
+            )
+            warnings.extend(selection.warnings)
+    else:
+        for layer, bands in enumerate(nlow_state_list):
+            layer_bands = [int(band) for band in bands]
+            if not layer_bands:
+                continue
+            block_index = int(layer) * int(q_count) + ref_q
+            vec = np.asarray(h_vec_blk[block_index], dtype=np.complex128)
+            u_low = vec[:, np.asarray(layer_bands, dtype=np.intp)]
+            selection = select_anchor_rows_qrcp(
+                u_low,
+                n_anchors=len(layer_bands),
+                basis_is_orthonormal=config.basis_is_orthonormal,
+            )
+            if selection.sigma_min < config.min_sigma:
+                raise ValueError(
+                    f"auto gauge layer {layer} sigma_min={selection.sigma_min:.3e} "
+                    f"below min_sigma={config.min_sigma:.3e}"
+                )
+            if selection.condition_number > config.max_condition:
+                raise ValueError(
+                    f"auto gauge layer {layer} condition_number={selection.condition_number:.3e} "
+                    f"exceeds max_condition={config.max_condition:.3e}"
+                )
+            resolved[layer] = [_auto_reference_entry(int(row)) for row in selection.selected_rows]
+            selections.append(
+                _selection_dict(
+                    scope="physical_layer",
+                    layer=layer,
+                    bands=layer_bands,
+                    selection=selection,
+                    q_index=ref_q,
+                )
+            )
+            warnings.extend(selection.warnings)
+
+    sigma_values = [float(row["sigma_min"]) for row in selections if row.get("sigma_min") is not None]
+    cond_values = [float(row["condition_number"]) for row in selections if row.get("condition_number") is not None]
+    sigma_min = min(sigma_values) if sigma_values else None
+    condition_number = max(cond_values) if cond_values else None
+    report = GaugeAnchorReport(
+        gauge_mode="auto_scdm",
+        resolved_norb_fix_list=resolved,
+        selections=selections,
+        metric={
+            "type": "orthonormal" if config.basis_is_orthonormal else "overlap_metric",
+            "basis_is_orthonormal": bool(config.basis_is_orthonormal),
+            "formula": "diag(U U^dagger)" if config.basis_is_orthonormal else "diag(S^1/2 U U^dagger S^1/2)",
+        },
+        state_selection_quality={
+            "status": "not_evaluated",
+            "reason": "auto gauge fixes anchors for the configured nlow_state_list only",
+        },
+        gauge_anchor_quality={
+            "status": "ok",
+            "sigma_min": sigma_min,
+            "condition_number": condition_number,
+            "min_sigma": float(config.min_sigma),
+            "max_condition": float(config.max_condition),
+        },
+        symmetry_closure_quality={
+            "status": "not_available",
+            "subspace_leakage": None,
+            "reason": "symmetry validation is not available during gauge resolution",
+        },
+        warnings=warnings,
+    )
+    return resolved, report
 
 
 def _physical_layer_entry_index(nlow_state_list: Any, num_layer_arr: np.ndarray, group_index: int, layer_in_group: int) -> int:
@@ -1020,7 +1296,8 @@ def project_heff_full(
             f"(sum(num_layer_list)); got {len(nlow_state_list)}. "
             "Use [] for layers that do not contribute."
         )
-    if norb_fix_list is not None and len(norb_fix_list) != total_layers:
+    has_anchor_list = bool(norb_fix_list)
+    if has_anchor_list and len(norb_fix_list) != total_layers:
         raise ValueError(
             f"norb_fix_list must have {total_layers} physical-layer rows "
             f"(sum(num_layer_list)); got {len(norb_fix_list)}."
@@ -1074,29 +1351,22 @@ def project_heff_full(
     method = (downfold_method or ("fixed_schur" if second_order else "first_order")).lower()
     include_high = method != "first_order"
 
-    # ---------- 若提供对齐所需信息，则先取对齐后的 vec（逐 Q） ----------
-    aligned_vec_blocks: List[np.ndarray] | None = None
-    if nlow_state_list and norb_fix_list:
-        # 若未显式给 Qlayer_list / num_orb_per_layer_list，则按当前参数合成一个“最小可用”布局
-        if Qlayer_list is None:
-            Qlayer_list = [[np.arange(q_count) for _ in range(n)] for n in num_layer_list]
-        if num_orb_per_layer_list is None:
-            num_orb_per_layer_list = [[int(orb_per_layer0) for _ in range(n)] for n in num_layer_list]
+    if Qlayer_list is None:
+        Qlayer_list = [[np.arange(q_count) for _ in range(n)] for n in num_layer_list]
+    if num_orb_per_layer_list is None:
+        num_orb_per_layer_list = [[int(orb_per_layer0) for _ in range(n)] for n in num_layer_list]
 
-        # 调用 get_H_block：其中已经做了 Procrustes + 相位规范
-        H_eig_blk, H_vec_blk, _, _ = get_H_block(
-            hamk_full,                        # ← 原 hamk_full 即 get_H_block 的 Hamk_list
-            Qlayer_list,
-            num_layer_list,
-            num_orb_per_layer_list,
-            nlow_state_list,
-            norb_fix_list,                   # ← 线性组合 [[idx, coeff], ...]
-            spin=spin,
-            mode=mode_lower,
-            selected_bands_by_layer=None if include_high else nlow_state_list,
-        )
-        # 规范成列表（每个元素为该 Q 的对齐后 vec）
-        aligned_vec_blocks = [np.asarray(v, dtype=np.complex128) for v in H_vec_blk.tolist()]
+    H_eig_blk, H_vec_blk, _, _ = get_H_block(
+        hamk_full,
+        Qlayer_list,
+        num_layer_list,
+        num_orb_per_layer_list,
+        nlow_state_list,
+        norb_fix_list if has_anchor_list else [],
+        spin=spin,
+        mode=mode_lower,
+        selected_bands_by_layer=None if include_high else nlow_state_list,
+    )
 
     options = DownfoldingOptions(
         method=method,
