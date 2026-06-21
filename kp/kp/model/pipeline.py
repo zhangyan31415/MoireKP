@@ -228,14 +228,17 @@ def _resolve_layerwise_counts(
 
     groups = _layer_groups_metadata(num_layer_list, raw_values)
     qset_values = [int(group["total"]) for group in groups]
+    active_layer_values = [int(value) for value in raw_values if int(value) > 0]
+    resolved_model_sectors = active_layer_values if len(active_layer_values) == qset_count else qset_values
     metadata.update(
         {
             "input_kind": "default_from_n_orb" if default_from is not None else "physical_layer",
             "resolved_qset": list(qset_values),
+            "resolved_model_sectors": list(resolved_model_sectors),
             "groups": groups,
         }
     )
-    return qset_values, metadata
+    return resolved_model_sectors, metadata
 
 
 def _model_section(raw: Mapping[str, Any]) -> Mapping[str, Any]:

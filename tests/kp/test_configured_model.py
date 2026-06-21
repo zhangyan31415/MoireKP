@@ -644,6 +644,25 @@ def test_load_model_config_resolves_layerwise_n_orb_from_num_layer_list(tmp_path
     assert cfg.orbital_count_metadata["nlow_state"]["input_kind"] == "default_from_n_orb"
 
 
+def test_load_model_config_drops_inactive_layer_for_gamma_1plus2_model(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    source_path = tmp_path / "source.yaml"
+    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
+    source_raw["material"]["num_layer_list"] = [1, 2]
+    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw["model"]["n_orb"] = [0, 2, 2]
+    raw["model"]["nlow_state"] = [0, 2, 2]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (2, 2)
+    assert cfg.nlow_state == [2, 2]
+    assert cfg.orbital_count_metadata["n_orb"]["resolved_model_sectors"] == [2, 2]
+    assert cfg.term_template_metadata["profiles"] == ["gamma_2x2_independent_sectors"]
+
+
 def test_load_model_config_resolves_layerwise_nlow_state_independently(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -658,9 +677,10 @@ def test_load_model_config_resolves_layerwise_nlow_state_independently(tmp_path:
     cfg = load_model_config(cfg_path)
 
     assert cfg.n_orb == (2, 2)
-    assert cfg.nlow_state == [0, 4]
+    assert cfg.nlow_state == [2, 2]
     assert cfg.orbital_count_metadata["n_orb"]["resolved_qset"] == [2, 2]
     assert cfg.orbital_count_metadata["nlow_state"]["resolved_qset"] == [0, 4]
+    assert cfg.orbital_count_metadata["nlow_state"]["resolved_model_sectors"] == [2, 2]
 
 
 def test_load_model_config_rejects_legacy_two_entry_n_orb_with_num_layer_list(tmp_path: Path) -> None:
