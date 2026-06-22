@@ -3721,10 +3721,25 @@ class SymmetryAnalysisRunner:
 
         if not candidate.get("antiunitary", False) and candidate.get("name") in {"C3z", "C3z^2"}:
             try:
+                valley_ctx = self._valley_context_for_valley(valley)
                 transport = self._build_transport(candidate, valley, q_target, q_target)
                 diagnostics = dict(getattr(self, "_last_transport_diagnostics", {}) or {})
+                pg_matrix, pg_rule, pg_diagnostics = build_periodic_gauge_matrix_for_candidate(
+                    self.structure,
+                    valley_ctx,
+                    candidate,
+                )
+                raw_transport = (transport @ pg_matrix).tocsr()
+                diagnostics.update(
+                    {
+                        "pg_shift_by_group_coeffs": _json_int_vector_dict(pg_rule.get("pg_shift_by_group_coeffs")),
+                        "pg_phase_convention": pg_rule.get("pg_phase_convention"),
+                        **dict(pg_diagnostics or {}),
+                    }
+                )
                 h_target, _ = self._raw_projected_hs(valley, q_target)
-            except SymmetrySupportError as exc:
+            except (SymmetrySupportError, np.linalg.LinAlgError) as exc:
+                reason = getattr(exc, "reason", "q_mapping_missing")
                 return self._make_detail_row(
                     valley_label=valley_label,
                     operation_name=candidate["name"],
@@ -3734,7 +3749,7 @@ class SymmetryAnalysisRunner:
                     k_label=q_label,
                     q_local=q_target,
                     supported=False,
-                    not_supported_reason=exc.reason,
+                    not_supported_reason=reason,
                     residual_h_raw=None,
                     residual_s_raw=None,
                     residual_h_sym=None,
@@ -3748,7 +3763,7 @@ class SymmetryAnalysisRunner:
                     tolerance=tolerance,
                 )
 
-            h_cov = transport @ h_target @ transport.conj().T
+            h_cov = raw_transport @ h_target @ raw_transport.conj().T
             residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
             return self._make_detail_row(
                 valley_label=valley_label,

@@ -551,6 +551,55 @@ def test_analyze_collects_only_minimal_supported_representation_generators(tmp_p
     assert export_flags == {"E": False, "C3z": True, "C3z^2": False}
 
 
+def test_c3_covariance_validation_uses_raw_h_action_with_periodic_gauge(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path)
+    runner.structure = SimpleNamespace(spin=False)
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=1,
+        valley_label="K1",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=SimpleNamespace(TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr"))),
+    )
+    runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
+
+    d0 = scipy.sparse.csr_matrix(np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128))
+    pg = scipy.sparse.diags([1.0, -1.0], dtype=np.complex128, format="csr")
+    raw_action = (d0 @ pg).toarray()
+    h_raw = np.array([[0.0, 1.0j], [-1.0j, 0.0]], dtype=np.complex128)
+    np.testing.assert_allclose(raw_action @ h_raw @ raw_action.conj().T, h_raw, atol=1.0e-14)
+    assert symmetry_analysis.frobenius_relative_residual(h_raw, d0 @ h_raw @ d0.conj().T, denominator=h_raw) > 1.0
+
+    runner._build_transport = MethodType(lambda self, candidate, valley, q_target, q_source: d0, runner)
+    runner._raw_projected_hs = MethodType(lambda self, valley, q_local: (h_raw, None), runner)
+    monkeypatch.setattr(
+        symmetry_analysis,
+        "build_periodic_gauge_matrix_for_candidate",
+        lambda structure, valley_ctx, candidate: (
+            pg,
+            {"pg_shift_by_group_coeffs": {"0": [1, 0]}, "pg_phase_convention": "test"},
+            {"pg_reason": "test"},
+        ),
+    )
+
+    row = runner._candidate_rows_for_q(
+        {"index": 1, "name": "C3z", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
+        valley=1,
+        valley_label="K1",
+        q_label="Gamma",
+        q_target=np.zeros(3),
+        tolerance=1.0e-10,
+    )
+
+    assert row["supported"] is True
+    assert row["residual_H_raw"] == pytest.approx(0.0, abs=1.0e-14)
+    assert row["status"] == "exact"
+
+
 def test_k_source_c2_and_internal_c2t_use_same_spglib_axis(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)
     runner.config.compute = SimpleNamespace(TAPW=True, valleys=[1])
@@ -1243,9 +1292,20 @@ def test_candidate_row_reports_raw_h_only_without_s_or_symmetrized_residuals(tmp
     assert len(calls) == 2
 
 
-def test_candidate_row_uses_legacy_c3_orbit_for_c3_covariance(tmp_path):
+def test_candidate_row_uses_raw_projected_h_for_c3_covariance(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)
-    runner.structure = SimpleNamespace(reciprocal_Tmat=np.eye(3))
+    runner.structure = SimpleNamespace(spin=False, reciprocal_Tmat=np.eye(3))
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=1,
+        valley_label="K1",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=SimpleNamespace(TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr"))),
+    )
     transport = scipy.sparse.csr_matrix(
         np.array(
             [
@@ -1255,20 +1315,29 @@ def test_candidate_row_uses_legacy_c3_orbit_for_c3_covariance(tmp_path):
             dtype=np.complex128,
         )
     )
-    h_target = np.array([[1.0, 0.0], [0.0, 2.0]], dtype=np.complex128)
-    h_source = transport.conj().T @ h_target @ transport
-    h_source_2 = transport @ h_target @ transport.conj().T
+    h_target = np.array([[1.0, 0.25], [0.25, 1.0]], dtype=np.complex128)
+    raw_calls = []
 
+    runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
     runner._build_transport = MethodType(lambda self, candidate, valley, q_target, q_source: transport, runner)
     runner._calculator_for_valley = MethodType(
-        lambda self, valley: SimpleNamespace(
-            Getk_super_gauge_sparse_symm=lambda hr, q, force_sparse_dot=False: [h_target, h_source, h_source_2]
-        ),
+        lambda self, valley: (_ for _ in ()).throw(AssertionError("C3 validation must not use the legacy C3 orbit")),
         runner,
     )
-    runner._raw_projected_hs = MethodType(
-        lambda self, valley, q_local: (_ for _ in ()).throw(AssertionError("C3 must use the legacy C3 orbit")),
-        runner,
+
+    def _fake_raw_projected_hs(self, valley, q_local):
+        raw_calls.append(tuple(np.asarray(q_local, dtype=float)))
+        return h_target, None
+
+    runner._raw_projected_hs = MethodType(_fake_raw_projected_hs, runner)
+    monkeypatch.setattr(
+        symmetry_analysis,
+        "build_periodic_gauge_matrix_for_candidate",
+        lambda structure, valley_ctx, candidate: (
+            scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+            {"pg_shift_by_group_coeffs": {"0": [0, 0]}, "pg_phase_convention": "test"},
+            {"pg_identity": True},
+        ),
     )
 
     row = runner._candidate_rows_for_q(
@@ -1289,6 +1358,7 @@ def test_candidate_row_uses_legacy_c3_orbit_for_c3_covariance(tmp_path):
 
     assert row["residual_H_raw"] == 0.0
     assert row["status"] == "exact"
+    assert raw_calls == [(0.0, 0.0, 0.0)]
 
 
 def test_source_pin_matrix_is_identity_for_zero_source_shift():

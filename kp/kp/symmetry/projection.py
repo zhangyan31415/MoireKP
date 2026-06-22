@@ -2192,7 +2192,9 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             "model_basis_action": model_basis_action,
             "matrix_selection": matrix_selection,
             "axis_deg": entry.get("axis_deg"),
-            "status": entry.get("status"),
+            "status": "projected",
+            "source_covariance_status": entry.get("status"),
+            "source_residual_H_raw": entry.get("residual_H_raw"),
             "square_residual": entry.get("square_residual"),
             "spglib_index": entry.get("spglib_index"),
             "ld_source_rule": entry.get("ld_source_rule"),
@@ -2294,6 +2296,8 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         operation_summary["matrix_file"] = f"exactified_{name}.npy"
         operation_summary["matrix_kind"] = "continuum_internal_rep_exact"
         operation_summary["matrix_source"] = "kp_symm_exactified_action"
+        operation_summary["status"] = "exactified"
+        operation_summary["exactification_status"] = status
         operation_summary["exactification_report_file"] = f"{name.lower()}_exactification_report.json"
         operation_summary["source_matrix_projection_report"] = report
         operation_summary["internal_resolved_action"] = report.get("resolved_action", operation_summary["model_action"])
