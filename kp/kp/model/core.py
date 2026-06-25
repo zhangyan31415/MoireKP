@@ -2411,6 +2411,83 @@ class ContinuumModelBuilder:
         rows, cols = self._fit_block_indices_for_key(key)
         return tuple(int(i) for i in rows), tuple(int(i) for i in cols)
 
+    def _term_fit_support_indices(
+        self,
+        key: ContinuumTermKey,
+        k_points: Sequence[np.ndarray],
+        *,
+        tol: float,
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
+    ) -> np.ndarray:
+        mat_real, mat_imag = self.stack_Y_for_term(
+            self.model.terms[key],
+            k_points,
+            term_matrix_cache=term_matrix_cache,
+        )
+        blocks = np.asarray(self.get_mat_blocks([mat_real, mat_imag], key, len(k_points)))
+        if blocks.size == 0:
+            return np.array([], dtype=int)
+        flat = blocks.reshape(blocks.shape[0], -1)
+        max_abs = float(np.max(np.abs(flat))) if flat.size else 0.0
+        support_tol = max(np.finfo(float).eps * max(max_abs, 1.0) * 100.0, float(tol) * 1.0e-4)
+        support = np.any(np.abs(flat) > support_tol, axis=0)
+        return np.flatnonzero(support).astype(int, copy=False)
+
+    def _support_connected_components_for_keys(
+        self,
+        keys: Sequence[ContinuumTermKey],
+        k_points: Sequence[np.ndarray],
+        *,
+        tol: float,
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
+    ) -> List[List[ContinuumTermKey]]:
+        keys_list = list(keys)
+        if not keys_list:
+            return []
+
+        parent = list(range(len(keys_list)))
+        rank = [0] * len(keys_list)
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            root_left = find(left)
+            root_right = find(right)
+            if root_left == root_right:
+                return
+            if rank[root_left] < rank[root_right]:
+                parent[root_left] = root_right
+            elif rank[root_left] > rank[root_right]:
+                parent[root_right] = root_left
+            else:
+                parent[root_right] = root_left
+                rank[root_left] += 1
+
+        first_owner_by_support: Dict[int, int] = {}
+        for index, key in enumerate(keys_list):
+            support = self._term_fit_support_indices(
+                key,
+                k_points,
+                tol=tol,
+                term_matrix_cache=term_matrix_cache,
+            )
+            for position in support.tolist():
+                owner = first_owner_by_support.get(int(position))
+                if owner is None:
+                    first_owner_by_support[int(position)] = index
+                else:
+                    union(index, owner)
+
+        grouped: Dict[int, List[int]] = {}
+        for index in range(len(keys_list)):
+            grouped.setdefault(find(index), []).append(index)
+        ordered_groups = sorted(grouped.values(), key=lambda values: values[0])
+        return [[keys_list[index] for index in group] for group in ordered_groups]
+
     def _filter_duplicate_symmetry_seed_keys(
         self,
         keys: List[ContinuumTermKey],
@@ -2547,74 +2624,99 @@ class ContinuumModelBuilder:
             subgroup = self._fit_block_signature_for_key(key)
             subgroup_dict.setdefault(subgroup, []).append(key)
 
-        for subgroup, sub_keys in subgroup_dict.items():
-            tag_counts: Dict[str, int] = {}
-            for key in sub_keys:
+        for subgroup, base_sub_keys in subgroup_dict.items():
+            base_tag_counts: Dict[str, int] = {}
+            for key in base_sub_keys:
                 tag = self.model.terms[key].tag
-                tag_counts[tag] = tag_counts.get(tag, 0) + 1
-            tag_summary = ", ".join(f"{tag}:{count}" for tag, count in sorted(tag_counts.items()))
+                base_tag_counts[tag] = base_tag_counts.get(tag, 0) + 1
+            base_tag_summary = ", ".join(f"{tag}:{count}" for tag, count in sorted(base_tag_counts.items()))
             print(
-                f"  Processing joint fit block with {len(sub_keys)} terms "
-                f"({tag_summary}). Time: {time.strftime('%H:%M:%S', time.localtime())}"
+                f"  Processing joint fit block with {len(base_sub_keys)} terms "
+                f"({base_tag_summary}). Time: {time.strftime('%H:%M:%S', time.localtime())}"
             )
 
-            orthogonalized = self.get_orthogonalized_terms_subset(
-                sub_keys,
+            support_components = self._support_connected_components_for_keys(
+                base_sub_keys,
                 k_points,
                 tol=tol,
-                tag=None,
                 term_matrix_cache=term_matrix_cache,
             )
-            if len(orthogonalized) == 4:
-                grp_keys, initialterms, finalterms, includinglist = orthogonalized
-                fit_support_idx = None
-            else:
-                grp_keys, initialterms, finalterms, includinglist, fit_support_idx = orthogonalized
-            print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
+            if len(support_components) > 1:
+                print(f"    split into {len(support_components)} support components before orthogonalization.")
 
-            raw_subgroups_by_tag: Dict[str, set[tuple[int, int, int, int]]] = {}
-            for key in sub_keys:
-                raw = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
-                raw_subgroups_by_tag.setdefault(self.model.terms[key].tag, set()).add(raw)
-
-            if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
+            for component_index, sub_keys in enumerate(support_components):
+                tag_counts: Dict[str, int] = {}
                 for key in sub_keys:
-                    self.model.terms[key].r_value_real = 0.0
-                    self.model.terms[key].r_value_imag = 0.0
+                    tag = self.model.terms[key].tag
+                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
+                tag_summary = ", ".join(f"{tag}:{count}" for tag, count in sorted(tag_counts.items()))
+                if len(support_components) > 1:
+                    print(
+                        f"    Processing support component {component_index + 1}/{len(support_components)} "
+                        f"with {len(sub_keys)} terms ({tag_summary})."
+                    )
+
+                orthogonalized = self.get_orthogonalized_terms_subset(
+                    sub_keys,
+                    k_points,
+                    tol=tol,
+                    tag=None,
+                    term_matrix_cache=term_matrix_cache,
+                )
+                if len(orthogonalized) == 4:
+                    grp_keys, initialterms, finalterms, includinglist = orthogonalized
+                    fit_support_idx = None
+                else:
+                    grp_keys, initialterms, finalterms, includinglist, fit_support_idx = orthogonalized
+                print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
+
+                raw_subgroups_by_tag: Dict[str, set[tuple[int, int, int, int]]] = {}
+                for key in sub_keys:
+                    raw = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
+                    raw_subgroups_by_tag.setdefault(self.model.terms[key].tag, set()).add(raw)
+
+                if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
+                    for key in sub_keys:
+                        self.model.terms[key].r_value_real = 0.0
+                        self.model.terms[key].r_value_imag = 0.0
+                    for tag, raw_subgroups in raw_subgroups_by_tag.items():
+                        diagnostics_key: Any = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
+                        if len(support_components) > 1:
+                            diagnostics_key = (diagnostics_key, ("support_component", component_index))
+                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
+                    print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
+                    continue
+
+                heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
+                print(f'    before transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
+                coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
+                coeffs = np.real(coeffs)
+                print(f'    after transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
+
+                included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
+                coeffs_print = []
+                coeffs_print_by_tag: Dict[str, List[complex]] = {tag: [] for tag in raw_subgroups_by_tag}
+                for i in tqdm(range(len(sub_keys))):
+                    idx_real = included.get(2 * i)
+                    idx_imag = included.get(2 * i + 1)
+                    r_real = coeffs[idx_real] if idx_real is not None else 0.0
+                    r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
+                    r = r_real + 1j * r_imag
+                    coeffs_print.append(r)
+                    tag = self.model.terms[sub_keys[i]].tag
+                    coeffs_print_by_tag.setdefault(tag, []).append(r)
+                    self.model.terms[sub_keys[i]].r_value_real = r_real
+                    self.model.terms[sub_keys[i]].r_value_imag = r_imag
+
+                print(f"  Updated coefficients for subgroup {subgroup}: {summarize_coefficients(coeffs_print)}")
                 for tag, raw_subgroups in raw_subgroups_by_tag.items():
                     diagnostics_key = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
-                    coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
-                print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
-                continue
-
-            heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
-            print(f'    before transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
-            coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
-            coeffs = np.real(coeffs)
-            print(f'    after transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
-
-            included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
-            coeffs_print = []
-            coeffs_print_by_tag: Dict[str, List[complex]] = {tag: [] for tag in raw_subgroups_by_tag}
-            for i in tqdm(range(len(sub_keys))):
-                idx_real = included.get(2 * i)
-                idx_imag = included.get(2 * i + 1)
-                r_real = coeffs[idx_real] if idx_real is not None else 0.0
-                r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
-                r = r_real + 1j * r_imag
-                coeffs_print.append(r)
-                tag = self.model.terms[sub_keys[i]].tag
-                coeffs_print_by_tag.setdefault(tag, []).append(r)
-                self.model.terms[sub_keys[i]].r_value_real = r_real
-                self.model.terms[sub_keys[i]].r_value_imag = r_imag
-
-            print(f"  Updated coefficients for subgroup {subgroup}: {summarize_coefficients(coeffs_print)}")
-            for tag, raw_subgroups in raw_subgroups_by_tag.items():
-                diagnostics_key = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
-                if len(raw_subgroups_by_tag) == 1:
-                    coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs)
-                else:
-                    coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs_print_by_tag.get(tag, []))
+                    if len(support_components) > 1:
+                        diagnostics_key = (diagnostics_key, ("support_component", component_index))
+                    if len(raw_subgroups_by_tag) == 1:
+                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs)
+                    else:
+                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs_print_by_tag.get(tag, []))
         print("="*100)
         return coeffs_by_tag
 

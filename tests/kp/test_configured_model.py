@@ -81,6 +81,140 @@ def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> 
     }
 
 
+def _support_grouping_builder() -> ContinuumModelBuilder:
+    return ContinuumModelBuilder(
+        np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float),
+        np.zeros((0, 2), dtype=float),
+        1,
+        0,
+        np.eye(2, dtype=float),
+        np.eye(2, dtype=float),
+        {},
+        {},
+        {},
+        None,
+        {"Kinect": [], "Onsite": [], "intra": [], "inter": []},
+    )
+
+
+def _add_matrix_term(
+    builder: ContinuumModelBuilder,
+    *,
+    mz: int,
+    matrix: np.ndarray,
+    tag: str = "intra",
+) -> ContinuumTermKey:
+    key = ContinuumTermKey(mz, 0, 1, 1, 1, 1, (float(mz), 0.0))
+    arr = np.asarray(matrix, dtype=np.complex128)
+    builder.model.add_term(key, lambda _k, value=arr: value.copy(), tag=tag, symmetry_ops=[])
+    return key
+
+
+def test_support_fit_groups_split_disjoint_actual_support() -> None:
+    builder = _support_grouping_builder()
+    key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 0.0]))
+    key_b = _add_matrix_term(builder, mz=1, matrix=np.diag([0.0, 1.0]))
+
+    groups = builder._support_connected_components_for_keys(
+        [key_a, key_b],
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+        term_matrix_cache={},
+    )
+
+    assert groups == [[key_a], [key_b]]
+
+
+def test_support_fit_groups_keep_overlapping_actual_support_together() -> None:
+    builder = _support_grouping_builder()
+    key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 0.0]))
+    key_b = _add_matrix_term(builder, mz=1, matrix=np.diag([2.0, 0.0]))
+
+    groups = builder._support_connected_components_for_keys(
+        [key_a, key_b],
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+        term_matrix_cache={},
+    )
+
+    assert groups == [[key_a, key_b]]
+
+
+def test_support_fit_groups_use_symmetrized_actual_support() -> None:
+    builder = _support_grouping_builder()
+    key_upper = _add_matrix_term(builder, mz=0, matrix=np.array([[0.0, 1.0], [0.0, 0.0]]))
+    key_lower = _add_matrix_term(builder, mz=1, matrix=np.array([[0.0, 0.0], [1.0, 0.0]]))
+
+    groups = builder._support_connected_components_for_keys(
+        [key_upper, key_lower],
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+        term_matrix_cache={},
+    )
+
+    assert groups == [[key_upper, key_lower]]
+
+
+def test_support_fit_support_indices_are_empty_for_zero_terms() -> None:
+    builder = _support_grouping_builder()
+    key = _add_matrix_term(builder, mz=0, matrix=np.zeros((2, 2), dtype=np.complex128))
+
+    support = builder._term_fit_support_indices(
+        key,
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+        term_matrix_cache={},
+    )
+
+    assert support.size == 0
+
+
+def test_compute_coefficients_by_tag_splits_disjoint_support_fit_groups(monkeypatch) -> None:
+    builder = _support_grouping_builder()
+    key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 0.0]))
+    key_b = _add_matrix_term(builder, mz=1, matrix=np.diag([0.0, 1.0]))
+    calls: list[list[ContinuumTermKey]] = []
+    original = builder.get_orthogonalized_terms_subset
+
+    def spy(keys, *args, **kwargs):
+        calls.append(list(keys))
+        return original(keys, *args, **kwargs)
+
+    monkeypatch.setattr(builder, "get_orthogonalized_terms_subset", spy)
+
+    builder.compute_coefficients_by_tag(
+        np.diag([3.0, 5.0]).astype(np.complex128),
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+    )
+
+    assert calls == [[key_a], [key_b]]
+    assert builder.model.terms[key_a].r_value_real == pytest.approx(3.0)
+    assert builder.model.terms[key_b].r_value_real == pytest.approx(5.0)
+
+
+def test_compute_coefficients_by_tag_keeps_overlapping_support_joint(monkeypatch) -> None:
+    builder = _support_grouping_builder()
+    key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 1.0]))
+    key_b = _add_matrix_term(builder, mz=1, matrix=np.diag([2.0, 0.0]))
+    calls: list[list[ContinuumTermKey]] = []
+    original = builder.get_orthogonalized_terms_subset
+
+    def spy(keys, *args, **kwargs):
+        calls.append(list(keys))
+        return original(keys, *args, **kwargs)
+
+    monkeypatch.setattr(builder, "get_orthogonalized_terms_subset", spy)
+
+    builder.compute_coefficients_by_tag(
+        np.diag([3.0, 0.0]).astype(np.complex128),
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+    )
+
+    assert calls == [[key_a, key_b]]
+
+
 def _triangular_q_shell() -> np.ndarray:
     b1 = np.array([1.0, 0.0])
     b2 = np.array([0.5, np.sqrt(3.0) / 2.0])
