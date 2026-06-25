@@ -2248,7 +2248,7 @@ class ContinuumModelBuilder:
         if term_matrix_cache is not None:
             cached = term_matrix_cache.get(cache_key)
             if cached is not None:
-                return cached[0].copy(), cached[1].copy()
+                return cached
 
         idx_inc, idy_inc = self._fit_block_indices_for_key(key)
         real_blocks = []
@@ -2270,7 +2270,7 @@ class ContinuumModelBuilder:
             scipy.linalg.block_diag(*imag_blocks),
         )
         if term_matrix_cache is not None:
-            term_matrix_cache[cache_key] = (matrices[0].copy(), matrices[1].copy())
+            term_matrix_cache[cache_key] = matrices
         return matrices
 
     def _initialterms_for_fit_keys(
@@ -2309,6 +2309,38 @@ class ContinuumModelBuilder:
                 raise ValueError("Different fit block signatures in keys.")
 
         return initialterms
+
+    def _initialterm_support_vectors_for_fit_keys(
+        self,
+        keys: Sequence[ContinuumTermKey],
+        k_points: Sequence[np.ndarray],
+        *,
+        support_idx: np.ndarray,
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
+    ) -> np.ndarray:
+        support_idx = np.asarray(support_idx, dtype=int)
+        if not keys:
+            return np.empty((0, support_idx.size), dtype=np.complex128)
+
+        vectors: List[np.ndarray] = []
+        for key in tqdm(keys, desc="Processing support vectors"):
+            mat_real, mat_imag = self._fit_blocks_for_term_key(
+                key,
+                k_points,
+                term_matrix_cache=term_matrix_cache,
+            )
+            flat_real = mat_real.reshape(-1)
+            flat_imag = mat_imag.reshape(-1)
+            vectors.append(flat_real[support_idx])
+            vectors.append(flat_imag[support_idx])
+
+        subgroup_0 = self._fit_block_signature_for_key(keys[0])
+        for key in keys:
+            subgroup = self._fit_block_signature_for_key(key)
+            if subgroup != subgroup_0:
+                raise ValueError("Different fit block signatures in keys.")
+
+        return np.asarray(vectors, dtype=np.complex128)
 
     @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
@@ -2442,6 +2474,55 @@ class ContinuumModelBuilder:
             lapack_driver="gelsy",
         )
         return np.asarray(coeffs, dtype=float), includinglist, support_idx
+
+    def _solve_coefficients_from_support_matrix(
+        self,
+        initial_vectors: np.ndarray,
+        target_vector: np.ndarray,
+        *,
+        tol: float = 1e-8,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        initial_vectors = np.asarray(initial_vectors)
+        target_vector = np.asarray(target_vector)
+        if initial_vectors.ndim != 2:
+            raise ValueError("initial_vectors must have shape (n_terms, n_support)")
+        if target_vector.ndim != 1 or target_vector.shape[0] != initial_vectors.shape[1]:
+            raise ValueError("target_vector must have shape (n_support,)")
+
+        n_terms = initial_vectors.shape[0]
+        if n_terms == 0 or initial_vectors.shape[1] == 0:
+            return np.array([], dtype=float), np.array([], dtype=int)
+
+        design_complex = initial_vectors.T
+        design = np.vstack((design_complex.real, design_complex.imag))
+        target = np.concatenate((target_vector.real, target_vector.imag))
+
+        col_norms = np.linalg.norm(design, axis=0)
+        nonzero = np.flatnonzero(col_norms > tol)
+        if nonzero.size == 0:
+            return np.array([], dtype=float), np.array([], dtype=int)
+
+        qr_input = np.asfortranarray(design[:, nonzero])
+        _q, r, piv = scipy.linalg.qr(
+            qr_input,
+            mode="economic",
+            pivoting=True,
+            overwrite_a=True,
+            check_finite=False,
+        )
+        diag = np.abs(np.diag(r))
+        rank = int(np.count_nonzero(diag > tol))
+        includinglist = np.sort(nonzero[piv[:rank]].astype(int, copy=False))
+        if rank == 0:
+            return np.array([], dtype=float), np.array([], dtype=int)
+
+        coeffs, *_ = scipy.linalg.lstsq(
+            design[:, includinglist],
+            target,
+            check_finite=False,
+            lapack_driver="gelsy",
+        )
+        return np.asarray(coeffs, dtype=float), includinglist
 
     @staticmethod
     def _matrix_support_image(operator: np.ndarray, indices: np.ndarray, *, tol: float = 1e-10) -> np.ndarray:
@@ -2812,18 +2893,20 @@ class ContinuumModelBuilder:
                     print(f"  No support for subgroup {subgroup}; coefficients set to zero.")
                     continue
 
-                initialterms = self._initialterms_for_fit_keys(
+                support_vectors = self._initialterm_support_vectors_for_fit_keys(
                     sub_keys,
                     k_points,
+                    support_idx=component_support_idx,
                     term_matrix_cache=term_matrix_cache,
                 )
                 heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
-                coeffs, includinglist, fit_support_idx = self._solve_coefficients_from_support_vectors(
-                    initialterms,
-                    heff_block,
+                target_vector = heff_block.reshape(-1)[component_support_idx]
+                coeffs, includinglist = self._solve_coefficients_from_support_matrix(
+                    support_vectors,
+                    target_vector,
                     tol=tol,
-                    support_idx=component_support_idx,
                 )
+                fit_support_idx = component_support_idx
                 print(
                     f"    {len(includinglist)} independent support-vector terms "
                     f"(support={len(fit_support_idx)} entries). Time: {time.strftime('%H:%M:%S', time.localtime())}"
@@ -2832,7 +2915,7 @@ class ContinuumModelBuilder:
                     idx1, idx2 = 2 * i, 2 * i + 1
                     self.model.terms[key].active = (idx1 in includinglist or idx2 in includinglist)
 
-                if len(includinglist) == 0 or np.asarray(initialterms).size == 0:
+                if len(includinglist) == 0 or np.asarray(support_vectors).size == 0:
                     for key in sub_keys:
                         self.model.terms[key].r_value_real = 0.0
                         self.model.terms[key].r_value_imag = 0.0

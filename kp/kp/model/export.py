@@ -821,6 +821,37 @@ def _expand_operator_recipe(runtime_terms: Sequence[ContinuumTerm], moire_config
     q_center: list[tuple[float, float]] = []
     prefactor_real: list[complex] = []
     prefactor_imag: list[complex] = []
+    monomial_transform_cache: dict[
+        tuple[tuple[float, ...], tuple[float, float], int, int],
+        tuple[int, int, tuple[float, float], complex],
+    ] = {}
+
+    def cached_transform_monomial(
+        transform: np.ndarray,
+        q_base: np.ndarray,
+        mz: int,
+        mz_star: int,
+    ) -> tuple[int, int, tuple[float, float], complex]:
+        transform_key = tuple(float(x) for x in np.asarray(transform, dtype=float).ravel())
+        q_key = (float(q_base[0]), float(q_base[1]))
+        cache_key = (transform_key, q_key, int(mz), int(mz_star))
+        cached = monomial_transform_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        mz_new, mz_star_new, q_new, transform_prefactor = _transform_monomial(
+            transform,
+            q_base,
+            mz,
+            mz_star,
+        )
+        cached = (
+            int(mz_new),
+            int(mz_star_new),
+            (float(q_new[0]), float(q_new[1])),
+            complex(transform_prefactor),
+        )
+        monomial_transform_cache[cache_key] = cached
+        return cached
 
     for idx, term in enumerate(runtime_terms):
         if not hasattr(term.Y_basis, "eval_sparse"):
@@ -848,7 +879,7 @@ def _expand_operator_recipe(runtime_terms: Sequence[ContinuumTerm], moire_config
             ):
                 q_base = q_rows[row_q_idx[sparse_pos]]
                 for mz_base, mz_star_base, component_prefactor in base_components:
-                    mz_new, mz_star_new, q_new, transform_prefactor = _transform_monomial(
+                    mz_new, mz_star_new, q_new, transform_prefactor = cached_transform_monomial(
                         transform,
                         q_base,
                         mz_base,
