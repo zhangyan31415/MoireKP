@@ -1162,6 +1162,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     model_raw["target_bands"] = target_bands
     raw["model"] = model_raw
 
+    auto_low_energy_refine_indices: list[int] | None = None
     if fit.get("indices") is not None:
         fit_indices = _as_int_list(fit.get("indices", []), name="fit.indices")
         fit_selection_metadata = {
@@ -1184,7 +1185,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             base=base,
             rotation_deg=rotation_deg,
         )
-        max_points = int(fit.get("max_points", 7))
+        max_points = int(fit.get("max_points", 2))
         initial_points = int(fit.get("initial_points", 2))
         initial_fit_indices = (
             _as_int_list(fit.get("initial_fit_indices"), name="fit.initial_fit_indices")
@@ -1197,6 +1198,19 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             max_points=max_points,
             initial_indices=initial_fit_indices,
         )
+        explicit_refine_indices = fit.get("refine_indices", fit.get("refinement_indices"))
+        if explicit_refine_indices is not None:
+            auto_low_energy_refine_indices = _as_int_list(
+                explicit_refine_indices,
+                name="fit.refine_indices",
+            )
+        else:
+            auto_low_energy_refine_indices = _auto_low_energy_refinement_indices(
+                fit_kpoints_all,
+                base_indices=fit_indices,
+                max_points=int(fit.get("max_refine_points", fit.get("refine_max_points", 8))),
+            )
+        fit_selection_metadata["refine_indices"] = [int(index) for index in auto_low_energy_refine_indices]
     else:
         fit_indices = []
         fit_selection_metadata = {
@@ -1391,7 +1405,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             max_expanded=int(fit.get("max_expanded_windows", 2)),
         )
         dim_for_windows = int(np.asarray(heff_eig_for_windows).shape[1])
-        weighted_fit_bands = int(fit.get("weighted_fit_bands", fit.get("fit_bands", min(dim_for_windows, max(n_primary, 14)))))
+        weighted_fit_bands = int(fit.get("weighted_fit_bands", fit.get("fit_bands", min(dim_for_windows, max(n_primary, 10)))))
         if weighted_fit_bands < n_primary:
             raise ValueError(
                 "fit.weighted_fit_bands must be at least the primary low-energy dimension "
@@ -1423,6 +1437,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             "band_slice": list(weighted_fit_window["band_slice"]),
             "align": target_bands,
             "solver": str(fit.get("refinement_solver", "linear_low_subspace")),
+            "indices": [int(index) for index in (auto_low_energy_refine_indices or fit_indices)],
             "variable_tags": ["Kinect", "Onsite", "intra"],
             "components": ["real"],
             "refinement_candidates": [
@@ -1452,24 +1467,38 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
                 "enabled": True,
                 "primary_bands": int(n_primary),
                 "fit_bands": int(weighted_fit_bands),
-                "decay": float(fit.get("band_weight_decay", 0.45)),
-                "floor": float(fit.get("band_weight_floor", 0.05)),
+                "decay": float(fit.get("band_weight_decay", 0.75)),
+                "floor": float(fit.get("band_weight_floor", 0.45)),
                 "normalize_mean": True,
             },
             "coefficient_weight": float(fit.get("coefficient_weight", 0.02)),
             "max_nfev": int(fit.get("max_nfev", 8)),
-            "use_fit_kpoints": bool(fit.get("use_fit_kpoints", True)),
+            "use_fit_kpoints": bool(fit.get("use_fit_kpoints", False)),
             "max_variables": int(fit.get("max_variables", 900)),
             "subspace_loss": {
-                "enabled": True,
+                "enabled": bool(fit.get("subspace_loss_enabled", False)),
                 "mode": "principal_angles",
                 "weight": float(fit.get("subspace_weight", 2.0)),
                 "band_slice": weighted_band_slice,
                 "normalize": True,
                 "gap_tolerance_mev": gap_tolerance_mev,
             },
-            "low_subspace_matrix_loss": {
+            "shell_projected_matrix_loss": {
                 "enabled": True,
+                "weight": float(fit.get("shell_projected_matrix_weight", fit.get("shell_subspace_weight", 1.0))),
+                "max_shells": int(fit.get("shell_projected_matrix_max_shells", fit.get("shell_subspace_max_shells", 3))),
+                "window": {
+                    "mode": "fixed_fraction",
+                    "center_fraction": float(
+                        fit.get("shell_projected_matrix_fraction", fit.get("shell_subspace_fraction", 0.5))
+                    ),
+                    "gap_tolerance_mev": float(fit.get("shell_projected_matrix_gap_tolerance_mev", gap_tolerance_mev)),
+                },
+                "shell_decay": float(fit.get("shell_projected_matrix_shell_decay", fit.get("shell_subspace_decay", 0.75))),
+                "legacy_alias": "shell_subspace_loss",
+            },
+            "low_subspace_matrix_loss": {
+                "enabled": bool(fit.get("low_subspace_matrix_loss_enabled", False)),
                 "weight": float(fit.get("low_subspace_matrix_weight", 0.25)),
                 "sigma_mev": float(fit.get("low_subspace_matrix_sigma_mev", 10.0)),
                 "band_slice": weighted_band_slice,
@@ -1485,8 +1514,14 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             },
             "acceptance_guard": {
                 "enabled": True,
-                "max_rms_increase_mev": float(fit.get("acceptance_max_rms_increase_mev", 0.05)),
-                "max_max_increase_mev": float(fit.get("acceptance_max_max_increase_mev", 0.25)),
+                "profile": "low_energy",
+                "selection": "best_validation_window",
+                "line_search_alphas": list(fit.get("acceptance_line_search_alphas", [0.5])),
+                "guard_all_bands": bool(fit.get("acceptance_guard_all_bands", False)),
+                "max_rms_increase_mev": float(fit.get("acceptance_max_rms_increase_mev", 999.0)),
+                "max_max_increase_mev": float(fit.get("acceptance_max_max_increase_mev", 999.0)),
+                "max_all_band_rms_increase_mev": float(fit.get("acceptance_max_all_band_rms_increase_mev", 3.0)),
+                "max_all_band_max_increase_mev": float(fit.get("acceptance_max_all_band_max_increase_mev", 5.0)),
             },
         }
         if refine_config.get("enabled", False):
@@ -5146,6 +5181,140 @@ def _model_row_metadata_for_harmonic_scan(
     return rows
 
 
+def _unique_nonnegative_norms(values: Sequence[float], *, tol: float) -> list[float]:
+    norms: list[float] = []
+    for value in sorted(float(item) for item in values):
+        if value < -tol:
+            continue
+        candidate = 0.0 if abs(value) <= tol else value
+        if not norms or abs(candidate - norms[-1]) > tol * max(1.0, abs(candidate), abs(norms[-1])):
+            norms.append(float(candidate))
+    return norms
+
+
+def _shell_subspace_band_count(dim: int, *, fraction: float = 0.5) -> int:
+    if dim <= 0:
+        raise ValueError("Q-shell subspace requires positive shell dimension")
+    if fraction <= 0.0 or fraction > 1.0:
+        raise ValueError(f"Q-shell subspace fraction must be in (0, 1], got {fraction}")
+    return max(1, min(int(dim), int(np.floor(float(dim) * float(fraction)))))
+
+
+def _q_shell_row_indices(
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    n_orb: tuple[int, int],
+    *,
+    max_shells: int | None = None,
+    subspace_fraction: float = 0.5,
+    tol: float = 1.0e-6,
+) -> list[dict[str, Any]]:
+    rows = _model_row_metadata_for_harmonic_scan(qset1, qset2, n_orb)
+    if not rows:
+        return []
+    norms = _unique_nonnegative_norms([float(np.linalg.norm(np.asarray(row["q"], dtype=float))) for row in rows], tol=tol)
+    if max_shells is not None:
+        if int(max_shells) <= 0:
+            raise ValueError(f"max_shells must be positive when provided, got {max_shells}")
+        norms = norms[: int(max_shells)]
+    shells: list[dict[str, Any]] = []
+    row_norms = [float(np.linalg.norm(np.asarray(row["q"], dtype=float))) for row in rows]
+    for shell_index, norm_bound in enumerate(norms):
+        selected = [idx for idx, norm in enumerate(row_norms) if norm <= float(norm_bound) + tol]
+        dim = int(len(selected))
+        shells.append(
+            {
+                "shell_index": int(shell_index),
+                "q_norm_max": float(norm_bound),
+                "rows": selected,
+                "dimension": dim,
+                "subspace_bands": _shell_subspace_band_count(dim, fraction=subspace_fraction),
+            }
+        )
+    return shells
+
+
+def _shell_subspace_overlap_report(
+    model_h: np.ndarray,
+    target_h: np.ndarray,
+    shells: Sequence[Mapping[str, Any]],
+    *,
+    target_bands: str,
+    subspace_fraction: float = 0.5,
+    window_config: Mapping[str, Any] | None = None,
+    align: str | None = None,
+) -> dict[str, Any]:
+    model_arr = np.asarray(model_h, dtype=np.complex128)
+    target_arr = np.asarray(target_h, dtype=np.complex128)
+    if model_arr.shape != target_arr.shape or model_arr.ndim != 3:
+        raise ValueError(f"shell subspace report expects matching (Nk,dim,dim) arrays, got {model_arr.shape}, {target_arr.shape}")
+    target_key = str(target_bands).strip().lower()
+    align_key = str(align if align is not None else target_key).strip().lower()
+    shell_reports: list[dict[str, Any]] = []
+    for shell in shells:
+        rows = np.asarray(shell.get("rows", []), dtype=int)
+        if rows.size == 0:
+            continue
+        model_shell = model_arr[:, rows[:, None], rows]
+        target_shell = target_arr[:, rows[:, None], rows]
+        target_eig, target_vec = np.linalg.eigh(target_shell)
+        model_eig, model_vec = np.linalg.eigh(model_shell)
+        shell_dim = int(rows.size)
+        effective_window = dict(window_config or {})
+        if "center_fraction" not in effective_window and "subspace_fraction" not in effective_window:
+            effective_window["center_fraction"] = float(subspace_fraction)
+        if "mode" not in effective_window and shell.get("subspace_bands") is not None:
+            effective_window["mode"] = "fixed_fraction"
+            effective_window["center_fraction"] = float(shell.get("subspace_bands")) / float(shell_dim)
+        window = _shell_band_window_from_target_eig(
+            target_eig,
+            target_bands=target_key,
+            window_config=effective_window,
+        )
+        n_bands = int(window["n_bands"])
+        band_slice = tuple(int(value) for value in window["band_slice"])
+        band_metrics = _band_refinement_metrics(
+            model_shell,
+            target_eig,
+            target_shell,
+            band_slice=(int(band_slice[0]), int(band_slice[1])),
+            align=align_key,
+        )
+        subspace = _subspace_overlap_metrics(
+            model_vec[:, :, band_slice[0] : band_slice[1]],
+            target_vec[:, :, band_slice[0] : band_slice[1]],
+        )
+        shell_reports.append(
+            {
+                "shell_index": int(shell.get("shell_index", len(shell_reports))),
+                "q_norm_max": float(shell.get("q_norm_max", 0.0)),
+                "dimension": shell_dim,
+                "subspace_bands": n_bands,
+                "band_slice": [int(band_slice[0]), int(band_slice[1])],
+                "window": window,
+                "band": band_metrics,
+                "subspace": subspace,
+            }
+        )
+    mean_overlap = (
+        float(np.mean([float(item["subspace"]["mean_overlap"]) for item in shell_reports])) if shell_reports else None
+    )
+    max_leakage = (
+        float(np.max([float(item["subspace"]["max_leakage"]) for item in shell_reports])) if shell_reports else None
+    )
+    return {
+        "enabled": True,
+        "mode": "q_shell_principal_angles",
+        "target_bands": target_key,
+        "subspace_fraction": float(subspace_fraction),
+        "window": dict(window_config or {"mode": "fixed_fraction", "center_fraction": float(subspace_fraction)}),
+        "shell_count": int(len(shell_reports)),
+        "mean_overlap": mean_overlap,
+        "max_leakage": max_leakage,
+        "shells": shell_reports,
+    }
+
+
 def _unique_positive_norms(values: Sequence[float], *, tol: float) -> list[float]:
     norms: list[float] = []
     for value in sorted(float(item) for item in values if float(item) > tol):
@@ -5599,6 +5768,102 @@ def _auto_low_energy_windows(
     return {"primary": primary, "expanded": expanded}
 
 
+def _shell_band_window_from_target_eig(
+    eigvals: np.ndarray,
+    *,
+    target_bands: str,
+    window_config: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    eig = np.asarray(eigvals, dtype=float)
+    if eig.ndim != 2:
+        raise ValueError(f"shell band window expects eigvals shape (Nk,dim), got {eig.shape}")
+    dim = int(eig.shape[1])
+    if dim <= 0:
+        raise ValueError("shell band window requires positive shell dimension")
+    target = str(target_bands or "top").strip().lower()
+    if target not in {"top", "bottom"}:
+        raise ValueError("model.target_bands must be 'top' or 'bottom'")
+    cfg = dict(window_config or {})
+    mode = str(cfg.get("mode", "gap_aware")).strip().lower()
+    center_fraction = float(cfg.get("center_fraction", cfg.get("subspace_fraction", 0.5)))
+    if center_fraction <= 0.0 or center_fraction > 1.0:
+        raise ValueError("shell projected matrix window center_fraction must be in (0, 1]")
+    gap_tolerance_mev = float(cfg.get("gap_tolerance_mev", 0.1))
+    if gap_tolerance_mev < 0.0:
+        raise ValueError("shell projected matrix window gap_tolerance_mev must be non-negative")
+
+    if mode in {"fraction", "fixed_fraction", "half"}:
+        n_bands = _shell_subspace_band_count(dim, fraction=center_fraction)
+        band_slice = _auto_low_energy_band_slice(dim, n_bands, target)
+        gap_by_k = _boundary_gap_mev_by_k(eig, band_slice)
+        finite = gap_by_k[np.isfinite(gap_by_k)]
+        boundary_gap = float(np.min(finite)) if finite.size else None
+        return {
+            "mode": "fixed_fraction",
+            "target_bands": target,
+            "n_bands": int(n_bands),
+            "band_slice": [int(band_slice[0]), int(band_slice[1])],
+            "boundary_gap_mev": boundary_gap,
+            "gap_tolerance_mev": gap_tolerance_mev,
+            "window_quality": "ok"
+            if boundary_gap is None or boundary_gap >= gap_tolerance_mev
+            else "boundary_gap_small",
+            "candidate_count": 1,
+            "center_fraction": center_fraction,
+        }
+    if mode != "gap_aware":
+        raise ValueError(f"Unsupported shell projected matrix window mode {mode!r}")
+
+    raw_search = cfg.get("search_fraction", [0.35, 0.65])
+    if not isinstance(raw_search, Sequence) or isinstance(raw_search, (str, bytes)) or len(raw_search) != 2:
+        raise ValueError("shell projected matrix window search_fraction must be [lo, hi]")
+    lo = float(raw_search[0])
+    hi = float(raw_search[1])
+    if lo <= 0.0 or hi <= 0.0 or lo > hi:
+        raise ValueError("shell projected matrix window search_fraction must satisfy 0 < lo <= hi")
+    lo_n = max(1, int(np.ceil(lo * dim)))
+    hi_n = min(dim, int(np.floor(hi * dim)))
+    if hi_n < lo_n:
+        center_n = _shell_subspace_band_count(dim, fraction=center_fraction)
+        lo_n = hi_n = int(center_n)
+    center_n_float = center_fraction * dim
+    candidates: list[dict[str, Any]] = []
+    for n_bands in range(int(lo_n), int(hi_n) + 1):
+        band_slice = _auto_low_energy_band_slice(dim, int(n_bands), target)
+        gap_by_k = _boundary_gap_mev_by_k(eig, band_slice)
+        finite = gap_by_k[np.isfinite(gap_by_k)]
+        boundary_gap = float(np.min(finite)) if finite.size else None
+        candidates.append(
+            {
+                "n_bands": int(n_bands),
+                "band_slice": [int(band_slice[0]), int(band_slice[1])],
+                "boundary_gap_mev": boundary_gap,
+                "distance_to_center": float(abs(float(n_bands) - center_n_float)),
+            }
+        )
+    selected = min(
+        candidates,
+        key=lambda row: (
+            -float(row["boundary_gap_mev"]) if row["boundary_gap_mev"] is not None else -np.inf,
+            float(row["distance_to_center"]),
+            int(row["n_bands"]),
+        ),
+    )
+    boundary_gap = selected["boundary_gap_mev"]
+    return {
+        "mode": "gap_aware",
+        "target_bands": target,
+        "n_bands": int(selected["n_bands"]),
+        "band_slice": [int(value) for value in selected["band_slice"]],
+        "boundary_gap_mev": boundary_gap,
+        "gap_tolerance_mev": gap_tolerance_mev,
+        "window_quality": "ok" if boundary_gap is None or boundary_gap >= gap_tolerance_mev else "boundary_gap_small",
+        "candidate_count": int(len(candidates)),
+        "center_fraction": center_fraction,
+        "search_fraction": [float(lo), float(hi)],
+    }
+
+
 def _select_adaptive_fit_indices(
     kpoints: np.ndarray,
     *,
@@ -5633,6 +5898,58 @@ def _select_adaptive_fit_indices(
         "residual_scores_used": residual_scores is not None,
     }
     return selected_list, metadata
+
+
+def _auto_low_energy_refinement_indices(
+    kpoints: np.ndarray,
+    *,
+    base_indices: Sequence[int],
+    max_points: int = 8,
+) -> list[int]:
+    arr = _validate_kpoints(kpoints)
+    n_k = int(arr.shape[0])
+    if n_k <= 0:
+        raise ValueError("auto_low_energy refinement selection requires at least one k-point")
+    limit = max(1, min(int(max_points), n_k))
+    vertices = _kpath_turning_point_indices(arr)
+    if n_k > 1 and (n_k - 1) not in vertices:
+        vertices.append(n_k - 1)
+    vertices = sorted({int(index) for index in vertices if 0 <= int(index) < n_k})
+
+    candidates: list[tuple[int, int]] = []
+
+    def add(priority: int, index: int) -> None:
+        if 0 <= int(index) < n_k:
+            candidates.append((int(priority), int(index)))
+
+    for index in base_indices:
+        add(0, int(index))
+    for index in vertices:
+        add(1, int(index))
+    for left, right in zip(vertices, vertices[1:]):
+        if int(right) > int(left):
+            add(2, int(round((int(left) + int(right)) / 2.0)))
+    if len(vertices) >= 2:
+        left = int(vertices[0])
+        right = int(vertices[1])
+        if right > left + 1:
+            near_edge_offset = max(1, int(round((right - left) * 0.1)))
+            add(3, left + near_edge_offset)
+
+    if n_k > 1:
+        for index in _uniform_fit_indices(n_k, min(limit, max(2, limit))):
+            add(4, int(index))
+
+    selected: list[int] = []
+    seen: set[int] = set()
+    for _priority, index in sorted(candidates, key=lambda item: (item[0], item[1])):
+        if index in seen:
+            continue
+        seen.add(index)
+        selected.append(index)
+        if len(selected) >= limit:
+            break
+    return sorted(selected)
 
 
 def _kpath_turning_point_indices(kpoints: np.ndarray, *, atol: float = 1.0e-10) -> list[int]:
@@ -5707,19 +6024,19 @@ def _auto_low_energy_fit_candidate_sets(
     else:
         minimal = [0]
 
-    rows: list[tuple[str, list[int], str, int]] = [
-        ("minimal", minimal, "minimal low-energy fit anchors", max_count),
+    rows: list[tuple[str, list[int], str, int, bool]] = [
+        ("minimal", minimal, "minimal low-energy fit anchors", max_count, False),
     ]
     if len(vertex_ladder) >= 3:
-        rows.append(("junctions_3", vertex_ladder[:3], "minimal anchors plus first high-symmetry junction", max_count))
+        rows.append(("junctions_3", vertex_ladder[:3], "minimal anchors plus first high-symmetry junction", max_count, False))
     if len(vertex_ladder) >= 4:
-        rows.append(("junctions_4", vertex_ladder[:4], "all high-symmetry junctions", max_count))
+        rows.append(("junctions_4", vertex_ladder[:4], "all high-symmetry junctions", max_count, False))
     elif len(vertex_ladder) > 1:
-        rows.append((f"junctions_{len(vertex_ladder)}", vertex_ladder, "available high-symmetry junctions", max_count))
+        rows.append((f"junctions_{len(vertex_ladder)}", vertex_ladder, "available high-symmetry junctions", max_count, False))
 
     uniform_count = min(max_count, max(5, initial))
     if uniform_count > len(minimal):
-        rows.append((f"uniform_{uniform_count}", _uniform_fit_indices(n_k, uniform_count), "uniform path anchors", max_count))
+        rows.append((f"uniform_{uniform_count}", _uniform_fit_indices(n_k, uniform_count), "uniform path anchors", max_count, False))
 
     if residual_scores is not None:
         scores = np.asarray(residual_scores, dtype=float)
@@ -5734,12 +6051,16 @@ def _auto_low_energy_fit_candidate_sets(
                     [*residual_seed, *residual_ranked],
                     f"high-symmetry anchors plus residual peaks up to {target_count} fit points",
                     target_count,
+                    True,
                 )
             )
 
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[int, ...]] = set()
-    for name, raw_indices, reason, limit in rows:
+    for name, raw_indices, reason, limit, allow_truncate in rows:
+        full_indices = _dedupe_fit_indices(raw_indices, n_k, n_k)
+        if not allow_truncate and len(full_indices) > int(limit):
+            continue
         indices = _dedupe_fit_indices(raw_indices, n_k, int(limit))
         if not indices:
             continue
@@ -6165,6 +6486,79 @@ def _low_subspace_matrix_loss_config(
     }
 
 
+def _shell_projected_matrix_loss_config(raw_cfg: Mapping[str, Any]) -> dict[str, Any] | None:
+    raw = raw_cfg.get("shell_projected_matrix_loss")
+    source_key = "shell_projected_matrix_loss"
+    if raw is None and "shell_subspace_loss" in raw_cfg:
+        raw = raw_cfg.get("shell_subspace_loss")
+        source_key = "shell_subspace_loss"
+    elif raw is not None and "shell_subspace_loss" in raw_cfg:
+        raise ValueError(
+            "fit.refine_bands.shell_projected_matrix_loss conflicts with legacy "
+            "fit.refine_bands.shell_subspace_loss; use only shell_projected_matrix_loss"
+        )
+    if raw in (None, False):
+        return None
+    if raw is True:
+        cfg: dict[str, Any] = {"enabled": True}
+    elif isinstance(raw, Mapping):
+        cfg = dict(raw)
+    else:
+        raise ValueError(f"fit.refine_bands.{source_key} must be a mapping or boolean when provided")
+    if not bool(cfg.get("enabled", True)):
+        return None
+    weight = float(cfg.get("weight", 1.0))
+    if weight < 0.0:
+        raise ValueError(f"fit.refine_bands.{source_key}.weight must be non-negative")
+    max_shells_raw = cfg.get("max_shells", 3)
+    max_shells = int(max_shells_raw) if max_shells_raw is not None else None
+    if max_shells is not None and max_shells <= 0:
+        raise ValueError(f"fit.refine_bands.{source_key}.max_shells must be positive")
+    raw_window = cfg.get("window")
+    if raw_window is None:
+        if source_key == "shell_subspace_loss":
+            window = {
+                "mode": "fixed_fraction",
+                "center_fraction": float(cfg.get("subspace_fraction", 0.5)),
+            }
+        else:
+            window = {
+                "mode": "gap_aware",
+                "center_fraction": float(cfg.get("subspace_fraction", 0.5)),
+                "search_fraction": [0.35, 0.65],
+                "gap_tolerance_mev": float(cfg.get("gap_tolerance_mev", raw_cfg.get("gap_tolerance_mev", 0.1))),
+            }
+    elif isinstance(raw_window, Mapping):
+        window = dict(raw_window)
+        if "center_fraction" not in window and "subspace_fraction" in cfg:
+            window["center_fraction"] = float(cfg["subspace_fraction"])
+        window.setdefault("center_fraction", 0.5)
+        window.setdefault("mode", "gap_aware" if source_key != "shell_subspace_loss" else "fixed_fraction")
+        if str(window.get("mode", "")).strip().lower() == "gap_aware":
+            window.setdefault("search_fraction", [0.35, 0.65])
+            window.setdefault("gap_tolerance_mev", float(cfg.get("gap_tolerance_mev", raw_cfg.get("gap_tolerance_mev", 0.1))))
+    else:
+        raise ValueError(f"fit.refine_bands.{source_key}.window must be a mapping when provided")
+    center_fraction = float(window.get("center_fraction", window.get("subspace_fraction", 0.5)))
+    if center_fraction <= 0.0 or center_fraction > 1.0:
+        raise ValueError(f"fit.refine_bands.{source_key}.window.center_fraction must be in (0, 1]")
+    window["center_fraction"] = center_fraction
+    shell_decay = float(cfg.get("shell_decay", 1.0))
+    if shell_decay < 0.0:
+        raise ValueError(f"fit.refine_bands.{source_key}.shell_decay must be non-negative")
+    return {
+        "enabled": True,
+        "weight": weight,
+        "max_shells": max_shells,
+        "subspace_fraction": center_fraction,
+        "window": window,
+        "shell_decay": shell_decay,
+        "tol": float(cfg.get("tol", 1.0e-6)),
+        "source_key": source_key,
+        "legacy_alias": "shell_subspace_loss",
+    }
+
+
 def _refinement_acceptance_guard_config(
     raw_cfg: Mapping[str, Any],
     model_config: ConfiguredModel,
@@ -6246,6 +6640,12 @@ def _refinement_acceptance_guard_config(
     alphas = sorted({float(value) for value in raw_alphas if float(value) > 0.0}, reverse=True)
     if not alphas:
         alphas = [1.0]
+    selection = str(cfg.get("selection", "first_accepted")).strip().lower()
+    if selection not in {"first_accepted", "best_validation_window"}:
+        raise ValueError(
+            "fit.refine_bands.acceptance_guard.selection must be "
+            "'first_accepted' or 'best_validation_window'"
+        )
 
     return {
         "enabled": True,
@@ -6255,6 +6655,7 @@ def _refinement_acceptance_guard_config(
         "max_max_increase_mev": max_max_increase,
         "windows": windows,
         "line_search_alphas": alphas,
+        "selection": selection,
     }
 
 
@@ -6304,6 +6705,7 @@ def _apply_refinement_acceptance_guard(
     y0_arr = np.asarray(y0, dtype=float)
     candidate_arr = np.asarray(candidate_y, dtype=float)
     trials: list[dict[str, Any]] = []
+    accepted_trials: list[tuple[np.ndarray, dict[str, Any]]] = []
     for alpha in guard_cfg["line_search_alphas"]:
         trial_y = y0_arr + float(alpha) * (candidate_arr - y0_arr)
         trial_h = h_from_y(trial_y)
@@ -6326,6 +6728,8 @@ def _apply_refinement_acceptance_guard(
         }
         trials.append(trial_report)
         if not failed:
+            accepted_trials.append((trial_y, trial_report))
+        if not failed and str(guard_cfg.get("selection", "first_accepted")) == "first_accepted":
             return trial_y, {
                 **guard_cfg,
                 "selected_alpha": float(alpha),
@@ -6337,6 +6741,31 @@ def _apply_refinement_acceptance_guard(
                 "windows": windows,
                 "reason": None,
             }
+
+    if accepted_trials:
+        def trial_key(item: tuple[np.ndarray, dict[str, Any]]) -> tuple[float, float, float]:
+            _trial_y, trial = item
+            windows = list(trial.get("windows", []))
+            validation = next((window for window in windows if window.get("name") == "validation_window"), windows[0])
+            candidate = validation["candidate"]
+            return (
+                float(candidate["top_band_rms_mev"]),
+                float(candidate["top_band_max_mev"]),
+                -float(trial.get("alpha", 0.0)),
+            )
+
+        selected_y, selected_trial = min(accepted_trials, key=trial_key)
+        return selected_y, {
+            **guard_cfg,
+            "selected_alpha": float(selected_trial["alpha"]),
+            "accepted": True,
+            "reverted": False,
+            "scaled": float(selected_trial["alpha"]) < 1.0,
+            "failed_windows": [],
+            "trials": trials,
+            "windows": list(selected_trial.get("windows", [])),
+            "reason": None,
+        }
 
     last = trials[-1] if trials else {"failed_windows": [], "windows": []}
     return y0_arr.copy(), {
@@ -6499,6 +6928,21 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
         dim=base_h.shape[-1],
         target_bands=target_bands,
     )
+    shell_projected_matrix_loss_cfg = _shell_projected_matrix_loss_config(raw_cfg)
+    shell_specs: list[dict[str, Any]] = []
+    if shell_projected_matrix_loss_cfg is not None:
+        qset1 = np.asarray(moire_config.Q_set1, dtype=float)
+        qset2 = np.asarray(moire_config.Q_set2, dtype=float)
+        shell_specs = _q_shell_row_indices(
+            qset1,
+            qset2,
+            (int(moire_config.n_orb1), int(moire_config.n_orb2)),
+            max_shells=shell_projected_matrix_loss_cfg.get("max_shells"),
+            subspace_fraction=float(shell_projected_matrix_loss_cfg["subspace_fraction"]),
+            tol=float(shell_projected_matrix_loss_cfg["tol"]),
+        )
+        if not shell_specs:
+            raise ValueError("fit.refine_bands.shell_projected_matrix_loss found no Q-shell rows")
     target_eig_full = None
     target_vec_full = None
     subspace_target_basis = None
@@ -6618,6 +7062,76 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
                     projected * weight_matrix
                 ).reshape(-1)
             row0 += subspace_dim * subspace_dim
+        design_chunks = [design_complex]
+        target_chunks = [target_complex]
+        shell_linear_report: dict[str, Any] = {"enabled": False}
+        if shell_projected_matrix_loss_cfg is not None:
+            shell_design_chunks: list[np.ndarray] = []
+            shell_target_chunks: list[np.ndarray] = []
+            shell_rows_report: list[dict[str, Any]] = []
+            shell_weight = float(shell_projected_matrix_loss_cfg["weight"])
+            shell_decay = float(shell_projected_matrix_loss_cfg["shell_decay"])
+            shell_window_cfg = dict(shell_projected_matrix_loss_cfg["window"])
+            for shell in shell_specs:
+                rows = np.asarray(shell["rows"], dtype=int)
+                shell_dim = int(rows.size)
+                target_shell_all = heff_all[:, rows[:, None], rows]
+                shell_eig_all, shell_vec_all = np.linalg.eigh(target_shell_all)
+                shell_window = _shell_band_window_from_target_eig(
+                    shell_eig_all,
+                    target_bands=target_bands,
+                    window_config=shell_window_cfg,
+                )
+                n_shell_bands = int(shell_window["n_bands"])
+                shell_slice = tuple(int(value) for value in shell_window["band_slice"])
+                n_shell_complex = int(len(kpoints) * n_shell_bands * n_shell_bands)
+                shell_design = np.empty((n_shell_complex, len(kept_variables)), dtype=np.complex128)
+                shell_target = np.empty(n_shell_complex, dtype=np.complex128)
+                scale_shell = np.sqrt(shell_weight * (shell_decay ** int(shell["shell_index"])))
+                shell_row0 = 0
+                for k_index in range(len(kpoints)):
+                    target_shell = target_shell_all[k_index]
+                    base_shell = base_h[k_index][rows[:, None], rows]
+                    target_basis = shell_vec_all[k_index, :, shell_slice[0] : shell_slice[1]]
+                    target_block = target_basis.conj().T @ (target_shell - base_shell) @ target_basis
+                    block_size = n_shell_bands * n_shell_bands
+                    shell_target[shell_row0 : shell_row0 + block_size] = (scale_shell * target_block).reshape(-1)
+                    for var_index in range(len(kept_variables)):
+                        basis_shell = basis[var_index, k_index][rows[:, None], rows]
+                        projected = target_basis.conj().T @ basis_shell @ target_basis
+                        shell_design[shell_row0 : shell_row0 + block_size, var_index] = (
+                            scale_shell * projected
+                        ).reshape(-1)
+                    shell_row0 += block_size
+                shell_design_chunks.append(shell_design)
+                shell_target_chunks.append(shell_target)
+                shell_rows_report.append(
+                    {
+                        "shell_index": int(shell["shell_index"]),
+                        "dimension": shell_dim,
+                        "subspace_bands": n_shell_bands,
+                        "band_slice": [int(shell_slice[0]), int(shell_slice[1])],
+                        "window": shell_window,
+                        "complex_rows": int(n_shell_complex),
+                        "weight": float(scale_shell**2),
+                    }
+                )
+            if shell_design_chunks:
+                design_chunks.extend(shell_design_chunks)
+                target_chunks.extend(shell_target_chunks)
+            shell_linear_report = {
+                "enabled": True,
+                "mode": "q_shell_projected_linear",
+                "target_bands": target_bands,
+                "weight": float(shell_projected_matrix_loss_cfg["weight"]),
+                "shell_decay": float(shell_projected_matrix_loss_cfg["shell_decay"]),
+                "subspace_fraction": float(shell_projected_matrix_loss_cfg["subspace_fraction"]),
+                "window": shell_window_cfg,
+                "source_key": str(shell_projected_matrix_loss_cfg.get("source_key", "shell_projected_matrix_loss")),
+                "shells": shell_rows_report,
+            }
+        design_complex = np.vstack(design_chunks)
+        target_complex = np.concatenate(target_chunks)
         design = np.vstack([design_complex.real, design_complex.imag])
         target = np.concatenate([target_complex.real, target_complex.imag])
         regularization = float(raw_cfg.get("regularization", raw_cfg.get("linear_regularization", 0.0)))
@@ -6646,6 +7160,29 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             _set_term_component_value(term, component, float(value))
         refined_h = h_from_y(current_y)
         refined_metrics = _band_refinement_metrics(refined_h, heff_eig, heff_all, band_slice=band_slice, align=align)
+        shell_projected_matrix_report = {"enabled": False}
+        if shell_projected_matrix_loss_cfg is not None:
+            shell_projected_matrix_report = {
+                **shell_linear_report,
+                "initial": _shell_subspace_overlap_report(
+                    base_h,
+                    heff_all,
+                    shell_specs,
+                    target_bands=target_bands,
+                    subspace_fraction=float(shell_projected_matrix_loss_cfg["subspace_fraction"]),
+                    window_config=dict(shell_projected_matrix_loss_cfg["window"]),
+                    align=align,
+                ),
+                "refined": _shell_subspace_overlap_report(
+                    refined_h,
+                    heff_all,
+                    shell_specs,
+                    target_bands=target_bands,
+                    subspace_fraction=float(shell_projected_matrix_loss_cfg["subspace_fraction"]),
+                    window_config=dict(shell_projected_matrix_loss_cfg["window"]),
+                    align=align,
+                ),
+            }
         drift = np.abs((current_y - y0) / scale)
         variable_report = [
             {
@@ -6688,6 +7225,11 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             "weighted_band_loss": weighted_band_report,
             "matrix_loss": {"enabled": False},
             "subspace_loss": {"enabled": False},
+            "shell_projected_matrix_loss": shell_projected_matrix_report,
+            "shell_subspace_loss": {
+                "enabled": bool(shell_projected_matrix_report.get("enabled", False)),
+                "legacy_alias_of": "shell_projected_matrix_loss",
+            },
             "low_subspace_matrix_loss": {
                 "enabled": True,
                 "band_slice": [int(s0), int(s1)],

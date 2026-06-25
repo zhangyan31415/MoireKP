@@ -17,7 +17,9 @@ from kp.model.pipeline import (  # noqa: E402
     _auto_harmonics_from_q_sets,
     _auto_harmonics_from_support,
     _all_band_plot_config,
+    _apply_refinement_acceptance_guard,
     _auto_low_energy_windows,
+    _auto_low_energy_refinement_indices,
     _build_operation_registry,
     _default_term_template_profile_metadata,
     _default_term_templates_for_model,
@@ -35,9 +37,12 @@ from kp.model.pipeline import (  # noqa: E402
     _matrix_loss_residual,
     _max_derivative_order_values,
     _principal_angle_subspace_residual,
+    _q_shell_row_indices,
     _representative_score,
     _select_adaptive_fit_indices,
     _select_band_refinement_variables,
+    _shell_band_window_from_target_eig,
+    _shell_subspace_overlap_report,
     _subspace_overlap_metrics,
     _symmetry_operation_index,
     _write_auto_model_selection_outputs,
@@ -1363,6 +1368,96 @@ def test_low_subspace_matrix_residual_uses_target_projector_not_full_matrix() ->
     assert report["max_mev"] == pytest.approx(2000.0)
 
 
+def test_q_shell_row_indices_are_cumulative_and_orbital_complete() -> None:
+    qset1 = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=float)
+    qset2 = np.array([[0.0, 0.0], [0.0, 1.0]], dtype=float)
+
+    shells = _q_shell_row_indices(qset1, qset2, (2, 1), max_shells=2, tol=1.0e-8)
+
+    assert [item["shell_index"] for item in shells] == [0, 1]
+    assert shells[0]["dimension"] == 3
+    assert shells[0]["subspace_bands"] == 1
+    assert shells[0]["rows"] == [0, 3, 6]
+    assert shells[1]["dimension"] == 6
+    assert shells[1]["subspace_bands"] == 3
+    assert shells[1]["rows"] == [0, 1, 3, 4, 6, 7]
+
+
+def test_shell_subspace_overlap_uses_half_shell_dimension_and_ignores_internal_rotation() -> None:
+    qset = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    shells = _q_shell_row_indices(qset, np.zeros((0, 2), dtype=float), (2, 0), max_shells=2)
+    target = np.diag([0.0, 0.1, 1.0, 1.1])[None, :, :].astype(np.complex128)
+    rotation = np.array(
+        [
+            [np.sqrt(0.5), -np.sqrt(0.5)],
+            [np.sqrt(0.5), np.sqrt(0.5)],
+        ],
+        dtype=np.complex128,
+    )
+    rotated_top = rotation @ np.diag([1.0, 1.1]) @ rotation.conj().T
+    model = target.copy()
+    model[0, 2:4, 2:4] = rotated_top
+
+    report = _shell_subspace_overlap_report(
+        model,
+        target,
+        shells,
+        target_bands="top",
+    )
+
+    shell1 = report["shells"][1]
+    assert shell1["dimension"] == 4
+    assert shell1["subspace_bands"] == 2
+    assert shell1["subspace"]["mean_overlap"] == pytest.approx(1.0)
+    assert shell1["subspace"]["max_leakage"] == pytest.approx(0.0)
+
+
+def test_shell_gap_aware_window_prefers_stable_boundary_near_half() -> None:
+    eig = np.array(
+        [
+            [0.0, 0.1, 0.2, 1.8, 1.9, 2.0],
+            [0.0, 0.2, 0.3, 1.7, 1.8, 1.9],
+        ],
+        dtype=float,
+    )
+
+    window = _shell_band_window_from_target_eig(
+        eig,
+        target_bands="top",
+        window_config={
+            "mode": "gap_aware",
+            "center_fraction": 0.5,
+            "search_fraction": [0.35, 0.65],
+            "gap_tolerance_mev": 50.0,
+        },
+    )
+
+    assert window["mode"] == "gap_aware"
+    assert window["n_bands"] == 3
+    assert window["band_slice"] == [3, 6]
+    assert window["boundary_gap_mev"] == pytest.approx(1400.0)
+    assert window["window_quality"] == "ok"
+
+
+def test_shell_gap_aware_window_reports_small_boundary_gap() -> None:
+    eig = np.array([[0.0, 0.1, 0.11, 0.12, 0.13, 0.14]], dtype=float)
+
+    window = _shell_band_window_from_target_eig(
+        eig,
+        target_bands="top",
+        window_config={
+            "mode": "gap_aware",
+            "center_fraction": 0.5,
+            "search_fraction": [0.35, 0.65],
+            "gap_tolerance_mev": 50.0,
+        },
+    )
+
+    assert window["n_bands"] == 3
+    assert window["boundary_gap_mev"] < 50.0
+    assert window["window_quality"] == "boundary_gap_small"
+
+
 def test_harmonic_ablation_selects_smallest_acceptable_support() -> None:
     qset = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=float)
     heff = np.zeros((1, 6, 6), dtype=np.complex128)
@@ -1548,7 +1643,6 @@ def test_load_model_config_auto_low_energy_sets_default_refinement(tmp_path: Pat
     data["model"]["target_bands"] = "top"
     data["fit"] = {
         "mode": "auto_low_energy",
-        "max_points": 2,
         "coeff_tol": 1.0e-8,
     }
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
@@ -1556,6 +1650,7 @@ def test_load_model_config_auto_low_energy_sets_default_refinement(tmp_path: Pat
     config = load_model_config(cfg_path)
 
     assert config.fit_selection_metadata["mode"] == "auto_low_energy"
+    assert config.fit_selection_metadata["max_points"] == 2
     assert config.band_refinement_config["enabled"] is True
     assert config.band_refinement_config["solver"] == "linear_low_subspace"
     assert config.band_refinement_config["variable_tags"] == ["Kinect", "Onsite", "intra"]
@@ -1565,21 +1660,37 @@ def test_load_model_config_auto_low_energy_sets_default_refinement(tmp_path: Pat
         "B_add_inter_real",
         "C_add_imag",
     ]
-    assert config.band_refinement_config["subspace_loss"]["enabled"] is True
-    assert config.band_refinement_config["low_subspace_matrix_loss"]["enabled"] is True
+    assert config.band_refinement_config["subspace_loss"]["enabled"] is False
+    shell_loss = config.band_refinement_config["shell_projected_matrix_loss"]
+    assert shell_loss["enabled"] is True
+    assert shell_loss["weight"] == pytest.approx(1.0)
+    assert shell_loss["max_shells"] == 3
+    assert shell_loss["window"]["mode"] == "fixed_fraction"
+    assert shell_loss["window"]["center_fraction"] == pytest.approx(0.5)
+    assert shell_loss["legacy_alias"] == "shell_subspace_loss"
+    assert "shell_subspace_loss" not in config.band_refinement_config
+    assert config.band_refinement_config["low_subspace_matrix_loss"]["enabled"] is False
     assert config.band_refinement_config["target_bands"] == "top"
     assert config.band_refinement_config["band_slice"][1] - config.band_refinement_config["band_slice"][0] > sum(config.n_orb)
     assert config.band_refinement_config["weighted_band_loss"]["enabled"] is True
     assert config.band_refinement_config["weighted_band_loss"]["primary_bands"] == sum(config.n_orb)
-    assert config.band_refinement_config["weighted_band_loss"]["decay"] == pytest.approx(0.45)
-    assert config.band_refinement_config["weighted_band_loss"]["floor"] == pytest.approx(0.05)
+    assert config.band_refinement_config["weighted_band_loss"]["decay"] == pytest.approx(0.75)
+    assert config.band_refinement_config["weighted_band_loss"]["floor"] == pytest.approx(0.45)
     assert config.band_refinement_config["subspace_loss"]["band_slice"] == config.band_refinement_config["band_slice"]
     assert config.band_refinement_config["low_subspace_matrix_loss"]["band_slice"] == config.band_refinement_config["band_slice"]
     assert config.band_refinement_config["subspace_loss"]["weight"] == pytest.approx(2.0)
     assert config.band_refinement_config["max_nfev"] == 8
-    assert config.band_refinement_config["use_fit_kpoints"] is True
+    assert config.band_refinement_config["indices"] == config.fit_selection_metadata["refine_indices"]
+    assert config.band_refinement_config["indices"] == [0, 1]
+    assert config.band_refinement_config["use_fit_kpoints"] is False
     assert config.band_refinement_config["max_variables"] == 900
     assert config.band_refinement_config["acceptance_guard"]["enabled"] is True
+    assert config.band_refinement_config["acceptance_guard"]["profile"] == "low_energy"
+    assert config.band_refinement_config["acceptance_guard"]["selection"] == "best_validation_window"
+    assert config.band_refinement_config["acceptance_guard"]["line_search_alphas"] == [0.5]
+    assert config.band_refinement_config["acceptance_guard"]["guard_all_bands"] is False
+    assert config.band_refinement_config["acceptance_guard"]["max_rms_increase_mev"] == pytest.approx(999.0)
+    assert config.band_refinement_config["acceptance_guard"]["max_max_increase_mev"] == pytest.approx(999.0)
     assert config.coeff_prune_threshold == pytest.approx(1.0e-4)
 
 
@@ -1863,6 +1974,70 @@ def test_band_refinement_acceptance_guard_reverts_worse_plot_window(monkeypatch,
     assert report["max_scaled_coefficient_drift"] == pytest.approx(0.0)
 
 
+def test_refinement_acceptance_guard_can_select_best_validation_alpha(tmp_path: Path) -> None:
+    heff = np.array([[[0.0, 0.0], [0.0, 1.0]]], dtype=np.complex128)
+    heff_eig = np.linalg.eigvalsh(heff)
+    model_cfg = ConfiguredModel(
+        path=tmp_path / "model.yaml",
+        raw={"model": {"target_bands": "top"}},
+        source_config=tmp_path / "source.yaml",
+        source_raw={},
+        qset1_file=tmp_path / "q1.npy",
+        qset2_file=tmp_path / "q2.npy",
+        kpoints_file=None,
+        heff_file=tmp_path / "heff.npy",
+        heff_eig_file=None,
+        output_dir=tmp_path / "out",
+        rotation_deg=0.0,
+        fit_indices=[0],
+        fit_selection_metadata={"mode": "manual"},
+        band_indices=None,
+        n_orb=(1, 0),
+        nlow_state=[1, 0],
+        bM_config={},
+        harmonics_config={},
+        max_order={},
+        symmetry_map={},
+        coeff_tol=1.0e-8,
+        coeff_prune_threshold=0.0,
+        compare_to_heff=True,
+        band_plot_config={"top_bands": 1, "align": "none"},
+    )
+
+    def h_from_y(y: np.ndarray) -> np.ndarray:
+        value = float(np.asarray(y)[0])
+        return np.array([[[0.0, 0.0], [0.0, value]]], dtype=np.complex128)
+
+    selected_y, report = _apply_refinement_acceptance_guard(
+        raw_cfg={
+            "align": "none",
+            "target_bands": "top",
+            "acceptance_guard": {
+                "enabled": True,
+                "selection": "best_validation_window",
+                "line_search_alphas": [1.0, 0.5],
+                "max_rms_increase_mev": 2000.0,
+                "max_max_increase_mev": 2000.0,
+                "guard_primary_window": False,
+                "guard_all_bands": False,
+            },
+        },
+        model_config=model_cfg,
+        base_h=h_from_y(np.array([0.0])),
+        heff_eig=heff_eig,
+        heff_all=heff,
+        y0=np.array([0.0]),
+        candidate_y=np.array([2.0]),
+        h_from_y=h_from_y,
+    )
+
+    assert selected_y == pytest.approx([1.0])
+    assert report is not None
+    assert report["accepted"] is True
+    assert report["selected_alpha"] == pytest.approx(0.5)
+    assert len(report["trials"]) == 2
+
+
 def test_band_refinement_uses_fit_kpoints_not_full_band_path(monkeypatch, tmp_path: Path) -> None:
     import kp.model.pipeline as pipeline
 
@@ -2105,6 +2280,7 @@ def test_band_refinement_linear_low_subspace_solver_updates_coefficients(monkeyp
             "components": ["real"],
             "regularization": 0.0,
             "subspace_loss": {"enabled": False},
+            "shell_projected_matrix_loss": {"enabled": True, "max_shells": 1},
             "low_subspace_matrix_loss": {"enabled": False},
         },
     )
@@ -2116,6 +2292,10 @@ def test_band_refinement_linear_low_subspace_solver_updates_coefficients(monkeyp
     assert model.term.r_value_real == pytest.approx(2.0)
     assert report["initial"]["top_band_rms_mev"] == pytest.approx(1000.0)
     assert report["refined"]["top_band_rms_mev"] == pytest.approx(0.0, abs=1.0e-9)
+    assert report["shell_projected_matrix_loss"]["enabled"] is True
+    assert report["shell_projected_matrix_loss"]["shells"][0]["subspace_bands"] == 1
+    assert report["shell_projected_matrix_loss"]["refined"]["shells"][0]["subspace"]["mean_overlap"] == pytest.approx(1.0)
+    assert report["shell_subspace_loss"]["legacy_alias_of"] == "shell_projected_matrix_loss"
 
 
 def test_band_refinement_linear_low_subspace_guard_reverts_all_band_degradation(monkeypatch, tmp_path: Path) -> None:
@@ -5709,6 +5889,39 @@ def test_auto_low_energy_fit_candidates_use_initial_fit_indices_override() -> No
 
     assert candidates[0]["name"] == "minimal"
     assert candidates[0]["indices"] == [0, 40]
+
+
+def test_auto_low_energy_fit_candidates_do_not_truncate_semantic_junctions() -> None:
+    seg1 = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21)])
+    seg2 = np.column_stack([np.ones(20), np.linspace(0.05, 1.0, 20)])
+    seg3 = np.column_stack([np.linspace(0.95, 0.0, 20), np.ones(20)])
+    kpoints = np.vstack([seg1, seg2, seg3])
+
+    candidates = _auto_low_energy_fit_candidate_sets(
+        kpoints,
+        initial_points=2,
+        max_points=2,
+        initial_indices=[0, 40],
+    )
+
+    assert [row["name"] for row in candidates] == ["minimal"]
+    assert candidates[0]["indices"] == [0, 40]
+    assert [0, 20] not in [row["indices"] for row in candidates]
+
+
+def test_auto_low_energy_refinement_indices_use_vertices_midpoints_and_edge_point() -> None:
+    seg1 = np.column_stack([np.linspace(0.0, 1.0, 21), np.zeros(21)])
+    seg2 = np.column_stack([np.ones(20), np.linspace(0.05, 1.0, 20)])
+    seg3 = np.column_stack([np.linspace(0.95, 0.0, 20), np.ones(20)])
+    kpoints = np.vstack([seg1, seg2, seg3])
+
+    indices = _auto_low_energy_refinement_indices(
+        kpoints,
+        base_indices=[0, 40],
+        max_points=8,
+    )
+
+    assert indices == [0, 2, 10, 20, 30, 40, 50, 60]
 
 
 def test_auto_low_energy_fit_candidate_selection_rejects_low_band_overfit() -> None:
