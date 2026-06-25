@@ -562,6 +562,25 @@ def analyze_block_support(D_num: np.ndarray, groups: Sequence[tuple[np.ndarray, 
     )
 
 
+def _block_support_is_substantially_cleaner(
+    monomial_report: ExactificationReport,
+    block_report: ExactificationReport | None,
+    *,
+    reject_if_off_support_rel_gt: float,
+    reject_if_amplitude_deviation_gt: float,
+) -> bool:
+    if block_report is None or block_report.support_mismatch_count:
+        return False
+    block_amp_dev = max(abs(block_report.amplitude_min - 1.0), abs(block_report.amplitude_max - 1.0))
+    if block_report.off_support_rel > reject_if_off_support_rel_gt or block_amp_dev > reject_if_amplitude_deviation_gt:
+        return False
+    mono_off = float(monomial_report.off_support_rel)
+    block_off = float(block_report.off_support_rel)
+    if mono_off <= 1.0e-12:
+        return False
+    return block_off < mono_off and block_off <= max(1.0e-12, 0.1 * mono_off)
+
+
 def root_of_unity(order: int, power: int) -> complex:
     return complex(np.exp(2.0j * np.pi * int(power) / int(order)))
 
@@ -1427,6 +1446,12 @@ def exactify_loaded_symmetry_source(
             and not monomial_report.support_mismatch_count
             and float(monomial_report.off_support_rel) <= reject_off
             and monomial_amp_dev <= reject_amp
+            and not _block_support_is_substantially_cleaner(
+                monomial_report,
+                candidate["block_report"],
+                reject_if_off_support_rel_gt=reject_off,
+                reject_if_amplitude_deviation_gt=reject_amp,
+            )
         ):
             preferred_mode = "monomial"
         if support_mode == "monomial":

@@ -13,6 +13,7 @@ from .workflows.band import BandStructureCalculator
 from .io.structure import OpenMXFile, StructureProcessorSpglib
 from .io.kpath import KPathGenerator
 from .io.hr import HrSparseHandler
+from .reporting import TapwReporter
 from .workflows.symmetry import SymmetryAnalysisRunner, resolve_requested_symmetrization_operations
 
 VALLEY_LABELS = dict(BandStructureCalculator.VALLEY_MAP)
@@ -33,15 +34,22 @@ def _mpi_world_rank_size() -> Tuple[int, int]:
 
 def setup_logging(log_file: str = None):
     """Setup logging configuration"""
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-        handlers=[
-            logging.StreamHandler(sys.stdout),
-            logging.FileHandler(log_file) if log_file else logging.NullHandler()
-        ]
-    )
-    return logging.getLogger(__name__)
+    logger = logging.getLogger(__name__)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    for handler in list(logger.handlers):
+        logger.removeHandler(handler)
+        handler.close()
+
+    formatter = logging.Formatter("%(message)s")
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(formatter)
+    logger.addHandler(stream_handler)
+    if log_file:
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(formatter)
+        logger.addHandler(file_handler)
+    return logger
 
 def build_calc_parser(prog: str = None, *, fixed_mode: str | None = None):
     """Build the TAPW calculation parser used by both tapw calc and tapw-calc."""
@@ -86,6 +94,8 @@ def build_calc_parser(prog: str = None, *, fixed_mode: str | None = None):
                        help='Total chunk count for job-array sharding (overrides config file)')
     parser.add_argument('--developer-outputs', action='store_true',
                        help='Write developer-only symmetry intermediate matrices under diagnostics/')
+    parser.add_argument('--verbose', action='store_true',
+                       help='Show detailed TAPW construction diagnostics in the terminal')
     return parser
 
 
@@ -278,19 +288,22 @@ def run_calc(args):
     log_suffix = f"_rank{mpi_rank}" if mpi_size > 1 else ""
     log_file = Path(config.paths.output_dir + "/logs") / f"run_{time.strftime('%Y%m%d_%H%M%S')}{log_suffix}.log"
     logger = setup_logging(str(log_file))
-    logger.info("Starting calculation with configuration:")
-    logger.info(f"Twist index: {config.twist.twist_index_m}")
-    logger.info(f"Output directory: {config.paths.output_dir}")
-    logger.info(f"Calculation mode: {config.compute.mode}")
+    reporter = TapwReporter(logger, verbose=bool(getattr(args, "verbose", False)))
+    reporter.stage("Run configuration", "Inputs and run controls for this TAPW calculation.")
+    reporter.kv("Config file", args.config)
+    reporter.kv("Twist index", config.twist.twist_index_m)
+    reporter.kv("Output directory", config.paths.output_dir)
+    reporter.kv("Run log", log_file)
+    reporter.kv("Calculation mode", config.compute.mode)
     if config.compute.TAPW:
-        logger.info(f"Valleys to calculate: {config.compute.valleys}")
-        logger.info(f"Harmonic of G vectors: {config.compute.n_g}")
+        reporter.kv("Valleys", config.compute.valleys)
+        reporter.kv("G-vector shell cutoff", config.compute.n_g)
     else:
-        logger.info("Basis: non-TAPW full-space generalized eigenproblem")
+        reporter.kv("Basis", "non-TAPW full-space generalized eigenproblem")
     if config.compute.mode == "chern":
         num_k1, num_k2 = config.compute.get_chern_grid_shape()
-        logger.info(f"Number of k-points for Chern number calculation: {num_k1}x{num_k2}")
-        logger.info(f"Number of processes: {config.compute.num_processes}")
+        reporter.kv("Chern k-grid", f"{num_k1}x{num_k2}")
+        reporter.kv("Processes", config.compute.num_processes)
     try:
         # Initialize structure
         structure = OpenMXFile(
@@ -298,7 +311,12 @@ def run_calc(args):
             twist_index=config.twist.twist_index_m,
             spin=config.twist.spin
         )
-        structure.display_properties()
+        try:
+            structure.display_properties(reporter=reporter)
+        except TypeError as exc:
+            if "reporter" not in str(exc):
+                raise
+            structure.display_properties()
         
         # Process structure (spglib-based atom typing via basis_id + sublayer)
         processor = StructureProcessorSpglib(
@@ -317,6 +335,7 @@ def run_calc(args):
             twist_index=config.twist.twist_index_m,
             Tmat=structure.Tmat,
             reciprocal_Tmat=structure.reciprocal_Tmat,
+            reporter=reporter,
         )
         if config.compute.TAPW:
             processor.process()
@@ -404,8 +423,11 @@ def run_calc(args):
             if target is None:
                 logger.info("Starting non-TAPW direct calculation")
             else:
-                logger.info(f"Starting calculation for valley {target}")
                 set_compute_valley(config.compute, target)
+                reporter.stage(
+                    f"Valley {_valley_label_for_target(target)}",
+                    "Build the projected TAPW basis and solve the requested k-points.",
+                )
             
             if reusable_m_valley_calculator is not None:
                 reusable_m_valley_calculator.switch_m_valley(target)
@@ -420,13 +442,16 @@ def run_calc(args):
                     sr_supercell=sr,
                     structure=processor,
                     config=config.compute,
-                    kpath_config=kpath_config
+                    kpath_config=kpath_config,
+                    reporter=reporter,
                 )
                 if getattr(calculator, "use_M_valley_threefold_symm", False):
                     reusable_m_valley_calculator = calculator
             
             out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config, calculator)
             out_path.mkdir(exist_ok=True)
+            reporter.stage("Outputs", "Primary files for this target are written under this run directory.")
+            reporter.kv("Target output directory", out_path)
             
             if reuse_m_valley_band_outputs and reused_reference_valley_flag is not None:
                 calculator.save_band_static_metadata(str(out_path))

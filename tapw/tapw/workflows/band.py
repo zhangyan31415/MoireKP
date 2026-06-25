@@ -52,6 +52,7 @@ from ..chern_post import (
 from ..io.structure import StructureProcessorSpglib
 from ..io.kpath import KPathGenerator
 from ..geometry.rotations import get_any_rot_orb_twostep
+from ..reporting import ensure_reporter
 from ..utils import (
     timing_decorator_factory, rotate_vector, unique_sorted, 
     check_hermitian, is_positive_definite, print_sparse_matrix_info, 
@@ -1689,11 +1690,12 @@ def _mp_kpoint_worker(args: tuple[int, np.ndarray]) -> tuple[int, bool, str | No
 class TAPW_parameters:
     """TAPW parameters for twisted material calculations"""
     
-    def __init__(self, structure: StructureProcessorSpglib, config: ComputeConfig):
+    def __init__(self, structure: StructureProcessorSpglib, config: ComputeConfig, reporter=None):
         self.config = config
         self.n_g = self.config.n_g
         self.valley = self.config.valley
         self.structure = structure
+        self.reporter = ensure_reporter(reporter)
         self.bravais = getattr(self.config, "bravais", "hex")
         self.c3_h_disable_reason = None
         self.requested_symmetry_operations = requested_hamiltonian_symmetry_operations(self.config)
@@ -1759,8 +1761,9 @@ class TAPW_parameters:
         z = df['z'].values
         delta_z = z - z0
         onsite = np.zeros_like(z, dtype=np.float64)
-        print("Electric_field_in_eVpA", cfg.Electric_field_in_eVpA)
-        print("delta_z = ", delta_z)
+        self.reporter.section("Electric field onsite correction")
+        self.reporter.kv("Electric field (eV/Angstrom)", cfg.Electric_field_in_eVpA)
+        self.reporter.array("delta_z", delta_z)
         # Electric_field_in_eVpA
         if cfg.Electric_field_in_eVpA is not None:
             onsite += cfg.Electric_field_in_eVpA * delta_z
@@ -1769,7 +1772,7 @@ class TAPW_parameters:
             isp = 0.005  # eV/Å
             # 指向零势能面
             onsite += isp * np.abs(delta_z)
-        print("onsite = ", onsite)
+        self.reporter.array("Onsite correction (eV)", onsite)
         self.electric_field_onsite = onsite
 
     def calculate_K_points(self):
@@ -1784,7 +1787,7 @@ class TAPW_parameters:
         n_moire = self.structure.twist_index
         
         if n_moire == 0:
-            print("n_moire == 0 is only for non-twisted Heterostructures")
+            self.reporter.kv("n_moire=0 note", "only for non-twisted heterostructures")
             reciprocal_Tmat_layer1 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]-1]
             reciprocal_Tmat_layer2 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]]
             K1 = 1/3 * reciprocal_Tmat_layer1[0][:2] + 2/3 * reciprocal_Tmat_layer1[1][:2]
@@ -1831,13 +1834,13 @@ class TAPW_parameters:
             # offset_Y = 0.5 * n_moire * (-g1 + g2)
             offset_M = n_moire * g1
             
-                
-            print("g1 = ",g1)
-            print("g2 = ",g2)
-            print("n_moire = ",n_moire)
-            print("offset_X = ",offset_X)
+            self.reporter.section("Valley center setup")
+            self.reporter.kv("g1", g1)
+            self.reporter.kv("g2", g2)
+            self.reporter.kv("n_moire", n_moire)
+            self.reporter.kv("offset_X", offset_X)
             # print("offset_Y = ",offset_Y)
-            print("offset_M = ",offset_M)
+            self.reporter.kv("offset_M", offset_M)
 
             # For square/rect: valley_dict returns (K1, K2) centers used downstream;
             # mK_dict stores the moiré k-point (e.g. X = 1/2*g1).
@@ -1870,11 +1873,17 @@ class TAPW_parameters:
             K1, K2 = valley_dict[self.valley]
             m_K1, m_K2 = mK_dict[self.valley]
             offset = offset_dict[self.valley]
-            print("K1, K2, m_K1, m_K2, offset = ", K1, K2, m_K1, m_K2, offset)
+            self.reporter.section("Valley centers")
+            self.reporter.kv("K1", K1)
+            self.reporter.kv("K2", K2)
+            self.reporter.kv("m_K1", m_K1)
+            self.reporter.kv("m_K2", m_K2)
+            self.reporter.kv("Offset", offset)
             return K1, K2, m_K1, m_K2, offset
 
-        print("m_g_unitvec_1 = ", m_g_unitvec_1)
-        print("m_g_unitvec_2 = ", m_g_unitvec_2)
+        self.reporter.stage("Valley center setup", "Resolve the reciprocal-space centers for this valley.")
+        self.reporter.detail("m_g_unitvec_1", m_g_unitvec_1, purpose="moire reciprocal basis vector")
+        self.reporter.detail("m_g_unitvec_2", m_g_unitvec_2, purpose="moire reciprocal basis vector")
         offset = -n_moire * m_g_unitvec_1 + n_moire * m_g_unitvec_2
 
         m_K1 = -1/3 * m_g_unitvec_1 + 2/3 * m_g_unitvec_2
@@ -1927,7 +1936,12 @@ class TAPW_parameters:
         K1, K2 = valley_dict[self.valley]
         m_K1, m_K2 = mK_dict[self.valley]
         offset = offset_dict[self.valley]
-        print("K1, K2, m_K1, m_K2, offset = ", K1, K2, m_K1, m_K2, offset)
+        self.reporter.stage("Valley centers", "Layer-resolved centers used for TAPW projection.")
+        self.reporter.kv("K1", K1)
+        self.reporter.kv("K2", K2)
+        self.reporter.kv("m_K1", m_K1)
+        self.reporter.kv("m_K2", m_K2)
+        self.reporter.kv("Offset", offset)
         return K1, K2, m_K1, m_K2, offset
 
     def generate_g_vec_list(self):
@@ -1985,10 +1999,17 @@ class TAPW_parameters:
         # self.g_vec_list_K1 = np.concatenate([g_vec_list_K1, -g_vec_list_K1])
         # self.g_vec_list_K2 = np.concatenate([g_vec_list_K2, -g_vec_list_K2])
 
-        print(self.g_vec_list_K1)
-        print("======================")
-        print(self.g_vec_list_K2)
-        print("num G vectors per layer = ", len(self.g_vec_list_K1),len(self.g_vec_list_K2))
+        self.reporter.kv("G-vector count", f"K1 set={len(self.g_vec_list_K1)}, K2 set={len(self.g_vec_list_K2)}")
+        self.reporter.detail(
+            "K1 G-vectors",
+            self.g_vec_list_K1,
+            purpose="reciprocal vectors retained for the first source orientation group",
+        )
+        self.reporter.detail(
+            "K2 G-vectors",
+            self.g_vec_list_K2,
+            purpose="reciprocal vectors retained for the second source orientation group",
+        )
 
     @timing_decorator_factory(process_id=0)
     def generate_gr_matrix(self):
@@ -2020,13 +2041,13 @@ class TAPW_parameters:
         for group_id in range(n_groups):
             if group_id % 2 == 0:
                 g_vec_list.append(self.g_vec_list_K1)
-                print(f"twist_group={group_id} -> K1 (g_vec_list length={len(self.g_vec_list_K1)})")
+                self.reporter.kv(f"Source orientation group {group_id}", f"uses K1 G-vector set (count={len(self.g_vec_list_K1)})")
             else:
                 g_vec_list.append(self.g_vec_list_K2)
-                print(f"twist_group={group_id} -> K2 (g_vec_list length={len(self.g_vec_list_K2)})")
+                self.reporter.kv(f"Source orientation group {group_id}", f"uses K2 G-vector set (count={len(self.g_vec_list_K2)})")
         
-        print(f"Total twist groups: {n_groups}")
-        self.g_matrix = self.generate_gr_matrix_cpu(self.structure.df, g_vec_list, spin=self.structure.spin)
+        self.reporter.kv("Source orientation groups", n_groups)
+        self.g_matrix = self.generate_gr_matrix_cpu(self.structure.df, g_vec_list, spin=self.structure.spin, reporter=self.reporter)
         if scipy.sparse.issparse(self.g_matrix):
             self.g_matrix = self.g_matrix.tocsr()
         else:
@@ -2040,12 +2061,16 @@ class TAPW_parameters:
         # Lightweight orthonormality check (much cheaper than det(g g^H)).
         row_norm2 = np.asarray(self.g_matrix.multiply(self.g_matrix.conj()).sum(axis=1)).ravel().real
         max_dev = float(np.max(np.abs(row_norm2 - 1.0))) if row_norm2.size else 0.0
-        print(f"g_matrix row-norm check: max|norm^2-1|={max_dev:.3e}")
+        self.reporter.check(
+            "Projection normalization check",
+            passed=max_dev <= 1.0e-2,
+            detail=f"max row-norm deviation {max_dev:.3e}",
+        )
         if max_dev > 1.0e-2:
             raise Exception(f"g_matrix row norms deviate too much: max|norm^2-1|={max_dev:.3e}")
         
     @staticmethod
-    def generate_gr_matrix_cpu(structure_df, g_vec_list, spin=None):
+    def generate_gr_matrix_cpu(structure_df, g_vec_list, spin=None, reporter=None):
         """Generate gr_matrix (sparse) using twist_group assignment (generalized for n_groups >= 2).
 
         This version builds the matrix directly as sparse COO/CSR (instead of allocating a huge dense
@@ -2111,12 +2136,17 @@ class TAPW_parameters:
 
         factor_list = 1.0 / np.sqrt(atom_num_list.astype(np.float64))
 
-        print("atom_type_list = ", atom_type_list)
-        print("atom_orb_num_list = ", atom_orb_num_list)
-        print("atom_num_list = ", atom_num_list)
-        print("atom_twist_group_list = ", atom_twist_group_list)
-        print("atom_orb_name_list = ", atom_orb_name_list)
-        print(f"n_groups = {n_groups}")
+        reporter = ensure_reporter(reporter)
+        reporter.detail(
+            "TAPW sparse projector input packing",
+            purpose="internal atom-type packing used to build the sparse projector",
+        )
+        reporter.detail("atom_type_list", atom_type_list, purpose="internal atom-type ids")
+        reporter.detail("atom_orb_num_list", atom_orb_num_list, purpose="orbital count per atom type")
+        reporter.detail("atom_num_list", atom_num_list, purpose="atom count per atom type")
+        reporter.detail("atom_twist_group_list", atom_twist_group_list, purpose="source orientation group per atom type")
+        reporter.detail("atom_orb_name_list", atom_orb_name_list, purpose="OpenMX orbital basis label per atom type")
+        reporter.detail("n_groups", n_groups, purpose="number of source orientation groups")
 
         orb_group_num = np.zeros(n_groups, dtype=int)
         for group_id in range(n_groups):
@@ -2125,8 +2155,8 @@ class TAPW_parameters:
 
         dim_gr_1 = int(np.dot(g_group_num, orb_group_num))
         dim_gr_2 = int(np.sum(atom_num_list * atom_orb_num_list))
-        print(f"dim_gr_1 = {dim_gr_1}")
-        print(f"dim_gr_2 = {dim_gr_2}")
+        reporter.kv("Projected TAPW basis dimension", dim_gr_1)
+        reporter.kv("Source orbital basis dimension", dim_gr_2)
 
         # shift3[group] = sum_{g'<group} g_group_num[g'] * orb_group_num[g']
         shift3 = np.zeros(n_groups, dtype=int)
@@ -2184,8 +2214,8 @@ class TAPW_parameters:
         gr = scipy.sparse.coo_matrix((data, (rows, cols)), shape=(dim_gr_1, dim_gr_2), dtype=np.complex128).tocsr()
         gr.sort_indices()
         density = gr.nnz / float(dim_gr_1 * dim_gr_2) if dim_gr_1 and dim_gr_2 else 0.0
-        print(f"gr_matrix built: shape={gr.shape}, nnz={gr.nnz}, density={density:.3e}")
-        print("factor_list = ", factor_list)
+        reporter.kv("Sparse projector", f"shape={gr.shape}, nonzeros={gr.nnz}, density={density:.3e}")
+        reporter.detail("factor_list", factor_list, purpose="normalization factor per atom type")
 
         if spin:
             gr = scipy.sparse.block_diag((gr, gr), format='csr')
@@ -2290,7 +2320,11 @@ class TAPW_parameters:
             # Combine: kron(C3_G, C3_orb)
             C3_group = np.kron(C3_G, C3_orb)
             C3_blocks.append(C3_group)
-            print(f"[C3] group {gid}: orientation={'K1' if gid%2==0 else 'K2'}, C3_G={C3_G.shape}, C3_orb={C3_orb.shape}, C3_group={C3_group.shape}")
+            self.reporter.kv(
+                f"C3 group {gid}",
+                f"orientation={'K1' if gid%2==0 else 'K2'}, C3_G={C3_G.shape}, "
+                f"C3_orb={C3_orb.shape}, C3_group={C3_group.shape}",
+            )
 
         # Direct sum across groups in gid order; this matches gr_matrix row block ordering.
         C3_all_rep = direct_sum(*C3_blocks)
@@ -2312,7 +2346,7 @@ class TAPW_parameters:
             C3_matrix_2.conj().T,
         ]
 
-        print(f"[C3] Combined C3 matrix shape={self.C3_matrix.shape}, nnz={self.C3_matrix.nnz}")
+        self.reporter.kv("Combined C3 matrix", f"shape={self.C3_matrix.shape}, nnz={self.C3_matrix.nnz}")
         return self.C3_matrix
         
     def generate_C3_matrix1(self):
@@ -2358,7 +2392,7 @@ class TAPW_parameters:
             try:
                 atom_part, orb_part = item.split('-')
             except ValueError:
-                print(f"Cannot split item: {item}")
+                self.reporter.kv("C3 orbital parse warning", f"cannot split item: {item}")
                 continue
             
             # 使用正则表达式提取原子符号（假设原子符号由字母组成）
@@ -2366,7 +2400,7 @@ class TAPW_parameters:
             if atom_match:
                 atom = atom_match.group(1)
             else:
-                print(f"Cannot extract atom symbol: {atom_part}")
+                self.reporter.kv("C3 orbital parse warning", f"cannot extract atom symbol: {atom_part}")
                 continue
             
             # 使用正则表达式提取轨道类型和对应的数量
@@ -2381,7 +2415,7 @@ class TAPW_parameters:
             try:
                 atom_part, orb_part = item.split('-')
             except ValueError:
-                print(f"Cannot split item: {item}")
+                self.reporter.kv("C3 orbital parse warning", f"cannot split item: {item}")
                 continue
             
             # 使用正则表达式提取原子符号（假设原子符号由字母组成）
@@ -2389,7 +2423,7 @@ class TAPW_parameters:
             if atom_match:
                 atom = atom_match.group(1)
             else:
-                print(f"Cannot extract atom symbol: {atom_part}")
+                self.reporter.kv("C3 orbital parse warning", f"cannot extract atom symbol: {atom_part}")
                 continue
             
             # 使用正则表达式提取轨道类型和对应的数量
@@ -2399,8 +2433,8 @@ class TAPW_parameters:
             
             species_2layer[idx] = {"atom": atom, "orbitals": orbitals}
         
-        print("species 1layer = ", species_1layer)
-        print("species 2layer = ", species_2layer)
+        self.reporter.kv("C3 species layer 1", species_1layer)
+        self.reporter.kv("C3 species layer 2", species_2layer)
         
         C3_G_rep_1layer, C3_G_rep_2layer = C3_G_matrix(
             self.g_vec_list_K1, self.g_vec_list_K2, 
@@ -2461,8 +2495,8 @@ class TAPW_parameters:
         if getattr(self, "use_single_valley_c3", False):
             self.generate_C3_matrix()
             self.generate_g_symm_matrix()
-        print("g matrix shape = ", self.g_matrix.shape)
-        print("TAPW parameters generated successfully!")
+        self.reporter.kv("Spin-expanded TAPW basis dimension", self.g_matrix.shape[0])
+        self.reporter.kv("TAPW basis construction", "complete")
 
 class BandStructureCalculator:
     """Band structure and Chern number calculator for twisted materials"""
@@ -2474,7 +2508,7 @@ class BandStructureCalculator:
         3: "M", 41: "X", 42: "Y"
     }
 
-    def __init__(self, hr_supercell, sr_supercell, structure: StructureProcessorSpglib, config: ComputeConfig, kpath_config: KPathGenerator=None):
+    def __init__(self, hr_supercell, sr_supercell, structure: StructureProcessorSpglib, config: ComputeConfig, kpath_config: KPathGenerator=None, reporter=None):
         """Initialize the calculator
         
         Args:
@@ -2489,6 +2523,7 @@ class BandStructureCalculator:
         self.structure = structure
         self.config = config
         self.kpath_config = kpath_config
+        self.reporter = ensure_reporter(reporter)
         
         self.result = {}
         self._progress_dir: str | None = None
@@ -2529,14 +2564,14 @@ class BandStructureCalculator:
                 self.use_single_valley_c3 = False
                 self._initialize_m_valley_threefold_symmetrization()
             else:
-                self.TAPW_parameters = TAPW_parameters(self.structure, self.config)
+                self.TAPW_parameters = TAPW_parameters(self.structure, self.config, reporter=self.reporter)
                 self.use_single_valley_c3 = self.TAPW_parameters.use_single_valley_c3
                 self.uses_hamiltonian_symmetrization = self.use_single_valley_c3
                 if "C3z" in self.requested_symmetry_operations and not self.use_single_valley_c3:
-                    print(
-                        "[symmetrize_hamiltonian] "
-                        + self.TAPW_parameters.c3_h_disable_reason
-                        + f" Proceeding with C3z disabled for valley {self.config.valley}."
+                    self.reporter.kv(
+                        "symmetrize_hamiltonian",
+                        self.TAPW_parameters.c3_h_disable_reason
+                        + f" Proceeding with C3z disabled for valley {self.config.valley}.",
                     )
                 self.TAPW_parameters.generate_all_parameters()
     def _set_progress_stage(self, index: int, stage: str) -> None:
@@ -2756,13 +2791,13 @@ class BandStructureCalculator:
         return cfg
 
     def _initialize_m_valley_threefold_symmetrization(self) -> None:
-        print(
-            f"[M-C3] Enabling threefold M-valley symmetrization for requested valley {self.config.valley} "
-            f"with reference valley {self._m_valley_reference}."
+        self.reporter.kv(
+            "M-valley C3 symmetrization",
+            f"enabled for requested valley {self.config.valley} with reference valley {self._m_valley_reference}",
         )
         for valley in _M_VALLEY_TRIPLET:
             cfg = self._clone_compute_config_for_valley(valley)
-            params = TAPW_parameters(self.structure, cfg)
+            params = TAPW_parameters(self.structure, cfg, reporter=self.reporter)
             params.generate_all_parameters()
             self._m_valley_parameters[valley] = params
 
@@ -2790,8 +2825,9 @@ class BandStructureCalculator:
         self._m_valley_c3_reference_projectors = self._build_m_valley_c3_reference_projectors()
 
         if self.use_M_valley_d3_symm:
-            print(
-                f"[M-D3] Enabling additional reference-valley C2 projection on M{self._m_valley_reference - 30}."
+            self.reporter.kv(
+                "M-valley D3 symmetrization",
+                f"enabled additional reference-valley C2 projection on M{self._m_valley_reference - 30}",
             )
             self._m_valley_c2_reference_symmetry = resolve_reference_m_valley_c2_symmetry(
                 self.structure,
@@ -3121,9 +3157,9 @@ class BandStructureCalculator:
             end = (nk_total * (chunk_id + 1)) // chunk_count
             kpoints = kpoints_all[start:end]
             kpoint_indices = list(range(start, end))
-            print(
-                f"[k-chunk] chunk {chunk_id}/{chunk_count}: indices [{start}:{end}) "
-                f"({len(kpoints)}/{nk_total})"
+            self.reporter.kv(
+                "K-point chunk",
+                f"chunk {chunk_id}/{chunk_count}: indices [{start}:{end}) ({len(kpoints)}/{nk_total})",
             )
         else:
             kpoint_indices = list(range(nk_total))
@@ -3163,9 +3199,9 @@ class BandStructureCalculator:
             mm_k = _get_memmap(kpoints_path)
             mm_k[:] = np.asarray(kpoints_all)
             mm_k.flush()
-            print(
-                f"[k-chunk] Wrote raw memmap slices. "
-                f"Run a separate postprocess step after all {chunk_count} chunks complete."
+            self.reporter.kv(
+                "K-point chunk output",
+                f"raw memmap slices written; run postprocess after all {chunk_count} chunks complete",
             )
             return
         
@@ -3320,7 +3356,8 @@ class BandStructureCalculator:
         # Generate uniform k-point mesh
         num_k1, num_k2 = self.config.get_chern_grid_shape()
         kpoints = self.generate_kmesh(num_k1, num_k2)
-        print("kpoints shape = ", kpoints.shape)
+        reporter = ensure_reporter(getattr(self, "reporter", None))
+        reporter.kv("Chern k-points shape", kpoints.shape)
         
         # Calculate band structure on the mesh
         self.calculate_band_structure(path, kpoints)
@@ -3418,8 +3455,9 @@ class BandStructureCalculator:
             json.dump(summary, handle, indent=2, sort_keys=True)
             handle.write("\n")
 
-        print(
-            "[chern] Chern number for {0} {1}: {2:.8f}".format(
+        reporter.kv(
+            "Chern number",
+            "{0} {1}: {2:.8f}".format(
                 self.valley_flag,
                 primary["band_indices"],
                 primary["chern_number"],
@@ -3925,7 +3963,9 @@ class BandStructureCalculator:
         start_time = time.time()
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
         sys.stdout.flush()
-        print(f"Current Time: {current_time}")
+        self.reporter.stage("K-point solve", "Diagonalize the projected Hamiltonian along the requested k-path or mesh.")
+        self.reporter.kv("Start time", current_time)
+        self.reporter.kv("K-points", len(kpoints))
 
         num_processes = int(getattr(self.config, "num_processes", 1))
         blas_threads = int(getattr(self.config, "blas_threads", 1))
@@ -3935,15 +3975,15 @@ class BandStructureCalculator:
         vec_store = getattr(self.config, "vec_store", "memory")
 
         if parallel_policy.auto_promoted:
-            print(
-                "[parallel] auto-switching TAPW k-point loop from joblib/loky "
-                "to mp/fork to avoid large-calculator pickling overhead."
+            self.reporter.kv(
+                "Parallel auto-switch",
+                "TAPW k-point loop switched from joblib/loky to mp/fork to avoid large-calculator pickling overhead.",
             )
 
-        print(
-            "Parallel config: "
-            f"impl={parallel_impl} backend={parallel_backend} "
-            f"num_processes={num_processes} blas_threads={blas_threads} vec_store={vec_store}"
+        self.reporter.kv(
+            "Parallel config",
+            f"impl={parallel_impl}, backend={parallel_backend}, "
+            f"num_processes={num_processes}, blas_threads={blas_threads}, vec_store={vec_store}",
         )
 
         if kpoint_indices is None:
@@ -4120,9 +4160,9 @@ class BandStructureCalculator:
         self._progress_dir = None
 
         end_time = time.time()
-        print(f"Running time: {end_time - start_time:.2f} seconds")
+        self.reporter.kv("Running time (seconds)", f"{end_time - start_time:.2f}")
         current_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-        print(f"Current Time: {current_time}")
+        self.reporter.kv("End time", current_time)
         if use_memmap:
             with suppress(Exception):
                 eig = self.result.get("eig")
@@ -4161,14 +4201,16 @@ class BandStructureCalculator:
 
         orb_num = self.structure.num_orbs_per_unit_cell
         band_wave = self.result['vec']
-        print(np.shape(band_wave))
+        self.reporter.kv("Band wavefunction shape", np.shape(band_wave))
         
         dir = os.path.join(path, f'{self.config.band_type}_{valley_flag}_valley')
         os.makedirs(dir, exist_ok=True)
         
         num_gn_all = len(g_vec_list_K_1layer) * 2
         up_all_index, down_all_index = self.generate_indices(num_gn_all, num_Te, num_Mo, orb_num)
-        print(up_all_index, down_all_index, band_wave.shape)
+        self.reporter.kv("Spin-up indices", up_all_index)
+        self.reporter.kv("Spin-down indices", down_all_index)
+        self.reporter.kv("Band wavefunction shape", band_wave.shape)
         
         np.save(os.path.join(dir, f'{self.config.band_type}_{valley_flag}_valley_up.npy'), band_wave[:, up_all_index])
         np.save(os.path.join(dir, f'{self.config.band_type}_{valley_flag}_valley_down.npy'), band_wave[:, down_all_index])

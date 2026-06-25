@@ -13,6 +13,8 @@ import scipy
 import pandas as pd
 from scipy.spatial import cKDTree
 
+from ..reporting import ensure_reporter
+
 # Plotting is optional for non-plot workflows; keep matplotlib import failure from breaking core logic.
 try:
     import matplotlib.pyplot as plt
@@ -389,54 +391,44 @@ class OpenMXFile:
         """
         return self.species_coordinates
 
-    def display_properties(self):
+    def display_properties(self, reporter=None):
         """
-        打印所有的属性。
+        Print all user-facing structure properties.
         """
-        print("=== Bravais (moiré supercell) ===")
-        print(self.bravais)
-        print("=== 扭转角度 (理论值，基于 twist_index_m) ===")
-        print(f"{self.twist_angle:.6f}°")
-        # print("\n=== 单位晶胞数量 ===")
-        # print(self.num_unit_cell)
-        print("\n=== 单位向量 (Angstrom) ===")
-        print(self.Tmat)
-        print("\n=== 逆格矢 (1/Angstrom) ===")
-        print(self.reciprocal_Tmat)
+        reporter = ensure_reporter(reporter)
+        reporter.stage("Structure overview", "Parsed moire supercell and source orbital metadata.")
+        reporter.kv("Bravais (moire supercell)", self.bravais)
+        reporter.kv("Twist angle from twist_index_m (deg)", self.twist_angle)
+        reporter.array("Moire lattice vectors (Angstrom)", self.Tmat)
+        reporter.array("Moire reciprocal vectors (1/Angstrom)", self.reciprocal_Tmat)
         if self.bravais == "square":
             b1 = np.asarray(self.reciprocal_Tmat[0][:2], dtype=np.float64)
             b2 = np.asarray(self.reciprocal_Tmat[1][:2], dtype=np.float64)
-            print("\n=== [square] Reciprocal self-check (moiré) ===")
-            print(f"b1·b2 = {float(np.dot(b1, b2)):.6e}")
-            print(f"|b1|-|b2| = {float(np.linalg.norm(b1) - np.linalg.norm(b2)):.6e}")
+            reporter.section("Square reciprocal self-check")
+            reporter.kv("b1 dot b2", f"{float(np.dot(b1, b2)):.6e}")
+            reporter.kv("|b1| - |b2|", f"{float(np.linalg.norm(b1) - np.linalg.norm(b2)):.6e}")
 
-            print("\n=== [square] Moiré BZ high-symmetry points (1/Angstrom) ===")
+            reporter.section("Square moire BZ high-symmetry points (1/Angstrom)")
             Gamma = np.array([0.0, 0.0])
             X = 0.5 * b1
             Y = 0.5 * b2
             M = 0.5 * (b1 + b2)
-            print(f"Gamma = {Gamma}")
-            print(f"X     = {X}")
-            print(f"Y     = {Y}")
-            print(f"M     = {M}")
-        print("\n=== 原子总数 ===")
-        print(self.atoms_number)
-        print("\n=== 原子坐标单位 ===")
-        print(self.species_coordinates_unit)
+            reporter.kv("Gamma", Gamma)
+            reporter.kv("X", X)
+            reporter.kv("Y", Y)
+            reporter.kv("M", M)
+        reporter.kv("Atom count", self.atoms_number)
+        reporter.kv("Coordinate unit", self.species_coordinates_unit)
         # print("\n=== 按 z 轴排序前的前5个原子 ===")
         # for atom in self.species_coordinates[:5]:
         #     print(atom)
         # print("\n=== 按 z 轴排序后的前5个原子 ===")
         # for atom in self.sorted_species_coordinates[:5]:
         #     print(atom)
-        print("\n=== 种类统计 ===")
-        print(self.species_count)
-        print("\n=== 轨道统计 ===")
-        print(self.orbitals_count)
-        print("\n=== 置换矩阵 (前5行) ===")
+        reporter.kv("Species counts", self.species_count)
+        reporter.kv("Orbital counts", self.orbitals_count)
         # print(self.permutation_matrix.T@self.permutation_matrix)
-        print("\n=== 原子轨道 ===")
-        print(self.atom_basis)
+        reporter.kv("Atomic basis", self.atom_basis)
 
 
 class LayeredLatticeAnalyzer:
@@ -2890,6 +2882,7 @@ class StructureProcessorSpglib:
         reciprocal_Tmat=None,
         symprec: float = 10e-1,
         spglib_z_lattice: float = 50.0,
+        reporter=None,
     ):
         self.input_data = input_data
         self.num_layers = num_layers
@@ -2916,9 +2909,10 @@ class StructureProcessorSpglib:
         self.symprec = float(symprec)
         self.spglib_z_lattice = float(spglib_z_lattice)
         self.layer_lattice_vectors = {}  # {layer: [a1, a2]}
+        self.reporter = ensure_reporter(reporter)
 
         self.load_data()
-        print("Data loaded.")
+        self.reporter.step("Structure table", "loaded atom coordinates into a DataFrame")
 
     def load_data(self):
         """
@@ -2953,7 +2947,7 @@ class StructureProcessorSpglib:
             })
 
         self.df = pd.DataFrame(data)
-        print(f"Loaded {len(self.df)} atoms into DataFrame.")
+        self.reporter.kv("Loaded atoms", len(self.df))
 
     def separate_layers(self):
         """
@@ -3036,16 +3030,18 @@ class StructureProcessorSpglib:
             self.input_data[i]['twist_group'] = int(self.df.loc[i, 'twist_group'])
             self.input_data[i]['layer'] = int(self.df.loc[i, 'layer'])  # = phys_layer
         
-        # Print summary
-        print(f"Separated into {self.num_layers} physical layers and {n_groups} twist groups with {self.df.shape[0]} atoms.")
-        print(f"twist_layer_counts = {twist_layer_counts}")
+        self.reporter.stage("Preprocessing", "Assign layers, source orientation groups, and TAPW projector ordering.")
+        self.reporter.kv("Physical layers", self.num_layers)
+        self.reporter.kv("Source orientation groups", n_groups)
+        self.reporter.kv("Atoms", self.df.shape[0])
+        self.reporter.kv("Twist layer counts", twist_layer_counts)
         for phys_layer in range(self.num_layers):
             num_atoms = len(self.df[self.df['phys_layer'] == phys_layer])
             group_id = phys_layer_to_group[phys_layer]
-            print(f"  phys_layer={phys_layer} (twist_group={group_id}): {num_atoms} atoms")
+            self.reporter.step(f"Physical layer {phys_layer}", f"source orientation group {group_id}, {num_atoms} atoms")
         for group_id in range(n_groups):
             num_atoms = len(self.df[self.df['twist_group'] == group_id])
-            print(f"  twist_group={group_id}: {num_atoms} atoms")
+            self.reporter.step(f"Source orientation group {group_id}", f"{num_atoms} atoms")
 
     def cluster_sublayers(self):
         """
@@ -3065,7 +3061,7 @@ class StructureProcessorSpglib:
             self.df.loc[layer_mask, 'sublayer'] = labels
             num_atoms = len(labels)
             num_sublayers = len(set(labels)) - (1 if -1 in labels else 0)
-            print(f"Layer {layer}: {num_atoms} atoms clustered into {num_sublayers} sublayers.")
+            self.reporter.step(f"Layer {layer} sublayer clustering", f"{num_atoms} atoms -> {num_sublayers} sublayers")
 
     def compute_phase(self):
         """
@@ -3182,11 +3178,10 @@ class StructureProcessorSpglib:
                 (np.ones(num_wann), (original_indices, sorted_indices)), shape=(num_wann, num_wann)
             )
         self.transformed_index_matrix = sp.csr_matrix(self.transformed_index_matrix)
-        print("=================== calculated transformed index matrix ===================")
-        print(
-            f"================== new orb_global_index = transformed_index_matrix{np.shape(self.transformed_index_matrix)} * old orb_global_index ==============="
-        )
-        print("==================    new ord : atom_type   ===============================")
+        self.reporter.stage("Orbital reordering", "Map OpenMX orbital order to TAPW atom-type order.")
+        self.reporter.kv("Transform matrix shape", self.transformed_index_matrix.shape)
+        self.reporter.kv("Ordering", "new orb_global_index = transformed_index_matrix * old orb_global_index")
+        self.reporter.kv("New order", "atom_type")
 
     def plot_clusters_loc(self, save_path=None, save=False):
         """
@@ -3302,24 +3297,25 @@ class StructureProcessorSpglib:
         Prints a summary of the clustering results, including the number of layers, sublayers,
         atom types, and atom counts.
         """
-        print("\n--- Clustering Summary ---")
+        reporter = getattr(self, "reporter", None)
+        reporter = ensure_reporter(reporter)
+        reporter.stage("Layer and atom-type summary", "Final atom-type grouping used by the TAPW projector.")
         total_layers = self.df['layer'].nunique()
-        print(f"Total Layers: {total_layers}")
+        reporter.kv("Total layers", total_layers)
         for layer in sorted(self.df['layer'].unique()):
             layer_df = self.df[self.df['layer'] == layer]
             num_sublayers = layer_df['sublayer'].nunique()
-            print(f"\nLayer {layer}: {num_sublayers} Sublayers")
+            reporter.line(f"  Layer {layer}: {num_sublayers} sublayers")
             for sublayer in sorted(layer_df['sublayer'].unique()):
                 sublayer_df = layer_df[layer_df['sublayer'] == sublayer]
                 atom_types = sublayer_df['atom_type'].unique()
-                print(f"  Sublayer {sublayer}:")
+                reporter.line(f"    Sublayer {sublayer}:")
                 for atom_type in sorted(atom_types):
                     count = (sublayer_df['atom_type'] == atom_type).sum()
                     species = sublayer_df.loc[sublayer_df['atom_type'] == atom_type, 'species'].values
                     species = species[0] if len(species) > 0 else "Unknown"
-                    label = "Noise" if atom_type == -1 else f"Atom Type {atom_type}"
-                    print(f"    {label} ({species}): {count} atoms")
-        print("--- End of Summary ---\n")
+                    label = "Noise" if atom_type == -1 else f"Atom type {atom_type}"
+                    reporter.line(f"      {label} ({species}): {count} atoms")
 
     @staticmethod
     def _get_mapping_to_primitive(dataset):
@@ -3385,8 +3381,11 @@ class StructureProcessorSpglib:
         numS = self._species_to_atomic_numbers(group_df["species"].values)
 
         cellS = (latS, pos_frac, numS)
-        # Print summary only (not full cellS with all atom positions)
-        print(f"[Spglib] Twist group {twist_group}: {len(numS)} atoms, lattice shape {latS.shape}, positions shape {pos_frac.shape}")
+        # Report summary only (not full cellS with all atom positions).
+        self.reporter.stage(f"Source orientation group {twist_group} primitive cell", "Spglib primitive-cell summary.")
+        self.reporter.kv("Atoms", len(numS))
+        self.reporter.kv("Lattice shape", latS.shape)
+        self.reporter.kv("Positions shape", pos_frac.shape)
         dataset = spglib.get_symmetry_dataset(cellS, symprec=self.symprec)
         if dataset is None:
             raise RuntimeError(
@@ -3437,8 +3436,7 @@ class StructureProcessorSpglib:
         
         # Store lattice vectors for this twist_group (shared by all physical layers in the group)
         self.layer_lattice_vectors[twist_group] = [a1, a2]
-        print(f"[Spglib] Twist group {twist_group}: lattice vectors (Angstrom) =====")
-        print(np.array([a1, a2]))
+        self.reporter.array("Primitive lattice vectors (Angstrom)", np.array([a1, a2]))
 
         area = float(a1[0] * a2[1] - a1[1] * a2[0])
         if area == 0.0:
@@ -3449,10 +3447,7 @@ class StructureProcessorSpglib:
         # Store reciprocal vectors for this twist_group (shared by all physical layers in the group)
         self.monolayer_reciprocal_list[twist_group] = [b1, b2]
 
-        print(f"\n[Spglib] ======= Twist group {twist_group}: lattice vectors (Angstrom) =====")
-        print(np.array([a1, a2]))
-        print(f"[Spglib] ======= Twist group {twist_group}: reciprocal vectors (1/Angstrom) =====")
-        print(np.array([b1, b2]))
+        self.reporter.array("Reciprocal vectors (1/Angstrom)", np.array([b1, b2]))
         
         # Also store for each physical layer in this group (for backward compatibility)
         phys_layers_in_group = sorted(group_df['phys_layer'].unique())
@@ -3485,9 +3480,9 @@ class StructureProcessorSpglib:
         Full workflow using spglib for lattice and basis assignment.
         """
         self.separate_layers()
-        print("Layers separated.")
+        self.reporter.step("Layer separation", "complete")
         self.cluster_sublayers()
-        print("Sublayers clustered.")
+        self.reporter.step("Sublayer clustering", "complete")
 
         # spglib: per-twist_group lattice + basis_id mapping
         # All physical layers in the same twist_group share the same lattice vectors
@@ -3509,18 +3504,17 @@ class StructureProcessorSpglib:
             # Normalize to [-180, 180] range
             twist_angle_diffs = np.mod(twist_angle_diffs + 180, 360) - 180
             
-            print("\n[Spglib] ======================= Twist angles between groups ========================")
+            self.reporter.stage("Twist-angle check", "Compare primitive-cell orientations between source orientation groups.")
             for i in range(len(twist_angle_diffs)):
-                print(f"[Spglib] Twist angle between group {i} and group {i+1}: {twist_angle_diffs[i]:.4f}°")
-            print(f"[Spglib] ======================= End twist angle calculation ========================\n")
+                self.reporter.kv(f"Group {i} to group {i+1} twist angle (deg)", f"{twist_angle_diffs[i]:.4f}")
 
         self._assign_atom_types_from_basis()
-        print("Atom types assigned (layer, sublayer, basis_id).")
+        self.reporter.step("Atom-type assignment", "based on layer, sublayer, and primitive-cell basis id")
 
         self.compute_phase()
-        print("Phase data computed.")
+        self.reporter.step("Phase coordinates", "computed")
         self.align_coordinates()
-        print("Coordinates aligned.")
+        self.reporter.step("Aligned coordinates", "computed")
         self.calculate_transformed_matrix()
-        print("Transformed index matrix calculated.")
+        self.reporter.step("Orbital reorder matrix", "computed")
         self.print_summary()

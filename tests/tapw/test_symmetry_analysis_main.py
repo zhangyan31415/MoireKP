@@ -95,6 +95,7 @@ def _patch_main_dependencies(monkeypatch, config, events):
         kpoint_chunk_id=None,
         kpoint_chunk_count=None,
         developer_outputs=False,
+        verbose=False,
     )
     monkeypatch.setattr(main_mod.Config, "from_yaml", lambda _: config)
     monkeypatch.setattr(main_mod, "_mpi_world_rank_size", lambda: (0, 1))

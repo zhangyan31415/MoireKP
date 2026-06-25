@@ -1,36 +1,44 @@
 ## MoTe2 3.89
 
-- `openmx/`: OpenMX input snapshots for this material/angle.
-- `tapw/`: TAPW inputs and Q-shell outputs used by KP.
-- `kp/configs/source/`: canonical `plot / project / symm` inputs.
-- `kp/configs/model/`: canonical continuum-model configs.
-- `kp/notebooks/`: notebooks wired to this directory layout.
+This release example covers the MoTe2 K1 valley at 3.89 degrees. The active KP
+entry points are:
 
-Main commands:
-
-```bash
-kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
-kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
-kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
-kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed
-kp model --config examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml  # precomputed
+```text
+kp/configs/mote2_3.89_K1_spinup_Q6.yaml
+kp/configs/mote2_3.89_K1_spinful_Q6.yaml
 ```
 
-`external-data` commands require TAPW arrays or symmetry exports listed as
-`pending_external` in `examples/data-manifest.yaml`. `precomputed` commands
-also require saved KP projection/symmetry outputs from that manifest.
+Both cases use automatic gauge anchors. The spinful case exercises the
+spinful C3z exactification path: the projected raw-H C3z action is treated as a
+block action first, then cleaned to a monomial continuum representation when
+the block support is clearly cleaner than the raw monomial support. This avoids
+using a single monomial phase branch for the two spinful C3z branches.
 
-Production status on 2026-06-03:
+### Run KP
 
-- `K1`: active config is `kp/configs/model/mote2_3.89_K1.yaml`
-- `K1`: aligned `top8` external-data comparison is: RMS about `1.226 meV`, max about `4.942 meV`
-- `K1 spinful`: active config is `kp/configs/model/mote2_3.89_K1_spinful.yaml`; source/project/symm input is `kp/configs/source/mote2_3.89_K1_spinful.yaml`
-- `K2`: TAPW-projected symmetry data exists, but the canonical published production example is currently `K1`
-- `Gamma`: TAPW full-space symmetry export exists, but the current published 10-band KP example remains `K1`
+From the repository root:
 
-## Historical Artifacts
+```bash
+kp project --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinup_Q6.yaml  # external-data
+kp symm    --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinup_Q6.yaml  # external-data
+kp model   --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinup_Q6.yaml  # external-data
 
-The active configs above write to `kp/outputs/...`. Older saved runs may still exist under `kp/runs/...` and `kp/outputs/model/production/...`; keep them as historical comparison artifacts only, not as active command targets.
+kp project --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_Q6.yaml  # external-data
+kp symm    --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_Q6.yaml  # external-data
+kp model   --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_Q6.yaml  # external-data
+```
+
+### Current Metrics
+
+These GPU validation numbers were generated with the single-file YAMLs:
+
+| case | gauge | model dim | active terms | all-band RMS / max | plotted-band RMS / max |
+| --- | --- | ---: | ---: | ---: | ---: |
+| K1 spin up Q6 | auto | 8 | 94 | 1.215 / 4.907 meV | top 8: 1.226 / 4.942 meV |
+| K1 spinful Q6 | auto | 16 | 386 | 1.470 / 4.740 meV | top 8: 1.235 / 4.841 meV |
+
+### Data Notes
+
+The heavy TAPW arrays and symmetry-analysis outputs are external data. In this
+local checkout they are available under `tapw/` for validation, but they are
+not part of a light source release.

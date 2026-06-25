@@ -23,6 +23,7 @@ from ..basis.selection import (
     select_gauge_candidate_by_symmetry,
     write_basis_selection_report,
 )
+from ..config.case import normalize_case_config
 from ..io.tapw_loader import load_Q_sets, load_hamk
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
 from .exactify_representation import exactify_loaded_symmetry_source
@@ -104,9 +105,7 @@ HARTREE_TO_EV = 27.211386245988
 
 
 def _energy_scale_from_material(material: Mapping[str, Any]) -> float:
-    unit = material.get("energy_unit")
-    if unit is None:
-        raise ValueError("material.energy_unit is required and must be 'eV' or 'Hartree'")
+    unit = material.get("energy_unit", "eV")
     text = str(unit).strip().lower()
     if text in {"ev", "electronvolt", "electron_volt"}:
         return 1.0
@@ -320,6 +319,112 @@ def _downfold_method(project_cfg: dict[str, Any]) -> str:
 def _e_ref(project_cfg: dict[str, Any]) -> float | None:
     value = project_cfg.get("e_ref", project_cfg.get("E_ref"))
     return None if value is None else float(value)
+
+
+def _infer_symmetry_operations_from_manifest(manifest: Mapping[str, Any], valley: str) -> list[str]:
+    rows: list[Mapping[str, Any]] = []
+    matrices = manifest.get("matrices")
+    if isinstance(matrices, list):
+        rows.extend(row for row in matrices if isinstance(row, Mapping))
+    operations = manifest.get("operations")
+    if isinstance(operations, Mapping):
+        valley_ops = operations.get(str(valley))
+        if isinstance(valley_ops, Mapping):
+            nested = valley_ops.get("operations", valley_ops)
+            if isinstance(nested, Mapping):
+                for name, value in nested.items():
+                    row = dict(value) if isinstance(value, Mapping) else {}
+                    row.setdefault("operation", str(name))
+                    row.setdefault("source_valley", str(valley))
+                    row.setdefault("target_valley", str(valley))
+                    rows.append(row)
+        else:
+            for name, value in operations.items():
+                row = dict(value) if isinstance(value, Mapping) else {}
+                row.setdefault("operation", str(name))
+                rows.append(row)
+    elif isinstance(operations, list):
+        rows.extend(row for row in operations if isinstance(row, Mapping))
+
+    selected: set[str] = set()
+    for row in rows:
+        source_valley = str(row.get("source_valley", row.get("valley_label", row.get("valley", valley))))
+        target_valley = str(row.get("target_valley", source_valley))
+        if source_valley != str(valley) or target_valley != str(valley):
+            continue
+        operation = str(row.get("operation", row.get("name", "")))
+        canonical = _canonical_internal_operation_name(operation)
+        if canonical in {"", "E"} or "^" in operation:
+            continue
+        if row.get("supported") is False:
+            continue
+        if not any(row.get(key) for key in ("raw_h_operator_file", "matrix_file", "filename", "file", "path")):
+            continue
+        try:
+            _validate_operation_label(canonical)
+        except ValueError:
+            continue
+        selected.add(canonical)
+
+    preferred = ["TR", "C3z", "C2", "C2T"]
+    ordered = [name for name in preferred if name in selected]
+    ordered.extend(sorted(selected - set(ordered)))
+    if not ordered:
+        raise ValueError(f"Could not infer symm.operations for valley {valley!r} from TAPW symmetry manifest")
+    return ordered
+
+
+def _default_exactification_overrides_for_valley(
+    valley: str,
+    *,
+    symmetry_tolerance: float | None = None,
+) -> dict[str, Any]:
+    family = _valley_family(str(valley))
+    if family == "K":
+        defaults: dict[str, Any] = {"reject_if_off_support_rel_gt": 5.0e-3}
+    elif family == "Gamma":
+        defaults = {
+            "reject_if_off_support_rel_gt": 1.0e-3,
+            "operations": {
+                "C3z": {"support_mode": "monomial"},
+            },
+        }
+    else:
+        defaults = {}
+    if symmetry_tolerance is not None and "reject_if_off_support_rel_gt" in defaults:
+        tolerance = float(symmetry_tolerance)
+        if tolerance > 0.0:
+            defaults["reject_if_off_support_rel_gt"] = max(
+                float(defaults["reject_if_off_support_rel_gt"]),
+                tolerance,
+            )
+    return defaults
+
+
+def _merged_exactification_overrides(
+    valley: str,
+    user_overrides: Any,
+    *,
+    symmetry_tolerance: float | None = None,
+) -> dict[str, Any]:
+    defaults = _default_exactification_overrides_for_valley(
+        valley,
+        symmetry_tolerance=symmetry_tolerance,
+    )
+    if user_overrides is None:
+        return defaults
+    if not isinstance(user_overrides, Mapping):
+        raise ValueError("symm.exactification must be a mapping when provided")
+    merged = dict(defaults)
+    for key, value in user_overrides.items():
+        if key == "operations" and isinstance(value, Mapping) and isinstance(merged.get("operations"), Mapping):
+            op_merged = {str(name): dict(spec) for name, spec in merged["operations"].items()}
+            for op_name, op_spec in value.items():
+                op_merged[str(op_name)] = dict(op_spec) if isinstance(op_spec, Mapping) else op_spec
+            merged[key] = op_merged
+        else:
+            merged[str(key)] = value
+    return merged
 
 
 def _infer_orbitals_per_layer(hamk2d: np.ndarray, q_count: int, num_layers: int) -> int:
@@ -1614,7 +1719,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     cfg_path = os.path.abspath(cfg_path)
     cfg_dir = os.path.dirname(cfg_path)
     with open(cfg_path, "r", encoding="utf-8") as handle:
-        cfg = yaml.safe_load(handle)
+        cfg = normalize_case_config(yaml.safe_load(handle), config_path=cfg_path)
 
     material = cfg.get("material", {})
     plot_cfg = cfg.get("plot", {})
@@ -1637,19 +1742,6 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     spin = str(symm_cfg.get("spin", material.get("spin", "all"))).lower()
     spin_sector_sewing = symm_cfg.get("spin_sector_sewing")
     q_rotation_raw = plot_cfg.get("q_rotation_deg", symm_cfg.get("q_rotation_deg"))
-    source_operations = [str(op) for op in symm_cfg.get("operations", [])]
-    if not source_operations:
-        raise ValueError("symm.operations must not be empty")
-    operation_requests = []
-    for operation in source_operations:
-        canonical = _validate_operation_label(operation)
-        operation_requests.append(
-            {
-                "source": _source_manifest_operation_name(canonical),
-                "output": _output_operation_name(operation, canonical),
-                "requested": operation,
-            }
-        )
     tolerance = float(symm_cfg.get("tolerance", 1.0e-2))
 
     tapw_symmetry_dir = _resolve(symm_cfg.get("tapw_symmetry_dir"), cfg_dir)
@@ -1660,6 +1752,25 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     if not manifest_path.exists():
         raise FileNotFoundError(f"Representation manifest missing: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    operations_raw = symm_cfg.get("operations")
+    inferred_operations = operations_raw in (None, [])
+    source_operations = (
+        _infer_symmetry_operations_from_manifest(manifest, valley)
+        if inferred_operations
+        else [str(op) for op in operations_raw]
+    )
+    if inferred_operations:
+        print(f"[kp symm] inferred symmetry operations: {', '.join(source_operations)}")
+    operation_requests = []
+    for operation in source_operations:
+        canonical = _validate_operation_label(operation)
+        operation_requests.append(
+            {
+                "source": _source_manifest_operation_name(canonical),
+                "output": _output_operation_name(operation, canonical),
+                "requested": operation,
+            }
+        )
 
     hamk_file = _resolve(material.get("hamk_file"), cfg_dir)
     qset1_file = _resolve(material.get("qset1_file"), cfg_dir)
@@ -1943,7 +2054,13 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
                 bM1=bM1_candidate,
                 bM2=bM2_candidate,
             )
-            exact_config_candidate = _kp_symm_exactification_config(symm_cfg.get("exactification"))
+            exact_config_candidate = _kp_symm_exactification_config(
+                _merged_exactification_overrides(
+                    valley,
+                    symm_cfg.get("exactification"),
+                    symmetry_tolerance=tolerance,
+                )
+            )
             _exact_matrices, exact_reports_candidate = exactify_loaded_symmetry_source(
                 loaded_metadata={"operations": operation_records},
                 matrices=raw_candidate_matrices,
@@ -2268,7 +2385,12 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         bM1=bM1,
         bM2=bM2,
     )
-    exact_config = _kp_symm_exactification_config(symm_cfg.get("exactification"))
+    exact_overrides = _merged_exactification_overrides(
+        valley,
+        symm_cfg.get("exactification"),
+        symmetry_tolerance=tolerance,
+    )
+    exact_config = _kp_symm_exactification_config(exact_overrides)
     exact_matrices, exact_reports = exactify_loaded_symmetry_source(
         loaded_metadata=summary,
         matrices=raw_low_matrices,
@@ -2304,6 +2426,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     summary["kp_symm_exactification"] = {
         "status": "exactified",
         "matrix_source": "kp_symm_exactified_action",
+        "config": exact_config,
         "bM1": bM1.tolist(),
         "bM2": bM2.tolist(),
         "n_orb": [int(n_orb[0]), int(n_orb[1])],

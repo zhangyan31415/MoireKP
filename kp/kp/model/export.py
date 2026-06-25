@@ -245,7 +245,7 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
         "points_per_segment": coordinate_payload["points_per_segment"],
         "default_band_slice": coordinate_payload["default_band_slice"],
         "energy_reference": _energy_reference(validation),
-        "runtime": {"hermitianize_before_eigvalsh": True, "max_antihermitian_norm": 1.0e-8},
+        "runtime": {"hermitianize_before_eigvalsh": True, "max_antihermitian_norm": 1.0e-10},
         "p_match_tolerance": P_MATCH_TOLERANCE,
         "runtime_recipe": {
             "array_file": "model_data.npz",

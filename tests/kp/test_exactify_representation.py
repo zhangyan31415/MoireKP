@@ -1078,6 +1078,61 @@ def test_raw_c3z_sewing_action_auto_removes_tiny_internal_mixing() -> None:
     assert "block_monomial_cleanup" in reports["C3z"]["report"]["notes"]
 
 
+def test_raw_c3z_auto_prefers_cleaner_block_support_even_when_monomial_passes_threshold() -> None:
+    labels, q1, q2, b1, b2, raw, expected, expected_cleanup_residual = _make_block_mixed_c3_case()
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(),
+                    "name": "C3z",
+                    "antiunitary": False,
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                }
+            ]
+        },
+        matrices={"C3z": raw},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 2},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 2},
+        ],
+        n_orb=(2, 2),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "reject_if_off_support_rel_gt": 5.0e-3,
+                "operations": {
+                    "C3z": {
+                        "power": 3,
+                        "central_phase": -1.0,
+                        "action_candidates": [
+                            {
+                                "k_map": {"type": "rotation", "angle_deg": 120.0},
+                                "q_map": {"type": "rotation", "angle_deg": 120.0},
+                                "sector_map": "identity",
+                                "antiunitary": False,
+                            }
+                        ],
+                    }
+                },
+            }
+        },
+    )
+
+    np.testing.assert_allclose(exactified["C3z"], expected, atol=1.0e-12)
+    assert reports["C3z"]["preferred_mode"] == "block_monomial"
+    assert reports["C3z"]["support_diagnostics"]["off_support_rel"] < expected_cleanup_residual
+    assert reports["C3z"]["report"]["joint_group_residuals"]["cleanup_input_off_support_rel"] == pytest.approx(
+        expected_cleanup_residual
+    )
+
+
 def test_c3z_bare_representation_block_support_is_not_auto_cleaned() -> None:
     labels, q1, q2, b1, b2, raw, expected, _cleanup_residual = _make_block_mixed_c3_case()
 

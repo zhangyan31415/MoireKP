@@ -30,12 +30,13 @@ from .basis.selection import GaugeAnchorReport, write_basis_selection_report
 #     SweepRow,
 # )
 from .symmetry.projection import run_symmetry_projection_from_config
+from .config.case import normalize_case_config
 
 HARTREE_TO_EV = 27.2113845
 
 
 def _default_standalone_export_dir(model_output_dir: Path) -> Path:
-    return model_output_dir.with_name(f"{model_output_dir.name}_standalone")
+    return model_output_dir / "standalone"
 
 
 def _record_standalone_export(model_output_dir: Path, export_path: Path) -> None:
@@ -50,14 +51,17 @@ def _record_standalone_export(model_output_dir: Path, export_path: Path) -> None
         summary = {}
     if not isinstance(summary, dict):
         summary = {}
-    summary["standalone_export"] = str(export_path.resolve())
+    model_output_resolved = model_output_dir.resolve()
+    export_resolved = export_path.resolve()
+    try:
+        summary["standalone_export"] = str(export_resolved.relative_to(model_output_resolved))
+    except ValueError:
+        summary["standalone_export"] = str(export_resolved)
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
 
 
 def _energy_scale_from_material(material: dict[str, Any]) -> float:
-    unit = material.get("energy_unit")
-    if unit is None:
-        raise ValueError("material.energy_unit is required and must be 'eV' or 'Hartree'")
+    unit = material.get("energy_unit", "eV")
     normalized = str(unit).strip().lower().replace("_", "").replace("-", "")
     if normalized in {"ev", "electronvolt", "electronvolts"}:
         return 1.0
@@ -378,7 +382,63 @@ def _symm_can_validate_auto_gauge(symm_cfg: Any) -> bool:
         return False
     if not _as_bool(symm_cfg.get("enable", True)):
         return False
-    return bool(symm_cfg.get("tapw_symmetry_dir")) and bool(symm_cfg.get("operations"))
+    return bool(symm_cfg.get("tapw_symmetry_dir"))
+
+
+def _project_requests_inline_symmetry_gauge_validation(project_cfg: dict[str, Any]) -> bool:
+    value = project_cfg.get("validate_auto_gauge_with_symmetry")
+    if value is not None:
+        return _as_bool(value)
+    gauge = project_cfg.get("gauge")
+    if isinstance(gauge, dict):
+        value = gauge.get("validate_with_symmetry", gauge.get("symmetry_validation"))
+        if isinstance(value, str):
+            return value.strip().lower() in {"inline", "required", "require", "true", "yes", "1"}
+        if value is not None:
+            return _as_bool(value)
+    return False
+
+
+def _cached_symmetry_basis_payload(symm_cfg: Any, resolve) -> dict[str, Any] | None:
+    if not isinstance(symm_cfg, dict):
+        return None
+    output_dir = symm_cfg.get("output_dir")
+    if output_dir is None:
+        return None
+    resolved = resolve(output_dir)
+    if resolved is None:
+        return None
+    basis_path = Path(resolved) / "basis_selection.json"
+    if not basis_path.exists():
+        return None
+    payload = json.loads(basis_path.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError(f"Cached basis selection must be a JSON object: {basis_path}")
+    if not isinstance(payload.get("resolved_norb_fix_list"), list):
+        raise ValueError(f"Cached basis selection lacks resolved_norb_fix_list: {basis_path}")
+    return payload
+
+
+def _with_deferred_symmetry_validation(report: GaugeAnchorReport) -> GaugeAnchorReport:
+    warnings = list(report.warnings)
+    message = "symmetry validation deferred to kp symm"
+    if message not in warnings:
+        warnings.append(message)
+    return GaugeAnchorReport(
+        gauge_mode=report.gauge_mode,
+        resolved_norb_fix_list=report.resolved_norb_fix_list,
+        selections=report.selections,
+        metric=report.metric,
+        state_selection_quality=report.state_selection_quality,
+        gauge_anchor_quality=report.gauge_anchor_quality,
+        symmetry_closure_quality={
+            "status": "deferred",
+            "source": "kp_symm",
+            "subspace_leakage": None,
+            "reason": "Run `kp symm` to validate auto gauge anchors against TAPW source symmetry.",
+        },
+        warnings=warnings,
+    )
 
 
 def _gauge_report_from_basis_payload(payload: dict[str, Any]) -> GaugeAnchorReport:
@@ -652,7 +712,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     cfg_dir = os.path.dirname(cfg_path)
     print(f"[kp] Loading config: {cfg_path}")
     with open(cfg_path, "r") as f:
-        cfg = yaml.safe_load(f)
+        cfg = normalize_case_config(yaml.safe_load(f), config_path=cfg_path)
 
     material = cfg.get("material", {})
     plot_cfg = cfg.get("plot", {})
@@ -1110,7 +1170,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     cfg_dir = os.path.dirname(cfg_path)
     print(f"[kp] Loading config: {cfg_path}")
     with open(cfg_path, "r") as f:
-        cfg = yaml.safe_load(f)
+        cfg = normalize_case_config(yaml.safe_load(f), config_path=cfg_path)
 
     material = cfg.get("material", {})
     plot_cfg = cfg.get("plot", {})
@@ -1198,35 +1258,52 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     resolved_norb_fix_list: list[Any] | None = None
     symm_cfg = cfg.get("symm", {})
     if _project_requests_auto_gauge(project_cfg) and _symm_can_validate_auto_gauge(symm_cfg):
-        print("[kp]   resolving auto gauge with kp symm validation")
-        symm_summary = run_symmetry_projection_from_config(cfg_path)
-        project_basis = symm_summary.get("project_basis", {}) if isinstance(symm_summary, dict) else {}
-        resolved_from_symm = project_basis.get("resolved_norb_fix_list") if isinstance(project_basis, dict) else None
-        if not isinstance(resolved_from_symm, list):
-            raise ValueError("kp symm did not return project_basis.resolved_norb_fix_list for auto gauge")
-        symm_output_dir = resolve(symm_cfg.get("output_dir", "symm_project")) if isinstance(symm_cfg, dict) else None
-        basis_payload: dict[str, Any] | None = None
-        if symm_output_dir is not None:
-            basis_path = Path(symm_output_dir) / "basis_selection.json"
-            if basis_path.exists():
-                basis_payload = json.loads(basis_path.read_text(encoding="utf-8"))
-        if basis_payload is None:
-            basis_payload = {
-                "gauge_mode": project_basis.get("gauge_mode", "auto_scdm") if isinstance(project_basis, dict) else "auto_scdm",
-                "resolved_norb_fix_list": resolved_from_symm,
-                "selections": [],
-                "metric": {"type": "orthonormal", "basis_is_orthonormal": True},
-                "state_selection_quality": {"status": "not_evaluated"},
-                "gauge_anchor_quality": {"status": "unknown"},
-                "symmetry_closure_quality": {
-                    "status": "validated",
-                    "source": "kp_symm",
-                    "subspace_leakage": None,
-                },
-                "warnings": [],
-            }
-        resolved_norb_fix_list = resolved_from_symm
-        gauge_report = _gauge_report_from_basis_payload(basis_payload)
+        basis_payload = _cached_symmetry_basis_payload(symm_cfg, resolve)
+        if basis_payload is not None:
+            print("[kp]   resolving auto gauge from cached kp symm basis selection")
+            resolved_norb_fix_list = list(basis_payload["resolved_norb_fix_list"])
+            gauge_report = _gauge_report_from_basis_payload(basis_payload)
+        elif _project_requests_inline_symmetry_gauge_validation(project_cfg):
+            print("[kp]   resolving auto gauge with kp symm validation")
+            symm_summary = run_symmetry_projection_from_config(cfg_path)
+            project_basis = symm_summary.get("project_basis", {}) if isinstance(symm_summary, dict) else {}
+            resolved_from_symm = project_basis.get("resolved_norb_fix_list") if isinstance(project_basis, dict) else None
+            if not isinstance(resolved_from_symm, list):
+                raise ValueError("kp symm did not return project_basis.resolved_norb_fix_list for auto gauge")
+            basis_payload = _cached_symmetry_basis_payload(symm_cfg, resolve)
+            if basis_payload is None:
+                basis_payload = {
+                    "gauge_mode": project_basis.get("gauge_mode", "auto_scdm") if isinstance(project_basis, dict) else "auto_scdm",
+                    "resolved_norb_fix_list": resolved_from_symm,
+                    "selections": [],
+                    "metric": {"type": "orthonormal", "basis_is_orthonormal": True},
+                    "state_selection_quality": {"status": "not_evaluated"},
+                    "gauge_anchor_quality": {"status": "unknown"},
+                    "symmetry_closure_quality": {
+                        "status": "validated",
+                        "source": "kp_symm",
+                        "subspace_leakage": None,
+                    },
+                    "warnings": [],
+                }
+            resolved_norb_fix_list = resolved_from_symm
+            gauge_report = _gauge_report_from_basis_payload(basis_payload)
+        else:
+            print("[kp]   resolving auto gauge locally; symmetry validation deferred to kp symm")
+            resolved_norb_fix_list, local_report = resolve_project_gauge_anchors(
+                _selected_spin_project_input(np.asarray(hamk2d), spin),
+                q_count,
+                orb0,
+                num_layer_list,
+                spin=projection_spin,
+                Qlayer_list=[[q1], [q2_for_projection]],
+                num_orb_per_layer_list=num_orb_per_layer_list,
+                nlow_state_list=nlow_state_list,
+                norb_fix_list=norb_fix_list,
+                gauge_config=project_cfg.get("gauge"),
+                mode=mode,
+            )
+            gauge_report = _with_deferred_symmetry_validation(local_report)
     else:
         resolved_norb_fix_list, gauge_report = resolve_project_gauge_anchors(
             _selected_spin_project_input(np.asarray(hamk2d), spin),
@@ -1428,7 +1505,7 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     cfg_dir = os.path.dirname(cfg_path)
     print(f"[kp] Loading config: {cfg_path}")
     with open(cfg_path, "r") as f:
-        cfg = yaml.safe_load(f)
+        cfg = normalize_case_config(yaml.safe_load(f), config_path=cfg_path)
 
     material = cfg.get("material", {})
     plot_cfg = cfg.get("plot", {})
@@ -1753,6 +1830,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(f"[kp model]   runtime: {float(results['runtime_s']):.2f} s")
         if results.get("band_plot"):
             print(f"[kp model]   band plot: {results['band_plot']}")
+        if results.get("all_band_plot"):
+            print(f"[kp model]   all-band plot: {results['all_band_plot']}")
         if comparison:
             rms = float(comparison["rms_error"])
             max_abs = float(comparison["max_abs_error"])
@@ -1766,6 +1845,23 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"[kp model]   plot bands RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})")
             if plot_comparison.get("model_alignment_shift_meV") is not None:
                 print(f"[kp model]   plot alignment shift: {float(plot_comparison['model_alignment_shift_meV']):.3f} meV")
+        all_band_comparison = results.get("all_band_plot_comparison")
+        if all_band_comparison:
+            rms_mev = float(
+                all_band_comparison.get(
+                    "rms_error_mev",
+                    1000.0 * float(all_band_comparison["rms_error"]),
+                )
+            )
+            max_mev = float(
+                all_band_comparison.get(
+                    "max_abs_error_mev",
+                    1000.0 * float(all_band_comparison["max_abs_error"]),
+                )
+            )
+            bands = int(all_band_comparison.get("num_bands", 0))
+            align = str(all_band_comparison.get("align", "none"))
+            print(f"[kp model]   all-band RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})")
         if model_cfg is None:
             raise RuntimeError("standalone export requires configured model results")
         from .model.export import export_standalone_model

@@ -30,6 +30,7 @@ from kp.symmetry.projection import (
     _resolve_projected_model_action,
     _select_operation_matrix_kind,
     _sector_orbital_counts,
+    _infer_symmetry_operations_from_manifest,
     _source_manifest_operation_name,
     _validate_operation_label,
 )
@@ -372,6 +373,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         include_default_k_pairs: bool = True,
         include_representation_file: bool = True,
         include_energy_unit: bool = True,
+        include_operations: bool = True,
+        auto_gauge: bool = False,
     ) -> Path:
         q1_file = tmp / f"{operation}_q1.npy"
         q2_file = tmp / f"{operation}_q2.npy"
@@ -433,18 +436,22 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 "mode": valley,
                 "downfold_method": "first_order",
                 "nlow_state_list": nlow_state_list,
-                "norb_fix_list": norb_fix_list,
             },
             "symm": {
                 "enable": True,
                 "valley": valley,
                 "spin": "up",
                 "tapw_symmetry_dir": str(symm_dir),
-                "operations": [operation],
                 "output_dir": str(out_dir),
                 "tolerance": 1.0e-8,
             },
         }
+        if auto_gauge:
+            cfg["project"]["gauge"] = "auto"
+        else:
+            cfg["project"]["norb_fix_list"] = norb_fix_list
+        if include_operations:
+            cfg["symm"]["operations"] = [operation]
         if not include_energy_unit:
             cfg["material"].pop("energy_unit", None)
         cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -452,10 +459,85 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         cli.main(["symm", "--config", str(cfg_path)])
         return out_dir
 
-    def test_symm_requires_explicit_energy_unit(self) -> None:
+    def test_symm_defaults_missing_energy_unit_to_ev(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
-            with self.assertRaisesRegex(ValueError, "material.energy_unit"):
+            out_dir = self._run_minimal_two_layer_projection(
+                tmp,
+                valley="K1",
+                operation="C3",
+                d_up=np.eye(4, dtype=np.complex128),
+                manifest_entry={
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                },
+                include_energy_unit=False,
+            )
+
+            self.assertTrue((out_dir / "manifest.json").exists())
+
+    def test_symm_infers_operations_from_tapw_manifest_when_omitted(self) -> None:
+        manifest = {
+            "matrices": [
+                {"source_valley": "K1", "target_valley": "K1", "operation": "E", "supported": True, "raw_h_operator_file": "K1/E_rawH.npz"},
+                {"source_valley": "K1", "target_valley": "K1", "operation": "C3z", "supported": True, "raw_h_operator_file": "K1/C3z_rawH.npz"},
+                {"source_valley": "K1", "target_valley": "K1", "operation": "C3z^2", "supported": True, "raw_h_operator_file": "K1/C3z2_rawH.npz"},
+                {"source_valley": "K1", "target_valley": "K2", "operation": "TR", "supported": True, "raw_h_operator_file": "K1/TR_rawH.npz"},
+                {"source_valley": "Gamma", "target_valley": "Gamma", "operation": "TR", "supported": True, "raw_h_operator_file": "Gamma/TR_rawH.npz"},
+                {"source_valley": "Gamma", "target_valley": "Gamma", "operation": "C3z", "supported": True, "raw_h_operator_file": "Gamma/C3z_rawH.npz"},
+            ]
+        }
+
+        self.assertEqual(_infer_symmetry_operations_from_manifest(manifest, "K1"), ["C3z"])
+        self.assertEqual(_infer_symmetry_operations_from_manifest(manifest, "Gamma"), ["TR", "C3z"])
+
+    def test_symm_omitted_operations_runs_and_reports_inference(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            stream = io.StringIO()
+            with redirect_stdout(stream):
+                out_dir = self._run_minimal_two_layer_projection(
+                    tmp,
+                    valley="K1",
+                    operation="C3",
+                    d_up=np.eye(4, dtype=np.complex128),
+                    manifest_entry={
+                        "k_map": {"type": "rotation", "angle_deg": 120.0},
+                        "q_map": {"type": "rotation", "angle_deg": 120.0},
+                        "sector_map": "identity",
+                    },
+                    include_operations=False,
+                )
+
+            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertIn("inferred symmetry operations: C3z", stream.getvalue())
+            self.assertEqual([row["operation"] for row in summary["operations"]], ["C3z"])
+            self.assertEqual(summary["kp_symm_exactification"]["config"]["reject_if_off_support_rel_gt"], 5.0e-3)
+
+    def test_symm_auto_gauge_candidate_exactification_uses_valley_default(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            observed_thresholds: list[float] = []
+
+            def fake_exactify_loaded_symmetry_source(**kwargs):
+                exact_cfg = kwargs["raw_config"]["exactification"]
+                observed_thresholds.append(float(exact_cfg["reject_if_off_support_rel_gt"]))
+                matrices = kwargs["matrices"]
+                reports = {
+                    str(name): {
+                        "report": {
+                            "status": "exactified",
+                            "distance_mod_global_phase": 0.0,
+                            "phase_std_deg": 0.0,
+                        },
+                        "support_diagnostics": {"off_support_rel": 1.0e-3},
+                    }
+                    for name in matrices
+                }
+                return dict(matrices), reports
+
+            with patch.object(projection_mod, "exactify_loaded_symmetry_source", side_effect=fake_exactify_loaded_symmetry_source):
                 self._run_minimal_two_layer_projection(
                     tmp,
                     valley="K1",
@@ -466,8 +548,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                         "q_map": {"type": "rotation", "angle_deg": 120.0},
                         "sector_map": "identity",
                     },
-                    include_energy_unit=False,
+                    include_operations=False,
+                    auto_gauge=True,
                 )
+
+            self.assertTrue(observed_thresholds)
+            self.assertTrue(all(value == 5.0e-3 for value in observed_thresholds))
 
     def test_symm_accepts_release_manifest_with_rawh_only(self) -> None:
         with tempfile.TemporaryDirectory() as td:

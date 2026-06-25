@@ -1,48 +1,51 @@
 ## MgI2 3.89
 
-- `openmx/`: OpenMX input snapshots for this material/angle.
-- `tapw/`: TAPW inputs, Q-shell data, and symmetry-analysis outputs used by KP.
-- `kp/configs/source/`: canonical `plot / project / symm` inputs.
-- `kp/configs/model/`: canonical continuum-model configs.
-- `kp/notebooks/`: notebooks wired to this directory layout.
+This release example covers MgI2 at 3.89 degrees. The active KP entry points
+are one YAML file per case:
 
-Main commands:
-
-```bash
-kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
-kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
-kp plot --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
-kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
-kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
-kp project --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
-kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
-kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
-kp symm --config examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
-kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml  # precomputed
-kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml  # precomputed
-kp model --config examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml  # precomputed
+```text
+kp/configs/mgi2_3.89_Gamma_Q5.yaml
+kp/configs/mgi2_3.89_M1_spinless_Q7.yaml
+kp/configs/mgi2_3.89_M1_spinful_Q7.yaml
 ```
 
-`external-data` commands require TAPW arrays or symmetry exports listed as
-`pending_external` in `examples/data-manifest.yaml`. `precomputed` commands
-also require saved KP projection/symmetry outputs from that manifest.
+The YAML files keep the user-facing parameters in one place: `valley`, `spin`,
+`project.nlow_state_list`, `project.gauge`, `model.n_orb`, fitting settings,
+and plotting settings. `symm.operations`, `source_config`, `symmetry_source`,
+`sectors`, and `term_templates` are inferred by the program.
 
-Production status on 2026-06-03:
+### Run KP
 
-- `Gamma`:
-  - active config: `kp/configs/model/mgi2_3.89_Gamma.yaml`
-  - user-facing symmetry names: `C3z`, `TR`, `C2`
-  - aligned `top4` external-data comparison: RMS about `0.670 meV`, max about `2.210 meV`
+From the repository root:
 
-- `M1`, `M2`, `M3`:
-  - raw TAPW `hamk_*_valley.npy` and `g_vec_list_*` inputs live under `tapw/Q_shell_7/`
-  - `kp project` writes `44 x 44` Heff for all three valleys
-  - active config currently covers `M1`
-  - user-facing symmetry names: `TR`, `C2`
-  - `M1` aligned `bottom8` comparison is: RMS about `1.179 meV`, max about `3.987 meV`
-  - `M1 spinful`: active config is `kp/configs/model/mgi2_3.89_M1_spinful.yaml`; source/project/symm input is `kp/configs/source/mgi2_3.89_M1_spinful.yaml`
-  - symmetry action metadata and exactified continuum matrices are read from the `kp symm` manifest
+```bash
+kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_Q5.yaml  # external-data
+kp symm    --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_Q5.yaml  # external-data
+kp model   --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_Q5.yaml  # external-data
 
-## Historical Artifacts
+kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_Q7.yaml  # external-data
+kp symm    --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_Q7.yaml  # external-data
+kp model   --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_Q7.yaml  # external-data
 
-The active configs above write to `kp/outputs/...`. Older saved runs may still exist under `kp/runs/...` and `kp/outputs/model/production/...`; keep them as historical comparison artifacts only, not as active command targets.
+kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_Q7.yaml  # external-data
+kp symm    --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_Q7.yaml  # external-data
+kp model   --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_Q7.yaml  # external-data
+```
+
+Each case uses `project.gauge: auto`; users do not write `norb_fix_list`.
+
+### Current Metrics
+
+These GPU validation numbers were generated with the single-file YAMLs:
+
+| case | gauge | model dim | active terms | all-band RMS / max | plotted-band RMS / max |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Gamma Q5 | auto + linear low-subspace refinement | 124 | 634 | 3.350 / 11.455 meV before refinement | top 10 plot: 0.836 / 3.180 meV |
+| M1 spinless Q7 | auto | 8 | 266 | 1.074 / 2.969 meV | bottom 8: 1.114 / 3.263 meV |
+| M1 spinful Q7 | auto | 16 | 401 | 1.886 / 4.631 meV | bottom 8: 0.695 / 2.784 meV |
+
+### Data Notes
+
+The heavy TAPW arrays and symmetry-analysis outputs are external data. In this
+local checkout they are available under `tapw/` for validation, but they are
+not part of a light source release.

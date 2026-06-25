@@ -3705,6 +3705,9 @@ def _compute_one_k(
         H11 = H_cont[np.ix_(remove, remove)]
         energy = np.max(np.linalg.eigvalsh(H00))
         H = H00 + H01 @ np.linalg.inv(energy * np.eye(len(H11)) - H11) @ H10
+    # Sparse symmetry assembly can leave tiny non-Hermitian roundoff.  Use the
+    # same Hermitian matrix for diagnostics, saved bands, and eigensolves.
+    H = 0.5 * (H + H.conj().T)
     t_schur = time.perf_counter() - t_schur_start
 
     t_eig_start = time.perf_counter()

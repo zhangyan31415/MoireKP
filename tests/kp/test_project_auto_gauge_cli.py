@@ -61,7 +61,7 @@ def test_project_gauge_auto_writes_basis_selection_reports(monkeypatch, tmp_path
             "downfold_method": "first_order",
             "out_dir": "project",
             "nlow_state_list": [[0], [0]],
-            "gauge": "auto",
+            "gauge": {"method": "auto_scdm", "validate_with_symmetry": True},
         },
     )
 
@@ -125,7 +125,7 @@ def test_project_auto_uses_symmetry_validated_resolved_anchors(monkeypatch, tmp_
             "downfold_method": "first_order",
             "out_dir": "project",
             "nlow_state_list": [[0], [0]],
-            "gauge": "auto",
+            "gauge": {"method": "auto_scdm", "validate_with_symmetry": True},
         },
         {
             "enable": True,
@@ -141,6 +141,100 @@ def test_project_auto_uses_symmetry_validated_resolved_anchors(monkeypatch, tmp_
     report = json.loads((tmp_path / "project" / "basis_selection.json").read_text(encoding="utf-8"))
     assert report["resolved_norb_fix_list"] == selected
     assert report["symmetry_closure_quality"]["status"] == "validated"
+
+
+def test_project_auto_reuses_cached_symmetry_basis_selection(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "plot_eigs_scatter",
+        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
+    )
+    selected = [[[[1, 1.0]]], [[[1, 1.0]]]]
+    symm_dir = tmp_path / "symm"
+    symm_dir.mkdir()
+    report = {
+        "gauge_mode": "auto_scdm",
+        "resolved_norb_fix_list": selected,
+        "selections": [],
+        "metric": {"type": "orthonormal", "basis_is_orthonormal": True},
+        "state_selection_quality": {"status": "not_evaluated"},
+        "gauge_anchor_quality": {"status": "ok", "sigma_min": 1.0, "condition_number": 1.0},
+        "symmetry_closure_quality": {
+            "status": "validated",
+            "selected_candidate_id": "cached_candidate",
+        },
+        "warnings": [],
+    }
+    (symm_dir / "basis_selection.json").write_text(json.dumps(report), encoding="utf-8")
+
+    def fail_symm(_cfg_path: str, *, developer_outputs=None):
+        raise AssertionError("kp project should reuse cached basis_selection.json")
+
+    monkeypatch.setattr(cli, "run_symmetry_projection_from_config", fail_symm)
+
+    cfg_path = _write_tiny_project_config_with_symm(
+        tmp_path,
+        {
+            "mode": "K1",
+            "workers": 1,
+            "downfold_method": "first_order",
+            "out_dir": "project",
+            "nlow_state_list": [[0], [0]],
+            "gauge": "auto",
+        },
+        {
+            "enable": True,
+            "tapw_symmetry_dir": "tapw_symmetry",
+            "output_dir": "symm",
+            "operations": ["TR"],
+        },
+    )
+    (tmp_path / "tapw_symmetry").mkdir()
+
+    cli.cmd_project_from_config(str(cfg_path))
+
+    payload = json.loads((tmp_path / "project" / "basis_selection.json").read_text(encoding="utf-8"))
+    assert payload["resolved_norb_fix_list"] == selected
+    assert payload["symmetry_closure_quality"]["selected_candidate_id"] == "cached_candidate"
+
+
+def test_project_auto_defers_symmetry_validation_without_cached_basis(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(
+        cli,
+        "plot_eigs_scatter",
+        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
+    )
+
+    def fail_symm(_cfg_path: str, *, developer_outputs=None):
+        raise AssertionError("kp project should not run heavy kp symm inline without a cache")
+
+    monkeypatch.setattr(cli, "run_symmetry_projection_from_config", fail_symm)
+
+    cfg_path = _write_tiny_project_config_with_symm(
+        tmp_path,
+        {
+            "mode": "K1",
+            "workers": 1,
+            "downfold_method": "first_order",
+            "out_dir": "project",
+            "nlow_state_list": [[0], [0]],
+            "gauge": "auto",
+        },
+        {
+            "enable": True,
+            "tapw_symmetry_dir": "tapw_symmetry",
+            "output_dir": "symm",
+            "operations": ["TR"],
+        },
+    )
+    (tmp_path / "tapw_symmetry").mkdir()
+
+    cli.cmd_project_from_config(str(cfg_path))
+
+    payload = json.loads((tmp_path / "project" / "basis_selection.json").read_text(encoding="utf-8"))
+    assert payload["resolved_norb_fix_list"] == [[[[0, 1.0]]], [[[0, 1.0]]]]
+    assert payload["symmetry_closure_quality"]["status"] == "deferred"
+    assert payload["symmetry_closure_quality"]["source"] == "kp_symm"
 
 
 def test_project_rejects_manual_norb_fix_with_auto_gauge(tmp_path: Path) -> None:
