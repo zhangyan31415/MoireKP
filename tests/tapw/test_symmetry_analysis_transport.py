@@ -726,3 +726,58 @@ def test_atom_mapping_accepts_integer_seitz_image_shift_for_layer_exchange_c2():
 
     assert atom_mapping["group_target_map"] == {0: 1, 1: 0}
     assert atom_mapping["atom_type_target_map"] == {0: 1, 1: 0}
+
+
+def test_spatial_c2_transport_reduces_integer_fractional_seitz_branch():
+    runner = symmetry_analysis.SymmetryAnalysisRunner.__new__(symmetry_analysis.SymmetryAnalysisRunner)
+    runner.structure = SimpleNamespace(
+        Tmat=np.eye(3, dtype=float),
+        reciprocal_Tmat=np.eye(3, dtype=float),
+        spin=False,
+        df=pd.DataFrame(
+            [
+                {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.25,
+                    "species": "Mg",
+                    "atom_type": 0,
+                    "twist_group": 0,
+                    "orb_name": "s1",
+                    "orb_num": 1,
+                },
+                {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.75,
+                    "species": "Mg",
+                    "atom_type": 1,
+                    "twist_group": 1,
+                    "orb_name": "s1",
+                    "orb_num": 1,
+                },
+            ]
+        ),
+    )
+    runner._valley_context_for_valley = lambda valley: SimpleNamespace(
+        group_g_vectors={
+            0: np.zeros((1, 2), dtype=float),
+            1: np.zeros((1, 2), dtype=float),
+        }
+    )
+    candidate = {
+        "rotation_cart": np.diag([1.0, -1.0, -1.0]),
+        "translation_cart": np.array([1.0, 0.0, 0.0], dtype=float),
+        "rotation_frac": np.diag([1.0, -1.0, -1.0]),
+        "translation_frac": np.array([1.0, 0.0, 0.0], dtype=float),
+    }
+
+    transport = runner._build_spatial_c2_layer_exchange_transport(
+        candidate,
+        valley=5,
+        q_target=np.zeros(3, dtype=float),
+        q_source=np.zeros(3, dtype=float),
+    )
+
+    assert transport.shape == (2, 2)
+    assert runner._last_transport_diagnostics["origin_shift_residual"] == pytest.approx(0.0)

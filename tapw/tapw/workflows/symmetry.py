@@ -907,6 +907,16 @@ def translation_removable_by_origin_shift(
     return residual < tol, np.asarray(shift, dtype=float), residual
 
 
+def _translation_cart_with_integer_lattice_branch_removed(structure, operation: dict[str, Any]) -> tuple[np.ndarray, np.ndarray]:
+    translation_cart = np.asarray(operation.get("translation_cart", np.zeros(3, dtype=float)), dtype=float)
+    if "translation_frac" not in operation or not hasattr(structure, "Tmat"):
+        return translation_cart, translation_cart
+    translation_frac = np.asarray(operation["translation_frac"], dtype=float)
+    reduced_translation_frac = translation_frac - np.rint(translation_frac)
+    reduced_translation_cart = np.asarray(structure.Tmat, dtype=float).T @ reduced_translation_frac
+    return translation_cart, np.asarray(reduced_translation_cart, dtype=float)
+
+
 def _rounded_q_key(q, ndigits: int = 10):
     q = np.asarray(q, dtype=float).reshape(-1)
     return tuple(np.round(q, decimals=ndigits).tolist())
@@ -2765,16 +2775,20 @@ class SymmetryAnalysisRunner:
         q_source = np.asarray(q_source, dtype=float)
         rotation_cart = np.asarray(candidate["rotation_cart"], dtype=float)
         linear_map = rotation_cart[:2, :2]
-        translation_cart = np.asarray(candidate.get("translation_cart", np.zeros(3, dtype=float)), dtype=float)
+        translation_cart, reduced_translation_cart = _translation_cart_with_integer_lattice_branch_removed(
+            self.structure,
+            candidate,
+        )
         removable, origin_shift_cart, origin_shift_residual = translation_removable_by_origin_shift(
             rotation_cart,
-            translation_cart,
+            reduced_translation_cart,
             tol=1.0e-8,
         )
         if not removable:
             raise SymmetrySupportError(
                 "seitz_translation_unsupported",
-                f"C2 v1 requires removable Seitz translation; got translation={translation_cart.tolist()} with origin-shift residual={origin_shift_residual:.3e}.",
+                f"C2 v1 requires removable Seitz translation; got translation={translation_cart.tolist()} "
+                f"(reduced={reduced_translation_cart.tolist()}) with origin-shift residual={origin_shift_residual:.3e}.",
             )
 
         q_target_cart = np.dot(q_target, np.asarray(self.structure.reciprocal_Tmat, dtype=float))[:2]
@@ -2803,6 +2817,11 @@ class SymmetryAnalysisRunner:
             "g_perm_max_delta": 0.0,
             "nonzero_reciprocal_shift_count": 0,
             "layer_exchange_detected": True,
+            "seitz_translation_norm_xy_raw": float(np.linalg.norm(translation_cart[:2])),
+            "seitz_translation_norm_xy": float(np.linalg.norm(reduced_translation_cart[:2])),
+            "seitz_translation_removed": bool(
+                np.linalg.norm(translation_cart[:2] - reduced_translation_cart[:2]) > 1.0e-8
+            ),
             "origin_shift_residual": origin_shift_residual,
         }
 
@@ -3149,13 +3168,10 @@ class SymmetryAnalysisRunner:
         scan: list[dict[str, Any]] = []
         for operation in list_layer_exchange_c2_spatial_operations(self.structure, spatial_operations):
             rotation_cart = np.asarray(operation["rotation_cart"], dtype=float)
-            translation_cart = np.asarray(operation.get("translation_cart", np.zeros(3, dtype=float)), dtype=float)
-            translation_frac = np.asarray(operation.get("translation_frac", np.zeros(3, dtype=float)), dtype=float)
-            reduced_translation_frac = translation_frac - np.rint(translation_frac)
-            if hasattr(self.structure, "Tmat"):
-                reduced_translation_cart = np.asarray(self.structure.Tmat, dtype=float).T @ reduced_translation_frac
-            else:
-                reduced_translation_cart = translation_cart
+            translation_cart, reduced_translation_cart = _translation_cart_with_integer_lattice_branch_removed(
+                self.structure,
+                operation,
+            )
             translation_norm_xy = float(np.linalg.norm(reduced_translation_cart[:2]))
             translation_removed = False
             origin_shift_cart = np.zeros(3, dtype=float)
