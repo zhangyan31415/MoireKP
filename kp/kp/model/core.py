@@ -2235,6 +2235,43 @@ class ContinuumModelBuilder:
         )
         return orthonormal_matrices, including_list
 
+    def _initialterms_for_fit_keys(
+        self,
+        keys: List[ContinuumTermKey],
+        k_points: List[np.ndarray],
+        *,
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
+    ) -> np.ndarray:
+        if not keys:
+            return np.empty((0, 0, 0), dtype=np.complex128)
+
+        def _process_single_term(key):
+            mat_real, mat_imag = self.stack_Y_for_term(
+                self.model.terms[key],
+                k_points,
+                term_matrix_cache=term_matrix_cache,
+            )
+            return mat_real, mat_imag
+
+        time_start = time.time()
+        results = [_process_single_term(key) for key in tqdm(keys, desc="Processing terms")]
+        time_end = time.time()
+        print(f"Time elapsed for processing terms: {time_end - time_start:.2f} s")
+
+        initialterms = []
+        for mat_real, mat_imag in results:
+            initialterms.append(mat_real)
+            initialterms.append(mat_imag)
+        initialterms = np.array(initialterms)
+
+        subgroup_0 = self._fit_block_signature_for_key(keys[0])
+        for key in keys:
+            subgroup = self._fit_block_signature_for_key(key)
+            if subgroup != subgroup_0:
+                raise ValueError("Different fit block signatures in keys.")
+
+        return np.array(self.get_mat_blocks(initialterms, keys[0], len(k_points)))
+
     @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
                                         tol: float = 1e-8, tag: str = None,
@@ -2243,48 +2280,21 @@ class ContinuumModelBuilder:
         对模型中指定 keys 的项，在 k_points 下采样后，
         对于每个 term同时采样 real 与 imag 两部分（分别由 stack_Y_for_term 返回），
         将这两部分都添加到 initialterms 中（顺序为 term1_real, term1_imag, term2_real, term2_imag, ...）。
-        
+
         拟合使用的 term 矩阵必须和后续组装/导出的 runtime term 矩阵一致；
         因此这里不对特定 tag 做额外去迹或 residual 修正。
-        
+
         返回：
         keys: 原 keys 列表（顺序不变）
         initialterms: 每个 term 得到的 block_diag 拼接矩阵（总数为 2*N）
         finalterms: 经过正交化后的矩阵数组
         includinglist: 正交化中被认为是线性独立的矩阵的原始索引数组
         """
-        
-        # 内部定义处理单个 key 的函数
-        def _process_single_term(key):
-            # 采样获得实部与虚部矩阵
-            mat_real, mat_imag = self.stack_Y_for_term(
-                self.model.terms[key],
-                k_points,
-                term_matrix_cache=term_matrix_cache,
-            )
-            
-            # 返回该 key 对应的两个矩阵
-            return mat_real, mat_imag
-
-        time_start = time.time()
-        results = [_process_single_term(key) for key in tqdm(keys, desc="Processing terms")]
-        time_end = time.time()
-        print(f"Time elapsed for processing terms: {time_end - time_start:.2f} s")
-        # 组合结果：每个 key 返回的两个矩阵依次放入 initialterms 列表
-        initialterms = []
-        for mat_real, mat_imag in results:
-            initialterms.append(mat_real)
-            initialterms.append(mat_imag)
-            # print(f"shape of mat_real: {mat_real.shape}, mat_imag: {mat_imag.shape}")
-        initialterms = np.array(initialterms)
-        
-        subgroup_0 = self._fit_block_signature_for_key(keys[0])
-        for key in keys:
-            subgroup = self._fit_block_signature_for_key(key)
-            if subgroup != subgroup_0:
-                raise ValueError("Different fit block signatures in keys.")
-
-        initialterms = np.array(self.get_mat_blocks(initialterms, keys[0], len(k_points)))
+        initialterms = self._initialterms_for_fit_keys(
+            keys,
+            k_points,
+            term_matrix_cache=term_matrix_cache,
+        )
         
         # 正交化
         finalterms, includinglist, support_idx = self._orthogonalize_hermitian_matrices_with_support(initialterms, tol=tol)
@@ -2333,6 +2343,67 @@ class ContinuumModelBuilder:
         except scipy.linalg.LinAlgError:
             coeffs = np.linalg.lstsq(transfermat, rhs, rcond=None)[0]
         return coeffs
+
+    def _solve_coefficients_from_support_vectors(
+        self,
+        initialterms: np.ndarray,
+        heff: np.ndarray,
+        *,
+        tol: float = 1e-8,
+        support_idx: np.ndarray | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        initialterms = np.asarray(initialterms)
+        heff = np.asarray(heff)
+        if initialterms.ndim != 3 or initialterms.shape[1] != initialterms.shape[2]:
+            raise ValueError("initialterms must have shape (n_terms, dim, dim)")
+        if heff.shape != initialterms.shape[1:]:
+            raise ValueError("heff must have the same matrix shape as initialterms entries")
+
+        n_terms, dim, _ = initialterms.shape
+        if n_terms == 0:
+            return np.array([], dtype=float), np.array([], dtype=int), np.array([], dtype=int)
+
+        flat = initialterms.reshape(n_terms, -1)
+        if support_idx is None:
+            max_abs = float(np.max(np.abs(flat))) if flat.size else 0.0
+            support_tol = max(np.finfo(float).eps * max(max_abs, 1.0) * 100.0, float(tol) * 1.0e-4)
+            support_idx = np.flatnonzero(np.any(np.abs(flat) > support_tol, axis=0)).astype(int, copy=False)
+        else:
+            support_idx = np.asarray(support_idx, dtype=int)
+        if support_idx.size == 0:
+            return np.array([], dtype=float), np.array([], dtype=int), support_idx
+
+        design_complex = flat[:, support_idx].T
+        target_complex = heff.reshape(dim * dim)[support_idx]
+        design = np.vstack((design_complex.real, design_complex.imag))
+        target = np.concatenate((target_complex.real, target_complex.imag))
+
+        col_norms = np.linalg.norm(design, axis=0)
+        nonzero = np.flatnonzero(col_norms > tol)
+        if nonzero.size == 0:
+            return np.array([], dtype=float), np.array([], dtype=int), support_idx
+
+        qr_input = np.asfortranarray(design[:, nonzero])
+        _q, r, piv = scipy.linalg.qr(
+            qr_input,
+            mode="economic",
+            pivoting=True,
+            overwrite_a=True,
+            check_finite=False,
+        )
+        diag = np.abs(np.diag(r))
+        rank = int(np.count_nonzero(diag > tol))
+        includinglist = np.sort(nonzero[piv[:rank]].astype(int, copy=False))
+        if rank == 0:
+            return np.array([], dtype=float), np.array([], dtype=int), support_idx
+
+        coeffs, *_ = scipy.linalg.lstsq(
+            design[:, includinglist],
+            target,
+            check_finite=False,
+            lapack_driver="gelsy",
+        )
+        return np.asarray(coeffs, dtype=float), includinglist, support_idx
 
     @staticmethod
     def _matrix_support_image(operator: np.ndarray, indices: np.ndarray, *, tol: float = 1e-10) -> np.ndarray:
@@ -2656,26 +2727,31 @@ class ContinuumModelBuilder:
                         f"with {len(sub_keys)} terms ({tag_summary})."
                     )
 
-                orthogonalized = self.get_orthogonalized_terms_subset(
+                initialterms = self._initialterms_for_fit_keys(
                     sub_keys,
                     k_points,
-                    tol=tol,
-                    tag=None,
                     term_matrix_cache=term_matrix_cache,
                 )
-                if len(orthogonalized) == 4:
-                    grp_keys, initialterms, finalterms, includinglist = orthogonalized
-                    fit_support_idx = None
-                else:
-                    grp_keys, initialterms, finalterms, includinglist, fit_support_idx = orthogonalized
-                print(f"    {len(includinglist)} terms included after orthogonalization. Time: {time.strftime('%H:%M:%S', time.localtime())}")
+                heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
+                coeffs, includinglist, fit_support_idx = self._solve_coefficients_from_support_vectors(
+                    initialterms,
+                    heff_block,
+                    tol=tol,
+                )
+                print(
+                    f"    {len(includinglist)} independent support-vector terms "
+                    f"(support={len(fit_support_idx)} entries). Time: {time.strftime('%H:%M:%S', time.localtime())}"
+                )
+                for i, key in enumerate(sub_keys):
+                    idx1, idx2 = 2 * i, 2 * i + 1
+                    self.model.terms[key].active = (idx1 in includinglist or idx2 in includinglist)
 
                 raw_subgroups_by_tag: Dict[str, set[tuple[int, int, int, int]]] = {}
                 for key in sub_keys:
                     raw = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
                     raw_subgroups_by_tag.setdefault(self.model.terms[key].tag, set()).add(raw)
 
-                if len(includinglist) == 0 or np.asarray(finalterms).size == 0:
+                if len(includinglist) == 0 or np.asarray(initialterms).size == 0:
                     for key in sub_keys:
                         self.model.terms[key].r_value_real = 0.0
                         self.model.terms[key].r_value_imag = 0.0
@@ -2686,12 +2762,6 @@ class ContinuumModelBuilder:
                         coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
                     print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
                     continue
-
-                heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
-                print(f'    before transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
-                coeffs = self.compute_coeffs_extreme(finalterms, initialterms, includinglist, heff_block, fit_support_idx)
-                coeffs = np.real(coeffs)
-                print(f'    after transfer matrix computation time: {time.strftime("%H:%M:%S", time.localtime())}')
 
                 included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
                 coeffs_print = []

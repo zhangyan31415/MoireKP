@@ -174,13 +174,13 @@ def test_compute_coefficients_by_tag_splits_disjoint_support_fit_groups(monkeypa
     key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 0.0]))
     key_b = _add_matrix_term(builder, mz=1, matrix=np.diag([0.0, 1.0]))
     calls: list[list[ContinuumTermKey]] = []
-    original = builder.get_orthogonalized_terms_subset
+    original = builder._initialterms_for_fit_keys
 
     def spy(keys, *args, **kwargs):
         calls.append(list(keys))
         return original(keys, *args, **kwargs)
 
-    monkeypatch.setattr(builder, "get_orthogonalized_terms_subset", spy)
+    monkeypatch.setattr(builder, "_initialterms_for_fit_keys", spy)
 
     builder.compute_coefficients_by_tag(
         np.diag([3.0, 5.0]).astype(np.complex128),
@@ -198,13 +198,13 @@ def test_compute_coefficients_by_tag_keeps_overlapping_support_joint(monkeypatch
     key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 1.0]))
     key_b = _add_matrix_term(builder, mz=1, matrix=np.diag([2.0, 0.0]))
     calls: list[list[ContinuumTermKey]] = []
-    original = builder.get_orthogonalized_terms_subset
+    original = builder._initialterms_for_fit_keys
 
     def spy(keys, *args, **kwargs):
         calls.append(list(keys))
         return original(keys, *args, **kwargs)
 
-    monkeypatch.setattr(builder, "get_orthogonalized_terms_subset", spy)
+    monkeypatch.setattr(builder, "_initialterms_for_fit_keys", spy)
 
     builder.compute_coefficients_by_tag(
         np.diag([3.0, 0.0]).astype(np.complex128),
@@ -213,6 +213,53 @@ def test_compute_coefficients_by_tag_keeps_overlapping_support_joint(monkeypatch
     )
 
     assert calls == [[key_a, key_b]]
+
+
+def test_support_vector_coefficient_solver_recovers_real_coefficients_on_actual_support() -> None:
+    builder = _support_grouping_builder()
+    initialterms = np.zeros((3, 4, 4), dtype=np.complex128)
+    initialterms[0, 0, 0] = 1.0
+    initialterms[0, 3, 3] = -0.5
+    initialterms[1, 1, 2] = 2.0 + 1.0j
+    initialterms[1, 2, 1] = 2.0 - 1.0j
+    initialterms[2, 0, 3] = -1.0j
+    initialterms[2, 3, 0] = 1.0j
+    expected = np.array([1.25, -0.5, 2.0], dtype=float)
+    heff = np.tensordot(expected, initialterms, axes=(0, 0))
+
+    coeffs, includinglist, support_idx = builder._solve_coefficients_from_support_vectors(
+        initialterms,
+        heff,
+        tol=1.0e-12,
+    )
+
+    assert includinglist.tolist() == [0, 1, 2]
+    assert support_idx.size < heff.size
+    assert coeffs == pytest.approx(expected)
+
+
+def test_compute_coefficients_by_tag_uses_support_vector_solver(monkeypatch) -> None:
+    builder = _support_grouping_builder()
+    key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 0.0]))
+    key_b = _add_matrix_term(builder, mz=1, matrix=np.diag([0.0, 1.0]))
+    calls: list[tuple[int, int, int]] = []
+    original = builder._solve_coefficients_from_support_vectors
+
+    def spy(initialterms, heff, *args, **kwargs):
+        calls.append(tuple(initialterms.shape))
+        return original(initialterms, heff, *args, **kwargs)
+
+    monkeypatch.setattr(builder, "_solve_coefficients_from_support_vectors", spy)
+
+    builder.compute_coefficients_by_tag(
+        np.diag([3.0, 5.0]).astype(np.complex128),
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+    )
+
+    assert calls == [(2, 2, 2), (2, 2, 2)]
+    assert builder.model.terms[key_a].r_value_real == pytest.approx(3.0)
+    assert builder.model.terms[key_b].r_value_real == pytest.approx(5.0)
 
 
 def _triangular_q_shell() -> np.ndarray:
@@ -3894,13 +3941,10 @@ def test_compute_coefficients_skips_empty_orthogonalized_subgroup(monkeypatch) -
     heff = np.eye(2, dtype=complex)
     k_points = np.array([[0.0, 0.0]])
 
-    def empty_subset(self, sub_keys, k_points, tol=1.0e-6, tag=None, **_kwargs):
-        dim = heff.shape[0]
-        initial = np.zeros((2 * len(sub_keys), dim, dim), dtype=complex)
-        final = np.zeros((0,), dtype=complex)
-        return sub_keys, initial, final, np.array([], dtype=int)
+    def empty_solver(self, initialterms, heff_block, *, tol=1.0e-6, support_idx=None):
+        return np.array([], dtype=float), np.array([], dtype=int), np.array([], dtype=int)
 
-    monkeypatch.setattr(ContinuumModelBuilder, "get_orthogonalized_terms_subset", empty_subset)
+    monkeypatch.setattr(ContinuumModelBuilder, "_solve_coefficients_from_support_vectors", empty_solver)
 
     diagnostics = builder.compute_coefficients_by_tag(heff, k_points)
 
@@ -3996,16 +4040,18 @@ def test_fit_uses_symmetry_closed_block_not_raw_subgroup(monkeypatch) -> None:
     def same_fit_block(self, key):
         return (0, 1), (0, 1)
 
-    def empty_subset(self, sub_keys, k_points, tol=1.0e-6, tag=None, **_kwargs):
+    def empty_initialterms(self, sub_keys, k_points, **_kwargs):
         calls.append(tuple((key.layer_from, key.layer_to, key.orbital_from, key.orbital_to) for key in sub_keys))
         dim = 2
-        initial = np.zeros((2 * len(sub_keys), dim, dim), dtype=complex)
-        final = np.zeros((0,), dtype=complex)
-        return sub_keys, initial, final, np.array([], dtype=int)
+        return np.zeros((2 * len(sub_keys), dim, dim), dtype=complex)
+
+    def empty_solver(self, initialterms, heff_block, *, tol=1.0e-6, support_idx=None):
+        return np.array([], dtype=float), np.array([], dtype=int), np.array([], dtype=int)
 
     monkeypatch.setattr(ContinuumModelBuilder, "_filter_duplicate_symmetry_seed_keys", keep_all)
     monkeypatch.setattr(ContinuumModelBuilder, "_fit_block_signature_for_key", same_fit_block)
-    monkeypatch.setattr(ContinuumModelBuilder, "get_orthogonalized_terms_subset", empty_subset)
+    monkeypatch.setattr(ContinuumModelBuilder, "_initialterms_for_fit_keys", empty_initialterms)
+    monkeypatch.setattr(ContinuumModelBuilder, "_solve_coefficients_from_support_vectors", empty_solver)
 
     diagnostics = builder.compute_coefficients_by_tag(np.eye(4, dtype=complex), np.array([[0.0, 0.0]]))
 
