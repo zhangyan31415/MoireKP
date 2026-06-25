@@ -1493,9 +1493,9 @@ def _minimal_symmetry_candidates_for_valley(
     c2_translation_frac = None
     c2_index = 11
     selected_operation = selected_c2_operation
-    if selected_operation is None:
+    if selected_operation is None and family != "M":
         selected_operation = _select_template_c2_operation(family, structure, spatial_operations)
-    if selected_operation is None and structure is not None:
+    if selected_operation is None and structure is not None and family != "M":
         selected_operation = find_layer_exchange_c2_spatial_operation(structure, spatial_operations)
     if selected_operation is not None:
         c2_index = int(selected_operation["index"])
@@ -1744,8 +1744,16 @@ def _build_atom_mapping(structure, operation, tol: float = 5.0e-6):
     records = []
     group_targets: dict[int, set[int]] = {}
     atom_type_targets: dict[int, set[int]] = {}
+    transformed_all = positions_frac @ rotation_frac.T + translation_frac
+    min_shift = np.floor(np.min(transformed_all, axis=0)).astype(int) - 1
+    max_shift = np.ceil(np.max(transformed_all, axis=0)).astype(int) + 1
     image_shifts = np.array(
-        [[n1, n2, n3] for n1 in (-1, 0, 1) for n2 in (-1, 0, 1) for n3 in (-1, 0, 1)],
+        [
+            [n1, n2, n3]
+            for n1 in range(int(min_shift[0]), int(max_shift[0]) + 1)
+            for n2 in range(int(min_shift[1]), int(max_shift[1]) + 1)
+            for n3 in range(int(min_shift[2]), int(max_shift[2]) + 1)
+        ],
         dtype=float,
     )
 
@@ -3142,12 +3150,41 @@ class SymmetryAnalysisRunner:
         for operation in list_layer_exchange_c2_spatial_operations(self.structure, spatial_operations):
             rotation_cart = np.asarray(operation["rotation_cart"], dtype=float)
             translation_cart = np.asarray(operation.get("translation_cart", np.zeros(3, dtype=float)), dtype=float)
+            translation_frac = np.asarray(operation.get("translation_frac", np.zeros(3, dtype=float)), dtype=float)
+            reduced_translation_frac = translation_frac - np.rint(translation_frac)
+            if hasattr(self.structure, "Tmat"):
+                reduced_translation_cart = np.asarray(self.structure.Tmat, dtype=float).T @ reduced_translation_frac
+            else:
+                reduced_translation_cart = translation_cart
+            translation_norm_xy = float(np.linalg.norm(reduced_translation_cart[:2]))
+            translation_removed = False
+            origin_shift_cart = np.zeros(3, dtype=float)
+            origin_shift_residual = 0.0
             entry: dict[str, Any] = {
                 "spglib_index": int(operation["index"]),
                 "supported": False,
                 "g_perm_max_delta": None,
+                "seitz_translation_norm_xy_raw": float(np.linalg.norm(translation_cart[:2])),
+                "seitz_translation_norm_xy": translation_norm_xy,
+                "seitz_translation_removed": False,
+                "origin_shift_residual": 0.0,
             }
-            if np.linalg.norm(translation_cart[:2]) > 1.0e-8:
+            if translation_norm_xy > 1.0e-8:
+                removable, origin_shift_cart, origin_shift_residual = translation_removable_by_origin_shift(
+                    rotation_cart,
+                    reduced_translation_cart,
+                    tol=1.0e-8,
+                )
+                entry["origin_shift_residual"] = float(origin_shift_residual)
+                if removable and translation_norm_xy <= 1.0e-6:
+                    translation_removed = True
+                    entry["seitz_translation_removed"] = True
+                    entry["origin_shift_cart"] = np.asarray(origin_shift_cart, dtype=float).tolist()
+                else:
+                    entry["not_supported_reason"] = "seitz_translation_unsupported"
+                    scan.append(entry)
+                    continue
+            if translation_removed and float(np.linalg.norm(origin_shift_cart[:2])) > 1.0e-4:
                 entry["not_supported_reason"] = "seitz_translation_unsupported"
                 scan.append(entry)
                 continue
@@ -3209,8 +3246,6 @@ class SymmetryAnalysisRunner:
         params = valley_ctx.calculator.TAPW_parameters
         spatial_operations = candidate.get("spatial_operations") or collect_spglib_spatial_operations(self.structure)
         resolved = candidate.get("resolved_m_c2_symmetry")
-        if resolved is None:
-            resolved = resolve_reference_m_valley_c2_symmetry(self.structure, params)
 
         m_k1 = np.asarray(getattr(params, "m_K1", None), dtype=float) if getattr(params, "m_K1", None) is not None else None
         m_k2 = np.asarray(getattr(params, "m_K2", None), dtype=float) if getattr(params, "m_K2", None) is not None else None
@@ -3226,8 +3261,6 @@ class SymmetryAnalysisRunner:
         axis_vec = axis_vec / axis_norm
         reference_rotation_cart = np.asarray(rotate_mat(np.array([axis_vec[0], axis_vec[1], 0.0]), np.pi), dtype=float)
         reference_linear_map = np.asarray(reference_m_valley_c2_linear_map(params), dtype=float)
-        spglib_rotation_cart = np.asarray(resolved.rotation_cart, dtype=float)
-        spglib_linear_map = np.asarray(resolved.linear_map_2d, dtype=float)
 
         def _build_consistent_transport(
             *,
@@ -3432,6 +3465,18 @@ class SymmetryAnalysisRunner:
             except SymmetrySupportError as exc:
                 preferred_exc = exc
                 preferred_diag = dict(getattr(self, "_last_transport_diagnostics", {}) or {})
+                self._last_transport_diagnostics = {
+                    "preferred_spglib_path": preferred_diag,
+                    "selected_path": None,
+                }
+                raise preferred_exc
+
+        reference_resolution_error = None
+        if resolved is None:
+            try:
+                resolved = resolve_reference_m_valley_c2_symmetry(self.structure, params)
+            except Exception as exc:  # noqa: BLE001 - report legacy reference failure without aborting selected path diagnostics.
+                reference_resolution_error = str(exc)
 
         reference_match, reference_atom_mapping = find_matching_spatial_operation_for_rotation(
             self.structure,
@@ -3459,37 +3504,33 @@ class SymmetryAnalysisRunner:
             reference_exc = exc
             reference_diag.update(dict(getattr(self, "_last_transport_diagnostics", {}) or {}))
 
-        spglib_operation = {
-            "rotation_cart": spglib_rotation_cart,
-            "translation_cart": np.asarray(resolved.translation_cart, dtype=float),
-            "rotation_frac": np.asarray(resolved.rotation_frac, dtype=float),
-            "translation_frac": np.asarray(resolved.translation_frac, dtype=float),
-        }
-        spglib_atom_mapping = {
-            "group_target_map": {0: 1, 1: 0},
-            "atom_type_target_map": {
-                **{int(k): int(v) for k, v in resolved.atom_type_map_0_to_1.items()},
-                **{int(k): int(v) for k, v in resolved.atom_type_map_1_to_0.items()},
-            },
-        }
         spglib_exc = None
         spglib_transport = None
-        spglib_diag = {
-            "spglib_reference_rotation_delta": float(np.linalg.norm(spglib_rotation_cart - reference_rotation_cart)),
-        }
-        try:
-            spglib_transport, spglib_build_diag = _build_consistent_transport(
-                path_name="spglib_R",
-                rotation_cart=spglib_rotation_cart,
-                linear_map=spglib_linear_map,
-                atom_mapping=spglib_atom_mapping,
-                not_structure_reason="atom_mapping_missing",
-                not_valley_reason="spglib_operation_not_valley_closed",
-            )
-            spglib_diag.update(spglib_build_diag)
-        except SymmetrySupportError as exc:
-            spglib_exc = exc
-            spglib_diag.update(dict(getattr(self, "_last_transport_diagnostics", {}) or {}))
+        spglib_diag = {"reference_resolution_error": reference_resolution_error}
+        if resolved is not None:
+            spglib_rotation_cart = np.asarray(resolved.rotation_cart, dtype=float)
+            spglib_linear_map = np.asarray(resolved.linear_map_2d, dtype=float)
+            spglib_atom_mapping = {
+                "group_target_map": {0: 1, 1: 0},
+                "atom_type_target_map": {
+                    **{int(k): int(v) for k, v in resolved.atom_type_map_0_to_1.items()},
+                    **{int(k): int(v) for k, v in resolved.atom_type_map_1_to_0.items()},
+                },
+            }
+            spglib_diag["spglib_reference_rotation_delta"] = float(np.linalg.norm(spglib_rotation_cart - reference_rotation_cart))
+            try:
+                spglib_transport, spglib_build_diag = _build_consistent_transport(
+                    path_name="spglib_R",
+                    rotation_cart=spglib_rotation_cart,
+                    linear_map=spglib_linear_map,
+                    atom_mapping=spglib_atom_mapping,
+                    not_structure_reason="atom_mapping_missing",
+                    not_valley_reason="spglib_operation_not_valley_closed",
+                )
+                spglib_diag.update(spglib_build_diag)
+            except SymmetrySupportError as exc:
+                spglib_exc = exc
+                spglib_diag.update(dict(getattr(self, "_last_transport_diagnostics", {}) or {}))
 
         combined = {
             "preferred_spglib_path": preferred_diag,
@@ -3510,7 +3551,12 @@ class SymmetryAnalysisRunner:
             raise reference_exc
         if spglib_exc is not None:
             raise spglib_exc
-        raise SymmetrySupportError("atom_mapping_missing", "M C2 could not build any consistent transport path.")
+        if reference_resolution_error is not None:
+            raise SymmetrySupportError(
+                "spglib_operation_not_valley_closed",
+                f"M C2 could not resolve a same-valley layer-exchange operation: {reference_resolution_error}",
+            )
+        raise SymmetrySupportError("spglib_operation_not_valley_closed", "M C2 could not build any consistent transport path.")
 
     def _build_transport(self, candidate: dict[str, Any], valley: int, q_target, q_source):
         if not hasattr(self, "_transport_cache"):
@@ -4007,7 +4053,7 @@ class SymmetryAnalysisRunner:
                     int(valley),
                     spatial_operations,
                 )
-            if source_c2_operation is None:
+            if source_c2_operation is None and family != "M":
                 source_c2_operation = _select_template_c2_operation(
                     family,
                     self.structure,
@@ -4033,37 +4079,14 @@ class SymmetryAnalysisRunner:
                         candidate["rotation_cart"] = np.asarray(spglib_c2["rotation_cart"], dtype=float)
                         candidate["translation_cart"] = np.asarray(spglib_c2["translation_cart"], dtype=float)
                 if candidate.get("transport_backend") == BACKEND_C2_LAYER_EXCHANGE_UNITARY:
-                    resolved_symmetry = resolve_reference_m_valley_c2_symmetry(
-                        self.structure,
-                        valley_ctx.calculator.TAPW_parameters,
-                    )
-                    candidate["resolved_m_c2_symmetry"] = resolved_symmetry
-                    spglib_m_c2 = self._select_unitary_c2_layer_exchange_spatial_operation(
-                        int(valley),
-                        spatial_operations,
-                    )
+                    spglib_m_c2 = source_c2_operation
                     candidate["c2_layer_exchange_unitary_operation_scan"] = list(getattr(self, "_last_unitary_c2_layer_exchange_operation_scan", []) or [])
-                    params = valley_ctx.calculator.TAPW_parameters
-                    m_k1 = np.asarray(getattr(params, "m_K1", None), dtype=float) if getattr(params, "m_K1", None) is not None else None
-                    m_k2 = np.asarray(getattr(params, "m_K2", None), dtype=float) if getattr(params, "m_K2", None) is not None else None
-                    if m_k1 is None or m_k2 is None:
-                        _, _, m_k1, m_k2, _ = params.calculate_K_points()
-                    axis_vec = np.asarray(m_k1, dtype=float) + np.asarray(m_k2, dtype=float)
-                    axis_vec = axis_vec / np.linalg.norm(axis_vec)
                     if spglib_m_c2 is not None:
                         candidate["spglib_m_c2_operation"] = spglib_m_c2
                         candidate["rotation_frac"] = np.asarray(spglib_m_c2["rotation_frac"], dtype=float)
                         candidate["translation_frac"] = np.asarray(spglib_m_c2["translation_frac"], dtype=float)
                         candidate["rotation_cart"] = np.asarray(spglib_m_c2["rotation_cart"], dtype=float)
                         candidate["translation_cart"] = np.asarray(spglib_m_c2["translation_cart"], dtype=float)
-                    else:
-                        candidate["rotation_frac"] = np.asarray(resolved_symmetry.rotation_frac, dtype=float)
-                        candidate["translation_frac"] = np.asarray(resolved_symmetry.translation_frac, dtype=float)
-                        candidate["rotation_cart"] = np.asarray(
-                            rotate_mat(np.array([axis_vec[0], axis_vec[1], 0.0]), np.pi),
-                            dtype=float,
-                        )
-                        candidate["translation_cart"] = np.asarray(resolved_symmetry.translation_cart, dtype=float)
                 if candidate.get("source_symmetry_role") == "inter-valley":
                     candidate["closed"] = False
                     candidate["closure_reason"] = "inter_valley_operation_not_exported_in_single_valley_block"

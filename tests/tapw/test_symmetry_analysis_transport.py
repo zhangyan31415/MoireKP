@@ -594,3 +594,135 @@ def test_unitary_m_c2_spin_helper_uses_pure_spin_rotation_without_time_reversal_
 
     assert np.allclose(spin_rep, expected)
     assert np.allclose(spin_rep @ spin_rep, -np.eye(2, dtype=np.complex128))
+
+
+def test_m_unitary_c2_selector_accepts_removable_seitz_shift_and_rejects_nonclosed_valley(monkeypatch):
+    runner = symmetry_analysis.SymmetryAnalysisRunner.__new__(symmetry_analysis.SymmetryAnalysisRunner)
+    runner.structure = SimpleNamespace(spin=False)
+    operation = {
+        "index": 4,
+        "rotation_cart": np.diag([1.0, -1.0, -1.0]),
+        "translation_cart": np.array([0.0, 2.0e-7, 0.0], dtype=float),
+        "rotation_frac": np.diag([1.0, -1.0, -1.0]),
+        "translation_frac": np.array([0.0, 2.0e-7, 0.0], dtype=float),
+    }
+    monkeypatch.setattr(
+        symmetry_analysis,
+        "list_layer_exchange_c2_spatial_operations",
+        lambda structure, operations: [operation],
+    )
+    monkeypatch.setattr(
+        symmetry_analysis,
+        "_build_atom_mapping",
+        lambda structure, op: {
+            "group_target_map": {0: 1, 1: 0},
+            "atom_type_target_map": {0: 1, 1: 0},
+        },
+    )
+
+    rel = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    linear_map = operation["rotation_cart"][:2, :2]
+    fixed_centers = {
+        0: np.array([-1.0, 1.0], dtype=float),
+        1: np.array([-1.0, -1.0], dtype=float),
+    }
+    fixed_ctx = SimpleNamespace(
+        group_k_centers=fixed_centers,
+        group_g_vectors={
+            0: fixed_centers[0] + rel,
+            1: fixed_centers[1] + (linear_map @ rel.T).T,
+        },
+        moire_reciprocal_basis=np.eye(2, dtype=float),
+    )
+    runner._valley_context_for_valley = lambda valley: fixed_ctx
+
+    selected = runner._select_unitary_c2_layer_exchange_spatial_operation(32, [operation])
+
+    assert selected is operation
+    scan = runner._last_unitary_c2_layer_exchange_operation_scan
+    assert scan[0]["supported"] is True
+    assert scan[0]["seitz_translation_removed"] is True
+    assert scan[0]["origin_shift_residual"] < 1.0e-8
+
+    nonclosed_ctx = SimpleNamespace(
+        group_k_centers={
+            0: np.array([1.0, 1.0], dtype=float),
+            1: np.array([0.0, 2.0], dtype=float),
+        },
+        group_g_vectors={
+            0: np.array([[1.0, 1.0], [2.0, 1.0], [1.0, 2.0]], dtype=float),
+            1: np.array([[0.0, 2.0], [1.0, 2.0], [0.0, 3.0]], dtype=float),
+        },
+        moire_reciprocal_basis=np.eye(2, dtype=float),
+    )
+    runner._valley_context_for_valley = lambda valley: nonclosed_ctx
+
+    selected = runner._select_unitary_c2_layer_exchange_spatial_operation(31, [operation])
+
+    assert selected is None
+    scan = runner._last_unitary_c2_layer_exchange_operation_scan
+    assert scan[0]["supported"] is False
+    assert scan[0]["not_supported_reason"] == "spglib_operation_not_valley_closed"
+
+
+def test_atom_mapping_accepts_integer_seitz_image_shift_for_layer_exchange_c2():
+    structure = SimpleNamespace(
+        Tmat=np.eye(3, dtype=float),
+        df=pd.DataFrame(
+            [
+                {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "z": 0.25,
+                    "species": "Mg",
+                    "atom_type": 0,
+                    "twist_group": 0,
+                    "orb_name": "s1",
+                    "orb_num": 1,
+                },
+                {
+                    "x": 0.0,
+                    "y": 1.0 - 1.0e-8,
+                    "z": 0.75,
+                    "species": "Mg",
+                    "atom_type": 1,
+                    "twist_group": 1,
+                    "orb_name": "s1",
+                    "orb_num": 1,
+                },
+            ]
+        ),
+    )
+    operation = {
+        "index": 3,
+        "rotation_frac": np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0],
+            ],
+            dtype=float,
+        ),
+        "translation_frac": np.array([1.0, 0.0, 0.0], dtype=float),
+        "rotation_cart": np.array(
+            [
+                [0.0, 1.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [0.0, 0.0, -1.0],
+            ],
+            dtype=float,
+        ),
+        "translation_cart": np.array([1.0, 0.0, 0.0], dtype=float),
+    }
+
+    atom_mapping = symmetry_analysis._build_atom_mapping(structure, operation)
+
+    assert atom_mapping["group_target_map"] == {0: 1, 1: 0}
+    assert atom_mapping["atom_type_target_map"] == {0: 1, 1: 0}
