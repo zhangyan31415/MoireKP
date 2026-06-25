@@ -2235,6 +2235,44 @@ class ContinuumModelBuilder:
         )
         return orthonormal_matrices, including_list
 
+    def _fit_blocks_for_term_key(
+        self,
+        key: ContinuumTermKey,
+        k_points: Sequence[np.ndarray],
+        *,
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
+    ) -> Tuple[np.ndarray, np.ndarray]:
+        k_signature = tuple(tuple(float(x) for x in np.asarray(k).ravel()) for k in k_points)
+        block_signature = self._fit_block_signature_for_key(key)
+        cache_key = ("fit_block", key, k_signature, block_signature)
+        if term_matrix_cache is not None:
+            cached = term_matrix_cache.get(cache_key)
+            if cached is not None:
+                return cached[0].copy(), cached[1].copy()
+
+        idx_inc, idy_inc = self._fit_block_indices_for_key(key)
+        real_blocks = []
+        imag_blocks = []
+        term = self.model.terms[key]
+        for k in k_points:
+            mat_real, mat_imag = ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static(
+                term.Y_basis,
+                k,
+                term.symmetry_ops,
+                symmetry_gen=self.symmetry_gen,
+                term=term,
+            )
+            real_blocks.append(mat_real[np.ix_(idx_inc, idy_inc)])
+            imag_blocks.append(mat_imag[np.ix_(idx_inc, idy_inc)])
+
+        matrices = (
+            scipy.linalg.block_diag(*real_blocks),
+            scipy.linalg.block_diag(*imag_blocks),
+        )
+        if term_matrix_cache is not None:
+            term_matrix_cache[cache_key] = (matrices[0].copy(), matrices[1].copy())
+        return matrices
+
     def _initialterms_for_fit_keys(
         self,
         keys: List[ContinuumTermKey],
@@ -2246,8 +2284,8 @@ class ContinuumModelBuilder:
             return np.empty((0, 0, 0), dtype=np.complex128)
 
         def _process_single_term(key):
-            mat_real, mat_imag = self.stack_Y_for_term(
-                self.model.terms[key],
+            mat_real, mat_imag = self._fit_blocks_for_term_key(
+                key,
                 k_points,
                 term_matrix_cache=term_matrix_cache,
             )
@@ -2270,7 +2308,7 @@ class ContinuumModelBuilder:
             if subgroup != subgroup_0:
                 raise ValueError("Different fit block signatures in keys.")
 
-        return np.array(self.get_mat_blocks(initialterms, keys[0], len(k_points)))
+        return initialterms
 
     @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
@@ -2490,12 +2528,12 @@ class ContinuumModelBuilder:
         tol: float,
         term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> np.ndarray:
-        mat_real, mat_imag = self.stack_Y_for_term(
-            self.model.terms[key],
+        mat_real, mat_imag = self._fit_blocks_for_term_key(
+            key,
             k_points,
             term_matrix_cache=term_matrix_cache,
         )
-        blocks = np.asarray(self.get_mat_blocks([mat_real, mat_imag], key, len(k_points)))
+        blocks = np.asarray([mat_real, mat_imag])
         if blocks.size == 0:
             return np.array([], dtype=int)
         flat = blocks.reshape(blocks.shape[0], -1)
@@ -2512,6 +2550,24 @@ class ContinuumModelBuilder:
         tol: float,
         term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> List[List[ContinuumTermKey]]:
+        return [
+            component_keys
+            for component_keys, _component_support in self._support_connected_components_with_support_for_keys(
+                keys,
+                k_points,
+                tol=tol,
+                term_matrix_cache=term_matrix_cache,
+            )
+        ]
+
+    def _support_connected_components_with_support_for_keys(
+        self,
+        keys: Sequence[ContinuumTermKey],
+        k_points: Sequence[np.ndarray],
+        *,
+        tol: float,
+        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
+    ) -> List[Tuple[List[ContinuumTermKey], np.ndarray]]:
         keys_list = list(keys)
         if not keys_list:
             return []
@@ -2539,6 +2595,7 @@ class ContinuumModelBuilder:
                 rank[root_left] += 1
 
         first_owner_by_support: Dict[int, int] = {}
+        support_by_key_index: List[np.ndarray] = []
         for index, key in enumerate(keys_list):
             support = self._term_fit_support_indices(
                 key,
@@ -2546,6 +2603,7 @@ class ContinuumModelBuilder:
                 tol=tol,
                 term_matrix_cache=term_matrix_cache,
             )
+            support_by_key_index.append(support)
             for position in support.tolist():
                 owner = first_owner_by_support.get(int(position))
                 if owner is None:
@@ -2557,7 +2615,16 @@ class ContinuumModelBuilder:
         for index in range(len(keys_list)):
             grouped.setdefault(find(index), []).append(index)
         ordered_groups = sorted(grouped.values(), key=lambda values: values[0])
-        return [[keys_list[index] for index in group] for group in ordered_groups]
+        components: List[Tuple[List[ContinuumTermKey], np.ndarray]] = []
+        for group in ordered_groups:
+            component_keys = [keys_list[index] for index in group]
+            support_parts = [support_by_key_index[index] for index in group if support_by_key_index[index].size]
+            if support_parts:
+                component_support = np.unique(np.concatenate(support_parts)).astype(int, copy=False)
+            else:
+                component_support = np.array([], dtype=int)
+            components.append((component_keys, component_support))
+        return components
 
     def _filter_duplicate_symmetry_seed_keys(
         self,
@@ -2581,13 +2648,13 @@ class ContinuumModelBuilder:
 
             basis: List[np.ndarray] = []
             for key in group_keys:
-                mat_real, mat_imag = self.stack_Y_for_term(
-                    self.model.terms[key],
+                mat_real, mat_imag = self._fit_blocks_for_term_key(
+                    key,
                     k_points,
                     term_matrix_cache=term_matrix_cache,
                 )
                 is_new_seed = False
-                for block in self.get_mat_blocks([mat_real, mat_imag], key, len(k_points)):
+                for block in (mat_real, mat_imag):
                     vector = block.ravel()
                     residual = vector.copy()
                     for existing in basis:
@@ -2706,7 +2773,7 @@ class ContinuumModelBuilder:
                 f"({base_tag_summary}). Time: {time.strftime('%H:%M:%S', time.localtime())}"
             )
 
-            support_components = self._support_connected_components_for_keys(
+            support_components = self._support_connected_components_with_support_for_keys(
                 base_sub_keys,
                 k_points,
                 tol=tol,
@@ -2715,7 +2782,7 @@ class ContinuumModelBuilder:
             if len(support_components) > 1:
                 print(f"    split into {len(support_components)} support components before orthogonalization.")
 
-            for component_index, sub_keys in enumerate(support_components):
+            for component_index, (sub_keys, component_support_idx) in enumerate(support_components):
                 tag_counts: Dict[str, int] = {}
                 for key in sub_keys:
                     tag = self.model.terms[key].tag
@@ -2727,6 +2794,24 @@ class ContinuumModelBuilder:
                         f"with {len(sub_keys)} terms ({tag_summary})."
                     )
 
+                raw_subgroups_by_tag: Dict[str, set[tuple[int, int, int, int]]] = {}
+                for key in sub_keys:
+                    raw = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
+                    raw_subgroups_by_tag.setdefault(self.model.terms[key].tag, set()).add(raw)
+
+                if component_support_idx.size == 0:
+                    for key in sub_keys:
+                        self.model.terms[key].active = False
+                        self.model.terms[key].r_value_real = 0.0
+                        self.model.terms[key].r_value_imag = 0.0
+                    for tag, raw_subgroups in raw_subgroups_by_tag.items():
+                        diagnostics_key: Any = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
+                        if len(support_components) > 1:
+                            diagnostics_key = (diagnostics_key, ("support_component", component_index))
+                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
+                    print(f"  No support for subgroup {subgroup}; coefficients set to zero.")
+                    continue
+
                 initialterms = self._initialterms_for_fit_keys(
                     sub_keys,
                     k_points,
@@ -2737,6 +2822,7 @@ class ContinuumModelBuilder:
                     initialterms,
                     heff_block,
                     tol=tol,
+                    support_idx=component_support_idx,
                 )
                 print(
                     f"    {len(includinglist)} independent support-vector terms "
@@ -2745,11 +2831,6 @@ class ContinuumModelBuilder:
                 for i, key in enumerate(sub_keys):
                     idx1, idx2 = 2 * i, 2 * i + 1
                     self.model.terms[key].active = (idx1 in includinglist or idx2 in includinglist)
-
-                raw_subgroups_by_tag: Dict[str, set[tuple[int, int, int, int]]] = {}
-                for key in sub_keys:
-                    raw = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
-                    raw_subgroups_by_tag.setdefault(self.model.terms[key].tag, set()).add(raw)
 
                 if len(includinglist) == 0 or np.asarray(initialterms).size == 0:
                     for key in sub_keys:

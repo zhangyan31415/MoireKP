@@ -262,6 +262,53 @@ def test_compute_coefficients_by_tag_uses_support_vector_solver(monkeypatch) -> 
     assert builder.model.terms[key_b].r_value_real == pytest.approx(5.0)
 
 
+def test_compute_coefficients_by_tag_skips_known_zero_support_components(monkeypatch) -> None:
+    builder = _support_grouping_builder()
+    key_zero = _add_matrix_term(builder, mz=0, matrix=np.zeros((2, 2), dtype=np.complex128))
+    key_live = _add_matrix_term(builder, mz=1, matrix=np.diag([0.0, 1.0]))
+    materialized: list[list[ContinuumTermKey]] = []
+    original = builder._initialterms_for_fit_keys
+
+    def keep_all(self, keys, k_points, *, tol, max_exact_group_size=16, **_kwargs):
+        return keys
+
+    def spy(keys, *args, **kwargs):
+        materialized.append(list(keys))
+        return original(keys, *args, **kwargs)
+
+    monkeypatch.setattr(ContinuumModelBuilder, "_filter_duplicate_symmetry_seed_keys", keep_all)
+    monkeypatch.setattr(builder, "_initialterms_for_fit_keys", spy)
+
+    builder.compute_coefficients_by_tag(
+        np.diag([0.0, 5.0]).astype(np.complex128),
+        np.array([[0.0, 0.0]], dtype=float),
+        tol=1.0e-10,
+    )
+
+    assert materialized == [[key_live]]
+    assert not builder.model.terms[key_zero].active
+    assert builder.model.terms[key_zero].r_value_real == 0.0
+    assert builder.model.terms[key_zero].r_value_imag == 0.0
+    assert builder.model.terms[key_live].r_value_real == pytest.approx(5.0)
+
+
+def test_fit_block_materialization_matches_stacked_dense_blocks() -> None:
+    builder = _support_grouping_builder()
+    key = _add_matrix_term(
+        builder,
+        mz=0,
+        matrix=np.array([[1.0, 2.0j], [-2.0j, 3.0]], dtype=np.complex128),
+    )
+    k_points = np.array([[0.0, 0.0], [0.25, 0.0]], dtype=float)
+
+    mat_real, mat_imag = builder.stack_Y_for_term(builder.model.terms[key], k_points)
+    expected_real, expected_imag = builder.get_mat_blocks([mat_real, mat_imag], key, len(k_points))
+    got_real, got_imag = builder._fit_blocks_for_term_key(key, k_points, term_matrix_cache={})
+
+    np.testing.assert_allclose(got_real, expected_real)
+    np.testing.assert_allclose(got_imag, expected_imag)
+
+
 def _triangular_q_shell() -> np.ndarray:
     b1 = np.array([1.0, 0.0])
     b2 = np.array([0.5, np.sqrt(3.0) / 2.0])
