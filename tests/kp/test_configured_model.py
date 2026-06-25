@@ -53,6 +53,7 @@ from kp.model.pipeline import (  # noqa: E402
     save_band_comparison_plot,
 )
 import kp.model.core as model_core  # noqa: E402
+import kp.model.pipeline as pipeline_module  # noqa: E402
 from kp.model.core import (  # noqa: E402
     ContinuumModel,
     ContinuumModelBuilder,
@@ -4317,6 +4318,116 @@ def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> 
     assert "production" + "_level" not in summary
     assert "validation_incomplete" in summary
     assert all("user_operation" in row and "canonical_operation" in row for row in summary["operations"])
+
+
+def test_release_output_profile_serializes_only_active_terms(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    active_key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
+    inactive_key = ContinuumTermKey(1, 0, 1, 1, 1, 1, (0.0, 0.0))
+
+    def fake_term(key, *, active: bool):
+        return type(
+            "Term",
+            (),
+            {
+                "key": key,
+                "tag": "Kinect",
+                "active": active,
+                "r_value_real": 1.0 if active else 0.0,
+                "r_value_imag": 0.0,
+                "symmetry_ops": [],
+            },
+        )()
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {
+            "eigvals": expected_eigvals,
+            "diagnostics": {"fit_rank": 1},
+            "model": type(
+                "Model",
+                (),
+                {
+                    "terms": {
+                        active_key: fake_term(active_key, active=True),
+                        inactive_key: fake_term(inactive_key, active=False),
+                    }
+                },
+            )(),
+        }
+
+    seen_keys = []
+    original_term_to_dict = pipeline_module._term_to_release_dict
+
+    def spy_term_to_dict(term):
+        seen_keys.append(term.key)
+        return original_term_to_dict(term)
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr(pipeline_module, "_term_to_release_dict", spy_term_to_dict)
+
+    run_configured_model(cfg_path)
+
+    assert seen_keys == [active_key]
+    active_terms = json.loads((tmp_path / "model_out" / "active_terms.json").read_text(encoding="utf-8"))
+    assert len(active_terms) == 1
+    assert active_terms[0]["active"] is True
+
+
+def test_release_active_terms_use_compact_symmetry_ops(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
+    heavy_symmetry = [
+        {
+            "name": "C3z",
+            "antiunitary": False,
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+            "internal_resolved_action": {"k_map": {"type": "rotation", "angle_deg": 120.0}},
+            "model_basis_action": {"items": [{"source_q_index": i, "target_q_index": i} for i in range(50)]},
+            "source_matrix_projection_report": {"items": [{"residual": float(i)} for i in range(50)]},
+        }
+    ]
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {
+            "eigvals": expected_eigvals,
+            "diagnostics": {"fit_rank": 1},
+            "model": type(
+                "Model",
+                (),
+                {
+                    "terms": {
+                        key: type(
+                            "Term",
+                            (),
+                            {
+                                "key": key,
+                                "tag": "Kinect",
+                                "active": True,
+                                "r_value_real": 1.0,
+                                "r_value_imag": 0.0,
+                                "symmetry_ops": heavy_symmetry,
+                                "registry_metadata": {},
+                            },
+                        )()
+                    }
+                },
+            )(),
+        }
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+
+    run_configured_model(cfg_path)
+
+    active_terms = json.loads((tmp_path / "model_out" / "active_terms.json").read_text(encoding="utf-8"))
+    op = active_terms[0]["symmetry_ops"][0]
+    assert op["name"] == "C3z"
+    assert op["k_map"] == {"type": "rotation", "angle_deg": 120.0}
+    assert "model_basis_action" not in op
+    assert "source_matrix_projection_report" not in op
 
 
 def test_debug_output_profile_writes_diagnostics_subdir(monkeypatch, tmp_path: Path) -> None:

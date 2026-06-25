@@ -3944,6 +3944,45 @@ def _term_to_dict(term: Any) -> dict[str, Any]:
     }
 
 
+_RELEASE_SYMMETRY_OP_KEYS = (
+    "name",
+    "operation",
+    "user_name",
+    "params",
+    "antiunitary",
+    "k_map",
+    "q_map",
+    "sector_map",
+    "internal_resolved_action",
+)
+
+
+def _compact_symmetry_op_for_release(operation: Any) -> dict[str, Any]:
+    if not isinstance(operation, Mapping):
+        return {}
+    return {
+        key: _json_safe(operation[key])
+        for key in _RELEASE_SYMMETRY_OP_KEYS
+        if key in operation and operation[key] is not None
+    }
+
+
+def _term_to_release_dict(term: Any) -> dict[str, Any]:
+    return {
+        "key": _term_key_to_dict(getattr(term, "key", None)),
+        "tag": getattr(term, "tag", None),
+        "active": bool(getattr(term, "active", False)),
+        "r_value_real": float(np.real(getattr(term, "r_value_real", 0.0))),
+        "r_value_imag": float(np.real(getattr(term, "r_value_imag", 0.0))),
+        "symmetry_ops": [
+            op
+            for op in (_compact_symmetry_op_for_release(operation) for operation in getattr(term, "symmetry_ops", []))
+            if op
+        ],
+        "registry_metadata": _json_safe(getattr(term, "registry_metadata", {})),
+    }
+
+
 def _operation_physics_level(model_config: ConfiguredModel, operation: Mapping[str, Any]) -> str:
     representation_level = str(operation.get("representation_level", ""))
     if representation_level:
@@ -4312,9 +4351,8 @@ def _write_model_registry_outputs(
 ) -> None:
     model = results.get("model")
     terms = list(getattr(model, "terms", {}).values()) if model is not None else []
-    rows = [_term_to_dict(term) for term in terms]
-    active = [row for row in rows if row["active"]]
-    discarded = [row for row in rows if not row["active"]]
+    active_terms = [term for term in terms if bool(getattr(term, "active", False))]
+    active = [_term_to_release_dict(term) for term in active_terms]
     active_terms_text = json.dumps(_json_safe(active), indent=2)
     with (output_dir / "active_terms.json").open("w", encoding="utf-8") as handle:
         handle.write(active_terms_text)
@@ -4326,6 +4364,8 @@ def _write_model_registry_outputs(
     operation_registry = _build_operation_registry(model_config)
     output_profile = "debug" if diagnostics_dir is not None else "release"
     if diagnostics_dir is not None:
+        rows = [_term_to_dict(term) for term in terms]
+        discarded = [row for row in rows if not row["active"]]
         diagnostics_dir.mkdir(parents=True, exist_ok=True)
         with (diagnostics_dir / "terms.json").open("w", encoding="utf-8") as handle:
             json.dump(rows, handle, indent=2)
