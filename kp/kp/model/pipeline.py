@@ -12,8 +12,10 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+import joblib
 import scipy.linalg
 import scipy.optimize
+import scipy.sparse
 import yaml
 
 from .schema import (
@@ -4841,6 +4843,115 @@ def _term_component_hamiltonians_for_kpoints(
     return np.asarray(hamiltonians)
 
 
+def _term_response_pair_hamiltonians_for_kpoints(
+    state: Any,
+    term: Any,
+    kpoints: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Return real/imag coefficient responses while symmetrizing each term once."""
+    remove = np.asarray(getattr(state, "remove", np.array([], dtype=int)), dtype=int)
+    if remove.size:
+        raise NotImplementedError("direct term response is only linear when no Schur remove subspace is active")
+    keep = np.asarray(getattr(state, "keep", np.array([], dtype=int)), dtype=int)
+    dim_full = int(getattr(state, "dim_full"))
+    real_list: list[np.ndarray] = []
+    imag_list: list[np.ndarray] = []
+    y_basis = getattr(term, "Y_basis")
+    sym_ops = getattr(term, "symmetry_ops", [])
+    symmetry_gen = getattr(state, "symmetry_gen", None)
+    sparse_available = (
+        ContinuumModelBuilder._SYMM_USE_SPARSE_BASIS
+        and hasattr(y_basis, "eval_sparse")
+        and symmetry_gen is not None
+    )
+    k_array = np.asarray(kpoints, dtype=float)
+    if sparse_available and k_array.size and (
+        not hasattr(term, "_moire_needs_hermitize_real")
+        or not hasattr(term, "_moire_needs_hermitize_imag")
+    ):
+        ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static(
+            y_basis,
+            k_array[0],
+            sym_ops,
+            symmetry_gen=symmetry_gen,
+            term=term,
+            use_cache=False,
+        )
+    needs_herm_real = bool(getattr(term, "_moire_needs_hermitize_real", False))
+    needs_herm_imag = bool(getattr(term, "_moire_needs_hermitize_imag", False))
+    has_herm_flags = hasattr(term, "_moire_needs_hermitize_real") and hasattr(term, "_moire_needs_hermitize_imag")
+    inconsistent = bool(getattr(term, "_moire_hermitize_flags_inconsistent", False))
+    use_sparse_direct = (
+        sparse_available
+        and has_herm_flags
+        and not inconsistent
+    )
+    for kval in k_array:
+        if use_sparse_direct:
+            h_real = np.zeros((dim_full, dim_full), dtype=np.complex128)
+            h_imag = np.zeros((dim_full, dim_full), dtype=np.complex128)
+            orbit_actions = (
+                ContinuumModelBuilder._get_symmetry_orbit_actions_cached(kval, sym_ops, symmetry_gen)
+                if sym_ops
+                else [(kval, None, tuple(), False)]
+            )
+            for kk, action, op_seq_applied, is_anti in orbit_actions:
+                if op_seq_applied != tuple():
+                    use_sparse_direct = False
+                    break
+                use_add_at = not getattr(y_basis, "_moire_sparse_unique", True)
+                rows, cols, vals0 = y_basis.eval_sparse(kk)
+                if action is not None:
+                    _perm, inv_perm, vals, inv_vals, is_anti_total = action
+                    rr = inv_perm[rows]
+                    cc = inv_perm[cols]
+                    vv = np.conjugate(vals0) if is_anti_total else vals0
+                    vv = vv * vals[rr] * inv_vals[cc]
+                else:
+                    rr, cc, vv = rows, cols, vals0
+                    is_anti_total = bool(is_anti)
+                sign = -1.0 if is_anti_total else 1.0
+                if use_add_at:
+                    np.add.at(h_real, (rr, cc), vv)
+                    np.add.at(h_imag, (rr, cc), 1j * sign * vv)
+                else:
+                    h_real[rr, cc] += vv
+                    h_imag[rr, cc] += 1j * sign * vv
+                if needs_herm_real:
+                    vv_h = np.conjugate(vv)
+                    if use_add_at:
+                        np.add.at(h_real, (cc, rr), vv_h)
+                    else:
+                        h_real[cc, rr] += vv_h
+                if needs_herm_imag:
+                    vv_h = np.conjugate(vv)
+                    if use_add_at:
+                        np.add.at(h_imag, (cc, rr), -1j * sign * vv_h)
+                    else:
+                        h_imag[cc, rr] += -1j * sign * vv_h
+            else:
+                if keep.size != dim_full:
+                    h_real = h_real[np.ix_(keep, keep)]
+                    h_imag = h_imag[np.ix_(keep, keep)]
+                real_list.append(0.5 * (h_real + h_real.conj().T))
+                imag_list.append(0.5 * (h_imag + h_imag.conj().T))
+                continue
+        h_real, h_imag = ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static(
+            y_basis,
+            kval,
+            sym_ops,
+            symmetry_gen=symmetry_gen,
+            term=term,
+            use_cache=False,
+        )
+        if keep.size != dim_full:
+            h_real = h_real[np.ix_(keep, keep)]
+            h_imag = h_imag[np.ix_(keep, keep)]
+        real_list.append(0.5 * (h_real + h_real.conj().T))
+        imag_list.append(0.5 * (h_imag + h_imag.conj().T))
+    return np.asarray(real_list), np.asarray(imag_list)
+
+
 def _select_band_refinement_variables(model: Any, config: Mapping[str, Any]) -> list[tuple[Any, str]]:
     raw_tags = config.get("variable_tags", config.get("tags", ["Kinect", "Onsite", "inter"]))
     if isinstance(raw_tags, str):
@@ -4929,6 +5040,273 @@ def _band_refinement_band_residual(
     if normalize and residual.size:
         residual = residual / np.sqrt(float(residual.size))
     return residual
+
+
+def _band_refinement_eigenvalue_jacobian(
+    eigvecs: np.ndarray,
+    basis: np.ndarray,
+    *,
+    band_slice: tuple[int, int],
+    align: str,
+    band_sigma: float,
+    normalize: bool,
+    edge_band_weights: np.ndarray | None = None,
+    band_weights: np.ndarray | None = None,
+) -> np.ndarray:
+    """Analytic Jacobian of the selected eigenvalue residual.
+
+    For a real coefficient y_j and Hermitian response B_j(k),
+    d lambda_n(k) / d y_j = <u_n(k)|B_j(k)|u_n(k)>.
+    """
+    vec = np.asarray(eigvecs, dtype=np.complex128)
+    responses = np.asarray(basis, dtype=np.complex128)
+    if vec.ndim != 3:
+        raise ValueError(f"eigvecs must have shape (n_k, dim, dim), got {vec.shape}")
+    if responses.ndim != 4:
+        raise ValueError(f"basis must have shape (n_variables, n_k, dim, dim), got {responses.shape}")
+    if responses.shape[1:] != (vec.shape[0], vec.shape[1], vec.shape[1]):
+        raise ValueError(
+            "basis/eigvec shape mismatch: "
+            f"basis={responses.shape}, eigvecs={vec.shape}"
+        )
+    start, stop = band_slice
+    selected_vec = vec[:, :, start:stop]
+    selected = np.einsum("kdn,jkde,ken->knj", selected_vec.conj(), responses, selected_vec, optimize=True).real
+    if align == "top":
+        selected = selected - selected[0:1, -1:, :]
+    elif align == "bottom":
+        selected = selected - selected[0:1, 0:1, :]
+    elif align not in {"none", ""}:
+        raise ValueError(f"fit.refine_bands.align currently supports 'top', 'bottom', or 'none', got {align!r}")
+    selected = selected / float(band_sigma)
+    if normalize and selected.size:
+        selected = selected / np.sqrt(float(selected.shape[0] * selected.shape[1]))
+    if edge_band_weights is not None:
+        weights = np.asarray(edge_band_weights, dtype=float)
+        if weights.shape != (selected.shape[1],):
+            raise ValueError(f"edge_band_weights must have shape ({selected.shape[1]},), got {weights.shape}")
+        selected = selected * np.sqrt(weights.reshape(1, -1, 1))
+    if band_weights is not None:
+        weights = np.asarray(band_weights, dtype=float)
+        if weights.shape != selected.shape[:2]:
+            raise ValueError(f"band_weights must have shape {selected.shape[:2]}, got {weights.shape}")
+        selected = selected * np.sqrt(weights[:, :, None])
+    return selected.reshape(selected.shape[0] * selected.shape[1], selected.shape[2])
+
+
+@dataclass
+class _BandRefinementOptimizeResult:
+    x: np.ndarray
+    cost: float
+    nfev: int
+    njev: int
+    status: int
+    message: str
+
+
+def _solve_band_refinement_gauss_newton(
+    residual_fn,
+    jacobian_fn,
+    y0: np.ndarray,
+    *,
+    max_nfev: int,
+    xtol: float,
+    ftol: float,
+    gtol: float,
+    initial_damping: float = 1.0e-6,
+    max_line_search_steps: int = 8,
+) -> _BandRefinementOptimizeResult:
+    """Small dense damped Gauss-Newton solver for refinement coefficients."""
+    y = np.asarray(y0, dtype=float).copy()
+    max_eval = max(1, int(max_nfev))
+    damping = max(float(initial_damping), 0.0)
+    line_steps = max(1, int(max_line_search_steps))
+    residual = np.asarray(residual_fn(y), dtype=float)
+    cost = 0.5 * float(residual @ residual)
+    nfev = 1
+    njev = 0
+    message = "max_nfev reached"
+    status = 0
+    for _iteration in range(max_eval):
+        jac = np.asarray(jacobian_fn(y), dtype=float)
+        njev += 1
+        gradient = jac.T @ residual
+        grad_norm = float(np.linalg.norm(gradient, ord=np.inf)) if gradient.size else 0.0
+        if grad_norm <= float(gtol):
+            status = 1
+            message = "gtol satisfied"
+            break
+        normal = jac.T @ jac
+        diag = np.maximum(np.diag(normal), 1.0)
+        local_damping = damping
+        accepted = False
+        step = np.zeros_like(y)
+        trial_cost = cost
+        trial_residual = residual
+        for _damping_round in range(8):
+            lhs = normal + local_damping * np.diag(diag)
+            try:
+                step = scipy.linalg.solve(lhs, -gradient, assume_a="pos", check_finite=False)
+            except (scipy.linalg.LinAlgError, ValueError):
+                step = scipy.linalg.lstsq(lhs, -gradient, check_finite=False)[0]
+            if not np.all(np.isfinite(step)):
+                local_damping = max(local_damping * 10.0, 1.0e-12)
+                continue
+            for line_index in range(line_steps):
+                alpha = 0.5**line_index
+                trial_y = y + alpha * step
+                trial_residual = np.asarray(residual_fn(trial_y), dtype=float)
+                nfev += 1
+                trial_cost = 0.5 * float(trial_residual @ trial_residual)
+                if trial_cost < cost:
+                    y = trial_y
+                    residual = trial_residual
+                    accepted = True
+                    break
+                if nfev >= max_eval:
+                    break
+            if accepted or nfev >= max_eval:
+                break
+            local_damping = max(local_damping * 10.0, 1.0e-12)
+        improvement = cost - trial_cost
+        if accepted:
+            step_norm = float(np.linalg.norm(y - (y - alpha * step)))
+            scale_norm = float(np.linalg.norm(y) + float(xtol))
+            prev_cost = cost
+            cost = trial_cost
+            damping = max(local_damping * 0.3, 1.0e-14)
+            if improvement <= float(ftol) * max(prev_cost, 1.0):
+                status = 2
+                message = "ftol satisfied"
+                break
+            if step_norm <= float(xtol) * max(scale_norm, 1.0):
+                status = 3
+                message = "xtol satisfied"
+                break
+        else:
+            damping = max(local_damping * 10.0, 1.0e-12)
+            if nfev >= max_eval:
+                break
+            status = 4
+            message = "line search failed to reduce cost"
+            break
+        if nfev >= max_eval:
+            break
+    return _BandRefinementOptimizeResult(
+        x=y,
+        cost=cost,
+        nfev=int(nfev),
+        njev=int(njev),
+        status=int(status),
+        message=message,
+    )
+
+
+def _band_refinement_global_matrix_jacobian(
+    basis: np.ndarray,
+    *,
+    matrix_weight: float,
+    matrix_sigma: float,
+) -> np.ndarray:
+    responses = np.asarray(basis, dtype=np.complex128)
+    if responses.ndim != 4:
+        raise ValueError(f"basis must have shape (n_variables, n_k, dim, dim), got {responses.shape}")
+    scale = np.sqrt(float(matrix_weight)) / float(matrix_sigma)
+    flat = responses.reshape(responses.shape[0], -1).T
+    return scale * np.vstack([flat.real, flat.imag])
+
+
+def _band_refinement_global_matrix_jacobian_sparse(
+    basis: np.ndarray,
+    *,
+    matrix_weight: float,
+    matrix_sigma: float,
+) -> scipy.sparse.csr_matrix:
+    responses = np.asarray(basis, dtype=np.complex128)
+    if responses.ndim != 4:
+        raise ValueError(f"basis must have shape (n_variables, n_k, dim, dim), got {responses.shape}")
+    scale = np.sqrt(float(matrix_weight)) / float(matrix_sigma)
+    flat = responses.reshape(responses.shape[0], -1).T
+    return scale * scipy.sparse.vstack(
+        [
+            scipy.sparse.csr_matrix(flat.real),
+            scipy.sparse.csr_matrix(flat.imag),
+        ],
+        format="csr",
+    )
+
+
+def _band_refinement_reduced_global_matrix_loss(
+    basis: np.ndarray,
+    target_delta: np.ndarray,
+    *,
+    matrix_weight: float,
+    matrix_sigma: float,
+    rcond: float = 1.0e-12,
+) -> dict[str, Any]:
+    """Compress the linear full-matrix loss to coefficient space.
+
+    The legacy matrix residual is A d + c, where d = y - y0.  Since A is
+    linear, ||A d + c||^2 differs from ||L (d - d*)||^2 only by a constant
+    when L.T @ L = A.T @ A and d* is a least-squares minimizer.  The optimizer
+    sees the same gradient/curvature but with at most n_variables rows.
+    """
+    responses = np.asarray(basis, dtype=np.complex128)
+    delta = np.asarray(target_delta, dtype=np.complex128)
+    if responses.ndim != 4:
+        raise ValueError(f"basis must have shape (n_variables, n_k, dim, dim), got {responses.shape}")
+    if delta.shape != responses.shape[1:]:
+        raise ValueError(f"target_delta must have shape {responses.shape[1:]}, got {delta.shape}")
+    if matrix_weight <= 0.0:
+        raise ValueError(f"matrix_weight must be positive, got {matrix_weight}")
+    if matrix_sigma <= 0.0:
+        raise ValueError(f"matrix_sigma must be positive, got {matrix_sigma}")
+    if rcond < 0.0:
+        raise ValueError(f"rcond must be non-negative, got {rcond}")
+
+    flat = responses.reshape(responses.shape[0], -1)
+    target = delta.reshape(-1)
+    scale_sq = float(matrix_weight) / (float(matrix_sigma) ** 2)
+    gram = scale_sq * np.real(flat.conj() @ flat.T)
+    gram = 0.5 * (gram + gram.T)
+    linear = scale_sq * np.real(flat.conj() @ target)
+    evals, evecs = scipy.linalg.eigh(gram)
+    if evals.size == 0:
+        return {
+            "jacobian": np.zeros((0, responses.shape[0]), dtype=float),
+            "center_delta": np.zeros(responses.shape[0], dtype=float),
+            "rank": 0,
+            "condition_number": None,
+            "source_rows": int(2 * target.size),
+            "compressed_rows": 0,
+            "rcond": float(rcond),
+        }
+    max_eval = float(np.max(evals))
+    cutoff = max(float(rcond) * max(max_eval, 1.0), np.finfo(float).eps * max(responses.shape[0], 1) * max_eval)
+    keep = evals > cutoff
+    if not np.any(keep):
+        return {
+            "jacobian": np.zeros((0, responses.shape[0]), dtype=float),
+            "center_delta": np.zeros(responses.shape[0], dtype=float),
+            "rank": 0,
+            "condition_number": None,
+            "source_rows": int(2 * target.size),
+            "compressed_rows": 0,
+            "rcond": float(rcond),
+        }
+    kept_evals = np.asarray(evals[keep], dtype=float)
+    kept_vecs = np.asarray(evecs[:, keep], dtype=float)
+    jac = np.sqrt(kept_evals)[:, None] * kept_vecs.T
+    center_delta = -kept_vecs @ ((kept_vecs.T @ linear) / kept_evals)
+    return {
+        "jacobian": jac,
+        "center_delta": center_delta,
+        "rank": int(kept_evals.size),
+        "condition_number": float(np.sqrt(float(kept_evals[-1] / kept_evals[0]))) if kept_evals[0] > 0.0 else None,
+        "source_rows": int(2 * target.size),
+        "compressed_rows": int(kept_evals.size),
+        "rcond": float(rcond),
+    }
 
 
 def _edge_weighted_band_weights(
@@ -6833,52 +7211,147 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
     if not variables:
         raise ValueError("fit.refine_bands selected no active variables")
 
+    base_h_start = time.perf_counter()
+    print("[kp model] refinement base Hamiltonian ...", flush=True)
     base_h = _model_hamiltonians_for_kpoints(moire_config, model, kpoints)
+    print(f"[kp model] refinement base Hamiltonian done in {time.perf_counter() - base_h_start:.2f} s", flush=True)
     band_slice = _refinement_band_slice(raw_cfg, model_config, base_h.shape[-1])
     align = str(raw_cfg.get("align", model_config.band_plot_config.get("align", "top"))).strip().lower()
+    initial_metrics_start = time.perf_counter()
+    print("[kp model] refinement initial metrics ...", flush=True)
     initial_metrics = _band_refinement_metrics(base_h, heff_eig, heff_all, band_slice=band_slice, align=align)
+    print(f"[kp model] refinement initial metrics done in {time.perf_counter() - initial_metrics_start:.2f} s", flush=True)
     solver = str(raw_cfg.get("solver", "")).strip().lower()
     direct_linear_response = solver in {"linear_low_subspace", "low_subspace_linear", "linear_projected_matrix"}
     direct_response_state = None
-    if direct_linear_response:
-        try:
-            direct_response_state = _prepare_band_state(moire_config, model)
-        except AttributeError:
-            direct_response_state = None
+    try:
+        direct_response_state = _prepare_band_state(moire_config, model)
+    except AttributeError:
+        direct_response_state = None
 
     y0_values: list[float] = []
     basis_items: list[np.ndarray] = []
     kept_variables: list[tuple[Any, str]] = []
     norm_tol = float(raw_cfg.get("variable_norm_tol", 1.0e-12))
-    for term, component in variables:
+    response_build_start = time.perf_counter()
+    response_build_report = {
+        "mode": "direct_pair_parallel" if direct_response_state is not None else "full_model_fallback",
+        "direct_pair_terms": 0,
+        "fallback_components": 0,
+        "zero_norm_components": 0,
+    }
+
+    def append_response(term: Any, component: str, delta: np.ndarray) -> None:
         original = _term_component_value(term, component)
-        if direct_response_state is not None:
-            try:
-                delta = _term_component_hamiltonians_for_kpoints(
-                    moire_config,
-                    direct_response_state,
-                    term,
-                    component,
-                    kpoints,
+        if float(np.linalg.norm(delta)) <= norm_tol:
+            response_build_report["zero_norm_components"] += 1
+            return
+        kept_variables.append((term, component))
+        y0_values.append(original)
+        basis_items.append(delta)
+
+    if direct_response_state is not None:
+        term_order: list[Any] = []
+        components_by_term: dict[int, list[str]] = {}
+        terms_by_id: dict[int, Any] = {}
+        for term, component in variables:
+            term_id = id(term)
+            if term_id not in components_by_term:
+                term_order.append(term)
+                terms_by_id[term_id] = term
+                components_by_term[term_id] = []
+            components_by_term[term_id].append(component)
+        response_n_jobs_raw = raw_cfg.get("response_n_jobs")
+        if response_n_jobs_raw is None:
+            response_n_jobs = 1
+        else:
+            response_n_jobs = int(response_n_jobs_raw)
+        if response_n_jobs == 0:
+            response_n_jobs = 1
+        response_build_report["parallel_n_jobs"] = int(response_n_jobs)
+
+        trace_response_terms = bool(raw_cfg.get("response_trace_terms", False))
+
+        def compute_term_pair(index: int, term: Any) -> tuple[int, tuple[np.ndarray, np.ndarray]]:
+            if trace_response_terms:
+                print(
+                    "[kp model] refinement response term "
+                    f"{index + 1}/{len(term_order)} tag={getattr(term, 'tag', '')} "
+                    f"component_count={len(components_by_term[id(term)])} start",
+                    flush=True,
                 )
-            except NotImplementedError:
-                direct_response_state = None
-        if direct_response_state is None:
+            term_start = time.perf_counter()
+            pair = _term_response_pair_hamiltonians_for_kpoints(direct_response_state, term, kpoints)
+            if trace_response_terms:
+                print(
+                    "[kp model] refinement response term "
+                    f"{index + 1}/{len(term_order)} done in {time.perf_counter() - term_start:.2f} s",
+                    flush=True,
+                )
+            return id(term), pair
+
+        try:
+            if abs(response_n_jobs) == 1 or len(term_order) <= 1:
+                term_pairs = [compute_term_pair(index, term) for index, term in enumerate(term_order)]
+            else:
+                response_backend = str(raw_cfg.get("response_backend", "threading")).strip().lower()
+                parallel_kwargs: dict[str, Any] = {
+                    "n_jobs": response_n_jobs,
+                    "verbose": int(raw_cfg.get("response_verbose", 0) or 0),
+                }
+                if response_backend in {"thread", "threads", "threading"}:
+                    parallel_kwargs.update({"prefer": "threads", "require": "sharedmem"})
+                elif response_backend in {"process", "processes", "loky"}:
+                    parallel_kwargs.update({"backend": "loky"})
+                else:
+                    raise ValueError(
+                        "fit.refine_bands.response_backend must be 'threading' or 'loky', "
+                        f"got {raw_cfg.get('response_backend')!r}"
+                    )
+                response_build_report["parallel_backend"] = response_backend
+                term_pairs = joblib.Parallel(
+                    **parallel_kwargs,
+                )(joblib.delayed(compute_term_pair)(index, term) for index, term in enumerate(term_order))
+            response_pair_cache = {term_id: pair for term_id, pair in term_pairs}
+            response_build_report["direct_pair_terms"] = int(len(response_pair_cache))
+            for term, component in variables:
+                pair = response_pair_cache[id(term)]
+                append_response(term, component, pair[0] if component == "real" else pair[1])
+        except NotImplementedError:
+            direct_response_state = None
+            y0_values.clear()
+            basis_items.clear()
+            kept_variables.clear()
+            response_build_report["mode"] = "full_model_fallback"
+            response_build_report["direct_pair_terms"] = 0
+            response_build_report["zero_norm_components"] = 0
+
+    if direct_response_state is None:
+        for term, component in variables:
+            original = _term_component_value(term, component)
             _set_term_component_value(term, component, original + 1.0)
             try:
                 delta = _model_hamiltonians_for_kpoints(moire_config, model, kpoints) - base_h
             finally:
                 _set_term_component_value(term, component, original)
-        if float(np.linalg.norm(delta)) <= norm_tol:
-            continue
-        kept_variables.append((term, component))
-        y0_values.append(original)
-        basis_items.append(delta)
+            response_build_report["fallback_components"] += 1
+            append_response(term, component, delta)
+    response_build_report["wall_seconds"] = float(time.perf_counter() - response_build_start)
+    response_build_report["requested_components"] = int(len(variables))
+    response_build_report["kept_components"] = int(len(kept_variables))
     if not kept_variables:
         raise ValueError("fit.refine_bands selected variables but all had zero model response")
 
     y0 = np.asarray(y0_values, dtype=float)
     basis = np.asarray(basis_items, dtype=np.complex128)
+    print(
+        "[kp model] refinement response basis: "
+        f"{response_build_report['kept_components']}/{response_build_report['requested_components']} components, "
+        f"{response_build_report['direct_pair_terms']} direct terms, "
+        f"{response_build_report.get('parallel_n_jobs', 1)} jobs, "
+        f"{response_build_report['wall_seconds']:.2f} s",
+        flush=True,
+    )
     max_variables_raw = raw_cfg.get("max_variables")
     max_variables = int(max_variables_raw) if max_variables_raw is not None else None
     if max_variables is not None and max_variables > 0 and len(kept_variables) > max_variables:
@@ -6892,6 +7365,7 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             "align": align,
             "n_variables": int(len(kept_variables)),
             "max_variables": int(max_variables),
+            "response_basis": response_build_report,
             "initial": skipped_metrics,
             "refined": skipped_metrics,
             "weighted_band_loss": {"enabled": False, "reason": "skipped"},
@@ -7210,6 +7684,7 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             "components": [str(component).strip().lower() for component in raw_components],
             "n_variables": int(len(kept_variables)),
             "max_variables": int(max_variables) if max_variables is not None else None,
+            "response_basis": response_build_report,
             "linear_system": {
                 "rows": int(design.shape[0]),
                 "cols": int(design.shape[1]),
@@ -7249,6 +7724,96 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             "p95_scaled_coefficient_drift": float(np.quantile(drift, 0.95)) if drift.size else 0.0,
             "variables": variable_report,
         }
+
+    jacobian_mode = str(raw_cfg.get("jacobian", "auto")).strip().lower()
+    if jacobian_mode in {"", "true"}:
+        jacobian_mode = "auto"
+    if jacobian_mode in {"false", "off", "none", "finite_difference", "finite-difference", "fd"}:
+        jacobian_mode = "finite_difference"
+    if jacobian_mode not in {"auto", "analytic", "finite_difference"}:
+        raise ValueError(
+            "fit.refine_bands.jacobian must be 'auto', 'analytic', or 'finite_difference', "
+            f"got {raw_cfg.get('jacobian')!r}"
+        )
+    analytic_jacobian_reasons: list[str] = []
+    if subspace_loss_cfg is not None:
+        analytic_jacobian_reasons.append("subspace_loss")
+    if low_matrix_loss_cfg is not None:
+        analytic_jacobian_reasons.append("low_subspace_matrix_loss")
+    if matrix_loss_cfg is not None:
+        analytic_jacobian_reasons.append("matrix_loss")
+    if shell_projected_matrix_loss_cfg is not None:
+        analytic_jacobian_reasons.append("shell_projected_matrix_loss")
+    analytic_jacobian_enabled = jacobian_mode in {"auto", "analytic"} and not analytic_jacobian_reasons
+    if jacobian_mode == "analytic" and analytic_jacobian_reasons:
+        raise ValueError(
+            "fit.refine_bands.jacobian='analytic' is not available with "
+            + ", ".join(analytic_jacobian_reasons)
+        )
+    matrix_jacobian = None
+    matrix_loss_reduced = None
+    matrix_compression_mode = str(raw_cfg.get("matrix_compression", "auto")).strip().lower()
+    if matrix_compression_mode in {"", "true"}:
+        matrix_compression_mode = "auto"
+    if matrix_compression_mode in {"false", "off", "none", "disabled"}:
+        matrix_compression_mode = "disabled"
+    if matrix_compression_mode not in {"auto", "reduced", "disabled"}:
+        raise ValueError(
+            "fit.refine_bands.matrix_compression must be 'auto', 'reduced', or 'disabled', "
+            f"got {raw_cfg.get('matrix_compression')!r}"
+        )
+    if analytic_jacobian_enabled and matrix_weight > 0.0:
+        if matrix_compression_mode in {"auto", "reduced"}:
+            matrix_compression_start = time.perf_counter()
+            matrix_loss_reduced = _band_refinement_reduced_global_matrix_loss(
+                basis,
+                base_h - heff_all,
+                matrix_weight=matrix_weight,
+                matrix_sigma=matrix_sigma,
+                rcond=float(raw_cfg.get("matrix_compression_rcond", 1.0e-12)),
+            )
+            print(
+                "[kp model] refinement matrix compression: "
+                f"{matrix_loss_reduced['source_rows']} -> {matrix_loss_reduced['compressed_rows']} rows, "
+                f"rank={matrix_loss_reduced['rank']}, "
+                f"{time.perf_counter() - matrix_compression_start:.2f} s",
+                flush=True,
+            )
+        else:
+            matrix_jacobian = _band_refinement_global_matrix_jacobian_sparse(
+                basis,
+                matrix_weight=matrix_weight,
+                matrix_sigma=matrix_sigma,
+            )
+    coeff_jacobian = None
+    if analytic_jacobian_enabled and coeff_weight > 0.0:
+        if matrix_jacobian is not None:
+            coeff_jacobian = scipy.sparse.diags(float(coeff_weight) * (1.0 / scale), format="csr")
+        else:
+            coeff_jacobian = float(coeff_weight) * np.diag(1.0 / scale)
+    jacobian_storage = None
+    if analytic_jacobian_enabled:
+        jacobian_storage = "sparse_csr" if matrix_jacobian is not None else "dense_reduced"
+    jacobian_report = {
+        "enabled": bool(analytic_jacobian_enabled),
+        "mode": "analytic_hellmann_feynman" if analytic_jacobian_enabled else "finite_difference",
+        "storage": jacobian_storage,
+        "source": jacobian_mode,
+        "fallback_reasons": analytic_jacobian_reasons,
+        "matrix_loss": (
+            {
+                "compressed": True,
+                "mode": "coefficient_space_quadratic",
+                "source_rows": int(matrix_loss_reduced["source_rows"]),
+                "compressed_rows": int(matrix_loss_reduced["compressed_rows"]),
+                "rank": int(matrix_loss_reduced["rank"]),
+                "condition_number": matrix_loss_reduced["condition_number"],
+                "rcond": float(matrix_loss_reduced["rcond"]),
+            }
+            if matrix_loss_reduced is not None
+            else {"compressed": False, "mode": "explicit_sparse" if matrix_jacobian is not None else "not_used"}
+        ),
+    }
 
     def residual(y: np.ndarray, band_weights: np.ndarray | None = None) -> np.ndarray:
         need_eigenvectors = subspace_loss_cfg is not None or low_matrix_loss_cfg is not None
@@ -7297,8 +7862,8 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             )
             parts.append(low_matrix_resid)
         if matrix_weight > 0.0:
-            matrix_delta = (h_current if h_current is not None else h_from_y(y)) - heff_all
             if matrix_loss_cfg is not None:
+                matrix_delta = (h_current if h_current is not None else h_from_y(y)) - heff_all
                 assert matrix_loss_masks is not None
                 matrix_resid, _matrix_report = _matrix_loss_residual(
                     matrix_delta,
@@ -7307,7 +7872,11 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
                     report=False,
                 )
                 parts.append(matrix_resid)
+            elif matrix_loss_reduced is not None:
+                delta_y = (np.asarray(y, dtype=float) - y0) - np.asarray(matrix_loss_reduced["center_delta"], dtype=float)
+                parts.append(np.asarray(matrix_loss_reduced["jacobian"], dtype=float) @ delta_y)
             else:
+                matrix_delta = (h_current if h_current is not None else h_from_y(y)) - heff_all
                 matrix_delta = matrix_delta.reshape(-1) / matrix_sigma
                 parts.append(np.sqrt(matrix_weight) * np.concatenate([matrix_delta.real, matrix_delta.imag]))
         elif matrix_loss_cfg is not None:
@@ -7324,17 +7893,97 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             parts.append(float(coeff_weight) * ((np.asarray(y, dtype=float) - y0) / scale))
         return np.concatenate(parts)
 
-    result = scipy.optimize.least_squares(
-        lambda y: residual(y),
-        y0,
-        method=str(raw_cfg.get("method", "trf")),
-        max_nfev=max_nfev,
-        xtol=float(raw_cfg.get("xtol", 1.0e-10)),
-        ftol=float(raw_cfg.get("ftol", 1.0e-10)),
-        gtol=float(raw_cfg.get("gtol", 1.0e-10)),
+    def jacobian(y: np.ndarray, band_weights: np.ndarray | None = None) -> np.ndarray:
+        if not analytic_jacobian_enabled:
+            raise RuntimeError("analytic band-refinement Jacobian is not enabled")
+        h_current = h_from_y(y)
+        _eig, vec = np.linalg.eigh(h_current)
+        band_jacobian = _band_refinement_eigenvalue_jacobian(
+            vec,
+            basis,
+            band_slice=band_slice,
+            align=align,
+            band_sigma=band_sigma,
+            normalize=normalize_band_loss,
+            edge_band_weights=edge_band_weights,
+            band_weights=band_weights,
+        )
+        if matrix_jacobian is not None:
+            parts = [scipy.sparse.csr_matrix(band_jacobian), matrix_jacobian]
+            if coeff_jacobian is not None:
+                parts.append(coeff_jacobian)
+            return scipy.sparse.vstack(parts, format="csr")
+        parts = [band_jacobian]
+        if matrix_loss_reduced is not None:
+            parts.append(np.asarray(matrix_loss_reduced["jacobian"], dtype=float))
+        if coeff_jacobian is not None:
+            parts.append(np.asarray(coeff_jacobian, dtype=float))
+        return np.vstack(parts)
+
+    least_squares_kwargs: dict[str, Any] = {
+        "method": str(raw_cfg.get("method", "trf")),
+        "max_nfev": max_nfev,
+        "xtol": float(raw_cfg.get("xtol", 1.0e-10)),
+        "ftol": float(raw_cfg.get("ftol", 1.0e-10)),
+        "gtol": float(raw_cfg.get("gtol", 1.0e-10)),
+    }
+    optimizer_mode = str(raw_cfg.get("optimizer", "auto")).strip().lower()
+    if optimizer_mode in {"", "true"}:
+        optimizer_mode = "auto"
+    if optimizer_mode in {"least_squares", "scipy", "scipy-least-squares"}:
+        optimizer_mode = "scipy_least_squares"
+    if optimizer_mode not in {"auto", "gauss_newton", "scipy_least_squares"}:
+        raise ValueError(
+            "fit.refine_bands.optimizer must be 'auto', 'gauss_newton', or 'scipy_least_squares', "
+            f"got {raw_cfg.get('optimizer')!r}"
+        )
+    use_gauss_newton = (
+        optimizer_mode in {"auto", "gauss_newton"}
+        and analytic_jacobian_enabled
+        and matrix_loss_reduced is not None
+        and matrix_jacobian is None
     )
+    if optimizer_mode == "gauss_newton" and not use_gauss_newton:
+        raise ValueError("fit.refine_bands.optimizer='gauss_newton' requires analytic reduced Jacobian support")
+    if analytic_jacobian_enabled:
+        least_squares_kwargs["jac"] = lambda y: jacobian(y)
+        if matrix_jacobian is not None and least_squares_kwargs["method"] != "lm":
+            least_squares_kwargs["tr_solver"] = str(raw_cfg.get("tr_solver", "lsmr"))
+    if use_gauss_newton:
+        optimizer_start = time.perf_counter()
+        result = _solve_band_refinement_gauss_newton(
+            lambda y: residual(y),
+            lambda y: jacobian(y),
+            y0,
+            max_nfev=max_nfev,
+            xtol=float(raw_cfg.get("xtol", 1.0e-10)),
+            ftol=float(raw_cfg.get("ftol", 1.0e-10)),
+            gtol=float(raw_cfg.get("gtol", 1.0e-10)),
+            initial_damping=float(raw_cfg.get("gauss_newton_damping", 1.0e-6)),
+            max_line_search_steps=int(raw_cfg.get("gauss_newton_line_search_steps", 8)),
+        )
+        print(
+            "[kp model] refinement optimizer: "
+            f"gauss_newton nfev={result.nfev} njev={result.njev} "
+            f"cost={result.cost:.6g}, {time.perf_counter() - optimizer_start:.2f} s",
+            flush=True,
+        )
+    else:
+        optimizer_start = time.perf_counter()
+        result = scipy.optimize.least_squares(
+            lambda y: residual(y),
+            y0,
+            **least_squares_kwargs,
+        )
+        print(
+            "[kp model] refinement optimizer: "
+            f"scipy_least_squares nfev={int(result.nfev)} "
+            f"cost={float(result.cost):.6g}, {time.perf_counter() - optimizer_start:.2f} s",
+            flush=True,
+        )
     current_y = np.asarray(result.x, dtype=float)
     total_nfev = int(result.nfev)
+    total_njev = int(getattr(result, "njev", 0) or 0)
     reweight_raw = raw_cfg.get("reweight", {})
     if reweight_raw is True:
         reweight_cfg: Mapping[str, Any] = {"rounds": 1}
@@ -7364,17 +8013,40 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             weights = 1.0 + alpha * np.power(np.abs(diff_mev) / threshold, power)
             weights = np.clip(weights, 1.0, cap)
             before = _band_refinement_metrics(h_from_y(current_y), heff_eig, heff_all, band_slice=band_slice, align=align)
-            result = scipy.optimize.least_squares(
-                lambda y, w=weights: residual(y, w),
-                current_y,
-                method=str(reweight_cfg.get("method", raw_cfg.get("method", "trf"))),
-                max_nfev=reweight_max_nfev,
-                xtol=float(reweight_cfg.get("xtol", raw_cfg.get("xtol", 1.0e-10))),
-                ftol=float(reweight_cfg.get("ftol", raw_cfg.get("ftol", 1.0e-10))),
-                gtol=float(reweight_cfg.get("gtol", raw_cfg.get("gtol", 1.0e-10))),
-            )
+            reweight_kwargs: dict[str, Any] = {
+                "method": str(reweight_cfg.get("method", raw_cfg.get("method", "trf"))),
+                "max_nfev": reweight_max_nfev,
+                "xtol": float(reweight_cfg.get("xtol", raw_cfg.get("xtol", 1.0e-10))),
+                "ftol": float(reweight_cfg.get("ftol", raw_cfg.get("ftol", 1.0e-10))),
+                "gtol": float(reweight_cfg.get("gtol", raw_cfg.get("gtol", 1.0e-10))),
+            }
+            if analytic_jacobian_enabled:
+                reweight_kwargs["jac"] = lambda y, w=weights: jacobian(y, w)
+                if matrix_jacobian is not None and reweight_kwargs["method"] != "lm":
+                    reweight_kwargs["tr_solver"] = str(reweight_cfg.get("tr_solver", raw_cfg.get("tr_solver", "lsmr")))
+            if use_gauss_newton:
+                result = _solve_band_refinement_gauss_newton(
+                    lambda y, w=weights: residual(y, w),
+                    lambda y, w=weights: jacobian(y, w),
+                    current_y,
+                    max_nfev=reweight_max_nfev,
+                    xtol=float(reweight_cfg.get("xtol", raw_cfg.get("xtol", 1.0e-10))),
+                    ftol=float(reweight_cfg.get("ftol", raw_cfg.get("ftol", 1.0e-10))),
+                    gtol=float(reweight_cfg.get("gtol", raw_cfg.get("gtol", 1.0e-10))),
+                    initial_damping=float(reweight_cfg.get("gauss_newton_damping", raw_cfg.get("gauss_newton_damping", 1.0e-6))),
+                    max_line_search_steps=int(
+                        reweight_cfg.get("gauss_newton_line_search_steps", raw_cfg.get("gauss_newton_line_search_steps", 8))
+                    ),
+                )
+            else:
+                result = scipy.optimize.least_squares(
+                    lambda y, w=weights: residual(y, w),
+                    current_y,
+                    **reweight_kwargs,
+                )
             current_y = np.asarray(result.x, dtype=float)
             total_nfev += int(result.nfev)
+            total_njev += int(getattr(result, "njev", 0) or 0)
             after = _band_refinement_metrics(h_from_y(current_y), heff_eig, heff_all, band_slice=band_slice, align=align)
             reweight_reports.append(
                 {
@@ -7493,6 +8165,7 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
         "components": [str(component).strip().lower() for component in raw_components],
         "n_variables": int(len(kept_variables)),
         "max_variables": int(max_variables) if max_variables is not None else None,
+        "response_basis": response_build_report,
         "band_sigma_mev": float(band_sigma * 1000.0),
         "normalize_band_loss": bool(normalize_band_loss),
         "weighted_band_loss": weighted_band_report,
@@ -7501,12 +8174,20 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
         "matrix_loss": matrix_loss_report if matrix_loss_report is not None else {"enabled": False},
         "subspace_loss": subspace_loss_report if subspace_loss_report is not None else {"enabled": False},
         "low_subspace_matrix_loss": low_matrix_loss_report if low_matrix_loss_report is not None else {"enabled": False},
+        "jacobian": jacobian_report,
         "acceptance_guard": acceptance_guard if acceptance_guard is not None else {"enabled": False},
         "coefficient_weight": float(coeff_weight),
         "max_nfev": int(max_nfev),
         "nfev": int(total_nfev),
+        "njev": int(total_njev),
         "primary_nfev": int(total_nfev - sum(int(item["nfev"]) for item in reweight_reports)),
         "cost": float(result.cost),
+        "optimizer": {
+            "mode": "gauss_newton" if use_gauss_newton else "scipy_least_squares",
+            "requested": optimizer_mode,
+            "status": int(getattr(result, "status", 0) or 0),
+            "message": str(getattr(result, "message", "")),
+        },
         "reweight": {
             "enabled": bool(reweight_rounds),
             "rounds": reweight_reports,

@@ -24,6 +24,9 @@ from kp.model.pipeline import (  # noqa: E402
     _default_term_template_profile_metadata,
     _default_term_templates_for_model,
     _band_refinement_band_residual,
+    _band_refinement_eigenvalue_jacobian,
+    _band_refinement_global_matrix_jacobian,
+    _band_refinement_reduced_global_matrix_loss,
     _default_auto_low_energy_order_config,
     _edge_weighted_band_weights,
     _harmonic_ablation_candidate_is_accepted,
@@ -43,8 +46,11 @@ from kp.model.pipeline import (  # noqa: E402
     _select_band_refinement_variables,
     _shell_band_window_from_target_eig,
     _shell_subspace_overlap_report,
+    _solve_band_refinement_gauss_newton,
     _subspace_overlap_metrics,
     _symmetry_operation_index,
+    _term_component_hamiltonians_for_kpoints,
+    _term_response_pair_hamiltonians_for_kpoints,
     _write_auto_model_selection_outputs,
     _window_band_plot_config,
     ConfiguredModel,
@@ -66,6 +72,7 @@ from kp.model.core import (  # noqa: E402
     ContinuumTermKey,
     MoireConfig,
     SymmetryGenerator,
+    _prepare_band_state,
     build_model,
     compute_bands,
 )
@@ -1265,6 +1272,251 @@ def test_band_loss_normalization_scales_selected_window_by_rms_count() -> None:
     assert np.sum(normalized**2) == pytest.approx(np.mean((model / 2.0) ** 2))
 
 
+def test_band_refinement_eigenvalue_jacobian_matches_finite_difference() -> None:
+    basis = np.array(
+        [
+            [
+                [[1.0, 0.2], [0.2, -0.3]],
+                [[0.4, -0.1j], [0.1j, 0.7]],
+            ],
+            [
+                [[0.1, 0.3j], [-0.3j, 0.2]],
+                [[-0.2, 0.5], [0.5, 0.9]],
+            ],
+        ],
+        dtype=np.complex128,
+    )
+    y = np.array([0.35, -0.2], dtype=float)
+    h = np.tensordot(y, basis, axes=(0, 0))
+    eig, vec = np.linalg.eigh(h)
+    target = eig[:, 0:2] + np.array([[0.01, -0.02], [0.02, -0.01]])
+
+    def residual(values: np.ndarray) -> np.ndarray:
+        current = np.tensordot(values, basis, axes=(0, 0))
+        current_eig = np.linalg.eigvalsh(current)
+        selected = current_eig[:, 0:2]
+        selected = selected + (target[0, -1] - selected[0, -1])
+        return _band_refinement_band_residual(selected, target, band_sigma=0.5, normalize=True).ravel()
+
+    analytic = _band_refinement_eigenvalue_jacobian(
+        vec,
+        basis,
+        band_slice=(0, 2),
+        align="top",
+        band_sigma=0.5,
+        normalize=True,
+    )
+    numeric = np.empty_like(analytic)
+    step = 1.0e-6
+    for index in range(y.size):
+        delta = np.zeros_like(y)
+        delta[index] = step
+        numeric[:, index] = (residual(y + delta) - residual(y - delta)) / (2.0 * step)
+
+    assert analytic == pytest.approx(numeric, abs=1.0e-6)
+
+
+def test_band_refinement_global_matrix_jacobian_matches_residual_layout() -> None:
+    basis = np.array(
+        [
+            [
+                [[1.0, 2.0j], [-2.0j, 3.0]],
+                [[0.5, 0.25], [0.25, -0.5]],
+            ],
+            [
+                [[0.2, -0.4], [-0.4, 0.1]],
+                [[0.0, 1.0j], [-1.0j, 0.3]],
+            ],
+        ],
+        dtype=np.complex128,
+    )
+    y = np.array([0.4, -0.7], dtype=float)
+    matrix_sigma = 0.01
+    matrix_weight = 0.2
+
+    def residual(values: np.ndarray) -> np.ndarray:
+        delta = np.tensordot(values, basis, axes=(0, 0)).reshape(-1) / matrix_sigma
+        return np.sqrt(matrix_weight) * np.concatenate([delta.real, delta.imag])
+
+    analytic = _band_refinement_global_matrix_jacobian(
+        basis,
+        matrix_weight=matrix_weight,
+        matrix_sigma=matrix_sigma,
+    )
+    numeric = np.empty_like(analytic)
+    step = 1.0e-6
+    for index in range(y.size):
+        delta = np.zeros_like(y)
+        delta[index] = step
+        numeric[:, index] = (residual(y + delta) - residual(y - delta)) / (2.0 * step)
+
+    assert analytic == pytest.approx(numeric, abs=1.0e-8)
+
+
+def test_band_refinement_reduced_matrix_loss_preserves_quadratic_gradient() -> None:
+    basis = np.array(
+        [
+            [
+                [[1.0, 0.2j], [-0.2j, 0.4]],
+                [[0.3, 0.1], [0.1, -0.7]],
+            ],
+            [
+                [[0.2, -0.5], [-0.5, 0.6]],
+                [[-0.1, 0.4j], [-0.4j, 0.8]],
+            ],
+            [
+                [[0.0, 0.3], [0.3, -0.2]],
+                [[0.5, -0.2j], [0.2j, 0.1]],
+            ],
+        ],
+        dtype=np.complex128,
+    )
+    target_delta = np.array(
+        [
+            [[0.3, 0.1j], [-0.1j, -0.2]],
+            [[-0.4, 0.2], [0.2, 0.5]],
+        ],
+        dtype=np.complex128,
+    )
+    matrix_weight = 0.4
+    matrix_sigma = 0.02
+    reduced = _band_refinement_reduced_global_matrix_loss(
+        basis,
+        target_delta,
+        matrix_weight=matrix_weight,
+        matrix_sigma=matrix_sigma,
+    )
+    jac = reduced["jacobian"]
+    center = reduced["center_delta"]
+    scale = np.sqrt(matrix_weight) / matrix_sigma
+
+    def original_objective(delta: np.ndarray) -> float:
+        matrix_delta = target_delta + np.tensordot(delta, basis, axes=(0, 0))
+        flat = matrix_delta.reshape(-1)
+        residual = scale * np.concatenate([flat.real, flat.imag])
+        return float(residual @ residual)
+
+    def reduced_objective(delta: np.ndarray) -> float:
+        residual = jac @ (delta - center)
+        return float(residual @ residual)
+
+    first = np.array([0.1, -0.2, 0.05], dtype=float)
+    second = np.array([-0.3, 0.4, 0.2], dtype=float)
+    assert original_objective(first) - original_objective(second) == pytest.approx(
+        reduced_objective(first) - reduced_objective(second),
+        abs=1.0e-8,
+    )
+
+    flat = basis.reshape(basis.shape[0], -1)
+    target = target_delta.reshape(-1)
+    gram = (matrix_weight / matrix_sigma**2) * np.real(flat.conj() @ flat.T)
+    linear = (matrix_weight / matrix_sigma**2) * np.real(flat.conj() @ target)
+    np.testing.assert_allclose(
+        jac.T @ (jac @ (first - center)),
+        gram @ first + linear,
+        atol=1.0e-8,
+    )
+
+
+def test_term_response_pair_matches_component_responses() -> None:
+    builder = _support_grouping_builder()
+    key = _add_matrix_term(
+        builder,
+        mz=0,
+        matrix=np.array([[1.0, 0.4j], [-0.4j, -0.2]], dtype=np.complex128),
+        tag="Kinect",
+    )
+    term = builder.model.terms[key]
+    term.active = True
+    moire_cfg = MoireConfig(
+        Q_set1=np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float),
+        Q_set2=np.zeros((0, 2), dtype=float),
+        n_orb1=1,
+        n_orb2=0,
+        kpoints=np.array([[0.0, 0.0], [0.2, 0.1]], dtype=float),
+    )
+    state = _prepare_band_state(moire_cfg, builder.model)
+    real_component = _term_component_hamiltonians_for_kpoints(
+        moire_cfg,
+        state,
+        term,
+        "real",
+        moire_cfg.kpoints,
+    )
+    imag_component = _term_component_hamiltonians_for_kpoints(
+        moire_cfg,
+        state,
+        term,
+        "imag",
+        moire_cfg.kpoints,
+    )
+
+    real_pair, imag_pair = _term_response_pair_hamiltonians_for_kpoints(state, term, moire_cfg.kpoints)
+
+    np.testing.assert_allclose(real_pair, real_component, atol=1.0e-12)
+    np.testing.assert_allclose(imag_pair, imag_component, atol=1.0e-12)
+
+
+def test_term_response_pair_matches_sparse_component_responses() -> None:
+    qset = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    key = ContinuumTermKey(1, 0, 1, 1, 1, 1, (0.0, 0.0))
+    term = ContinuumTerm(
+        key=key,
+        Y_basis=ContinuumModelBuilder.make_Y_basis_function(
+            key,
+            qset,
+            np.zeros((0, 2), dtype=float),
+            1,
+            0,
+        ),
+        r_value_real=0.0,
+        r_value_imag=0.0,
+        active=True,
+        tag="Kinect",
+        symmetry_ops=[],
+    )
+    model = SimpleNamespace(terms={key: term})
+    moire_cfg = MoireConfig(
+        Q_set1=qset,
+        Q_set2=np.zeros((0, 2), dtype=float),
+        n_orb1=1,
+        n_orb2=0,
+        kpoints=np.array([[0.1, 0.0], [0.2, 0.3]], dtype=float),
+    )
+    state = _prepare_band_state(moire_cfg, model)
+    real_component = _term_component_hamiltonians_for_kpoints(moire_cfg, state, term, "real", moire_cfg.kpoints)
+    imag_component = _term_component_hamiltonians_for_kpoints(moire_cfg, state, term, "imag", moire_cfg.kpoints)
+
+    real_pair, imag_pair = _term_response_pair_hamiltonians_for_kpoints(state, term, moire_cfg.kpoints)
+
+    np.testing.assert_allclose(real_pair, real_component, atol=1.0e-12)
+    np.testing.assert_allclose(imag_pair, imag_component, atol=1.0e-12)
+
+
+def test_band_refinement_gauss_newton_solver_fits_nonlinear_residual() -> None:
+    def residual(values: np.ndarray) -> np.ndarray:
+        x, y = values
+        return np.array([x * x + y - 1.0, x - y], dtype=float)
+
+    def jacobian(values: np.ndarray) -> np.ndarray:
+        x, _y = values
+        return np.array([[2.0 * x, 1.0], [1.0, -1.0]], dtype=float)
+
+    result = _solve_band_refinement_gauss_newton(
+        residual,
+        jacobian,
+        np.array([0.2, 0.8], dtype=float),
+        max_nfev=40,
+        xtol=1.0e-12,
+        ftol=1.0e-12,
+        gtol=1.0e-12,
+    )
+
+    assert result.cost < 1.0e-20
+    np.testing.assert_allclose(result.x, [0.6180339887, 0.6180339887], atol=1.0e-10)
+    assert result.njev > 0
+
+
 def test_edge_weighted_band_weights_prioritize_top_bands() -> None:
     weights = _edge_weighted_band_weights(
         n_bands=6,
@@ -1883,6 +2135,107 @@ def test_band_refinement_invokes_subspace_and_low_matrix_losses(monkeypatch, tmp
     assert report["low_subspace_matrix_loss"]["enabled"] is True
     assert calls["subspace"] > 0
     assert calls["matrix"] > 0
+
+
+def test_band_refinement_passes_analytic_jacobian_to_least_squares(monkeypatch, tmp_path: Path) -> None:
+    import kp.model.pipeline as pipeline
+
+    heff = np.array([[[0.0, 0.0], [0.0, 1.0]]], dtype=np.complex128)
+    heff_file = tmp_path / "heff.npy"
+    np.save(heff_file, heff)
+
+    class Term:
+        tag = "Kinect"
+        active = True
+        key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
+
+        def __init__(self) -> None:
+            self.r_value_real = 0.1
+            self.r_value_imag = 0.0
+
+    term = Term()
+
+    class Model:
+        terms = {"term": term}
+
+    def fake_hamiltonians(_moire_config, model, kpoints):
+        value = next(iter(model.terms.values())).r_value_real
+        return np.array([[[value, 0.0], [0.0, 1.0 - value]] for _ in range(len(kpoints))], dtype=np.complex128)
+
+    captured = {}
+
+    class Result:
+        x = np.array([0.1], dtype=float)
+        nfev = 1
+        cost = 0.0
+
+    def fake_least_squares(fun, y0, **kwargs):
+        captured["has_jac"] = "jac" in kwargs
+        residual = fun(y0)
+        jac = kwargs["jac"](y0)
+        captured["residual_shape"] = residual.shape
+        captured["jac_shape"] = jac.shape
+        return Result()
+
+    monkeypatch.setattr(pipeline, "_model_hamiltonians_for_kpoints", fake_hamiltonians)
+    monkeypatch.setattr(pipeline.scipy.optimize, "least_squares", fake_least_squares)
+
+    moire_cfg = MoireConfig(
+        Q_set1=np.zeros((1, 2), dtype=float),
+        Q_set2=np.zeros((0, 2), dtype=float),
+        n_orb1=2,
+        n_orb2=0,
+        kpoints=np.array([[0.0, 0.0]], dtype=float),
+    )
+    model_cfg = ConfiguredModel(
+        path=tmp_path / "model.yaml",
+        raw={},
+        source_config=tmp_path / "source.yaml",
+        source_raw={},
+        qset1_file=tmp_path / "q1.npy",
+        qset2_file=tmp_path / "q2.npy",
+        kpoints_file=None,
+        heff_file=heff_file,
+        heff_eig_file=None,
+        output_dir=tmp_path / "out",
+        rotation_deg=0.0,
+        fit_indices=[0],
+        fit_selection_metadata={},
+        band_indices=None,
+        n_orb=(1, 0),
+        nlow_state=[1, 0],
+        bM_config={},
+        harmonics_config={},
+        max_order={},
+        symmetry_map={},
+        coeff_tol=1.0e-8,
+        coeff_prune_threshold=0.0,
+        compare_to_heff=True,
+        band_refinement_config={
+            "enabled": True,
+            "band_slice": [0, 2],
+            "align": "none",
+            "variable_tags": ["Kinect"],
+            "components": ["real"],
+            "matrix_weight": 0.1,
+            "matrix_sigma_mev": 10.0,
+            "optimizer": "scipy_least_squares",
+            "max_nfev": 1,
+        },
+    )
+
+    report = pipeline.refine_band_coefficients(moire_cfg, model_cfg, Model())
+
+    assert captured == {
+        "has_jac": True,
+        "residual_shape": (3,),
+        "jac_shape": (3, 1),
+    }
+    assert report["jacobian"]["enabled"] is True
+    assert report["jacobian"]["mode"] == "analytic_hellmann_feynman"
+    assert report["jacobian"]["matrix_loss"]["compressed"] is True
+    assert report["jacobian"]["matrix_loss"]["source_rows"] == 8
+    assert report["jacobian"]["matrix_loss"]["compressed_rows"] == 1
 
 
 def test_band_refinement_acceptance_guard_reverts_worse_plot_window(monkeypatch, tmp_path: Path) -> None:
