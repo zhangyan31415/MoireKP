@@ -48,22 +48,16 @@ def test_unified_tapw_dispatches_calc_and_finalizes_at_cli_boundary(monkeypatch)
     calls = []
     monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(("run", args.config)) or 0)
 
-    class Finished(RuntimeError):
-        def __init__(self, code):
-            super().__init__(f"finished {code}")
-            self.code = code
-
     monkeypatch.setattr(
         cli,
         "finish_calculation_process",
-        lambda code: (_ for _ in ()).throw(Finished(code)),
+        lambda code: calls.append(("finish", code)) or code,
     )
 
-    with pytest.raises(Finished) as excinfo:
-        cli.main(["run", "--config", "config.yaml"])
+    code = cli.main(["run", "--config", "config.yaml"])
 
-    assert excinfo.value.code == 0
-    assert calls == [("run", "config.yaml")]
+    assert code == 0
+    assert calls == [("run", "config.yaml"), ("finish", 0)]
 
 
 def test_unified_tapw_treats_none_calc_result_as_success(monkeypatch):
@@ -72,22 +66,16 @@ def test_unified_tapw_treats_none_calc_result_as_success(monkeypatch):
     calls = []
     monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(("run", args.config)) or None)
 
-    class Finished(RuntimeError):
-        def __init__(self, code):
-            super().__init__(f"finished {code}")
-            self.code = code
-
     monkeypatch.setattr(
         cli,
         "finish_calculation_process",
-        lambda code: (_ for _ in ()).throw(Finished(code)),
+        lambda code: calls.append(("finish", code)) or code,
     )
 
-    with pytest.raises(Finished) as excinfo:
-        cli.main(["run", "--config", "config.yaml"])
+    code = cli.main(["run", "--config", "config.yaml"])
 
-    assert excinfo.value.code == 0
-    assert calls == [("run", "config.yaml")]
+    assert code == 0
+    assert calls == [("run", "config.yaml"), ("finish", 0)]
 
 
 def test_exit_cli_raises_system_exit_without_os_exit(monkeypatch):
@@ -129,30 +117,19 @@ def test_shutdown_parallel_runtime_terminates_existing_memmapping_executor(monke
     assert reusable_executor._executor_kwargs is None
 
 
-def test_finish_calculation_process_shutdowns_runtime_and_exits_without_teardown(monkeypatch):
+def test_finish_calculation_process_shutdowns_runtime_and_returns_status(monkeypatch):
     from tapw import cli
 
     calls = []
-
-    class ProcessExit(RuntimeError):
-        def __init__(self, code):
-            super().__init__(f"os._exit({code})")
-            self.code = code
 
     monkeypatch.setattr(cli, "shutdown_parallel_runtime", lambda **kwargs: calls.append(("shutdown", kwargs)))
     monkeypatch.setattr(cli.logging, "shutdown", lambda: calls.append("logging"))
     monkeypatch.setattr(cli.sys.stdout, "flush", lambda: calls.append("stdout"))
     monkeypatch.setattr(cli.sys.stderr, "flush", lambda: calls.append("stderr"))
-    monkeypatch.setattr(
-        cli.os,
-        "_exit",
-        lambda code: (_ for _ in ()).throw(ProcessExit(code)),
-    )
 
-    with pytest.raises(ProcessExit) as excinfo:
-        cli.finish_calculation_process(5)
+    code = cli.finish_calculation_process(5)
 
-    assert excinfo.value.code == 5
+    assert code == 5
     assert calls == [("shutdown", {"wait": False, "kill_workers": True}), "logging", "stdout", "stderr"]
 
 
@@ -161,25 +138,14 @@ def test_finish_calculation_process_treats_none_as_success(monkeypatch):
 
     calls = []
 
-    class ProcessExit(RuntimeError):
-        def __init__(self, code):
-            super().__init__(f"os._exit({code})")
-            self.code = code
-
     monkeypatch.setattr(cli, "shutdown_parallel_runtime", lambda **kwargs: calls.append(("shutdown", kwargs)))
     monkeypatch.setattr(cli.logging, "shutdown", lambda: calls.append("logging"))
     monkeypatch.setattr(cli.sys.stdout, "flush", lambda: calls.append("stdout"))
     monkeypatch.setattr(cli.sys.stderr, "flush", lambda: calls.append("stderr"))
-    monkeypatch.setattr(
-        cli.os,
-        "_exit",
-        lambda code: (_ for _ in ()).throw(ProcessExit(code)),
-    )
 
-    with pytest.raises(ProcessExit) as excinfo:
-        cli.finish_calculation_process(None)
+    code = cli.finish_calculation_process(None)
 
-    assert excinfo.value.code == 0
+    assert code == 0
     assert calls == [("shutdown", {"wait": False, "kill_workers": True}), "logging", "stdout", "stderr"]
 
 

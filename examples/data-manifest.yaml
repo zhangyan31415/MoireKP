@@ -84,8 +84,8 @@ datasets:
         sha256: 7c658ede9b6fd8d559e0d1c4baecde88baa725b606b3c11a60f627182b353cdf
       - path: examples/tapw/mote2_9.43/configs/mote2_k_tapw.yaml
         kind: file
-        size_bytes: 674
-        sha256: 903250ef1e919a19565c4deb1a8db63dd7e66391d687f5dc8659ce03fcb6ef3c
+        size_bytes: 675
+        sha256: dd94fec18535363019d637ec378b28904c333cb412288a8e71e971cab9f0c3d5
       - path: examples/tapw/mote2_9.43/configs/mote2_direct.yaml
         kind: file
         size_bytes: 672
@@ -232,20 +232,20 @@ datasets:
     required_files:
       - path: examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml
         kind: file
-        size_bytes: 1411
-        sha256: 5f2a5374a11682d93edab0b7c49783afb6dbd2c64be8549235caffe58f321ca9
+        size_bytes: 1342
+        sha256: 2c773ac6a7cd139951ab2cba84652c731437b676421aeaf1c03015d19b3e1a68
       - path: examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml
         kind: file
-        size_bytes: 1633
-        sha256: 3b50bf7323fb87ff75a00493990a601fcdb116f2ad0b49458bcac3860d327a53
+        size_bytes: 1508
+        sha256: 2fed82b90dc378fc1fdb2a048977a43c913f883c686dc5c73c723193bc7e0ae9
       - path: examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml
         kind: file
-        size_bytes: 812
-        sha256: b045d321fa6452b3e1b7c619b0958eb975d2a88e6d9c8c8008af0a782caa0a7d
+        size_bytes: 786
+        sha256: f7e171613fa60ba555709802be0db25342205108d5abf51cd9ad9307b39952be
       - path: examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml
         kind: file
-        size_bytes: 1012
-        sha256: a5f07c1bb1ccaf3d18c4e9438b14b7d029dde1e5af3d92075eac5214354b4bfe
+        size_bytes: 986
+        sha256: aa2c42b39ae75b935765703f8944b117e28391b6e483d48877aff45c8526e0ef
       - path: examples/mote2_3.89/tapw/KPATH.in
         kind: file
         external:
@@ -345,28 +345,28 @@ datasets:
     required_files:
       - path: examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml
         kind: file
-        size_bytes: 1359
-        sha256: 019d707aea7588772f293e9e53005bae74ea0947e9a522e243da7d99eceb6da8
+        size_bytes: 1431
+        sha256: b150787917eaa6527f82af91ebc6597c3d0b094a4eca3d60dbdc1aaba33fec12
       - path: examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml
         kind: file
-        size_bytes: 2161
-        sha256: cdebb3de0601a0ef2af57543b5fd4e86fa69bc36d8cb65980c7b022ad73a2e56
+        size_bytes: 2095
+        sha256: fb1f760510fbd4c92a170ffc99809101bdb75c8f3d72a3191adbbfdb93ca31cb
       - path: examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml
         kind: file
-        size_bytes: 1455
-        sha256: 551a13b38ff17382b0019b44f13126d2e4056f3f8b62f3ac2969700940d6abdc
+        size_bytes: 1388
+        sha256: 81bd36fcf380fab52d35f00ed76ac354762cd3134f7efe633412e1dcf8fa57da
       - path: examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml
         kind: file
-        size_bytes: 707
-        sha256: bd9b551c9762738d82866aaeb0d15fdc563889adade70d0f883f21ea893c88e8
+        size_bytes: 681
+        sha256: d0d1e3355488a6d406aeb90bd535de50fad0184db6f5f26887010132035e5463
       - path: examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml
         kind: file
-        size_bytes: 908
-        sha256: 91db3854dc85013e0a46fedc72e483589b9d8eeb5c58666e627c9fb3263ababb
+        size_bytes: 882
+        sha256: 7f92e28b45f8ecbe2bb3a0c3a63791af76eaf3372bf8d04b7d55ccc5c80af300
       - path: examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml
         kind: file
-        size_bytes: 1031
-        sha256: 6c07783e42d4039191a4143f6bf945048783a77652adabf8ec6893421db9e908
+        size_bytes: 1005
+        sha256: 38c03f5cd9750bb6c044333b8027e8ef7550e123439945491eb37c0025dc6dbb
       - path: examples/mgi2_3.89/tapw/KPATH.in
         kind: file
         external:

@@ -214,12 +214,12 @@ def exit_cli(code: Optional[int]) -> None:
     raise SystemExit(_coerce_exit_code(code))
 
 
-def finish_calculation_process(code: Optional[int]) -> None:
+def finish_calculation_process(code: Optional[int]) -> int:
     shutdown_parallel_runtime(wait=False, kill_workers=True)
     logging.shutdown()
     sys.stdout.flush()
     sys.stderr.flush()
-    os._exit(_coerce_exit_code(code))
+    return _coerce_exit_code(code)
 
 
 def copy_reused_m_valley_band_outputs(qshell_path: Path, source_valley_flag: str, target_valley_flag: str) -> None:
@@ -497,7 +497,7 @@ def main_calc(argv=None, *, prog="tapw run", finalize: bool = True):
     """Run the TAPW calculator entry point."""
     code = _coerce_exit_code(run_calc(build_calc_parser(prog=prog).parse_args(argv)))
     if finalize:
-        finish_calculation_process(code)
+        return finish_calculation_process(code)
     return code
 
 
@@ -507,7 +507,7 @@ def main_chern(argv=None, *, prog="tapw chern", finalize: bool = True):
     args.mode = "chern"
     code = _coerce_exit_code(run_calc(args))
     if finalize:
-        finish_calculation_process(code)
+        return finish_calculation_process(code)
     return code
 
 
@@ -610,4 +610,4 @@ def main(argv=None):
     return None
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
