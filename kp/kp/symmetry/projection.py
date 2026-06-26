@@ -1784,7 +1784,54 @@ def _write_summary_md(path: Path, summary: dict[str, Any]) -> None:
     path.write_text("\n".join(lines), encoding="utf-8")
 
 
-def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: bool | None = None) -> dict[str, Any]:
+@dataclass
+class _ProjectionRunConfig:
+    cfg_path: str
+    cfg_dir: str
+    material: Mapping[str, Any]
+    plot_cfg: Mapping[str, Any]
+    project_cfg: Mapping[str, Any]
+    symm_cfg: Mapping[str, Any]
+    save_projection_diagnostics: bool
+    valley: str
+    spin: str
+    spin_sector_sewing: Any
+    q_rotation_raw: Any
+    tolerance: float
+
+
+@dataclass
+class _ProjectionRunContext:
+    config: _ProjectionRunConfig
+    rep_root: Path
+    operation_requests: list[dict[str, Any]]
+    q1: np.ndarray
+    q2: np.ndarray
+    q_count: int
+    mode: str
+    method: str
+    e_ref: float | None
+    nlow_state_list: list[list[int]]
+    num_layer_list: list[int]
+    orb0: int
+    num_orb_per_layer_list: list[int]
+    required_k: list[int]
+    hamk_source_by_k: dict[int, np.ndarray]
+    hamk_target_by_k: dict[int, np.ndarray]
+    full_dim: int
+    output_dir: Path
+    q_model1: np.ndarray
+    q_model2: np.ndarray
+    q_rotation_deg: float
+    frame_inference: Mapping[str, Any]
+    operation_payloads: dict[str, dict[str, Any]]
+
+
+def _load_projection_run_config(
+    cfg_path: str,
+    *,
+    developer_outputs: bool | None,
+) -> _ProjectionRunConfig:
     cfg_path = os.path.abspath(cfg_path)
     cfg_dir = os.path.dirname(cfg_path)
     with open(cfg_path, "r", encoding="utf-8") as handle:
@@ -1807,13 +1854,26 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     if not _as_bool(symm_cfg.get("enable", True)):
         raise ValueError("symm.enable is false")
 
-    valley = str(symm_cfg.get("valley", "K1"))
-    spin = str(symm_cfg.get("spin", material.get("spin", "all"))).lower()
-    spin_sector_sewing = symm_cfg.get("spin_sector_sewing")
-    q_rotation_raw = plot_cfg.get("q_rotation_deg", symm_cfg.get("q_rotation_deg"))
-    tolerance = float(symm_cfg.get("tolerance", 1.0e-2))
+    return _ProjectionRunConfig(
+        cfg_path=cfg_path,
+        cfg_dir=cfg_dir,
+        material=material,
+        plot_cfg=plot_cfg,
+        project_cfg=project_cfg,
+        symm_cfg=symm_cfg,
+        save_projection_diagnostics=save_projection_diagnostics,
+        valley=str(symm_cfg.get("valley", "K1")),
+        spin=str(symm_cfg.get("spin", material.get("spin", "all"))).lower(),
+        spin_sector_sewing=symm_cfg.get("spin_sector_sewing"),
+        q_rotation_raw=plot_cfg.get("q_rotation_deg", symm_cfg.get("q_rotation_deg")),
+        tolerance=float(symm_cfg.get("tolerance", 1.0e-2)),
+    )
 
-    tapw_symmetry_dir = _resolve(symm_cfg.get("tapw_symmetry_dir"), cfg_dir)
+
+def _load_manifest_and_operation_requests(
+    run_cfg: _ProjectionRunConfig,
+) -> tuple[Path, Mapping[str, Any], list[dict[str, Any]]]:
+    tapw_symmetry_dir = _resolve(run_cfg.symm_cfg.get("tapw_symmetry_dir"), run_cfg.cfg_dir)
     if tapw_symmetry_dir is None:
         raise ValueError("symm.tapw_symmetry_dir is required")
     rep_root = Path(tapw_symmetry_dir) / "representations"
@@ -1821,16 +1881,18 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     if not manifest_path.exists():
         raise FileNotFoundError(f"Representation manifest missing: {manifest_path}")
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    operations_raw = symm_cfg.get("operations")
+
+    operations_raw = run_cfg.symm_cfg.get("operations")
     inferred_operations = operations_raw in (None, [])
     source_operations = (
-        _infer_symmetry_operations_from_manifest(manifest, valley)
+        _infer_symmetry_operations_from_manifest(manifest, run_cfg.valley)
         if inferred_operations
         else [str(op) for op in operations_raw]
     )
     if inferred_operations:
         print(f"[kp symm] inferred symmetry operations: {', '.join(source_operations)}")
-    operation_requests = []
+
+    operation_requests: list[dict[str, Any]] = []
     for operation in source_operations:
         canonical = _validate_operation_label(operation)
         operation_requests.append(
@@ -1840,35 +1902,59 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
                 "requested": operation,
             }
         )
+    return rep_root, manifest, operation_requests
 
-    hamk_file = _resolve(material.get("hamk_file"), cfg_dir)
-    qset1_file = _resolve(material.get("qset1_file"), cfg_dir)
-    qset2_file = _resolve(material.get("qset2_file"), cfg_dir)
+
+def _load_projection_arrays_and_layout(
+    run_cfg: _ProjectionRunConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str, float | None, list[list[int]], list[int], int, list[int]]:
+    hamk_file = _resolve(run_cfg.material.get("hamk_file"), run_cfg.cfg_dir)
+    qset1_file = _resolve(run_cfg.material.get("qset1_file"), run_cfg.cfg_dir)
+    qset2_file = _resolve(run_cfg.material.get("qset2_file"), run_cfg.cfg_dir)
     if hamk_file is None or qset1_file is None or qset2_file is None:
         raise ValueError("material.hamk_file/qset1_file/qset2_file are required")
-    hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
+    hamk = _load_hamk_with_energy_unit(hamk_file, run_cfg.material, mmap_mode="r")
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
     if q2 is None:
         raise ValueError("K-valley symmetry projection requires qset2_file")
+
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
-    nk = int(hamk3d.shape[0])
     q_count = int(len(q1))
-    mode = str(project_cfg.get("mode", "K1")).lower()
-    method = _downfold_method(project_cfg)
-    e_ref = _e_ref(project_cfg)
+    mode = str(run_cfg.project_cfg.get("mode", "K1")).lower()
+    method = _downfold_method(run_cfg.project_cfg)
+    e_ref = _e_ref(run_cfg.project_cfg)
     if method in {"fixed_schur", "linearized_lowdin"} and e_ref is None:
         raise ValueError(f"project.downfold_method={method!r} requires project.e_ref")
-    nlow_state_list = _normalize_nlow_state_list(project_cfg)
-    norb_fix_list = project_cfg["norb_fix_list"] if "norb_fix_list" in project_cfg else None
+    nlow_state_list = _normalize_nlow_state_list(run_cfg.project_cfg)
     num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
-        material,
+        run_cfg.material,
         np.asarray(hamk3d[0]),
         q_count,
     )
+    return (
+        hamk3d,
+        q1,
+        q2,
+        mode,
+        method,
+        e_ref,
+        nlow_state_list,
+        num_layer_list,
+        orb0,
+        num_orb_per_layer_list,
+    )
 
+
+def _resolve_operation_entries(
+    *,
+    manifest: Mapping[str, Any],
+    valley: str,
+    operation_requests: Sequence[Mapping[str, Any]],
+    nk: int,
+    default_k_index: int,
+) -> tuple[dict[str, dict[str, Any]], set[tuple[int, int]]]:
     operation_entries: dict[str, dict[str, Any]] = {}
     all_pairs: set[tuple[int, int]] = set()
-    default_k_index = int(plot_cfg.get("hamk_index", 0))
     for request in operation_requests:
         operation = request["source"]
         output_operation = request["output"]
@@ -1876,63 +1962,55 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         pairs = _pairs_from_entry(entry, nk, default_k_index=default_k_index)
         for target_idx, source_idx in pairs:
             if target_idx < 0 or target_idx >= nk or source_idx < 0 or source_idx >= nk:
-                raise IndexError(f"{output_operation} source/target k unavailable: target={target_idx}, source={source_idx}, nk={nk}")
+                raise IndexError(
+                    f"{output_operation} source/target k unavailable: "
+                    f"target={target_idx}, source={source_idx}, nk={nk}"
+                )
             all_pairs.add((target_idx, source_idx))
         entry["_pairs"] = pairs
         operation_entries[output_operation] = entry
+    return operation_entries, all_pairs
 
-    if q_rotation_raw is None:
-        q_rotation_deg, frame_inference = _infer_model_frame_rotation(q1, q2, operation_entries)
-    else:
-        q_rotation_deg = float(q_rotation_raw)
-        frame_inference = {
-            "source": "explicit_config",
-            "field": "plot.q_rotation_deg" if "q_rotation_deg" in plot_cfg else "symm.q_rotation_deg",
-        }
 
-    required_k = sorted({idx for pair in all_pairs for idx in pair})
-    if not required_k:
-        raise ValueError("No source/target k points requested by symmetry operations")
+def _source_target_hamk_by_k(
+    *,
+    hamk3d: np.ndarray,
+    required_k: Sequence[int],
+    spin: str,
+    spin_sector_sewing: Any,
+) -> tuple[dict[int, np.ndarray], dict[int, np.ndarray]]:
     if spin_sector_sewing is None:
         hamk_source_by_k = {
             k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), spin)
             for k_index in required_k
         }
-        hamk_target_by_k = hamk_source_by_k
-    else:
-        if str(spin_sector_sewing).lower() != "up_to_down":
-            raise ValueError(f"Unsupported spin_sector_sewing mode: {spin_sector_sewing!r}")
-        hamk_source_by_k = {
-            k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), "up")
-            for k_index in required_k
-        }
-        hamk_target_by_k = {
-            k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), "down")
-            for k_index in required_k
-        }
-    full_dim = int(hamk_source_by_k[required_k[0]].shape[0])
-    output_dir = Path(_resolve(symm_cfg.get("output_dir", "symm_project"), cfg_dir) or "symm_project")
-    output_dir.mkdir(parents=True, exist_ok=True)
-    resolver_spin = _spin_label_for_sliced_block(spin) if spin_sector_sewing is None else "up"
-    reference_k = default_k_index if default_k_index in hamk_source_by_k else required_k[0]
-    q2_for_projection = q2 if q2 is not None else q1
-    gauge_candidates = resolve_project_gauge_anchor_candidates(
-        hamk_source_by_k[reference_k],
-        q_count,
-        orb0,
-        num_layer_list,
-        spin=resolver_spin,
-        Qlayer_list=[[q1], [q2_for_projection]],
-        num_orb_per_layer_list=num_orb_per_layer_list,
-        nlow_state_list=nlow_state_list,
-        norb_fix_list=norb_fix_list,
-        gauge_config=project_cfg.get("gauge"),
-        mode=mode,
-    )
+        return hamk_source_by_k, hamk_source_by_k
 
+    if str(spin_sector_sewing).lower() != "up_to_down":
+        raise ValueError(f"Unsupported spin_sector_sewing mode: {spin_sector_sewing!r}")
+    hamk_source_by_k = {
+        k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), "up")
+        for k_index in required_k
+    }
+    hamk_target_by_k = {
+        k_index: _spin_slice_hamk(np.asarray(hamk3d[k_index], dtype=np.complex128), "down")
+        for k_index in required_k
+    }
+    return hamk_source_by_k, hamk_target_by_k
+
+
+def _build_operation_payloads(
+    *,
+    run_cfg: _ProjectionRunConfig,
+    rep_root: Path,
+    operation_requests: Sequence[Mapping[str, Any]],
+    operation_entries: Mapping[str, Mapping[str, Any]],
+    hamk_source_by_k: Mapping[int, np.ndarray],
+    hamk_target_by_k: Mapping[int, np.ndarray],
+    full_dim: int,
+) -> dict[str, dict[str, Any]]:
     operation_payloads: dict[str, dict[str, Any]] = {}
     for request in operation_requests:
-        operation = request["source"]
         output_operation = request["output"]
         entry = operation_entries[output_operation]
         antiunitary = _as_bool(entry.get("antiunitary", False))
@@ -1943,10 +2021,10 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             rep_root=rep_root,
             filename=filename,
             antiunitary=antiunitary,
-            spin=spin,
+            spin=run_cfg.spin,
             full_dim=full_dim,
-            tolerance=tolerance,
-            spin_sector_sewing=None if spin_sector_sewing is None else str(spin_sector_sewing),
+            tolerance=run_cfg.tolerance,
+            spin_sector_sewing=None if run_cfg.spin_sector_sewing is None else str(run_cfg.spin_sector_sewing),
         )
         full_pair_rows = []
         for target_idx, source_idx in entry["_pairs"]:
@@ -1956,7 +2034,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
                 h_source=hamk_source_by_k[source_idx],
                 antiunitary=antiunitary,
             )
-            if full_residual > tolerance:
+            if full_residual > run_cfg.tolerance:
                 raise ValueError(
                     f"{output_operation} k=({target_idx},{source_idx}) full-space covariance residual "
                     f"{full_residual:.3e} exceeds tolerance. The TAPW representation is not "
@@ -1976,306 +2054,454 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             "action": action,
             "full_pair_rows": full_pair_rows,
         }
+    return operation_payloads
 
+
+def _build_projection_run_context(run_cfg: _ProjectionRunConfig) -> _ProjectionRunContext:
+    rep_root, manifest, operation_requests = _load_manifest_and_operation_requests(run_cfg)
+    (
+        hamk3d,
+        q1,
+        q2,
+        mode,
+        method,
+        e_ref,
+        nlow_state_list,
+        num_layer_list,
+        orb0,
+        num_orb_per_layer_list,
+    ) = _load_projection_arrays_and_layout(run_cfg)
+
+    nk = int(hamk3d.shape[0])
+    default_k_index = int(run_cfg.plot_cfg.get("hamk_index", 0))
+    operation_entries, all_pairs = _resolve_operation_entries(
+        manifest=manifest,
+        valley=run_cfg.valley,
+        operation_requests=operation_requests,
+        nk=nk,
+        default_k_index=default_k_index,
+    )
+    if run_cfg.q_rotation_raw is None:
+        q_rotation_deg, frame_inference = _infer_model_frame_rotation(q1, q2, operation_entries)
+    else:
+        q_rotation_deg = float(run_cfg.q_rotation_raw)
+        frame_inference = {
+            "source": "explicit_config",
+            "field": "plot.q_rotation_deg" if "q_rotation_deg" in run_cfg.plot_cfg else "symm.q_rotation_deg",
+        }
+    required_k = sorted({idx for pair in all_pairs for idx in pair})
+    if not required_k:
+        raise ValueError("No source/target k points requested by symmetry operations")
+    hamk_source_by_k, hamk_target_by_k = _source_target_hamk_by_k(
+        hamk3d=hamk3d,
+        required_k=required_k,
+        spin=run_cfg.spin,
+        spin_sector_sewing=run_cfg.spin_sector_sewing,
+    )
+    full_dim = int(hamk_source_by_k[required_k[0]].shape[0])
+    output_dir = Path(_resolve(run_cfg.symm_cfg.get("output_dir", "symm_project"), run_cfg.cfg_dir) or "symm_project")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    operation_payloads = _build_operation_payloads(
+        run_cfg=run_cfg,
+        rep_root=rep_root,
+        operation_requests=operation_requests,
+        operation_entries=operation_entries,
+        hamk_source_by_k=hamk_source_by_k,
+        hamk_target_by_k=hamk_target_by_k,
+        full_dim=full_dim,
+    )
     q_model1, q_model2 = _model_q_sets(q1, q2, rotation_deg=q_rotation_deg)
 
-    def _states_for_resolved_anchors(resolved_norb_fix_list: list[Any]):
-        states_local: dict[int, ProjectionState] = {}
-        source_states_local: dict[int, ProjectionState] = {}
-        target_states_local: dict[int, ProjectionState] = {}
-        if spin_sector_sewing is None:
-            block_spin = _spin_label_for_sliced_block(spin)
-            for k_index in required_k:
-                states_local[k_index] = _projectors_for_k(
-                    hamk_source_by_k[k_index],
-                    q1,
-                    q2,
-                    orb0=orb0,
-                    num_layer_list=num_layer_list,
-                    num_orb_per_layer_list=num_orb_per_layer_list,
-                    spin=block_spin,
-                    mode=mode,
-                    nlow_state_list=nlow_state_list,
-                    norb_fix_list=resolved_norb_fix_list,
-                    method=method,
-                    e_ref=e_ref,
-                    project_cfg=project_cfg,
-                )
-            return states_local, states_local, states_local, states_local[required_k[0]]
-        if str(spin_sector_sewing).lower() != "up_to_down":
-            raise ValueError(f"Unsupported spin_sector_sewing mode: {spin_sector_sewing!r}")
-        for k_index in required_k:
-            source_states_local[k_index] = _projectors_for_k(
-                hamk_source_by_k[k_index],
-                q1,
-                q2,
-                orb0=orb0,
-                num_layer_list=num_layer_list,
-                num_orb_per_layer_list=num_orb_per_layer_list,
-                spin="up",
-                mode=mode,
-                nlow_state_list=nlow_state_list,
-                norb_fix_list=resolved_norb_fix_list,
-                method=method,
-                e_ref=e_ref,
-                project_cfg=project_cfg,
-            )
-            target_states_local[k_index] = _projectors_for_k(
-                hamk_target_by_k[k_index],
-                q1,
-                q2,
-                orb0=orb0,
-                num_layer_list=num_layer_list,
-                num_orb_per_layer_list=num_orb_per_layer_list,
-                spin="up",
-                mode=mode,
-                nlow_state_list=nlow_state_list,
-                norb_fix_list=resolved_norb_fix_list,
-                method=method,
-                e_ref=e_ref,
-                project_cfg=project_cfg,
-            )
-        return {}, source_states_local, target_states_local, source_states_local[required_k[0]]
+    return _ProjectionRunContext(
+        config=run_cfg,
+        rep_root=rep_root,
+        operation_requests=operation_requests,
+        q1=q1,
+        q2=q2,
+        q_count=int(len(q1)),
+        mode=mode,
+        method=method,
+        e_ref=e_ref,
+        nlow_state_list=nlow_state_list,
+        num_layer_list=num_layer_list,
+        orb0=orb0,
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        required_k=required_k,
+        hamk_source_by_k=hamk_source_by_k,
+        hamk_target_by_k=hamk_target_by_k,
+        full_dim=full_dim,
+        output_dir=output_dir,
+        q_model1=q_model1,
+        q_model2=q_model2,
+        q_rotation_deg=q_rotation_deg,
+        frame_inference=frame_inference,
+        operation_payloads=operation_payloads,
+    )
 
-    def _candidate_symmetry_metrics(candidate: ProjectGaugeAnchorCandidate) -> GaugeCandidateSymmetryMetrics:
-        try:
-            _validate_project_layer_lists(
-                nlow_state_list,
-                candidate.resolved_norb_fix_list,
-                num_layer_list=num_layer_list,
-                context=f"auto gauge candidate {candidate.candidate_id}",
-            )
-            _states, source_states_candidate, target_states_candidate, first_state_candidate = _states_for_resolved_anchors(
-                candidate.resolved_norb_fix_list
-            )
-            low_dim_candidate = int(first_state_candidate.u_low.shape[1])
-            n_orb_candidate = _sector_orbital_counts(
-                q_model1,
-                q_model2,
-                nlow_state_list,
-                low_dim=low_dim_candidate,
-                num_layer_list=num_layer_list,
-            )
-            spin_convention_candidate = _spin_convention_for_exactification(
-                spin,
-                n_orb_candidate,
-                valley=valley,
-            )
-            raw_candidate_matrices: dict[str, np.ndarray] = {}
-            operation_records: list[dict[str, Any]] = []
-            for request in operation_requests:
-                output_operation = request["output"]
-                canonical_name = _canonical_internal_operation_name(output_operation)
-                payload = operation_payloads[output_operation]
-                entry = payload["entry"]
-                antiunitary = bool(payload["antiunitary"])
-                action = payload["action"]
-                source_action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
-                model_action_metadata = _model_action_metadata(
-                    source_action_metadata,
-                    valley=valley,
-                    operation=output_operation,
-                    rotation_deg=q_rotation_deg,
-                )
-                raw_mats, _polar_mats, _pair_rows = _project_operation(
-                    operation=output_operation,
-                    antiunitary=antiunitary,
-                    d_full=action.matrix,
-                    states=source_states_candidate,
-                    pairs=entry["_pairs"],
-                    tolerance=tolerance,
-                    compute_polar=False,
-                    target_states=target_states_candidate,
-                    source_states=source_states_candidate,
-                )
-                raw_candidate_matrices[canonical_name] = np.asarray(raw_mats[0], dtype=np.complex128)
-                operation_records.append(
-                    {
-                        "name": canonical_name,
-                        "operation": output_operation,
-                        "antiunitary": antiunitary,
-                        "matrix_file": f"{output_operation}_low_raw.npy",
-                        "source_matrix_role": "raw_h_sewing_action",
-                        "source_gauge": "raw_saved_TAPW",
-                        "target_role": "continuum_internal_rep",
-                        **model_action_metadata,
-                        "source_action": source_action_metadata,
-                        "model_action": model_action_metadata,
-                        "declared_model_action": model_action_metadata,
-                        "group_relations": [
-                            _operation_power_relation(canonical_name, spin_convention=spin_convention_candidate)
-                        ],
-                    }
-                )
-            bM_candidates = bM_candidates_from_q_distances(q_model1, q_model2)
-            if bM_candidates:
-                bM1_candidate, bM2_candidate = canonical_bM_pair_from_candidates(bM_candidates, angle_deg=60.0)
-            else:
-                bM1_candidate = np.array([1.0, 0.0], dtype=float)
-                bM2_candidate = np.array([0.5, float(np.sqrt(3.0) / 2.0)], dtype=float)
-            sectors_candidate = sectors_with_q_offsets(
-                [
-                    {"name": "L1", "qset": "qset1", "n_orb": int(n_orb_candidate[0])},
-                    {"name": "L2", "qset": "qset2", "n_orb": int(n_orb_candidate[1])},
-                ],
-                Q_set1=q_model1,
-                Q_set2=q_model2,
-                bM1=bM1_candidate,
-                bM2=bM2_candidate,
-            )
-            exact_config_candidate = _kp_symm_exactification_config(
-                _merged_exactification_overrides(
-                    valley,
-                    symm_cfg.get("exactification"),
-                    symmetry_tolerance=tolerance,
-                )
-            )
-            _exact_matrices, exact_reports_candidate = exactify_loaded_symmetry_source(
-                loaded_metadata={"operations": operation_records},
-                matrices=raw_candidate_matrices,
-                Q_set1=q_model1,
-                Q_set2=q_model2,
-                sectors=sectors_candidate,
-                n_orb=n_orb_candidate,
-                bM1=bM1_candidate,
-                bM2=bM2_candidate,
-                raw_config={"exactification": exact_config_candidate},
-                rotation_deg=0.0,
-                output_dir=None,
-            )
-            distances: dict[str, float] = {}
-            support_off: dict[str, float] = {}
-            phase_branch: dict[str, float] = {}
-            for op_name, report in exact_reports_candidate.items():
-                report_payload = report.get("report", {}) if isinstance(report, Mapping) else {}
-                support_payload = report.get("support_diagnostics", {}) if isinstance(report, Mapping) else {}
-                if isinstance(report_payload, Mapping) and "distance_mod_global_phase" in report_payload:
-                    distances[str(op_name)] = float(report_payload["distance_mod_global_phase"])
-                if isinstance(support_payload, Mapping) and "off_support_rel" in support_payload:
-                    support_off[str(op_name)] = float(support_payload["off_support_rel"])
-                if isinstance(report_payload, Mapping) and "phase_std_deg" in report_payload:
-                    phase_branch[str(op_name)] = float(report_payload["phase_std_deg"])
-            return GaugeCandidateSymmetryMetrics(
-                candidate_id=str(candidate.candidate_id),
-                exactification_distance_by_op=distances,
-                phase_branch_distance_by_op=phase_branch,
-                support_off_by_op=support_off,
-                metadata={
-                    "status": "evaluated",
-                    "candidate_priority": int(candidate.priority),
-                    "sigma_min": candidate.report.gauge_anchor_quality.get("sigma_min"),
-                    "condition_number": candidate.report.gauge_anchor_quality.get("condition_number"),
-                    "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
-                },
-            )
-        except Exception as exc:
-            return GaugeCandidateSymmetryMetrics(
-                candidate_id=str(candidate.candidate_id),
-                exactification_distance_by_op={},
-                metadata={
-                    "status": "failed",
-                    "candidate_priority": int(candidate.priority),
-                    "error": str(exc),
-                    "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
-                },
-            )
 
-    selected_gauge_candidate = gauge_candidates[0]
-    gauge_report = selected_gauge_candidate.report
-    if gauge_report.gauge_mode == "auto_scdm":
-        candidate_metrics = [_candidate_symmetry_metrics(candidate) for candidate in gauge_candidates]
-        validation_cfg = symm_cfg.get("gauge_validation", {})
-        if not isinstance(validation_cfg, Mapping):
-            validation_cfg = {}
-        selected_gauge_candidate, validation_decision = _select_validated_auto_gauge_candidate(
-            gauge_candidates,
-            candidate_metrics,
-            max_exactification_distance=float(validation_cfg.get("max_exactification_distance", tolerance)),
+def _resolve_projection_gauge_candidates(ctx: _ProjectionRunContext) -> Sequence[ProjectGaugeAnchorCandidate]:
+    run_cfg = ctx.config
+    resolver_spin = _spin_label_for_sliced_block(run_cfg.spin) if run_cfg.spin_sector_sewing is None else "up"
+    reference_k = int(run_cfg.plot_cfg.get("hamk_index", 0))
+    if reference_k not in ctx.hamk_source_by_k:
+        reference_k = ctx.required_k[0]
+    q2_for_projection = ctx.q2 if ctx.q2 is not None else ctx.q1
+    norb_fix_list = run_cfg.project_cfg["norb_fix_list"] if "norb_fix_list" in run_cfg.project_cfg else None
+    return resolve_project_gauge_anchor_candidates(
+        ctx.hamk_source_by_k[reference_k],
+        ctx.q_count,
+        ctx.orb0,
+        ctx.num_layer_list,
+        spin=resolver_spin,
+        Qlayer_list=[[ctx.q1], [q2_for_projection]],
+        num_orb_per_layer_list=ctx.num_orb_per_layer_list,
+        nlow_state_list=ctx.nlow_state_list,
+        norb_fix_list=norb_fix_list,
+        gauge_config=run_cfg.project_cfg.get("gauge"),
+        mode=ctx.mode,
+    )
+
+
+def _states_for_resolved_anchors(
+    ctx: _ProjectionRunContext,
+    resolved_norb_fix_list: list[Any],
+) -> tuple[
+    dict[int, ProjectionState],
+    dict[int, ProjectionState],
+    dict[int, ProjectionState],
+    ProjectionState,
+]:
+    run_cfg = ctx.config
+    states_local: dict[int, ProjectionState] = {}
+    source_states_local: dict[int, ProjectionState] = {}
+    target_states_local: dict[int, ProjectionState] = {}
+    if run_cfg.spin_sector_sewing is None:
+        block_spin = _spin_label_for_sliced_block(run_cfg.spin)
+        for k_index in ctx.required_k:
+            states_local[k_index] = _projectors_for_k(
+                ctx.hamk_source_by_k[k_index],
+                ctx.q1,
+                ctx.q2,
+                orb0=ctx.orb0,
+                num_layer_list=ctx.num_layer_list,
+                num_orb_per_layer_list=ctx.num_orb_per_layer_list,
+                spin=block_spin,
+                mode=ctx.mode,
+                nlow_state_list=ctx.nlow_state_list,
+                norb_fix_list=resolved_norb_fix_list,
+                method=ctx.method,
+                e_ref=ctx.e_ref,
+                project_cfg=run_cfg.project_cfg,
+            )
+        return states_local, states_local, states_local, states_local[ctx.required_k[0]]
+
+    if str(run_cfg.spin_sector_sewing).lower() != "up_to_down":
+        raise ValueError(f"Unsupported spin_sector_sewing mode: {run_cfg.spin_sector_sewing!r}")
+    for k_index in ctx.required_k:
+        source_states_local[k_index] = _projectors_for_k(
+            ctx.hamk_source_by_k[k_index],
+            ctx.q1,
+            ctx.q2,
+            orb0=ctx.orb0,
+            num_layer_list=ctx.num_layer_list,
+            num_orb_per_layer_list=ctx.num_orb_per_layer_list,
+            spin="up",
+            mode=ctx.mode,
+            nlow_state_list=ctx.nlow_state_list,
+            norb_fix_list=resolved_norb_fix_list,
+            method=ctx.method,
+            e_ref=ctx.e_ref,
+            project_cfg=run_cfg.project_cfg,
         )
-        gauge_report = replace(
-            selected_gauge_candidate.report,
-            symmetry_closure_quality={
-                "status": "validated",
-                "selection_policy": "symmetry_exactification_residual",
-                "selected_candidate_id": selected_gauge_candidate.candidate_id,
-                "candidate_rankings": validation_decision.rankings,
-                "metrics": [
-                    {
-                        "candidate_id": metric.candidate_id,
-                        "exactification_distance_by_op": dict(metric.exactification_distance_by_op),
-                        "phase_branch_distance_by_op": dict(metric.phase_branch_distance_by_op),
-                        "support_off_by_op": dict(metric.support_off_by_op),
-                        "metadata": dict(metric.metadata),
-                    }
-                    for metric in candidate_metrics
-                ],
+        target_states_local[k_index] = _projectors_for_k(
+            ctx.hamk_target_by_k[k_index],
+            ctx.q1,
+            ctx.q2,
+            orb0=ctx.orb0,
+            num_layer_list=ctx.num_layer_list,
+            num_orb_per_layer_list=ctx.num_orb_per_layer_list,
+            spin="up",
+            mode=ctx.mode,
+            nlow_state_list=ctx.nlow_state_list,
+            norb_fix_list=resolved_norb_fix_list,
+            method=ctx.method,
+            e_ref=ctx.e_ref,
+            project_cfg=run_cfg.project_cfg,
+        )
+    return {}, source_states_local, target_states_local, source_states_local[ctx.required_k[0]]
+
+
+def _candidate_symmetry_metrics(
+    ctx: _ProjectionRunContext,
+    candidate: ProjectGaugeAnchorCandidate,
+) -> GaugeCandidateSymmetryMetrics:
+    run_cfg = ctx.config
+    try:
+        _validate_project_layer_lists(
+            ctx.nlow_state_list,
+            candidate.resolved_norb_fix_list,
+            num_layer_list=ctx.num_layer_list,
+            context=f"auto gauge candidate {candidate.candidate_id}",
+        )
+        _states, source_states_candidate, target_states_candidate, first_state_candidate = _states_for_resolved_anchors(
+            ctx,
+            candidate.resolved_norb_fix_list,
+        )
+        low_dim_candidate = int(first_state_candidate.u_low.shape[1])
+        n_orb_candidate = _sector_orbital_counts(
+            ctx.q_model1,
+            ctx.q_model2,
+            ctx.nlow_state_list,
+            low_dim=low_dim_candidate,
+            num_layer_list=ctx.num_layer_list,
+        )
+        spin_convention_candidate = _spin_convention_for_exactification(
+            run_cfg.spin,
+            n_orb_candidate,
+            valley=run_cfg.valley,
+        )
+        raw_candidate_matrices: dict[str, np.ndarray] = {}
+        operation_records: list[dict[str, Any]] = []
+        for request in ctx.operation_requests:
+            output_operation = request["output"]
+            canonical_name = _canonical_internal_operation_name(output_operation)
+            payload = ctx.operation_payloads[output_operation]
+            entry = payload["entry"]
+            antiunitary = bool(payload["antiunitary"])
+            action = payload["action"]
+            source_action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
+            model_action_metadata = _model_action_metadata(
+                source_action_metadata,
+                valley=run_cfg.valley,
+                operation=output_operation,
+                rotation_deg=ctx.q_rotation_deg,
+            )
+            raw_mats, _polar_mats, _pair_rows = _project_operation(
+                operation=output_operation,
+                antiunitary=antiunitary,
+                d_full=action.matrix,
+                states=source_states_candidate,
+                pairs=entry["_pairs"],
+                tolerance=run_cfg.tolerance,
+                compute_polar=False,
+                target_states=target_states_candidate,
+                source_states=source_states_candidate,
+            )
+            raw_candidate_matrices[canonical_name] = np.asarray(raw_mats[0], dtype=np.complex128)
+            operation_records.append(
+                {
+                    "name": canonical_name,
+                    "operation": output_operation,
+                    "antiunitary": antiunitary,
+                    "matrix_file": f"{output_operation}_low_raw.npy",
+                    "source_matrix_role": "raw_h_sewing_action",
+                    "source_gauge": "raw_saved_TAPW",
+                    "target_role": "continuum_internal_rep",
+                    **model_action_metadata,
+                    "source_action": source_action_metadata,
+                    "model_action": model_action_metadata,
+                    "declared_model_action": model_action_metadata,
+                    "group_relations": [
+                        _operation_power_relation(canonical_name, spin_convention=spin_convention_candidate)
+                    ],
+                }
+            )
+        bM_candidates = bM_candidates_from_q_distances(ctx.q_model1, ctx.q_model2)
+        if bM_candidates:
+            bM1_candidate, bM2_candidate = canonical_bM_pair_from_candidates(bM_candidates, angle_deg=60.0)
+        else:
+            bM1_candidate = np.array([1.0, 0.0], dtype=float)
+            bM2_candidate = np.array([0.5, float(np.sqrt(3.0) / 2.0)], dtype=float)
+        sectors_candidate = sectors_with_q_offsets(
+            [
+                {"name": "L1", "qset": "qset1", "n_orb": int(n_orb_candidate[0])},
+                {"name": "L2", "qset": "qset2", "n_orb": int(n_orb_candidate[1])},
+            ],
+            Q_set1=ctx.q_model1,
+            Q_set2=ctx.q_model2,
+            bM1=bM1_candidate,
+            bM2=bM2_candidate,
+        )
+        exact_config_candidate = _kp_symm_exactification_config(
+            _merged_exactification_overrides(
+                run_cfg.valley,
+                run_cfg.symm_cfg.get("exactification"),
+                symmetry_tolerance=run_cfg.tolerance,
+            )
+        )
+        _exact_matrices, exact_reports_candidate = exactify_loaded_symmetry_source(
+            loaded_metadata={"operations": operation_records},
+            matrices=raw_candidate_matrices,
+            Q_set1=ctx.q_model1,
+            Q_set2=ctx.q_model2,
+            sectors=sectors_candidate,
+            n_orb=n_orb_candidate,
+            bM1=bM1_candidate,
+            bM2=bM2_candidate,
+            raw_config={"exactification": exact_config_candidate},
+            rotation_deg=0.0,
+            output_dir=None,
+        )
+        distances: dict[str, float] = {}
+        support_off: dict[str, float] = {}
+        phase_branch: dict[str, float] = {}
+        for op_name, report in exact_reports_candidate.items():
+            report_payload = report.get("report", {}) if isinstance(report, Mapping) else {}
+            support_payload = report.get("support_diagnostics", {}) if isinstance(report, Mapping) else {}
+            if isinstance(report_payload, Mapping) and "distance_mod_global_phase" in report_payload:
+                distances[str(op_name)] = float(report_payload["distance_mod_global_phase"])
+            if isinstance(support_payload, Mapping) and "off_support_rel" in support_payload:
+                support_off[str(op_name)] = float(support_payload["off_support_rel"])
+            if isinstance(report_payload, Mapping) and "phase_std_deg" in report_payload:
+                phase_branch[str(op_name)] = float(report_payload["phase_std_deg"])
+        return GaugeCandidateSymmetryMetrics(
+            candidate_id=str(candidate.candidate_id),
+            exactification_distance_by_op=distances,
+            phase_branch_distance_by_op=phase_branch,
+            support_off_by_op=support_off,
+            metadata={
+                "status": "evaluated",
+                "candidate_priority": int(candidate.priority),
+                "sigma_min": candidate.report.gauge_anchor_quality.get("sigma_min"),
+                "condition_number": candidate.report.gauge_anchor_quality.get("condition_number"),
+                "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
             },
         )
-    norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
-    _validate_project_layer_lists(
-        nlow_state_list,
-        norb_fix_list,
-        num_layer_list=num_layer_list,
-        context="project",
+    except Exception as exc:
+        return GaugeCandidateSymmetryMetrics(
+            candidate_id=str(candidate.candidate_id),
+            exactification_distance_by_op={},
+            metadata={
+                "status": "failed",
+                "candidate_priority": int(candidate.priority),
+                "error": str(exc),
+                "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
+            },
+        )
+
+
+def _select_projection_gauge(
+    ctx: _ProjectionRunContext,
+    gauge_candidates: Sequence[ProjectGaugeAnchorCandidate],
+):
+    selected_gauge_candidate = gauge_candidates[0]
+    gauge_report = selected_gauge_candidate.report
+    if gauge_report.gauge_mode != "auto_scdm":
+        return selected_gauge_candidate, gauge_report
+
+    candidate_metrics = [_candidate_symmetry_metrics(ctx, candidate) for candidate in gauge_candidates]
+    validation_cfg = ctx.config.symm_cfg.get("gauge_validation", {})
+    if not isinstance(validation_cfg, Mapping):
+        validation_cfg = {}
+    selected_gauge_candidate, validation_decision = _select_validated_auto_gauge_candidate(
+        gauge_candidates,
+        candidate_metrics,
+        max_exactification_distance=float(validation_cfg.get("max_exactification_distance", ctx.config.tolerance)),
     )
-    write_basis_selection_report(output_dir, gauge_report)
+    gauge_report = replace(
+        selected_gauge_candidate.report,
+        symmetry_closure_quality={
+            "status": "validated",
+            "selection_policy": "symmetry_exactification_residual",
+            "selected_candidate_id": selected_gauge_candidate.candidate_id,
+            "candidate_rankings": validation_decision.rankings,
+            "metrics": [
+                {
+                    "candidate_id": metric.candidate_id,
+                    "exactification_distance_by_op": dict(metric.exactification_distance_by_op),
+                    "phase_branch_distance_by_op": dict(metric.phase_branch_distance_by_op),
+                    "support_off_by_op": dict(metric.support_off_by_op),
+                    "metadata": dict(metric.metadata),
+                }
+                for metric in candidate_metrics
+            ],
+        },
+    )
+    return selected_gauge_candidate, gauge_report
 
-    states, source_states, target_states, first_state = _states_for_resolved_anchors(norb_fix_list)
-    low_dim = int(first_state.u_low.shape[1])
-    np.save(output_dir / "q_model_layer1.npy", q_model1)
-    np.save(output_dir / "q_model_layer2.npy", q_model2)
 
-    summary = {
-        "config": cfg_path,
-        "valley": valley,
-        "spin": spin,
-        "mode": mode,
-        "tolerance": tolerance,
-        "q_count": q_count,
-        "orbital_block_dim": orb0,
-        "full_dim": full_dim,
+def _initial_projection_summary(
+    ctx: _ProjectionRunContext,
+    *,
+    gauge_report: Any,
+    low_dim: int,
+    n_orb_for_exactification: tuple[int, int],
+) -> dict[str, Any]:
+    run_cfg = ctx.config
+    return {
+        "config": run_cfg.cfg_path,
+        "valley": run_cfg.valley,
+        "spin": run_cfg.spin,
+        "mode": ctx.mode,
+        "tolerance": run_cfg.tolerance,
+        "q_count": ctx.q_count,
+        "orbital_block_dim": ctx.orb0,
+        "full_dim": ctx.full_dim,
         "low_dim": low_dim,
-        "frame": _frame_metadata(rotation_deg=q_rotation_deg, inference=frame_inference),
+        "frame": _frame_metadata(rotation_deg=ctx.q_rotation_deg, inference=ctx.frame_inference),
         "q_model": {
             "files": {"layer1": "q_model_layer1.npy", "layer2": "q_model_layer2.npy"},
-            "source_files": {"layer1": str(qset1_file), "layer2": str(qset2_file)},
+            "source_files": {
+                "layer1": str(_resolve(run_cfg.material.get("qset1_file"), run_cfg.cfg_dir)),
+                "layer2": str(_resolve(run_cfg.material.get("qset2_file"), run_cfg.cfg_dir)),
+            },
             "formula": "q_model = R(rotation_deg) @ (layer_mean - q_source)",
         },
         "operations": [],
         "strict_metadata": True,
         "requires_model_exactification": False,
         "exactification_owner": "kp_symm",
+        "project_basis": {
+            "nlow_state_list_layout": "physical_layer",
+            "num_layer_list": [int(n) for n in ctx.num_layer_list],
+            "gauge_mode": gauge_report.gauge_mode,
+            "resolved_norb_fix_list": gauge_report.resolved_norb_fix_list,
+            "basis_selection_report": "basis_selection.json",
+            "resolved_sector_orbital_counts": {
+                "L1": int(n_orb_for_exactification[0]),
+                "L2": int(n_orb_for_exactification[1]),
+            },
+            "resolved_source_group_nlow_state_list": _source_group_nlow_state_list(
+                ctx.nlow_state_list,
+                ctx.num_layer_list,
+            ),
+        },
     }
 
+
+def _cleanup_stale_projection_diagnostics(output_dir: Path, output_operation: str) -> None:
+    diagnostics_dir = output_dir / "diagnostics"
+    for stale in (
+        output_dir / f"{output_operation}_low_polar.npy",
+        output_dir / f"{output_operation}_low_representation_raw.npy",
+        output_dir / f"{output_operation}_low_representation_polar.npy",
+        diagnostics_dir / f"{output_operation}_low_polar.npy",
+        diagnostics_dir / f"{output_operation}_low_representation_raw.npy",
+        diagnostics_dir / f"{output_operation}_low_representation_polar.npy",
+    ):
+        if stale.exists():
+            stale.unlink()
+
+
+def _append_projected_operation_summaries(
+    ctx: _ProjectionRunContext,
+    *,
+    summary: dict[str, Any],
+    source_states: Mapping[int, ProjectionState],
+    target_states: Mapping[int, ProjectionState],
+    n_orb_for_exactification: tuple[int, int],
+) -> dict[str, np.ndarray]:
+    run_cfg = ctx.config
     raw_low_matrices: dict[str, np.ndarray] = {}
-    n_orb_for_exactification = _sector_orbital_counts(
-        q_model1,
-        q_model2,
-        nlow_state_list,
-        low_dim=low_dim,
-        num_layer_list=num_layer_list,
+    spin_convention = _spin_convention_for_exactification(
+        run_cfg.spin,
+        n_orb_for_exactification,
+        valley=run_cfg.valley,
     )
-    summary["project_basis"] = {
-        "nlow_state_list_layout": "physical_layer",
-        "num_layer_list": [int(n) for n in num_layer_list],
-        "gauge_mode": gauge_report.gauge_mode,
-        "resolved_norb_fix_list": gauge_report.resolved_norb_fix_list,
-        "basis_selection_report": "basis_selection.json",
-        "resolved_sector_orbital_counts": {
-            "L1": int(n_orb_for_exactification[0]),
-            "L2": int(n_orb_for_exactification[1]),
-        },
-        "resolved_source_group_nlow_state_list": _source_group_nlow_state_list(
-            nlow_state_list,
-            num_layer_list,
-        ),
-    }
-    spin_convention = _spin_convention_for_exactification(spin, n_orb_for_exactification, valley=valley)
-    for request in operation_requests:
-        operation = request["source"]
+    for request in ctx.operation_requests:
         output_operation = request["output"]
         canonical_name = _canonical_internal_operation_name(output_operation)
-        payload = operation_payloads[output_operation]
+        payload = ctx.operation_payloads[output_operation]
         entry = payload["entry"]
         antiunitary = bool(payload["antiunitary"])
         filename = None if payload["filename"] is None else str(payload["filename"])
@@ -2284,9 +2510,9 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         source_action_metadata = _operation_action_metadata(entry, output_operation, antiunitary)
         model_action_metadata = _model_action_metadata(
             source_action_metadata,
-            valley=valley,
+            valley=run_cfg.valley,
             operation=output_operation,
-            rotation_deg=q_rotation_deg,
+            rotation_deg=ctx.q_rotation_deg,
         )
 
         raw_mats, polar_mats, pair_rows = _project_operation(
@@ -2295,22 +2521,22 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             d_full=action.matrix,
             states=source_states,
             pairs=entry["_pairs"],
-            tolerance=tolerance,
-            compute_polar=save_projection_diagnostics,
+            tolerance=run_cfg.tolerance,
+            compute_polar=run_cfg.save_projection_diagnostics,
             target_states=target_states,
             source_states=source_states,
         )
         rep_raw_mats: list[np.ndarray] = []
         rep_polar_mats: list[np.ndarray] = []
         rep_pair_rows: list[dict[str, Any]] = []
-        if save_projection_diagnostics and rep is not None:
+        if run_cfg.save_projection_diagnostics and rep is not None:
             rep_raw_mats, rep_polar_mats, rep_pair_rows = _project_operation(
                 operation=output_operation,
                 antiunitary=antiunitary,
                 d_full=rep.matrix,
                 states=source_states,
                 pairs=entry["_pairs"],
-                tolerance=tolerance,
+                tolerance=run_cfg.tolerance,
                 enforce_heff_covariance=False,
                 raise_on_quality_failure=False,
                 compute_polar=True,
@@ -2326,25 +2552,16 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             D_low=np.asarray(raw_mats[0], dtype=np.complex128),
             support_matrices=support_matrices,
             model_action=model_action_metadata,
-            q_model1=q_model1,
-            q_model2=q_model2,
-            nlow_state_list=nlow_state_list,
-            num_layer_list=num_layer_list,
-            tol=max(float(tolerance), 1.0e-8),
+            q_model1=ctx.q_model1,
+            q_model2=ctx.q_model2,
+            nlow_state_list=ctx.nlow_state_list,
+            num_layer_list=ctx.num_layer_list,
+            tol=max(float(run_cfg.tolerance), 1.0e-8),
         )
-        _save_matrix_stack(output_dir / f"{output_operation}_low_raw.npy", raw_mats)
-        diagnostics_dir = output_dir / "diagnostics"
-        for stale in (
-            output_dir / f"{output_operation}_low_polar.npy",
-            output_dir / f"{output_operation}_low_representation_raw.npy",
-            output_dir / f"{output_operation}_low_representation_polar.npy",
-            diagnostics_dir / f"{output_operation}_low_polar.npy",
-            diagnostics_dir / f"{output_operation}_low_representation_raw.npy",
-            diagnostics_dir / f"{output_operation}_low_representation_polar.npy",
-        ):
-            if stale.exists():
-                stale.unlink()
-        if save_projection_diagnostics:
+        _save_matrix_stack(ctx.output_dir / f"{output_operation}_low_raw.npy", raw_mats)
+        _cleanup_stale_projection_diagnostics(ctx.output_dir, output_operation)
+        if run_cfg.save_projection_diagnostics:
+            diagnostics_dir = ctx.output_dir / "diagnostics"
             diagnostics_dir.mkdir(parents=True, exist_ok=True)
             _save_matrix_stack(diagnostics_dir / f"{output_operation}_low_polar.npy", polar_mats)
             if rep_raw_mats:
@@ -2384,28 +2601,28 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             "square_residual": entry.get("square_residual"),
             "spglib_index": entry.get("spglib_index"),
             "ld_source_rule": entry.get("ld_source_rule"),
-            "pg_file": None if action.pg_filename is None else str(rep_root / action.pg_filename),
-            "raw_h_operator_file": None if action.raw_h_filename is None else str(rep_root / action.raw_h_filename),
+            "pg_file": None if action.pg_filename is None else str(ctx.rep_root / action.pg_filename),
+            "raw_h_operator_file": None if action.raw_h_filename is None else str(ctx.rep_root / action.raw_h_filename),
             "action_source": action.action_source,
             "combined_raw_h_residual": action.combined_raw_h_residual,
             "from_full_spinful": None if rep is None else rep.from_full_spinful,
             "spin_leakage": None if rep is None else rep.spin_leakage,
             "pg_spin_leakage": None if action.pg is None else action.pg.spin_leakage,
             "raw_h_spin_leakage": None if action.raw_h is None else action.raw_h.spin_leakage,
-            "spin_sector_sewing": spin_sector_sewing,
-            "source_spin": spin if spin_sector_sewing is None else "up",
-            "target_spin": spin if spin_sector_sewing is None else "down",
+            "spin_sector_sewing": run_cfg.spin_sector_sewing,
+            "source_spin": run_cfg.spin if run_cfg.spin_sector_sewing is None else "up",
+            "target_spin": run_cfg.spin if run_cfg.spin_sector_sewing is None else "down",
             "pairs": pair_rows,
             "group_relations": [
                 _operation_power_relation(canonical_name, spin_convention=spin_convention)
             ],
         }
-        if save_projection_diagnostics:
+        if run_cfg.save_projection_diagnostics:
             developer_output_files = {
                 "polar_matrix_file": f"diagnostics/{output_operation}_low_polar.npy",
             }
             if filename is not None:
-                developer_output_files["representation_file"] = str(rep_root / filename)
+                developer_output_files["representation_file"] = str(ctx.rep_root / filename)
             if rep_raw_mats:
                 developer_output_files["representation_matrix_file"] = f"diagnostics/{output_operation}_low_representation_raw.npy"
                 developer_output_files["representation_polar_matrix_file"] = (
@@ -2421,7 +2638,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         if accepted_internal_action:
             operation_summary["internal_resolved_action"] = resolved_model_action
         c2_action_audit = _c2_action_audit_for_gamma(
-            mode=mode,
+            mode=ctx.mode,
             operation=output_operation,
             matrix_kind=matrix_kind,
             matrix_selection=matrix_selection,
@@ -2436,9 +2653,18 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         if c2_action_audit is not None:
             operation_summary["C2_action_audit"] = c2_action_audit
         summary["operations"].append(operation_summary)
+    return raw_low_matrices
 
-    n_orb = n_orb_for_exactification
-    bM_candidates = bM_candidates_from_q_distances(q_model1, q_model2)
+
+def _exactify_and_write_projection_summary(
+    ctx: _ProjectionRunContext,
+    *,
+    summary: dict[str, Any],
+    raw_low_matrices: Mapping[str, np.ndarray],
+    n_orb: tuple[int, int],
+) -> dict[str, Any]:
+    run_cfg = ctx.config
+    bM_candidates = bM_candidates_from_q_distances(ctx.q_model1, ctx.q_model2)
     if bM_candidates:
         bM1, bM2 = canonical_bM_pair_from_candidates(bM_candidates, angle_deg=60.0)
     else:
@@ -2449,29 +2675,29 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
             {"name": "L1", "qset": "qset1", "n_orb": int(n_orb[0])},
             {"name": "L2", "qset": "qset2", "n_orb": int(n_orb[1])},
         ],
-        Q_set1=q_model1,
-        Q_set2=q_model2,
+        Q_set1=ctx.q_model1,
+        Q_set2=ctx.q_model2,
         bM1=bM1,
         bM2=bM2,
     )
     exact_overrides = _merged_exactification_overrides(
-        valley,
-        symm_cfg.get("exactification"),
-        symmetry_tolerance=tolerance,
+        run_cfg.valley,
+        run_cfg.symm_cfg.get("exactification"),
+        symmetry_tolerance=run_cfg.tolerance,
     )
     exact_config = _kp_symm_exactification_config(exact_overrides)
     exact_matrices, exact_reports = exactify_loaded_symmetry_source(
         loaded_metadata=summary,
         matrices=raw_low_matrices,
-        Q_set1=q_model1,
-        Q_set2=q_model2,
+        Q_set1=ctx.q_model1,
+        Q_set2=ctx.q_model2,
         sectors=sectors,
         n_orb=n_orb,
         bM1=bM1,
         bM2=bM2,
         raw_config={"exactification": exact_config},
         rotation_deg=0.0,
-        output_dir=output_dir,
+        output_dir=ctx.output_dir,
     )
     for operation_summary in summary["operations"]:
         name = str(operation_summary["name"])
@@ -2503,7 +2729,55 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     }
 
     payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
-    (output_dir / "manifest.json").write_text(payload, encoding="utf-8")
-    (output_dir / "summary.json").write_text(payload, encoding="utf-8")
-    _write_summary_md(output_dir / "summary.md", summary)
+    (ctx.output_dir / "manifest.json").write_text(payload, encoding="utf-8")
+    (ctx.output_dir / "summary.json").write_text(payload, encoding="utf-8")
+    _write_summary_md(ctx.output_dir / "summary.md", summary)
     return summary
+
+
+def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: bool | None = None) -> dict[str, Any]:
+    run_cfg = _load_projection_run_config(cfg_path, developer_outputs=developer_outputs)
+    ctx = _build_projection_run_context(run_cfg)
+
+    gauge_candidates = _resolve_projection_gauge_candidates(ctx)
+    selected_gauge_candidate, gauge_report = _select_projection_gauge(ctx, gauge_candidates)
+    norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
+    _validate_project_layer_lists(
+        ctx.nlow_state_list,
+        norb_fix_list,
+        num_layer_list=ctx.num_layer_list,
+        context="project",
+    )
+    write_basis_selection_report(ctx.output_dir, gauge_report)
+
+    _states, source_states, target_states, first_state = _states_for_resolved_anchors(ctx, norb_fix_list)
+    low_dim = int(first_state.u_low.shape[1])
+    np.save(ctx.output_dir / "q_model_layer1.npy", ctx.q_model1)
+    np.save(ctx.output_dir / "q_model_layer2.npy", ctx.q_model2)
+
+    n_orb_for_exactification = _sector_orbital_counts(
+        ctx.q_model1,
+        ctx.q_model2,
+        ctx.nlow_state_list,
+        low_dim=low_dim,
+        num_layer_list=ctx.num_layer_list,
+    )
+    summary = _initial_projection_summary(
+        ctx,
+        gauge_report=gauge_report,
+        low_dim=low_dim,
+        n_orb_for_exactification=n_orb_for_exactification,
+    )
+    raw_low_matrices = _append_projected_operation_summaries(
+        ctx,
+        summary=summary,
+        source_states=source_states,
+        target_states=target_states,
+        n_orb_for_exactification=n_orb_for_exactification,
+    )
+    return _exactify_and_write_projection_summary(
+        ctx,
+        summary=summary,
+        raw_low_matrices=raw_low_matrices,
+        n_orb=n_orb_for_exactification,
+    )
