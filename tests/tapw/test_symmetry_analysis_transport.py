@@ -10,6 +10,33 @@ import tapw.workflows.symmetry as symmetry_analysis
 from tapw.symmetry.representations import C3_G_matrix
 
 
+def test_valley_context_is_cached_per_valley(monkeypatch):
+    runner = symmetry_analysis.SymmetryAnalysisRunner.__new__(symmetry_analysis.SymmetryAnalysisRunner)
+    runner.structure = SimpleNamespace()
+    runner._valley_context_cache = {}
+
+    calculators = {
+        5: SimpleNamespace(config=SimpleNamespace(valley=5)),
+        6: SimpleNamespace(config=SimpleNamespace(valley=6)),
+    }
+    runner._calculator_for_valley = lambda valley: calculators[int(valley)]
+    calls = []
+
+    def fake_resolve(structure, config, *, calculator):
+        calls.append(int(config.valley))
+        return SimpleNamespace(valley=int(config.valley), calculator=calculator)
+
+    monkeypatch.setattr(symmetry_analysis, "resolve_tapw_valley_context", fake_resolve)
+
+    ctx_a = symmetry_analysis.SymmetryAnalysisRunner._valley_context_for_valley(runner, 5)
+    ctx_b = symmetry_analysis.SymmetryAnalysisRunner._valley_context_for_valley(runner, 5)
+    ctx_c = symmetry_analysis.SymmetryAnalysisRunner._valley_context_for_valley(runner, 6)
+
+    assert ctx_a is ctx_b
+    assert ctx_c.valley == 6
+    assert calls == [5, 6]
+
+
 def test_transport_cache_key_distinguishes_valley_and_q_source(monkeypatch):
     runner = symmetry_analysis.SymmetryAnalysisRunner.__new__(symmetry_analysis.SymmetryAnalysisRunner)
     runner.structure = SimpleNamespace(spin=False)
@@ -129,6 +156,64 @@ def test_build_transport_keeps_sparse_projected_transport(monkeypatch):
     )
 
     assert scipy.sparse.issparse(transport)
+
+
+def test_validated_c3_transport_reuses_validated_base_for_square(monkeypatch):
+    runner = symmetry_analysis.SymmetryAnalysisRunner.__new__(symmetry_analysis.SymmetryAnalysisRunner)
+    runner._transport_cache = {}
+    runner._legacy_c3_matrix_cache = {}
+
+    legacy = scipy.sparse.csr_matrix(
+        np.array(
+            [
+                [0.0, 1.0],
+                [1.0, 0.0],
+            ],
+            dtype=np.complex128,
+        )
+    )
+    calls = []
+
+    def fake_build(self, valley, angle_deg):
+        calls.append((int(valley), float(angle_deg)))
+        return legacy
+
+    monkeypatch.setattr(
+        symmetry_analysis.SymmetryAnalysisRunner,
+        "_build_generic_c3_projected_transport",
+        fake_build,
+    )
+    monkeypatch.setattr(
+        symmetry_analysis.SymmetryAnalysisRunner,
+        "_legacy_c3_matrix_for_valley",
+        lambda self, valley: legacy,
+    )
+
+    c3 = symmetry_analysis.SymmetryAnalysisRunner._validated_generic_c3_transport(runner, valley=5, power=1)
+    c3_square = symmetry_analysis.SymmetryAnalysisRunner._validated_generic_c3_transport(runner, valley=5, power=2)
+
+    assert np.allclose(c3.toarray(), legacy.toarray())
+    assert np.allclose(c3_square.toarray(), (legacy @ legacy).toarray())
+    assert calls == [(5, 120.0)]
+
+
+def test_orbital_rotation_block_uses_present_orbitals_and_cache(monkeypatch):
+    calls = []
+    dims = {"s": 1, "p": 3, "d": 5, "f": 7}
+
+    def fake_rot(orbital, rotation_cart):
+        calls.append(str(orbital))
+        return np.eye(dims[str(orbital)], dtype=np.complex128)
+
+    monkeypatch.setattr(symmetry_analysis, "get_any_rot_orb_twostep", fake_rot)
+
+    rotation = np.eye(3, dtype=float)
+    block1 = symmetry_analysis._orbital_rotation_block("TestUnique-s1p1", rotation)
+    block2 = symmetry_analysis._orbital_rotation_block("TestUnique-s1p1", rotation.copy())
+
+    assert block1.shape == (4, 4)
+    assert np.allclose(block1, block2)
+    assert calls == ["s", "p"]
 
 
 def test_physical_momentum_g_mapping_depends_on_k_centers_and_q_points():

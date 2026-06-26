@@ -340,10 +340,10 @@ def run_calc(args):
         if config.compute.TAPW:
             processor.process()
 
-            # # Plot clustering results
-            os.makedirs(config.paths.output_dir + "/lattice", exist_ok=True)
-            processor.plot_clusters_loc(save=True, save_path=config.paths.output_dir + "/lattice")
-            processor.plot_clusters_phase(save=True, save_path=config.paths.output_dir + "/lattice")
+            if config.compute.mode != "symmetry":
+                os.makedirs(config.paths.output_dir + "/lattice", exist_ok=True)
+                processor.plot_clusters_loc(save=True, save_path=config.paths.output_dir + "/lattice")
+                processor.plot_clusters_phase(save=True, save_path=config.paths.output_dir + "/lattice")
 
         # Handle Hamiltonian
         H_file = config.paths.H_file

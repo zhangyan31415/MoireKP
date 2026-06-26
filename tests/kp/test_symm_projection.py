@@ -19,7 +19,9 @@ import kp.cli as cli
 import kp.symmetry.projection as projection_mod
 from kp.basis.selection import GaugeCandidateSymmetryMetrics
 from kp.model.symmetry import load_symmetry_source
+from kp.orbitals import expand_orbital_order_by_sector
 from kp.symmetry.projection import (
+    _basis_action_for_candidate,
     _build_action_representation,
     _c2_action_audit_for_gamma,
     _model_action_metadata,
@@ -34,6 +36,41 @@ from kp.symmetry.projection import (
     _source_manifest_operation_name,
     _validate_operation_label,
 )
+
+
+def test_orbital_order_accepts_per_layer_patterns() -> None:
+    labels = expand_orbital_order_by_sector(
+        {
+            "L1": "Bi-s1,Te-p1,I-s1",
+            "L2": "I-s1,Te-p1,Bi-s1",
+        },
+        ["L1", "L2"],
+    )
+
+    assert labels is not None
+    assert labels["L1"] == ["Bi_s_r1", "Te_px_r1", "Te_py_r1", "Te_pz_r1", "I_s_r1"]
+    assert labels["L2"] == ["I_s_r1", "Te_px_r1", "Te_py_r1", "Te_pz_r1", "Bi_s_r1"]
+
+
+def test_projected_basis_action_uses_orbital_map_for_layer_exchange() -> None:
+    action = {
+        "k_map": {"type": "identity"},
+        "q_map": {"type": "identity"},
+        "sector_map": "layer_exchange",
+        "orbital_map": {"L1": {1: 2, 2: 1}, "L2": {1: 2, 2: 1}},
+    }
+
+    basis_action = _basis_action_for_candidate(
+        action=action,
+        q_model1=np.array([[0.0, 0.0]]),
+        q_model2=np.array([[0.0, 0.0]]),
+        nlow_state_list=[[0, 1], [0, 1]],
+        low_dim=4,
+        tol=1.0e-8,
+    )
+
+    assert basis_action["complete"] is True
+    assert basis_action["perm"].tolist() == [3, 2, 1, 0]
 
 
 class SymmetryProjectionCliTests(unittest.TestCase):

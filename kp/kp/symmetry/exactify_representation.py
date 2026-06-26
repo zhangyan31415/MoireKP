@@ -20,6 +20,7 @@ class OperationAction:
     central_phase: complex
     group_relations: list[dict[str, Any]]
     source: str
+    orbital_map: object = None
 
 
 @dataclass(frozen=True)
@@ -171,6 +172,55 @@ def _target_sector(
     return sector_map.get(label.sector, label.sector)
 
 
+def _mapping_get_int(mapping: Mapping[Any, Any], key: int) -> int | None:
+    for candidate in (key, str(key)):
+        if candidate in mapping:
+            return int(mapping[candidate])
+    return None
+
+
+def _mapping_int_keys(mapping: Mapping[Any, Any]) -> set[int]:
+    keys: set[int] = set()
+    for key in mapping:
+        try:
+            keys.add(int(key))
+        except (TypeError, ValueError):
+            continue
+    return keys
+
+
+def _mapping_get_exactification_orbital(mapping: Mapping[Any, Any], orbital: int) -> int | None:
+    # Exactification BasisLabel.orbital is 1-based. A map containing slot 0 is
+    # accepted as internal 0-based form and converted to the 1-based basis.
+    if 0 in _mapping_int_keys(mapping):
+        mapped = _mapping_get_int(mapping, int(orbital) - 1)
+        return None if mapped is None else int(mapped) + 1
+    return _mapping_get_int(mapping, int(orbital))
+
+
+def _target_orbital(label: BasisLabel, target_sector: str, operation: OperationAction) -> int:
+    orbital = int(label.orbital)
+    raw = operation.orbital_map
+    if not isinstance(raw, Mapping):
+        return orbital
+    source_sector = str(label.sector)
+    candidates: list[Any] = []
+    for key in (source_sector, f"{source_sector}->{target_sector}", f"{source_sector}:{target_sector}", "*"):
+        if key in raw:
+            candidates.append(raw[key])
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            nested = candidate.get(target_sector)
+            if isinstance(nested, Mapping):
+                mapped = _mapping_get_exactification_orbital(nested, orbital)
+                if mapped is not None:
+                    return mapped
+            mapped = _mapping_get_exactification_orbital(candidate, orbital)
+            if mapped is not None:
+                return mapped
+    return orbital
+
+
 def _build_operation_from_record(record: Mapping[str, Any]) -> OperationAction:
     name = str(record.get("name"))
     k_map = _standardize_k_map(record.get("k_map", {}))
@@ -186,6 +236,7 @@ def _build_operation_from_record(record: Mapping[str, Any]) -> OperationAction:
         central_phase=complex(1.0, 0.0),
         group_relations=[],
         source="kp_symm_output",
+        orbital_map=record.get("orbital_map"),
     )
 
 
@@ -211,6 +262,7 @@ def _action_candidate_summary(operation: OperationAction) -> dict[str, Any]:
         "k_map": _jsonable(operation.k_map),
         "q_map": _jsonable(operation.q_map),
         "sector_map": _jsonable(operation.sector_map),
+        "orbital_map": _jsonable(operation.orbital_map),
         "antiunitary": bool(operation.antiunitary),
     }
 
@@ -250,7 +302,7 @@ def _candidate_operation_actions(
     model_record = dict(record)
     model_action = record.get("model_action")
     if isinstance(model_action, Mapping):
-        for key in ("antiunitary", "k_map", "q_map", "sector_map"):
+        for key in ("antiunitary", "k_map", "q_map", "sector_map", "orbital_map"):
             if key in model_action:
                 model_record[key] = model_action[key]
         model_record["k_map"] = _model_frame_k_map(model_record.get("k_map", {}))
@@ -343,24 +395,31 @@ def build_label_action(
     sector_names = _sector_names_from_basis_labels(basis_labels)
     for label in basis_labels:
         target_sector = _target_sector(label, operation, sector_names=sector_names)
+        target_orbital = _target_orbital(label, target_sector, operation)
         q_target = operation.R @ np.asarray(label.q_vector, dtype=float)
         target_idx = None
         integerize_error: str | None = None
         try:
             _, n1, n2 = canonical_q_coordinates(q_target, target_sector, bM1, bM2, q_offsets[target_sector], tol)
-            key = (target_sector, n1, n2, int(label.orbital))
+            key = (target_sector, n1, n2, target_orbital)
             target_idx = lookup.get(key)
         except Exception as exc:
             integerize_error = str(exc)
         if target_idx is None:
-            candidates = by_sector_orbital.get((target_sector, int(label.orbital)), [])
+            candidates = by_sector_orbital.get((target_sector, target_orbital), [])
             if candidates:
                 distances = [float(np.linalg.norm(np.asarray(candidate.q_vector, dtype=float) - q_target)) for candidate in candidates]
                 best_idx = int(np.argmin(distances))
                 if distances[best_idx] <= float(tol):
                     target_idx = int(candidates[best_idx].index)
             if target_idx is None:
-                payload = {"index": int(label.index), "sector": label.sector, "target_sector": target_sector}
+                payload = {
+                    "index": int(label.index),
+                    "sector": label.sector,
+                    "target_sector": target_sector,
+                    "source_orbital": int(label.orbital),
+                    "target_orbital": int(target_orbital),
+                }
                 if integerize_error is not None:
                     payload["reason"] = integerize_error
                 missing.append(payload)

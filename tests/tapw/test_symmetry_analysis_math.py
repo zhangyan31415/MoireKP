@@ -1,4 +1,6 @@
 import numpy as np
+import pytest
+import scipy.sparse
 
 import tapw.workflows.symmetry as symmetry_analysis
 
@@ -32,6 +34,49 @@ def test_unitary_symmetrization_improves_a_broken_covariance_residual():
 
     assert raw > 0.0
     assert improved < raw
+
+
+def test_monomial_covariance_residual_matches_explicit_dense_product():
+    helper = getattr(symmetry_analysis, "monomial_covariance_relative_residual", None)
+    assert helper is not None
+
+    phases = np.array([1.0, 1.0j, -1.0, -1.0j], dtype=np.complex128)
+    permutation = np.array([2, 0, 3, 1], dtype=int)
+    rows = np.arange(4)
+    transport = scipy.sparse.csr_matrix((phases, (rows, permutation)), shape=(4, 4))
+    h = np.array(
+        [
+            [2.0, 0.2 + 0.1j, -0.3j, 0.4],
+            [0.2 - 0.1j, 3.0, 0.5j, -0.2],
+            [0.3j, -0.5j, 4.0, 0.7 - 0.2j],
+            [0.4, -0.2, 0.7 + 0.2j, 5.0],
+        ],
+        dtype=np.complex128,
+    )
+
+    explicit = transport @ h @ transport.conj().T
+    expected = symmetry_analysis.frobenius_relative_residual(h, explicit, denominator=h)
+    actual = helper(h, h, transport, block_size=2)
+
+    assert actual == pytest.approx(expected, abs=1.0e-14)
+
+
+def test_monomial_covariance_residual_returns_none_for_non_monomial_transport():
+    helper = getattr(symmetry_analysis, "monomial_covariance_relative_residual", None)
+    assert helper is not None
+
+    h = np.eye(2, dtype=np.complex128)
+    transport = scipy.sparse.csr_matrix(
+        np.array(
+            [
+                [1.0, 1.0],
+                [0.0, 1.0],
+            ],
+            dtype=np.complex128,
+        )
+    )
+
+    assert helper(h, h, transport) is None
 
 
 def test_lowdin_order_residual_is_small_for_exact_symmetric_orbit():

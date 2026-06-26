@@ -551,6 +551,86 @@ def test_analyze_collects_only_minimal_supported_representation_generators(tmp_p
     assert export_flags == {"E": False, "C3z": True, "C3z^2": False}
 
 
+def test_analyze_derives_c3_square_from_supported_c3_without_raw_validation(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path)
+    runner.config.compute = SimpleNamespace(TAPW=True, valleys=[5])
+    runner.config.twist = SimpleNamespace(bravais="hex")
+    runner.structure = SimpleNamespace(spin=False, reciprocal_Tmat=np.eye(3))
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=5,
+        valley_label="Gamma",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=SimpleNamespace(TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr"))),
+    )
+    runner._calculator_for_valley = MethodType(
+        lambda self, valley: SimpleNamespace(
+            valley_flag="Gamma",
+            TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr")),
+        ),
+        runner,
+    )
+    runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
+    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure, **_kwargs: [])
+    monkeypatch.setattr(
+        symmetry_analysis,
+        "_minimal_symmetry_candidates_for_valley",
+        lambda valley_ctx, bravais, spatial_operations=None, structure=None, **_kwargs: [
+            {"index": 0, "name": "E", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
+            {"index": 2, "name": "C3z", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
+            {"index": 3, "name": "C3z^2", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
+        ],
+    )
+    monkeypatch.setattr(symmetry_analysis, "_default_validation_q_points", lambda: [("Gamma", np.zeros(3))])
+    raw_validation_calls = []
+
+    def fake_candidate_rows(self, candidate, valley, valley_label, q_label, q_target, tolerance):
+        operation = symmetry_analysis.displayed_operation_name(candidate["name"])
+        raw_validation_calls.append(operation)
+        if operation == "C3z^2":
+            raise AssertionError("C3z^2 should be derived from verified C3z")
+        return {
+            "valley": valley_label,
+            "operation": operation,
+            "k_label": q_label,
+            "supported": True,
+            "status": "exact",
+            "covariance_status": "exact",
+            "not_supported_reason": "",
+            "residual_H_raw": 0.0,
+        }
+
+    runner._candidate_rows_for_q = MethodType(fake_candidate_rows, runner)
+    runner._representation_record_for_candidate = MethodType(
+        lambda self, candidate, valley, valley_label, valley_ctx, candidate_rows: {
+            "valley": valley,
+            "valley_label": valley_label,
+            "operation": symmetry_analysis.representation_operation_name(candidate["name"]),
+            "antiunitary": bool(candidate.get("antiunitary", False)),
+            "matrix": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+        },
+        runner,
+    )
+
+    payload = runner._analyze()
+
+    assert raw_validation_calls == ["E", "C3z"]
+    details_by_operation = {row["operation"]: row for row in payload["details"]}
+    assert details_by_operation["C3z^2"]["status"] == "derived"
+    assert details_by_operation["C3z^2"]["covariance_status"] == "derived"
+    assert details_by_operation["C3z^2"]["residual_H_raw"] is None
+    summary_by_operation = {
+        entry["operation"]: entry
+        for entry in payload["summary"]["operations"]["Gamma"]
+    }
+    assert summary_by_operation["C3z^2"]["supported"] is True
+    assert summary_by_operation["C3z^2"]["export_raw_h_matrix"] is False
+
+
 def test_c3_covariance_validation_uses_raw_h_action_with_periodic_gauge(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)
     runner.structure = SimpleNamespace(spin=False)
@@ -1245,7 +1325,7 @@ def test_default_validation_points_are_gamma_plus_one_generic_point():
     assert [label for label, _ in points] == ["Gamma", "q1"]
 
 
-def test_candidate_row_reports_raw_h_only_without_s_or_symmetrized_residuals(tmp_path):
+def test_candidate_row_shortcuts_identity_without_raw_h_projection(tmp_path):
     runner = _make_runner(tmp_path)
     runner.structure = SimpleNamespace(reciprocal_Tmat=np.eye(3))
     h0 = np.array([[2.0, 0.25], [0.25, 1.0]], dtype=np.complex128)
@@ -1289,7 +1369,7 @@ def test_candidate_row_reports_raw_h_only_without_s_or_symmetrized_residuals(tmp
     assert row["g_perm_max_delta"] is None
     assert row["nonzero_reciprocal_shift_count"] is None
     assert row["square_residual"] is None
-    assert len(calls) == 2
+    assert calls == []
 
 
 def test_candidate_row_uses_raw_projected_h_for_c3_covariance(tmp_path, monkeypatch):

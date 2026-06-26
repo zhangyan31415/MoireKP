@@ -13,6 +13,10 @@ import yaml
 import numpy as np
 
 from .io.tapw_loader import load_hamk, load_Q_sets
+from .orbitals import (
+    expand_orbital_order_by_sector,
+    expand_orbital_order_pattern as _expand_orbital_order_pattern,
+)
 from .blocks import (
     get_H_block,
     project_heff_full,
@@ -238,6 +242,14 @@ def plot_eigs_scatter(
     ylim: tuple[float, float] | None = None,
     index_order: Sequence[int] | None = None,
     original_eigs_list: Sequence[np.ndarray] | None = None,
+    top_bands: int | None = None,
+    bottom_bands: int | None = None,
+    band_slice: Sequence[int] | None = None,
+    align: str = "fermi",
+    x_values: Sequence[float] | None = None,
+    x_ticks: Sequence[float] | None = None,
+    x_ticklabels: Sequence[str] | None = None,
+    xlabel: str = "k-path point",
     return_fig: bool = False,
 ):
     """Plot all bands as lines across Q (2nd dim is band index).
@@ -269,14 +281,57 @@ def plot_eigs_scatter(
         if index_order is not None:
             idx = np.asarray(index_order, dtype=int)
             E0 = E0[idx]
-    x = np.arange(E.shape[0])
+
+    def select_window(arr: np.ndarray) -> np.ndarray:
+        nbands = int(arr.shape[1])
+        if band_slice is not None:
+            if len(band_slice) != 2:
+                raise ValueError(f"band_slice must have two entries, got {band_slice!r}")
+            start = max(0, int(band_slice[0]))
+            stop = min(nbands, int(band_slice[1]))
+        elif top_bands is not None:
+            count = max(1, int(top_bands))
+            start = max(0, nbands - count)
+            stop = nbands
+        elif bottom_bands is not None:
+            count = max(1, int(bottom_bands))
+            start = 0
+            stop = min(nbands, count)
+        else:
+            start = 0
+            stop = nbands
+        if stop <= start:
+            raise ValueError(f"Empty band plotting window start={start}, stop={stop}, nbands={nbands}")
+        return arr[:, start:stop]
+
+    E = select_window(E)
+    if E0 is not None:
+        E0 = select_window(E0)
+
+    x = np.asarray(x_values, dtype=float) if x_values is not None else np.arange(E.shape[0], dtype=float)
+    if x.shape[0] != E.shape[0]:
+        raise ValueError(f"x-axis length {x.shape[0]} does not match band rows {E.shape[0]}")
     fig, ax = plt.subplots(figsize=(5.6, 9.0))
-    shift = float(efermi) if (efermi is not None) else 0.0
+    align_key = str(align or "fermi").strip().lower()
+
+    def shift_for(arr: np.ndarray) -> float:
+        if align_key in {"top", "top_band", "top-band"}:
+            return float(np.max(arr[:, -1]))
+        if align_key in {"bottom", "bottom_band", "bottom-band"}:
+            return float(np.min(arr[:, 0]))
+        if align_key in {"fermi", "ef", "efermi"}:
+            return float(efermi) if (efermi is not None) else 0.0
+        if align_key in {"none", "false", "0"}:
+            return 0.0
+        raise ValueError(f"Unsupported band plot align={align!r}; expected 'top', 'bottom', 'fermi', or 'none'")
+
+    shift = shift_for(E)
+    original_shift = shift_for(E0) if E0 is not None else shift
     if E0 is not None:
         for i in range(E0.shape[1]):
             ax.plot(
                 x,
-                E0[:, i] - shift,
+                E0[:, i] - original_shift,
                 color="#9AA0A6",
                 lw=0.7,
                 alpha=0.45,
@@ -296,8 +351,22 @@ def plot_eigs_scatter(
         )
 
     ax.axhline(0.0, color="#555555", lw=0.8, ls="--", alpha=0.8, zorder=0)
-    ax.set_xlabel("Q index")
-    ax.set_ylabel("Energy - E_F (eV)" if (efermi is not None) else "Energy (eV)")
+    if x_ticks is not None and x_ticklabels is not None and len(x_ticks) == len(x_ticklabels):
+        ax.set_xticks([float(item) for item in x_ticks])
+        ax.set_xticklabels([str(item) for item in x_ticklabels])
+        for tick in x_ticks:
+            ax.axvline(float(tick), color="0.86", linewidth=0.75, zorder=0)
+        ax.set_xlim(float(x[0]), float(x[-1]))
+    else:
+        ax.set_xlabel(xlabel)
+    if align_key in {"top", "top_band", "top-band"}:
+        ax.set_ylabel(r"$E - E_{\mathrm{top}}$ (eV)")
+    elif align_key in {"bottom", "bottom_band", "bottom-band"}:
+        ax.set_ylabel(r"$E - E_{\mathrm{bottom}}$ (eV)")
+    elif align_key in {"fermi", "ef", "efermi"} and efermi is not None:
+        ax.set_ylabel("Energy - E_F (eV)")
+    else:
+        ax.set_ylabel("Energy (eV)")
     ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
     ax.grid(axis="x", visible=False)
     ax.set_axisbelow(True)
@@ -347,6 +416,59 @@ def _load_bands_from_text(path: str) -> list[np.ndarray]:
     if not rows:
         raise ValueError(f"No numeric rows found in band file: {path}")
     return rows
+
+
+def _normalize_kpath_tick_label(label: Any) -> str:
+    text = str(label).strip()
+    if text.lower() in {"gamma", "gam", "g"}:
+        return r"$\Gamma$"
+    return text
+
+
+def _kpath_axis_from_config(
+    cfg: dict[str, Any],
+    *,
+    cfg_dir: str,
+    project_indices: Sequence[int],
+    row_count: int,
+) -> dict[str, Any]:
+    kpath_cfg = cfg.get("kpath", {})
+    if not isinstance(kpath_cfg, dict):
+        return {}
+    file_raw = kpath_cfg.get("file")
+    tmat_raw = kpath_cfg.get("tmat")
+    if file_raw is None or tmat_raw is None:
+        return {}
+    path = Path(str(file_raw))
+    if not path.is_absolute():
+        path = Path(cfg_dir) / path
+    try:
+        from .model.core import generate_kpath_from_file
+
+        kpath = generate_kpath_from_file(
+            Tmat=np.asarray(tmat_raw, dtype=float),
+            file_path=path,
+            phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
+            segment_points=kpath_cfg.get("segment_points"),
+        )
+        x_all = np.asarray(kpath.x, dtype=float)
+        if x_all.shape[0] == row_count:
+            x_values = x_all
+            full_path = True
+        else:
+            indices = np.asarray(project_indices, dtype=int)
+            if x_all.shape[0] <= int(np.max(indices, initial=-1)):
+                return {}
+            x_values = x_all[indices]
+            full_path = indices.shape[0] == x_all.shape[0] and np.array_equal(indices, np.arange(x_all.shape[0]))
+        payload: dict[str, Any] = {"x_values": x_values}
+        if full_path and len(kpath.x_ticks) == len(kpath.labels_ticks):
+            payload["x_ticks"] = [float(item) for item in kpath.x_ticks]
+            payload["x_ticklabels"] = [_normalize_kpath_tick_label(item) for item in kpath.labels_ticks]
+        return payload
+    except Exception as exc:
+        print(f"[kp] K-path axis warning: {exc}; use k-path point index")
+        return {}
 
 
 def _as_bool(value: Any) -> bool:
@@ -1069,12 +1191,16 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         else:
             # 轨道标签准备（"层内轨道名表"，长度对齐到 orb0）
             labels_pattern = material.get("orbital_order") if isinstance(material, dict) else None
-            per_layer_labels = expand_orbital_order_pattern(labels_pattern) if labels_pattern else None
-            if per_layer_labels is not None and len(per_layer_labels) != orb0:
-                if len(per_layer_labels) < orb0:
-                    per_layer_labels = per_layer_labels + [f"orb_{i}" for i in range(len(per_layer_labels), orb0)]
-                else:
-                    per_layer_labels = per_layer_labels[:orb0]
+            layer_names = [f"L{i + 1}" for i in range(int(sum(num_layer_list)))]
+            labels_by_layer = (
+                expand_orbital_order_by_sector(
+                    labels_pattern,
+                    layer_names,
+                    expected_count=orb0,
+                )
+                if labels_pattern
+                else None
+            )
 
             Vq = np.asarray(vecs_ord[ref_q])  # 形状 (block_dim, nBands)
             if Vq.ndim != 2:
@@ -1117,8 +1243,10 @@ def cmd_plot_from_config(cfg_path: str) -> None:
 
                 orb_local = idx0 % orb0
                 label = None
-                if per_layer_labels is not None and 0 <= orb_local < len(per_layer_labels):
-                    label = per_layer_labels[orb_local]
+                if labels_by_layer is not None:
+                    per_layer_labels = labels_by_layer.get(f"L{int(layer) + 1}")
+                    if per_layer_labels is not None and 0 <= orb_local < len(per_layer_labels):
+                        label = per_layer_labels[orb_local]
                 return spin_tag, int(layer), int(orb_local), (label if label is not None else "-")
 
             # 仅在 ref_q 做分解：对每条被选中的带打印 top-N 分量 + 复系数
@@ -1471,6 +1599,21 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     efermi = float(proj_ef) if proj_ef is not None else None
     ylim_cfg = project_cfg.get("ylim")
     ylim = (float(ylim_cfg[0]), float(ylim_cfg[1])) if isinstance(ylim_cfg, (list, tuple)) and len(ylim_cfg) == 2 else None
+    project_plot_cfg = project_cfg.get("plot", {})
+    if project_plot_cfg is None:
+        project_plot_cfg = {}
+    if not isinstance(project_plot_cfg, dict):
+        raise ValueError("project.plot must be a mapping when provided")
+    project_top_bands = project_plot_cfg.get("top_bands", project_cfg.get("plot_top_bands"))
+    project_bottom_bands = project_plot_cfg.get("bottom_bands", project_cfg.get("plot_bottom_bands"))
+    project_band_slice = project_plot_cfg.get("band_slice", project_cfg.get("plot_band_slice"))
+    project_align = str(project_plot_cfg.get("align", project_cfg.get("plot_align", "fermi")))
+    kpath_axis = _kpath_axis_from_config(
+        cfg,
+        cfg_dir=cfg_dir,
+        project_indices=project_indices,
+        row_count=len(heig_list),
+    )
     if original_eigs_list is not None and len(original_eigs_list) != len(heig_list):
         print(
             f"[kp] Overlay warning: original band rows ({len(original_eigs_list)}) "
@@ -1494,6 +1637,12 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         ylim=ylim,
         index_order=None,
         original_eigs_list=original_eigs_list,
+        top_bands=None if project_top_bands is None else int(project_top_bands),
+        bottom_bands=None if project_bottom_bands is None else int(project_bottom_bands),
+        band_slice=project_band_slice,
+        align=project_align,
+        xlabel="k-path point",
+        **kpath_axis,
     )
     save_spectrum_txt(heig_list, data_out)
     print(f"[kp] Saved Heff spectrum: {data_out}")
@@ -1645,38 +1794,12 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
 # -------------------- Band analysis --------------------
 
 def _expand_orbital_pattern(segment: str) -> list[str]:
-    """Expand a segment like 'I-s3p2d2' into a list of orbital labels for that species.
-    Ordering: s, p(x,y,z), d(z2, x2-y2, xy, xz, yz), f(7 real harmonics).
-    """
-    segment = segment.strip()
-    if not segment:
-        return []
-    if '-' not in segment:
-        return [segment]
-    species, patterns = segment.split('-', 1)
-    s_list = ['s']
-    p_list = ['px', 'py', 'pz']
-    d_list = ['dz2', 'dx2-y2', 'dxy', 'dxz', 'dyz']
-    f_list = ['f5z2', 'f5xz2', 'f5yz2', 'fzx2', 'fxyz', 'fx3', 'f3yx2']
-    out: list[str] = []
-    import re
-    for m in re.finditer(r'([spdf])(\d+)', patterns):
-        orb = m.group(1)
-        rep = int(m.group(2))
-        base = {'s': s_list, 'p': p_list, 'd': d_list, 'f': f_list}[orb]
-        for r in range(1, rep + 1):
-            for b in base:
-                out.append(f"{species}_{b}_r{r}")
-    return out
+    return _expand_orbital_order_pattern(segment)
 
 
 def expand_orbital_order_pattern(pattern: str) -> list[str]:
     """Expand 'I-s3p2d2,Mg-s2p2,I-s3p2d2' into a flat list of labels (length should match orb_per_layer)."""
-    parts = [p for p in pattern.split(',') if p.strip()]
-    labels: list[str] = []
-    for seg in parts:
-        labels.extend(_expand_orbital_pattern(seg))
-    return labels
+    return _expand_orbital_order_pattern(pattern)
 
 
 def build_argparser() -> argparse.ArgumentParser:

@@ -175,6 +175,8 @@ def test_symmetry_mode_dispatches_to_symmetry_runner_without_band_calculation(mo
     main_mod.run_calc(args)
 
     assert "runner.run" in events
+    assert "processor.process" in events
+    assert not any(isinstance(event, tuple) and event[0].startswith("plot.") for event in events)
     assert not any(isinstance(event, tuple) and event[0] == "hr.init" and event[1] == str(Path(config.paths.S_file)) for event in events)
     assert not any(event == "kpath" or (isinstance(event, tuple) and event[0] == "kpath") for event in events)
 
@@ -198,6 +200,8 @@ def test_normal_band_mode_still_uses_existing_band_calculator(monkeypatch, tmp_p
     main_mod.run_calc(args)
 
     assert "band.init" in events
+    assert any(isinstance(event, tuple) and event[0] == "plot.loc" for event in events)
+    assert any(isinstance(event, tuple) and event[0] == "plot.phase" for event in events)
     assert any(isinstance(event, tuple) and event[0] == "band.run" for event in events)
     assert "runner.run" not in events
 

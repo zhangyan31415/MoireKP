@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Iterable
@@ -389,6 +390,75 @@ def frobenius_relative_residual(lhs, rhs, denominator=None) -> float:
     if base_norm == 0.0:
         return 0.0 if diff_norm == 0.0 else float("inf")
     return diff_norm / base_norm
+
+
+def _monomial_sparse_rows(operator, tol: float = 1.0e-14):
+    if not scipy.sparse.issparse(operator):
+        return None
+    matrix = operator.tocsr()
+    if matrix.shape[0] != matrix.shape[1]:
+        return None
+    n_rows = int(matrix.shape[0])
+    row_counts = np.diff(matrix.indptr)
+    if row_counts.shape[0] != n_rows or not np.all(row_counts == 1):
+        return None
+    cols = np.asarray(matrix.indices, dtype=np.int64)
+    values = np.asarray(matrix.data, dtype=np.complex128)
+    if cols.shape[0] != n_rows or values.shape[0] != n_rows:
+        return None
+    if np.any(np.abs(values) <= float(tol)):
+        return None
+    col_counts = np.bincount(cols, minlength=n_rows)
+    if col_counts.shape[0] != n_rows or not np.all(col_counts == 1):
+        return None
+    return cols, values
+
+
+def monomial_covariance_relative_residual(
+    target,
+    source,
+    transport,
+    *,
+    antiunitary: bool = False,
+    block_size: int = 512,
+):
+    """Compute ||H_t - D H_s D^dagger||_F / ||H_t||_F for monomial sparse D.
+
+    Returns None when the transport is not a square monomial sparse matrix.
+    """
+    row_action = _monomial_sparse_rows(transport)
+    if row_action is None:
+        return None
+    source_cols, phases = row_action
+    target = np.asarray(target, dtype=np.complex128)
+    source = np.asarray(source, dtype=np.complex128)
+    if target.ndim != 2 or source.ndim != 2:
+        raise ValueError("target and source Hamiltonians must be matrices")
+    if target.shape != source.shape or target.shape[0] != target.shape[1]:
+        raise ValueError(
+            f"target/source shapes must match square matrices, got {target.shape} and {source.shape}"
+        )
+    n = int(target.shape[0])
+    if source_cols.shape[0] != n:
+        return None
+    block_size = max(1, int(block_size))
+    phase_conj = phases.conj()
+    diff_norm_sq = 0.0
+    base_norm_sq = 0.0
+    for start in range(0, n, block_size):
+        stop = min(n, start + block_size)
+        row_cols = source_cols[start:stop]
+        block = source[np.ix_(row_cols, source_cols)]
+        if antiunitary:
+            block = np.conjugate(block)
+        transformed = phases[start:stop, None] * block * phase_conj[None, :]
+        target_block = target[start:stop, :]
+        delta = target_block - transformed
+        diff_norm_sq += float(np.sum(np.abs(delta) ** 2))
+        base_norm_sq += float(np.sum(np.abs(target_block) ** 2))
+    if base_norm_sq == 0.0:
+        return 0.0 if diff_norm_sq == 0.0 else float("inf")
+    return float(np.sqrt(diff_norm_sq) / np.sqrt(base_norm_sq))
 
 
 def is_positive_definite(matrix, atol: float = 1.0e-12) -> bool:
@@ -842,6 +912,7 @@ def classify_residual(value: float | None, tolerance: float) -> str:
 def _status_rank(status: str) -> int:
     return {
         "exact": 0,
+        "derived": 1,
         "approximate/provisional": 1,
         "failed": 2,
         "not_supported": 3,
@@ -1717,16 +1788,30 @@ def _parse_orbitals_from_orb_name(orb_name: str):
     return orbitals
 
 
-def _orbital_rotation_block(orb_name: str, rotation_cart: np.ndarray):
+def _rotation_cache_key(rotation_cart: np.ndarray) -> tuple[float, ...]:
+    rotation = np.asarray(rotation_cart, dtype=float)
+    if rotation.shape != (3, 3):
+        raise SymmetrySupportError(
+            "orbital_rotation_unsupported",
+            f"Expected a 3x3 orbital rotation matrix, got shape={rotation.shape}.",
+        )
+    return tuple(float(value) for value in np.round(rotation.reshape(-1), decimals=12))
+
+
+@lru_cache(maxsize=512)
+def _cached_orbital_rotation_block(orb_name: str, rotation_key: tuple[float, ...]):
+    rotation_cart = np.asarray(rotation_key, dtype=float).reshape(3, 3)
     orbitals = _parse_orbitals_from_orb_name(str(orb_name))
+    orbital_mapping = {
+        orbital: get_any_rot_orb_twostep(orbital, rotation_cart)
+        for orbital in orbitals
+    }
+    return direct_sum(*generate_direct_sum_params(orbitals, orbital_mapping))
+
+
+def _orbital_rotation_block(orb_name: str, rotation_cart: np.ndarray):
     try:
-        orbital_mapping = {
-            "s": get_any_rot_orb_twostep("s", rotation_cart),
-            "p": get_any_rot_orb_twostep("p", rotation_cart),
-            "d": get_any_rot_orb_twostep("d", rotation_cart),
-            "f": get_any_rot_orb_twostep("f", rotation_cart),
-        }
-        return direct_sum(*generate_direct_sum_params(orbitals, orbital_mapping))
+        return _cached_orbital_rotation_block(str(orb_name), _rotation_cache_key(rotation_cart)).copy()
     except Exception as exc:
         raise SymmetrySupportError(
             "orbital_rotation_unsupported",
@@ -2366,6 +2451,7 @@ class SymmetryAnalysisRunner:
         self._raw_c3_h_orbit_cache: dict[tuple[int, tuple[float, float, float]], list[np.ndarray]] = {}
         self._transport_cache: dict[Any, np.ndarray] = {}
         self._legacy_c3_matrix_cache: dict[int, np.ndarray] = {}
+        self._valley_context_cache: dict[int, ValleyContext] = {}
 
     def _calculator_for_valley(self, valley: int) -> BandStructureCalculator:
         calculator = self._calculator_cache.get(int(valley))
@@ -2383,8 +2469,14 @@ class SymmetryAnalysisRunner:
         return calculator
 
     def _valley_context_for_valley(self, valley: int) -> ValleyContext:
+        valley = int(valley)
+        cached = self._valley_context_cache.get(valley)
+        if cached is not None:
+            return cached
         calculator = self._calculator_for_valley(valley)
-        return resolve_tapw_valley_context(self.structure, calculator.config, calculator=calculator)
+        context = resolve_tapw_valley_context(self.structure, calculator.config, calculator=calculator)
+        self._valley_context_cache[valley] = context
+        return context
 
     def _raw_projected_hs(self, valley: int, q_local):
         q_local = np.asarray(q_local, dtype=float)
@@ -2449,19 +2541,31 @@ class SymmetryAnalysisRunner:
         return matrix
 
     def _validated_generic_c3_transport(self, valley: int, power: int):
+        power = int(power)
+        if power < 1:
+            raise SymmetrySupportError(
+                "generic_C3_builder_failed",
+                f"Generic C3 power must be positive, got {power}.",
+            )
         cache_key = ("validated_c3", int(valley), int(power))
         cached = self._transport_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        generic_c3 = self._build_generic_c3_projected_transport(valley, 120.0)
+        base_key = ("validated_c3_base", int(valley))
+        generic_c3 = self._transport_cache.get(base_key)
         legacy_c3 = self._legacy_c3_matrix_for_valley(valley).tocsr()
-        residual_c3 = compare_transport_against_legacy_c3(generic_c3, legacy_c3)
-        if residual_c3 >= 1.0e-8:
-            raise SymmetrySupportError(
-                "generic_C3_builder_failed",
-                f"Generic C3 transport does not match legacy C3: residual={residual_c3:.3e}.",
-            )
+        if generic_c3 is None:
+            generic_c3 = self._build_generic_c3_projected_transport(valley, 120.0)
+            residual_c3 = compare_transport_against_legacy_c3(generic_c3, legacy_c3)
+            if residual_c3 >= 1.0e-8:
+                raise SymmetrySupportError(
+                    "generic_C3_builder_failed",
+                    f"Generic C3 transport does not match legacy C3: residual={residual_c3:.3e}.",
+                )
+            generic_c3 = generic_c3.tocsr()
+            self._transport_cache[base_key] = generic_c3
+            self._transport_cache[("validated_c3", int(valley), 1)] = generic_c3
 
         generic_power = generic_c3
         legacy_power = legacy_c3
@@ -3687,6 +3791,8 @@ class SymmetryAnalysisRunner:
         diagnostic_t_square_residual=None,
         debug: dict[str, Any] | None = None,
         tolerance: float,
+        status_override: str | None = None,
+        covariance_status_override: str | None = None,
     ):
         covariance_status = "not_supported"
         if supported or residual_h_raw is not None or residual_s_raw is not None:
@@ -3697,6 +3803,8 @@ class SymmetryAnalysisRunner:
                     if value is not None
                 ]
             ) if any(value is not None for value in (residual_h_raw, residual_s_raw)) else "not_supported"
+        if covariance_status_override is not None:
+            covariance_status = str(covariance_status_override)
 
         symmetrization_status = "not_supported"
         if supported or residual_h_sym is not None or residual_s_sym is not None:
@@ -3714,6 +3822,8 @@ class SymmetryAnalysisRunner:
 
         statuses = [status for status in (covariance_status,) if status != "not_supported"]
         status = "not_supported" if (not supported and not statuses) else (combine_statuses(statuses) if statuses else "not_supported")
+        if status_override is not None:
+            status = str(status_override)
         return {
             "valley": valley_label,
             "operation": displayed_operation_name(operation_name),
@@ -3743,6 +3853,36 @@ class SymmetryAnalysisRunner:
             "debug": debug or {},
         }
 
+    def _derived_c3_square_detail_row(self, candidate, valley_label: str, q_label: str, q_target, tolerance: float):
+        rotation_cart = np.asarray(candidate.get("rotation_cart", np.eye(3, dtype=float)), dtype=float)
+        return self._make_detail_row(
+            valley_label=valley_label,
+            operation_name=candidate["name"],
+            operation_type="unitary",
+            spglib_index=_candidate_spglib_index(candidate),
+            r_2d=_format_matrix_json(rotation_cart[:2, :2]),
+            k_label=q_label,
+            q_local=np.asarray(q_target, dtype=float),
+            supported=True,
+            not_supported_reason="",
+            residual_h_raw=None,
+            residual_s_raw=None,
+            residual_h_sym=None,
+            residual_s_sym=None,
+            residual_lowdin_order=None,
+            diagnostic_g_perm_max_delta=None,
+            diagnostic_nonzero_reciprocal_shift_count=None,
+            diagnostic_transport_unitarity_residual=None,
+            diagnostic_t_square_residual=None,
+            debug={
+                "derived_from": "C3z",
+                "raw_h_residual": "not_computed_for_non_exported_derived_generator",
+            },
+            tolerance=tolerance,
+            status_override="derived",
+            covariance_status_override="derived",
+        )
+
     def _candidate_rows_for_q(self, candidate, valley: int, valley_label: str, q_label: str, q_target, tolerance: float):
         q_target = np.asarray(q_target, dtype=float)
         diagnostics = {}
@@ -3769,6 +3909,30 @@ class SymmetryAnalysisRunner:
                 supported=False,
                 not_supported_reason=candidate.get("closure_reason", "valley_not_closed"),
                 residual_h_raw=None,
+                residual_s_raw=None,
+                residual_h_sym=None,
+                residual_s_sym=None,
+                residual_lowdin_order=None,
+                diagnostic_g_perm_max_delta=None,
+                diagnostic_nonzero_reciprocal_shift_count=None,
+                diagnostic_transport_unitarity_residual=None,
+                diagnostic_t_square_residual=None,
+                debug={k: v for k, v in base_debug.items() if v is not None},
+                tolerance=tolerance,
+            )
+
+        if displayed_operation_name(candidate.get("name")) == "E" and not candidate.get("antiunitary", False):
+            return self._make_detail_row(
+                valley_label=valley_label,
+                operation_name=candidate["name"],
+                operation_type="unitary",
+                spglib_index=spglib_index,
+                r_2d=r_2d,
+                k_label=q_label,
+                q_local=q_target,
+                supported=True,
+                not_supported_reason="",
+                residual_h_raw=0.0,
                 residual_s_raw=None,
                 residual_h_sym=None,
                 residual_s_sym=None,
@@ -3825,8 +3989,14 @@ class SymmetryAnalysisRunner:
                     tolerance=tolerance,
                 )
 
-            h_cov = raw_transport @ h_target @ raw_transport.conj().T
-            residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
+            residual_h_raw = monomial_covariance_relative_residual(
+                h_target,
+                h_target,
+                raw_transport,
+            )
+            if residual_h_raw is None:
+                h_cov = raw_transport @ h_target @ raw_transport.conj().T
+                residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
             return self._make_detail_row(
                 valley_label=valley_label,
                 operation_name=candidate["name"],
@@ -3881,12 +4051,18 @@ class SymmetryAnalysisRunner:
         h_target, _ = self._raw_projected_hs(valley, q_target)
         h_source, _ = self._raw_projected_hs(valley, q_source)
         antiunitary = bool(candidate.get("antiunitary", False))
-        if antiunitary:
-            h_cov = transport @ h_source.conj() @ transport.conj().T
-        else:
-            h_cov = transport @ h_source @ transport.conj().T
-
-        residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
+        residual_h_raw = monomial_covariance_relative_residual(
+            h_target,
+            h_source,
+            transport,
+            antiunitary=antiunitary,
+        )
+        if residual_h_raw is None:
+            if antiunitary:
+                h_cov = transport @ h_source.conj() @ transport.conj().T
+            else:
+                h_cov = transport @ h_source @ transport.conj().T
+            residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
         residual_s_raw = None
 
         residual_h_sym = None
@@ -4057,6 +4233,7 @@ class SymmetryAnalysisRunner:
 
             valley_entries = []
             saved_representation_operations: set[str] = set()
+            c3_generator_validated = False
             family = _valley_family(int(valley))
             source_c2_operation = self._select_shared_c2_spatial_operation(
                 family,
@@ -4129,23 +4306,41 @@ class SymmetryAnalysisRunner:
                     candidate["closure_reason"] = str(closure["reason"])
                     candidate["reciprocal_shift"] = closure["reciprocal_shift"]
 
+                operation_display_name = displayed_operation_name(candidate["name"])
                 candidate_validation_q_points = validation_q_points
                 if (
                     not candidate.get("antiunitary", False)
-                    and candidate.get("name") in {"C3z", "C3z^2"}
+                    and operation_display_name in {"C3z", "C3z^2"}
                 ):
                     candidate_validation_q_points = validation_q_points[:1]
-                candidate_rows = [
-                    self._candidate_rows_for_q(
-                        candidate,
-                        int(valley),
-                        valley_label,
-                        q_label,
-                        q_value,
-                        tolerance,
-                    )
-                    for q_label, q_value in candidate_validation_q_points
-                ]
+                if (
+                    operation_display_name == "C3z^2"
+                    and c3_generator_validated
+                    and bool(candidate.get("closed", False))
+                    and str(candidate.get("source_symmetry_role", "internal")) == "internal"
+                ):
+                    candidate_rows = [
+                        self._derived_c3_square_detail_row(
+                            candidate,
+                            valley_label,
+                            q_label,
+                            q_value,
+                            tolerance,
+                        )
+                        for q_label, q_value in candidate_validation_q_points
+                    ]
+                else:
+                    candidate_rows = [
+                        self._candidate_rows_for_q(
+                            candidate,
+                            int(valley),
+                            valley_label,
+                            q_label,
+                            q_value,
+                            tolerance,
+                        )
+                        for q_label, q_value in candidate_validation_q_points
+                    ]
                 all_details.extend(candidate_rows)
 
                 candidate_status = combine_statuses(row["status"] for row in candidate_rows)
@@ -4155,7 +4350,6 @@ class SymmetryAnalysisRunner:
                     if row["not_supported_reason"]:
                         candidate_reason = row["not_supported_reason"]
                         break
-                operation_display_name = displayed_operation_name(candidate["name"])
                 axis_angle_deg = None
                 if "C2" in operation_display_name:
                     axis_angle_deg = c2_axis_angle_deg_from_rotation(candidate.get("rotation_cart"))
@@ -4177,6 +4371,8 @@ class SymmetryAnalysisRunner:
                             )
                         )
                         saved_representation_operations.add(representation_name)
+                        if operation_display_name == "C3z":
+                            c3_generator_validated = True
                     except SymmetrySupportError:
                         export_raw_h_matrix = False
                 valley_entries.append(
@@ -4211,7 +4407,7 @@ class SymmetryAnalysisRunner:
                 metric_statuses = [
                     row[status_key]
                     for row in valley_rows
-                    if row.get(status_key) not in (None, "not_supported")
+                    if row.get(status_key) not in (None, "not_supported", "derived")
                 ]
                 return combine_statuses(metric_statuses) if metric_statuses else "not_supported"
 

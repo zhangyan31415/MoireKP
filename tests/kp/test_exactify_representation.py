@@ -60,6 +60,35 @@ def test_infer_q_offset_handles_branch_cut_half_coset() -> None:
     np.testing.assert_allclose(coeffs, np.rint(coeffs), atol=1.0e-10)
 
 
+def test_label_action_uses_orbital_map_for_layer_exchange() -> None:
+    b1, b2 = _hex_bm()
+    q = np.zeros(2)
+    labels = [
+        BasisLabel(index=0, sector="L1", q_integer=(0, 0), q_vector=q, orbital=1, internal_label="Bi_s"),
+        BasisLabel(index=1, sector="L1", q_integer=(0, 0), q_vector=q, orbital=2, internal_label="I_s"),
+        BasisLabel(index=2, sector="L2", q_integer=(0, 0), q_vector=q, orbital=1, internal_label="I_s"),
+        BasisLabel(index=3, sector="L2", q_integer=(0, 0), q_vector=q, orbital=2, internal_label="Bi_s"),
+    ]
+    action = OperationAction(
+        name="C2",
+        canonical_name="C2",
+        antiunitary=False,
+        k_map={"type": "identity"},
+        R=np.eye(2),
+        sector_map="layer_exchange",
+        q_map={"type": "identity"},
+        orbital_map={"L1": {1: 2, 2: 1}, "L2": {1: 2, 2: 1}},
+        central_phase=complex(1.0, 0.0),
+        group_relations=[],
+        source="test",
+    )
+
+    label_action = build_label_action(labels, action, b1, b2, {"L1": q, "L2": q}, tol=1.0e-8)
+
+    assert label_action.missing == []
+    assert label_action.perm.tolist() == [3, 2, 1, 0]
+
+
 def _k_basis_labels() -> list[BasisLabel]:
     b1, b2 = _hex_bm()
     qshell = [

@@ -841,6 +841,59 @@ def _sector_target(sector: str, sector_map: Any) -> str:
     return sector
 
 
+def _mapping_get_int(mapping: Mapping[Any, Any], key: int) -> int | None:
+    for candidate in (key, str(key)):
+        if candidate in mapping:
+            return int(mapping[candidate])
+    return None
+
+
+def _mapping_int_keys(mapping: Mapping[Any, Any]) -> set[int]:
+    keys: set[int] = set()
+    for key in mapping:
+        try:
+            keys.add(int(key))
+        except (TypeError, ValueError):
+            continue
+    return keys
+
+
+def _mapping_get_projected_orbital(mapping: Mapping[Any, Any], orbital: int) -> int | None:
+    # User-facing orbital_map is 1-based to match exactification labels. A map
+    # that explicitly contains slot 0 is treated as internal 0-based form.
+    if 0 in _mapping_int_keys(mapping):
+        return _mapping_get_int(mapping, int(orbital))
+    mapped = _mapping_get_int(mapping, int(orbital) + 1)
+    return None if mapped is None else int(mapped) - 1
+
+
+def _target_orbital_for_action(
+    orbital: int,
+    *,
+    source_sector: str,
+    target_sector: str,
+    action: Mapping[str, Any],
+) -> int:
+    raw = action.get("orbital_map")
+    if not isinstance(raw, Mapping):
+        return int(orbital)
+    candidates: list[Any] = []
+    for key in (source_sector, f"{source_sector}->{target_sector}", f"{source_sector}:{target_sector}", "*"):
+        if key in raw:
+            candidates.append(raw[key])
+    for candidate in candidates:
+        if isinstance(candidate, Mapping):
+            nested = candidate.get(target_sector)
+            if isinstance(nested, Mapping):
+                mapped = _mapping_get_projected_orbital(nested, int(orbital))
+                if mapped is not None:
+                    return mapped
+            mapped = _mapping_get_projected_orbital(candidate, int(orbital))
+            if mapped is not None:
+                return mapped
+    return int(orbital)
+
+
 def _action_key_for_mismatch(action: dict[str, Any]) -> str:
     comparable = {
         key: value
@@ -995,9 +1048,22 @@ def _basis_action_for_candidate(
                 }
             )
             continue
-        key = (target_sector, target_q_index, int(label["orbital"]))
+        target_orbital = _target_orbital_for_action(
+            int(label["orbital"]),
+            source_sector=source_sector,
+            target_sector=target_sector,
+            action=action,
+        )
+        key = (target_sector, target_q_index, target_orbital)
         if key not in target_index:
-            missing.append({"source_index": int(src_idx), "reason": "missing_target_orbital"})
+            missing.append(
+                {
+                    "source_index": int(src_idx),
+                    "reason": "missing_target_orbital",
+                    "source_orbital": int(label["orbital"]),
+                    "target_orbital": int(target_orbital),
+                }
+            )
             continue
         perm[src_idx] = int(target_index[key])
         q_key = (source_sector, int(label["q_index"]))
@@ -1018,6 +1084,7 @@ def _basis_action_for_candidate(
         "items": q_action_items,
         "missing": missing,
         "sector_map": action.get("sector_map", "identity"),
+        "orbital_map": action.get("orbital_map"),
     }
 
 
@@ -1110,6 +1177,7 @@ def _resolve_projected_model_action(
                     "k_map": candidate.get("k_map"),
                     "q_map": candidate.get("q_map"),
                     "sector_map": candidate.get("sector_map"),
+                    "orbital_map": candidate.get("orbital_map"),
                     "antiunitary": candidate.get("antiunitary"),
                 },
                 "complete": bool(basis_action["complete"]),
@@ -1148,6 +1216,7 @@ def _resolve_projected_model_action(
     basis_action_out = {
         "complete": bool(basis_action["complete"]),
         "sector_map": basis_action["sector_map"],
+        "orbital_map": basis_action.get("orbital_map"),
         "items": basis_action["items"],
         "missing": basis_action["missing"],
         "support_resolution": {
