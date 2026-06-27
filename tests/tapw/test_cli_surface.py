@@ -11,8 +11,10 @@ def test_unified_tapw_help_lists_subcommands(capsys):
     out = capsys.readouterr().out
     assert "init" in out
     assert "run" in out
+    assert "symm" in out
     assert "plot" in out
     assert "topo" in out
+    assert "final" in out
     assert "postprocess-memmap" in out
     assert "orbital" in out
     assert "fatband" in out
@@ -58,6 +60,36 @@ def test_unified_tapw_dispatches_calc_and_finalizes_at_cli_boundary(monkeypatch)
 
     assert code == 0
     assert calls == [("run", "config.yaml"), ("finish", 0)]
+
+
+def test_tapw_short_symm_alias_dispatches_fixed_symmetry_mode(monkeypatch):
+    from tapw import cli
+
+    calls = []
+
+    def fake_run_calc(args):
+        calls.append((args.config, args.mode))
+        return 0
+
+    monkeypatch.setattr(cli, "run_calc", fake_run_calc)
+    monkeypatch.setattr(cli, "finish_calculation_process", lambda code: code)
+
+    code = cli.main(["symm", "-c", "tapw.yaml"])
+
+    assert code == 0
+    assert calls == [("tapw.yaml", "symmetry")]
+
+
+def test_tapw_short_final_alias_dispatches_memmap_postprocess(monkeypatch):
+    from tapw import cli
+    from tapw import postprocess_memmap
+
+    calls = []
+    monkeypatch.setattr(postprocess_memmap, "main", lambda argv=None, **_kwargs: calls.append(argv))
+
+    cli.main(["final", "--root-dir", "Q_shell_6", "--mode", "band"])
+
+    assert calls == [["--root-dir", "Q_shell_6", "--mode", "band"]]
 
 
 def test_unified_tapw_treats_none_calc_result_as_success(monkeypatch):
@@ -157,6 +189,17 @@ def test_tapw_run_help_lists_developer_outputs(capsys):
 
     assert excinfo.value.code == 0
     assert "--developer-outputs" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("command", ["plot", "topo"])
+def test_tapw_plot_and_topo_help_list_short_config_flag(command, capsys):
+    from tapw import cli
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main([command, "--help"])
+
+    assert excinfo.value.code == 0
+    assert "-c CONFIG" in capsys.readouterr().out
 
 
 def test_unified_tapw_dispatches_orbital_commands(monkeypatch):

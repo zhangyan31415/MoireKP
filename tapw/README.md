@@ -35,7 +35,8 @@ Run a band calculation:
 
 ```bash
 cd output_dir
-tapw run --config config.yaml
+tapw run -c config.yaml
+tapw symm -c config.yaml
 ```
 
 Plot the generated bands:
@@ -43,7 +44,7 @@ Plot the generated bands:
 ```bash
 Q_SHELL_DIR=Q_shell_4
 cd "output_dir/${Q_SHELL_DIR}/band"
-tapw plot --config ../../bands.yaml
+tapw plot -c ../../bands.yaml
 ```
 
 Legacy outputs may use `band_data/` instead of `band/`.
@@ -52,9 +53,9 @@ Legacy outputs may use `band_data/` instead of `band/`.
 
 ```bash
 cd output_dir
-tapw run --config config.yaml --mode chern --n_g 4 --num_processes 100 --num_chern 20
+tapw chern -c config.yaml --n_g 4 --num_processes 100 --num_chern 20
 cd output_dir/Q_shell_4
-tapw topo --config config.yaml -b -1 -2 -v 1 > tapw_chern.log
+tapw topo -c config.yaml -b -1 -2 -v 1 > tapw_chern.log
 ```
 
 ## Orbital Analysis
@@ -66,7 +67,7 @@ tapw orbital . --config ../config.yaml --valley Gamma --band CBM
 tapw fatband . --valley Gamma --band CBM --orbital-dir orbital_analysis --output-dir orbital_plots
 ```
 
-Legacy aliases remain supported for existing scripts: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
+Short aliases are the recommended release-facing commands. Longer compatibility forms remain supported: `tapw run --config ... --mode symmetry` is equivalent to `tapw symm -c ...`, and `tapw postprocess-memmap` is equivalent to `tapw final`. Legacy script entry points remain supported for existing scripts: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 
 ## Examples
 

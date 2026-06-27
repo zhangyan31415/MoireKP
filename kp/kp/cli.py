@@ -1802,25 +1802,82 @@ def expand_orbital_order_pattern(pattern: str) -> list[str]:
     return _expand_orbital_order_pattern(pattern)
 
 
+def _add_project_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-c", "--config", required=True, help="YAML config path")
+    parser.add_argument("--active-indices", help="Comma-separated active band indices, e.g. 46,47")
+    parser.add_argument("--downfold-method", choices=["first_order", "fixed_schur", "linearized_lowdin"])
+    parser.add_argument("--e-ref", type=float, help="Reference energy for fixed_schur/linearized_lowdin in eV")
+    parser.add_argument("--top-n", help="Comma-separated top-N values for diagnostics, e.g. 2,4,6,10,20")
+    parser.add_argument("--k-indices", help="Comma-separated k indices; default is all")
+    parser.add_argument("--pole-warning-mev", type=float)
+    parser.add_argument("--pole-danger-mev", type=float)
+    parser.add_argument("--fail-on-near-pole", action="store_true")
+    parser.add_argument("--compute-pole-diagnostics", action="store_true")
+    parser.add_argument("--compute-condition-number", action="store_true")
+
+
+def _project_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "active_indices": args.active_indices,
+        "downfold_method": args.downfold_method,
+        "e_ref": args.e_ref,
+        "top_n": args.top_n,
+        "k_indices": args.k_indices,
+        "pole_warning_mev": args.pole_warning_mev,
+        "pole_danger_mev": args.pole_danger_mev,
+        "fail_on_near_pole": args.fail_on_near_pole if args.fail_on_near_pole else None,
+        "compute_pole_diagnostics": args.compute_pole_diagnostics if args.compute_pole_diagnostics else None,
+        "compute_condition_number": args.compute_condition_number if args.compute_condition_number else None,
+    }
+
+
+def _run_standalone_export_command(args: argparse.Namespace, action_args: Sequence[str]) -> None:
+    from .model import export as export_mod
+
+    if args.all_examples:
+        all_output_root = action_args[0] if action_args else None
+        if all_output_root is None:
+            raise SystemExit("kp export --all-examples requires <output_root>")
+        report = export_mod.export_all_standalone_models(
+            args.all_examples,
+            all_output_root,
+            force=bool(args.force),
+            debug_files=bool(args.debug_files),
+            dry_run=bool(args.dry_run),
+        )
+        print(f"[kp model] standalone exportable: {len(report['exportable'])}")
+        print(f"[kp model] standalone exported: {len(report['exported'])}")
+        print(f"[kp model] standalone blocked: {len(report['blocked'])}")
+        for row in report["blocked"]:
+            print(f"[kp model]   blocked: {row['model_output_dir']}: {row['reason']}")
+        return
+
+    if len(action_args) < 2:
+        raise SystemExit("kp export requires <model_output_dir> <output_dir>")
+    export_path = export_mod.export_standalone_model(
+        Path(action_args[0]),
+        action_args[1],
+        force=bool(args.force),
+        debug_files=bool(args.debug_files),
+    )
+    print(f"[kp model]   standalone export: {export_path}")
+
+
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kp", description="kp CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    p_show = sub.add_parser("show", help="Inspect source bands and Q-block spectra")
+    p_show.add_argument("-c", "--config", required=True, help="YAML config path")
+
     p_plot = sub.add_parser("plot", help="Plot scatter of band vs Q from config")
     p_plot.add_argument("-c", "--config", required=True, help="YAML config path")
 
+    p_proj_short = sub.add_parser("proj", help="Project selected bands to Heff across Q")
+    _add_project_arguments(p_proj_short)
+
     p_proj = sub.add_parser("project", help="Project selected bands to Heff across Q and plot")
-    p_proj.add_argument("-c", "--config", required=True, help="YAML config path")
-    p_proj.add_argument("--active-indices", help="Comma-separated active band indices, e.g. 46,47")
-    p_proj.add_argument("--downfold-method", choices=["first_order", "fixed_schur", "linearized_lowdin"])
-    p_proj.add_argument("--e-ref", type=float, help="Reference energy for fixed_schur/linearized_lowdin in eV")
-    p_proj.add_argument("--top-n", help="Comma-separated top-N values for diagnostics, e.g. 2,4,6,10,20")
-    p_proj.add_argument("--k-indices", help="Comma-separated k indices; default is all")
-    p_proj.add_argument("--pole-warning-mev", type=float)
-    p_proj.add_argument("--pole-danger-mev", type=float)
-    p_proj.add_argument("--fail-on-near-pole", action="store_true")
-    p_proj.add_argument("--compute-pole-diagnostics", action="store_true")
-    p_proj.add_argument("--compute-condition-number", action="store_true")
+    _add_project_arguments(p_proj)
 
     p_sweep = sub.add_parser("sweep", help="Sweep E_ref for fixed Schur downfolding")
     p_sweep.add_argument("-c", "--config", required=True, help="YAML config path")
@@ -1838,6 +1895,11 @@ def build_argparser() -> argparse.ArgumentParser:
     p_symm.add_argument("-c", "--config", required=True, help="YAML config path")
     p_symm.add_argument("--developer-outputs", action="store_true", help="Write developer-only projection matrices under diagnostics/")
 
+    p_fit = sub.add_parser("fit", help="Fit/build a configured continuum model")
+    p_fit.add_argument("-c", "--config", required=True, help="YAML model config path")
+    p_fit.add_argument("--export-standalone", help="Write a minimal NumPy-only standalone model package")
+    p_fit.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
+
     p_model = sub.add_parser("model", help="Build/fit/export a configured continuum model")
     p_model.add_argument("model_action", nargs="?", help="Optional action, e.g. export-standalone")
     p_model.add_argument("model_args", nargs="*", help="Arguments for optional model action")
@@ -1848,6 +1910,14 @@ def build_argparser() -> argparse.ArgumentParser:
     p_model.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")
     p_model.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
 
+    p_export = sub.add_parser("export", help="Export a standalone continuum model package")
+    p_export.add_argument("model_output_dir", nargs="?", help="Model output directory")
+    p_export.add_argument("output_dir", nargs="?", help="Standalone package output directory")
+    p_export.add_argument("--all-examples", help="Inventory/export all examples under this root")
+    p_export.add_argument("--dry-run", action="store_true", help="Report standalone exportability without writing packages")
+    p_export.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")
+    p_export.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
+
     return p
 
 
@@ -1856,21 +1926,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     args, extra_args = p.parse_known_args(argv)
     if extra_args and not (args.cmd == "model" and args.model_action == "export-standalone"):
         p.error(f"unrecognized arguments: {' '.join(extra_args)}")
-    if args.cmd == "plot":
+    if args.cmd in {"plot", "show"}:
         cmd_plot_from_config(args.config)
-    elif args.cmd == "project":
-        overrides = {
-            "active_indices": args.active_indices,
-            "downfold_method": args.downfold_method,
-            "e_ref": args.e_ref,
-            "top_n": args.top_n,
-            "k_indices": args.k_indices,
-            "pole_warning_mev": args.pole_warning_mev,
-            "pole_danger_mev": args.pole_danger_mev,
-            "fail_on_near_pole": args.fail_on_near_pole if args.fail_on_near_pole else None,
-            "compute_pole_diagnostics": args.compute_pole_diagnostics if args.compute_pole_diagnostics else None,
-            "compute_condition_number": args.compute_condition_number if args.compute_condition_number else None,
-        }
+    elif args.cmd in {"project", "proj"}:
+        overrides = _project_overrides_from_args(args)
         cmd_project_from_config(args.config, overrides)
     elif args.cmd == "sweep":
         overrides = {
@@ -1890,37 +1949,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.config,
             developer_outputs=True if args.developer_outputs else None,
         )
-    elif args.cmd == "model":
-        if args.model_action == "export-standalone":
-            from .model import export as export_mod
+    elif args.cmd == "export":
+        action_args = [x for x in [args.model_output_dir, args.output_dir] if x is not None]
+        _run_standalone_export_command(args, action_args)
+    elif args.cmd in {"model", "fit"}:
+        if args.cmd == "model" and args.model_action == "export-standalone":
             action_args = list(args.model_args) + list(extra_args)
-
-            if args.all_examples:
-                all_output_root = action_args[0] if action_args else None
-                if all_output_root is None:
-                    raise SystemExit("kp model export-standalone --all-examples requires <output_root>")
-                report = export_mod.export_all_standalone_models(
-                    args.all_examples,
-                    all_output_root,
-                    force=bool(args.force),
-                    debug_files=bool(args.debug_files),
-                    dry_run=bool(args.dry_run),
-                )
-                print(f"[kp model] standalone exportable: {len(report['exportable'])}")
-                print(f"[kp model] standalone exported: {len(report['exported'])}")
-                print(f"[kp model] standalone blocked: {len(report['blocked'])}")
-                for row in report["blocked"]:
-                    print(f"[kp model]   blocked: {row['model_output_dir']}: {row['reason']}")
-                return
-            if len(action_args) < 2:
-                raise SystemExit("kp model export-standalone requires <model_output_dir> <output_dir>")
-            export_path = export_mod.export_standalone_model(
-                Path(action_args[0]),
-                action_args[1],
-                force=bool(args.force),
-                debug_files=bool(args.debug_files),
-            )
-            print(f"[kp model]   standalone export: {export_path}")
+            _run_standalone_export_command(args, action_args)
             return
         if not args.config:
             raise SystemExit("kp model requires --config unless using 'export-standalone'")

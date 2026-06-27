@@ -57,7 +57,7 @@ examples/<material>_<angle>/
 
 ## Config Roles
 
-- `configs/source/<case_id>.yaml`: shared input for `kp plot`, `kp project`,
+- `configs/source/<case_id>.yaml`: shared input for `kp show`, `kp proj`,
   and `kp symm`.
 - `configs/model/<case_id>.yaml`: canonical continuum-model configuration.
   Production configs consume validated symmetry/action metadata from `kp symm`
@@ -88,10 +88,10 @@ examples/<material>_<angle>/
 The active KP workflow is documented as a dependency DAG rather than as a
 clean-clone test:
 
-- `kp plot -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays)
-- `kp project -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
+- `kp show -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays)
+- `kp proj -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
 - `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW symmetry-analysis exports)
-- `kp model -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp project` and `kp symm` outputs)
+- `kp fit -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp proj` and `kp symm` outputs)
 
 New source configs should use `project.gauge: auto` with an explicit
 `project.nlow_state_list`. Existing hand-written `project.norb_fix_list` entries
@@ -99,7 +99,7 @@ remain valid as expert overrides, but they should not be required for ordinary
 finite-basis projection. Auto-gauge reports are written next to `heff_list.npy`
 as `basis_selection.json` and `basis_selection.md`.
 
-If the same source config has a TAPW raw-H symmetry source in `symm`, `kp project`
+If the same source config has a TAPW raw-H symmetry source in `symm`, `kp proj`
 and `kp symm` both use the symmetry-scored auto-gauge resolver. The report then
 lists all gauge candidates and rejected residuals. Auto gauge still does not
 choose `nlow_state_list`; it only fixes the gauge of the low subspace the user

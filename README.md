@@ -42,13 +42,14 @@ Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the requir
 
 ```bash
 cd output_dir
-tapw run --config config.yaml
-tapw plot --config bands.yaml
+tapw run -c config.yaml
+tapw symm -c config.yaml
+tapw plot -c bands.yaml
 ```
 
-For topology post-processing, run `tapw run` with a Chern configuration and then use `tapw topo` in the generated `Q_shell_*` directory.
+For topology post-processing, run `tapw chern` with a Chern configuration and then use `tapw topo` in the generated `Q_shell_*` directory.
 
-Legacy TAPW aliases remain available for existing scripts: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
+Longer TAPW forms remain available for compatibility: `tapw run --config ... --mode symmetry` is equivalent to `tapw symm -c ...`, and `tapw postprocess-memmap` is equivalent to `tapw final`. Legacy script entry points also remain available: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 
 ## Continuum-Model Workflow
 
@@ -59,12 +60,15 @@ outputs; clean-clone checks are limited to package metadata and CLI surfaces.
 Typical operations are:
 
 ```bash
-kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
+kp show -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
+kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
+kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
+kp fit -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed/external-data
 ```
 
-For new `kp project` configs, prefer `project.gauge: auto` instead of hand
+The longer forms `kp plot`, `kp project`, and `kp model --config ...` remain supported for existing scripts.
+
+For new `kp proj` configs, prefer `project.gauge: auto` instead of hand
 writing `project.norb_fix_list`. See `docs/project_auto_gauge.md` for the
 finite-basis auto-gauge anchor report and failure checks.
 
