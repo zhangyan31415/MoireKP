@@ -24,14 +24,17 @@ From the repository root:
 kp proj -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
 kp symm -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
 kp fit  -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml  # precomputed/external-data
+kp export -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml -o exported/mgi2_3.89_Gamma  # precomputed
 
 kp proj -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
 kp symm -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
 kp fit  -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml  # precomputed/external-data
+kp export -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml -o exported/mgi2_3.89_M1  # precomputed
 
 kp proj -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
 kp symm -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
 kp fit  -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml  # precomputed/external-data
+kp export -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml -o exported/mgi2_3.89_M1_spinful  # precomputed
 ```
 
 Each case uses `project.gauge: auto`; users do not write `norb_fix_list`.

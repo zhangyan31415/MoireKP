@@ -24,10 +24,12 @@ From the repository root:
 kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp fit  -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed/external-data
+kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml -o exported/mote2_3.89_K1  # precomputed
 
 kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
 kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
 kp fit  -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml  # precomputed/external-data
+kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml -o exported/mote2_3.89_K1_spinful  # precomputed
 ```
 
 ### Current Metrics

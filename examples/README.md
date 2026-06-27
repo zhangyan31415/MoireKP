@@ -92,6 +92,7 @@ clean-clone test:
 - `kp proj -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
 - `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW symmetry-analysis exports)
 - `kp fit -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp proj` and `kp symm` outputs)
+- `kp export -c examples/<case>/kp/configs/model/<case_id>.yaml -o exported/<case_id>` (precomputed: optionally writes a standalone package from the model output)
 
 New source configs should use `project.gauge: auto` with an explicit
 `project.nlow_state_list`. Existing hand-written `project.norb_fix_list` entries

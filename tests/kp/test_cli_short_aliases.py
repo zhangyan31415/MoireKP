@@ -80,6 +80,28 @@ def test_kp_export_alias_dispatches_standalone_export(monkeypatch, tmp_path: Pat
     assert calls == [(Path("outputs/model/case"), "exported/case", True, False)]
 
 
+def test_kp_export_alias_resolves_model_output_from_config(monkeypatch, tmp_path: Path):
+    from kp import cli
+    from kp.model import export as export_mod
+
+    cfg_dir = tmp_path / "configs" / "model"
+    cfg_dir.mkdir(parents=True)
+    cfg_path = cfg_dir / "case.yaml"
+    cfg_path.write_text("output:\n  dir: ../../outputs/model/case\n", encoding="utf-8")
+    export_dir = tmp_path / "exported" / "case"
+    calls = []
+
+    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+        calls.append((Path(model_output_dir), output_dir, force, debug_files))
+        return tmp_path / "portable"
+
+    monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
+
+    cli.main(["export", "-c", str(cfg_path), "-o", str(export_dir), "--debug-files"])
+
+    assert calls == [(cfg_dir / "../../outputs/model/case", str(export_dir), False, True)]
+
+
 def test_kp_help_lists_short_aliases(capsys):
     from kp import cli
 
@@ -93,3 +115,16 @@ def test_kp_help_lists_short_aliases(capsys):
     assert "proj" in out
     assert "fit" in out
     assert "export" in out
+
+
+def test_kp_export_help_lists_config_form(capsys):
+    from kp import cli
+
+    try:
+        cli.main(["export", "--help"])
+    except SystemExit as exc:
+        assert exc.code == 0
+
+    out = capsys.readouterr().out
+    assert "-c CONFIG" in out
+    assert "-o EXPORT_OUTPUT_DIR" in out

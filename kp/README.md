@@ -26,6 +26,7 @@ Release examples are under the repository-level `examples/` directory. Start wit
 ```bash
 kp fit -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed
 kp fit -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml  # precomputed
+kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml -o exported/mote2_3.89_K1  # precomputed
 ```
 
 These model commands require precomputed `kp proj` and `kp symm` outputs
@@ -34,7 +35,8 @@ input/output workflow and the meaning of `nlow_state_list` and `norb_fix_list`.
 
 Longer compatibility forms remain supported: `kp plot` is equivalent to
 `kp show`, `kp project` is equivalent to `kp proj`, and `kp model --config ...`
-is equivalent to `kp fit -c ...`.
+is equivalent to `kp fit -c ...`. `kp export outputs/model/case exported/case`
+remains valid for direct export from a generated model output directory.
 
 ## Package Layout
 

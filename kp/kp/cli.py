@@ -1831,11 +1831,32 @@ def _project_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _model_output_dir_from_config(cfg_path: str) -> Path:
+    config_path = Path(cfg_path).expanduser()
+    if not config_path.is_absolute():
+        config_path = Path.cwd() / config_path
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = normalize_case_config(yaml.safe_load(f), config_path=config_path)
+
+    output_cfg = cfg.get("output", {})
+    if not isinstance(output_cfg, dict) or not output_cfg.get("dir"):
+        raise SystemExit("kp export -c/--config requires output.dir in the model config")
+
+    model_output_dir = Path(str(output_cfg["dir"])).expanduser()
+    if model_output_dir.is_absolute():
+        return model_output_dir
+    return config_path.parent / model_output_dir
+
+
 def _run_standalone_export_command(args: argparse.Namespace, action_args: Sequence[str]) -> None:
     from .model import export as export_mod
 
     if args.all_examples:
+        if getattr(args, "config", None):
+            raise SystemExit("kp export --all-examples cannot be combined with -c/--config")
         all_output_root = action_args[0] if action_args else None
+        if all_output_root is None:
+            all_output_root = getattr(args, "export_output_dir", None)
         if all_output_root is None:
             raise SystemExit("kp export --all-examples requires <output_root>")
         report = export_mod.export_all_standalone_models(
@@ -1852,11 +1873,22 @@ def _run_standalone_export_command(args: argparse.Namespace, action_args: Sequen
             print(f"[kp model]   blocked: {row['model_output_dir']}: {row['reason']}")
         return
 
-    if len(action_args) < 2:
-        raise SystemExit("kp export requires <model_output_dir> <output_dir>")
+    if getattr(args, "config", None):
+        if action_args:
+            raise SystemExit("kp export -c/--config cannot be combined with <model_output_dir>")
+        output_dir = getattr(args, "export_output_dir", None)
+        if output_dir is None:
+            raise SystemExit("kp export -c/--config requires -o/--out")
+        model_output_dir = _model_output_dir_from_config(args.config)
+    else:
+        if len(action_args) < 2:
+            raise SystemExit("kp export requires <model_output_dir> <output_dir>")
+        model_output_dir = Path(action_args[0])
+        output_dir = action_args[1]
+
     export_path = export_mod.export_standalone_model(
-        Path(action_args[0]),
-        action_args[1],
+        model_output_dir,
+        output_dir,
         force=bool(args.force),
         debug_files=bool(args.debug_files),
     )
@@ -1913,6 +1945,8 @@ def build_argparser() -> argparse.ArgumentParser:
     p_export = sub.add_parser("export", help="Export a standalone continuum model package")
     p_export.add_argument("model_output_dir", nargs="?", help="Model output directory")
     p_export.add_argument("output_dir", nargs="?", help="Standalone package output directory")
+    p_export.add_argument("-c", "--config", help="YAML model config path")
+    p_export.add_argument("-o", "--out", dest="export_output_dir", help="Standalone package output directory")
     p_export.add_argument("--all-examples", help="Inventory/export all examples under this root")
     p_export.add_argument("--dry-run", action="store_true", help="Report standalone exportability without writing packages")
     p_export.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")

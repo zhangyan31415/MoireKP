@@ -64,9 +64,13 @@ kp show -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-
 kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp fit -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed/external-data
+kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml -o exported/mote2_3.89_K1  # precomputed
 ```
 
-The longer forms `kp plot`, `kp project`, and `kp model --config ...` remain supported for existing scripts.
+The longer forms `kp plot`, `kp project`, `kp model --config ...`, and
+`kp model export-standalone ...` remain supported for existing scripts. `kp
+export outputs/model/case exported/case` is also supported when exporting
+directly from a generated model output directory.
 
 For new `kp proj` configs, prefer `project.gauge: auto` instead of hand
 writing `project.norb_fix_list`. See `docs/project_auto_gauge.md` for the
