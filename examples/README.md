@@ -35,6 +35,17 @@ listed in `examples/data-manifest.yaml`.
 examples/<material>_<angle>/
   openmx/
   tapw/
+    configs/
+      K1_q06.yaml
+      K1_up_q06.yaml
+    outputs/
+      manifest.json
+      K1/
+        q06/
+          manifest.json
+          band/
+          symmetry/
+          topology/
   kp/
     configs/
       source/
@@ -54,6 +65,11 @@ examples/<material>_<angle>/
 
 `case_id` uses `<material>_<angle>_<valley>`, for example
 `mote2_3.89_K1`, `mgi2_3.89_Gamma`, or `mgi2_3.89_M1`.
+
+For TAPW, use one config per material/angle/valley/q-shell case. The default
+spinful profile omits a spin suffix, for example `tapw/configs/K1_q06.yaml`
+writes `tapw/outputs/K1/q06`. Non-default spin profiles must be explicit:
+`K1_up/q06`, `K1_down/q06`, or `K1_spinless/q06`.
 
 ## Config Roles
 
@@ -88,6 +104,9 @@ examples/<material>_<angle>/
 The active KP workflow is documented as a dependency DAG rather than as a
 clean-clone test:
 
+- `tapw run -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW band outputs)
+- `tapw symm -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW raw-H symmetry outputs)
+- `tapw chern -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical topology outputs)
 - `kp show -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays)
 - `kp proj -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
 - `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW symmetry-analysis exports)
@@ -99,6 +118,14 @@ New source configs should use `project.gauge: auto` with an explicit
 remain valid as expert overrides, but they should not be required for ordinary
 finite-basis projection. Auto-gauge reports are written next to `heff_list.npy`
 as `basis_selection.json` and `basis_selection.md`.
+
+When TAPW outputs use the canonical layout, KP source configs should prefer the
+band manifest instead of repeating every TAPW filename:
+
+```yaml
+material:
+  tapw_band_manifest: ../../../tapw/outputs/K1/q06/band/manifest.json
+```
 
 If the same source config has a TAPW raw-H symmetry source in `symm`, `kp proj`
 and `kp symm` both use the symmetry-scored auto-gauge resolver. The report then

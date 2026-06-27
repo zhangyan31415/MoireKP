@@ -18,6 +18,7 @@ import copy
 import json
 import multiprocessing as mp
 from contextlib import contextmanager, suppress
+from pathlib import Path
 from types import SimpleNamespace
 
 from numpy.lib.format import open_memmap
@@ -39,6 +40,9 @@ from ..config import ComputeConfig, normalize_symmetrize_hamiltonian
 from ..artifacts import (
     array_output_filename,
     band_output_filename,
+    canonical_band_filename,
+    canonical_topology_band_label,
+    canonical_topology_grid_name,
     chern_flux_filename,
     chern_summary_filename,
     gvec_output_filename,
@@ -61,6 +65,55 @@ from ..utils import (
 import re
 # 设置numpy的打印精度
 np.set_printoptions(precision=6)
+
+
+def _is_canonical_output_layout(config) -> bool:
+    layout = getattr(config, "output_layout", None)
+    return str(getattr(layout, "style", "")).lower() == "canonical_v1"
+
+
+def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def _update_canonical_manifests(workflow_dir: Path, workflow: str) -> None:
+    target_dir = workflow_dir.parent
+    if len(target_dir.parents) < 2:
+        return
+    profile_dir = target_dir.parent
+    root_dir = profile_dir.parent
+    workflows = sorted(
+        child.name
+        for child in target_dir.iterdir()
+        if child.is_dir() and (child / "manifest.json").exists()
+    )
+    _write_json(
+        target_dir / "manifest.json",
+        {
+            "schema": "tapw_target_outputs/v1",
+            "profile": profile_dir.name,
+            "q_shell": target_dir.name,
+            "workflows": workflows,
+        },
+    )
+    targets = []
+    for profile_path in sorted(root_dir.iterdir()):
+        if not profile_path.is_dir():
+            continue
+        for q_path in sorted(profile_path.iterdir()):
+            if q_path.is_dir() and (q_path / "manifest.json").exists():
+                targets.append(
+                    {
+                        "profile": profile_path.name,
+                        "q_shell": q_path.name,
+                        "path": f"{profile_path.name}/{q_path.name}",
+                    }
+                )
+    _write_json(
+        root_dir / "manifest.json",
+        {"schema": "tapw_outputs/v1", "updated_workflow": workflow, "targets": targets},
+    )
 
 # Optional MKL-accelerated sparse GEMM (can be a big speedup for g@H@g^H)
 try:
@@ -3096,25 +3149,30 @@ class BandStructureCalculator:
         return filtered_energies, vbm_energies, cbm_energies, pivot_col, vbm_vecs, cbm_vecs
 
     def save_band_static_metadata(self, path):
-        os.makedirs(path, exist_ok=True)
+        metadata_path = os.path.join(path, "band") if _is_canonical_output_layout(self.config) else path
+        os.makedirs(metadata_path, exist_ok=True)
         if self.config.TAPW:
             np.save(
                 os.path.join(
-                    path,
-                    gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=1),
+                    metadata_path,
+                    canonical_band_filename("g_vectors", 1)
+                    if _is_canonical_output_layout(self.config)
+                    else gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=1),
                 ),
                 self.TAPW_parameters.g_vec_list_K1,
             )
             np.save(
                 os.path.join(
-                    path,
-                    gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=2),
+                    metadata_path,
+                    canonical_band_filename("g_vectors", 2)
+                    if _is_canonical_output_layout(self.config)
+                    else gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=2),
                 ),
                 self.TAPW_parameters.g_vec_list_K2,
             )
         if getattr(self, "use_single_valley_c3", False):
             np.save(
-                os.path.join(path, f"C3_matrix_{self.valley_flag}"),
+                os.path.join(metadata_path, f"C3_matrix_{self.valley_flag}"),
                 self.TAPW_parameters.C3_matrix.toarray(),
             )
 
@@ -3208,12 +3266,19 @@ class BandStructureCalculator:
         # Save results
         band_data = self.result['eig']
         # 在chern模式下，添加num_chern标识
+        canonical_layout = _is_canonical_output_layout(self.config)
         if mode == "chern":
-            os.makedirs(os.path.join(path, "topo"), exist_ok=True)
-            out_path = os.path.join(path, "topo")
+            if canonical_layout:
+                num_k1, num_k2 = self.config.get_chern_grid_shape()
+                out_path = os.path.join(path, "topology", canonical_topology_grid_name(num_k1, num_k2))
+            else:
+                os.makedirs(os.path.join(path, "topo"), exist_ok=True)
+                out_path = os.path.join(path, "topo")
         else:
-            os.makedirs(os.path.join(path, "band"), exist_ok=True)
             out_path = os.path.join(path, "band")
+        os.makedirs(out_path, exist_ok=True)
+        if canonical_layout:
+            np.save(os.path.join(out_path, canonical_band_filename("kpoints", None)), np.asarray(kpoints_all))
         
         # Split bands and eigenvectors by fermi energy
         band_type = str(getattr(self.config, "band_type", "")).upper()
@@ -3248,14 +3313,18 @@ class BandStructureCalculator:
             if want_vbm and vbm.shape[1] > 0:
                 vbm_path = os.path.join(
                     out_path,
-                    array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("wavefunctions", "vbm")
+                    if canonical_layout
+                    else array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
                 )
                 _ensure_memmap_file(vbm_path, np.complex128, (energies.shape[0], vec_data.shape[1], vbm.shape[1]))
                 vbm_mm = open_memmap(vbm_path, mode="r+")
             if want_cbm and cbm.shape[1] > 0:
                 cbm_path = os.path.join(
                     out_path,
-                    array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("wavefunctions", "cbm")
+                    if canonical_layout
+                    else array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
                 )
                 _ensure_memmap_file(cbm_path, np.complex128, (energies.shape[0], vec_data.shape[1], cbm.shape[1]))
                 cbm_mm = open_memmap(cbm_path, mode="r+")
@@ -3288,7 +3357,9 @@ class BandStructureCalculator:
             np.savetxt(
                 os.path.join(
                     out_path,
-                    band_output_filename("VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("energies", "vbm")
+                    if canonical_layout
+                    else band_output_filename("VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
                 ),
                 vbm,
                 fmt='%15.11f',
@@ -3299,7 +3370,9 @@ class BandStructureCalculator:
             np.savetxt(
                 os.path.join(
                     out_path,
-                    band_output_filename("CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("energies", "cbm")
+                    if canonical_layout
+                    else band_output_filename("CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
                 ),
                 cbm,
                 fmt='%15.11f',
@@ -3311,7 +3384,9 @@ class BandStructureCalculator:
                 np.save(
                     os.path.join(
                         out_path,
-                        array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                        canonical_band_filename("wavefunctions", "vbm")
+                        if canonical_layout
+                        else array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
                     ),
                     vbm_vecs,
                 )
@@ -3319,7 +3394,9 @@ class BandStructureCalculator:
                 np.save(
                     os.path.join(
                         out_path,
-                        array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                        canonical_band_filename("wavefunctions", "cbm")
+                        if canonical_layout
+                        else array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
                     ),
                     cbm_vecs,
                 )
@@ -3329,10 +3406,42 @@ class BandStructureCalculator:
             np.save(
                 os.path.join(
                     out_path,
-                    array_output_filename("hamk", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("hamiltonian", None)
+                    if canonical_layout
+                    else array_output_filename("hamk", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
                 ),
                 self.result['hamk'],
             )
+        if canonical_layout and mode != "chern":
+            files = {
+                "kpoints": canonical_band_filename("kpoints", None),
+                "g_vectors_group1": canonical_band_filename("g_vectors", 1),
+                "g_vectors_group2": canonical_band_filename("g_vectors", 2),
+            }
+            if want_vbm and vbm.size > 0:
+                files["energies_vbm"] = canonical_band_filename("energies", "vbm")
+                if self.config.eig_vec_cal:
+                    files["wavefunctions_vbm"] = canonical_band_filename("wavefunctions", "vbm")
+            if want_cbm and cbm.size > 0:
+                files["energies_cbm"] = canonical_band_filename("energies", "cbm")
+                if self.config.eig_vec_cal:
+                    files["wavefunctions_cbm"] = canonical_band_filename("wavefunctions", "cbm")
+            if self.config.hamk_save:
+                files["hamiltonian_k"] = canonical_band_filename("hamiltonian", None)
+            _write_json(
+                Path(out_path) / "manifest.json",
+                {
+                    "schema": "tapw_band_outputs/v1",
+                    "valley": self.valley_flag,
+                    "q_shell": Path(path).name,
+                    "files": files,
+                    "group_mapping": {
+                        "g_vectors_group1": {"source_group": 1},
+                        "g_vectors_group2": {"source_group": 2},
+                    },
+                },
+            )
+            _update_canonical_manifests(Path(out_path), "band")
 
     def calculate_chern(self, path):
         """Calculate Chern number using uniform k-point mesh
@@ -3377,6 +3486,7 @@ class BandStructureCalculator:
                     "mode='chern' requires compute.chern_band_indices when more than one band is available."
                 )
 
+        raw_band_indices = [int(index) for index in raw_band_indices]
         resolved_band_indices = []
         for raw_band_index in [int(index) for index in raw_band_indices]:
             resolved = raw_band_index if raw_band_index >= 0 else num_bands + raw_band_index
@@ -3390,23 +3500,34 @@ class BandStructureCalculator:
         if not resolved_band_indices:
             raise ValueError("compute.chern_band_indices must not be empty.")
 
-        topo_path = os.path.join(os.fspath(path), "topo")
+        canonical_layout = _is_canonical_output_layout(self.config)
+        if canonical_layout:
+            topo_path = os.path.join(os.fspath(path), "topology", canonical_topology_grid_name(num_k1, num_k2))
+        else:
+            topo_path = os.path.join(os.fspath(path), "topo")
         os.makedirs(topo_path, exist_ok=True)
         band_type = str(getattr(self.config, "band_type", "BOTH")).upper()
         suffix = self.config.get_chern_grid_suffix()
         entries = []
-        for band_index in resolved_band_indices:
+        files: dict[str, str] = {}
+        for raw_band_index, band_index in zip(raw_band_indices, resolved_band_indices):
             berry_flux = compute_berry_flux_single_band(band_vec_grid, band_index)
-            filename = chern_flux_filename(
-                band_type=band_type,
-                valley_flag=self.valley_flag,
-                suffix=suffix,
-                band_label=f"band{band_index}",
-            )
+            if canonical_layout:
+                label = canonical_topology_band_label([raw_band_index])
+                filename = f"berry_flux_{label}.npy"
+                files[f"berry_flux_{label}"] = filename
+            else:
+                filename = chern_flux_filename(
+                    band_type=band_type,
+                    valley_flag=self.valley_flag,
+                    suffix=suffix,
+                    band_label=f"band{band_index}",
+                )
             np.save(os.path.join(topo_path, filename), berry_flux)
             entries.append(
                 {
-                    "band_indices": [band_index],
+                    "band_indices": [raw_band_index],
+                    "resolved_band_indices": [band_index],
                     "chern_number": float(np.sum(berry_flux) / (2.0 * np.pi)),
                     "berry_flux_file": filename,
                 }
@@ -3414,17 +3535,23 @@ class BandStructureCalculator:
 
         if len(resolved_band_indices) > 1:
             berry_flux = compute_berry_flux_multiband(band_vec_grid, resolved_band_indices)
-            label = "bands" + "_".join(str(index) for index in resolved_band_indices)
-            filename = chern_flux_filename(
-                band_type=band_type,
-                valley_flag=self.valley_flag,
-                suffix=suffix,
-                band_label=label,
-            )
+            if canonical_layout:
+                label = canonical_topology_band_label(raw_band_indices)
+                filename = f"berry_flux_{label}.npy"
+                files[f"berry_flux_{label}"] = filename
+            else:
+                label = "bands" + "_".join(str(index) for index in resolved_band_indices)
+                filename = chern_flux_filename(
+                    band_type=band_type,
+                    valley_flag=self.valley_flag,
+                    suffix=suffix,
+                    band_label=label,
+                )
             np.save(os.path.join(topo_path, filename), berry_flux)
             entries.append(
                 {
-                    "band_indices": resolved_band_indices,
+                    "band_indices": raw_band_indices,
+                    "resolved_band_indices": resolved_band_indices,
                     "chern_number": float(np.sum(berry_flux) / (2.0 * np.pi)),
                     "berry_flux_file": filename,
                 }
@@ -3444,16 +3571,45 @@ class BandStructureCalculator:
             "berry_flux_file": primary["berry_flux_file"],
             "entries": entries,
         }
-        summary_filename = chern_summary_filename(
-            band_type=band_type,
-            valley_flag=self.valley_flag,
-            suffix=suffix,
-            tapw=self.config.TAPW,
+        summary_filename = (
+            "chern_summary.json"
+            if canonical_layout
+            else chern_summary_filename(
+                band_type=band_type,
+                valley_flag=self.valley_flag,
+                suffix=suffix,
+                tapw=self.config.TAPW,
+            )
         )
         summary["summary_file"] = summary_filename
         with open(os.path.join(topo_path, summary_filename), "w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2, sort_keys=True)
             handle.write("\n")
+        if canonical_layout:
+            files["chern_summary"] = summary_filename
+            _write_json(
+                Path(topo_path) / "manifest.json",
+                {
+                    "schema": "tapw_topology_outputs/v1",
+                    "grid_shape": [int(num_k1), int(num_k2)],
+                    "valley": self.valley_flag,
+                    "files": files,
+                },
+            )
+            topology_dir = Path(os.fspath(path)) / "topology"
+            _write_json(
+                topology_dir / "manifest.json",
+                {
+                    "schema": "tapw_topology_collection/v1",
+                    "grids": [
+                        {
+                            "grid": canonical_topology_grid_name(num_k1, num_k2),
+                            "manifest": f"{canonical_topology_grid_name(num_k1, num_k2)}/manifest.json",
+                        }
+                    ],
+                },
+            )
+            _update_canonical_manifests(topology_dir, "topology")
 
         reporter.kv(
             "Chern number",

@@ -22,6 +22,16 @@ paths:
   kpath_in: "KPATH_GMKG.in"   # K-path input file for band structure calculation
   kpath_out: "KPATH_GMKG.out"   # K-path output file
 
+# Optional release-facing output layout. Remove this section to use the legacy
+# output/Q_shell_<n_g> layout.
+output_layout:
+  style: "canonical_v1"
+  root: "outputs"
+  # profile defaults to the valley label for spinful runs, for example K1.
+  # Use an explicit non-default profile for spin-filtered or spinless runs:
+  # profile: "K1_up"
+  q_shell: "q03"
+
 # Computation parameters
 compute:
   # Valley configuration

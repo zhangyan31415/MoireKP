@@ -38,16 +38,21 @@ Generate starter configuration files:
 tapw init -o output_dir
 ```
 
-Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the required OpenMX-derived input files, then run:
+Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the required OpenMX-derived input files, then run the same config through the requested TAPW workflows:
 
 ```bash
 cd output_dir
 tapw run -c config.yaml
 tapw symm -c config.yaml
+tapw chern -c config.yaml  # when topology settings are present
 tapw plot -c bands.yaml
 ```
 
-For topology post-processing, run `tapw chern` with a Chern configuration and then use `tapw topo` in the generated `Q_shell_*` directory.
+New configs prefer `output_layout.style: canonical_v1`, which writes
+`outputs/<profile>/<q_shell>/<workflow>/manifest.json`. For the default spinful
+profile, K1 with `n_g: 6` should be named `outputs/K1/q06`; non-default spin
+profiles should be explicit, for example `K1_up/q06` or `K1_spinless/q06`.
+Legacy configs without `output_layout` continue to write `Q_shell_*`.
 
 Longer TAPW forms remain available for compatibility: `tapw run --config ... --mode symmetry` is equivalent to `tapw symm -c ...`, and `tapw postprocess-memmap` is equivalent to `tapw final`. Legacy script entry points also remain available: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 
@@ -65,6 +70,14 @@ kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-
 kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp fit -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed/external-data
 kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml -o exported/mote2_3.89_K1  # precomputed
+```
+
+KP source configs may either name TAPW arrays directly or consume the canonical
+TAPW band manifest:
+
+```yaml
+material:
+  tapw_band_manifest: ../../../tapw/outputs/K1/q06/band/manifest.json
 ```
 
 The longer forms `kp plot`, `kp project`, `kp model --config ...`, and

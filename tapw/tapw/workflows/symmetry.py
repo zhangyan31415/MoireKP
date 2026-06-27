@@ -15,6 +15,7 @@ import scipy.linalg
 import scipy.sparse
 from scipy.spatial import cKDTree
 
+from ..artifacts import canonical_profile_name, canonical_qshell_name
 from ..symmetry.representations import (
     direct_sum,
     generate_direct_sum_params,
@@ -34,6 +35,7 @@ from .band import (
     resolve_reference_m_valley_c2_symmetry,
     reference_m_valley_c2_linear_map,
     transform_k_by_cartesian_linear_map,
+    _update_canonical_manifests,
 )
 
 
@@ -50,6 +52,31 @@ DETAIL_COLUMNS = [
     "nonzero_reciprocal_shift_count",
     "square_residual",
 ]
+
+
+def _is_canonical_output_layout(config) -> bool:
+    layout = getattr(config, "output_layout", None)
+    return str(getattr(layout, "style", "")).lower() == "canonical_v1"
+
+
+def _canonical_symmetry_output_dir(config) -> Path | None:
+    layout = getattr(config, "output_layout", None)
+    if str(getattr(layout, "style", "")).lower() != "canonical_v1":
+        return None
+    valleys = (
+        getattr(getattr(config, "symmetry_analysis", None), "valleys", None)
+        or getattr(getattr(config, "compute", None), "valleys", None)
+        or [getattr(getattr(config, "compute", None), "valley", 0)]
+    )
+    valley = int(valleys[0])
+    valley_label = BandStructureCalculator.VALLEY_MAP.get(valley, f"valley{valley}")
+    profile = canonical_profile_name(
+        valley_label,
+        spin=getattr(getattr(config, "twist", None), "spin", True),
+        profile=getattr(layout, "profile", None),
+    )
+    q_shell = getattr(layout, "q_shell", None) or canonical_qshell_name(getattr(config.compute, "n_g"))
+    return Path(layout.root) / profile / q_shell / "symmetry"
 
 NOT_SUPPORTED_REASONS = (
     "valley_not_closed",
@@ -2442,9 +2469,13 @@ class SymmetryAnalysisRunner:
         self.sr_supercell = kwargs.get("sr_supercell")
         self.logger = kwargs.get("logger")
 
-        base_output_dir = Path(self.config.paths.output_dir)
-        relative_output_dir = getattr(self.config.symmetry_analysis, "output_dir", "symmetry_analysis")
-        self.output_dir = str(base_output_dir / relative_output_dir)
+        canonical_output_dir = _canonical_symmetry_output_dir(self.config)
+        if canonical_output_dir is not None:
+            self.output_dir = str(canonical_output_dir)
+        else:
+            base_output_dir = Path(self.config.paths.output_dir)
+            relative_output_dir = getattr(self.config.symmetry_analysis, "output_dir", "symmetry_analysis")
+            self.output_dir = str(base_output_dir / relative_output_dir)
         self._operation_mapping_cache: dict[tuple[int, bool], dict[str, Any]] = {}
         self._calculator_cache: dict[int, BandStructureCalculator] = {}
         self._raw_hs_cache: dict[tuple[int, tuple[float, float, float]], tuple[np.ndarray, np.ndarray | None]] = {}
@@ -4735,6 +4766,7 @@ class SymmetryAnalysisRunner:
     ) -> None:
         representations_dir = output_dir / "representations"
         representations_dir.mkdir(parents=True, exist_ok=True)
+        canonical_layout = _is_canonical_output_layout(self.config)
         manifest = {
             "output_schema": "tapw_source_symmetry/v2",
             "schema_version": 2,
@@ -4764,7 +4796,11 @@ class SymmetryAnalysisRunner:
             operation_file = _safe_path_component(operation) + ".npz"
             matrix_dir = representations_dir / valley_label
             matrix_dir.mkdir(parents=True, exist_ok=True)
-            diagnostics_dir = representations_dir / "diagnostics" / valley_label
+            diagnostics_dir = (
+                representations_dir / "diagnostics"
+                if canonical_layout
+                else representations_dir / "diagnostics" / valley_label
+            )
             developer_files: dict[str, str] = {}
             for old_name in (operation_file, _safe_path_component(operation) + "_Pin.npz", _safe_path_component(operation) + "_PG.npz"):
                 old_path = matrix_dir / old_name
@@ -4775,7 +4811,11 @@ class SymmetryAnalysisRunner:
                     old_diagnostic_path.unlink()
             if developer_outputs:
                 diagnostics_dir.mkdir(parents=True, exist_ok=True)
-                relative_path = Path("diagnostics") / valley_label / operation_file
+                relative_path = (
+                    Path("diagnostics") / f"{_safe_path_component(operation)}_source.npz"
+                    if canonical_layout
+                    else Path("diagnostics") / valley_label / operation_file
+                )
                 scipy.sparse.save_npz(representations_dir / relative_path, matrix)
                 developer_files["file"] = relative_path.as_posix()
 
@@ -4789,8 +4829,16 @@ class SymmetryAnalysisRunner:
                 pin_shape = [int(pin_matrix.shape[0]), int(pin_matrix.shape[1])]
                 pin_nnz = int(pin_matrix.nnz)
                 if developer_outputs:
-                    pin_file = _safe_path_component(operation) + "_Pin.npz"
-                    pin_relative_path = Path("diagnostics") / valley_label / pin_file
+                    pin_file = (
+                        _safe_path_component(operation) + "_pin.npz"
+                        if canonical_layout
+                        else _safe_path_component(operation) + "_Pin.npz"
+                    )
+                    pin_relative_path = (
+                        Path("diagnostics") / pin_file
+                        if canonical_layout
+                        else Path("diagnostics") / valley_label / pin_file
+                    )
                     scipy.sparse.save_npz(representations_dir / pin_relative_path, pin_matrix)
                     developer_files["pin_file"] = pin_relative_path.as_posix()
 
@@ -4804,8 +4852,16 @@ class SymmetryAnalysisRunner:
                 pg_shape = [int(pg_matrix.shape[0]), int(pg_matrix.shape[1])]
                 pg_nnz = int(pg_matrix.nnz)
                 if developer_outputs:
-                    pg_file = _safe_path_component(operation) + "_PG.npz"
-                    pg_relative_path = Path("diagnostics") / valley_label / pg_file
+                    pg_file = (
+                        _safe_path_component(operation) + "_pg.npz"
+                        if canonical_layout
+                        else _safe_path_component(operation) + "_PG.npz"
+                    )
+                    pg_relative_path = (
+                        Path("diagnostics") / pg_file
+                        if canonical_layout
+                        else Path("diagnostics") / valley_label / pg_file
+                    )
                     scipy.sparse.save_npz(representations_dir / pg_relative_path, pg_matrix)
                     developer_files["pg_file"] = pg_relative_path.as_posix()
 
@@ -4817,8 +4873,12 @@ class SymmetryAnalysisRunner:
                 if not scipy.sparse.issparse(raw_h_matrix):
                     raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
                 raw_h_matrix = raw_h_matrix.tocsr()
-                raw_h_file = _safe_path_component(operation) + "_rawH.npz"
-                raw_h_relative_path = Path(valley_label) / raw_h_file
+                raw_h_relative_path = (
+                    Path("raw_h") / f"{_safe_path_component(operation)}.npz"
+                    if canonical_layout
+                    else Path(valley_label) / f"{_safe_path_component(operation)}_rawH.npz"
+                )
+                (representations_dir / raw_h_relative_path).parent.mkdir(parents=True, exist_ok=True)
                 scipy.sparse.save_npz(representations_dir / raw_h_relative_path, raw_h_matrix)
                 raw_h_shape = [int(raw_h_matrix.shape[0]), int(raw_h_matrix.shape[1])]
                 raw_h_nnz = int(raw_h_matrix.nnz)
@@ -4920,6 +4980,24 @@ class SymmetryAnalysisRunner:
         manifest_path = representations_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
+    def _write_canonical_workflow_manifest(self, output_dir: Path) -> None:
+        if not _is_canonical_output_layout(self.config):
+            return
+        manifest = {
+            "schema": "tapw_symmetry_outputs/v1",
+            "files": {
+                "summary_json": "summary.json",
+                "summary_markdown": "summary.md",
+                "details_csv": "details.csv",
+                "representations_manifest": "representations/manifest.json",
+            },
+        }
+        (output_dir / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        _update_canonical_manifests(output_dir, "symmetry")
+
     def run(self):
         payload = self._analyze()
         summary = dict(payload.get("summary", {}))
@@ -4943,6 +5021,7 @@ class SymmetryAnalysisRunner:
             output_dir,
             developer_outputs=developer_outputs,
         )
+        self._write_canonical_workflow_manifest(output_dir)
         debug_path = output_dir / "debug.json"
         if debug_path.exists():
             debug_path.unlink()

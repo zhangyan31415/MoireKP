@@ -15,6 +15,7 @@ from .io.kpath import KPathGenerator
 from .io.hr import HrSparseHandler
 from .reporting import TapwReporter
 from .workflows.symmetry import SymmetryAnalysisRunner, resolve_requested_symmetrization_operations
+from .artifacts import canonical_profile_name, canonical_qshell_name
 
 VALLEY_LABELS = dict(BandStructureCalculator.VALLEY_MAP)
 
@@ -128,6 +129,19 @@ def resolve_qshell_dir_name(config_or_compute_cfg, calculator) -> str:
     if uses_symm:
         return qshell_name + "_symm"
     return qshell_name
+
+
+def canonical_target_output_dir(config, calculator) -> Path | None:
+    layout = getattr(config, "output_layout", None)
+    if str(getattr(layout, "style", "")).lower() != "canonical_v1":
+        return None
+    profile = canonical_profile_name(
+        getattr(calculator, "valley_flag", getattr(config.compute, "valley_flag", "unknown")),
+        spin=getattr(config.twist, "spin", True),
+        profile=getattr(layout, "profile", None),
+    )
+    q_shell = getattr(layout, "q_shell", None) or canonical_qshell_name(config.compute.n_g)
+    return Path(layout.root) / profile / q_shell
 
 
 def calculation_targets(compute_cfg) -> list:
@@ -445,11 +459,15 @@ def run_calc(args):
                     kpath_config=kpath_config,
                     reporter=reporter,
                 )
+                if hasattr(calculator, "config"):
+                    calculator.config.output_layout = getattr(config, "output_layout", None)
                 if getattr(calculator, "use_M_valley_threefold_symm", False):
                     reusable_m_valley_calculator = calculator
             
-            out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config, calculator)
-            out_path.mkdir(exist_ok=True)
+            out_path = canonical_target_output_dir(config, calculator)
+            if out_path is None:
+                out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config, calculator)
+            out_path.mkdir(parents=True, exist_ok=True)
             reporter.stage("Outputs", "Primary files for this target are written under this run directory.")
             reporter.kv("Target output directory", out_path)
             

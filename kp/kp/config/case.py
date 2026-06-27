@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -30,6 +31,45 @@ def _merge_nested_section(raw: dict[str, Any], model: dict[str, Any], key: str) 
     raw[key] = nested
 
 
+def _resolve_relative_to(path_value: str | Path, base_dir: Path) -> Path:
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path
+    return base_dir / path
+
+
+def _manifest_file_path(files: Mapping[str, Any], manifest_dir: Path, *keys: str) -> str | None:
+    for key in keys:
+        value = files.get(key)
+        if value not in (None, ""):
+            return str(_resolve_relative_to(str(value), manifest_dir))
+    return None
+
+
+def _apply_tapw_band_manifest(material: dict[str, Any], *, config_dir: Path) -> dict[str, Any]:
+    manifest_value = material.get("tapw_band_manifest")
+    if manifest_value in (None, ""):
+        return material
+
+    manifest_path = _resolve_relative_to(str(manifest_value), config_dir)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    files = manifest.get("files", {})
+    if not isinstance(files, Mapping):
+        raise ValueError(f"TAPW band manifest must contain a files mapping: {manifest_path}")
+    manifest_dir = manifest_path.parent
+
+    out = dict(material)
+    out.setdefault("hamk_file", _manifest_file_path(files, manifest_dir, "hamiltonian_k", "hamk"))
+    out.setdefault("qset1_file", _manifest_file_path(files, manifest_dir, "g_vectors_group1", "qset1"))
+    out.setdefault("qset2_file", _manifest_file_path(files, manifest_dir, "g_vectors_group2", "qset2"))
+    out.setdefault("band_file", _manifest_file_path(files, manifest_dir, "energies_vbm", "energies_cbm", "band_file"))
+
+    missing = [key for key in ("hamk_file", "qset1_file", "qset2_file") if out.get(key) in (None, "")]
+    if missing:
+        raise ValueError(f"TAPW band manifest missing required file role(s) {missing}: {manifest_path}")
+    return out
+
+
 def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | Path) -> dict[str, Any]:
     """Normalize the compact one-file KP case YAML into legacy section views.
 
@@ -43,6 +83,7 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
 
     material_raw = out.get("material")
     material = dict(material_raw) if isinstance(material_raw, Mapping) else {}
+    material = _apply_tapw_band_manifest(material, config_dir=path.parent)
     top_spin = out.get("spin")
     if top_spin is not None:
         if material.get("spin") is not None and str(material["spin"]) != str(top_spin):

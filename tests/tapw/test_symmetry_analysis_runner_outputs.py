@@ -18,6 +18,9 @@ class _FakeLogger:
 def _make_runner(tmp_path: Path):
     config = SimpleNamespace(
         paths=SimpleNamespace(output_dir=str(tmp_path / "run")),
+        output_layout=None,
+        twist=SimpleNamespace(spin=True),
+        compute=SimpleNamespace(n_g=6, valleys=[1]),
         symmetry_analysis=SimpleNamespace(
             output_dir="symmetry_analysis",
             tolerance=1.0e-2,
@@ -33,6 +36,56 @@ def _make_runner(tmp_path: Path):
         sr_supercell=None,
         logger=_FakeLogger(),
     )
+
+
+def _minimal_rawh_payload(operation: str = "C2T"):
+    matrix = scipy.sparse.csr_matrix(
+        np.array(
+            [
+                [0.0, 1.0],
+                [-1.0, 0.0],
+            ],
+            dtype=np.complex128,
+        )
+    )
+    pg_matrix = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    return {
+        "summary": {
+            "valleys": [1],
+            "tolerance": 1.0e-2,
+            "operations": {"K1": [{"operation": operation, "supported": True, "status": "exact"}]},
+        },
+        "details": [],
+        "representations": [
+            {
+                "valley": 1,
+                "valley_label": "K1",
+                "operation": operation,
+                "antiunitary": operation in {"TR", "C2T"},
+                "spglib_index": 17,
+                "axis_angle_deg": 3.7,
+                "basis_hash": "basis-test-hash",
+                "residual_H_raw": 1.0e-5,
+                "status": "approximate/provisional",
+                "g_perm_max_delta": 2.0e-12,
+                "nonzero_reciprocal_shift_count": 0,
+                "square_residual": 4.0e-9,
+                "matrix": matrix,
+                "matrix_role": "D_g^(0)",
+                "pin_supported": True,
+                "pin_matrix": pg_matrix,
+                "pin_reason": "",
+                "pin_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
+                "source_form": "ordinary_with_pin",
+                "ld_source_rule": "q_lambda = R_eff^{-1}(k + K_target(lambda)) - K_lambda",
+                "pg_matrix": pg_matrix,
+                "pg_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
+                "pg_phase_convention": "P_G^atomic=diag(exp(-i DeltaG_group dot r_atom)); P_G^TAPW=g P_G^atomic g^dagger",
+                "raw_h_matrix": matrix @ pg_matrix,
+                "raw_h_action_rule": "unitary: D_raw H D_raw^dagger; antiunitary: D_raw H^* D_raw^dagger",
+            }
+        ],
+    }
 
 
 def test_c3_g_transport_accepts_moire_q_roundoff():
@@ -328,6 +381,42 @@ def test_runner_writes_release_rawh_representation_and_manifest_by_default(tmp_p
     )
     assert "K" + "_C2T" not in serialized_outputs
     assert "M" + "_C2_eta" not in serialized_outputs
+
+
+def test_runner_writes_canonical_symmetry_manifest_and_rawh_layout(tmp_path):
+    runner = _make_runner(tmp_path)
+    runner.config.output_layout = SimpleNamespace(
+        style="canonical_v1",
+        root=str(tmp_path / "outputs"),
+        profile=None,
+        q_shell="q06",
+    )
+    runner.config.symmetry_analysis.developer_outputs = True
+    runner.output_dir = str(tmp_path / "outputs" / "K1" / "q06" / "symmetry")
+    runner._analyze = MethodType(lambda self: _minimal_rawh_payload("C2T"), runner)
+
+    runner.run()
+
+    output_dir = Path(runner.output_dir)
+    raw_h_path = output_dir / "representations" / "raw_h" / "C2T.npz"
+    manifest_path = output_dir / "representations" / "manifest.json"
+    workflow_manifest_path = output_dir / "manifest.json"
+    assert raw_h_path.is_file()
+    assert not (output_dir / "representations" / "K1" / "C2T_rawH.npz").exists()
+    assert (output_dir / "representations" / "diagnostics" / "C2T_source.npz").is_file()
+    assert (output_dir / "representations" / "diagnostics" / "C2T_pin.npz").is_file()
+    assert (output_dir / "representations" / "diagnostics" / "C2T_pg.npz").is_file()
+
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assert manifest["matrices"][0]["raw_h_operator_file"] == "raw_h/C2T.npz"
+    assert manifest["matrices"][0]["developer_outputs"] == {
+        "file": "diagnostics/C2T_source.npz",
+        "pin_file": "diagnostics/C2T_pin.npz",
+        "pg_file": "diagnostics/C2T_pg.npz",
+    }
+    workflow_manifest = json.loads(workflow_manifest_path.read_text(encoding="utf-8"))
+    assert workflow_manifest["schema"] == "tapw_symmetry_outputs/v1"
+    assert workflow_manifest["files"]["representations_manifest"] == "representations/manifest.json"
 
 
 def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_path):
