@@ -69,6 +69,7 @@ def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) 
 
 def test_projected_band_plot_can_use_release_style(tmp_path: Path) -> None:
     from kp import cli
+    from kp.plot_style import KP_BAND_BOX_ASPECT, KP_BAND_FIGSIZE
 
     fig, ax = cli.plot_eigs_scatter(
         [
@@ -77,13 +78,15 @@ def test_projected_band_plot_can_use_release_style(tmp_path: Path) -> None:
         ],
         efermi=-4.5,
         out=str(tmp_path / "project.png"),
-        box_aspect=5 / 3,
+        figsize=KP_BAND_FIGSIZE,
+        box_aspect=KP_BAND_BOX_ASPECT,
         font_family="DejaVu Serif",
         return_fig=True,
     )
 
     try:
-        assert round(float(ax.get_box_aspect()), 6) == round(5 / 3, 6)
+        assert tuple(round(float(item), 6) for item in fig.get_size_inches()) == KP_BAND_FIGSIZE
+        assert round(float(ax.get_box_aspect()), 6) == round(KP_BAND_BOX_ASPECT, 6)
         assert ax.get_ylabel() == "Energy - E_F (eV)"
         assert ax.lines[1].get_ydata()[0] == 0.0
         assert ax.title.get_fontfamily()[0] == "DejaVu Serif" or ax.yaxis.label.get_fontfamily()[0] == "DejaVu Serif"

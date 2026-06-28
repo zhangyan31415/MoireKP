@@ -24,6 +24,15 @@ from .blocks import (
     set_projector_blas_threads,
 )
 from .basis.selection import GaugeAnchorReport, write_basis_selection_report
+from .plot_style import (
+    KP_BAND_BOX_ASPECT,
+    KP_BAND_FIGSIZE,
+    KP_DPI,
+    KP_INSPECT_FIGSIZE,
+    apply_kp_axis_style,
+    kp_font_family,
+    kp_plot_rc_context,
+)
 # Reporting-only downfold helpers were removed from the active core. Keep the
 # old imports here as a reference while the workflow is simplified.
 # from .blocks.downfold import (
@@ -407,8 +416,6 @@ def plot_eigs_scatter(
     if x.shape[0] != E.shape[0]:
         raise ValueError(f"x-axis length {x.shape[0]} does not match band rows {E.shape[0]}")
     fig, ax = plt.subplots(figsize=tuple(figsize) if figsize is not None else (5.6, 9.0))
-    if box_aspect is not None:
-        ax.set_box_aspect(float(box_aspect))
     align_key = str(align or "fermi").strip().lower()
 
     def shift_for(arr: np.ndarray) -> float:
@@ -473,18 +480,15 @@ def plot_eigs_scatter(
         ax.set_ylim(ylim)
     if E0 is not None:
         ax.legend(loc="best", frameon=False, fontsize=9)
-    if font_family:
-        text_items = [ax.title, ax.xaxis.label, ax.yaxis.label]
-        text_items.extend(ax.get_xticklabels())
-        text_items.extend(ax.get_yticklabels())
-        legend = ax.get_legend()
-        if legend is not None:
-            text_items.extend(legend.get_texts())
-        for item in text_items:
-            item.set_fontfamily(font_family)
+    if box_aspect is not None or font_family:
+        apply_kp_axis_style(
+            ax,
+            box_aspect=None if box_aspect is None else float(box_aspect),
+            font_family=font_family,
+        )
     fig.tight_layout()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    fig.savefig(out, dpi=220)
+    fig.savefig(out, dpi=KP_DPI)
     if return_fig:
         return fig, ax
     plt.close(fig)
@@ -521,16 +525,6 @@ def _default_inspect_relative_ylim() -> tuple[float, float]:
     return (-1.0, 1.0)
 
 
-def _inspect_plot_font_family() -> str:
-    from matplotlib import font_manager
-
-    available = {font.name for font in font_manager.fontManager.ttflist}
-    for name in ("Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"):
-        if name in available:
-            return name
-    return "DejaVu Serif"
-
-
 def plot_inspect_band_and_qblock(
     band_eigs_list: Sequence[np.ndarray],
     qblock_eigs_list: Sequence[np.ndarray],
@@ -553,8 +547,7 @@ def plot_inspect_band_and_qblock(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    font_cfg = {"font.family": _inspect_plot_font_family(), "mathtext.fontset": "stix"}
-    with plt.rc_context(font_cfg):
+    with kp_plot_rc_context():
         E_band = _stack_band_rows(band_eigs_list)
         E_q = _stack_band_rows(qblock_eigs_list)
         if q_index_order is not None:
@@ -573,7 +566,7 @@ def plot_inspect_band_and_qblock(
         fig, (ax_band, ax_q) = plt.subplots(
             1,
             2,
-            figsize=(7.4, 6.2),
+            figsize=KP_INSPECT_FIGSIZE,
             sharey=True,
             gridspec_kw={"width_ratios": [1.0, 1.0], "wspace": 0.08},
         )
@@ -630,7 +623,7 @@ def plot_inspect_band_and_qblock(
         ax_q.set_title("Q-block diagonalization")
 
         for ax in (ax_band, ax_q):
-            ax.set_box_aspect(5 / 3)
+            apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT)
             ax.axhline(0.0, color="#555555", lw=0.8, ls=":", alpha=0.8, zorder=0)
             ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
             ax.grid(axis="x", visible=False)
@@ -642,7 +635,7 @@ def plot_inspect_band_and_qblock(
             fig.suptitle(title, y=0.995)
         fig.subplots_adjust(left=0.11, right=0.98, bottom=0.11, top=0.90 if title else 0.94, wspace=0.08)
         os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-        fig.savefig(out, dpi=220)
+        fig.savefig(out, dpi=KP_DPI)
         if return_fig:
             return fig, (ax_band, ax_q)
         plt.close(fig)
@@ -2021,9 +2014,9 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         band_slice=project_band_slice,
         align=project_align,
         xlabel="k-path point",
-        figsize=(3.0, 5.0) if canonical_project else None,
-        box_aspect=(5 / 3) if canonical_project else None,
-        font_family=_inspect_plot_font_family() if canonical_project else None,
+        figsize=KP_BAND_FIGSIZE if canonical_project else None,
+        box_aspect=KP_BAND_BOX_ASPECT if canonical_project else None,
+        font_family=kp_font_family() if canonical_project else None,
         **kpath_axis,
     )
     save_spectrum_txt(heig_list, data_out)

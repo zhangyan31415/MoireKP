@@ -26,6 +26,7 @@ from .schema import (
 )
 from .symmetry import load_symmetry_source
 from ..config.case import normalize_case_config
+from ..plot_style import KP_BAND_BOX_ASPECT, KP_BAND_FIGSIZE, KP_DPI, apply_kp_axis_style, kp_font_family
 from ..symmetry.action_schema import allows_inferred_action_metadata
 from ..symmetry.geometry import (
     bM_candidates_from_q_distances,
@@ -3738,10 +3739,10 @@ def save_band_comparison_plot(
     x_values = np.asarray(x, dtype=float) if x is not None else np.arange(model_plot.shape[0], dtype=float)
     if x_values.shape[0] != model_plot.shape[0]:
         raise ValueError(f"plot x-axis length {x_values.shape[0]} does not match k-point count {model_sel.shape[0]}")
-    figsize_raw = plot_options.get("figsize", [3.2, 5.8])
+    figsize_raw = plot_options.get("figsize", list(KP_BAND_FIGSIZE))
     if not isinstance(figsize_raw, Sequence) or isinstance(figsize_raw, (str, bytes)) or len(figsize_raw) != 2:
         raise ValueError(f"bands.plot.figsize must be [width, height], got {figsize_raw!r}")
-    dpi = int(plot_options.get("dpi", 220))
+    dpi = int(plot_options.get("dpi", KP_DPI))
     fig, ax = plt.subplots(figsize=(float(figsize_raw[0]), float(figsize_raw[1])), dpi=dpi)
     for ib in range(heff_plot.shape[1]):
         ax.plot(x_values, heff_plot[:, ib], color="0.20", linewidth=0.9, alpha=0.9)
@@ -3813,6 +3814,16 @@ def save_band_comparison_plot(
         )
     for spine in ax.spines.values():
         spine.set_linewidth(1.0)
+    box_aspect = plot_options.get("box_aspect", KP_BAND_BOX_ASPECT)
+    if box_aspect in {None, False, "none", "None"}:
+        resolved_box_aspect = None
+    else:
+        resolved_box_aspect = float(box_aspect)
+    apply_kp_axis_style(
+        ax,
+        box_aspect=resolved_box_aspect,
+        font_family=str(plot_options.get("font_family") or kp_font_family()),
+    )
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)

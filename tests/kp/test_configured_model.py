@@ -5932,6 +5932,36 @@ def test_save_band_comparison_plot_can_plot_all_bands_with_top_band_window(monke
     assert ylims[-1][1] < 3.5
 
 
+def test_save_band_comparison_plot_uses_release_style_by_default(monkeypatch, tmp_path: Path) -> None:
+    import matplotlib.axes
+    import matplotlib.pyplot as plt
+
+    from kp.plot_style import KP_BAND_BOX_ASPECT, KP_BAND_FIGSIZE
+
+    model = np.array([[0.0, 0.1], [0.02, 0.12]])
+    heff = model + 0.01
+    captured: dict[str, object] = {}
+
+    original_subplots = plt.subplots
+    original_set_box_aspect = matplotlib.axes.Axes.set_box_aspect
+
+    def spy_subplots(*args, **kwargs):
+        captured["figsize"] = kwargs.get("figsize")
+        return original_subplots(*args, **kwargs)
+
+    def spy_set_box_aspect(self, aspect=None, *args, **kwargs):
+        captured["box_aspect"] = aspect
+        return original_set_box_aspect(self, aspect, *args, **kwargs)
+
+    monkeypatch.setattr(plt, "subplots", spy_subplots)
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_box_aspect", spy_set_box_aspect)
+
+    save_band_comparison_plot(model, heff, tmp_path / "bands.png")
+
+    assert tuple(captured["figsize"]) == KP_BAND_FIGSIZE
+    assert round(float(captured["box_aspect"]), 6) == round(KP_BAND_BOX_ASPECT, 6)
+
+
 def test_all_band_plot_config_drops_zoom_selection_and_annotations() -> None:
     config = _all_band_plot_config(
         {
