@@ -342,6 +342,9 @@ def plot_eigs_scatter(
     x_ticks: Sequence[float] | None = None,
     x_ticklabels: Sequence[str] | None = None,
     xlabel: str = "k-path point",
+    figsize: tuple[float, float] | list[float] | None = None,
+    box_aspect: float | None = None,
+    font_family: str | None = None,
     return_fig: bool = False,
 ):
     """Plot all bands as lines across Q (2nd dim is band index).
@@ -403,7 +406,9 @@ def plot_eigs_scatter(
     x = np.asarray(x_values, dtype=float) if x_values is not None else np.arange(E.shape[0], dtype=float)
     if x.shape[0] != E.shape[0]:
         raise ValueError(f"x-axis length {x.shape[0]} does not match band rows {E.shape[0]}")
-    fig, ax = plt.subplots(figsize=(5.6, 9.0))
+    fig, ax = plt.subplots(figsize=tuple(figsize) if figsize is not None else (5.6, 9.0))
+    if box_aspect is not None:
+        ax.set_box_aspect(float(box_aspect))
     align_key = str(align or "fermi").strip().lower()
 
     def shift_for(arr: np.ndarray) -> float:
@@ -468,6 +473,15 @@ def plot_eigs_scatter(
         ax.set_ylim(ylim)
     if E0 is not None:
         ax.legend(loc="best", frameon=False, fontsize=9)
+    if font_family:
+        text_items = [ax.title, ax.xaxis.label, ax.yaxis.label]
+        text_items.extend(ax.get_xticklabels())
+        text_items.extend(ax.get_yticklabels())
+        legend = ax.get_legend()
+        if legend is not None:
+            text_items.extend(legend.get_texts())
+        for item in text_items:
+            item.set_fontfamily(font_family)
     fig.tight_layout()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     fig.savefig(out, dpi=220)
@@ -1958,9 +1972,9 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print_k_diagnostics=print_k_diagnostics,
     )
 
-    # Plot projected bands
-    # Shift: subtract only if project.efermi is provided; otherwise no shift
-    proj_ef = project_cfg.get("efermi")
+    # Plot projected bands.  Project-specific E_F wins; canonical one-file
+    # configs normally define it once under material.
+    proj_ef = project_cfg.get("efermi", material.get("efermi"))
     efermi = float(proj_ef) if proj_ef is not None else None
     ylim_cfg = project_cfg.get("ylim")
     ylim = (float(ylim_cfg[0]), float(ylim_cfg[1])) if isinstance(ylim_cfg, (list, tuple)) and len(ylim_cfg) == 2 else None
@@ -2007,6 +2021,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         band_slice=project_band_slice,
         align=project_align,
         xlabel="k-path point",
+        box_aspect=(5 / 3) if canonical_project else None,
+        font_family=_inspect_plot_font_family() if canonical_project else None,
         **kpath_axis,
     )
     save_spectrum_txt(heig_list, data_out)

@@ -236,8 +236,8 @@ datasets:
         sha256: 4caf567d1f26c7a76354cf692d34035ce8d0de35950768198c104b5bd0256a97
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         kind: file
-        size_bytes: 1464
-        sha256: 48f521dbfcd32d8d55094bc895109c3bf4710af62dab77afafb1833f6b62dcf7
+        size_bytes: 1478
+        sha256: 0857a72e886c34bb64999ca31f8d83a48052a7593b7836410d4a42a920824cbd
       - path: examples/mote2_3.89/tapw/KPATH.in
         kind: file
         external:

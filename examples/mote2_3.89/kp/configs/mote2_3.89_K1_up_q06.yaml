@@ -38,6 +38,7 @@ project:
   gauge: auto
   downfold_method: fixed_schur
   e_ref: -4.575
+  workers: 61
 
 symm:
   tapw_symmetry_dir: ../../tapw/symmetry_analysis_test_k

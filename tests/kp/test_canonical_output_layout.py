@@ -167,6 +167,7 @@ def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp
 def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch, tmp_path: Path) -> None:
     q = np.zeros((1, 2), dtype=float)
     hamk = np.zeros((1, 4, 4), dtype=np.complex128)
+    captured_plot: dict[str, object] = {}
 
     monkeypatch.setattr(cli, "_load_hamk_with_energy_unit", lambda *_args, **_kwargs: hamk)
     monkeypatch.setattr(cli, "load_Q_sets", lambda *_args, **_kwargs: (q, q.copy()))
@@ -180,11 +181,19 @@ def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch
             SimpleNamespace(hermiticity_residual=0.0),
         ),
     )
-    monkeypatch.setattr(cli, "plot_eigs_scatter", lambda *_args, out, **_kwargs: Path(out).write_text("plot"))
+    def fake_project_plot(_eigs, efermi, *, out, box_aspect=None, font_family=None, **_kwargs):
+        captured_plot["efermi"] = efermi
+        captured_plot["box_aspect"] = box_aspect
+        captured_plot["font_family"] = font_family
+        Path(out).write_text("plot")
+
+    monkeypatch.setattr(cli, "plot_eigs_scatter", fake_project_plot)
 
     cfg_path = tmp_path / "kp" / "configs" / "K1_q06.yaml"
     cfg_path.parent.mkdir(parents=True)
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_config(), sort_keys=False), encoding="utf-8")
+    cfg = _canonical_case_config()
+    cfg["material"]["efermi"] = 0.0
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["project", "-c", str(cfg_path)])
 
@@ -196,6 +205,9 @@ def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch
     assert (projection_dir / "scatter.png").read_text(encoding="utf-8") == "plot"
     assert (projection_dir / "heff_list.npy").exists()
     assert (projection_dir / "heff_eig.npy").exists()
+    assert captured_plot["efermi"] == 0.0
+    assert round(float(captured_plot["box_aspect"]), 6) == round(5 / 3, 6)
+    assert captured_plot["font_family"]
 
 
 def test_project_without_low_state_selection_points_user_to_inspect() -> None:

@@ -67,6 +67,32 @@ def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) 
         plt.close(fig)
 
 
+def test_projected_band_plot_can_use_release_style(tmp_path: Path) -> None:
+    from kp import cli
+
+    fig, ax = cli.plot_eigs_scatter(
+        [
+            np.array([-4.6, -4.5]),
+            np.array([-4.55, -4.45]),
+        ],
+        efermi=-4.5,
+        out=str(tmp_path / "project.png"),
+        box_aspect=5 / 3,
+        font_family="DejaVu Serif",
+        return_fig=True,
+    )
+
+    try:
+        assert round(float(ax.get_box_aspect()), 6) == round(5 / 3, 6)
+        assert ax.get_ylabel() == "Energy - E_F (eV)"
+        assert ax.lines[1].get_ydata()[0] == 0.0
+        assert ax.title.get_fontfamily()[0] == "DejaVu Serif" or ax.yaxis.label.get_fontfamily()[0] == "DejaVu Serif"
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
 def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
     from kp import cli
 
