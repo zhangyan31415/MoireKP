@@ -38,6 +38,26 @@ def test_projected_band_plot_uses_single_heff_color(tmp_path: Path) -> None:
         plt.close(fig)
 
 
+def test_kp_plot_style_does_not_force_pdf_font_embedding(tmp_path: Path) -> None:
+    import matplotlib as mpl
+    import matplotlib.pyplot as plt
+
+    from kp.plot_style import apply_kp_axis_style, kp_plot_rc_context
+
+    original_pdf_fonttype = mpl.rcParams["pdf.fonttype"]
+    original_ps_fonttype = mpl.rcParams["ps.fonttype"]
+    fig, ax = plt.subplots()
+    try:
+        apply_kp_axis_style(ax)
+        assert mpl.rcParams["pdf.fonttype"] == original_pdf_fonttype
+        assert mpl.rcParams["ps.fonttype"] == original_ps_fonttype
+        with kp_plot_rc_context():
+            assert mpl.rcParams["pdf.fonttype"] == original_pdf_fonttype
+            assert mpl.rcParams["ps.fonttype"] == original_ps_fonttype
+    finally:
+        plt.close(fig)
+
+
 def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) -> None:
     from kp import cli
     from kp.plot_style import kp_font_family

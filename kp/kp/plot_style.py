@@ -29,10 +29,6 @@ def relative_energy_ylabel(reference: str) -> str:
 
 
 def apply_kp_axis_style(ax, *, box_aspect: float | None = KP_BAND_BOX_ASPECT, font_family: str | None = None) -> None:
-    import matplotlib as mpl
-
-    mpl.rcParams["pdf.fonttype"] = 42
-    mpl.rcParams["ps.fonttype"] = 42
     if box_aspect is not None:
         ax.set_box_aspect(float(box_aspect))
     family = font_family or kp_font_family()
@@ -58,8 +54,6 @@ def kp_plot_rc_context() -> Iterator[None]:
             "mathtext.rm": family,
             "mathtext.it": f"{family}:italic",
             "mathtext.bf": f"{family}:bold",
-            "pdf.fonttype": 42,
-            "ps.fonttype": 42,
         }
     ):
         yield
