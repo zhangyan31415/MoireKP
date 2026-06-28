@@ -36,6 +36,7 @@ from ..plot_style import (
     KP_PRIMARY_STYLE,
     KP_REFERENCE_STYLE,
     apply_kp_axis_style,
+    kp_plot_rc_context,
     kp_font_family,
     relative_energy_ylabel,
 )
@@ -4070,6 +4071,230 @@ def save_harmonics_diagnostics(
     )
 
 
+_Q_LATTICE_PALETTE = {
+    "red": "#d1495b",
+    "blue": "#3b6fb6",
+    "gold": "#d79a2b",
+    "green": "#2a9d64",
+    "edge": "#c6ccd4",
+    "frame": "#737b86",
+    "dark": "#20242a",
+    "paper": "#f8f9fb",
+}
+
+
+def _nearest_point(points: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, float]:
+    arr = np.asarray(points, dtype=float)
+    tgt = np.asarray(target, dtype=float)
+    if arr.size == 0:
+        return tgt, float("inf")
+    distances = np.linalg.norm(arr - tgt, axis=1)
+    idx = int(np.argmin(distances))
+    return arr[idx], float(distances[idx])
+
+
+def _harmonic_vectors_from_map(mapping: Mapping[int, np.ndarray]) -> list[tuple[int, np.ndarray]]:
+    return [(int(index), np.asarray(vector, dtype=float)) for index, vector in sorted(mapping.items(), key=lambda item: int(item[0]))]
+
+
+def _q_lattice_match_tolerance(qset1: np.ndarray, qset2: np.ndarray, bM1: np.ndarray, bM2: np.ndarray) -> float:
+    stacked = np.vstack([np.asarray(qset1, dtype=float), np.asarray(qset2, dtype=float)])
+    span = max(float(np.ptp(stacked[:, 0])), float(np.ptp(stacked[:, 1])), float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
+    return max(1.0e-7, 1.0e-5 * span)
+
+
+def _choose_q_lattice_anchor(
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    intra_vectors: Sequence[tuple[int, np.ndarray]],
+    inter_vectors: Sequence[tuple[int, np.ndarray]],
+    *,
+    tol: float,
+) -> np.ndarray:
+    q1 = np.asarray(qset1, dtype=float)
+    q2 = np.asarray(qset2, dtype=float)
+    best_score: tuple[int, float, float] | None = None
+    best = q1[0]
+    for point in q1:
+        miss_count = 0
+        residual = 0.0
+        for _index, vector in intra_vectors:
+            _nearest, distance = _nearest_point(q1, point - vector)
+            residual += distance
+            miss_count += int(distance > tol)
+        for _index, vector in inter_vectors:
+            _nearest, distance = _nearest_point(q2, point + vector)
+            residual += distance
+            miss_count += int(distance > tol)
+        score = (miss_count, round(residual, 12), round(float(np.linalg.norm(point)), 12))
+        if best_score is None or score < best_score:
+            best_score = score
+            best = point
+    return np.asarray(best, dtype=float)
+
+
+def _draw_q_lattice_basis_arrows(ax: Any, bM1: np.ndarray, bM2: np.ndarray) -> None:
+    origin = np.zeros(2, dtype=float)
+    for vector, label, offset in (
+        (np.asarray(bM1, dtype=float), r"$\mathbf{b}_{M1}$", np.array([0.04, -0.08])),
+        (np.asarray(bM2, dtype=float), r"$\mathbf{b}_{M2}$", np.array([0.04, 0.06])),
+    ):
+        ax.annotate(
+            "",
+            xy=vector,
+            xytext=origin,
+            arrowprops=dict(arrowstyle="-|>", lw=1.15, color=_Q_LATTICE_PALETTE["dark"], mutation_scale=8.5),
+            zorder=6,
+        )
+        text_xy = vector + offset * max(float(np.linalg.norm(vector)), 1.0)
+        ax.text(text_xy[0], text_xy[1], label, fontsize=8.4, color=_Q_LATTICE_PALETTE["dark"], zorder=7)
+
+
+def _draw_q_lattice_segments(ax: Any, points: np.ndarray) -> None:
+    from matplotlib.collections import LineCollection
+
+    arr = np.asarray(points, dtype=float)
+    distances = [
+        float(np.linalg.norm(arr[i] - arr[j]))
+        for i in range(len(arr))
+        for j in range(i + 1, len(arr))
+        if np.linalg.norm(arr[i] - arr[j]) > 1.0e-10
+    ]
+    if not distances:
+        return
+    nearest = min(distances)
+    threshold = 1.04 * nearest
+    segments = [(arr[i], arr[j]) for i in range(len(arr)) for j in range(i + 1, len(arr)) if np.linalg.norm(arr[i] - arr[j]) <= threshold]
+    ax.add_collection(LineCollection(segments, colors=_Q_LATTICE_PALETTE["edge"], linewidths=0.82, zorder=1))
+
+
+def save_q_lattice_harmonics_plot(
+    *,
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    bM1: np.ndarray,
+    bM2: np.ndarray,
+    intra_harmonics: Mapping[int, np.ndarray],
+    inter_harmonics: Mapping[int, np.ndarray],
+    path: str | Path,
+    title: str = "Q lattice and selected harmonics",
+) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Polygon
+
+    q1 = np.asarray(Q_set1, dtype=float)
+    q2 = np.asarray(Q_set2, dtype=float)
+    b1 = np.asarray(bM1, dtype=float)
+    b2 = np.asarray(bM2, dtype=float)
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    intra_vectors = _harmonic_vectors_from_map(intra_harmonics)
+    inter_vectors = _harmonic_vectors_from_map(inter_harmonics)
+    tol = _q_lattice_match_tolerance(q1, q2, b1, b2)
+    anchor = _choose_q_lattice_anchor(q1, q2, intra_vectors, inter_vectors, tol=tol)
+
+    with kp_plot_rc_context():
+        fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=KP_DPI, constrained_layout=True)
+        try:
+            bz = _first_bz_vertices(b1, b2)
+            ax.add_patch(
+                Polygon(
+                    bz,
+                    closed=True,
+                    facecolor=_Q_LATTICE_PALETTE["paper"],
+                    edgecolor=_Q_LATTICE_PALETTE["frame"],
+                    linewidth=1.15,
+                    linestyle=(0, (4, 3)),
+                    zorder=0,
+                )
+            )
+        except Exception:
+            bz = np.empty((0, 2), dtype=float)
+
+        _draw_q_lattice_segments(ax, np.vstack([q1, q2]))
+        ax.scatter(q1[:, 0], q1[:, 1], s=42, color=_Q_LATTICE_PALETTE["red"], edgecolor="white", linewidth=0.6, zorder=3)
+        ax.scatter(q2[:, 0], q2[:, 1], s=42, color=_Q_LATTICE_PALETTE["blue"], edgecolor="white", linewidth=0.6, zorder=3)
+        ax.scatter(anchor[0], anchor[1], s=82, color=_Q_LATTICE_PALETTE["dark"], edgecolor="white", linewidth=0.7, zorder=5)
+
+        arrow_targets: list[np.ndarray] = [anchor]
+        styles = {
+            "intra": {"color": _Q_LATTICE_PALETTE["gold"], "linestyle": "-", "label": "intra"},
+            "inter": {"color": _Q_LATTICE_PALETTE["green"], "linestyle": "--", "label": "inter"},
+        }
+        for kind, vectors, target_qset, sign in (
+            ("intra", intra_vectors, q1, -1.0),
+            ("inter", inter_vectors, q2, 1.0),
+        ):
+            style = styles[kind]
+            for index, vector in vectors:
+                ideal_target = anchor + sign * vector
+                target, distance = _nearest_point(target_qset, ideal_target)
+                if distance > tol:
+                    target = ideal_target
+                arrow_targets.append(np.asarray(target, dtype=float))
+                ax.annotate(
+                    "",
+                    xy=target,
+                    xytext=anchor,
+                    arrowprops=dict(
+                        arrowstyle="-|>",
+                        lw=1.45,
+                        color=style["color"],
+                        linestyle=style["linestyle"],
+                        mutation_scale=10.0,
+                        shrinkA=4.0,
+                        shrinkB=4.0,
+                    ),
+                    zorder=6,
+                )
+                mid = 0.62 * np.asarray(target, dtype=float) + 0.38 * anchor
+                ax.text(
+                    mid[0],
+                    mid[1],
+                    f"{kind[0]}{index}",
+                    fontsize=8.0,
+                    color=style["color"],
+                    ha="center",
+                    va="center",
+                    zorder=7,
+                )
+
+        _draw_q_lattice_basis_arrows(ax, b1, b2)
+        all_points = [q1, q2, np.asarray([anchor, b1, b2]), np.asarray(arrow_targets, dtype=float)]
+        if bz.size:
+            all_points.append(bz)
+        stacked = np.vstack(all_points)
+        span = max(float(np.ptp(stacked[:, 0])), float(np.ptp(stacked[:, 1])), float(np.linalg.norm(b1)), float(np.linalg.norm(b2)), 1.0)
+        center = np.mean(stacked, axis=0)
+        half = 0.58 * span
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[1] - half, center[1] + half)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        ax.set_title(title, fontsize=13, pad=7, weight="semibold")
+        ax.legend(
+            handles=[
+                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["red"], markeredgecolor="white", markersize=6, label=r"$Q_1$"),
+                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["blue"], markeredgecolor="white", markersize=6, label=r"$Q_2$"),
+                Line2D([0], [0], color=_Q_LATTICE_PALETTE["gold"], lw=1.45, linestyle="-", label="intra"),
+                Line2D([0], [0], color=_Q_LATTICE_PALETTE["green"], lw=1.45, linestyle="--", label="inter"),
+            ],
+            **KP_LEGEND_KWARGS,
+        )
+        apply_kp_axis_style(ax, box_aspect=None, font_family=kp_font_family())
+        fig.savefig(out, bbox_inches="tight")
+        plt.close(fig)
+    return out
+
+
 def save_bM_diagnostics(*, model_config: ConfiguredModel, output_dir: Path) -> None:
     if not model_config.bM_diagnostics:
         return
@@ -4475,6 +4700,7 @@ def _build_run_summary(
         "plot_comparison": _json_safe(results.get("plot_comparison")),
         "all_band_plot_comparison": _json_safe(results.get("all_band_plot_comparison")),
         "all_band_plot": "band_comparison_all.pdf" if results.get("all_band_plot") else None,
+        "q_lattice_plot": "q_lattice_harmonics.pdf" if results.get("q_lattice_plot") else None,
         "coefficient_pruning": _json_safe(results.get("coefficient_pruning")),
         "band_refinement": _json_safe(results.get("band_refinement", {"enabled": False})),
         "auto_model_selection": _json_safe(results.get("auto_model_selection", {"enabled": False})),
@@ -8704,6 +8930,15 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     all_band_plot_comparison = None
     band_plot_path = None
     all_band_plot_path = None
+    q_lattice_plot_path = save_q_lattice_harmonics_plot(
+        Q_set1=np.asarray(moire_config.Q_set1, dtype=float),
+        Q_set2=np.asarray(moire_config.Q_set2, dtype=float),
+        bM1=np.asarray(moire_config.bM1, dtype=float),
+        bM2=np.asarray(moire_config.bM2, dtype=float),
+        intra_harmonics=getattr(moire_config, "intra_harmonics_map", {}) or {},
+        inter_harmonics=getattr(moire_config, "inter_harmonics_map", {}) or {},
+        path=output_dir / "q_lattice_harmonics.pdf",
+    )
     if model_config.compare_to_heff:
         if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
             heff_eig = np.load(model_config.heff_eig_file)
@@ -8768,6 +9003,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     results["comparison"] = comparison
     results["plot_comparison"] = plot_comparison
     results["all_band_plot_comparison"] = all_band_plot_comparison
+    results["q_lattice_plot"] = str(q_lattice_plot_path.resolve())
     if band_plot_path is not None:
         results["band_plot"] = str(band_plot_path.resolve())
     if all_band_plot_path is not None:

@@ -54,6 +54,9 @@ def kp_plot_rc_context() -> Iterator[None]:
             "mathtext.rm": family,
             "mathtext.it": f"{family}:italic",
             "mathtext.bf": f"{family}:bold",
+            "mathtext.cal": family,
+            "mathtext.sf": family,
+            "mathtext.tt": family,
         }
     ):
         yield

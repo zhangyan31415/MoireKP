@@ -431,7 +431,7 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
     def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
         seen["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        for name in ("README.md", "MODEL.md", "evaluate.py", "model_data.npz", "eigvals.npy", "band_comparison.pdf"):
+        for name in ("README.md", "MODEL.md", "evaluate.py", "model_data.npz", "eigvals.npy", "band_comparison.pdf", "q_lattice_harmonics.pdf"):
             (Path(output_dir) / name).write_text("x", encoding="utf-8")
         for stale in ("active_terms.json", "active_terms.sha256", "fit_selection.json", "run_summary.json", "model_run.log", "band_comparison_all.pdf"):
             (Path(output_dir) / stale).write_text("stale", encoding="utf-8")
@@ -450,4 +450,5 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
         "eigvals.npy",
         "evaluate.py",
         "model_data.npz",
+        "q_lattice_harmonics.pdf",
     }

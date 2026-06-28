@@ -62,6 +62,7 @@ from kp.model.pipeline import (  # noqa: E402
     matrix_residual,
     run_configured_model,
     save_band_comparison_plot,
+    save_q_lattice_harmonics_plot,
 )
 import kp.model.core as model_core  # noqa: E402
 import kp.model.pipeline as pipeline_module  # noqa: E402
@@ -5830,6 +5831,26 @@ def test_run_configured_model_saves_auto_harmonics_diagnostic_plot(monkeypatch, 
     assert (tmp_path / "model_out" / "diagnostics" / "harmonics_diagnostic.json").exists()
 
 
+def test_save_q_lattice_harmonics_plot_draws_model_qsets(tmp_path: Path) -> None:
+    qset1 = np.array([[0.0, 0.0], [1.0, 0.0], [0.5, 0.8660254]], dtype=float)
+    qset2 = qset1 + np.array([1.0 / 3.0, -0.2], dtype=float)
+    out = tmp_path / "q_lattice_harmonics.pdf"
+
+    path = save_q_lattice_harmonics_plot(
+        Q_set1=qset1,
+        Q_set2=qset2,
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.5, 0.8660254]),
+        intra_harmonics={1: np.array([-1.0, 0.0])},
+        inter_harmonics={1: qset2[0] - qset1[0]},
+        path=out,
+    )
+
+    assert path == out
+    assert out.exists()
+    assert out.stat().st_size > 0
+
+
 def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
@@ -5848,6 +5869,8 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
     assert not (tmp_path / "model_out" / "comparison.json").exists()
     assert not (tmp_path / "model_out" / "comparison_plot.json").exists()
     assert (tmp_path / "model_out" / "band_comparison.pdf").exists()
+    assert (tmp_path / "model_out" / "q_lattice_harmonics.pdf").exists()
+    assert results["q_lattice_plot"] == str((tmp_path / "model_out" / "q_lattice_harmonics.pdf").resolve())
     assert results["band_plot"] == str((tmp_path / "model_out" / "band_comparison.pdf").resolve())
     assert (tmp_path / "model_out" / "band_comparison_all.pdf").exists()
     assert results["all_band_plot"] == str((tmp_path / "model_out" / "band_comparison_all.pdf").resolve())
@@ -5856,6 +5879,7 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
     assert summary["comparison"]["max_abs_error"] == 0.0
     assert summary["plot_comparison"]["max_abs_error"] == 0.0
     assert summary["all_band_plot"] == "band_comparison_all.pdf"
+    assert summary["q_lattice_plot"] == "q_lattice_harmonics.pdf"
     assert summary["all_band_plot_comparison"]["num_bands"] == expected_eigvals.shape[1]
 
 

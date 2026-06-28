@@ -186,10 +186,10 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "README.md",
         "MODEL.md",
         "evaluate.py",
-        "model.json",
         "model_data.npz",
         "eigvals.npy",
         "band_comparison.pdf",
+        "q_lattice_harmonics.pdf",
     }
     root = Path(model_output_dir)
     if not root.exists():
@@ -2471,6 +2471,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 print(f"[kp model]   runtime: {float(results['runtime_s']):.2f} s")
         if results.get("band_plot"):
             print(f"[kp model]   band plot: {results['band_plot']}")
+        if results.get("q_lattice_plot"):
+            print(f"[kp model]   q lattice plot: {results['q_lattice_plot']}")
         if results.get("all_band_plot"):
             print(f"[kp model]   all-band plot: {results['all_band_plot']}")
         if comparison:
