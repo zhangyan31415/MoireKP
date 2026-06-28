@@ -114,6 +114,4 @@ kp/configs/
 Mote_DFT_gen/
 *.npy
 *.npz
-!tests/fixtures/**/*.npy
-!tests/fixtures/**/*.npz
 !examples/minimal_synthetic/expected/KPATH.out
