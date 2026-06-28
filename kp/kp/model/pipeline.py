@@ -37,6 +37,7 @@ from ..plot_style import (
     KP_REFERENCE_STYLE,
     apply_kp_axis_style,
     kp_font_family,
+    relative_energy_ylabel,
 )
 from ..symmetry.action_schema import allows_inferred_action_metadata
 from ..symmetry.geometry import (
@@ -3768,8 +3769,8 @@ def save_band_comparison_plot(
     else:
         ax.set_xlabel("k-point index")
     if model_ref or heff_ref:
-        ref_label = r"top" if align in {"top", "top_band", "top-band"} else r"bottom"
-        ax.set_ylabel(rf"$E - E_{{\mathrm{{{ref_label}}}}}$ (eV)")
+        ref_label = "top" if align in {"top", "top_band", "top-band"} else "bottom"
+        ax.set_ylabel(relative_energy_ylabel(ref_label))
     else:
         ax.set_ylabel("Energy (eV)")
     if title:
@@ -3940,8 +3941,8 @@ def save_harmonics_diagnostic_plot(
     ax.set_aspect("equal", adjustable="box")
     ax.axhline(0.0, color="0.88", linewidth=0.7)
     ax.axvline(0.0, color="0.88", linewidth=0.7)
-    ax.set_xlabel(r"$Q_x$")
-    ax.set_ylabel(r"$Q_y$")
+    ax.set_xlabel("Qx")
+    ax.set_ylabel("Qy")
     ax.set_title("Auto-selected harmonic vectors")
     handles, labels = ax.get_legend_handles_labels()
     handles.extend(

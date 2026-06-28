@@ -40,6 +40,7 @@ def test_projected_band_plot_uses_single_heff_color(tmp_path: Path) -> None:
 
 def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) -> None:
     from kp import cli
+    from kp.plot_style import kp_font_family
 
     fig, ax = cli.plot_eigs_scatter(
         [
@@ -60,7 +61,9 @@ def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) 
         assert len(heff_lines) == 2
         assert max(float(np.max(line.get_ydata())) for line in heff_lines) == 0.0
         assert ax.get_xlabel() == "k-path point"
-        assert ax.get_ylabel() == r"$E - E_{\mathrm{top}}$ (eV)"
+        assert ax.get_ylabel() == "Energy - E_top (eV)"
+        assert "$" not in ax.get_ylabel()
+        assert ax.yaxis.label.get_fontfamily()[0] == kp_font_family()
     finally:
         import matplotlib.pyplot as plt
 
@@ -98,7 +101,7 @@ def test_projected_band_plot_can_use_release_style(tmp_path: Path) -> None:
 
 def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
     from kp import cli
-    from kp.plot_style import KP_INSPECT_FIGSIZE
+    from kp.plot_style import KP_INSPECT_FIGSIZE, kp_font_family
 
     fig, axes = cli.plot_inspect_band_and_qblock(
         band_eigs_list=[
@@ -124,6 +127,7 @@ def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
         assert len(fig.axes) == 2
         assert tuple(round(float(item), 6) for item in fig.get_size_inches()) == KP_INSPECT_FIGSIZE
         assert ax_band.get_shared_y_axes().joined(ax_band, ax_q)
+        assert ax_band.yaxis.label.get_fontfamily()[0] == kp_font_family()
         assert ax_band.get_title() == "Band path"
         assert ax_q.get_title() == "Q-block diagonalization"
         assert tuple(round(float(item), 6) for item in ax_band.get_ylim()) == (-1.0, 1.0)

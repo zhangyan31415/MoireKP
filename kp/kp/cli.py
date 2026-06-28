@@ -36,6 +36,7 @@ from .plot_style import (
     apply_kp_axis_style,
     kp_font_family,
     kp_plot_rc_context,
+    relative_energy_ylabel,
 )
 # Reporting-only downfold helpers were removed from the active core. Keep the
 # old imports here as a reference while the workflow is simplified.
@@ -463,11 +464,11 @@ def plot_eigs_scatter(
     else:
         ax.set_xlabel(xlabel)
     if align_key in {"top", "top_band", "top-band"}:
-        ax.set_ylabel(r"$E - E_{\mathrm{top}}$ (eV)")
+        ax.set_ylabel(relative_energy_ylabel("top"))
     elif align_key in {"bottom", "bottom_band", "bottom-band"}:
-        ax.set_ylabel(r"$E - E_{\mathrm{bottom}}$ (eV)")
+        ax.set_ylabel(relative_energy_ylabel("bottom"))
     elif align_key in {"fermi", "ef", "efermi"} and efermi is not None:
-        ax.set_ylabel("Energy - E_F (eV)")
+        ax.set_ylabel(relative_energy_ylabel("F"))
     else:
         ax.set_ylabel("Energy (eV)")
     ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
@@ -479,12 +480,11 @@ def plot_eigs_scatter(
         ax.set_ylim(ylim)
     if E0 is not None:
         ax.legend(**KP_LEGEND_KWARGS)
-    if box_aspect is not None or font_family:
-        apply_kp_axis_style(
-            ax,
-            box_aspect=None if box_aspect is None else float(box_aspect),
-            font_family=font_family,
-        )
+    apply_kp_axis_style(
+        ax,
+        box_aspect=None if box_aspect is None else float(box_aspect),
+        font_family=font_family,
+    )
     fig.tight_layout()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
     fig.savefig(out, dpi=KP_DPI)
@@ -625,16 +625,17 @@ def plot_inspect_band_and_qblock(
         ax_q.set_title("Q-block diagonalization")
 
         for ax in (ax_band, ax_q):
-            apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT)
             ax.axhline(0.0, color="#555555", lw=0.8, ls=":", alpha=0.8, zorder=0)
             ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
             ax.grid(axis="x", visible=False)
             ax.set_axisbelow(True)
-        ax_band.set_ylabel("Energy - E_F (eV)")
+        ax_band.set_ylabel(relative_energy_ylabel("F"))
         ax_q.tick_params(labelleft=False)
         ax_band.set_ylim(ylim)
         ax_band.legend(**KP_LEGEND_KWARGS)
         ax_q.legend(**KP_LEGEND_KWARGS)
+        for ax in (ax_band, ax_q):
+            apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT)
         if title:
             fig.suptitle(title, y=0.995)
         fig.subplots_adjust(left=0.11, right=0.98, bottom=0.11, top=0.90 if title else 0.94, wspace=0.08)

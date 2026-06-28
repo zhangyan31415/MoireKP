@@ -5937,7 +5937,7 @@ def test_save_band_comparison_plot_uses_release_style_by_default(monkeypatch, tm
     import matplotlib.axes
     import matplotlib.pyplot as plt
 
-    from kp.plot_style import KP_BAND_BOX_ASPECT, KP_BAND_FIGSIZE
+    from kp.plot_style import KP_BAND_BOX_ASPECT, KP_BAND_FIGSIZE, kp_font_family
 
     model = np.array([[0.0, 0.1], [0.02, 0.12]])
     heff = model + 0.01
@@ -5954,13 +5954,23 @@ def test_save_band_comparison_plot_uses_release_style_by_default(monkeypatch, tm
         captured["box_aspect"] = aspect
         return original_set_box_aspect(self, aspect, *args, **kwargs)
 
+    saved_axes = []
+
+    def spy_close(fig=None):
+        saved_axes.extend(fig.axes if fig is not None else [])
+
     monkeypatch.setattr(plt, "subplots", spy_subplots)
     monkeypatch.setattr(matplotlib.axes.Axes, "set_box_aspect", spy_set_box_aspect)
+    monkeypatch.setattr(plt, "close", spy_close)
 
-    save_band_comparison_plot(model, heff, tmp_path / "bands.png")
+    save_band_comparison_plot(model, heff, tmp_path / "bands.png", plot_config={"align": "top"})
 
     assert tuple(captured["figsize"]) == KP_BAND_FIGSIZE
     assert round(float(captured["box_aspect"]), 6) == round(KP_BAND_BOX_ASPECT, 6)
+    assert saved_axes
+    assert saved_axes[0].get_ylabel() == "Energy - E_top (eV)"
+    assert "$" not in saved_axes[0].get_ylabel()
+    assert saved_axes[0].yaxis.label.get_fontfamily()[0] == kp_font_family()
 
 
 def test_all_band_plot_config_drops_zoom_selection_and_annotations() -> None:
