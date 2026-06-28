@@ -537,6 +537,16 @@ def _default_inspect_relative_ylim() -> tuple[float, float]:
     return (-1.0, 1.0)
 
 
+def _inspect_plot_font_family() -> str:
+    from matplotlib import font_manager
+
+    available = {font.name for font in font_manager.fontManager.ttflist}
+    for name in ("Times New Roman", "Times", "Nimbus Roman", "DejaVu Serif"):
+        if name in available:
+            return name
+    return "DejaVu Serif"
+
+
 def plot_inspect_band_and_qblock(
     band_eigs_list: Sequence[np.ndarray],
     qblock_eigs_list: Sequence[np.ndarray],
@@ -559,84 +569,99 @@ def plot_inspect_band_and_qblock(
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    E_band = _stack_band_rows(band_eigs_list)
-    E_q = _stack_band_rows(qblock_eigs_list)
-    if q_index_order is not None:
-        idx = np.asarray(q_index_order, dtype=int)
-        E_q = E_q[idx]
+    font_cfg = {"font.family": _inspect_plot_font_family(), "mathtext.fontset": "stix"}
+    with plt.rc_context(font_cfg):
+        E_band = _stack_band_rows(band_eigs_list)
+        E_q = _stack_band_rows(qblock_eigs_list)
+        if q_index_order is not None:
+            idx = np.asarray(q_index_order, dtype=int)
+            E_q = E_q[idx]
 
-    q_band_indices = _fermi_window_band_indices(
-        [row for row in E_q],
-        efermi=efermi,
-        ref_q_index=ref_q_index,
-        count=q_window_bands,
-    )
-    if ylim is None:
-        ylim = _default_inspect_relative_ylim()
+        q_band_indices = _fermi_window_band_indices(
+            [row for row in E_q],
+            efermi=efermi,
+            ref_q_index=ref_q_index,
+            count=q_window_bands,
+        )
+        if ylim is None:
+            ylim = _default_inspect_relative_ylim()
 
-    fig, (ax_band, ax_q) = plt.subplots(
-        1,
-        2,
-        figsize=(8.4, 5.6),
-        sharey=True,
-        gridspec_kw={"width_ratios": [1.25, 1.0], "wspace": 0.06},
-    )
+        fig, (ax_band, ax_q) = plt.subplots(
+            1,
+            2,
+            figsize=(7.4, 6.2),
+            sharey=True,
+            gridspec_kw={"width_ratios": [1.0, 1.0], "wspace": 0.08},
+        )
 
-    x_band = np.asarray(k_x_values, dtype=float) if k_x_values is not None else np.arange(E_band.shape[0], dtype=float)
-    if x_band.shape[0] != E_band.shape[0]:
-        raise ValueError(f"k-path axis length {x_band.shape[0]} does not match band rows {E_band.shape[0]}")
-    for band_index in range(E_band.shape[1]):
-        ax_band.plot(x_band, E_band[:, band_index] - efermi, color="#222222", lw=0.75, alpha=0.82)
-    if k_x_ticks is not None and k_x_ticklabels is not None and len(k_x_ticks) == len(k_x_ticklabels):
-        ax_band.set_xticks([float(item) for item in k_x_ticks])
-        ax_band.set_xticklabels([str(item) for item in k_x_ticklabels])
-        for tick in k_x_ticks:
-            ax_band.axvline(float(tick), color="0.84", linewidth=0.7, zorder=0)
-        if x_band.size:
-            ax_band.set_xlim(float(x_band[0]), float(x_band[-1]))
-    else:
-        ax_band.set_xlabel("k-path point")
-    ax_band.set_title("Band path")
+        x_band = (
+            np.asarray(k_x_values, dtype=float)
+            if k_x_values is not None
+            else np.arange(E_band.shape[0], dtype=float)
+        )
+        if x_band.shape[0] != E_band.shape[0]:
+            raise ValueError(f"k-path axis length {x_band.shape[0]} does not match band rows {E_band.shape[0]}")
+        for band_index in range(E_band.shape[1]):
+            ax_band.plot(x_band, E_band[:, band_index] - efermi, color="#222222", lw=0.75, alpha=0.82)
+        if k_x_ticks is not None and k_x_ticklabels is not None and len(k_x_ticks) == len(k_x_ticklabels):
+            ax_band.set_xticks([float(item) for item in k_x_ticks])
+            ax_band.set_xticklabels([str(item) for item in k_x_ticklabels])
+            for tick in k_x_ticks:
+                ax_band.axvline(float(tick), color="0.84", linewidth=0.7, zorder=0)
+            if x_band.size:
+                ax_band.set_xlim(float(x_band[0]), float(x_band[-1]))
+        else:
+            ax_band.set_xlabel("k-path point")
+        ax_band.set_title("Band path")
 
-    x_q = np.arange(E_q.shape[0], dtype=float)
-    for band_index in q_band_indices:
-        ax_q.plot(x_q, E_q[:, band_index] - efermi, color="#1f77b4", lw=0.9, alpha=0.95)
-    if q_sector_lengths:
-        cumulative = 0
-        for sector_index, length in enumerate(q_sector_lengths[:-1], start=1):
-            cumulative += int(length)
-            if 0 < cumulative < E_q.shape[0]:
-                ax_q.axvline(float(cumulative) - 0.5, color="#555555", lw=0.9, ls="--", alpha=0.8)
-                ax_q.text(
-                    float(cumulative) - 0.5,
-                    0.98,
-                    f"sector {sector_index + 1}",
-                    transform=ax_q.get_xaxis_transform(),
-                    ha="left",
-                    va="top",
-                    fontsize=8,
-                    color="#555555",
-                    rotation=90,
-                )
-    ax_q.set_xlabel("Q block index")
-    ax_q.set_title("Q-block diagonalization")
+        x_q = np.arange(E_q.shape[0], dtype=float)
+        for band_index in q_band_indices:
+            ax_q.plot(
+                x_q,
+                E_q[:, band_index] - efermi,
+                marker="o",
+                markersize=2.5,
+                color="#1f77b4",
+                lw=0.75,
+                alpha=0.9,
+            )
+        if q_sector_lengths:
+            cumulative = 0
+            for sector_index, length in enumerate(q_sector_lengths[:-1], start=1):
+                cumulative += int(length)
+                if 0 < cumulative < E_q.shape[0]:
+                    ax_q.axvline(float(cumulative) - 0.5, color="#555555", lw=0.9, ls="--", alpha=0.8)
+                    ax_q.text(
+                        float(cumulative) - 0.5,
+                        0.98,
+                        f"sector {sector_index + 1}",
+                        transform=ax_q.get_xaxis_transform(),
+                        ha="left",
+                        va="top",
+                        fontsize=8,
+                        color="#555555",
+                        rotation=90,
+                    )
+        ax_q.set_xlabel("Q block index")
+        ax_q.set_title("Q-block diagonalization")
 
-    for ax in (ax_band, ax_q):
-        ax.axhline(0.0, color="#555555", lw=0.8, ls=":", alpha=0.8, zorder=0)
-        ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
-        ax.grid(axis="x", visible=False)
-        ax.set_axisbelow(True)
-    ax_band.set_ylabel("Energy - E_F (eV)")
-    ax_q.tick_params(labelleft=False)
-    ax_band.set_ylim(ylim)
-    if title:
-        fig.suptitle(title, y=0.995)
-    fig.subplots_adjust(left=0.11, right=0.98, bottom=0.11, top=0.90 if title else 0.94, wspace=0.06)
-    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    fig.savefig(out, dpi=220)
-    if return_fig:
-        return fig, (ax_band, ax_q)
-    plt.close(fig)
+        for ax in (ax_band, ax_q):
+            ax.set_box_aspect(5 / 3)
+            ax.axhline(0.0, color="#555555", lw=0.8, ls=":", alpha=0.8, zorder=0)
+            ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
+            ax.grid(axis="x", visible=False)
+            ax.set_axisbelow(True)
+        ax_band.set_ylabel("Energy - E_F (eV)")
+        ax_q.tick_params(labelleft=False)
+        ax_band.set_ylim(ylim)
+        if title:
+            fig.suptitle(title, y=0.995)
+        fig.subplots_adjust(left=0.11, right=0.98, bottom=0.11, top=0.90 if title else 0.94, wspace=0.08)
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        fig.savefig(out, dpi=220)
+        if return_fig:
+            return fig, (ax_band, ax_q)
+        plt.close(fig)
     return None
 
 

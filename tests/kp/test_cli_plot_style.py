@@ -96,6 +96,14 @@ def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
         assert ax_band.get_title() == "Band path"
         assert ax_q.get_title() == "Q-block diagonalization"
         assert tuple(round(float(item), 6) for item in ax_band.get_ylim()) == (-1.0, 1.0)
+        assert round(float(ax_band.get_box_aspect()), 6) == round(5 / 3, 6)
+        assert round(float(ax_q.get_box_aspect()), 6) == round(5 / 3, 6)
+        q_band_lines = [
+            line for line in ax_q.lines
+            if line.get_linestyle() == "-" and len(set(line.get_xdata())) > 1
+        ]
+        assert q_band_lines, "Q-block bands should be rendered as lines with point markers"
+        assert {line.get_marker() for line in q_band_lines} == {"o"}
         divider_lines = [
             line for line in ax_q.lines
             if line.get_linestyle() == "--" and len(set(line.get_xdata())) == 1
