@@ -64,6 +64,7 @@ ENV/
 
 # Local agent/runtime state
 /.codex/
+/.worktrees/
 /.learnings/
 kp/.codex_remote_logs/
 **/.ipynb_checkpoints/
