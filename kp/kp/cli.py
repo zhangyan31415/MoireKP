@@ -128,17 +128,6 @@ def _write_inspect_sidecars(
         return
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
-    rows = []
-    for q_index, eigs in enumerate(eigs_list):
-        for band_index, energy in enumerate(np.asarray(eigs, dtype=float).tolist()):
-            rows.append(
-                f"{q_index},{band_index},{float(energy):.12g},{float(energy) - float(efermi):.12g}"
-            )
-    _write_text(
-        out / "blocks.csv",
-        "q_index,band_index,energy_eV,relative_to_efermi_eV\n" + "\n".join(rows) + ("\n" if rows else ""),
-    )
-
     _write_case_summary(cfg, out, "inspect")
 
 

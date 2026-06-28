@@ -111,7 +111,7 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path,
     assert (inspect_dir / "spectrum.txt").exists()
     assert (inspect_dir / "scatter.png").read_text(encoding="utf-8") == "plot"
     assert not (inspect_dir / "candidates.md").exists()
-    assert (inspect_dir / "blocks.csv").exists()
+    assert not (inspect_dir / "blocks.csv").exists()
     assert "[kp] Selected bands at ref_Q=0: below EF [0], above EF [1]" in stdout
 
 

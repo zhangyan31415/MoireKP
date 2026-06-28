@@ -28,7 +28,6 @@ examples/kp_canonical_smoke/kp/outputs/K1/q01/
     spectrum.txt
     candidates.md
     scatter.png
-    blocks.csv
   projection/
     heff.npy
     eigvals.npy
@@ -61,7 +60,6 @@ examples/kp_canonical_smoke/kp/outputs/Gamma/q01/
     spectrum.txt
     candidates.md
     scatter.png
-    blocks.csv
   projection/
     heff.npy
     eigvals.npy
