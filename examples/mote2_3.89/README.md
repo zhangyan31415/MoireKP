@@ -20,15 +20,15 @@ using a single monomial phase branch for the two spinful C3z branches.
 From the repository root:
 
 ```bash
-kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
-kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
-kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
-kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
+kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
 
-kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
-kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
-kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
-kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
+kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
 ```
 
 Run `inspect` first and check `kp/outputs/<profile>/<q_shell>/inspect/` before

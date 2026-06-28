@@ -507,6 +507,139 @@ def plot_eigs_scatter(
     return None
 
 
+def _stack_band_rows(rows: Sequence[np.ndarray]) -> np.ndarray:
+    arrs = [np.asarray(ev, dtype=float).ravel() for ev in rows]
+    if not arrs:
+        raise ValueError("No band rows to plot")
+    width = arrs[0].shape[0]
+    for arr in arrs:
+        if arr.shape[0] != width:
+            raise ValueError("Band rows have inconsistent widths")
+    return np.stack(arrs, axis=0)
+
+
+def _fermi_window_band_indices(
+    rows: Sequence[np.ndarray],
+    *,
+    efermi: float,
+    ref_q_index: int,
+    count: int,
+) -> list[int]:
+    E = _stack_band_rows(rows)
+    ref = max(0, min(int(ref_q_index), E.shape[0] - 1))
+    nbands = int(E.shape[1])
+    width = max(1, min(int(count), nbands))
+    order = np.argsort(np.abs(E[ref] - float(efermi)))
+    return sorted(int(item) for item in order[:width])
+
+
+def _default_inspect_relative_ylim() -> tuple[float, float]:
+    return (-1.0, 1.0)
+
+
+def plot_inspect_band_and_qblock(
+    band_eigs_list: Sequence[np.ndarray],
+    qblock_eigs_list: Sequence[np.ndarray],
+    efermi: float,
+    *,
+    out: str,
+    title: str | None = None,
+    ylim: tuple[float, float] | None = None,
+    q_index_order: Sequence[int] | None = None,
+    q_sector_lengths: Sequence[int] | None = None,
+    ref_q_index: int = 0,
+    q_window_bands: int = 10,
+    k_x_values: Sequence[float] | None = None,
+    k_x_ticks: Sequence[float] | None = None,
+    k_x_ticklabels: Sequence[str] | None = None,
+    return_fig: bool = False,
+):
+    """Plot normal k-path bands beside Q-block diagonalization for inspect."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    E_band = _stack_band_rows(band_eigs_list)
+    E_q = _stack_band_rows(qblock_eigs_list)
+    if q_index_order is not None:
+        idx = np.asarray(q_index_order, dtype=int)
+        E_q = E_q[idx]
+
+    q_band_indices = _fermi_window_band_indices(
+        [row for row in E_q],
+        efermi=efermi,
+        ref_q_index=ref_q_index,
+        count=q_window_bands,
+    )
+    if ylim is None:
+        ylim = _default_inspect_relative_ylim()
+
+    fig, (ax_band, ax_q) = plt.subplots(
+        1,
+        2,
+        figsize=(8.4, 5.6),
+        sharey=True,
+        gridspec_kw={"width_ratios": [1.25, 1.0], "wspace": 0.06},
+    )
+
+    x_band = np.asarray(k_x_values, dtype=float) if k_x_values is not None else np.arange(E_band.shape[0], dtype=float)
+    if x_band.shape[0] != E_band.shape[0]:
+        raise ValueError(f"k-path axis length {x_band.shape[0]} does not match band rows {E_band.shape[0]}")
+    for band_index in range(E_band.shape[1]):
+        ax_band.plot(x_band, E_band[:, band_index] - efermi, color="#222222", lw=0.75, alpha=0.82)
+    if k_x_ticks is not None and k_x_ticklabels is not None and len(k_x_ticks) == len(k_x_ticklabels):
+        ax_band.set_xticks([float(item) for item in k_x_ticks])
+        ax_band.set_xticklabels([str(item) for item in k_x_ticklabels])
+        for tick in k_x_ticks:
+            ax_band.axvline(float(tick), color="0.84", linewidth=0.7, zorder=0)
+        if x_band.size:
+            ax_band.set_xlim(float(x_band[0]), float(x_band[-1]))
+    else:
+        ax_band.set_xlabel("k-path point")
+    ax_band.set_title("Band path")
+
+    x_q = np.arange(E_q.shape[0], dtype=float)
+    for band_index in q_band_indices:
+        ax_q.plot(x_q, E_q[:, band_index] - efermi, color="#1f77b4", lw=0.9, alpha=0.95)
+    if q_sector_lengths:
+        cumulative = 0
+        for sector_index, length in enumerate(q_sector_lengths[:-1], start=1):
+            cumulative += int(length)
+            if 0 < cumulative < E_q.shape[0]:
+                ax_q.axvline(float(cumulative) - 0.5, color="#555555", lw=0.9, ls="--", alpha=0.8)
+                ax_q.text(
+                    float(cumulative) - 0.5,
+                    0.98,
+                    f"sector {sector_index + 1}",
+                    transform=ax_q.get_xaxis_transform(),
+                    ha="left",
+                    va="top",
+                    fontsize=8,
+                    color="#555555",
+                    rotation=90,
+                )
+    ax_q.set_xlabel("Q block index")
+    ax_q.set_title("Q-block diagonalization")
+
+    for ax in (ax_band, ax_q):
+        ax.axhline(0.0, color="#555555", lw=0.8, ls=":", alpha=0.8, zorder=0)
+        ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
+        ax.grid(axis="x", visible=False)
+        ax.set_axisbelow(True)
+    ax_band.set_ylabel("Energy - E_F (eV)")
+    ax_q.tick_params(labelleft=False)
+    ax_band.set_ylim(ylim)
+    if title:
+        fig.suptitle(title, y=0.995)
+    fig.subplots_adjust(left=0.11, right=0.98, bottom=0.11, top=0.90 if title else 0.94, wspace=0.06)
+    os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+    fig.savefig(out, dpi=220)
+    if return_fig:
+        return fig, (ax_band, ax_q)
+    plt.close(fig)
+    return None
+
+
 def save_spectrum_txt(eigs_list: Sequence[np.ndarray], path: str, *, index_order: Sequence[int] | None = None) -> None:
     """Save full spectrum per Q to a txt file, one line per Q.
 
@@ -981,6 +1114,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     num_layers = int(material.get("num_layers", 2))
 
     eigs_list: list[np.ndarray]
+    band_eigs_list: list[np.ndarray] | None = None
     target = str(plot_cfg.get("target", "valence"))
     print(f"[kp] Target: {target}")
 
@@ -990,12 +1124,15 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     q2 = None
     vecs_list = None
 
-    if band_file and target.lower() != "all":
-        # Prefer precomputed band energies (fast path)
-        print(f"[kp] Using band file (fast path): {band_file}")
+    if band_file:
+        print(f"[kp] Using band file for k-path panel: {band_file}")
         rows = _load_bands_from_text(band_file)
-        eigs_list = [np.array(sorted(r)) for r in rows]
-        print(f"[kp] Loaded {len(eigs_list)} Q points from band file.")
+        band_eigs_list = [np.array(sorted(r)) for r in rows]
+        print(f"[kp] Loaded {len(band_eigs_list)} k-path rows from band file.")
+
+    if band_eigs_list is not None and target.lower() != "all":
+        # Keep normal bands for the left panel, then compute Q-block bands below.
+        eigs_list = band_eigs_list
     else:
         # Build from Hamiltonian (heavy). Keep for generality.
         hamk_file = resolve(material["hamk_file"])
@@ -1079,6 +1216,58 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         efermi = float(np.median(concat[-max(10, len(concat)//10):]))
         print(f"[kp] Using fallback efermi estimate: {efermi:.6f} eV")
 
+    if band_eigs_list is not None and target.lower() != "all":
+        hamk_file = resolve(material["hamk_file"])
+        qset1_file = resolve(material["qset1_file"])
+        qset2_file = resolve(material["qset2_file"])
+        print(f"[kp] Using Hamiltonian for Q-block panel: {hamk_file}")
+        print(f"[kp] Using Q-set files: {qset1_file}, {qset2_file}")
+
+        hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
+        q1, q2 = load_Q_sets(qset1_file, qset2_file)
+        print(f"[kp] Q1 shape={q1.shape}, Q2 shape={q2.shape}")
+
+        hamk_index = int(plot_cfg.get("hamk_index", 0))
+        if hamk.ndim == 3:
+            hamk2d = hamk[hamk_index]
+        elif hamk.ndim == 2:
+            hamk2d = hamk
+        else:
+            raise ValueError(f"Unexpected hamk ndim: {hamk.ndim}")
+
+        print(f"[kp] spin={spin}, num_layers={num_layers}")
+        num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
+            material,
+            hamk2d,
+            len(q1),
+            spin=spin,
+            mode=mode,
+        )
+        Qlayer_list = [[q1], [q2]]
+        print(f"[kp] num_layer_list = {num_layer_list}")
+        print(f"[kp] num_orb_per_layer_list = {num_orb_per_layer_list}")
+        block_n = (sum(num_layer_list) * orb0) * (2 if spin == "all" else 1)
+        print(f"[kp] block dimension per Q (with spin) = {block_n}")
+        nlow_state_list = plot_cfg.get("nlow_state_list", [])
+        norb_fix_list = plot_cfg.get("norb_fix_list", [])
+        print("[kp] nlow_state_list = ", nlow_state_list)
+        print("[kp] norb_fix_list = ", norb_fix_list)
+        hamk2d, block_spin = _selected_spin_block_for_projection(hamk2d, spin)
+        H_eig, H_vec, H_blocks, U_new = get_H_block(
+            hamk2d,
+            Qlayer_list,
+            num_layer_list,
+            num_orb_per_layer_list,
+            nlow_state_list,
+            norb_fix_list,
+            spin=block_spin,
+            mode=mode,
+        )
+        eigs_list = [np.asarray(ev, dtype=np.float64) for ev in H_eig]
+        vecs_list = [np.asarray(v, dtype=np.complex128) for v in H_vec]
+        print(f"[kp] Diagonalized {len(eigs_list)} Q blocks.")
+        print(f"[kp] {np.array(eigs_list).shape}")
+
     out_path = resolve(plot_cfg.get("out", f"plot_{mode}_scatter.png"))
     data_out = resolve(plot_cfg.get("data_out", os.path.splitext(out_path)[0] + ".txt"))
     ref_q_index = int(plot_cfg.get("ref_q_index", 0))
@@ -1129,16 +1318,49 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     # H_eig is an array of object vectors; normalize to list
     # Save spectrum to text
     save_spectrum_txt(eigs_list, data_out, index_order=index_order)
-    plot_eigs_scatter(
-        eigs_list,
-        efermi,
-        out=out_path,
-        # target=target,
-        # ref_q_index=ref_q_index,
-        title=title,
-        ylim=ylim,
-        index_order=index_order,
-    )
+    if band_eigs_list is not None and eigs_list is not band_eigs_list:
+        q_sector_lengths = None
+        if q1 is not None and q2 is not None:
+            if mode == "gamma":
+                q_sector_lengths = [len(eigs_list)]
+            else:
+                q_lengths = [len(q1), len(q2)]
+                q_sector_lengths = [
+                    int(n_layers) * int(q_lengths[group_index])
+                    for group_index, n_layers in enumerate(num_layer_list)
+                ]
+        k_axis = _kpath_axis_from_config(
+            cfg,
+            cfg_dir=cfg_dir,
+            project_indices=list(range(len(band_eigs_list))),
+            row_count=len(band_eigs_list),
+        )
+        plot_inspect_band_and_qblock(
+            band_eigs_list,
+            eigs_list,
+            efermi,
+            out=out_path,
+            title=title,
+            ylim=ylim,
+            q_index_order=index_order,
+            q_sector_lengths=q_sector_lengths,
+            ref_q_index=ref_q_index,
+            q_window_bands=int(plot_cfg.get("q_window_bands", 10)),
+            k_x_values=k_axis.get("x_values"),
+            k_x_ticks=k_axis.get("x_ticks"),
+            k_x_ticklabels=k_axis.get("x_ticklabels"),
+        )
+    else:
+        plot_eigs_scatter(
+            eigs_list,
+            efermi,
+            out=out_path,
+            # target=target,
+            # ref_q_index=ref_q_index,
+            title=title,
+            ylim=ylim,
+            index_order=index_order,
+        )
     _write_inspect_sidecars(
         cfg,
         output_dir=os.path.dirname(out_path) or ".",

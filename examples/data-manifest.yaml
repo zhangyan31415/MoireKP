@@ -232,8 +232,12 @@ datasets:
     required_files:
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         kind: file
+        size_bytes: 1475
+        sha256: 4caf567d1f26c7a76354cf692d34035ce8d0de35950768198c104b5bd0256a97
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         kind: file
+        size_bytes: 1464
+        sha256: 48f521dbfcd32d8d55094bc895109c3bf4710af62dab77afafb1833f6b62dcf7
       - path: examples/mote2_3.89/tapw/KPATH.in
         kind: file
         external:
@@ -333,10 +337,16 @@ datasets:
     required_files:
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         kind: file
+        size_bytes: 1885
+        sha256: bb26133704c944138c99376005a7b37e22188c7d43c5a6b9e74ce033819570e4
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         kind: file
+        size_bytes: 1496
+        sha256: 00736d5c88466c4da155e24d925aa8115b7113ae77860012f598dd46dd9844ef
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         kind: file
+        size_bytes: 1543
+        sha256: acecaefc966c3879e109fc599e020b8e53564bb7c0ee4bd30034d4a2f4bb68eb
       - path: examples/mgi2_3.89/tapw/KPATH.in
         kind: file
         external:

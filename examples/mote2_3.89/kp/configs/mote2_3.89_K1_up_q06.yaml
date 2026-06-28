@@ -27,7 +27,8 @@ plot:
   report_below: 4
   report_above: 0
   report_components: 8
-  ylim: [-2.2, 2.0]
+  q_window_bands: 10
+  ylim: [-1.0, 1.0]
   title: "MoTe2 K1 spin up q06: VBM band vs Q"
 
 project:

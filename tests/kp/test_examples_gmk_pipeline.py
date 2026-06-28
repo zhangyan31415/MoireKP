@@ -246,8 +246,8 @@ def test_gmk_case_configs_make_inspect_plot_settings_explicit() -> None:
         assert isinstance(plot, dict), path
         assert plot.get("target") in {"all", "valence", "conduction"}, path
         assert isinstance(plot.get("ref_q_index"), int), path
-        ylim = plot.get("ylim")
-        assert isinstance(ylim, list) and len(ylim) == 2, path
+        assert plot.get("ylim") == [-1.0, 1.0], path
+        assert int(plot.get("q_window_bands", 0)) > 0, path
 
 
 def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:

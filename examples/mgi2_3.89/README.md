@@ -17,20 +17,20 @@ fitting. Release examples do not use split source/model config directories.
 From the repository root:
 
 ```bash
-kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
-kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
 
-kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
-kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
 
-kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
-kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
 ```
 
 Run `inspect` first and check `kp/outputs/<profile>/<q_shell>/inspect/` before

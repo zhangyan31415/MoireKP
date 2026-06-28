@@ -65,3 +65,43 @@ def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) 
         import matplotlib.pyplot as plt
 
         plt.close(fig)
+
+
+def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
+    from kp import cli
+
+    fig, axes = cli.plot_inspect_band_and_qblock(
+        band_eigs_list=[
+            np.array([-0.30, -0.20, -0.10]),
+            np.array([-0.28, -0.18, -0.08]),
+            np.array([-0.27, -0.17, -0.07]),
+        ],
+        qblock_eigs_list=[
+            np.array([-0.31, -0.21, -0.11]),
+            np.array([-0.29, -0.19, -0.09]),
+            np.array([-0.26, -0.16, -0.06]),
+            np.array([-0.25, -0.15, -0.05]),
+        ],
+        efermi=-0.18,
+        out=str(tmp_path / "inspect.png"),
+        q_sector_lengths=[2, 2],
+        q_window_bands=2,
+        return_fig=True,
+    )
+
+    try:
+        ax_band, ax_q = axes
+        assert len(fig.axes) == 2
+        assert ax_band.get_shared_y_axes().joined(ax_band, ax_q)
+        assert ax_band.get_title() == "Band path"
+        assert ax_q.get_title() == "Q-block diagonalization"
+        assert tuple(round(float(item), 6) for item in ax_band.get_ylim()) == (-1.0, 1.0)
+        divider_lines = [
+            line for line in ax_q.lines
+            if line.get_linestyle() == "--" and len(set(line.get_xdata())) == 1
+        ]
+        assert divider_lines
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)

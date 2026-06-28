@@ -27,7 +27,8 @@ plot:
   report_below: 12
   report_above: 0
   report_components: 12
-  ylim: [-4.0, -1.0]
+  q_window_bands: 10
+  ylim: [-1.0, 1.0]
   title: "MgI2 Gamma q05: VBM band vs Q"
 
 project:

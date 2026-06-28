@@ -112,6 +112,55 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path)
     assert (inspect_dir / "blocks.csv").exists()
 
 
+def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp_path: Path) -> None:
+    q = np.zeros((1, 2), dtype=float)
+    hamk = np.zeros((1, 4, 4), dtype=np.complex128)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_load_hamk_with_energy_unit", lambda *_args, **_kwargs: hamk)
+    monkeypatch.setattr(cli, "load_Q_sets", lambda *_args, **_kwargs: (q, q.copy()))
+
+    def fake_get_H_block(*_args, **_kwargs):
+        eigs = np.empty(2, dtype=object)
+        eigs[0] = np.array([-0.2, 0.1])
+        eigs[1] = np.array([-0.1, 0.2])
+        vecs = np.empty(2, dtype=object)
+        vecs[0] = np.eye(2, dtype=np.complex128)
+        vecs[1] = np.eye(2, dtype=np.complex128)
+        return eigs, vecs, np.empty(0, dtype=object), np.empty(0, dtype=object)
+
+    def fake_combined_plot(band_rows, qblock_rows, efermi, *, out, q_sector_lengths=None, **kwargs):
+        captured["band_rows"] = len(band_rows)
+        captured["qblock_rows"] = len(qblock_rows)
+        captured["efermi"] = efermi
+        captured["q_sector_lengths"] = q_sector_lengths
+        Path(out).write_text("combined", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "get_H_block", fake_get_H_block)
+    monkeypatch.setattr(cli, "plot_inspect_band_and_qblock", fake_combined_plot)
+
+    cfg_path = tmp_path / "kp" / "configs" / "K1_q06.yaml"
+    cfg_path.parent.mkdir(parents=True)
+    (cfg_path.parent / "bands.txt").write_text("-0.3 -0.2 -0.1\n-0.28 -0.18 -0.08\n", encoding="utf-8")
+    cfg = _canonical_case_config()
+    cfg["material"]["band_file"] = "bands.txt"
+    cfg["material"]["efermi"] = -0.15
+    cfg["plot"] = {"mode": "K1", "target": "valence", "ref_q_index": 0}
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    cli.main(["inspect", "-c", str(cfg_path)])
+
+    inspect_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "inspect"
+    assert (inspect_dir / "scatter.png").read_text(encoding="utf-8") == "combined"
+    assert captured == {
+        "band_rows": 2,
+        "qblock_rows": 2,
+        "efermi": -0.15,
+        "q_sector_lengths": [1, 1],
+    }
+    assert (inspect_dir / "spectrum.txt").read_text(encoding="utf-8").splitlines()[0] == "-0.2000000000 0.1000000000"
+
+
 def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch, tmp_path: Path) -> None:
     q = np.zeros((1, 2), dtype=float)
     hamk = np.zeros((1, 4, 4), dtype=np.complex128)

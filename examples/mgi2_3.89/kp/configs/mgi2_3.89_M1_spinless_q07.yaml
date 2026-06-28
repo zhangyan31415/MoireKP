@@ -27,7 +27,8 @@ plot:
   report_below: 2
   report_above: 2
   report_components: 8
-  ylim: [-1.0, 8.0]
+  q_window_bands: 10
+  ylim: [-1.0, 1.0]
   title: "MgI2 M1 spinless q07: CBM band vs Q"
 
 project:
