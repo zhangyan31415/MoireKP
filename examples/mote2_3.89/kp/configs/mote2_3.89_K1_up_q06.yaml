@@ -37,7 +37,7 @@ project:
     - [22]
   gauge: auto
   downfold_method: fixed_schur
-  e_ref: -4.575
+  e_ref: -4.6
   workers: 61
 
 symm:

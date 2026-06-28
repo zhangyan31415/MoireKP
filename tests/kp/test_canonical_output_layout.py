@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -8,6 +9,8 @@ import yaml
 
 import kp.cli as cli
 from kp.config.case import normalize_case_config
+from kp.model.pipeline import _rotation_deg_from_symmetry_manifest
+from kp.model.symmetry import load_symmetry_source
 from kp.symmetry import projection as projection_mod
 
 
@@ -257,12 +260,46 @@ def test_model_canonical_defaults_read_project_heff(tmp_path: Path) -> None:
     np.save(project_dir / "heff.npy", np.zeros((1, 2, 2), dtype=np.complex128))
     symmetry_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "symmetry"
     symmetry_dir.mkdir(parents=True)
-    np.savez(symmetry_dir / "representations.npz", C3z=np.eye(2), C2T=np.eye(2))
+    np.savez(
+        symmetry_dir / "representations.npz",
+        C3z=np.eye(2),
+        C2T=np.eye(2),
+        __metadata_json__=np.asarray(
+            json.dumps({"frame": {"q_transform": {"rotation_deg": 0.0}}}, sort_keys=True)
+        ),
+    )
 
     model_cfg = load_model_config(cfg_path)
 
     assert model_cfg.heff_file == project_dir / "heff.npy"
     assert model_cfg.heff_eig_file is None
+
+
+def test_model_rejects_compact_symmetry_without_frame_metadata(tmp_path: Path) -> None:
+    from kp.model.pipeline import load_model_config
+
+    cfg_path = tmp_path / "kp" / "configs" / "K1_q06.yaml"
+    cfg_path.parent.mkdir(parents=True)
+    cfg = _canonical_case_config()
+    cfg["symm"] = {}
+    cfg["symmetry_source"] = {
+        "type": "kp_symm_output",
+        "path": "../outputs/K1/q06/symmetry",
+    }
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    project_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "projection"
+    project_dir.mkdir(parents=True)
+    np.save(project_dir / "heff.npy", np.zeros((1, 2, 2), dtype=np.complex128))
+    symmetry_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "symmetry"
+    symmetry_dir.mkdir(parents=True)
+    np.savez(symmetry_dir / "representations.npz", C3z=np.eye(2), C2T=np.eye(2))
+
+    try:
+        load_model_config(cfg_path)
+    except ValueError as exc:
+        assert "Rerun `kp symm`" in str(exc)
+    else:
+        raise AssertionError("compact symmetry without frame metadata should fail")
 
 
 def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_path: Path) -> None:
@@ -281,12 +318,28 @@ def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_pa
         "tolerance": 1.0e-8,
         "full_dim": 2,
         "low_dim": 2,
+        "frame": {
+            "q_transform": {"rotation_deg": 210.0},
+            "k_transform": {"rotation_deg": 210.0},
+        },
         "operations": [
                 {
                     "name": "C3z",
                     "operation": "C3z",
                     "matrix_file": "exactified_C3z.npy",
                     "antiunitary": False,
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                    "matrix_kind": "continuum_internal_rep_exact",
+                    "matrix_source": "kp_symm_exactified_action",
+                    "source_matrix_role": "raw_h_sewing_action",
+                    "source_gauge": "raw_saved_TAPW",
+                    "target_role": "continuum_internal_rep",
+                    "gauge_correction": {"kind": "none"},
+                    "antiunitary_convention": "none",
+                    "spin_map": "from_kp_symm_output",
+                    "valley_map": "identity",
                     "target_block_dims": [2],
                     "residuals": {"unitarity": 1.0e-12},
                     "pairs": [],
@@ -297,19 +350,43 @@ def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_pa
                     "operation": "C2T",
                     "matrix_file": "exactified_C2T.npy",
                     "antiunitary": True,
-                        "target_block_dims": [2],
-                        "pairs": [],
-                        "status": "exactified",
-                "exactification_distance": 2.0e-12,
-            },
-        ]
-    }
+                    "k_map": {"type": "reflection", "axis_deg": 60.0},
+                    "q_map": {"type": "reflection", "axis_deg": 60.0},
+                    "sector_map": "layer_exchange",
+                    "matrix_kind": "continuum_internal_rep_exact",
+                    "matrix_source": "kp_symm_exactified_action",
+                    "source_matrix_role": "raw_h_sewing_action",
+                    "source_gauge": "raw_saved_TAPW",
+                    "target_role": "continuum_internal_rep",
+                    "gauge_correction": {"kind": "none"},
+                    "antiunitary_convention": "U_K",
+                    "spin_map": "from_kp_symm_output",
+                    "valley_map": "identity",
+                    "target_block_dims": [2],
+                    "pairs": [],
+                    "status": "exactified",
+                    "exactification_distance": 2.0e-12,
+                },
+            ]
+        }
 
     projection_mod._write_canonical_symmetry_outputs(out_dir, summary)
 
     with np.load(out_dir / "representations.npz") as payload:
         np.testing.assert_allclose(payload["C3z"], np.eye(2))
         np.testing.assert_allclose(payload["C2T"], -np.eye(2))
+        metadata = json.loads(str(payload["__metadata_json__"].item()))
+    c2t = next(op for op in metadata["operations"] if op["name"] == "C2T")
+    assert c2t["k_map"] == {"type": "reflection", "axis_deg": 60.0}
+    rotation_deg = _rotation_deg_from_symmetry_manifest(
+        {"symmetry_source": {"type": "kp_symm_output", "path": str(out_dir)}},
+        base=tmp_path,
+    )
+    assert rotation_deg == 210.0
+    loaded = load_symmetry_source({"type": "kp_symm_output", "path": str(out_dir)}, base=tmp_path, expected_dim=2)
+    loaded_c2t = next(op for op in loaded.metadata["operations"] if op["name"] == "C2T")
+    assert loaded_c2t["k_map"] == {"type": "reflection", "axis_deg": 60.0}
+    assert loaded.generator.get_operator("C2T").shape == (2, 2)
     residuals = (out_dir / "residuals.csv").read_text(encoding="utf-8")
     assert "operation,status,unitarity,exactification_distance" in residuals
     assert "C3z,exactified,1e-12," in residuals
@@ -354,7 +431,7 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
     def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
         seen["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        for name in ("README.md", "MODEL.md", "evaluate.py", "model.json", "model_data.npz", "eigvals.npy", "band_comparison.pdf"):
+        for name in ("README.md", "MODEL.md", "evaluate.py", "model_data.npz", "eigvals.npy", "band_comparison.pdf"):
             (Path(output_dir) / name).write_text("x", encoding="utf-8")
         for stale in ("active_terms.json", "active_terms.sha256", "fit_selection.json", "run_summary.json", "model_run.log", "band_comparison_all.pdf"):
             (Path(output_dir) / stale).write_text("stale", encoding="utf-8")
@@ -372,6 +449,5 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
         "band_comparison.pdf",
         "eigvals.npy",
         "evaluate.py",
-        "model.json",
         "model_data.npz",
     }

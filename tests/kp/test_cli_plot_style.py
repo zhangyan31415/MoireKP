@@ -78,7 +78,7 @@ def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) 
 
     try:
         heff_lines = [line for line in ax.lines if line.get_zorder() == 2]
-        assert len(heff_lines) == 2
+        assert len(heff_lines) == 4
         assert max(float(np.max(line.get_ydata())) for line in heff_lines) == 0.0
         assert ax.get_xlabel() == "k-path point"
         assert ax.get_ylabel() == "Energy - E_top (eV)"
@@ -188,7 +188,7 @@ def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
             line for line in ax_q.lines
             if line.get_linestyle() == "-" and len(set(line.get_xdata())) > 1
         ]
-        assert q_band_lines, "Q-block bands should be rendered as lines with point markers"
+        assert len(q_band_lines) == 3
         assert {line.get_marker() for line in q_band_lines} == {"o"}
         divider_lines = [
             line for line in ax_q.lines

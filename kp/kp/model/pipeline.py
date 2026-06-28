@@ -935,8 +935,21 @@ def _rotation_deg_from_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) 
         k_transform = frame.get("k_transform", {})
         if isinstance(k_transform, Mapping) and "rotation_deg" in k_transform:
             return float(k_transform["rotation_deg"])
-    if (path / "representations.npz").exists():
-        return 0.0
+    representations = path / "representations.npz"
+    if representations.exists():
+        with np.load(representations, allow_pickle=False) as payload:
+            if "__metadata_json__" in payload.files:
+                metadata = json.loads(str(payload["__metadata_json__"].item()))
+                if isinstance(metadata, Mapping):
+                    frame = metadata.get("frame", {})
+                    if isinstance(frame, Mapping):
+                        q_transform = frame.get("q_transform", {})
+                        if isinstance(q_transform, Mapping) and "rotation_deg" in q_transform:
+                            return float(q_transform["rotation_deg"])
+                        k_transform = frame.get("k_transform", {})
+                        if isinstance(k_transform, Mapping) and "rotation_deg" in k_transform:
+                            return float(k_transform["rotation_deg"])
+        return None
     return None
 
 
@@ -998,6 +1011,10 @@ def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, 
             return dict(manifest) if isinstance(manifest, Mapping) else {}
     representations = path / "representations.npz"
     if representations.exists():
+        with np.load(representations, allow_pickle=False) as payload:
+            if "__metadata_json__" in payload.files:
+                metadata = json.loads(str(payload["__metadata_json__"].item()))
+                return dict(metadata) if isinstance(metadata, Mapping) else {}
         valley_model = raw.get("valley_model", {})
         if not isinstance(valley_model, Mapping):
             valley_model = {}
@@ -1013,6 +1030,7 @@ def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, 
                         **_packed_symmetry_operation_metadata(str(name), valley_model),
                     }
                     for name in payload.files
+                    if not str(name).startswith("__")
                 ],
                 "frame": {
                     "q_transform": {"rotation_deg": 0.0},
@@ -3662,26 +3680,27 @@ def _window_band_plot_config(
     plot_config: Mapping[str, Any] | None,
     *,
     target_bands: str = "top",
-    min_bands: int = 12,
+    default_bands: int = 10,
 ) -> dict[str, Any]:
-    if min_bands <= 0:
-        raise ValueError(f"min_bands must be positive, got {min_bands}")
+    if default_bands <= 0:
+        raise ValueError(f"default_bands must be positive, got {default_bands}")
     options = dict(plot_config or {})
     options.setdefault("show_metrics", False)
     options.setdefault("legend_outside", True)
+    options.setdefault("plot_all_bands", True)
     if options.get("band_slice") is not None:
         return options
     target = str(target_bands or "top").strip().lower()
     if options.get("top_bands") is not None:
-        options["top_bands"] = max(int(options["top_bands"]), int(min_bands))
+        options["top_bands"] = int(options["top_bands"])
         return options
     if options.get("bottom_bands") is not None:
-        options["bottom_bands"] = max(int(options["bottom_bands"]), int(min_bands))
+        options["bottom_bands"] = int(options["bottom_bands"])
         return options
     if target == "bottom":
-        options["bottom_bands"] = int(min_bands)
+        options["bottom_bands"] = int(default_bands)
     else:
-        options["top_bands"] = int(min_bands)
+        options["top_bands"] = int(default_bands)
     return options
 
 
@@ -3801,7 +3820,7 @@ def save_band_comparison_plot(
         heff_sel = heff_sel - heff_ref
     elif align not in {"none", "false", "0"}:
         raise ValueError(f"Unsupported bands.plot.align={plot_options.get('align')!r}; expected 'none', 'top', or 'bottom'")
-    plot_all_bands = bool(plot_options.get("plot_all_bands", plot_options.get("show_all_bands", False)))
+    plot_all_bands = bool(plot_options.get("plot_all_bands", plot_options.get("show_all_bands", True)))
     if plot_all_bands:
         model_plot = model_sorted - model_ref
         heff_plot = heff_sorted - heff_ref

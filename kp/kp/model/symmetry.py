@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -149,6 +150,10 @@ def _packed_manifest(path: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
     packed = path / "representations.npz"
     if not packed.exists():
         return {}
+    with np.load(packed, allow_pickle=False) as payload:
+        if "__metadata_json__" in payload.files:
+            metadata = json.loads(str(payload["__metadata_json__"].item()))
+            return dict(metadata) if isinstance(metadata, Mapping) else {}
     valley_model = raw.get("valley_model", {})
     if not isinstance(valley_model, Mapping):
         valley_model = {}
@@ -162,6 +167,7 @@ def _packed_manifest(path: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
                 **_packed_operation_metadata(str(name), valley_model),
             }
             for name in payload.files
+            if not str(name).startswith("__")
         ]
     return {
         "operations": operations,

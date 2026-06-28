@@ -26,7 +26,7 @@ SCHEMA_VERSION = "standalone-kp-model-v1"
 EXPORTER_VERSION = "0.1"
 P_MATCH_TOLERANCE = 1.0e-5
 FORBIDDEN_PRODUCTION_OPERATION_NAMES = {"C2x", "C2y", "C2yT", "mirror_x", "mirror_y"}
-DEFAULT_TOP_LEVEL_FILES = {"README.md", "MODEL.md", "evaluate.py", "model.json", "model_data.npz"}
+DEFAULT_TOP_LEVEL_FILES = {"README.md", "MODEL.md", "evaluate.py", "model_data.npz"}
 SUPPORTED_VALLEY_TYPES = {"K", "M", "Gamma"}
 SUPPORTED_SPIN_CONVENTIONS = {"spin_up_projected", "spin_down_projected", "spinful", "spinless_effective", "spinless"}
 
@@ -59,19 +59,17 @@ def export_standalone_model(
     if out.exists() and force and not in_place:
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
+    stale_model_json = out / "model.json"
+    if stale_model_json.exists() and stale_model_json.is_file():
+        stale_model_json.unlink()
 
     package = _build_standalone_export(model_output, include_debug=debug_files)
-    _assert_clean_text("model.json", json.dumps(package.model_json, sort_keys=True))
     _assert_clean_text("README.md", package.readme)
     _assert_clean_text("MODEL.md", package.model_doc)
 
     (out / "README.md").write_text(package.readme, encoding="utf-8")
     (out / "MODEL.md").write_text(package.model_doc, encoding="utf-8")
     (out / "evaluate.py").write_text(package.evaluate_py, encoding="utf-8")
-    (out / "model.json").write_text(
-        json.dumps(package.model_json, indent=2, sort_keys=True, allow_nan=False) + "\n",
-        encoding="utf-8",
-    )
     _write_npz(out / "model_data.npz", package.model_data)
 
     if debug_files:
@@ -199,6 +197,11 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
         "operator_q_center": operator_data["q_center"],
         "operator_prefactor_real": operator_data["prefactor_real"],
         "operator_prefactor_imag": operator_data["prefactor_imag"],
+        "term_r_value_real": np.asarray([float(term["r_value_real"]) for term in semantic_terms], dtype=float),
+        "term_r_value_imag": np.asarray([float(term["r_value_imag"]) for term in semantic_terms], dtype=float),
+        "dimension_dim": np.asarray(dim, dtype=np.int64),
+        "runtime_hermitianize_before_eigvalsh": np.asarray(True, dtype=np.bool_),
+        "runtime_max_antihermitian_norm": np.asarray(1.0e-10, dtype=float),
         "reference_kpoints": reference_kpoints,
         "reference_eigvals": np.asarray(reference_eigvals, dtype=float),
     }
@@ -649,6 +652,8 @@ def _load_exactified_matrices(model_config: Any, dim: int) -> dict[str, np.ndarr
     if packed_path.exists():
         with np.load(packed_path, allow_pickle=False) as packed:
             for key in packed.files:
+                if str(key).startswith("__"):
+                    continue
                 packed_keys.setdefault(_operation_family_name(str(key)), str(key))
     names = requested or sorted(available)
     if not names and packed_keys:
@@ -1402,9 +1407,9 @@ Runtime evaluation reads the pre-expanded arrays in `model_data.npz`:
 - `operator_prefactor_imag`
 
 For contribution `c`, `operator_term_index[c]` selects the fitted coefficient
-in `model.json["terms"]`; row/col select the matrix element; `mz/mz_star` and
-`q_center` define the monomial; prefactors multiply the real and imaginary
-coefficient channels.
+from `term_r_value_real` and `term_r_value_imag`; row/col select the matrix
+element; `mz/mz_star` and `q_center` define the monomial; prefactors multiply
+the real and imaginary coefficient channels.
 """
 
 
@@ -1428,6 +1433,7 @@ This writes:
 
 - `kpoints.npy`
 - `bands.npy`
+- `bands.pdf`
 - `kdist.npy`
 - `kpath_ticks.json`
 
@@ -1438,12 +1444,12 @@ Open `evaluate.py` and edit:
 - `HIGH_SYMMETRY_POINTS`
 - `KPATH`
 - `POINTS_PER_SEGMENT`
-- `BAND_SLICE`
+- `WINDOW_BANDS`
+- `WINDOW_EDGE`
 
 ## Files
 
 - `evaluate.py`: standalone evaluator
-- `model.json`: model metadata and coefficients
 - `model_data.npz`: arrays used by the evaluator
 - `MODEL.md`: model formula and basis notes
 """
@@ -1452,7 +1458,7 @@ Open `evaluate.py` and edit:
 def _material_display(model: Mapping[str, Any]) -> str:
     material = model.get("material", {})
     name = str(material.get("name", "")).strip() if isinstance(material, Mapping) else ""
-    return name if name else "not recorded in model.json"
+    return name if name else "not recorded"
 
 
 def _operation_names_text(model: Mapping[str, Any]) -> str:
@@ -1809,7 +1815,7 @@ def _render_validation_section(model: Mapping[str, Any]) -> str:
     max_abs = comparison.get("max_abs_error_mev", comparison.get("aligned_max_abs_error_meV", "not recorded"))
     heff_shape = validation.get("reference_heff_eig_shape")
     if heff_shape is None and validation.get("reference_heff_eig_available"):
-        heff_text = "`reference_heff_eig` is present; shape was not recorded in `model.json`."
+        heff_text = "`reference_heff_eig` is present; shape was not recorded."
     elif heff_shape is not None:
         heff_text = f"`reference_heff_eig` is present with shape `{heff_shape}`. It is compact validation data, not the raw `heff_list.npy`."
     else:
@@ -1857,9 +1863,9 @@ Standalone NumPy evaluator for `{model['model_id']}`.
 - Dimension: `{dim}`
 - Energy unit: `{model.get('energy_unit', 'eV')}`
 
-Files: `evaluate.py` runs the model; `model.json` stores metadata and fitted
-coefficients; `model_data.npz` stores q sets, exactified symmetry matrices,
-operator arrays, and compact reference arrays.
+Files: `evaluate.py` runs the model; `model_data.npz` stores q sets, fitted
+coefficients, exactified symmetry matrices, operator arrays, and compact
+reference arrays.
 
 ## Basis And Q Sets
 
@@ -1913,8 +1919,8 @@ $$
 Runtime mapping: `operator_term_index -> t`, `operator_row/col -> i_c/j_c`,
 `operator_mz/operator_mz_star -> m_c/\\bar m_c`, `operator_q_center -> q_c`,
 and `operator_prefactor_real/imag -> P_c^R/P_c^I`.
-`evaluate.py` combines these arrays with `r_value_real` and `r_value_imag`
-from `model.json["terms"]`.
+`evaluate.py` combines these arrays with `term_r_value_real` and
+`term_r_value_imag` from `model_data.npz`.
 
 Output bands are `{energy.get('output_bands', 'not recorded')}`.
 Validation alignment is `{energy.get('validation_alignment')}` and is applied
@@ -1923,7 +1929,7 @@ to output bands: `{energy.get('alignment_applied_to_output', False)}`.
 ## Terms
 
 Active term counts: {count_text}; total `{len(terms)}`.
-Kinetic (`"Kinect"` tag in `model.json`) terms, `Onsite`, `intra`, and `inter`
+Kinetic (`"Kinect"` tag) terms, `Onsite`, `intra`, and `inter`
 terms share the same runtime recipe. Semantic fields such as `key.Mz`,
 `key.p`, `operation_names`, and `metadata.term_name` explain the source term
 before export. Editing them does not rebuild `operator_*`; re-export with `kp`
@@ -1962,7 +1968,7 @@ For this exported model, the actual nonzero \\(\\rho_g\\) rules are:
 - Max error: `{validation.get('max_error_mev')}` meV
 - Full TAPW validation: `{validation.get('is_full_tapw_validation')}`
 
-Missing fields are recorded as `null` in `model.json`; no validation numbers are
+Missing fields are recorded as `null` in this report; no validation numbers are
 invented during export.
 
 ## Limitations
@@ -1981,7 +1987,20 @@ def _evaluate_py_template(model: Mapping[str, Any]) -> str:
     hsp = json.dumps(model.get("high_symmetry_points", {}), indent=4, sort_keys=True)
     kpath = repr(list(model.get("default_kpath", [])))
     points_per_segment = int(model.get("points_per_segment", 80))
-    band_slice = repr(model.get("default_band_slice", None))
+    default_band_slice = model.get("default_band_slice", None)
+    dim = int(model.get("dimension", {}).get("dim", 0)) if isinstance(model.get("dimension", {}), Mapping) else 0
+    window_bands: int | None = None
+    window_edge = "all"
+    if isinstance(default_band_slice, Sequence) and not isinstance(default_band_slice, (str, bytes)) and len(default_band_slice) == 2:
+        start, stop = int(default_band_slice[0]), int(default_band_slice[1])
+        window_bands = max(0, stop - start)
+        if dim > 0 and stop == dim:
+            window_edge = "top"
+        elif start == 0:
+            window_edge = "bottom"
+        else:
+            window_edge = "top"
+    window_bands_repr = repr(window_bands)
     bM1 = repr(list(coord.get("bM1", []))) if isinstance(coord, Mapping) else "[]"
     bM2 = repr(list(coord.get("bM2", []))) if isinstance(coord, Mapping) else "[]"
     coord_type = str(coord.get("type", "not recorded")) if isinstance(coord, Mapping) else "not recorded"
@@ -1996,8 +2015,9 @@ import numpy as np
 # Run this standalone evaluator with:
 #   python evaluate.py
 #
-# Edit HIGH_SYMMETRY_POINTS, KPATH, POINTS_PER_SEGMENT, and BAND_SLICE to change
-# the path or selected bands. Coordinates are {coord_type}.
+# Edit HIGH_SYMMETRY_POINTS, KPATH, POINTS_PER_SEGMENT, WINDOW_BANDS,
+# and WINDOW_EDGE to change the path or plotted energy window.
+# Coordinates are {coord_type}.
 
 # =========================
 # User-editable settings
@@ -2007,13 +2027,17 @@ HIGH_SYMMETRY_POINTS = {hsp}
 
 KPATH = {kpath}
 POINTS_PER_SEGMENT = {points_per_segment}
-BAND_SLICE = {band_slice}
+
+# All bands are drawn. These settings only control the plotted y-range.
+WINDOW_BANDS = {window_bands_repr}
+WINDOW_EDGE = {window_edge!r}
 
 BM1 = {bM1}
 BM2 = {bM2}
 
 OUT_KPOINTS = "kpoints.npy"
 OUT_BANDS = "bands.npy"
+OUT_BAND_PLOT = "bands.pdf"
 OUT_KDIST = "kdist.npy"
 OUT_TICKS = "kpath_ticks.json"
 
@@ -2023,17 +2047,9 @@ OUT_TICKS = "kpath_ticks.json"
 class StandaloneModel:
     def __init__(self, root):
         self.root = Path(root).resolve()
-        with (self.root / "model.json").open("r", encoding="utf-8") as handle:
-            self.metadata = json.load(handle)
         self.data = np.load(self.root / "model_data.npz", allow_pickle=False)
-        self.dim = int(self.metadata["dimension"]["dim"])
-        self.terms = list(self.metadata["terms"])
-        self.r_real = np.asarray([float(term["r_value_real"]) for term in self.terms], dtype=float)
-        self.r_imag = np.asarray([float(term["r_value_imag"]) for term in self.terms], dtype=float)
-        runtime = self.metadata.get("runtime", {{}})
-        self.hermitianize_before_eigvalsh = bool(runtime.get("hermitianize_before_eigvalsh", True))
-        self.max_antihermitian_norm = float(runtime.get("max_antihermitian_norm", 1.0e-10))
         self._required = [
+            "dimension_dim",
             "operator_term_index",
             "operator_row",
             "operator_col",
@@ -2042,10 +2058,26 @@ class StandaloneModel:
             "operator_q_center",
             "operator_prefactor_real",
             "operator_prefactor_imag",
+            "term_r_value_real",
+            "term_r_value_imag",
+            "runtime_hermitianize_before_eigvalsh",
+            "runtime_max_antihermitian_norm",
         ]
         missing = [key for key in self._required if key not in self.data.files]
         if missing:
             raise KeyError(f"model_data.npz is missing runtime keys: {{missing}}")
+        self.dim = int(np.asarray(self.data["dimension_dim"]).item())
+        self.r_real = np.asarray(self.data["term_r_value_real"], dtype=float)
+        self.r_imag = np.asarray(self.data["term_r_value_imag"], dtype=float)
+        self.hermitianize_before_eigvalsh = bool(
+            np.asarray(self.data["runtime_hermitianize_before_eigvalsh"]).item()
+        )
+        self.max_antihermitian_norm = float(np.asarray(self.data["runtime_max_antihermitian_norm"]).item())
+        term_index = np.asarray(self.data["operator_term_index"], dtype=np.int64)
+        if self.r_real.shape != self.r_imag.shape or self.r_real.ndim != 1:
+            raise ValueError("term_r_value_real and term_r_value_imag must be one-dimensional arrays of equal shape")
+        if term_index.size and int(np.max(term_index)) >= self.r_real.shape[0]:
+            raise ValueError("operator_term_index references a missing fitted coefficient")
 
     def hamiltonian(self, k):
         k = np.asarray(k, dtype=float)
@@ -2157,6 +2189,91 @@ def _generate_kpath():
     return np.asarray(kpoints, dtype=float), np.asarray(kdist, dtype=float), {{"labels": list(KPATH), "positions": tick_positions}}
 
 
+def _kdist_from_kpoints(kpoints):
+    kpoints = np.asarray(kpoints, dtype=float)
+    if kpoints.ndim != 2 or kpoints.shape[1] != 2:
+        raise ValueError(f"kpoints must have shape (Nk, 2), got {{kpoints.shape}}")
+    kdist = np.zeros(kpoints.shape[0], dtype=float)
+    for i in range(1, kpoints.shape[0]):
+        kdist[i] = kdist[i - 1] + float(np.linalg.norm(kpoints[i] - kpoints[i - 1]))
+    return kdist
+
+
+def _ticks_for_reference_kpath(kdist):
+    segments = len(KPATH) - 1
+    if segments <= 0:
+        return {{"labels": [], "positions": []}}
+    expected = segments * int(POINTS_PER_SEGMENT) + 1
+    if int(kdist.shape[0]) != expected:
+        return {{"labels": [], "positions": []}}
+    indices = [i * int(POINTS_PER_SEGMENT) for i in range(segments + 1)]
+    return {{"labels": list(KPATH), "positions": [float(kdist[i]) for i in indices]}}
+
+
+def _band_window(dim):
+    if WINDOW_BANDS is not None:
+        count = max(1, min(int(WINDOW_BANDS), int(dim)))
+        edge = str(WINDOW_EDGE).strip().lower()
+        if edge == "bottom":
+            start, stop = 0, count
+        elif edge in {{"top", "all"}}:
+            start, stop = int(dim) - count, int(dim)
+        else:
+            raise ValueError(f"WINDOW_EDGE must be 'top', 'bottom', or 'all', got {{WINDOW_EDGE!r}}")
+    else:
+        start, stop = 0, int(dim)
+    if start < 0 or stop > dim or start >= stop:
+        raise ValueError(f"Invalid band window [{{start}}, {{stop}}] for dim={{dim}}")
+    return start, stop
+
+
+def _plot_bands(kdist, bands, ticks, out_path):
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        print("matplotlib is not installed; skipped band plot")
+        return None
+
+    bands = np.asarray(bands, dtype=float)
+    start, stop = _band_window(bands.shape[1])
+    window = bands[:, start:stop]
+    edge = str(WINDOW_EDGE).strip().lower()
+    if edge == "bottom":
+        reference = float(np.min(window[:, 0]))
+        ylabel = "Energy - E_bottom (eV)"
+    elif edge in {{"top", "slice"}}:
+        reference = float(np.max(window[:, -1]))
+        ylabel = "Energy - E_top (eV)"
+    else:
+        reference = 0.0
+        ylabel = "Energy (eV)"
+    shifted = bands - reference
+    window_shifted = window - reference
+    fig, ax = plt.subplots(figsize=(3.0, 5.0))
+    for iband in range(shifted.shape[1]):
+        ax.plot(kdist, shifted[:, iband], color="#1f77b4", linewidth=1.05, marker="o", markersize=2.3)
+    if ticks.get("positions") and ticks.get("labels"):
+        ax.set_xticks([float(item) for item in ticks["positions"]])
+        ax.set_xticklabels([str(item) for item in ticks["labels"]])
+        for tick in ticks["positions"]:
+            ax.axvline(float(tick), color="0.86", linewidth=0.75, zorder=0)
+    else:
+        ax.set_xlabel("k-point index")
+    ax.axhline(0.0, color="#555555", linewidth=0.8, linestyle="--", alpha=0.8, zorder=0)
+    ax.set_ylabel(ylabel)
+    ymin = float(np.min(window_shifted))
+    ymax = float(np.max(window_shifted))
+    pad = max(0.004, 0.08 * (ymax - ymin if ymax > ymin else 1.0))
+    ax.set_ylim(ymin - pad, ymax + pad)
+    ax.grid(axis="y", color="0.88", linewidth=0.65)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=300)
+    plt.close(fig)
+    return out_path
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Evaluate standalone NumPy continuum model bands.")
     parser.add_argument("--model-root", default=".", help="Standalone package root")
@@ -2167,19 +2284,27 @@ def main(argv=None):
     root = Path(args.model_root).resolve()
     model = load_model(root)
     if args.kpoints is None:
-        kpoints, kdist, ticks = _generate_kpath()
+        if "reference_kpoints" in model.data.files:
+            kpoints = np.asarray(model.data["reference_kpoints"], dtype=float)
+            kdist = _kdist_from_kpoints(kpoints)
+            ticks = _ticks_for_reference_kpath(kdist)
+        else:
+            kpoints, kdist, ticks = _generate_kpath()
     else:
         kpoints = _load_kpoints(args.kpoints, root)
-        kdist = np.arange(kpoints.shape[0], dtype=float)
+        kdist = _kdist_from_kpoints(kpoints)
         ticks = {{"labels": [], "positions": []}}
-    bands = model.bands(kpoints, band_slice=BAND_SLICE)
+    bands = model.bands(kpoints, band_slice=None)
     np.save(_resolve_path(root, OUT_KPOINTS), kpoints)
     np.save(_resolve_path(root, args.out or OUT_BANDS), bands)
     np.save(_resolve_path(root, OUT_KDIST), kdist)
     with _resolve_path(root, OUT_TICKS).open("w", encoding="utf-8") as handle:
         json.dump(ticks, handle, indent=2, allow_nan=False)
         handle.write("\\n")
+    plot_path = _plot_bands(kdist, bands, ticks, _resolve_path(root, OUT_BAND_PLOT))
     print(f"wrote {{kpoints.shape[0]}} k-points and {{bands.shape[1]}} bands")
+    if plot_path is not None:
+        print(f"wrote band plot: {{plot_path}}")
     return 0
 
 

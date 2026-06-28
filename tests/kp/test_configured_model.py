@@ -5933,6 +5933,40 @@ def test_save_band_comparison_plot_can_plot_all_bands_with_top_band_window(monke
     assert ylims[-1][1] < 3.5
 
 
+def test_save_band_comparison_plot_draws_all_bands_by_default(monkeypatch, tmp_path: Path) -> None:
+    import matplotlib.axes
+    from kp.plot_style import KP_MODEL_STYLE, KP_REFERENCE_STYLE
+
+    model = np.array(
+        [
+            [-100.0, -1.0, 0.0, 2.0, 3.0],
+            [-99.0, -0.8, 0.2, 2.2, 3.2],
+        ]
+    )
+    heff = model + 0.01
+    plotted_colors: list[str] = []
+
+    original_plot = matplotlib.axes.Axes.plot
+
+    def spy_plot(self, *args, **kwargs):
+        color = kwargs.get("color")
+        if color in {KP_REFERENCE_STYLE["color"], KP_MODEL_STYLE["color"]}:
+            plotted_colors.append(str(color))
+        return original_plot(self, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", spy_plot)
+
+    save_band_comparison_plot(
+        model,
+        heff,
+        tmp_path / "bands.png",
+        plot_config={"top_bands": 2},
+    )
+
+    assert plotted_colors.count(KP_REFERENCE_STYLE["color"]) == 5
+    assert plotted_colors.count(KP_MODEL_STYLE["color"]) == 5
+
+
 def test_save_band_comparison_plot_uses_release_style_by_default(monkeypatch, tmp_path: Path) -> None:
     import matplotlib.axes
     import matplotlib.pyplot as plt
@@ -5997,10 +6031,10 @@ def test_all_band_plot_config_drops_zoom_selection_and_annotations() -> None:
     assert "ylim" not in config
 
 
-def test_window_band_plot_config_uses_at_least_twelve_bands() -> None:
+def test_window_band_plot_config_respects_explicit_top_bands() -> None:
     config = _window_band_plot_config({"top_bands": 10, "align": "top"}, target_bands="top")
 
-    assert config["top_bands"] == 12
+    assert config["top_bands"] == 10
     assert config["align"] == "top"
     assert config["show_metrics"] is False
     assert config["legend_outside"] is True
@@ -6010,15 +6044,21 @@ def test_window_band_plot_config_respects_larger_or_explicit_slices() -> None:
     assert _window_band_plot_config({"top_bands": 16}, target_bands="top")["top_bands"] == 16
 
     sliced = _window_band_plot_config({"band_slice": [4, 18], "align": "top"}, target_bands="top")
-    assert sliced == {"band_slice": [4, 18], "align": "top", "show_metrics": False, "legend_outside": True}
+    assert sliced == {
+        "band_slice": [4, 18],
+        "align": "top",
+        "show_metrics": False,
+        "legend_outside": True,
+        "plot_all_bands": True,
+    }
 
 
 def test_window_band_plot_config_defaults_from_target_edge() -> None:
     top = _window_band_plot_config({}, target_bands="top")
     bottom = _window_band_plot_config({}, target_bands="bottom")
 
-    assert top["top_bands"] == 12
-    assert bottom["bottom_bands"] == 12
+    assert top["top_bands"] == 10
+    assert bottom["bottom_bands"] == 10
 
 
 def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_path: Path) -> None:

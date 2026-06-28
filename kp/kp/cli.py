@@ -380,7 +380,7 @@ def plot_eigs_scatter(
     top_bands: int | None = None,
     bottom_bands: int | None = None,
     band_slice: Sequence[int] | None = None,
-    plot_all_bands: bool = False,
+    plot_all_bands: bool = True,
     align: str = "fermi",
     x_values: Sequence[float] | None = None,
     x_ticks: Sequence[float] | None = None,
@@ -639,13 +639,15 @@ def plot_inspect_band_and_qblock(
         ax_band.set_title("Band path")
 
         x_q = np.arange(E_q.shape[0], dtype=float)
-        for band_index in q_band_indices:
+        q_window_set = set(q_band_indices)
+        for band_index in range(E_q.shape[1]):
+            style = {**KP_PRIMARY_STYLE, **KP_MARKER_STYLE}
+            style["alpha"] = 1.0 if band_index in q_window_set else 0.32
             ax_q.plot(
                 x_q,
                 E_q[:, band_index] - efermi,
-                **KP_PRIMARY_STYLE,
-                **KP_MARKER_STYLE,
-                label="Q block" if band_index == q_band_indices[0] else "_nolegend_",
+                **style,
+                label="Q block" if band_index == 0 else "_nolegend_",
             )
         if q_sector_lengths:
             cumulative = 0
