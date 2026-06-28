@@ -80,7 +80,7 @@ def test_kp_inspect_alias_dispatches_to_plot() -> None:
     assert calls == ["K1_q06.yaml"]
 
 
-def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path) -> None:
+def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path, capsys) -> None:
     q = np.zeros((1, 2), dtype=float)
     hamk = np.zeros((1, 4, 4), dtype=np.complex128)
 
@@ -100,16 +100,19 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path)
     cfg_path = tmp_path / "kp" / "configs" / "K1_q06.yaml"
     cfg_path.parent.mkdir(parents=True)
     cfg = _canonical_case_config()
-    cfg["plot"] = {"mode": "gamma"}
+    cfg["material"]["efermi"] = 0.0
+    cfg["plot"] = {"mode": "gamma", "report_below": 1, "report_above": 1}
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["inspect", "-c", str(cfg_path)])
+    stdout = capsys.readouterr().out
 
     inspect_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "inspect"
     assert (inspect_dir / "spectrum.txt").exists()
     assert (inspect_dir / "scatter.png").read_text(encoding="utf-8") == "plot"
-    assert (inspect_dir / "candidates.md").exists()
+    assert not (inspect_dir / "candidates.md").exists()
     assert (inspect_dir / "blocks.csv").exists()
+    assert "[kp] Selected bands at ref_Q=0: below EF [0], above EF [1]" in stdout
 
 
 def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp_path: Path) -> None:

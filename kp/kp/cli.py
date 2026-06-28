@@ -139,25 +139,6 @@ def _write_inspect_sidecars(
         "q_index,band_index,energy_eV,relative_to_efermi_eV\n" + "\n".join(rows) + ("\n" if rows else ""),
     )
 
-    ref_q = max(0, min(int(ref_q_index), len(eigs_list) - 1)) if eigs_list else 0
-    ref = np.asarray(eigs_list[ref_q], dtype=float) if eigs_list else np.asarray([], dtype=float)
-    below = np.where(ref < float(efermi))[0]
-    above = np.where(ref >= float(efermi))[0]
-    suggested = {
-        "below": below[-2:].astype(int).tolist() if below.size else [],
-        "above": above[:2].astype(int).tolist() if above.size else [],
-    }
-    lines = [
-        "# KP Inspect Candidates",
-        "",
-        f"- reference_q_index: {ref_q}",
-        f"- efermi_eV: {float(efermi):.12g}",
-        f"- suggested_below: {suggested['below']}",
-        f"- suggested_above: {suggested['above']}",
-        "",
-        "Use this report to set `project.nlow_state_list`, `project.gauge`, and model band windows in the same config.",
-    ]
-    _write_text(out / "candidates.md", "\n".join(lines) + "\n")
     _write_case_summary(cfg, out, "inspect")
 
 
