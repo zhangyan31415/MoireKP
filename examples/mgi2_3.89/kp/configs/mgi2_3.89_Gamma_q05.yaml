@@ -1,0 +1,67 @@
+case:
+  profile: Gamma
+  q_shell: q05
+  output_root: ../outputs
+title: MgI2 Gamma q05
+valley: Gamma
+spin: all
+
+material:
+  name: MgI2
+  num_layer_list: [1, 1]
+  orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2
+  efermi: -4.168612
+  hamk_file: ../../tapw/Q_shell_5_symm/band/hamk_Gamma_valley.npy
+  qset1_file: ../../tapw/Q_shell_5_symm/g_vec_list_5_Gamma_1layer.npy
+  qset2_file: ../../tapw/Q_shell_5_symm/g_vec_list_5_Gamma_2layer.npy
+  band_file: ../../tapw/Q_shell_5_symm/band/band_VBM_Gamma_valley.txt
+
+project:
+  nlow_state_list:
+    - [40, 41]
+    - [42, 43]
+  gauge: auto
+  downfold_method: fixed_schur
+  e_ref: -5.75
+
+symm:
+  tapw_symmetry_dir: ../../tapw/symmetry_analysis_test_gamma_q5
+  tolerance: 1.0e-2
+
+kpath:
+  file: ../../tapw/KPATH.in
+  tmat: [[60.9508659523, 0.0, 0.0], [-30.4754329751, 52.7849982976, 0.0], [0.0, 0.0, 50.0]]
+
+model:
+  n_orb: [2, 2]
+  harmonics:
+    intralayer: 4
+    interlayer: 4
+  max_order:
+    kinetic: 10
+    intralayer: 6
+    interlayer: 10
+  fit:
+    indices: [0, 40]
+    coeff_tol: 1.0e-6
+    refine_bands:
+      enabled: true
+      solver: linear_low_subspace
+      indices: [0, 2, 10, 20, 30, 40, 50, 60]
+      top_bands: 10
+      align: top
+      variable_tags: [kinetic, onsite, intralayer]
+      components: [real]
+      regularization: 0.3
+      weighted_band_loss:
+        enabled: true
+        primary_bands: 4
+        decay: 0.75
+        floor: 0.45
+  bands:
+    compare_to_heff: true
+    band_slice: [0, 124]
+    plot:
+      top_bands: 10
+      align: top
+      figsize: [3.2, 5.8]

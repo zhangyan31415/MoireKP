@@ -1,16 +1,15 @@
 ## MoTe2 3.89
 
-This release example covers the MoTe2 K1 valley at 3.89 degrees. The active KP
-entry points are:
+This release example covers the MoTe2 K1 valley at 3.89 degrees. The
+release-facing KP entry points use one config per case:
 
 ```text
-kp/configs/source/mote2_3.89_K1.yaml
-kp/configs/model/mote2_3.89_K1.yaml
-kp/configs/source/mote2_3.89_K1_spinful.yaml
-kp/configs/model/mote2_3.89_K1_spinful.yaml
+kp/configs/mote2_3.89_K1_q06.yaml
+kp/configs/mote2_3.89_K1_up_q06.yaml
 ```
 
-Both cases use automatic gauge anchors. The spinful case exercises the
+The older split source/model configs are kept for compatibility. Both cases use
+automatic gauge anchors. The spinful case exercises the
 spinful C3z exactification path: the projected raw-H C3z action is treated as a
 block action first, then cleaned to a monomial continuum representation when
 the block support is clearly cleaner than the raw monomial support. This avoids
@@ -21,16 +20,19 @@ using a single monomial phase branch for the two spinful C3z branches.
 From the repository root:
 
 ```bash
-kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp fit  -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed/external-data
-kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml -o exported/mote2_3.89_K1  # precomputed
+kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
 
-kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
-kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml  # external-data
-kp fit  -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml  # precomputed/external-data
-kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml -o exported/mote2_3.89_K1_spinful  # precomputed
+kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
 ```
+
+Run `inspect` first and check `kp/outputs/<profile>/<q_shell>/inspect/` before
+changing `project.nlow_state_list`.
 
 ### Current Metrics
 

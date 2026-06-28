@@ -1,43 +1,41 @@
 ## MgI2 3.89
 
-This release example covers MgI2 at 3.89 degrees. The active KP entry points
-use split source/model configs:
+This release example covers MgI2 at 3.89 degrees. The release-facing KP entry
+points use one config per case:
 
 ```text
-kp/configs/source/mgi2_3.89_Gamma.yaml
-kp/configs/model/mgi2_3.89_Gamma.yaml
-kp/configs/source/mgi2_3.89_M1.yaml
-kp/configs/model/mgi2_3.89_M1.yaml
-kp/configs/source/mgi2_3.89_M1_spinful.yaml
-kp/configs/model/mgi2_3.89_M1_spinful.yaml
+kp/configs/mgi2_3.89_Gamma_q05.yaml
+kp/configs/mgi2_3.89_M1_q07.yaml
+kp/configs/mgi2_3.89_M1_spinless_q07.yaml
 ```
 
-Source configs drive inspection, projection, and symmetry projection. Model
-configs consume the projected/exactified outputs and define fitting settings,
-sectors, and term templates.
+Each config drives inspection, projection, symmetry projection, and model
+fitting. The older split source/model configs are kept for compatibility.
 
 ### Run KP
 
 From the repository root:
 
 ```bash
-kp proj -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
-kp symm -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml  # external-data
-kp fit  -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml  # precomputed/external-data
-kp export -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml -o exported/mgi2_3.89_Gamma  # precomputed
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
 
-kp proj -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
-kp symm -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml  # external-data
-kp fit  -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml  # precomputed/external-data
-kp export -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml -o exported/mgi2_3.89_M1  # precomputed
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
 
-kp proj -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
-kp symm -c examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml  # external-data
-kp fit  -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml  # precomputed/external-data
-kp export -c examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml -o exported/mgi2_3.89_M1_spinful  # precomputed
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
 ```
 
-Each case uses `project.gauge: auto`; users do not write `norb_fix_list`.
+Run `inspect` first and check `kp/outputs/<profile>/<q_shell>/inspect/` before
+changing `project.nlow_state_list`. Each case uses `project.gauge: auto`; users
+do not write `norb_fix_list`.
 
 ### Current Metrics
 
