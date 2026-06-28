@@ -24,6 +24,7 @@ from .blocks import (
     set_projector_blas_threads,
 )
 from .basis.selection import GaugeAnchorReport, write_basis_selection_report
+from .basis.selection import _format_report_markdown as _format_basis_report_markdown
 from .plot_style import (
     KP_BAND_BOX_ASPECT,
     KP_BAND_FIGSIZE,
@@ -73,6 +74,16 @@ def _write_text(path: str | Path, text: str) -> None:
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(text, encoding="utf-8")
+
+
+def _remove_known_stale_files(directory: str | Path, filenames: Sequence[str]) -> None:
+    root = Path(directory)
+    if not root.exists():
+        return
+    for name in filenames:
+        path = root / name
+        if path.is_file() or path.is_symlink():
+            path.unlink()
 
 
 def _write_case_summary(cfg: dict[str, Any], workflow_dir: str | Path, workflow: str) -> None:
@@ -168,6 +179,24 @@ def _record_standalone_export(model_output_dir: Path, export_path: Path) -> None
     except ValueError:
         summary["standalone_export"] = str(export_resolved)
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+
+def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
+    keep = {
+        "README.md",
+        "MODEL.md",
+        "evaluate.py",
+        "model.json",
+        "model_data.npz",
+        "eigvals.npy",
+        "band_comparison.pdf",
+    }
+    root = Path(model_output_dir)
+    if not root.exists():
+        return
+    for path in root.iterdir():
+        if path.is_file() and path.name not in keep:
+            path.unlink()
 
 
 def _energy_scale_from_material(material: dict[str, Any]) -> float:
@@ -351,6 +380,7 @@ def plot_eigs_scatter(
     top_bands: int | None = None,
     bottom_bands: int | None = None,
     band_slice: Sequence[int] | None = None,
+    plot_all_bands: bool = False,
     align: str = "fermi",
     x_values: Sequence[float] | None = None,
     x_ticks: Sequence[float] | None = None,
@@ -413,9 +443,16 @@ def plot_eigs_scatter(
             raise ValueError(f"Empty band plotting window start={start}, stop={stop}, nbands={nbands}")
         return arr[:, start:stop]
 
-    E = select_window(E)
+    E_full = E
+    E_window = select_window(E)
     if E0 is not None:
-        E0 = select_window(E0)
+        E0_full = E0
+        E0_window = select_window(E0)
+    else:
+        E0_full = None
+        E0_window = None
+    E = E_full if plot_all_bands else E_window
+    E0 = E0_full if (plot_all_bands and E0_full is not None) else E0_window
 
     x = np.asarray(x_values, dtype=float) if x_values is not None else np.arange(E.shape[0], dtype=float)
     if x.shape[0] != E.shape[0]:
@@ -434,8 +471,8 @@ def plot_eigs_scatter(
             return 0.0
         raise ValueError(f"Unsupported band plot align={align!r}; expected 'top', 'bottom', 'fermi', or 'none'")
 
-    shift = shift_for(E)
-    original_shift = shift_for(E0) if E0 is not None else shift
+    shift = shift_for(E_window)
+    original_shift = shift_for(E0_window) if E0_window is not None else shift
     if E0 is not None:
         for i in range(E0.shape[1]):
             ax.plot(
@@ -478,6 +515,12 @@ def plot_eigs_scatter(
         ax.set_title(title)
     if ylim is not None:
         ax.set_ylim(ylim)
+    elif plot_all_bands and (top_bands is not None or bottom_bands is not None or band_slice is not None):
+        window_shifted = E_window - shift
+        ymin = float(np.min(window_shifted))
+        ymax = float(np.max(window_shifted))
+        pad = max(0.02, 0.05 * (ymax - ymin if ymax > ymin else 1.0))
+        ax.set_ylim(ymin - pad, ymax + pad)
     if E0 is not None:
         ax.legend(**KP_LEGEND_KWARGS)
     apply_kp_axis_style(
@@ -1811,18 +1854,36 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             mode=mode,
         )
     norb_fix_list = resolved_norb_fix_list
-    write_basis_selection_report(out_dir, gauge_report)
     if canonical_project:
-        basis_md = Path(out_dir) / "basis_selection.md"
-        if basis_md.exists():
-            (Path(out_dir) / "basis.md").write_text(basis_md.read_text(encoding="utf-8"), encoding="utf-8")
+        _remove_known_stale_files(
+            out_dir,
+            (
+                "auto_norb_fix_list.yaml",
+                "basis_selection.json",
+                "basis_selection.md",
+                "eigvals.npy",
+                "heff_eig.npy",
+                "heff_list.npy",
+                "heff_vec.npy",
+                "scatter.png",
+                "vectors.npy",
+            ),
+        )
+        basis_payload = gauge_report.to_dict()
+        _write_text(Path(out_dir) / "basis.md", _format_basis_report_markdown(basis_payload))
         np.savez(
             Path(out_dir) / "basis.npz",
             nlow_state_list=np.asarray(nlow_state_list, dtype=object),
             norb_fix_list=np.asarray(norb_fix_list, dtype=object),
         )
+    else:
+        write_basis_selection_report(out_dir, gauge_report)
+    if canonical_project:
+        basis_report_path = os.path.join(out_dir, "basis.md")
+    else:
+        basis_report_path = os.path.join(out_dir, "basis_selection.json")
     print(f"[kp]   gauge={gauge_report.gauge_mode}")
-    print(f"[kp]   basis selection report={os.path.join(out_dir, 'basis_selection.json')}")
+    print(f"[kp]   basis selection report={basis_report_path}")
     print(f"[kp]   output directory={out_dir}")
     if verbose:
         print(f"[kp]   hamk={hamk_file}")
@@ -1833,8 +1894,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp]   norb_fix_list={norb_fix_list}")
     # Unified output directory for all artifacts
     out_heff = os.path.join(out_dir, "heff.npy" if canonical_project else "heff_list.npy")
-    out_eig = os.path.join(out_dir, "eigvals.npy" if canonical_project else "heff_eig.npy")
-    out_vec = os.path.join(out_dir, "vectors.npy" if canonical_project else "heff_vec.npy")
+    out_eig = None if canonical_project else os.path.join(out_dir, "heff_eig.npy")
+    out_vec = os.path.join(out_dir, "wavefunctions.npy" if canonical_project else "heff_vec.npy")
     plot_out = os.path.join(out_dir, "scatter.pdf" if canonical_project else "heff_scatter.png")
     data_out = os.path.join(out_dir, "eigvals.txt" if canonical_project else "heff_spectrum.txt")
     original_eigs_list = None
@@ -1949,19 +2010,17 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     # Save
     os.makedirs(os.path.dirname(out_heff) or ".", exist_ok=True)
     np.save(out_heff, heff_arr)
-    np.save(out_eig, heig_arr)
+    if out_eig is not None:
+        np.save(out_eig, heig_arr)
     np.save(out_vec, hvec_arr)
-    if canonical_project:
-        np.save(os.path.join(out_dir, "heff_list.npy"), heff_arr)
-        np.save(os.path.join(out_dir, "heff_eig.npy"), heig_arr)
-        np.save(os.path.join(out_dir, "heff_vec.npy"), hvec_arr)
     if has_explicit_k_indices:
         np.save(os.path.join(out_dir, "k_indices.npy"), np.asarray(project_indices, dtype=int))
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
         print(f"[kp] Heff shape: {heff_arr.shape}")
     print("[kp] Saved arrays:")
     print(f"[kp]   {out_heff}")
-    print(f"[kp]   {out_eig}")
+    if out_eig is not None:
+        print(f"[kp]   {out_eig}")
     print(f"[kp]   {out_vec}")
     _print_project_diagnostics(
         diag_list,
@@ -1982,8 +2041,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     if not isinstance(project_plot_cfg, dict):
         raise ValueError("project.plot must be a mapping when provided")
     project_top_bands = project_plot_cfg.get("top_bands", project_cfg.get("plot_top_bands"))
+    if canonical_project and project_top_bands is None:
+        project_top_bands = 10
     project_bottom_bands = project_plot_cfg.get("bottom_bands", project_cfg.get("plot_bottom_bands"))
     project_band_slice = project_plot_cfg.get("band_slice", project_cfg.get("plot_band_slice"))
+    project_plot_all_bands = _as_bool(project_plot_cfg.get("plot_all_bands", project_cfg.get("plot_all_bands", canonical_project)))
     project_align = str(project_plot_cfg.get("align", project_cfg.get("plot_align", "fermi")))
     kpath_axis = _kpath_axis_from_config(
         cfg,
@@ -2017,6 +2079,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         top_bands=None if project_top_bands is None else int(project_top_bands),
         bottom_bands=None if project_bottom_bands is None else int(project_bottom_bands),
         band_slice=project_band_slice,
+        plot_all_bands=project_plot_all_bands,
         align=project_align,
         xlabel="k-path point",
         figsize=KP_BAND_FIGSIZE if canonical_project else None,
@@ -2400,7 +2463,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"[kp model]   harmonics: intra={intra_count}, inter={inter_count}")
             if sym_ops:
                 print(f"[kp model]   symmetry: {', '.join(str(op) for op in sym_ops)}")
-            if results.get("model_log"):
+            if results.get("model_log") and not _config_path_uses_canonical_case(args.config):
                 print(f"[kp model]   detailed log: {results['model_log']}")
             if results.get("runtime_s") is not None:
                 print(f"[kp model]   runtime: {float(results['runtime_s']):.2f} s")
@@ -2458,6 +2521,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             debug_files=bool(args.debug_files),
         )
         _record_standalone_export(Path(model_cfg.output_dir), Path(export_path))
+        if _config_path_uses_canonical_case(args.config):
+            _cleanup_canonical_model_output(model_cfg.output_dir)
         print(f"[kp model]   standalone export: {export_path}")
     else:
         raise SystemExit(2)

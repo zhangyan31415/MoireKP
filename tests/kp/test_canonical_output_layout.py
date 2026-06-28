@@ -164,7 +164,7 @@ def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp
     assert (inspect_dir / "spectrum.txt").read_text(encoding="utf-8").splitlines()[0] == "-0.2000000000 0.1000000000"
 
 
-def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch, tmp_path: Path) -> None:
+def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Path) -> None:
     q = np.zeros((1, 2), dtype=float)
     hamk = np.zeros((1, 4, 4), dtype=np.complex128)
     captured_plot: dict[str, object] = {}
@@ -186,6 +186,8 @@ def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch
         captured_plot["figsize"] = figsize
         captured_plot["box_aspect"] = box_aspect
         captured_plot["font_family"] = font_family
+        captured_plot["top_bands"] = _kwargs.get("top_bands")
+        captured_plot["plot_all_bands"] = _kwargs.get("plot_all_bands")
         Path(out).write_text("plot")
 
     monkeypatch.setattr(cli, "plot_eigs_scatter", fake_project_plot)
@@ -200,16 +202,32 @@ def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch
 
     projection_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "projection"
     assert np.load(projection_dir / "heff.npy").shape == (1, 2, 2)
+    assert np.load(projection_dir / "wavefunctions.npy").shape == (1, 2, 2)
     assert (projection_dir / "eigvals.txt").exists()
     assert (projection_dir / "basis.md").exists()
     assert (projection_dir / "basis.npz").exists()
     assert (projection_dir / "scatter.pdf").read_text(encoding="utf-8") == "plot"
-    assert (projection_dir / "heff_list.npy").exists()
-    assert (projection_dir / "heff_eig.npy").exists()
+    assert set(path.name for path in projection_dir.iterdir()) == {
+        "basis.md",
+        "basis.npz",
+        "eigvals.txt",
+        "heff.npy",
+        "scatter.pdf",
+        "wavefunctions.npy",
+    }
+    assert not (projection_dir / "heff_list.npy").exists()
+    assert not (projection_dir / "heff_eig.npy").exists()
+    assert not (projection_dir / "heff_vec.npy").exists()
+    assert not (projection_dir / "vectors.npy").exists()
+    assert not (projection_dir / "basis_selection.json").exists()
+    assert not (projection_dir / "basis_selection.md").exists()
+    assert not (projection_dir / "auto_norb_fix_list.yaml").exists()
     assert captured_plot["efermi"] == 0.0
     assert tuple(captured_plot["figsize"]) == (3.0, 5.0)
     assert round(float(captured_plot["box_aspect"]), 6) == round(5 / 3, 6)
     assert captured_plot["font_family"]
+    assert captured_plot["top_bands"] == 10
+    assert captured_plot["plot_all_bands"] is True
 
 
 def test_project_without_low_state_selection_points_user_to_inspect() -> None:
@@ -222,23 +240,66 @@ def test_project_without_low_state_selection_points_user_to_inspect() -> None:
         raise AssertionError("missing project.nlow_state_list should fail")
 
 
+def test_model_canonical_defaults_read_project_heff(tmp_path: Path) -> None:
+    from kp.model.pipeline import load_model_config
+
+    cfg_path = tmp_path / "kp" / "configs" / "K1_q06.yaml"
+    cfg_path.parent.mkdir(parents=True)
+    cfg = _canonical_case_config()
+    cfg["symm"] = {}
+    cfg["symmetry_source"] = {
+        "type": "kp_symm_output",
+        "path": "../outputs/K1/q06/symmetry",
+    }
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    project_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "projection"
+    project_dir.mkdir(parents=True)
+    np.save(project_dir / "heff.npy", np.zeros((1, 2, 2), dtype=np.complex128))
+    symmetry_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "symmetry"
+    symmetry_dir.mkdir(parents=True)
+    np.savez(symmetry_dir / "representations.npz", C3z=np.eye(2), C2T=np.eye(2))
+
+    model_cfg = load_model_config(cfg_path)
+
+    assert model_cfg.heff_file == project_dir / "heff.npy"
+    assert model_cfg.heff_eig_file is None
+
+
 def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_path: Path) -> None:
     out_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "symmetry"
     out_dir.mkdir(parents=True)
     np.save(out_dir / "exactified_C3z.npy", np.eye(2, dtype=np.complex128))
     np.save(out_dir / "exactified_C2T.npy", -np.eye(2, dtype=np.complex128))
+    np.save(out_dir / "C3z_low_raw.npy", 2.0 * np.eye(2, dtype=np.complex128))
+    np.save(out_dir / "q_model_layer1.npy", np.zeros((1, 2), dtype=float))
+    np.save(out_dir / "q_model_layer2.npy", np.zeros((1, 2), dtype=float))
+    for stale in ("manifest.json", "summary.json", "basis_selection.json", "basis_selection.md", "auto_norb_fix_list.yaml"):
+        (out_dir / stale).write_text("stale", encoding="utf-8")
     summary = {
+        "valley": "K1",
+        "spin": "up",
+        "tolerance": 1.0e-8,
+        "full_dim": 2,
+        "low_dim": 2,
         "operations": [
-            {
-                "name": "C3z",
-                "matrix_file": "exactified_C3z.npy",
-                "status": "exactified",
-                "residuals": {"unitarity": 1.0e-12},
-            },
-            {
-                "name": "C2T",
-                "matrix_file": "exactified_C2T.npy",
-                "status": "exactified",
+                {
+                    "name": "C3z",
+                    "operation": "C3z",
+                    "matrix_file": "exactified_C3z.npy",
+                    "antiunitary": False,
+                    "target_block_dims": [2],
+                    "residuals": {"unitarity": 1.0e-12},
+                    "pairs": [],
+                    "status": "exactified",
+                },
+                {
+                    "name": "C2T",
+                    "operation": "C2T",
+                    "matrix_file": "exactified_C2T.npy",
+                    "antiunitary": True,
+                        "target_block_dims": [2],
+                        "pairs": [],
+                        "status": "exactified",
                 "exactification_distance": 2.0e-12,
             },
         ]
@@ -252,6 +313,12 @@ def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_pa
     residuals = (out_dir / "residuals.csv").read_text(encoding="utf-8")
     assert "operation,status,unitarity,exactification_distance" in residuals
     assert "C3z,exactified,1e-12," in residuals
+    assert (out_dir / "summary.md").exists()
+    assert set(path.name for path in out_dir.iterdir()) == {
+        "representations.npz",
+        "residuals.csv",
+        "summary.md",
+    }
 
 
 def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_path: Path) -> None:
@@ -287,8 +354,10 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
     def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
         seen["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        for name in ("README.md", "MODEL.md", "evaluate.py", "model.json", "model_data.npz"):
+        for name in ("README.md", "MODEL.md", "evaluate.py", "model.json", "model_data.npz", "eigvals.npy", "band_comparison.pdf"):
             (Path(output_dir) / name).write_text("x", encoding="utf-8")
+        for stale in ("active_terms.json", "active_terms.sha256", "fit_selection.json", "run_summary.json", "model_run.log", "band_comparison_all.pdf"):
+            (Path(output_dir) / stale).write_text("stale", encoding="utf-8")
         return Path(output_dir)
 
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
@@ -297,3 +366,12 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
 
     assert seen["export"] == (model_output, model_output, True, False)
     assert not (model_output / "standalone").exists()
+    assert set(path.name for path in model_output.iterdir()) == {
+        "MODEL.md",
+        "README.md",
+        "band_comparison.pdf",
+        "eigvals.npy",
+        "evaluate.py",
+        "model.json",
+        "model_data.npz",
+    }

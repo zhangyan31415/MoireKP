@@ -90,6 +90,37 @@ def test_projected_band_plot_can_show_top_bands_aligned_to_zero(tmp_path: Path) 
         plt.close(fig)
 
 
+def test_projected_band_plot_can_draw_all_bands_with_top_window_ylim(tmp_path: Path) -> None:
+    from kp import cli
+
+    rows = [
+        np.linspace(-5.0, 1.0, 20),
+        np.linspace(-4.8, 1.2, 20),
+        np.linspace(-4.9, 1.1, 20),
+    ]
+    fig, ax = cli.plot_eigs_scatter(
+        rows,
+        efermi=None,
+        out=str(tmp_path / "all_bands_top_window.pdf"),
+        top_bands=10,
+        plot_all_bands=True,
+        align="top",
+        return_fig=True,
+    )
+
+    try:
+        heff_lines = [line for line in ax.lines if line.get_zorder() == 2]
+        assert len(heff_lines) == 20
+        ymin, ymax = ax.get_ylim()
+        assert ymin > -3.5
+        assert ymax > 0.0
+        assert ymax < 0.5
+    finally:
+        import matplotlib.pyplot as plt
+
+        plt.close(fig)
+
+
 def test_projected_band_plot_can_use_release_style(tmp_path: Path) -> None:
     from kp import cli
     from kp.plot_style import KP_BAND_BOX_ASPECT, KP_BAND_FIGSIZE

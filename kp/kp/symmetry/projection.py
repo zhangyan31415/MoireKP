@@ -2704,6 +2704,11 @@ def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, An
     if matrices:
         np.savez_compressed(output_dir / "representations.npz", **matrices)
     (output_dir / "residuals.csv").write_text("\n".join(residual_rows) + "\n", encoding="utf-8")
+    _write_summary_md(output_dir / "summary.md", summary)
+    keep = {"representations.npz", "residuals.csv", "summary.md"}
+    for path in output_dir.iterdir():
+        if path.is_file() and path.name not in keep:
+            path.unlink()
 
 
 def _exactify_and_write_projection_summary(

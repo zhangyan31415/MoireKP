@@ -9,8 +9,10 @@ import numpy as np
 import yaml
 
 from .schema import M_EFFECTIVE_OPERATION_ALIASES
+from .schema import canonical_operation_name_for_valley
 from ..symmetry.action_schema import (
     PRODUCTION_MATRIX_KINDS,
+    SOURCE_MATRIX_SEMANTICS,
     allows_inferred_action_metadata,
     complete_action_operation_metadata,
     validate_action_map,
@@ -101,6 +103,73 @@ def _load_manifest(path: Path) -> dict[str, Any]:
     return {}
 
 
+def _packed_operation_metadata(name: str, valley_model: Mapping[str, Any]) -> dict[str, Any]:
+    family = canonical_operation_name_for_valley(str(name), valley_model)
+    if family == "C3z":
+        action = {
+            "antiunitary": False,
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+        }
+    elif family == "C2T":
+        action = {
+            "antiunitary": True,
+            "k_map": {"type": "reflection", "axis_deg": 180.0},
+            "q_map": {"type": "reflection", "axis_deg": 180.0},
+            "sector_map": "identity",
+        }
+    elif family == "TR":
+        action = {
+            "antiunitary": True,
+            "k_map": {"type": "negation"},
+            "q_map": {"type": "negation"},
+            "sector_map": "identity",
+        }
+    elif family == "C2":
+        action = {
+            "antiunitary": False,
+            "k_map": {"type": "reflection", "axis_deg": 0.0},
+            "q_map": {"type": "reflection", "axis_deg": 0.0},
+            "sector_map": "layer_exchange",
+        }
+    else:
+        action = {}
+    if action:
+        action["antiunitary_convention"] = "U_K" if action["antiunitary"] else "none"
+        action["matrix_kind"] = "continuum_internal_rep_exact"
+        action["matrix_source"] = "kp_symm_exactified_action"
+        action["spin_map"] = "from_kp_symm_output"
+        action["valley_map"] = "identity"
+        action.update({key: value for key, value in SOURCE_MATRIX_SEMANTICS.items()})
+    return action
+
+
+def _packed_manifest(path: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
+    packed = path / "representations.npz"
+    if not packed.exists():
+        return {}
+    valley_model = raw.get("valley_model", {})
+    if not isinstance(valley_model, Mapping):
+        valley_model = {}
+    with np.load(packed, allow_pickle=False) as payload:
+        operations = [
+            {
+                "name": _canonical_manifest_operation_name(str(name)),
+                "operation": _canonical_manifest_operation_name(str(name)),
+                "matrix_file": "representations.npz",
+                "matrix_array_key": str(name),
+                **_packed_operation_metadata(str(name), valley_model),
+            }
+            for name in payload.files
+        ]
+    return {
+        "operations": operations,
+        "exactification_owner": "kp_symm",
+        "kp_symm_exactification": {"status": "exactified", "matrix_source": "kp_symm_exactified_action"},
+    }
+
+
 def _load_matrix(path: Path) -> np.ndarray:
     arr = np.load(path)
     if isinstance(arr, np.lib.npyio.NpzFile):
@@ -109,6 +178,13 @@ def _load_matrix(path: Path) -> np.ndarray:
             raise ValueError(f"Empty npz symmetry matrix file: {path}")
         return np.asarray(arr[keys[0]], dtype=complex)
     return np.asarray(arr, dtype=complex)
+
+
+def _load_operation_matrix(path: Path, record: Mapping[str, Any]) -> np.ndarray:
+    if path.suffix == ".npz" and record.get("matrix_array_key") is not None:
+        with np.load(path, allow_pickle=False) as payload:
+            return np.asarray(payload[str(record["matrix_array_key"])], dtype=complex)
+    return _load_matrix(path)
 
 
 def _manifest_operations(manifest: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -379,6 +455,8 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     if not path.is_absolute():
         path = (base / path).resolve()
     manifest = _load_manifest(path)
+    if not manifest:
+        manifest = _packed_manifest(path, raw)
     records = _operation_records(raw.get("operations"), manifest)
     matrices: dict[str, np.ndarray] = {}
     metadata_records: list[dict[str, Any]] = []
@@ -409,7 +487,7 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
         matrix_file = Path(str(record["matrix_file"]))
         if not matrix_file.is_absolute():
             matrix_file = path / matrix_file
-        matrix = _load_matrix(matrix_file)
+        matrix = _load_operation_matrix(matrix_file, record)
         if expected_dim is not None and matrix.shape != (expected_dim, expected_dim):
             raise ValueError(f"Symmetry matrix {matrix_file} has shape {matrix.shape}, expected {(expected_dim, expected_dim)}")
         matrices[name] = matrix

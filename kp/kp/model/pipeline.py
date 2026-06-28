@@ -39,7 +39,7 @@ from ..plot_style import (
     kp_font_family,
     relative_energy_ylabel,
 )
-from ..symmetry.action_schema import allows_inferred_action_metadata
+from ..symmetry.action_schema import SOURCE_MATRIX_SEMANTICS, allows_inferred_action_metadata
 from ..symmetry.geometry import (
     bM_candidates_from_q_distances,
     canonical_bM_pair_from_candidates,
@@ -606,6 +606,8 @@ def _default_symmetry_source(
                 out["inferred_from_source_config"] = True
     if out.get("type") == "kp_symm_output":
         out.setdefault("use", "raw")
+        if isinstance(raw.get("valley_model"), Mapping):
+            out.setdefault("valley_model", dict(raw["valley_model"]))
         symm = source_raw.get("symm", {})
         if "operations" not in out and isinstance(symm, Mapping) and symm.get("operations"):
             out["operations"] = list(symm.get("operations", []))
@@ -933,7 +935,50 @@ def _rotation_deg_from_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) 
         k_transform = frame.get("k_transform", {})
         if isinstance(k_transform, Mapping) and "rotation_deg" in k_transform:
             return float(k_transform["rotation_deg"])
+    if (path / "representations.npz").exists():
+        return 0.0
     return None
+
+
+def _packed_symmetry_operation_metadata(name: str, valley_model: Mapping[str, Any]) -> dict[str, Any]:
+    family = canonical_operation_name_for_valley(str(name), valley_model)
+    if family == "C3z":
+        action = {
+            "antiunitary": False,
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+        }
+    elif family == "C2T":
+        action = {
+            "antiunitary": True,
+            "k_map": {"type": "reflection", "axis_deg": 180.0},
+            "q_map": {"type": "reflection", "axis_deg": 180.0},
+            "sector_map": "identity",
+        }
+    elif family == "TR":
+        action = {
+            "antiunitary": True,
+            "k_map": {"type": "negation"},
+            "q_map": {"type": "negation"},
+            "sector_map": "identity",
+        }
+    elif family == "C2":
+        action = {
+            "antiunitary": False,
+            "k_map": {"type": "reflection", "axis_deg": 0.0},
+            "q_map": {"type": "reflection", "axis_deg": 0.0},
+            "sector_map": "layer_exchange",
+        }
+    else:
+        action = {}
+    if action:
+        action["antiunitary_convention"] = "U_K" if action["antiunitary"] else "none"
+        action["matrix_kind"] = "continuum_internal_rep_exact"
+        action["spin_map"] = "from_kp_symm_output"
+        action["valley_map"] = "identity"
+        action.update(copy.deepcopy(SOURCE_MATRIX_SEMANTICS))
+    return action
 
 
 def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, Any]:
@@ -951,6 +996,29 @@ def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, 
         if manifest_path.exists():
             manifest = _load_yaml(manifest_path)
             return dict(manifest) if isinstance(manifest, Mapping) else {}
+    representations = path / "representations.npz"
+    if representations.exists():
+        valley_model = raw.get("valley_model", {})
+        if not isinstance(valley_model, Mapping):
+            valley_model = {}
+        with np.load(representations, allow_pickle=False) as payload:
+            return {
+                "operations": [
+                    {
+                        "name": str(name),
+                        "matrix_file": "representations.npz",
+                        "matrix_array_key": str(name),
+                        "matrix_source": "kp_symm_exactified_action",
+                        **effective_operation_metadata_for_valley(str(name), valley_model),
+                        **_packed_symmetry_operation_metadata(str(name), valley_model),
+                    }
+                    for name in payload.files
+                ],
+                "frame": {
+                    "q_transform": {"rotation_deg": 0.0},
+                    "k_transform": {"rotation_deg": 0.0},
+                },
+            }
     return {}
 
 
@@ -1043,7 +1111,8 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         project_out = _resolve_path(project.get("out_dir"), source_base)
         if project_out is None:
             raise ValueError("heff_file is missing and source_config project.out_dir is unavailable")
-        heff_file = project_out / "heff_list.npy"
+        canonical_case = isinstance(raw.get("case"), Mapping) and bool(raw["case"].get("profile")) and bool(raw["case"].get("q_shell"))
+        heff_file = project_out / ("heff.npy" if canonical_case else "heff_list.npy")
     heff_eig_file = _resolve_path(_get_path_value(raw, "heff_eig_file"), base)
     if heff_eig_file is None:
         candidate = heff_file.with_name("heff_eig.npy")
@@ -8573,6 +8642,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     moire_config, model_config = build_moire_config_from_file(path)
     output_dir = model_config.output_dir
     output_profile = _model_output_profile(model_config)
+    canonical_output = isinstance(model_config.raw.get("case"), Mapping) and bool(model_config.raw["case"].get("profile")) and bool(model_config.raw["case"].get("q_shell"))
     diagnostics_dir = _model_diagnostics_dir(output_dir) if output_profile == "debug" else None
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[kp model] output directory: {output_dir}", flush=True)
@@ -8652,27 +8722,28 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             x_ticklabels=x_ticklabels,
             title=_band_plot_title(model_config),
         )
-        all_band_config = _all_band_plot_config(model_config.band_plot_config)
-        all_band_plot_comparison = compare_bands_for_plot(
-            eigvals_array,
-            heff_selected,
-            band_slice=None,
-            plot_config=all_band_config,
-        )
-        if diagnostics_dir is not None:
-            with (diagnostics_dir / "comparison_all_bands.json").open("w", encoding="utf-8") as handle:
-                json.dump(all_band_plot_comparison, handle, indent=2)
-        all_band_plot_path = save_band_comparison_plot(
-            eigvals_array,
-            heff_selected,
-            output_dir / "band_comparison_all.pdf",
-            band_slice=None,
-            plot_config=all_band_config,
-            x=x_values,
-            x_ticks=x_ticks,
-            x_ticklabels=x_ticklabels,
-            title=f"{_band_plot_title(model_config)} (all bands)",
-        )
+        if not canonical_output:
+            all_band_config = _all_band_plot_config(model_config.band_plot_config)
+            all_band_plot_comparison = compare_bands_for_plot(
+                eigvals_array,
+                heff_selected,
+                band_slice=None,
+                plot_config=all_band_config,
+            )
+            if diagnostics_dir is not None:
+                with (diagnostics_dir / "comparison_all_bands.json").open("w", encoding="utf-8") as handle:
+                    json.dump(all_band_plot_comparison, handle, indent=2)
+            all_band_plot_path = save_band_comparison_plot(
+                eigvals_array,
+                heff_selected,
+                output_dir / "band_comparison_all.pdf",
+                band_slice=None,
+                plot_config=all_band_config,
+                x=x_values,
+                x_ticks=x_ticks,
+                x_ticklabels=x_ticklabels,
+                title=f"{_band_plot_title(model_config)} (all bands)",
+            )
     results["configured_model"] = model_config
     results["moire_config"] = moire_config
     results["comparison"] = comparison
