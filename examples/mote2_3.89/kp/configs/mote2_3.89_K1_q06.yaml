@@ -16,6 +16,20 @@ material:
   qset2_file: ../../tapw/Q_shell_6/g_vec_list_6_K1_2layer.npy
   band_file: ../../tapw/Q_shell_6/band/band_VBM_K1_valley.txt
 
+plot:
+  mode: K1
+  hamk_index: 0
+  # Fast inspect path from band_file. Change to "all" to diagonalize hamk and
+  # print orbital/eigenvector components.
+  target: valence
+  ref_q_index: 0
+  sort_by_qnorm: true
+  report_below: 4
+  report_above: 0
+  report_components: 8
+  ylim: [-6.2, 0.0]
+  title: "MoTe2 K1 q06: VBM band vs Q"
+
 project:
   nlow_state_list:
     - [44, 45]

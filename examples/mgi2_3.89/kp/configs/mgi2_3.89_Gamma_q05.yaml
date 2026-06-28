@@ -16,6 +16,20 @@ material:
   qset2_file: ../../tapw/Q_shell_5_symm/g_vec_list_5_Gamma_2layer.npy
   band_file: ../../tapw/Q_shell_5_symm/band/band_VBM_Gamma_valley.txt
 
+plot:
+  mode: gamma
+  hamk_index: 0
+  # Fast inspect path from band_file. Change to "all" to diagonalize hamk and
+  # print orbital/eigenvector components.
+  target: valence
+  ref_q_index: 0
+  sort_by_qnorm: true
+  report_below: 12
+  report_above: 0
+  report_components: 12
+  ylim: [-4.0, -1.0]
+  title: "MgI2 Gamma q05: VBM band vs Q"
+
 project:
   nlow_state_list:
     - [40, 41]

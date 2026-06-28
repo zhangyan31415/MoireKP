@@ -16,6 +16,20 @@ material:
   qset2_file: ../../tapw/Q_shell_7/g_vec_list_7_M1_2layer.npy
   band_file: ../../tapw/Q_shell_7/band/band_CBM_M1_valley.txt
 
+plot:
+  mode: M1
+  hamk_index: 0
+  # Fast inspect path from band_file. Change to "all" to diagonalize hamk and
+  # print orbital/eigenvector components.
+  target: conduction
+  ref_q_index: 30
+  sort_by_qnorm: true
+  report_below: 2
+  report_above: 2
+  report_components: 8
+  ylim: [-1.0, 8.0]
+  title: "MgI2 M1 spinless q07: CBM band vs Q"
+
 project:
   nlow_state_list:
     - [11]

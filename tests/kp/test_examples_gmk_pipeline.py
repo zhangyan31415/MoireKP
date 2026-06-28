@@ -239,6 +239,17 @@ def test_gmk_case_configs_do_not_use_split_source_model_configs() -> None:
         assert "material" in raw and "project" in raw and "symm" in raw and "model" in raw, path
 
 
+def test_gmk_case_configs_make_inspect_plot_settings_explicit() -> None:
+    for path in GMK_CASE_CONFIGS.values():
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        plot = raw.get("plot")
+        assert isinstance(plot, dict), path
+        assert plot.get("target") in {"all", "valence", "conduction"}, path
+        assert isinstance(plot.get("ref_q_index"), int), path
+        ylim = plot.get("ylim")
+        assert isinstance(ylim, list) and len(ylim) == 2, path
+
+
 def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
     for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
