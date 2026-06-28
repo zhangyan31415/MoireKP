@@ -65,5 +65,5 @@ model:
     plot:
       top_bands: 8
       align: top
-      figsize: [3.0, 5.8]
+      figsize: [3.0, 5.0]
       num_bands: 16

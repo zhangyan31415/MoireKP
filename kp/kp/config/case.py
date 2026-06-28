@@ -176,7 +176,7 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
 
         plot = dict(out.get("plot", {}) or {})
         if case_base:
-            _set_default_path(plot, "out", _path_join(case_base, "inspect", "scatter.png"))
+            _set_default_path(plot, "out", _path_join(case_base, "inspect", "scatter.pdf"))
             _set_default_path(plot, "data_out", _path_join(case_base, "inspect", "spectrum.txt"))
         else:
             _set_default_path(plot, "out", f"../outputs/project/{case_name}/heff_scatter.png")

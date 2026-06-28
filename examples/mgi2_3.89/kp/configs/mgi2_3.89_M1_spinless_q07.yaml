@@ -66,5 +66,5 @@ model:
     plot:
       bottom_bands: 8
       align: bottom
-      figsize: [3.2, 5.8]
+      figsize: [3.0, 5.0]
       ylim: [0.0, 0.16]

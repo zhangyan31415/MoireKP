@@ -49,7 +49,7 @@ def test_canonical_case_defaults_point_all_workflows_to_one_case_directory(tmp_p
     cfg = normalize_case_config(_canonical_case_config(), config_path=cfg_path)
 
     assert cfg["project"]["out_dir"] == "../outputs/K1/q06/projection"
-    assert cfg["plot"]["out"] == "../outputs/K1/q06/inspect/scatter.png"
+    assert cfg["plot"]["out"] == "../outputs/K1/q06/inspect/scatter.pdf"
     assert cfg["plot"]["data_out"] == "../outputs/K1/q06/inspect/spectrum.txt"
     assert cfg["symm"]["output_dir"] == "../outputs/K1/q06/symmetry"
     assert cfg["output"]["dir"] == "../outputs/K1/q06/model"
@@ -109,7 +109,7 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path,
 
     inspect_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "inspect"
     assert (inspect_dir / "spectrum.txt").exists()
-    assert (inspect_dir / "scatter.png").read_text(encoding="utf-8") == "plot"
+    assert (inspect_dir / "scatter.pdf").read_text(encoding="utf-8") == "plot"
     assert not (inspect_dir / "candidates.md").exists()
     assert not (inspect_dir / "blocks.csv").exists()
     assert "[kp] Selected bands at ref_Q=0: below EF [0], above EF [1]" in stdout
@@ -154,7 +154,7 @@ def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp
     cli.main(["inspect", "-c", str(cfg_path)])
 
     inspect_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "inspect"
-    assert (inspect_dir / "scatter.png").read_text(encoding="utf-8") == "combined"
+    assert (inspect_dir / "scatter.pdf").read_text(encoding="utf-8") == "combined"
     assert captured == {
         "band_rows": 2,
         "qblock_rows": 2,
@@ -203,7 +203,7 @@ def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch
     assert (projection_dir / "eigvals.txt").exists()
     assert (projection_dir / "basis.md").exists()
     assert (projection_dir / "basis.npz").exists()
-    assert (projection_dir / "scatter.png").read_text(encoding="utf-8") == "plot"
+    assert (projection_dir / "scatter.pdf").read_text(encoding="utf-8") == "plot"
     assert (projection_dir / "heff_list.npy").exists()
     assert (projection_dir / "heff_eig.npy").exists()
     assert captured_plot["efermi"] == 0.0

@@ -233,11 +233,11 @@ datasets:
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         kind: file
         size_bytes: 1475
-        sha256: 4caf567d1f26c7a76354cf692d34035ce8d0de35950768198c104b5bd0256a97
+        sha256: 233949dfb120bed5c40ccf9054ccfb3346f94cb7a6ffb26fa5c949491a1e5b6d
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         kind: file
         size_bytes: 1478
-        sha256: 0857a72e886c34bb64999ca31f8d83a48052a7593b7836410d4a42a920824cbd
+        sha256: c533e8a980b382154d456dc7dc8dc466e9bcb6f0dcddcfba99baea130a5583d5
       - path: examples/mote2_3.89/tapw/KPATH.in
         kind: file
         external:
@@ -280,7 +280,7 @@ datasets:
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1/q06/inspect/spectrum.txt
             status: generated
-          - path: examples/mote2_3.89/kp/outputs/K1/q06/inspect/scatter.png
+          - path: examples/mote2_3.89/kp/outputs/K1/q06/inspect/scatter.pdf
             status: generated
       - id: inspect-k1-up
         command: kp inspect --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
@@ -288,7 +288,7 @@ datasets:
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1_up/q06/inspect/spectrum.txt
             status: generated
-          - path: examples/mote2_3.89/kp/outputs/K1_up/q06/inspect/scatter.png
+          - path: examples/mote2_3.89/kp/outputs/K1_up/q06/inspect/scatter.pdf
             status: generated
       - id: project-k1
         command: kp project --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
@@ -338,15 +338,15 @@ datasets:
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         kind: file
         size_bytes: 1885
-        sha256: bb26133704c944138c99376005a7b37e22188c7d43c5a6b9e74ce033819570e4
+        sha256: abf9b2f0da51aee7ecf1f239e1fdab828d026a8bd926882bfed1039732ff07ed
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         kind: file
         size_bytes: 1496
-        sha256: 00736d5c88466c4da155e24d925aa8115b7113ae77860012f598dd46dd9844ef
+        sha256: 65fc4ce4f212ed3edab0459359e6b4c6068d4c6a3749261e0897d43f2c86612b
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         kind: file
         size_bytes: 1543
-        sha256: acecaefc966c3879e109fc599e020b8e53564bb7c0ee4bd30034d4a2f4bb68eb
+        sha256: 28fd45b2e12ae11902d5aa0cbda1c052f04632212624ea689465c0b5321f6360
       - path: examples/mgi2_3.89/tapw/KPATH.in
         kind: file
         external:
@@ -409,7 +409,7 @@ datasets:
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/inspect/spectrum.txt
             status: generated
-          - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/inspect/scatter.png
+          - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/inspect/scatter.pdf
             status: generated
       - id: inspect-m1
         command: kp inspect --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
@@ -417,7 +417,7 @@ datasets:
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1/q07/inspect/spectrum.txt
             status: generated
-          - path: examples/mgi2_3.89/kp/outputs/M1/q07/inspect/scatter.png
+          - path: examples/mgi2_3.89/kp/outputs/M1/q07/inspect/scatter.pdf
             status: generated
       - id: inspect-m1-spinless
         command: kp inspect --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
@@ -425,7 +425,7 @@ datasets:
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/inspect/spectrum.txt
             status: generated
-          - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/inspect/scatter.png
+          - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/inspect/scatter.pdf
             status: generated
       - id: project-gamma
         command: kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml

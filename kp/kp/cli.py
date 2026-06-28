@@ -29,6 +29,10 @@ from .plot_style import (
     KP_BAND_FIGSIZE,
     KP_DPI,
     KP_INSPECT_FIGSIZE,
+    KP_LEGEND_KWARGS,
+    KP_MARKER_STYLE,
+    KP_PRIMARY_STYLE,
+    KP_REFERENCE_STYLE,
     apply_kp_axis_style,
     kp_font_family,
     kp_plot_rc_context,
@@ -436,22 +440,17 @@ def plot_eigs_scatter(
             ax.plot(
                 x,
                 E0[:, i] - original_shift,
-                color="#9AA0A6",
-                lw=0.7,
-                alpha=0.45,
+                **KP_REFERENCE_STYLE,
                 zorder=1,
-                label="Original" if i == 0 else "_nolegend_",
+                label="Reference" if i == 0 else "_nolegend_",
             )
-    heff_color = "#1f77b4"
     for i in range(E.shape[1]):
         ax.plot(
             x,
             E[:, i] - shift,
-            lw=0.95,
-            alpha=0.95,
-            color=heff_color,
+            **KP_PRIMARY_STYLE,
             zorder=2,
-            label="Heff" if i == 0 else "_nolegend_",
+            label="KP" if i == 0 else "_nolegend_",
         )
 
     ax.axhline(0.0, color="#555555", lw=0.8, ls="--", alpha=0.8, zorder=0)
@@ -479,7 +478,7 @@ def plot_eigs_scatter(
     if ylim is not None:
         ax.set_ylim(ylim)
     if E0 is not None:
-        ax.legend(loc="best", frameon=False, fontsize=9)
+        ax.legend(**KP_LEGEND_KWARGS)
     if box_aspect is not None or font_family:
         apply_kp_axis_style(
             ax,
@@ -579,7 +578,12 @@ def plot_inspect_band_and_qblock(
         if x_band.shape[0] != E_band.shape[0]:
             raise ValueError(f"k-path axis length {x_band.shape[0]} does not match band rows {E_band.shape[0]}")
         for band_index in range(E_band.shape[1]):
-            ax_band.plot(x_band, E_band[:, band_index] - efermi, color="#222222", lw=0.75, alpha=0.82)
+            ax_band.plot(
+                x_band,
+                E_band[:, band_index] - efermi,
+                **KP_REFERENCE_STYLE,
+                label="Band path" if band_index == 0 else "_nolegend_",
+            )
         if k_x_ticks is not None and k_x_ticklabels is not None and len(k_x_ticks) == len(k_x_ticklabels):
             ax_band.set_xticks([float(item) for item in k_x_ticks])
             ax_band.set_xticklabels([str(item) for item in k_x_ticklabels])
@@ -596,11 +600,9 @@ def plot_inspect_band_and_qblock(
             ax_q.plot(
                 x_q,
                 E_q[:, band_index] - efermi,
-                marker="o",
-                markersize=2.5,
-                color="#1f77b4",
-                lw=0.75,
-                alpha=0.9,
+                **KP_PRIMARY_STYLE,
+                **KP_MARKER_STYLE,
+                label="Q block" if band_index == q_band_indices[0] else "_nolegend_",
             )
         if q_sector_lengths:
             cumulative = 0
@@ -631,6 +633,8 @@ def plot_inspect_band_and_qblock(
         ax_band.set_ylabel("Energy - E_F (eV)")
         ax_q.tick_params(labelleft=False)
         ax_band.set_ylim(ylim)
+        ax_band.legend(**KP_LEGEND_KWARGS)
+        ax_q.legend(**KP_LEGEND_KWARGS)
         if title:
             fig.suptitle(title, y=0.995)
         fig.subplots_adjust(left=0.11, right=0.98, bottom=0.11, top=0.90 if title else 0.94, wspace=0.08)
@@ -1270,7 +1274,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         print(f"[kp] Diagonalized {len(eigs_list)} Q blocks.")
         print(f"[kp] {np.array(eigs_list).shape}")
 
-    out_path = resolve(plot_cfg.get("out", f"plot_{mode}_scatter.png"))
+    out_path = resolve(plot_cfg.get("out", f"plot_{mode}_scatter.pdf"))
     data_out = resolve(plot_cfg.get("data_out", os.path.splitext(out_path)[0] + ".txt"))
     ref_q_index = int(plot_cfg.get("ref_q_index", 0))
     title = plot_cfg.get("title", None)
@@ -1830,7 +1834,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     out_heff = os.path.join(out_dir, "heff.npy" if canonical_project else "heff_list.npy")
     out_eig = os.path.join(out_dir, "eigvals.npy" if canonical_project else "heff_eig.npy")
     out_vec = os.path.join(out_dir, "vectors.npy" if canonical_project else "heff_vec.npy")
-    plot_out = os.path.join(out_dir, "scatter.png" if canonical_project else "heff_scatter.png")
+    plot_out = os.path.join(out_dir, "scatter.pdf" if canonical_project else "heff_scatter.png")
     data_out = os.path.join(out_dir, "eigvals.txt" if canonical_project else "heff_spectrum.txt")
     original_eigs_list = None
     band_file = resolve(material.get("band_file"))

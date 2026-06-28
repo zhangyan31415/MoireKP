@@ -26,7 +26,18 @@ from .schema import (
 )
 from .symmetry import load_symmetry_source
 from ..config.case import normalize_case_config
-from ..plot_style import KP_BAND_BOX_ASPECT, KP_BAND_FIGSIZE, KP_DPI, apply_kp_axis_style, kp_font_family
+from ..plot_style import (
+    KP_BAND_BOX_ASPECT,
+    KP_BAND_FIGSIZE,
+    KP_DPI,
+    KP_LEGEND_KWARGS,
+    KP_MARKER_STYLE,
+    KP_MODEL_STYLE,
+    KP_PRIMARY_STYLE,
+    KP_REFERENCE_STYLE,
+    apply_kp_axis_style,
+    kp_font_family,
+)
 from ..symmetry.action_schema import allows_inferred_action_metadata
 from ..symmetry.geometry import (
     bM_candidates_from_q_distances,
@@ -101,7 +112,7 @@ _MODEL_DEBUG_OUTPUT_FILES = {
     "operation_registry.json",
     "bM_diagnostic.json",
     "harmonics_diagnostic.json",
-    "harmonics_diagnostic.png",
+    "harmonics_diagnostic.pdf",
     "comparison.json",
     "comparison_plot.json",
 }
@@ -3607,10 +3618,10 @@ def _window_band_plot_config(
 def _cleanup_stale_band_outputs(output_dir: Path) -> None:
     for pattern in (
         "comparison_top*.json",
-        "band_comparison_top*.png",
+        "band_comparison_top*.pdf",
         "comparison_plot.json",
         "comparison_all_bands.json",
-        "band_comparison_all.png",
+        "band_comparison_all.pdf",
     ):
         for path in output_dir.glob(pattern):
             path.unlink()
@@ -3745,9 +3756,9 @@ def save_band_comparison_plot(
     dpi = int(plot_options.get("dpi", KP_DPI))
     fig, ax = plt.subplots(figsize=(float(figsize_raw[0]), float(figsize_raw[1])), dpi=dpi)
     for ib in range(heff_plot.shape[1]):
-        ax.plot(x_values, heff_plot[:, ib], color="0.20", linewidth=0.9, alpha=0.9)
+        ax.plot(x_values, heff_plot[:, ib], **KP_REFERENCE_STYLE)
     for ib in range(model_plot.shape[1]):
-        ax.plot(x_values, model_plot[:, ib], color="#d7263d", linewidth=1.0, alpha=0.92)
+        ax.plot(x_values, model_plot[:, ib], **KP_MODEL_STYLE)
     if x_ticks is not None and x_ticklabels is not None and len(x_ticks) == len(x_ticklabels):
         ax.set_xticks([float(item) for item in x_ticks])
         ax.set_xticklabels(list(x_ticklabels))
@@ -3795,8 +3806,8 @@ def save_band_comparison_plot(
             fontsize=9,
         )
     legend_handles = [
-        Line2D([0], [0], color="0.20", lw=1.3, label="Heff"),
-        Line2D([0], [0], color="#d7263d", lw=1.3, label="model"),
+        Line2D([0], [0], label="Reference", **KP_REFERENCE_STYLE),
+        Line2D([0], [0], label="KP model", **KP_MODEL_STYLE),
     ]
     if bool(plot_options.get("legend_outside", False)):
         ax.legend(
@@ -3804,13 +3815,15 @@ def save_band_comparison_plot(
             loc=str(plot_options.get("legend_loc", "upper center")),
             bbox_to_anchor=(0.5, -0.08),
             ncol=2,
-            frameon=False,
+            frameon=KP_LEGEND_KWARGS["frameon"],
+            fontsize=KP_LEGEND_KWARGS["fontsize"],
         )
     else:
         ax.legend(
             handles=legend_handles,
-            loc=str(plot_options.get("legend_loc", "lower right")),
-            frameon=False,
+            loc=str(plot_options.get("legend_loc", KP_LEGEND_KWARGS["loc"])),
+            frameon=KP_LEGEND_KWARGS["frameon"],
+            fontsize=KP_LEGEND_KWARGS["fontsize"],
         )
     for spine in ax.spines.values():
         spine.set_linewidth(1.0)
@@ -3871,7 +3884,7 @@ def save_harmonics_diagnostic_plot(
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(6.0, 6.0), dpi=180)
+    fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=KP_DPI)
     ax.scatter(Q_set1[:, 0], Q_set1[:, 1], s=28, marker="o", color="#1f77b4", alpha=0.75, label="layer 1 Q")
     ax.scatter(Q_set2[:, 0], Q_set2[:, 1], s=34, marker="^", color="#ff7f0e", alpha=0.75, label="layer 2 Q")
 
@@ -3938,9 +3951,10 @@ def save_harmonics_diagnostic_plot(
         ]
     )
     labels.extend(["intra selected", "inter selected"])
-    ax.legend(handles, labels, frameon=False, fontsize=8, loc="best")
+    ax.legend(handles, labels, **KP_LEGEND_KWARGS)
+    apply_kp_axis_style(ax, box_aspect=None, font_family=kp_font_family())
     fig.tight_layout()
-    fig.savefig(out)
+    fig.savefig(out, dpi=KP_DPI)
     plt.close(fig)
     return out
 
@@ -3963,7 +3977,7 @@ def save_harmonics_diagnostics(
         bM1=np.asarray(moire_config.bM1, dtype=float),
         bM2=np.asarray(moire_config.bM2, dtype=float),
         diagnostics=diagnostics,
-        path=output_dir / "harmonics_diagnostic.png",
+        path=output_dir / "harmonics_diagnostic.pdf",
     )
 
 
@@ -4371,7 +4385,7 @@ def _build_run_summary(
         "comparison": _json_safe(results.get("comparison")),
         "plot_comparison": _json_safe(results.get("plot_comparison")),
         "all_band_plot_comparison": _json_safe(results.get("all_band_plot_comparison")),
-        "all_band_plot": "band_comparison_all.png" if results.get("all_band_plot") else None,
+        "all_band_plot": "band_comparison_all.pdf" if results.get("all_band_plot") else None,
         "coefficient_pruning": _json_safe(results.get("coefficient_pruning")),
         "band_refinement": _json_safe(results.get("band_refinement", {"enabled": False})),
         "auto_model_selection": _json_safe(results.get("auto_model_selection", {"enabled": False})),
@@ -4691,7 +4705,7 @@ def _write_auto_model_selection_outputs(
     save_band_comparison_plot(
         model_eig,
         heff_eig,
-        output_dir / "band_comparison_top_primary.png",
+        output_dir / "band_comparison_top_primary.pdf",
         band_slice=primary["band_slice"],
         plot_config={**model_config.band_plot_config, "band_slice": primary["band_slice"]},
         title="Auto low-energy primary window",
@@ -4701,7 +4715,7 @@ def _write_auto_model_selection_outputs(
         save_band_comparison_plot(
             model_eig,
             heff_eig,
-            output_dir / "band_comparison_weighted_fit.png",
+            output_dir / "band_comparison_weighted_fit.pdf",
             band_slice=weighted_window["band_slice"],
             plot_config={**model_config.band_plot_config, "band_slice": weighted_window["band_slice"]},
             title="Auto low-energy weighted fit window",
@@ -4712,15 +4726,17 @@ def _write_auto_model_selection_outputs(
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(5.2, 3.2), dpi=180)
+        fig, ax = plt.subplots(figsize=KP_BAND_FIGSIZE, dpi=KP_DPI)
         x = np.arange(len(primary_leakage_curve))
-        ax.plot(x, 100.0 * np.asarray(primary_leakage_curve), lw=1.8)
+        ax.plot(x, 100.0 * np.asarray(primary_leakage_curve), label="Leakage", **KP_PRIMARY_STYLE, **KP_MARKER_STYLE)
         ax.set_xlabel("k-path index")
         ax.set_ylabel("subspace leakage (%)")
         ax.set_title("Primary low-energy subspace leakage")
         ax.grid(True, alpha=0.25, linewidth=0.6)
+        ax.legend(**KP_LEGEND_KWARGS)
+        apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT, font_family=kp_font_family())
         fig.tight_layout()
-        fig.savefig(output_dir / "subspace_leakage.png")
+        fig.savefig(output_dir / "subspace_leakage.pdf", dpi=KP_DPI)
         plt.close(fig)
     return summary
 
@@ -8627,7 +8643,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         band_plot_path = save_band_comparison_plot(
             eigvals_array,
             heff_selected,
-            output_dir / "band_comparison.png",
+            output_dir / "band_comparison.pdf",
             band_slice=model_config.band_slice,
             plot_config=window_plot_config,
             x=x_values,
@@ -8648,7 +8664,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         all_band_plot_path = save_band_comparison_plot(
             eigvals_array,
             heff_selected,
-            output_dir / "band_comparison_all.png",
+            output_dir / "band_comparison_all.pdf",
             band_slice=None,
             plot_config=all_band_config,
             x=x_values,

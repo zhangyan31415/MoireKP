@@ -792,8 +792,8 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
 
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
-    plot_path = tmp_path / "model_out" / "band_comparison.png"
-    all_plot_path = tmp_path / "model_out" / "band_comparison_all.png"
+    plot_path = tmp_path / "model_out" / "band_comparison.pdf"
+    all_plot_path = tmp_path / "model_out" / "band_comparison_all.pdf"
 
     class FakeModelConfig:
         output_dir = tmp_path / "model_out"
@@ -2909,7 +2909,7 @@ def test_auto_model_selection_outputs_write_user_facing_reports(monkeypatch, tmp
     assert (output_dir / "selected_model_config.yaml").exists()
     assert (output_dir / "candidate_metrics.csv").exists()
     assert (output_dir / "matrix_residual_report.json").exists()
-    assert (output_dir / "subspace_leakage.png").exists()
+    assert (output_dir / "subspace_leakage.pdf").exists()
     payload = json.loads((output_dir / "auto_model_selection.json").read_text(encoding="utf-8"))
     assert payload["harmonic_selection"]["selected"]["intra_shells"] == 1
     md = (output_dir / "auto_model_selection.md").read_text(encoding="utf-8")
@@ -5818,7 +5818,7 @@ def test_run_configured_model_saves_auto_harmonics_diagnostic_plot(monkeypatch, 
 
     run_configured_model(cfg_path)
 
-    assert not (tmp_path / "model_out" / "harmonics_diagnostic.png").exists()
+    assert not (tmp_path / "model_out" / "harmonics_diagnostic.pdf").exists()
     assert not (tmp_path / "model_out" / "harmonics_diagnostic.json").exists()
 
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -5826,7 +5826,7 @@ def test_run_configured_model_saves_auto_harmonics_diagnostic_plot(monkeypatch, 
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
     run_configured_model(cfg_path)
 
-    assert (tmp_path / "model_out" / "diagnostics" / "harmonics_diagnostic.png").exists()
+    assert (tmp_path / "model_out" / "diagnostics" / "harmonics_diagnostic.pdf").exists()
     assert (tmp_path / "model_out" / "diagnostics" / "harmonics_diagnostic.json").exists()
 
 
@@ -5847,15 +5847,15 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
     assert (tmp_path / "model_out" / "eigvals.npy").exists()
     assert not (tmp_path / "model_out" / "comparison.json").exists()
     assert not (tmp_path / "model_out" / "comparison_plot.json").exists()
-    assert (tmp_path / "model_out" / "band_comparison.png").exists()
-    assert results["band_plot"] == str((tmp_path / "model_out" / "band_comparison.png").resolve())
-    assert (tmp_path / "model_out" / "band_comparison_all.png").exists()
-    assert results["all_band_plot"] == str((tmp_path / "model_out" / "band_comparison_all.png").resolve())
+    assert (tmp_path / "model_out" / "band_comparison.pdf").exists()
+    assert results["band_plot"] == str((tmp_path / "model_out" / "band_comparison.pdf").resolve())
+    assert (tmp_path / "model_out" / "band_comparison_all.pdf").exists()
+    assert results["all_band_plot"] == str((tmp_path / "model_out" / "band_comparison_all.pdf").resolve())
     assert results["all_band_plot_comparison"]["num_bands"] == expected_eigvals.shape[1]
     summary = json.loads((tmp_path / "model_out" / "run_summary.json").read_text(encoding="utf-8"))
     assert summary["comparison"]["max_abs_error"] == 0.0
     assert summary["plot_comparison"]["max_abs_error"] == 0.0
-    assert summary["all_band_plot"] == "band_comparison_all.png"
+    assert summary["all_band_plot"] == "band_comparison_all.pdf"
     assert summary["all_band_plot_comparison"]["num_bands"] == expected_eigvals.shape[1]
 
 
@@ -5890,6 +5890,7 @@ def test_compare_bands_for_plot_supports_bottom_bands_with_bottom_alignment() ->
 
 def test_save_band_comparison_plot_can_plot_all_bands_with_top_band_window(monkeypatch, tmp_path: Path) -> None:
     import matplotlib.axes
+    from kp.plot_style import KP_MODEL_STYLE, KP_REFERENCE_STYLE
 
     model = np.array(
         [
@@ -5906,7 +5907,7 @@ def test_save_band_comparison_plot_can_plot_all_bands_with_top_band_window(monke
 
     def spy_plot(self, *args, **kwargs):
         color = kwargs.get("color")
-        if color in {"0.20", "#d7263d"}:
+        if color in {KP_REFERENCE_STYLE["color"], KP_MODEL_STYLE["color"]}:
             plotted_colors.append(str(color))
         return original_plot(self, *args, **kwargs)
 
@@ -5925,8 +5926,8 @@ def test_save_band_comparison_plot_can_plot_all_bands_with_top_band_window(monke
         plot_config={"top_bands": 2, "plot_all_bands": True},
     )
 
-    assert plotted_colors.count("0.20") == 5
-    assert plotted_colors.count("#d7263d") == 5
+    assert plotted_colors.count(KP_REFERENCE_STYLE["color"]) == 5
+    assert plotted_colors.count(KP_MODEL_STYLE["color"]) == 5
     assert ylims
     assert ylims[-1][0] > 1.0
     assert ylims[-1][1] < 3.5

@@ -27,14 +27,14 @@ examples/kp_canonical_smoke/kp/outputs/K1/q01/
   inspect/
     spectrum.txt
     candidates.md
-    scatter.png
+    scatter.pdf
   projection/
     heff.npy
     eigvals.npy
     eigvals.txt
     basis.md
     basis.npz
-    scatter.png
+    scatter.pdf
     vectors.npy
     k_indices.npy
     basis_selection.json
@@ -59,14 +59,14 @@ examples/kp_canonical_smoke/kp/outputs/Gamma/q01/
   inspect/
     spectrum.txt
     candidates.md
-    scatter.png
+    scatter.pdf
   projection/
     heff.npy
     eigvals.npy
     eigvals.txt
     basis.md
     basis.npz
-    scatter.png
+    scatter.pdf
     vectors.npy
     k_indices.npy
     basis_selection.json

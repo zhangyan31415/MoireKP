@@ -79,4 +79,4 @@ model:
     plot:
       top_bands: 10
       align: top
-      figsize: [3.2, 5.8]
+      figsize: [3.0, 5.0]

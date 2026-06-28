@@ -5,8 +5,13 @@ from typing import Iterator
 
 KP_BAND_FIGSIZE: tuple[float, float] = (3.0, 5.0)
 KP_BAND_BOX_ASPECT: float = 5.0 / 3.0
-KP_INSPECT_FIGSIZE: tuple[float, float] = (7.4, 6.2)
+KP_INSPECT_FIGSIZE: tuple[float, float] = (7.4, 5.0)
 KP_DPI: int = 220
+KP_REFERENCE_STYLE = {"color": "0.30", "linewidth": 0.85, "alpha": 0.78, "linestyle": "-"}
+KP_PRIMARY_STYLE = {"color": "#1f77b4", "linewidth": 0.95, "alpha": 0.92, "linestyle": "-"}
+KP_MODEL_STYLE = {"color": "#1f77b4", "linewidth": 1.0, "alpha": 0.95, "linestyle": "-"}
+KP_MARKER_STYLE = {"marker": "o", "markersize": 2.4, "markeredgewidth": 0.0}
+KP_LEGEND_KWARGS = {"loc": "best", "frameon": False, "fontsize": 9}
 
 
 def kp_font_family() -> str:

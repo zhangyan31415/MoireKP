@@ -98,6 +98,7 @@ def test_projected_band_plot_can_use_release_style(tmp_path: Path) -> None:
 
 def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
     from kp import cli
+    from kp.plot_style import KP_INSPECT_FIGSIZE
 
     fig, axes = cli.plot_inspect_band_and_qblock(
         band_eigs_list=[
@@ -121,6 +122,7 @@ def test_inspect_plot_combines_kpath_and_qblock_panels(tmp_path: Path) -> None:
     try:
         ax_band, ax_q = axes
         assert len(fig.axes) == 2
+        assert tuple(round(float(item), 6) for item in fig.get_size_inches()) == KP_INSPECT_FIGSIZE
         assert ax_band.get_shared_y_axes().joined(ax_band, ax_q)
         assert ax_band.get_title() == "Band path"
         assert ax_q.get_title() == "Q-block diagonalization"
