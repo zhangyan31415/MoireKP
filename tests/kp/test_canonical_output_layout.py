@@ -181,8 +181,9 @@ def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch
             SimpleNamespace(hermiticity_residual=0.0),
         ),
     )
-    def fake_project_plot(_eigs, efermi, *, out, box_aspect=None, font_family=None, **_kwargs):
+    def fake_project_plot(_eigs, efermi, *, out, figsize=None, box_aspect=None, font_family=None, **_kwargs):
         captured_plot["efermi"] = efermi
+        captured_plot["figsize"] = figsize
         captured_plot["box_aspect"] = box_aspect
         captured_plot["font_family"] = font_family
         Path(out).write_text("plot")
@@ -206,6 +207,7 @@ def test_project_canonical_writes_compact_outputs_and_legacy_aliases(monkeypatch
     assert (projection_dir / "heff_list.npy").exists()
     assert (projection_dir / "heff_eig.npy").exists()
     assert captured_plot["efermi"] == 0.0
+    assert tuple(captured_plot["figsize"]) == (3.0, 5.0)
     assert round(float(captured_plot["box_aspect"]), 6) == round(5 / 3, 6)
     assert captured_plot["font_family"]
 

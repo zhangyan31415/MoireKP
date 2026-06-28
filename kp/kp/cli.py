@@ -2021,6 +2021,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         band_slice=project_band_slice,
         align=project_align,
         xlabel="k-path point",
+        figsize=(3.0, 5.0) if canonical_project else None,
         box_aspect=(5 / 3) if canonical_project else None,
         font_family=_inspect_plot_font_family() if canonical_project else None,
         **kpath_axis,
