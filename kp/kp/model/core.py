@@ -608,6 +608,8 @@ class MoireConfig:
     kpoints_fit: np.ndarray | None = None
     heff: np.ndarray | None = None
     coeff_tol: float = 1e-6
+    null_channel_abs_tol: float = 0.0
+    null_channel_rel_tol: float = 0.0
 
     # --- band reduction (optional Schur complement) ---
     keep_indices: np.ndarray | None = None
@@ -1091,6 +1093,9 @@ class ContinuumModelBuilder:
         # 如果没有传入 symmetry_map，则使用默认设置
         self.symmetry_map = symmetry_map if symmetry_map is not None else {"Onsite": [], "Kinect": [], "intra": [], "inter": []}
         self.model = ContinuumModel()
+        self.null_channel_abs_tol = 0.0
+        self.null_channel_rel_tol = 0.0
+        self._null_channel_filter_reports: List[Dict[str, Any]] = []
 
     @staticmethod
     def _build_sector_name_to_slot(sectors: Sequence[Mapping[str, Any]]) -> Dict[str, int]:
@@ -2342,6 +2347,28 @@ class ContinuumModelBuilder:
 
         return np.asarray(vectors, dtype=np.complex128)
 
+    def _raw_initialterm_norms_for_fit_keys(
+        self,
+        keys: Sequence[ContinuumTermKey],
+        k_points: Sequence[np.ndarray],
+    ) -> np.ndarray:
+        if not keys:
+            return np.empty((0,), dtype=float)
+
+        norms: List[float] = []
+        for key in tqdm(keys, desc="Processing raw support norms"):
+            idx_inc, idy_inc = self._fit_block_indices_for_key(key)
+            term = self.model.terms[key]
+            raw_blocks = []
+            for k in k_points:
+                mat = term.Y_basis(k)
+                raw_blocks.append(mat[np.ix_(idx_inc, idy_inc)])
+            raw = scipy.linalg.block_diag(*raw_blocks)
+            raw_norm = float(np.linalg.norm(raw.reshape(-1)))
+            norms.append(raw_norm)
+            norms.append(raw_norm)
+        return np.asarray(norms, dtype=float)
+
     @timing_decorator_factory(0)
     def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
                                         tol: float = 1e-8, tag: str = None,
@@ -2481,6 +2508,9 @@ class ContinuumModelBuilder:
         target_vector: np.ndarray,
         *,
         tol: float = 1e-8,
+        null_channel_abs_tol: float = 0.0,
+        raw_channel_norms: np.ndarray | None = None,
+        null_channel_rel_tol: float = 0.0,
     ) -> Tuple[np.ndarray, np.ndarray]:
         initial_vectors = np.asarray(initial_vectors)
         target_vector = np.asarray(target_vector)
@@ -2498,7 +2528,49 @@ class ContinuumModelBuilder:
         target = np.concatenate((target_vector.real, target_vector.imag))
 
         col_norms = np.linalg.norm(design, axis=0)
-        nonzero = np.flatnonzero(col_norms > tol)
+        nonzero_mask = col_norms > tol
+        null_channel_abs_tol = float(null_channel_abs_tol or 0.0)
+        null_channel_rel_tol = float(null_channel_rel_tol or 0.0)
+        if null_channel_abs_tol > 0.0 or null_channel_rel_tol > 0.0:
+            filtered_mask = np.zeros_like(nonzero_mask, dtype=bool)
+            abs_filtered = np.zeros_like(nonzero_mask, dtype=bool)
+            rel_filtered = np.zeros_like(nonzero_mask, dtype=bool)
+            ratios = None
+            if null_channel_abs_tol > 0.0:
+                abs_filtered = nonzero_mask & (col_norms <= max(tol, null_channel_abs_tol))
+                filtered_mask |= abs_filtered
+            if null_channel_rel_tol > 0.0 and raw_channel_norms is not None:
+                raw_channel_norms = np.asarray(raw_channel_norms, dtype=float)
+                if raw_channel_norms.shape != col_norms.shape:
+                    raise ValueError(
+                        "raw_channel_norms must have shape matching term columns, "
+                        f"got {raw_channel_norms.shape}, expected {col_norms.shape}"
+                    )
+                valid_raw = raw_channel_norms > tol
+                ratios = np.full_like(col_norms, np.inf, dtype=float)
+                ratios[valid_raw] = col_norms[valid_raw] / raw_channel_norms[valid_raw]
+                rel_filtered = nonzero_mask & valid_raw & (ratios < null_channel_rel_tol)
+                filtered_mask |= rel_filtered
+            keep_mask = nonzero_mask & ~filtered_mask
+            if np.any(filtered_mask):
+                filtered_norms = col_norms[filtered_mask]
+                report = {
+                    "abs_tol": null_channel_abs_tol,
+                    "rel_tol": null_channel_rel_tol,
+                    "filtered": int(filtered_norms.size),
+                    "filtered_by_abs": int(np.count_nonzero(abs_filtered)),
+                    "filtered_by_rel": int(np.count_nonzero(rel_filtered)),
+                    "candidate_columns": int(np.count_nonzero(nonzero_mask)),
+                    "min_filtered_norm": float(np.min(filtered_norms)),
+                    "max_filtered_norm": float(np.max(filtered_norms)),
+                }
+                if ratios is not None and np.any(rel_filtered):
+                    filtered_ratios = ratios[rel_filtered]
+                    report["min_filtered_ratio"] = float(np.min(filtered_ratios))
+                    report["max_filtered_ratio"] = float(np.max(filtered_ratios))
+                self._null_channel_filter_reports.append(report)
+            nonzero_mask = keep_mask
+        nonzero = np.flatnonzero(nonzero_mask)
         if nonzero.size == 0:
             return np.array([], dtype=float), np.array([], dtype=int)
 
@@ -2824,6 +2896,7 @@ class ContinuumModelBuilder:
 
         coeffs_by_tag: Dict[str, Dict[Any, np.ndarray]] = {tag: {} for tag in tag_groups}
         term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] = {}
+        self._null_channel_filter_reports = []
 
         print("\n" + "="*100)
         print(f"Processing joint fit blocks. Time: {time.strftime('%H:%M:%S', time.localtime())}")
@@ -2899,12 +2972,18 @@ class ContinuumModelBuilder:
                     support_idx=component_support_idx,
                     term_matrix_cache=term_matrix_cache,
                 )
+                raw_channel_norms = None
+                if float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0) > 0.0:
+                    raw_channel_norms = self._raw_initialterm_norms_for_fit_keys(sub_keys, k_points)
                 heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
                 target_vector = heff_block.reshape(-1)[component_support_idx]
                 coeffs, includinglist = self._solve_coefficients_from_support_matrix(
                     support_vectors,
                     target_vector,
                     tol=tol,
+                    null_channel_abs_tol=float(getattr(self, "null_channel_abs_tol", 0.0) or 0.0),
+                    raw_channel_norms=raw_channel_norms,
+                    null_channel_rel_tol=float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0),
                 )
                 fit_support_idx = component_support_idx
                 print(
@@ -3772,9 +3851,14 @@ def compute_coefficients(config: MoireConfig, model: ContinuumModel) -> Tuple[Co
         list(config.term_templates),
     )
     builder.model = model
+    builder.null_channel_abs_tol = float(getattr(config, "null_channel_abs_tol", 0.0) or 0.0)
+    builder.null_channel_rel_tol = float(getattr(config, "null_channel_rel_tol", 0.0) or 0.0)
     heff = np.asarray(config.heff)
     kpts = np.asarray(config.kpoints_fit, dtype=float)
     diagnostics = builder.compute_coefficients_by_tag(heff, kpts, tol=float(config.coeff_tol))
+    setattr(model, "_null_channel_filter_reports", list(getattr(builder, "_null_channel_filter_reports", [])))
+    setattr(model, "_null_channel_abs_tol", float(getattr(builder, "null_channel_abs_tol", 0.0) or 0.0))
+    setattr(model, "_null_channel_rel_tol", float(getattr(builder, "null_channel_rel_tol", 0.0) or 0.0))
     return model, diagnostics
 
 def _sym_ops_group_key(sym_ops: List[Dict[str, Any]]) -> tuple[Any, ...]:

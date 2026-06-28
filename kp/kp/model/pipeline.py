@@ -146,6 +146,8 @@ class ConfiguredModel:
     orbital_count_metadata: dict[str, Any] = field(default_factory=dict)
     validation_config: dict[str, Any] = field(default_factory=dict)
     band_refinement_config: dict[str, Any] = field(default_factory=dict)
+    null_channel_abs_tol: float = 0.0
+    null_channel_rel_tol: float = 0.0
 
 
 def _resolve_path(value: str | Path | None, base: Path) -> Path | None:
@@ -1373,6 +1375,12 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     coeff_prune_threshold = float(fit.get("coeff_prune_threshold", coeff_prune_default))
     if coeff_prune_threshold < 0.0:
         raise ValueError(f"fit.coeff_prune_threshold must be non-negative, got {coeff_prune_threshold}")
+    null_channel_abs_tol = float(fit.get("null_channel_abs_tol", 0.0))
+    if null_channel_abs_tol < 0.0:
+        raise ValueError(f"fit.null_channel_abs_tol must be non-negative, got {null_channel_abs_tol}")
+    null_channel_rel_tol = float(fit.get("null_channel_rel_tol", 0.0))
+    if null_channel_rel_tol < 0.0:
+        raise ValueError(f"fit.null_channel_rel_tol must be non-negative, got {null_channel_rel_tol}")
     output_profile = str(output_section.get("profile", "release")).strip().lower()
     if output_profile in {"", "default"}:
         output_profile = "release"
@@ -1555,6 +1563,8 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         max_order=max_order_values,
         symmetry_map={str(key): list(value) for key, value in dict(symmetry_map).items()},
         coeff_tol=float(fit.get("coeff_tol", 1.0e-6)),
+        null_channel_abs_tol=null_channel_abs_tol,
+        null_channel_rel_tol=null_channel_rel_tol,
         coeff_prune_threshold=coeff_prune_threshold,
         compare_to_heff=bool(bands.get("compare_to_heff", True)),
         kpath_config=dict(kpath_config),
@@ -3193,6 +3203,8 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         kpoints_fit=fit_kpoints,
         heff=_block_diag_heff(heff_list, config.fit_indices),
         coeff_tol=config.coeff_tol,
+        null_channel_abs_tol=config.null_channel_abs_tol,
+        null_channel_rel_tol=config.null_channel_rel_tol,
         output_dir=config.output_dir,
     )
     if loaded_symmetry.generator is not None:
@@ -4361,6 +4373,7 @@ def _build_run_summary(
         "plot_comparison": _json_safe(results.get("plot_comparison")),
         "all_band_plot_comparison": _json_safe(results.get("all_band_plot_comparison")),
         "all_band_plot": "band_comparison_all.png" if results.get("all_band_plot") else None,
+        "null_channel_filter": _json_safe(results.get("null_channel_filter")),
         "coefficient_pruning": _json_safe(results.get("coefficient_pruning")),
         "band_refinement": _json_safe(results.get("band_refinement", {"enabled": False})),
         "auto_model_selection": _json_safe(results.get("auto_model_selection", {"enabled": False})),
@@ -4374,6 +4387,33 @@ def _build_run_summary(
     if active_terms_hash is not None:
         summary["active_terms_hash"] = active_terms_hash
         summary["active_terms_hash_file"] = "active_terms.sha256"
+    return summary
+
+
+def _null_channel_filter_summary(model: Any, abs_tol: float, rel_tol: float) -> dict[str, Any]:
+    reports = list(getattr(model, "_null_channel_filter_reports", []) or [])
+    filtered = int(sum(int(row.get("filtered", 0)) for row in reports))
+    summary: dict[str, Any] = {
+        "enabled": bool(float(abs_tol or 0.0) > 0.0 or float(rel_tol or 0.0) > 0.0),
+        "abs_tol": float(abs_tol or 0.0),
+        "rel_tol": float(rel_tol or 0.0),
+        "filtered_columns": filtered,
+        "blocks_with_filtered_columns": len(reports),
+    }
+    if reports:
+        min_norms = [float(row["min_filtered_norm"]) for row in reports if "min_filtered_norm" in row]
+        max_norms = [float(row["max_filtered_norm"]) for row in reports if "max_filtered_norm" in row]
+        min_ratios = [float(row["min_filtered_ratio"]) for row in reports if "min_filtered_ratio" in row]
+        max_ratios = [float(row["max_filtered_ratio"]) for row in reports if "max_filtered_ratio" in row]
+        summary.update(
+            {
+                "min_filtered_norm": float(min(min_norms)) if min_norms else None,
+                "max_filtered_norm": float(max(max_norms)) if max_norms else None,
+                "min_filtered_ratio": float(min(min_ratios)) if min_ratios else None,
+                "max_filtered_ratio": float(max(max_ratios)) if max_ratios else None,
+                "reports": reports,
+            }
+        )
     return summary
 
 
@@ -8224,10 +8264,26 @@ def _run_model_pipeline(
 
     model = run_stage("building continuum terms", lambda: build_model(moire_config))
     diagnostics = None
+    null_filter = _null_channel_filter_summary(
+        model,
+        model_config.null_channel_abs_tol,
+        model_config.null_channel_rel_tol,
+    )
     pruning = {"enabled": False, "threshold": 0.0, "dropped": 0, "kept": None}
     refinement = {"enabled": False}
     if moire_config.heff is not None and moire_config.kpoints_fit is not None:
         model, diagnostics = run_stage("fitting coefficients", lambda: compute_coefficients(moire_config, model))
+        null_filter = _null_channel_filter_summary(
+            model,
+            model_config.null_channel_abs_tol,
+            model_config.null_channel_rel_tol,
+        )
+        if null_filter.get("enabled") and int(null_filter.get("filtered_columns", 0)) > 0:
+            _progress_line(
+                "null-channel filter: abs_tol={abs_tol:g}, rel_tol={rel_tol:g}, "
+                "filtered_columns={filtered_columns}".format(**null_filter),
+                enabled=progress,
+            )
         pruning = _prune_small_coefficients(model, model_config.coeff_prune_threshold)
         if pruning["enabled"]:
             _progress_line(
@@ -8263,6 +8319,7 @@ def _run_model_pipeline(
         "model": model,
         "eigvals": eigvals,
         "diagnostics": diagnostics,
+        "null_channel_filter": null_filter,
         "coefficient_pruning": pruning,
         "band_refinement": refinement,
     }

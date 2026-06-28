@@ -287,6 +287,52 @@ def test_support_vector_coefficient_solver_recovers_real_coefficients_on_actual_
     assert coeffs == pytest.approx(expected)
 
 
+def test_support_matrix_solver_filters_numerical_null_channels_before_qr() -> None:
+    builder = _support_grouping_builder()
+    initial_vectors = np.array(
+        [
+            [1.0, 0.0],
+            [1.0e-12, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    target_vector = np.array([2.0, 0.0], dtype=np.complex128)
+
+    coeffs, includinglist = builder._solve_coefficients_from_support_matrix(
+        initial_vectors,
+        target_vector,
+        tol=1.0e-13,
+        null_channel_abs_tol=1.0e-10,
+    )
+
+    assert includinglist.tolist() == [0]
+    assert coeffs == pytest.approx([2.0])
+
+
+def test_support_matrix_solver_filters_small_symmetrized_to_raw_ratio_before_qr() -> None:
+    builder = _support_grouping_builder()
+    initial_vectors = np.array(
+        [
+            [1.0, 0.0],
+            [1.0e-6, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    raw_norms = np.array([1.0, 1.0], dtype=float)
+    target_vector = np.array([2.0, 0.0], dtype=np.complex128)
+
+    coeffs, includinglist = builder._solve_coefficients_from_support_matrix(
+        initial_vectors,
+        target_vector,
+        tol=1.0e-13,
+        raw_channel_norms=raw_norms,
+        null_channel_rel_tol=1.0e-3,
+    )
+
+    assert includinglist.tolist() == [0]
+    assert coeffs == pytest.approx([2.0])
+
+
 def test_compute_coefficients_by_tag_uses_support_matrix_solver(monkeypatch) -> None:
     builder = _support_grouping_builder()
     key_a = _add_matrix_term(builder, mz=0, matrix=np.diag([1.0, 0.0]))
@@ -3056,6 +3102,48 @@ def test_load_model_config_rejects_negative_coeff_prune_threshold(tmp_path: Path
         load_model_config(cfg_path)
 
 
+def test_load_model_config_reads_null_channel_abs_tol(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["null_channel_abs_tol"] = 1.0e-10
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.null_channel_abs_tol == pytest.approx(1.0e-10)
+
+
+def test_load_model_config_rejects_negative_null_channel_abs_tol(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["null_channel_abs_tol"] = -1.0e-10
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="null_channel_abs_tol"):
+        load_model_config(cfg_path)
+
+
+def test_load_model_config_reads_null_channel_rel_tol(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["null_channel_rel_tol"] = 1.0e-3
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.null_channel_rel_tol == pytest.approx(1.0e-3)
+
+
+def test_load_model_config_rejects_negative_null_channel_rel_tol(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["null_channel_rel_tol"] = -1.0e-3
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="null_channel_rel_tol"):
+        load_model_config(cfg_path)
+
+
 def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
@@ -4616,7 +4704,7 @@ def test_compute_coefficients_skips_empty_orthogonalized_subgroup(monkeypatch) -
     heff = np.eye(2, dtype=complex)
     k_points = np.array([[0.0, 0.0]])
 
-    def empty_solver(self, initial_vectors, target_vector, *, tol=1.0e-6):
+    def empty_solver(self, initial_vectors, target_vector, *, tol=1.0e-6, **_kwargs):
         return np.array([], dtype=float), np.array([], dtype=int)
 
     monkeypatch.setattr(ContinuumModelBuilder, "_solve_coefficients_from_support_matrix", empty_solver)
@@ -4725,7 +4813,7 @@ def test_fit_uses_symmetry_closed_block_not_raw_subgroup(monkeypatch) -> None:
         calls.append(tuple((key.layer_from, key.layer_to, key.orbital_from, key.orbital_to) for key in sub_keys))
         return np.zeros((2 * len(sub_keys), len(support_idx)), dtype=complex)
 
-    def empty_solver(self, initial_vectors, target_vector, *, tol=1.0e-6):
+    def empty_solver(self, initial_vectors, target_vector, *, tol=1.0e-6, **_kwargs):
         return np.array([], dtype=float), np.array([], dtype=int)
 
     monkeypatch.setattr(ContinuumModelBuilder, "_filter_duplicate_symmetry_seed_keys", keep_all)
