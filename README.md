@@ -78,15 +78,14 @@ kp/
 Typical operations are:
 
 ```bash
-kp inspect -c examples/mote2_3.89/kp/configs/K1_q06.yaml  # external-data
-kp show -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp fit -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml  # precomputed/external-data
-kp export -c examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml -o exported/mote2_3.89_K1  # precomputed
+kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp export  -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml -o exported/mote2_3.89_K1  # precomputed
 ```
 
-KP source configs may either name TAPW arrays directly or consume the canonical
+KP case configs may either name TAPW arrays directly or consume the canonical
 TAPW band manifest:
 
 ```yaml
@@ -99,7 +98,7 @@ The longer forms `kp plot`, `kp project`, `kp model --config ...`, and
 export outputs/model/case exported/case` is also supported when exporting
 directly from a generated model output directory.
 
-For new `kp proj` configs, prefer `project.gauge: auto` instead of hand
+For new `kp project` configs, prefer `project.gauge: auto` instead of hand
 writing `project.norb_fix_list`. See `docs/project_auto_gauge.md` for the
 finite-basis auto-gauge anchor report and failure checks.
 

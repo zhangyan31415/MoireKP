@@ -8,8 +8,8 @@ kp/configs/mote2_3.89_K1_q06.yaml
 kp/configs/mote2_3.89_K1_up_q06.yaml
 ```
 
-The older split source/model configs are kept for compatibility. Both cases use
-automatic gauge anchors. The spinful case exercises the
+Release examples do not use split source/model config directories. Both cases
+use automatic gauge anchors. The spinful case exercises the
 spinful C3z exactification path: the projected raw-H C3z action is treated as a
 block action first, then cleaned to a monomial continuum representation when
 the block support is clearly cleaner than the raw monomial support. This avoids

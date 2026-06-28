@@ -10,7 +10,7 @@ kp/configs/mgi2_3.89_M1_spinless_q07.yaml
 ```
 
 Each config drives inspection, projection, symmetry projection, and model
-fitting. The older split source/model configs are kept for compatibility.
+fitting. Release examples do not use split source/model config directories.
 
 ### Run KP
 

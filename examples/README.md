@@ -74,33 +74,20 @@ writes `tapw/outputs/K1/q06`. Non-default spin profiles must be explicit:
 
 ## Config Roles
 
-- `configs/source/<case_id>.yaml`: shared input for `kp show`, `kp proj`,
-  and `kp symm`.
-- `configs/K1_q06.yaml`: preferred single-case config for `kp inspect`,
-  `kp project`, `kp symm`, and `kp model`.
-- `configs/model/<case_id>.yaml`: canonical continuum-model configuration.
-  Production configs consume validated symmetry/action metadata from `kp symm`
-  outputs.
-- `configs/model/reference/<case_id>.yaml`: notebook, toy, or legacy comparison
-  paths.
-- `configs/model/diagnostics/<case_id>_<tag>.yaml`: diagnostic experiments that
-  are not the active release path.
+KP release examples use one YAML file per material/angle/valley/q-shell case.
+The same file drives `kp inspect`, `kp project`, `kp symm`, and `kp model`.
+Do not split release examples into separate source and model subdirectories.
 
 ## Active GMK Cases
 
 - MoTe2 K:
-  - `examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml`
-  - `examples/mote2_3.89/kp/configs/model/mote2_3.89_K1.yaml`
-  - `examples/mote2_3.89/kp/configs/source/mote2_3.89_K1_spinful.yaml`
-  - `examples/mote2_3.89/kp/configs/model/mote2_3.89_K1_spinful.yaml`
+  - `examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml`
+  - `examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml`
 - MgI2 Gamma:
-  - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_Gamma.yaml`
-  - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml`
+  - `examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml`
 - MgI2 M:
-  - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1.yaml`
-  - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1.yaml`
-  - `examples/mgi2_3.89/kp/configs/source/mgi2_3.89_M1_spinful.yaml`
-  - `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_M1_spinful.yaml`
+  - `examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml`
+  - `examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml`
 
 ## External-Data Scientific Examples
 
@@ -111,19 +98,18 @@ clean-clone test:
 - `tapw symm -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW raw-H symmetry outputs)
 - `tapw chern -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical topology outputs)
 - `kp inspect -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: inspect source bands before selecting low states)
-- `kp show -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays)
-- `kp proj -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
-- `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW symmetry-analysis exports)
-- `kp fit -c examples/<case>/kp/configs/model/<case_id>.yaml` (precomputed: consumes `kp proj` and `kp symm` outputs)
-- `kp export -c examples/<case>/kp/configs/model/<case_id>.yaml -o exported/<case_id>` (precomputed: optionally writes a standalone package from the model output)
+- `kp project -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
+- `kp symm -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes TAPW symmetry-analysis exports)
+- `kp model -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes projection and symmetry outputs)
+- `kp export -c examples/<case>/kp/configs/K1_q06.yaml -o exported/<case_id>` (precomputed: optionally writes a standalone package from the model output)
 
-New source configs should use `project.gauge: auto` with an explicit
+New KP case configs should use `project.gauge: auto` with an explicit
 `project.nlow_state_list`. Existing hand-written `project.norb_fix_list` entries
 remain valid as expert overrides, but they should not be required for ordinary
 finite-basis projection. Auto-gauge reports are written next to `heff_list.npy`
 as `basis_selection.json` and `basis_selection.md`.
 
-When TAPW outputs use the canonical layout, KP source configs should prefer the
+When TAPW outputs use the canonical layout, KP case configs should prefer the
 band manifest instead of repeating every TAPW filename:
 
 ```yaml
