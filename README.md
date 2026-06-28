@@ -62,9 +62,23 @@ The `kp` command works with YAML source and model configurations under `examples
 The release example commands consume external TAPW arrays or precomputed KP
 outputs; clean-clone checks are limited to package metadata and CLI surfaces.
 
+New KP configs should use one case file for inspect, projection, symmetry, and
+model fitting:
+
+```text
+kp/
+  configs/K1_q06.yaml
+  outputs/K1/q06/
+    inspect/
+    projection/
+    symmetry/
+    model/
+```
+
 Typical operations are:
 
 ```bash
+kp inspect -c examples/mote2_3.89/kp/configs/K1_q06.yaml  # external-data
 kp show -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp proj -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
 kp symm -c examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data

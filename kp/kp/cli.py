@@ -39,6 +39,128 @@ from .config.case import normalize_case_config
 HARTREE_TO_EV = 27.2113845
 
 
+def _is_canonical_case_config(cfg: dict[str, Any]) -> bool:
+    case = cfg.get("case")
+    if not isinstance(case, dict):
+        return False
+    return all(case.get(key) not in (None, "") for key in ("profile", "q_shell", "output_root"))
+
+
+def _config_path_uses_canonical_case(config_path: str | Path) -> bool:
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            cfg = normalize_case_config(yaml.safe_load(handle), config_path=config_path)
+        return _is_canonical_case_config(cfg)
+    except Exception:
+        return False
+
+
+def _write_text(path: str | Path, text: str) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
+def _write_case_summary(cfg: dict[str, Any], workflow_dir: str | Path, workflow: str) -> None:
+    if not _is_canonical_case_config(cfg):
+        return
+    workflow_path = Path(workflow_dir)
+    case_dir = workflow_path.parent
+    summary = case_dir / "summary.md"
+    case = cfg.get("case", {})
+    lines = [
+        "# KP Case Summary",
+        "",
+        f"- profile: `{case.get('profile')}`",
+        f"- q_shell: `{case.get('q_shell')}`",
+        f"- updated_workflow: `{workflow}`",
+        "",
+        "## Workflows",
+    ]
+    for name in ("inspect", "projection", "symmetry", "model"):
+        status = "ready" if (case_dir / name).exists() else "pending"
+        lines.append(f"- {name}: {status}")
+    _write_text(summary, "\n".join(lines) + "\n")
+
+    root = case_dir.parent.parent
+    manifest = root / "manifest.yaml"
+    profile_dir = case_dir.parent
+    targets = []
+    if root.exists():
+        for profile in sorted(p for p in root.iterdir() if p.is_dir()):
+            for q_shell in sorted(q for q in profile.iterdir() if q.is_dir()):
+                targets.append(
+                    {
+                        "profile": profile.name,
+                        "q_shell": q_shell.name,
+                        "path": f"{profile.name}/{q_shell.name}",
+                    }
+                )
+    _write_text(
+        manifest,
+        yaml.safe_dump(
+            {
+                "schema": "kp_outputs/v1",
+                "updated_workflow": workflow,
+                "targets": targets
+                or [
+                    {
+                        "profile": profile_dir.name,
+                        "q_shell": case_dir.name,
+                        "path": f"{profile_dir.name}/{case_dir.name}",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+    )
+
+
+def _write_inspect_sidecars(
+    cfg: dict[str, Any],
+    *,
+    output_dir: str | Path,
+    eigs_list: Sequence[np.ndarray],
+    efermi: float,
+    ref_q_index: int,
+) -> None:
+    if not _is_canonical_case_config(cfg):
+        return
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    rows = []
+    for q_index, eigs in enumerate(eigs_list):
+        for band_index, energy in enumerate(np.asarray(eigs, dtype=float).tolist()):
+            rows.append(
+                f"{q_index},{band_index},{float(energy):.12g},{float(energy) - float(efermi):.12g}"
+            )
+    _write_text(
+        out / "blocks.csv",
+        "q_index,band_index,energy_eV,relative_to_efermi_eV\n" + "\n".join(rows) + ("\n" if rows else ""),
+    )
+
+    ref_q = max(0, min(int(ref_q_index), len(eigs_list) - 1)) if eigs_list else 0
+    ref = np.asarray(eigs_list[ref_q], dtype=float) if eigs_list else np.asarray([], dtype=float)
+    below = np.where(ref < float(efermi))[0]
+    above = np.where(ref >= float(efermi))[0]
+    suggested = {
+        "below": below[-2:].astype(int).tolist() if below.size else [],
+        "above": above[:2].astype(int).tolist() if above.size else [],
+    }
+    lines = [
+        "# KP Inspect Candidates",
+        "",
+        f"- reference_q_index: {ref_q}",
+        f"- efermi_eV: {float(efermi):.12g}",
+        f"- suggested_below: {suggested['below']}",
+        f"- suggested_above: {suggested['above']}",
+        "",
+        "Use this report to set `project.nlow_state_list`, `project.gauge`, and model band windows in the same config.",
+    ]
+    _write_text(out / "candidates.md", "\n".join(lines) + "\n")
+    _write_case_summary(cfg, out, "inspect")
+
+
 def _default_standalone_export_dir(model_output_dir: Path) -> Path:
     return model_output_dir / "standalone"
 
@@ -728,6 +850,11 @@ def _normalize_nlow_state_list(project_cfg: dict[str, Any]) -> list[list[int]]:
     if active is not None:
         return [parse_int_list(active)]
     nlow_state_list = project_cfg.get("nlow_state_list", [])
+    if not nlow_state_list:
+        raise ValueError(
+            "project.nlow_state_list is required before projection/model fitting; "
+            "run `kp inspect -c <config>` and choose low-state bands first."
+        )
     if nlow_state_list and not isinstance(nlow_state_list[0], (list, tuple)):
         return [[int(x) for x in nlow_state_list]]
     return nlow_state_list
@@ -1011,6 +1138,13 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         title=title,
         ylim=ylim,
         index_order=index_order,
+    )
+    _write_inspect_sidecars(
+        cfg,
+        output_dir=os.path.dirname(out_path) or ".",
+        eigs_list=eigs_list,
+        efermi=efermi,
+        ref_q_index=ref_q_index,
     )
 
     # # -------------------- Optional low-energy projection (Heff) --------------------
@@ -1357,6 +1491,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     out_dir = resolve(project_cfg.get("out_dir", "plots"))
     if out_dir is None:
         out_dir = os.path.join(cfg_dir, "plots")
+    canonical_project = _is_canonical_case_config(cfg)
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     nk = hamk3d.shape[0]
     has_explicit_k_indices = project_cfg.get("k_indices") is not None
@@ -1448,6 +1583,15 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         )
     norb_fix_list = resolved_norb_fix_list
     write_basis_selection_report(out_dir, gauge_report)
+    if canonical_project:
+        basis_md = Path(out_dir) / "basis_selection.md"
+        if basis_md.exists():
+            (Path(out_dir) / "basis.md").write_text(basis_md.read_text(encoding="utf-8"), encoding="utf-8")
+        np.savez(
+            Path(out_dir) / "basis.npz",
+            nlow_state_list=np.asarray(nlow_state_list, dtype=object),
+            norb_fix_list=np.asarray(norb_fix_list, dtype=object),
+        )
     print(f"[kp]   gauge={gauge_report.gauge_mode}")
     print(f"[kp]   basis selection report={os.path.join(out_dir, 'basis_selection.json')}")
     print(f"[kp]   output directory={out_dir}")
@@ -1459,11 +1603,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp]   nlow_state_list={nlow_state_list}")
         print(f"[kp]   norb_fix_list={norb_fix_list}")
     # Unified output directory for all artifacts
-    out_heff = os.path.join(out_dir, "heff_list.npy")
-    out_eig = os.path.join(out_dir, "heff_eig.npy")
-    out_vec = os.path.join(out_dir, "heff_vec.npy")
-    plot_out = os.path.join(out_dir, "heff_scatter.png")
-    data_out = os.path.join(out_dir, "heff_spectrum.txt")
+    out_heff = os.path.join(out_dir, "heff.npy" if canonical_project else "heff_list.npy")
+    out_eig = os.path.join(out_dir, "eigvals.npy" if canonical_project else "heff_eig.npy")
+    out_vec = os.path.join(out_dir, "vectors.npy" if canonical_project else "heff_vec.npy")
+    plot_out = os.path.join(out_dir, "scatter.png" if canonical_project else "heff_scatter.png")
+    data_out = os.path.join(out_dir, "eigvals.txt" if canonical_project else "heff_spectrum.txt")
     original_eigs_list = None
     band_file = resolve(material.get("band_file"))
     if band_file:
@@ -1578,6 +1722,10 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     np.save(out_heff, heff_arr)
     np.save(out_eig, heig_arr)
     np.save(out_vec, hvec_arr)
+    if canonical_project:
+        np.save(os.path.join(out_dir, "heff_list.npy"), heff_arr)
+        np.save(os.path.join(out_dir, "heff_eig.npy"), heig_arr)
+        np.save(os.path.join(out_dir, "heff_vec.npy"), hvec_arr)
     if has_explicit_k_indices:
         np.save(os.path.join(out_dir, "k_indices.npy"), np.asarray(project_indices, dtype=int))
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
@@ -1646,6 +1794,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     )
     save_spectrum_txt(heig_list, data_out)
     print(f"[kp] Saved Heff spectrum: {data_out}")
+    if canonical_project:
+        _write_case_summary(cfg, out_dir, "projection")
 
 
 def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:
@@ -1901,6 +2051,8 @@ def build_argparser() -> argparse.ArgumentParser:
 
     p_show = sub.add_parser("show", help="Inspect source bands and Q-block spectra")
     p_show.add_argument("-c", "--config", required=True, help="YAML config path")
+    p_inspect = sub.add_parser("inspect", help="Inspect source bands and Q-block spectra")
+    p_inspect.add_argument("-c", "--config", required=True, help="YAML config path")
 
     p_plot = sub.add_parser("plot", help="Plot scatter of band vs Q from config")
     p_plot.add_argument("-c", "--config", required=True, help="YAML config path")
@@ -1960,7 +2112,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     args, extra_args = p.parse_known_args(argv)
     if extra_args and not (args.cmd == "model" and args.model_action == "export-standalone"):
         p.error(f"unrecognized arguments: {' '.join(extra_args)}")
-    if args.cmd in {"plot", "show"}:
+    if args.cmd in {"plot", "show", "inspect"}:
         cmd_plot_from_config(args.config)
     elif args.cmd in {"project", "proj"}:
         overrides = _project_overrides_from_args(args)
@@ -2061,7 +2213,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         standalone_dir = (
             Path(args.export_standalone)
             if args.export_standalone
-            else _default_standalone_export_dir(Path(model_cfg.output_dir))
+            else (
+                Path(model_cfg.output_dir)
+                if _config_path_uses_canonical_case(args.config)
+                else _default_standalone_export_dir(Path(model_cfg.output_dir))
+            )
         )
         export_path = export_standalone_model(
             model_cfg.output_dir,

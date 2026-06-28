@@ -53,9 +53,10 @@ def export_standalone_model(
     out = Path(output_dir).resolve()
     if not model_output.is_dir():
         raise FileNotFoundError(f"model_output_dir does not exist: {model_output}")
-    if out.exists() and any(out.iterdir()) and not force:
+    in_place = out == model_output
+    if out.exists() and any(out.iterdir()) and not force and not in_place:
         raise FileExistsError(f"output_dir already exists and is not empty: {out}")
-    if out.exists() and force:
+    if out.exists() and force and not in_place:
         shutil.rmtree(out)
     out.mkdir(parents=True, exist_ok=True)
 
@@ -82,9 +83,10 @@ def export_standalone_model(
             else:
                 path.write_text(payload, encoding="utf-8")
 
-    extra = {path.name for path in out.iterdir()} - DEFAULT_TOP_LEVEL_FILES - ({"debug"} if debug_files else set())
-    if extra:
-        raise RuntimeError(f"unexpected files in standalone export: {sorted(extra)}")
+    if not in_place:
+        extra = {path.name for path in out.iterdir()} - DEFAULT_TOP_LEVEL_FILES - ({"debug"} if debug_files else set())
+        if extra:
+            raise RuntimeError(f"unexpected files in standalone export: {sorted(extra)}")
     return out
 
 

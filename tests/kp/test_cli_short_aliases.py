@@ -111,6 +111,7 @@ def test_kp_help_lists_short_aliases(capsys):
         assert exc.code == 0
 
     out = capsys.readouterr().out
+    assert "inspect" in out
     assert "show" in out
     assert "proj" in out
     assert "fit" in out

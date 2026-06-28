@@ -21,6 +21,30 @@ def _set_default_path(section: dict[str, Any], key: str, value: str) -> None:
         section[key] = value
 
 
+def _path_join(root: str | Path, *parts: str) -> str:
+    return Path(str(root)).joinpath(*parts).as_posix()
+
+
+def _canonical_case_base(case_raw: Any) -> str | None:
+    if not isinstance(case_raw, Mapping):
+        return None
+    profile = case_raw.get("profile")
+    q_shell = case_raw.get("q_shell")
+    output_root = case_raw.get("output_root", case_raw.get("root"))
+    if profile in (None, "") or q_shell in (None, "") or output_root in (None, ""):
+        return None
+    return _path_join(str(output_root), str(profile), str(q_shell))
+
+
+def _case_name(raw_case: Any, fallback: str) -> str:
+    if isinstance(raw_case, Mapping):
+        profile = raw_case.get("profile")
+        q_shell = raw_case.get("q_shell")
+        if profile not in (None, "") and q_shell not in (None, ""):
+            return f"{profile}_{q_shell}"
+    return str(raw_case or fallback)
+
+
 def _merge_nested_section(raw: dict[str, Any], model: dict[str, Any], key: str) -> None:
     nested = model.pop(key, None)
     if nested is None:
@@ -79,7 +103,8 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
     """
     out = dict(raw or {})
     path = Path(config_path)
-    case_name = str(out.get("case") or path.stem)
+    case_base = _canonical_case_base(out.get("case"))
+    case_name = _case_name(out.get("case"), path.stem)
 
     material_raw = out.get("material")
     material = dict(material_raw) if isinstance(material_raw, Mapping) else {}
@@ -126,20 +151,36 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
     is_unified = all(key in out for key in ("material", "project", "model"))
     if is_unified:
         project = dict(out.get("project", {}) or {})
-        _set_default_path(project, "out_dir", f"../outputs/project/{case_name}")
+        _set_default_path(
+            project,
+            "out_dir",
+            _path_join(case_base, "projection") if case_base else f"../outputs/project/{case_name}",
+        )
         out["project"] = project
 
         symm = dict(out.get("symm", {}) or {})
-        _set_default_path(symm, "output_dir", f"../outputs/symm/{case_name}")
+        _set_default_path(
+            symm,
+            "output_dir",
+            _path_join(case_base, "symmetry") if case_base else f"../outputs/symm/{case_name}",
+        )
         out["symm"] = symm
 
         output = dict(out.get("output", {}) or {})
-        _set_default_path(output, "dir", f"../outputs/model/{case_name}")
+        _set_default_path(
+            output,
+            "dir",
+            _path_join(case_base, "model") if case_base else f"../outputs/model/{case_name}",
+        )
         out["output"] = output
 
         plot = dict(out.get("plot", {}) or {})
-        _set_default_path(plot, "out", f"../outputs/project/{case_name}/heff_scatter.png")
-        _set_default_path(plot, "data_out", f"../outputs/project/{case_name}/heff_spectrum.txt")
+        if case_base:
+            _set_default_path(plot, "out", _path_join(case_base, "inspect", "scatter.png"))
+            _set_default_path(plot, "data_out", _path_join(case_base, "inspect", "spectrum.txt"))
+        else:
+            _set_default_path(plot, "out", f"../outputs/project/{case_name}/heff_scatter.png")
+            _set_default_path(plot, "data_out", f"../outputs/project/{case_name}/heff_spectrum.txt")
         out["plot"] = plot
 
         if valley is not None and "valley_model" not in out:

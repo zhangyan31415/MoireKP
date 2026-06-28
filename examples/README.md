@@ -48,6 +48,7 @@ examples/<material>_<angle>/
           topology/
   kp/
     configs/
+      K1_q06.yaml
       source/
       model/
         reference/
@@ -75,6 +76,8 @@ writes `tapw/outputs/K1/q06`. Non-default spin profiles must be explicit:
 
 - `configs/source/<case_id>.yaml`: shared input for `kp show`, `kp proj`,
   and `kp symm`.
+- `configs/K1_q06.yaml`: preferred single-case config for `kp inspect`,
+  `kp project`, `kp symm`, and `kp model`.
 - `configs/model/<case_id>.yaml`: canonical continuum-model configuration.
   Production configs consume validated symmetry/action metadata from `kp symm`
   outputs.
@@ -107,6 +110,7 @@ clean-clone test:
 - `tapw run -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW band outputs)
 - `tapw symm -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW raw-H symmetry outputs)
 - `tapw chern -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical topology outputs)
+- `kp inspect -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: inspect source bands before selecting low states)
 - `kp show -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays)
 - `kp proj -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
 - `kp symm -c examples/<case>/kp/configs/source/<case_id>.yaml` (external-data: consumes TAPW symmetry-analysis exports)
