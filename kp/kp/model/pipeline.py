@@ -4074,12 +4074,12 @@ def save_harmonics_diagnostics(
 _Q_LATTICE_PALETTE = {
     "red": "#d1495b",
     "blue": "#3b6fb6",
-    "gold": "#d79a2b",
+    "gold": "#d99000",
     "green": "#2a9d64",
-    "edge": "#c6ccd4",
+    "edge": "#737b86",
     "frame": "#737b86",
     "dark": "#20242a",
-    "paper": "#f8f9fb",
+    "paper": "white",
 }
 
 
@@ -4150,7 +4150,7 @@ def _draw_q_lattice_basis_arrows(ax: Any, bM1: np.ndarray, bM2: np.ndarray) -> N
         ax.text(text_xy[0], text_xy[1], label, fontsize=8.4, color=_Q_LATTICE_PALETTE["dark"], zorder=7)
 
 
-def _draw_q_lattice_segments(ax: Any, points: np.ndarray) -> None:
+def _draw_q_lattice_segments(ax: Any, points: np.ndarray, *, alpha: float = 1.0, linewidth: float = 1.05) -> None:
     from matplotlib.collections import LineCollection
 
     arr = np.asarray(points, dtype=float)
@@ -4165,7 +4165,62 @@ def _draw_q_lattice_segments(ax: Any, points: np.ndarray) -> None:
     nearest = min(distances)
     threshold = 1.04 * nearest
     segments = [(arr[i], arr[j]) for i in range(len(arr)) for j in range(i + 1, len(arr)) if np.linalg.norm(arr[i] - arr[j]) <= threshold]
-    ax.add_collection(LineCollection(segments, colors=_Q_LATTICE_PALETTE["edge"], linewidths=0.82, zorder=1))
+    ax.add_collection(LineCollection(segments, colors=_Q_LATTICE_PALETTE["edge"], linewidths=linewidth, alpha=alpha, zorder=1))
+
+
+def _q_lattice_nearest_spacing(points: np.ndarray) -> float:
+    arr = np.asarray(points, dtype=float)
+    distances = [
+        float(np.linalg.norm(arr[i] - arr[j]))
+        for i in range(len(arr))
+        for j in range(i + 1, len(arr))
+        if np.linalg.norm(arr[i] - arr[j]) > 1.0e-10
+    ]
+    return min(distances) if distances else 1.0
+
+
+def _draw_q_lattice_harmonic_arrow(
+    ax: Any,
+    start: np.ndarray,
+    stop: np.ndarray,
+    *,
+    color: str,
+    spacing: float,
+    curvature: float = 0.045,
+) -> None:
+    from matplotlib.patches import FancyArrow
+
+    p0 = np.asarray(start, dtype=float)
+    p1 = np.asarray(stop, dtype=float)
+    direction = p1 - p0
+    length = float(np.linalg.norm(direction))
+    if length <= 1.0e-12:
+        return
+
+    unit = direction / length
+    normal = np.array([-unit[1], unit[0]], dtype=float)
+    head_length = min(0.30 * spacing, 0.34 * length)
+    head_base = p1 - head_length * unit
+    shaft_end = p1 - 0.62 * head_length * unit
+    control = 0.5 * (p0 + shaft_end) + curvature * length * normal
+    t = np.linspace(0.0, 1.0, 40)[:, None]
+    curve = (1.0 - t) ** 2 * p0 + 2.0 * (1.0 - t) * t * control + t**2 * shaft_end
+    ax.plot(curve[:, 0], curve[:, 1], color=color, linewidth=1.35, solid_capstyle="round", zorder=6)
+    arrow_head = FancyArrow(
+        head_base[0],
+        head_base[1],
+        p1[0] - head_base[0],
+        p1[1] - head_base[1],
+        width=0.001 * spacing,
+        head_width=0.28 * spacing,
+        head_length=head_length,
+        length_includes_head=True,
+        overhang=0.30,
+        color=color,
+        linewidth=0.0,
+        zorder=7,
+    )
+    ax.add_patch(arrow_head)
 
 
 def save_q_lattice_harmonics_plot(
@@ -4177,7 +4232,7 @@ def save_q_lattice_harmonics_plot(
     intra_harmonics: Mapping[int, np.ndarray],
     inter_harmonics: Mapping[int, np.ndarray],
     path: str | Path,
-    title: str = "Q lattice and selected harmonics",
+    title: str | None = None,
 ) -> Path:
     import matplotlib
 
@@ -4197,6 +4252,7 @@ def save_q_lattice_harmonics_plot(
     inter_vectors = _harmonic_vectors_from_map(inter_harmonics)
     tol = _q_lattice_match_tolerance(q1, q2, b1, b2)
     anchor = _choose_q_lattice_anchor(q1, q2, intra_vectors, inter_vectors, tol=tol)
+    spacing = _q_lattice_nearest_spacing(np.vstack([q1, q2]))
 
     with kp_plot_rc_context():
         fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=KP_DPI, constrained_layout=True)
@@ -4206,25 +4262,25 @@ def save_q_lattice_harmonics_plot(
                 Polygon(
                     bz,
                     closed=True,
-                    facecolor=_Q_LATTICE_PALETTE["paper"],
+                    facecolor="none",
                     edgecolor=_Q_LATTICE_PALETTE["frame"],
-                    linewidth=1.15,
-                    linestyle=(0, (4, 3)),
+                    linewidth=0.9,
+                    linestyle="--",
+                    alpha=0.7,
                     zorder=0,
                 )
             )
         except Exception:
             bz = np.empty((0, 2), dtype=float)
 
-        _draw_q_lattice_segments(ax, np.vstack([q1, q2]))
-        ax.scatter(q1[:, 0], q1[:, 1], s=42, color=_Q_LATTICE_PALETTE["red"], edgecolor="white", linewidth=0.6, zorder=3)
-        ax.scatter(q2[:, 0], q2[:, 1], s=42, color=_Q_LATTICE_PALETTE["blue"], edgecolor="white", linewidth=0.6, zorder=3)
-        ax.scatter(anchor[0], anchor[1], s=82, color=_Q_LATTICE_PALETTE["dark"], edgecolor="white", linewidth=0.7, zorder=5)
+        _draw_q_lattice_segments(ax, np.vstack([q1, q2]), alpha=1.0, linewidth=1.05)
+        ax.scatter(q1[:, 0], q1[:, 1], s=40, color=_Q_LATTICE_PALETTE["red"], edgecolor="none", linewidth=0.0, zorder=3)
+        ax.scatter(q2[:, 0], q2[:, 1], s=40, color=_Q_LATTICE_PALETTE["blue"], edgecolor="none", linewidth=0.0, zorder=3)
 
         arrow_targets: list[np.ndarray] = [anchor]
         styles = {
-            "intra": {"color": _Q_LATTICE_PALETTE["gold"], "linestyle": "-", "label": "intra"},
-            "inter": {"color": _Q_LATTICE_PALETTE["green"], "linestyle": "--", "label": "inter"},
+            "intra": {"color": _Q_LATTICE_PALETTE["gold"], "label": "intra"},
+            "inter": {"color": _Q_LATTICE_PALETTE["green"], "label": "inter"},
         }
         for kind, vectors, target_qset, sign in (
             ("intra", intra_vectors, q1, -1.0),
@@ -4237,35 +4293,15 @@ def save_q_lattice_harmonics_plot(
                 if distance > tol:
                     target = ideal_target
                 arrow_targets.append(np.asarray(target, dtype=float))
-                ax.annotate(
-                    "",
-                    xy=target,
-                    xytext=anchor,
-                    arrowprops=dict(
-                        arrowstyle="-|>",
-                        lw=1.45,
-                        color=style["color"],
-                        linestyle=style["linestyle"],
-                        mutation_scale=10.0,
-                        shrinkA=4.0,
-                        shrinkB=4.0,
-                    ),
-                    zorder=6,
-                )
-                mid = 0.62 * np.asarray(target, dtype=float) + 0.38 * anchor
-                ax.text(
-                    mid[0],
-                    mid[1],
-                    f"{kind[0]}{index}",
-                    fontsize=8.0,
+                _draw_q_lattice_harmonic_arrow(
+                    ax,
+                    anchor,
+                    target,
                     color=style["color"],
-                    ha="center",
-                    va="center",
-                    zorder=7,
+                    spacing=spacing,
                 )
 
-        _draw_q_lattice_basis_arrows(ax, b1, b2)
-        all_points = [q1, q2, np.asarray([anchor, b1, b2]), np.asarray(arrow_targets, dtype=float)]
+        all_points = [q1, q2, np.asarray([anchor]), np.asarray(arrow_targets, dtype=float)]
         if bz.size:
             all_points.append(bz)
         stacked = np.vstack(all_points)
@@ -4279,13 +4315,14 @@ def save_q_lattice_harmonics_plot(
         ax.set_yticks([])
         for spine in ax.spines.values():
             spine.set_visible(False)
-        ax.set_title(title, fontsize=13, pad=7, weight="semibold")
+        if title:
+            ax.set_title(title, fontsize=13, pad=7, weight="semibold")
         ax.legend(
             handles=[
-                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["red"], markeredgecolor="white", markersize=6, label=r"$Q_1$"),
-                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["blue"], markeredgecolor="white", markersize=6, label=r"$Q_2$"),
+                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["red"], markeredgecolor="none", markersize=6, label=r"$Q_1$"),
+                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["blue"], markeredgecolor="none", markersize=6, label=r"$Q_2$"),
                 Line2D([0], [0], color=_Q_LATTICE_PALETTE["gold"], lw=1.45, linestyle="-", label="intra"),
-                Line2D([0], [0], color=_Q_LATTICE_PALETTE["green"], lw=1.45, linestyle="--", label="inter"),
+                Line2D([0], [0], color=_Q_LATTICE_PALETTE["green"], lw=1.45, linestyle="-", label="inter"),
             ],
             **KP_LEGEND_KWARGS,
         )
