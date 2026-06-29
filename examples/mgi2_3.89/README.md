@@ -1,42 +1,45 @@
 ## MgI2 3.89
 
-This release example covers MgI2 at 3.89 degrees. The active KP entry points
-are one YAML file per case:
+This release example covers MgI2 at 3.89 degrees. The release-facing KP entry
+points use one config per case:
 
 ```text
-kp/configs/mgi2_3.89_Gamma_Q5.yaml
-kp/configs/mgi2_3.89_M1_spinless_Q7.yaml
-kp/configs/mgi2_3.89_M1_spinful_Q7.yaml
+kp/configs/mgi2_3.89_Gamma_q05.yaml
+kp/configs/mgi2_3.89_M1_q07.yaml
+kp/configs/mgi2_3.89_M1_spinless_q07.yaml
 ```
 
-The YAML files keep the user-facing parameters in one place: `valley`, `spin`,
-`project.nlow_state_list`, `project.gauge`, `model.n_orb`, fitting settings,
-and plotting settings. `symm.operations`, `source_config`, `symmetry_source`,
-`sectors`, and `term_templates` are inferred by the program.
+Each config drives inspection, projection, symmetry projection, and model
+fitting. Release examples do not use split source/model config directories.
 
 ### Run KP
 
 From the repository root:
 
 ```bash
-kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_Q5.yaml  # external-data
-kp symm    --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_Q5.yaml  # external-data
-kp model   --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_Q5.yaml  # external-data
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
 
-kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_Q7.yaml  # external-data
-kp symm    --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_Q7.yaml  # external-data
-kp model   --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_Q7.yaml  # external-data
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
 
-kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_Q7.yaml  # external-data
-kp symm    --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_Q7.yaml  # external-data
-kp model   --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_Q7.yaml  # external-data
+kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
+kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
 ```
 
-Each case uses `project.gauge: auto`; users do not write `norb_fix_list`.
+Run `inspect` first and check `kp/outputs/<profile>/<q_shell>/inspect/` before
+changing `project.nlow_state_list`. Each case uses `project.gauge: auto`; users
+do not write `norb_fix_list`.
 
 ### Current Metrics
 
-These GPU validation numbers were generated with the single-file YAMLs:
+These GPU validation numbers were generated with the active release configs:
 
 | case | gauge | model dim | active terms | all-band RMS / max | plotted-band RMS / max |
 | --- | --- | ---: | ---: | ---: | ---: |

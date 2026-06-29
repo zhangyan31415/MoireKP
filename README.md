@@ -38,17 +38,23 @@ Generate starter configuration files:
 tapw init -o output_dir
 ```
 
-Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the required OpenMX-derived input files, then run:
+Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the required OpenMX-derived input files, then run the same config through the requested TAPW workflows:
 
 ```bash
 cd output_dir
-tapw run --config config.yaml
-tapw plot --config bands.yaml
+tapw run -c config.yaml
+tapw symm -c config.yaml
+tapw chern -c config.yaml  # when topology settings are present
+tapw plot -c bands.yaml
 ```
 
-For topology post-processing, run `tapw run` with a Chern configuration and then use `tapw topo` in the generated `Q_shell_*` directory.
+New configs prefer `output_layout.style: canonical_v1`, which writes
+`outputs/<profile>/<q_shell>/<workflow>/manifest.json`. For the default spinful
+profile, K1 with `n_g: 6` should be named `outputs/K1/q06`; non-default spin
+profiles should be explicit, for example `K1_up/q06` or `K1_spinless/q06`.
+Legacy configs without `output_layout` continue to write `Q_shell_*`.
 
-Legacy TAPW aliases remain available for existing scripts: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
+Longer TAPW forms remain available for compatibility: `tapw run --config ... --mode symmetry` is equivalent to `tapw symm -c ...`, and `tapw postprocess-memmap` is equivalent to `tapw final`. Legacy script entry points also remain available: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 
 ## Continuum-Model Workflow
 
@@ -56,13 +62,41 @@ The `kp` command works with YAML source and model configurations under `examples
 The release example commands consume external TAPW arrays or precomputed KP
 outputs; clean-clone checks are limited to package metadata and CLI surfaces.
 
+New KP configs should use one case file for inspect, projection, symmetry, and
+model fitting:
+
+```text
+kp/
+  configs/K1_q06.yaml
+  outputs/K1/q06/
+    inspect/
+    projection/
+    symmetry/
+    model/
+```
+
 Typical operations are:
 
 ```bash
-kp plot --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp project --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
-kp symm --config examples/mote2_3.89/kp/configs/source/mote2_3.89_K1.yaml  # external-data
+kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+kp export  -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml -o exported/mote2_3.89_K1  # precomputed
 ```
+
+KP case configs may either name TAPW arrays directly or consume the canonical
+TAPW band manifest:
+
+```yaml
+material:
+  tapw_band_manifest: ../../../tapw/outputs/K1/q06/band/manifest.json
+```
+
+The longer forms `kp plot`, `kp project`, `kp model --config ...`, and
+`kp model export-standalone ...` remain supported for existing scripts. `kp
+export outputs/model/case exported/case` is also supported when exporting
+directly from a generated model output directory.
 
 For new `kp project` configs, prefer `project.gauge: auto` instead of hand
 writing `project.norb_fix_list`. See `docs/project_auto_gauge.md` for the

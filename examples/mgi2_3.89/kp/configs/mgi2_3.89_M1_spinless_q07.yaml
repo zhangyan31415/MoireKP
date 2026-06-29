@@ -1,0 +1,70 @@
+case:
+  profile: M1_spinless
+  q_shell: q07
+  output_root: ../outputs
+title: MgI2 M1 spinless q07
+valley: M1
+spin: up
+
+material:
+  name: MgI2
+  num_layer_list: [1, 1]
+  orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2
+  efermi: -4.168612
+  hamk_file: ../../tapw/Q_shell_7/band/hamk_M1_valley.npy
+  qset1_file: ../../tapw/Q_shell_7/g_vec_list_7_M1_1layer.npy
+  qset2_file: ../../tapw/Q_shell_7/g_vec_list_7_M1_2layer.npy
+  band_file: ../../tapw/Q_shell_7/band/band_CBM_M1_valley.txt
+
+plot:
+  mode: M1
+  hamk_index: 0
+  # Fast inspect path from band_file. Change to "all" to diagonalize hamk and
+  # print orbital/eigenvector components.
+  target: conduction
+  ref_q_index: 30
+  sort_by_qnorm: true
+  report_below: 2
+  report_above: 2
+  report_components: 8
+  q_window_bands: 10
+  ylim: [-1.0, 1.0]
+  title: "MgI2 M1 spinless q07: CBM band vs Q"
+
+project:
+  nlow_state_list:
+    - [11]
+    - [11]
+  gauge: auto
+  downfold_method: fixed_schur
+  e_ref: -2.6
+
+symm:
+  tapw_symmetry_dir: ../../tapw/symmetry_analysis_test_m_q7
+  spin_sector_sewing: up_to_down
+  tolerance: 1.0e-2
+
+kpath:
+  file: ../../tapw/KPATH.in
+  tmat: [[60.9508659523, 0.0, 0.0], [-30.4754329751, 52.7849982976, 0.0], [0.0, 0.0, 50.0]]
+
+model:
+  n_orb: [1, 1]
+  harmonics:
+    intralayer: 6
+    interlayer: 5
+  max_order:
+    kinetic: 10
+    intralayer: 6
+    interlayer: 8
+  fit:
+    indices: [20, 40]
+    coeff_tol: 1.0e-6
+  bands:
+    compare_to_heff: true
+    band_slice: [0, 8]
+    plot:
+      bottom_bands: 8
+      align: bottom
+      figsize: [3.0, 5.0]
+      ylim: [0.0, 0.16]

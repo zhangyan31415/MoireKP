@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
@@ -89,6 +90,82 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
     assert guarded.accessed == [0, 1]
     assert len(projected_blocks) == 1
     assert (tmp_path / "project" / "k_indices.npy").exists()
+
+
+def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path) -> None:
+    band_dir = tmp_path / "tapw" / "outputs" / "K1" / "q06" / "band"
+    band_dir.mkdir(parents=True)
+    manifest_path = band_dir / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema": "tapw_band_outputs/v1",
+                "files": {
+                    "hamiltonian_k": "hamiltonian_k.npy",
+                    "g_vectors_group1": "g_vectors_group1.npy",
+                    "g_vectors_group2": "g_vectors_group2.npy",
+                    "energies_vbm": "energies_vbm.txt",
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    hamk = np.zeros((1, 4, 4), dtype=np.complex128)
+    q = np.zeros((1, 2), dtype=float)
+    seen: dict[str, object] = {}
+
+    def fake_load_hamk(path, *_args, **_kwargs):
+        seen["hamk"] = Path(path)
+        return hamk
+
+    def fake_load_qsets(qset1, qset2):
+        seen["qset1"] = Path(qset1)
+        seen["qset2"] = Path(qset2)
+        return q, q.copy()
+
+    monkeypatch.setattr(cli, "_load_hamk_with_energy_unit", fake_load_hamk)
+    monkeypatch.setattr(cli, "load_Q_sets", fake_load_qsets)
+    monkeypatch.setattr(
+        cli,
+        "project_heff_full",
+        lambda *_args, **_kwargs: (
+            np.eye(2, dtype=np.complex128),
+            np.array([0.0, 1.0], dtype=float),
+            np.eye(2, dtype=np.complex128),
+            SimpleNamespace(hermiticity_residual=0.0),
+        ),
+    )
+    monkeypatch.setattr(cli, "plot_eigs_scatter", lambda *_args, out, **_kwargs: Path(out).write_text("plot"))
+
+    cfg = {
+        "material": {
+            "tapw_band_manifest": "tapw/outputs/K1/q06/band/manifest.json",
+            "spin": "up",
+            "energy_unit": "eV",
+            "num_layers": 2,
+            "num_orb_per_layer": [1],
+        },
+        "plot": {"hamk_index": 0},
+        "project": {
+            "mode": "K1",
+            "workers": 1,
+            "k_indices": [0],
+            "downfold_method": "first_order",
+            "out_dir": "project",
+            "nlow_state_list": [[0], [0]],
+            "norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+        },
+    }
+    cfg_path = tmp_path / "source.yaml"
+    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+
+    cli.cmd_project_from_config(str(cfg_path))
+
+    assert seen == {
+        "hamk": band_dir / "hamiltonian_k.npy",
+        "qset1": band_dir / "g_vectors_group1.npy",
+        "qset2": band_dir / "g_vectors_group2.npy",
+    }
 
 
 def test_active_indices_summary_flattens_sparse_layer_bands() -> None:

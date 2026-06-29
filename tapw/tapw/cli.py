@@ -15,6 +15,7 @@ from .io.kpath import KPathGenerator
 from .io.hr import HrSparseHandler
 from .reporting import TapwReporter
 from .workflows.symmetry import SymmetryAnalysisRunner, resolve_requested_symmetrization_operations
+from .artifacts import canonical_profile_name, canonical_qshell_name
 
 VALLEY_LABELS = dict(BandStructureCalculator.VALLEY_MAP)
 
@@ -57,7 +58,7 @@ def build_calc_parser(prog: str = None, *, fixed_mode: str | None = None):
         prog=prog,
         description='Twisted Material Band Structure Calculator',
     )
-    parser.add_argument('--config', type=str, default='config.yaml',
+    parser.add_argument('-c', '--config', type=str, default='config.yaml',
                        help='Path to configuration file')
     parser.add_argument('--twist-index', type=int,
                        help='Twist index (overrides config file)')
@@ -128,6 +129,19 @@ def resolve_qshell_dir_name(config_or_compute_cfg, calculator) -> str:
     if uses_symm:
         return qshell_name + "_symm"
     return qshell_name
+
+
+def canonical_target_output_dir(config, calculator) -> Path | None:
+    layout = getattr(config, "output_layout", None)
+    if str(getattr(layout, "style", "")).lower() != "canonical_v1":
+        return None
+    profile = canonical_profile_name(
+        getattr(calculator, "valley_flag", getattr(config.compute, "valley_flag", "unknown")),
+        spin=getattr(config.twist, "spin", True),
+        profile=getattr(layout, "profile", None),
+    )
+    q_shell = getattr(layout, "q_shell", None) or canonical_qshell_name(config.compute.n_g)
+    return Path(layout.root) / profile / q_shell
 
 
 def calculation_targets(compute_cfg) -> list:
@@ -445,11 +459,15 @@ def run_calc(args):
                     kpath_config=kpath_config,
                     reporter=reporter,
                 )
+                if hasattr(calculator, "config"):
+                    calculator.config.output_layout = getattr(config, "output_layout", None)
                 if getattr(calculator, "use_M_valley_threefold_symm", False):
                     reusable_m_valley_calculator = calculator
             
-            out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config, calculator)
-            out_path.mkdir(exist_ok=True)
+            out_path = canonical_target_output_dir(config, calculator)
+            if out_path is None:
+                out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config, calculator)
+            out_path.mkdir(parents=True, exist_ok=True)
             reporter.stage("Outputs", "Primary files for this target are written under this run directory.")
             reporter.kv("Target output directory", out_path)
             
@@ -511,6 +529,16 @@ def main_chern(argv=None, *, prog="tapw chern", finalize: bool = True):
     return code
 
 
+def main_symm(argv=None, *, prog="tapw symm", finalize: bool = True):
+    """Run TAPW source-symmetry analysis with mode fixed to `symmetry`."""
+    args = build_calc_parser(prog=prog, fixed_mode="symmetry").parse_args(argv)
+    args.mode = "symmetry"
+    code = _coerce_exit_code(run_calc(args))
+    if finalize:
+        return finish_calculation_process(code)
+    return code
+
+
 def build_main_parser():
     """Build the unified TAPW command dispatcher parser."""
     parser = argparse.ArgumentParser(
@@ -520,9 +548,11 @@ def build_main_parser():
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.add_parser("init", help="Generate TAPW configuration files")
     subparsers.add_parser("run", help="Run TAPW band, Chern, or symmetry calculations")
+    subparsers.add_parser("symm", help="Run TAPW source-symmetry analysis")
     subparsers.add_parser("chern", help="Run TAPW Chern calculation")
     subparsers.add_parser("plot", help="Plot TAPW band structures")
     subparsers.add_parser("topo", help="Post-process TAPW Chern/Wilson-loop outputs")
+    subparsers.add_parser("final", help="Finalize chunked TAPW outputs")
     subparsers.add_parser("postprocess-memmap", help="Finalize chunked TAPW memmap outputs")
     subparsers.add_parser("orbital", help="Analyze TAPW orbital weights")
     subparsers.add_parser("fatband", help="Plot orbital-weighted bands")
@@ -585,6 +615,8 @@ def main(argv=None):
         return config_generator.main(rest, prog="tapw init")
     if command in {"run", "calc"}:
         return main_calc(rest, prog="tapw run")
+    if command in {"symm", "symmetry"}:
+        return main_symm(rest, prog=f"tapw {command}")
     if command == "chern":
         return main_chern(rest, prog="tapw chern")
     if command == "plot":
@@ -595,10 +627,10 @@ def main(argv=None):
         from . import chern_post
 
         return chern_post.main(rest, prog="tapw topo")
-    if command == "postprocess-memmap":
+    if command in {"final", "postprocess-memmap"}:
         from . import postprocess_memmap
 
-        return postprocess_memmap.main(rest, prog="tapw postprocess-memmap")
+        return postprocess_memmap.main(rest, prog=f"tapw {command}")
     if command == "orbital":
         return _main_orbital(rest)
     if command == "fatband":

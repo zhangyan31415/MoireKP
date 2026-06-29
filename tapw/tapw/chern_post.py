@@ -1034,7 +1034,7 @@ def build_parser(*, prog=None):
         prog=prog,
         description="TAPW Chern number, Wilson-loop, and QGT post-processing",
     )
-    parser.add_argument("--config", type=str, default="config.yaml", help="Path to config.yaml")
+    parser.add_argument("-c", "--config", type=str, default="config.yaml", help="Path to config.yaml")
     parser.add_argument(
         "-b",
         "--band",

@@ -12,6 +12,7 @@ REPO_ROOT = EXAMPLES_ROOT.parent
 for src_dir in (REPO_ROOT / "kp", REPO_ROOT / "tapw"):
     sys.path.insert(0, str(src_dir))
 
+from kp.config.case import normalize_case_config
 from kp.model.pipeline import build_moire_config_from_file, load_model_config, run_configured_model
 from kp.model.core import build_model
 
@@ -22,26 +23,18 @@ pytestmark = pytest.mark.external_data
 MOTE2_ROOT = EXAMPLES_ROOT / "mote2_3.89"
 MGI2_ROOT = EXAMPLES_ROOT / "mgi2_3.89"
 
-GMK_BASE_MODEL_CONFIGS = {
-    "mote2_3.89_K1": MOTE2_ROOT / "kp/configs/model/mote2_3.89_K1.yaml",
-    "mgi2_3.89_Gamma": MGI2_ROOT / "kp/configs/model/mgi2_3.89_Gamma.yaml",
-    "mgi2_3.89_M1": MGI2_ROOT / "kp/configs/model/mgi2_3.89_M1.yaml",
+GMK_BASE_CASE_CONFIGS = {
+    "mote2_3.89_K1_up_q06": MOTE2_ROOT / "kp/configs/mote2_3.89_K1_up_q06.yaml",
+    "mgi2_3.89_Gamma_q05": MGI2_ROOT / "kp/configs/mgi2_3.89_Gamma_q05.yaml",
+    "mgi2_3.89_M1_spinless_q07": MGI2_ROOT / "kp/configs/mgi2_3.89_M1_spinless_q07.yaml",
 }
 
-GMK_EXTENDED_MODEL_CONFIGS = {
-    "mote2_3.89_K1": MOTE2_ROOT / "kp/configs/model/mote2_3.89_K1.yaml",
-    "mote2_3.89_K1_spinful": MOTE2_ROOT / "kp/configs/model/mote2_3.89_K1_spinful.yaml",
-    "mgi2_3.89_Gamma": MGI2_ROOT / "kp/configs/model/mgi2_3.89_Gamma.yaml",
-    "mgi2_3.89_M1": MGI2_ROOT / "kp/configs/model/mgi2_3.89_M1.yaml",
-    "mgi2_3.89_M1_spinful": MGI2_ROOT / "kp/configs/model/mgi2_3.89_M1_spinful.yaml",
-}
-
-GMK_ACTIVE_SOURCE_CONFIGS = {
-    "mote2_3.89_K1": MOTE2_ROOT / "kp/configs/source/mote2_3.89_K1.yaml",
-    "mote2_3.89_K1_spinful": MOTE2_ROOT / "kp/configs/source/mote2_3.89_K1_spinful.yaml",
-    "mgi2_3.89_Gamma": MGI2_ROOT / "kp/configs/source/mgi2_3.89_Gamma.yaml",
-    "mgi2_3.89_M1": MGI2_ROOT / "kp/configs/source/mgi2_3.89_M1.yaml",
-    "mgi2_3.89_M1_spinful": MGI2_ROOT / "kp/configs/source/mgi2_3.89_M1_spinful.yaml",
+GMK_CASE_CONFIGS = {
+    "mote2_3.89_K1_q06": MOTE2_ROOT / "kp/configs/mote2_3.89_K1_q06.yaml",
+    "mote2_3.89_K1_up_q06": MOTE2_ROOT / "kp/configs/mote2_3.89_K1_up_q06.yaml",
+    "mgi2_3.89_Gamma_q05": MGI2_ROOT / "kp/configs/mgi2_3.89_Gamma_q05.yaml",
+    "mgi2_3.89_M1_q07": MGI2_ROOT / "kp/configs/mgi2_3.89_M1_q07.yaml",
+    "mgi2_3.89_M1_spinless_q07": MGI2_ROOT / "kp/configs/mgi2_3.89_M1_spinless_q07.yaml",
 }
 
 GMK_REFERENCE_OUTPUTS = {
@@ -143,30 +136,58 @@ def _symmetry_source_path(config_path: Path, raw: dict) -> Path | None:
 
 
 def _require_model_load_artifacts(config_path: Path, raw: dict) -> None:
-    source_path = (config_path.parent / raw["source_config"]).resolve()
-    _require_example_artifact(source_path)
+    normalized = normalize_case_config(raw, config_path=config_path)
+    source_path_raw = normalized.get("source_config")
+    if source_path_raw not in (None, ""):
+        source_path = Path(str(source_path_raw))
+        if not source_path.is_absolute():
+            source_path = (config_path.parent / source_path).resolve()
+        _require_example_artifact(source_path)
+    else:
+        for key in ("hamk_file", "qset1_file", "qset2_file"):
+            value = normalized.get("material", {}).get(key)
+            if value in (None, ""):
+                pytest.skip(f"single-case config is missing material.{key}: {config_path}")
+            path = Path(str(value))
+            if not path.is_absolute():
+                path = (config_path.parent / path).resolve()
+            _require_example_artifact(path)
     symmetry_path = _symmetry_source_path(config_path, raw)
     if symmetry_path is None:
-        pytest.skip(f"model config has no external kp symm source: {config_path}")
+        symm_dir = normalized.get("symm", {}).get("output_dir")
+        if symm_dir not in (None, ""):
+            symmetry_path = Path(str(symm_dir))
+            if not symmetry_path.is_absolute():
+                symmetry_path = (config_path.parent / symmetry_path).resolve()
+        else:
+            pytest.skip(f"model config has no external kp symm source: {config_path}")
     _require_example_artifact(symmetry_path)
 
 
-def test_gmk_base_configs_follow_unified_layout() -> None:
-    for case_id, path in GMK_BASE_MODEL_CONFIGS.items():
+def test_gmk_case_configs_are_single_file_release_layout() -> None:
+    for config_root in (MOTE2_ROOT / "kp/configs", MGI2_ROOT / "kp/configs"):
+        assert config_root.exists(), config_root
+        assert not any(child.is_dir() for child in config_root.iterdir()), config_root
+
+    for case_id, path in GMK_CASE_CONFIGS.items():
         assert path.exists(), path
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert raw["source_config"].startswith("../source/")
-        assert raw["output"]["dir"] == f"../../outputs/model/{case_id}"
-        _require_example_artifact((path.parent / raw["source_config"]).resolve())
+        assert "source_config" not in raw, path
+        assert isinstance(raw.get("case"), dict), path
+        assert raw["case"]["profile"] and raw["case"]["q_shell"], path
+        normalized = normalize_case_config(raw, config_path=path)
+        assert normalized["project"]["out_dir"].endswith("/projection"), (case_id, normalized["project"]["out_dir"])
+        assert normalized["symm"]["output_dir"].endswith("/symmetry"), (case_id, normalized["symm"]["output_dir"])
+        assert normalized["output"]["dir"].endswith("/model"), (case_id, normalized["output"]["dir"])
 
 
 def test_gmk_model_config_dirs_are_file_organization_only() -> None:
     forbidden_parts = {"production", "release", "public"}
-    for path in [*GMK_BASE_MODEL_CONFIGS.values(), *GMK_EXTENDED_MODEL_CONFIGS.values()]:
+    for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        output_dir = Path(str(raw["output"]["dir"]))
+        normalized = normalize_case_config(raw, config_path=path)
+        output_dir = Path(str(normalized["output"]["dir"]))
         assert not _has_forbidden_path_semantics(output_dir, forbidden_parts), (path, output_dir)
-        _require_example_artifact((path.parent / raw["source_config"]).resolve())
         _require_model_load_artifacts(path, raw)
         cfg = load_model_config(path)
         assert not _has_forbidden_path_semantics(cfg.output_dir, forbidden_parts), (path, cfg.output_dir)
@@ -174,9 +195,8 @@ def test_gmk_model_config_dirs_are_file_organization_only() -> None:
 
 def test_gmk_active_configs_do_not_reference_release_or_public_paths() -> None:
     forbidden_parts = {"production", "release", "public"}
-    active_configs = [*GMK_ACTIVE_SOURCE_CONFIGS.values(), *GMK_EXTENDED_MODEL_CONFIGS.values()]
 
-    for path in active_configs:
+    for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         for path_string in _iter_path_strings(raw):
             assert not _has_forbidden_path_semantics(path_string, forbidden_parts), (path, path_string)
@@ -212,17 +232,26 @@ def test_gmk_readmes_do_not_promote_historical_runs_as_active_paths() -> None:
             assert fragment not in active_section, (path, fragment)
 
 
-def test_gmk_model_configs_use_canonical_source_configs() -> None:
-    for path in GMK_EXTENDED_MODEL_CONFIGS.values():
+def test_gmk_case_configs_do_not_use_split_source_model_configs() -> None:
+    for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        source_config = str(raw["source_config"])
-        assert source_config.startswith("../source/"), (path, source_config)
-        assert "_symm_config" not in source_config, (path, source_config)
-        _require_example_artifact((path.parent / source_config).resolve())
+        assert "source_config" not in raw, path
+        assert "material" in raw and "project" in raw and "symm" in raw and "model" in raw, path
+
+
+def test_gmk_case_configs_make_inspect_plot_settings_explicit() -> None:
+    for path in GMK_CASE_CONFIGS.values():
+        raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        plot = raw.get("plot")
+        assert isinstance(plot, dict), path
+        assert plot.get("target") in {"all", "valence", "conduction"}, path
+        assert isinstance(plot.get("ref_q_index"), int), path
+        assert plot.get("ylim") == [-1.0, 1.0], path
+        assert int(plot.get("q_window_bands", 0)) > 0, path
 
 
 def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
-    for path in [*GMK_BASE_MODEL_CONFIGS.values(), *GMK_EXTENDED_MODEL_CONFIGS.values()]:
+    for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert "valley" in raw, path
         assert "spin" in raw, path
@@ -259,18 +288,18 @@ def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
 
 
 def test_gmk_base_configs_load() -> None:
-    for case_id, path in GMK_BASE_MODEL_CONFIGS.items():
+    for case_id, path in GMK_BASE_CASE_CONFIGS.items():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert raw.get("spin") != "spinless", path
         _require_model_load_artifacts(path, raw)
         cfg = load_model_config(path)
-        assert cfg.output_dir.name == case_id
+        assert cfg.output_dir.name == "model"
         assert cfg.path == path
         assert cfg.valley_model["valley_type"] in {"Gamma", "K", "M"}
 
 
 def test_gmk_base_configs_use_uniform_term_symmetry_sets() -> None:
-    for path in GMK_BASE_MODEL_CONFIGS.values():
+    for path in GMK_BASE_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         _require_model_load_artifacts(path, raw)
         cfg = load_model_config(path)
@@ -330,7 +359,7 @@ def test_c2_action_for_gamma_from_rawh_matches_declared_model_support() -> None:
 
 
 def test_m_base_config_builds_named_sector_model() -> None:
-    path = GMK_BASE_MODEL_CONFIGS["mgi2_3.89_M1"]
+    path = GMK_BASE_CASE_CONFIGS["mgi2_3.89_M1_spinless_q07"]
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     _require_model_load_artifacts(path, raw)
     moire_cfg, _model_cfg = build_moire_config_from_file(path)
@@ -341,14 +370,14 @@ def test_m_base_config_builds_named_sector_model() -> None:
 
 
 def test_k1_base_example_stays_mev_scale_and_has_active_terms(tmp_path: Path) -> None:
-    src = GMK_BASE_MODEL_CONFIGS["mote2_3.89_K1"]
+    src = GMK_BASE_CASE_CONFIGS["mote2_3.89_K1_up_q06"]
     raw = yaml.safe_load(src.read_text(encoding="utf-8"))
-    _require_example_artifact((src.parent / raw["source_config"]).resolve())
-    _require_example_artifact((src.parent / raw["symmetry_source"]).resolve())
-    raw["source_config"] = str((src.parent / raw["source_config"]).resolve())
+    _require_model_load_artifacts(src, raw)
+    normalized = normalize_case_config(raw, config_path=src)
     raw["kpath"]["file"] = str((src.parent / raw["kpath"]["file"]).resolve())
-    raw["symmetry_source"] = str((src.parent / raw["symmetry_source"]).resolve())
-    raw["output"]["dir"] = str((tmp_path / "k1_regression").resolve())
+    raw["project"]["out_dir"] = str((src.parent / normalized["project"]["out_dir"]).resolve())
+    raw["symm"]["output_dir"] = str((src.parent / normalized["symm"]["output_dir"]).resolve())
+    raw["output"] = {"dir": str((tmp_path / "k1_regression").resolve())}
     cfg_path = tmp_path / "mote2_3.89_K1_regression.yaml"
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 

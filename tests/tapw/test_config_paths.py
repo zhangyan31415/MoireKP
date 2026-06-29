@@ -60,6 +60,27 @@ def test_config_relative_paths_resolve_from_config_file_directory(tmp_path, monk
     assert Path(config.paths.output_dir) == config_dir / "results"
 
 
+def test_config_resolves_canonical_output_layout_from_config_file_directory(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config_path = _write_relative_path_config(config_dir)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["output_layout"] = {
+        "style": "Canonical_V1",
+        "root": "../outputs",
+        "q_shell": "q06",
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = Config.from_yaml(str(config_path))
+
+    assert config.output_layout is not None
+    assert config.output_layout.style == "canonical_v1"
+    assert Path(config.output_layout.root) == config_dir.parent / "outputs"
+    assert config.output_layout.q_shell == "q06"
+    assert config.output_layout.profile is None
+
+
 def test_path_config_has_no_filesystem_or_stack_inspection_side_effects(tmp_path, monkeypatch):
     output_dir = tmp_path / "not_created"
     original_import = builtins.__import__

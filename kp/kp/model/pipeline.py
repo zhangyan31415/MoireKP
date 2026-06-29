@@ -26,7 +26,21 @@ from .schema import (
 )
 from .symmetry import load_symmetry_source
 from ..config.case import normalize_case_config
-from ..symmetry.action_schema import allows_inferred_action_metadata
+from ..plot_style import (
+    KP_BAND_BOX_ASPECT,
+    KP_BAND_FIGSIZE,
+    KP_DPI,
+    KP_LEGEND_KWARGS,
+    KP_MARKER_STYLE,
+    KP_MODEL_STYLE,
+    KP_PRIMARY_STYLE,
+    KP_REFERENCE_STYLE,
+    apply_kp_axis_style,
+    kp_plot_rc_context,
+    kp_font_family,
+    relative_energy_ylabel,
+)
+from ..symmetry.action_schema import SOURCE_MATRIX_SEMANTICS, allows_inferred_action_metadata
 from ..symmetry.geometry import (
     bM_candidates_from_q_distances,
     canonical_bM_pair_from_candidates,
@@ -100,7 +114,7 @@ _MODEL_DEBUG_OUTPUT_FILES = {
     "operation_registry.json",
     "bM_diagnostic.json",
     "harmonics_diagnostic.json",
-    "harmonics_diagnostic.png",
+    "harmonics_diagnostic.pdf",
     "comparison.json",
     "comparison_plot.json",
 }
@@ -595,6 +609,8 @@ def _default_symmetry_source(
                 out["inferred_from_source_config"] = True
     if out.get("type") == "kp_symm_output":
         out.setdefault("use", "raw")
+        if isinstance(raw.get("valley_model"), Mapping):
+            out.setdefault("valley_model", dict(raw["valley_model"]))
         symm = source_raw.get("symm", {})
         if "operations" not in out and isinstance(symm, Mapping) and symm.get("operations"):
             out["operations"] = list(symm.get("operations", []))
@@ -922,7 +938,63 @@ def _rotation_deg_from_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) 
         k_transform = frame.get("k_transform", {})
         if isinstance(k_transform, Mapping) and "rotation_deg" in k_transform:
             return float(k_transform["rotation_deg"])
+    representations = path / "representations.npz"
+    if representations.exists():
+        with np.load(representations, allow_pickle=False) as payload:
+            if "__metadata_json__" in payload.files:
+                metadata = json.loads(str(payload["__metadata_json__"].item()))
+                if isinstance(metadata, Mapping):
+                    frame = metadata.get("frame", {})
+                    if isinstance(frame, Mapping):
+                        q_transform = frame.get("q_transform", {})
+                        if isinstance(q_transform, Mapping) and "rotation_deg" in q_transform:
+                            return float(q_transform["rotation_deg"])
+                        k_transform = frame.get("k_transform", {})
+                        if isinstance(k_transform, Mapping) and "rotation_deg" in k_transform:
+                            return float(k_transform["rotation_deg"])
+        return None
     return None
+
+
+def _packed_symmetry_operation_metadata(name: str, valley_model: Mapping[str, Any]) -> dict[str, Any]:
+    family = canonical_operation_name_for_valley(str(name), valley_model)
+    if family == "C3z":
+        action = {
+            "antiunitary": False,
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+        }
+    elif family == "C2T":
+        action = {
+            "antiunitary": True,
+            "k_map": {"type": "reflection", "axis_deg": 180.0},
+            "q_map": {"type": "reflection", "axis_deg": 180.0},
+            "sector_map": "identity",
+        }
+    elif family == "TR":
+        action = {
+            "antiunitary": True,
+            "k_map": {"type": "negation"},
+            "q_map": {"type": "negation"},
+            "sector_map": "identity",
+        }
+    elif family == "C2":
+        action = {
+            "antiunitary": False,
+            "k_map": {"type": "reflection", "axis_deg": 0.0},
+            "q_map": {"type": "reflection", "axis_deg": 0.0},
+            "sector_map": "layer_exchange",
+        }
+    else:
+        action = {}
+    if action:
+        action["antiunitary_convention"] = "U_K" if action["antiunitary"] else "none"
+        action["matrix_kind"] = "continuum_internal_rep_exact"
+        action["spin_map"] = "from_kp_symm_output"
+        action["valley_map"] = "identity"
+        action.update(copy.deepcopy(SOURCE_MATRIX_SEMANTICS))
+    return action
 
 
 def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, Any]:
@@ -940,6 +1012,34 @@ def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, 
         if manifest_path.exists():
             manifest = _load_yaml(manifest_path)
             return dict(manifest) if isinstance(manifest, Mapping) else {}
+    representations = path / "representations.npz"
+    if representations.exists():
+        with np.load(representations, allow_pickle=False) as payload:
+            if "__metadata_json__" in payload.files:
+                metadata = json.loads(str(payload["__metadata_json__"].item()))
+                return dict(metadata) if isinstance(metadata, Mapping) else {}
+        valley_model = raw.get("valley_model", {})
+        if not isinstance(valley_model, Mapping):
+            valley_model = {}
+        with np.load(representations, allow_pickle=False) as payload:
+            return {
+                "operations": [
+                    {
+                        "name": str(name),
+                        "matrix_file": "representations.npz",
+                        "matrix_array_key": str(name),
+                        "matrix_source": "kp_symm_exactified_action",
+                        **effective_operation_metadata_for_valley(str(name), valley_model),
+                        **_packed_symmetry_operation_metadata(str(name), valley_model),
+                    }
+                    for name in payload.files
+                    if not str(name).startswith("__")
+                ],
+                "frame": {
+                    "q_transform": {"rotation_deg": 0.0},
+                    "k_transform": {"rotation_deg": 0.0},
+                },
+            }
     return {}
 
 
@@ -1032,7 +1132,8 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         project_out = _resolve_path(project.get("out_dir"), source_base)
         if project_out is None:
             raise ValueError("heff_file is missing and source_config project.out_dir is unavailable")
-        heff_file = project_out / "heff_list.npy"
+        canonical_case = isinstance(raw.get("case"), Mapping) and bool(raw["case"].get("profile")) and bool(raw["case"].get("q_shell"))
+        heff_file = project_out / ("heff.npy" if canonical_case else "heff_list.npy")
     heff_eig_file = _resolve_path(_get_path_value(raw, "heff_eig_file"), base)
     if heff_eig_file is None:
         candidate = heff_file.with_name("heff_eig.npy")
@@ -3592,36 +3693,37 @@ def _window_band_plot_config(
     plot_config: Mapping[str, Any] | None,
     *,
     target_bands: str = "top",
-    min_bands: int = 12,
+    default_bands: int = 10,
 ) -> dict[str, Any]:
-    if min_bands <= 0:
-        raise ValueError(f"min_bands must be positive, got {min_bands}")
+    if default_bands <= 0:
+        raise ValueError(f"default_bands must be positive, got {default_bands}")
     options = dict(plot_config or {})
     options.setdefault("show_metrics", False)
     options.setdefault("legend_outside", True)
+    options.setdefault("plot_all_bands", True)
     if options.get("band_slice") is not None:
         return options
     target = str(target_bands or "top").strip().lower()
     if options.get("top_bands") is not None:
-        options["top_bands"] = max(int(options["top_bands"]), int(min_bands))
+        options["top_bands"] = int(options["top_bands"])
         return options
     if options.get("bottom_bands") is not None:
-        options["bottom_bands"] = max(int(options["bottom_bands"]), int(min_bands))
+        options["bottom_bands"] = int(options["bottom_bands"])
         return options
     if target == "bottom":
-        options["bottom_bands"] = int(min_bands)
+        options["bottom_bands"] = int(default_bands)
     else:
-        options["top_bands"] = int(min_bands)
+        options["top_bands"] = int(default_bands)
     return options
 
 
 def _cleanup_stale_band_outputs(output_dir: Path) -> None:
     for pattern in (
         "comparison_top*.json",
-        "band_comparison_top*.png",
+        "band_comparison_top*.pdf",
         "comparison_plot.json",
         "comparison_all_bands.json",
-        "band_comparison_all.png",
+        "band_comparison_all.pdf",
     ):
         for path in output_dir.glob(pattern):
             path.unlink()
@@ -3731,7 +3833,7 @@ def save_band_comparison_plot(
         heff_sel = heff_sel - heff_ref
     elif align not in {"none", "false", "0"}:
         raise ValueError(f"Unsupported bands.plot.align={plot_options.get('align')!r}; expected 'none', 'top', or 'bottom'")
-    plot_all_bands = bool(plot_options.get("plot_all_bands", plot_options.get("show_all_bands", False)))
+    plot_all_bands = bool(plot_options.get("plot_all_bands", plot_options.get("show_all_bands", True)))
     if plot_all_bands:
         model_plot = model_sorted - model_ref
         heff_plot = heff_sorted - heff_ref
@@ -3750,15 +3852,15 @@ def save_band_comparison_plot(
     x_values = np.asarray(x, dtype=float) if x is not None else np.arange(model_plot.shape[0], dtype=float)
     if x_values.shape[0] != model_plot.shape[0]:
         raise ValueError(f"plot x-axis length {x_values.shape[0]} does not match k-point count {model_sel.shape[0]}")
-    figsize_raw = plot_options.get("figsize", [3.2, 5.8])
+    figsize_raw = plot_options.get("figsize", list(KP_BAND_FIGSIZE))
     if not isinstance(figsize_raw, Sequence) or isinstance(figsize_raw, (str, bytes)) or len(figsize_raw) != 2:
         raise ValueError(f"bands.plot.figsize must be [width, height], got {figsize_raw!r}")
-    dpi = int(plot_options.get("dpi", 220))
+    dpi = int(plot_options.get("dpi", KP_DPI))
     fig, ax = plt.subplots(figsize=(float(figsize_raw[0]), float(figsize_raw[1])), dpi=dpi)
     for ib in range(heff_plot.shape[1]):
-        ax.plot(x_values, heff_plot[:, ib], color="0.20", linewidth=0.9, alpha=0.9)
+        ax.plot(x_values, heff_plot[:, ib], **KP_REFERENCE_STYLE)
     for ib in range(model_plot.shape[1]):
-        ax.plot(x_values, model_plot[:, ib], color="#d7263d", linewidth=1.0, alpha=0.92)
+        ax.plot(x_values, model_plot[:, ib], **KP_MODEL_STYLE)
     if x_ticks is not None and x_ticklabels is not None and len(x_ticks) == len(x_ticklabels):
         ax.set_xticks([float(item) for item in x_ticks])
         ax.set_xticklabels(list(x_ticklabels))
@@ -3768,8 +3870,8 @@ def save_band_comparison_plot(
     else:
         ax.set_xlabel("k-point index")
     if model_ref or heff_ref:
-        ref_label = r"top" if align in {"top", "top_band", "top-band"} else r"bottom"
-        ax.set_ylabel(rf"$E - E_{{\mathrm{{{ref_label}}}}}$ (eV)")
+        ref_label = "top" if align in {"top", "top_band", "top-band"} else "bottom"
+        ax.set_ylabel(relative_energy_ylabel(ref_label))
     else:
         ax.set_ylabel("Energy (eV)")
     if title:
@@ -3806,8 +3908,8 @@ def save_band_comparison_plot(
             fontsize=9,
         )
     legend_handles = [
-        Line2D([0], [0], color="0.20", lw=1.3, label="Heff"),
-        Line2D([0], [0], color="#d7263d", lw=1.3, label="model"),
+        Line2D([0], [0], label="Reference", **KP_REFERENCE_STYLE),
+        Line2D([0], [0], label="KP model", **KP_MODEL_STYLE),
     ]
     if bool(plot_options.get("legend_outside", False)):
         ax.legend(
@@ -3815,16 +3917,28 @@ def save_band_comparison_plot(
             loc=str(plot_options.get("legend_loc", "upper center")),
             bbox_to_anchor=(0.5, -0.08),
             ncol=2,
-            frameon=False,
+            frameon=KP_LEGEND_KWARGS["frameon"],
+            fontsize=KP_LEGEND_KWARGS["fontsize"],
         )
     else:
         ax.legend(
             handles=legend_handles,
-            loc=str(plot_options.get("legend_loc", "lower right")),
-            frameon=False,
+            loc=str(plot_options.get("legend_loc", KP_LEGEND_KWARGS["loc"])),
+            frameon=KP_LEGEND_KWARGS["frameon"],
+            fontsize=KP_LEGEND_KWARGS["fontsize"],
         )
     for spine in ax.spines.values():
         spine.set_linewidth(1.0)
+    box_aspect = plot_options.get("box_aspect", KP_BAND_BOX_ASPECT)
+    if box_aspect in {None, False, "none", "None"}:
+        resolved_box_aspect = None
+    else:
+        resolved_box_aspect = float(box_aspect)
+    apply_kp_axis_style(
+        ax,
+        box_aspect=resolved_box_aspect,
+        font_family=str(plot_options.get("font_family") or kp_font_family()),
+    )
     fig.tight_layout()
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
@@ -3872,7 +3986,7 @@ def save_harmonics_diagnostic_plot(
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    fig, ax = plt.subplots(figsize=(6.0, 6.0), dpi=180)
+    fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=KP_DPI)
     ax.scatter(Q_set1[:, 0], Q_set1[:, 1], s=28, marker="o", color="#1f77b4", alpha=0.75, label="layer 1 Q")
     ax.scatter(Q_set2[:, 0], Q_set2[:, 1], s=34, marker="^", color="#ff7f0e", alpha=0.75, label="layer 2 Q")
 
@@ -3928,8 +4042,8 @@ def save_harmonics_diagnostic_plot(
     ax.set_aspect("equal", adjustable="box")
     ax.axhline(0.0, color="0.88", linewidth=0.7)
     ax.axvline(0.0, color="0.88", linewidth=0.7)
-    ax.set_xlabel(r"$Q_x$")
-    ax.set_ylabel(r"$Q_y$")
+    ax.set_xlabel("Qx")
+    ax.set_ylabel("Qy")
     ax.set_title("Auto-selected harmonic vectors")
     handles, labels = ax.get_legend_handles_labels()
     handles.extend(
@@ -3939,9 +4053,10 @@ def save_harmonics_diagnostic_plot(
         ]
     )
     labels.extend(["intra selected", "inter selected"])
-    ax.legend(handles, labels, frameon=False, fontsize=8, loc="best")
+    ax.legend(handles, labels, **KP_LEGEND_KWARGS)
+    apply_kp_axis_style(ax, box_aspect=None, font_family=kp_font_family())
     fig.tight_layout()
-    fig.savefig(out)
+    fig.savefig(out, dpi=KP_DPI)
     plt.close(fig)
     return out
 
@@ -3964,8 +4079,269 @@ def save_harmonics_diagnostics(
         bM1=np.asarray(moire_config.bM1, dtype=float),
         bM2=np.asarray(moire_config.bM2, dtype=float),
         diagnostics=diagnostics,
-        path=output_dir / "harmonics_diagnostic.png",
+        path=output_dir / "harmonics_diagnostic.pdf",
     )
+
+
+_Q_LATTICE_PALETTE = {
+    "red": "#d1495b",
+    "blue": "#3b6fb6",
+    "gold": "#d99000",
+    "green": "#2a9d64",
+    "edge": "#737b86",
+    "frame": "#737b86",
+    "dark": "#20242a",
+    "paper": "white",
+}
+
+
+def _nearest_point(points: np.ndarray, target: np.ndarray) -> tuple[np.ndarray, float]:
+    arr = np.asarray(points, dtype=float)
+    tgt = np.asarray(target, dtype=float)
+    if arr.size == 0:
+        return tgt, float("inf")
+    distances = np.linalg.norm(arr - tgt, axis=1)
+    idx = int(np.argmin(distances))
+    return arr[idx], float(distances[idx])
+
+
+def _harmonic_vectors_from_map(mapping: Mapping[int, np.ndarray]) -> list[tuple[int, np.ndarray]]:
+    return [(int(index), np.asarray(vector, dtype=float)) for index, vector in sorted(mapping.items(), key=lambda item: int(item[0]))]
+
+
+def _q_lattice_match_tolerance(qset1: np.ndarray, qset2: np.ndarray, bM1: np.ndarray, bM2: np.ndarray) -> float:
+    stacked = np.vstack([np.asarray(qset1, dtype=float), np.asarray(qset2, dtype=float)])
+    span = max(float(np.ptp(stacked[:, 0])), float(np.ptp(stacked[:, 1])), float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
+    return max(1.0e-7, 1.0e-5 * span)
+
+
+def _choose_q_lattice_anchor(
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    intra_vectors: Sequence[tuple[int, np.ndarray]],
+    inter_vectors: Sequence[tuple[int, np.ndarray]],
+    *,
+    tol: float,
+) -> np.ndarray:
+    q1 = np.asarray(qset1, dtype=float)
+    q2 = np.asarray(qset2, dtype=float)
+    best_score: tuple[int, float, float] | None = None
+    best = q1[0]
+    for point in q1:
+        miss_count = 0
+        residual = 0.0
+        for _index, vector in intra_vectors:
+            _nearest, distance = _nearest_point(q1, point - vector)
+            residual += distance
+            miss_count += int(distance > tol)
+        for _index, vector in inter_vectors:
+            _nearest, distance = _nearest_point(q2, point + vector)
+            residual += distance
+            miss_count += int(distance > tol)
+        score = (miss_count, round(residual, 12), round(float(np.linalg.norm(point)), 12))
+        if best_score is None or score < best_score:
+            best_score = score
+            best = point
+    return np.asarray(best, dtype=float)
+
+
+def _draw_q_lattice_basis_arrows(ax: Any, bM1: np.ndarray, bM2: np.ndarray) -> None:
+    origin = np.zeros(2, dtype=float)
+    for vector, label, offset in (
+        (np.asarray(bM1, dtype=float), r"$\mathbf{b}_{M1}$", np.array([0.04, -0.08])),
+        (np.asarray(bM2, dtype=float), r"$\mathbf{b}_{M2}$", np.array([0.04, 0.06])),
+    ):
+        ax.annotate(
+            "",
+            xy=vector,
+            xytext=origin,
+            arrowprops=dict(arrowstyle="-|>", lw=1.15, color=_Q_LATTICE_PALETTE["dark"], mutation_scale=8.5),
+            zorder=6,
+        )
+        text_xy = vector + offset * max(float(np.linalg.norm(vector)), 1.0)
+        ax.text(text_xy[0], text_xy[1], label, fontsize=8.4, color=_Q_LATTICE_PALETTE["dark"], zorder=7)
+
+
+def _draw_q_lattice_segments(ax: Any, points: np.ndarray, *, alpha: float = 1.0, linewidth: float = 1.05) -> None:
+    from matplotlib.collections import LineCollection
+
+    arr = np.asarray(points, dtype=float)
+    distances = [
+        float(np.linalg.norm(arr[i] - arr[j]))
+        for i in range(len(arr))
+        for j in range(i + 1, len(arr))
+        if np.linalg.norm(arr[i] - arr[j]) > 1.0e-10
+    ]
+    if not distances:
+        return
+    nearest = min(distances)
+    threshold = 1.04 * nearest
+    segments = [(arr[i], arr[j]) for i in range(len(arr)) for j in range(i + 1, len(arr)) if np.linalg.norm(arr[i] - arr[j]) <= threshold]
+    ax.add_collection(LineCollection(segments, colors=_Q_LATTICE_PALETTE["edge"], linewidths=linewidth, alpha=alpha, zorder=1))
+
+
+def _q_lattice_nearest_spacing(points: np.ndarray) -> float:
+    arr = np.asarray(points, dtype=float)
+    distances = [
+        float(np.linalg.norm(arr[i] - arr[j]))
+        for i in range(len(arr))
+        for j in range(i + 1, len(arr))
+        if np.linalg.norm(arr[i] - arr[j]) > 1.0e-10
+    ]
+    return min(distances) if distances else 1.0
+
+
+def _draw_q_lattice_harmonic_arrow(
+    ax: Any,
+    start: np.ndarray,
+    stop: np.ndarray,
+    *,
+    color: str,
+    spacing: float,
+    curvature: float = 0.045,
+) -> None:
+    from matplotlib.patches import FancyArrow
+
+    p0 = np.asarray(start, dtype=float)
+    p1 = np.asarray(stop, dtype=float)
+    direction = p1 - p0
+    length = float(np.linalg.norm(direction))
+    if length <= 1.0e-12:
+        return
+
+    unit = direction / length
+    normal = np.array([-unit[1], unit[0]], dtype=float)
+    head_length = min(0.30 * spacing, 0.34 * length)
+    head_base = p1 - head_length * unit
+    shaft_end = p1 - 0.62 * head_length * unit
+    control = 0.5 * (p0 + shaft_end) + curvature * length * normal
+    t = np.linspace(0.0, 1.0, 40)[:, None]
+    curve = (1.0 - t) ** 2 * p0 + 2.0 * (1.0 - t) * t * control + t**2 * shaft_end
+    ax.plot(curve[:, 0], curve[:, 1], color=color, linewidth=1.35, solid_capstyle="round", zorder=6)
+    arrow_head = FancyArrow(
+        head_base[0],
+        head_base[1],
+        p1[0] - head_base[0],
+        p1[1] - head_base[1],
+        width=0.001 * spacing,
+        head_width=0.28 * spacing,
+        head_length=head_length,
+        length_includes_head=True,
+        overhang=0.30,
+        color=color,
+        linewidth=0.0,
+        zorder=7,
+    )
+    ax.add_patch(arrow_head)
+
+
+def save_q_lattice_harmonics_plot(
+    *,
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    bM1: np.ndarray,
+    bM2: np.ndarray,
+    intra_harmonics: Mapping[int, np.ndarray],
+    inter_harmonics: Mapping[int, np.ndarray],
+    path: str | Path,
+    title: str | None = None,
+) -> Path:
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+    from matplotlib.patches import Polygon
+
+    q1 = np.asarray(Q_set1, dtype=float)
+    q2 = np.asarray(Q_set2, dtype=float)
+    b1 = np.asarray(bM1, dtype=float)
+    b2 = np.asarray(bM2, dtype=float)
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+
+    intra_vectors = _harmonic_vectors_from_map(intra_harmonics)
+    inter_vectors = _harmonic_vectors_from_map(inter_harmonics)
+    tol = _q_lattice_match_tolerance(q1, q2, b1, b2)
+    anchor = _choose_q_lattice_anchor(q1, q2, intra_vectors, inter_vectors, tol=tol)
+    spacing = _q_lattice_nearest_spacing(np.vstack([q1, q2]))
+
+    with kp_plot_rc_context():
+        fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=KP_DPI, constrained_layout=True)
+        try:
+            bz = _first_bz_vertices(b1, b2)
+            ax.add_patch(
+                Polygon(
+                    bz,
+                    closed=True,
+                    facecolor="none",
+                    edgecolor=_Q_LATTICE_PALETTE["frame"],
+                    linewidth=0.9,
+                    linestyle="--",
+                    alpha=0.7,
+                    zorder=0,
+                )
+            )
+        except Exception:
+            bz = np.empty((0, 2), dtype=float)
+
+        _draw_q_lattice_segments(ax, np.vstack([q1, q2]), alpha=1.0, linewidth=1.05)
+        ax.scatter(q1[:, 0], q1[:, 1], s=40, color=_Q_LATTICE_PALETTE["red"], edgecolor="none", linewidth=0.0, zorder=3)
+        ax.scatter(q2[:, 0], q2[:, 1], s=40, color=_Q_LATTICE_PALETTE["blue"], edgecolor="none", linewidth=0.0, zorder=3)
+
+        arrow_targets: list[np.ndarray] = [anchor]
+        styles = {
+            "intra": {"color": _Q_LATTICE_PALETTE["gold"], "label": "intra"},
+            "inter": {"color": _Q_LATTICE_PALETTE["green"], "label": "inter"},
+        }
+        for kind, vectors, target_qset, sign in (
+            ("intra", intra_vectors, q1, -1.0),
+            ("inter", inter_vectors, q2, 1.0),
+        ):
+            style = styles[kind]
+            for index, vector in vectors:
+                ideal_target = anchor + sign * vector
+                target, distance = _nearest_point(target_qset, ideal_target)
+                if distance > tol:
+                    target = ideal_target
+                arrow_targets.append(np.asarray(target, dtype=float))
+                _draw_q_lattice_harmonic_arrow(
+                    ax,
+                    anchor,
+                    target,
+                    color=style["color"],
+                    spacing=spacing,
+                )
+
+        all_points = [q1, q2, np.asarray([anchor]), np.asarray(arrow_targets, dtype=float)]
+        if bz.size:
+            all_points.append(bz)
+        stacked = np.vstack(all_points)
+        span = max(float(np.ptp(stacked[:, 0])), float(np.ptp(stacked[:, 1])), float(np.linalg.norm(b1)), float(np.linalg.norm(b2)), 1.0)
+        center = np.mean(stacked, axis=0)
+        half = 0.58 * span
+        ax.set_xlim(center[0] - half, center[0] + half)
+        ax.set_ylim(center[1] - half, center[1] + half)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xticks([])
+        ax.set_yticks([])
+        for spine in ax.spines.values():
+            spine.set_visible(False)
+        if title:
+            ax.set_title(title, fontsize=13, pad=7, weight="semibold")
+        ax.legend(
+            handles=[
+                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["red"], markeredgecolor="none", markersize=6, label=r"$Q_1$"),
+                Line2D([0], [0], marker="o", color="none", markerfacecolor=_Q_LATTICE_PALETTE["blue"], markeredgecolor="none", markersize=6, label=r"$Q_2$"),
+                Line2D([0], [0], color=_Q_LATTICE_PALETTE["gold"], lw=1.45, linestyle="-", label="intra"),
+                Line2D([0], [0], color=_Q_LATTICE_PALETTE["green"], lw=1.45, linestyle="-", label="inter"),
+            ],
+            **KP_LEGEND_KWARGS,
+        )
+        apply_kp_axis_style(ax, box_aspect=None, font_family=kp_font_family())
+        fig.savefig(out, bbox_inches="tight")
+        plt.close(fig)
+    return out
 
 
 def save_bM_diagnostics(*, model_config: ConfiguredModel, output_dir: Path) -> None:
@@ -4372,7 +4748,8 @@ def _build_run_summary(
         "comparison": _json_safe(results.get("comparison")),
         "plot_comparison": _json_safe(results.get("plot_comparison")),
         "all_band_plot_comparison": _json_safe(results.get("all_band_plot_comparison")),
-        "all_band_plot": "band_comparison_all.png" if results.get("all_band_plot") else None,
+        "all_band_plot": "band_comparison_all.pdf" if results.get("all_band_plot") else None,
+        "q_lattice_plot": "q_lattice_harmonics.pdf" if results.get("q_lattice_plot") else None,
         "null_channel_filter": _json_safe(results.get("null_channel_filter")),
         "coefficient_pruning": _json_safe(results.get("coefficient_pruning")),
         "band_refinement": _json_safe(results.get("band_refinement", {"enabled": False})),
@@ -4720,7 +5097,7 @@ def _write_auto_model_selection_outputs(
     save_band_comparison_plot(
         model_eig,
         heff_eig,
-        output_dir / "band_comparison_top_primary.png",
+        output_dir / "band_comparison_top_primary.pdf",
         band_slice=primary["band_slice"],
         plot_config={**model_config.band_plot_config, "band_slice": primary["band_slice"]},
         title="Auto low-energy primary window",
@@ -4730,7 +5107,7 @@ def _write_auto_model_selection_outputs(
         save_band_comparison_plot(
             model_eig,
             heff_eig,
-            output_dir / "band_comparison_weighted_fit.png",
+            output_dir / "band_comparison_weighted_fit.pdf",
             band_slice=weighted_window["band_slice"],
             plot_config={**model_config.band_plot_config, "band_slice": weighted_window["band_slice"]},
             title="Auto low-energy weighted fit window",
@@ -4741,15 +5118,17 @@ def _write_auto_model_selection_outputs(
         matplotlib.use("Agg", force=True)
         import matplotlib.pyplot as plt
 
-        fig, ax = plt.subplots(figsize=(5.2, 3.2), dpi=180)
+        fig, ax = plt.subplots(figsize=KP_BAND_FIGSIZE, dpi=KP_DPI)
         x = np.arange(len(primary_leakage_curve))
-        ax.plot(x, 100.0 * np.asarray(primary_leakage_curve), lw=1.8)
+        ax.plot(x, 100.0 * np.asarray(primary_leakage_curve), label="Leakage", **KP_PRIMARY_STYLE, **KP_MARKER_STYLE)
         ax.set_xlabel("k-path index")
         ax.set_ylabel("subspace leakage (%)")
         ax.set_title("Primary low-energy subspace leakage")
         ax.grid(True, alpha=0.25, linewidth=0.6)
+        ax.legend(**KP_LEGEND_KWARGS)
+        apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT, font_family=kp_font_family())
         fig.tight_layout()
-        fig.savefig(output_dir / "subspace_leakage.png")
+        fig.savefig(output_dir / "subspace_leakage.pdf", dpi=KP_DPI)
         plt.close(fig)
     return summary
 
@@ -8602,6 +8981,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     moire_config, model_config = build_moire_config_from_file(path)
     output_dir = model_config.output_dir
     output_profile = _model_output_profile(model_config)
+    canonical_output = isinstance(model_config.raw.get("case"), Mapping) and bool(model_config.raw["case"].get("profile")) and bool(model_config.raw["case"].get("q_shell"))
     diagnostics_dir = _model_diagnostics_dir(output_dir) if output_profile == "debug" else None
     output_dir.mkdir(parents=True, exist_ok=True)
     print(f"[kp model] output directory: {output_dir}", flush=True)
@@ -8644,6 +9024,15 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     all_band_plot_comparison = None
     band_plot_path = None
     all_band_plot_path = None
+    q_lattice_plot_path = save_q_lattice_harmonics_plot(
+        Q_set1=np.asarray(moire_config.Q_set1, dtype=float),
+        Q_set2=np.asarray(moire_config.Q_set2, dtype=float),
+        bM1=np.asarray(moire_config.bM1, dtype=float),
+        bM2=np.asarray(moire_config.bM2, dtype=float),
+        intra_harmonics=getattr(moire_config, "intra_harmonics_map", {}) or {},
+        inter_harmonics=getattr(moire_config, "inter_harmonics_map", {}) or {},
+        path=output_dir / "q_lattice_harmonics.pdf",
+    )
     if model_config.compare_to_heff:
         if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
             heff_eig = np.load(model_config.heff_eig_file)
@@ -8673,7 +9062,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         band_plot_path = save_band_comparison_plot(
             eigvals_array,
             heff_selected,
-            output_dir / "band_comparison.png",
+            output_dir / "band_comparison.pdf",
             band_slice=model_config.band_slice,
             plot_config=window_plot_config,
             x=x_values,
@@ -8681,32 +9070,34 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             x_ticklabels=x_ticklabels,
             title=_band_plot_title(model_config),
         )
-        all_band_config = _all_band_plot_config(model_config.band_plot_config)
-        all_band_plot_comparison = compare_bands_for_plot(
-            eigvals_array,
-            heff_selected,
-            band_slice=None,
-            plot_config=all_band_config,
-        )
-        if diagnostics_dir is not None:
-            with (diagnostics_dir / "comparison_all_bands.json").open("w", encoding="utf-8") as handle:
-                json.dump(all_band_plot_comparison, handle, indent=2)
-        all_band_plot_path = save_band_comparison_plot(
-            eigvals_array,
-            heff_selected,
-            output_dir / "band_comparison_all.png",
-            band_slice=None,
-            plot_config=all_band_config,
-            x=x_values,
-            x_ticks=x_ticks,
-            x_ticklabels=x_ticklabels,
-            title=f"{_band_plot_title(model_config)} (all bands)",
-        )
+        if not canonical_output:
+            all_band_config = _all_band_plot_config(model_config.band_plot_config)
+            all_band_plot_comparison = compare_bands_for_plot(
+                eigvals_array,
+                heff_selected,
+                band_slice=None,
+                plot_config=all_band_config,
+            )
+            if diagnostics_dir is not None:
+                with (diagnostics_dir / "comparison_all_bands.json").open("w", encoding="utf-8") as handle:
+                    json.dump(all_band_plot_comparison, handle, indent=2)
+            all_band_plot_path = save_band_comparison_plot(
+                eigvals_array,
+                heff_selected,
+                output_dir / "band_comparison_all.pdf",
+                band_slice=None,
+                plot_config=all_band_config,
+                x=x_values,
+                x_ticks=x_ticks,
+                x_ticklabels=x_ticklabels,
+                title=f"{_band_plot_title(model_config)} (all bands)",
+            )
     results["configured_model"] = model_config
     results["moire_config"] = moire_config
     results["comparison"] = comparison
     results["plot_comparison"] = plot_comparison
     results["all_band_plot_comparison"] = all_band_plot_comparison
+    results["q_lattice_plot"] = str(q_lattice_plot_path.resolve())
     if band_plot_path is not None:
         results["band_plot"] = str(band_plot_path.resolve())
     if all_band_plot_path is not None:

@@ -362,7 +362,7 @@ def plot_bands(config: PlotConfig):
 
 def main(argv=None, *, prog=None):
     parser = argparse.ArgumentParser(prog=prog, description='Plot band structure')
-    parser.add_argument('--config', type=str, help='YAML config file')
+    parser.add_argument('-c', '--config', type=str, help='YAML config file')
     parser.add_argument('--kpath-in', type=str, help='KPATH.in file')
     parser.add_argument('--kpath-out', type=str, help='KPATH.out file')
     parser.add_argument('--bands', nargs='+', help='Band data files')

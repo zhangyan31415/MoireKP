@@ -1,0 +1,69 @@
+case:
+  profile: K1_up
+  q_shell: q06
+  output_root: ../outputs
+title: MoTe2 K1 spin up q06
+valley: K1
+spin: up
+
+material:
+  name: MoTe2
+  num_layer_list: [1, 1]
+  orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
+  efermi: -4.1
+  hamk_file: ../../tapw/Q_shell_6/band/hamk_K1_valley.npy
+  qset1_file: ../../tapw/Q_shell_6/g_vec_list_6_K1_1layer.npy
+  qset2_file: ../../tapw/Q_shell_6/g_vec_list_6_K1_2layer.npy
+  band_file: ../../tapw/Q_shell_6/band/band_VBM_K1_valley.txt
+
+plot:
+  mode: K1
+  hamk_index: 0
+  # Fast inspect path from band_file. Change to "all" to diagonalize hamk and
+  # print orbital/eigenvector components.
+  target: valence
+  ref_q_index: 0
+  sort_by_qnorm: true
+  report_below: 4
+  report_above: 0
+  report_components: 8
+  q_window_bands: 10
+  ylim: [-1.0, 1.0]
+  title: "MoTe2 K1 spin up q06: VBM band vs Q"
+
+project:
+  nlow_state_list:
+    - [22]
+    - [22]
+  gauge: auto
+  downfold_method: fixed_schur
+  e_ref: -4.6
+  workers: 61
+
+symm:
+  tapw_symmetry_dir: ../../tapw/symmetry_analysis_test_k
+  tolerance: 2.0e-2
+
+kpath:
+  file: ../../tapw/KPATH.in
+  tmat: [[52.4951056667, 0.0, 0.0], [-26.247552834, 45.4620950821, 0.0], [0.0, 0.0, 27.0]]
+
+model:
+  n_orb: [1, 1]
+  harmonics:
+    intralayer: 4
+    interlayer: 4
+  max_order:
+    kinetic: 6
+    intralayer: 4
+    interlayer: 4
+  fit:
+    indices: [0]
+    coeff_tol: 1.0e-6
+  bands:
+    compare_to_heff: true
+    band_slice: [46, 54]
+    plot:
+      top_bands: 8
+      align: top
+      figsize: [3.0, 5.0]

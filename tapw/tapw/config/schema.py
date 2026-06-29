@@ -155,6 +155,35 @@ class SymmetryAnalysisConfig:
     debug: bool = False
     developer_outputs: bool = False
 
+
+@dataclass
+class OutputLayoutConfig:
+    """Optional release-facing output layout."""
+
+    style: str = "legacy"
+    root: str = ""
+    profile: Optional[str] = None
+    q_shell: Optional[str] = None
+
+    @staticmethod
+    def _resolve_path(path_value: str, base_dir: Path) -> str:
+        path = Path(path_value).expanduser()
+        if path.is_absolute():
+            return str(path.resolve())
+        return str((base_dir / path).resolve())
+
+    def normalize(self, base_dir: Path) -> None:
+        self.style = str(self.style).strip().lower()
+        if self.root:
+            self.root = self._resolve_path(self.root, base_dir)
+
+    def validate(self) -> None:
+        allowed = {"legacy", "canonical_v1"}
+        if self.style not in allowed:
+            raise ValueError(f"Invalid output_layout.style={self.style!r}. Must be one of {sorted(allowed)}")
+        if self.style == "canonical_v1" and not self.root:
+            raise ValueError("output_layout.root is required when output_layout.style=canonical_v1")
+
 @dataclass
 class ComputeConfig:
     """Configuration for computation parameters"""
@@ -339,11 +368,14 @@ class Config:
     paths: PathConfig
     compute: ComputeConfig
     symmetry_analysis: SymmetryAnalysisConfig = field(default_factory=SymmetryAnalysisConfig)
+    output_layout: Optional[OutputLayoutConfig] = None
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
 
     def validate(self) -> None:
         """Validate cross-section configuration constraints."""
         self.compute.validate()
+        if self.output_layout is not None:
+            self.output_layout.validate()
         if (
             self.compute.mode in {"band", "chern"}
             and not self.compute.orthogonal_basis
@@ -387,6 +419,10 @@ class Config:
         paths_config.normalize(config_dir)
         compute_config = ComputeConfig(**compute_raw)
         symmetry_analysis_config = SymmetryAnalysisConfig(**config_dict.get('symmetry_analysis', {}))
+        output_layout_config = None
+        if config_dict.get("output_layout") is not None:
+            output_layout_config = OutputLayoutConfig(**config_dict.get("output_layout", {}))
+            output_layout_config.normalize(config_dir)
         # Use default cluster config if not provided
         cluster_config = ClusterConfig(**config_dict.get('cluster', {})) if 'cluster' in config_dict else ClusterConfig()
         
@@ -395,6 +431,7 @@ class Config:
             paths=paths_config,
             compute=compute_config,
             symmetry_analysis=symmetry_analysis_config,
+            output_layout=output_layout_config,
             cluster=cluster_config
         )
         # Propagate twist bravais to compute for downstream logic
@@ -411,6 +448,8 @@ class Config:
             'symmetry_analysis': self.symmetry_analysis.__dict__,
             # Don't save cluster config as it uses fixed values
         }
+        if self.output_layout is not None:
+            config_dict['output_layout'] = self.output_layout.__dict__
         with open(yaml_path, 'w') as f:
             yaml.dump(config_dict, f, default_flow_style=False)
 

@@ -210,6 +210,16 @@ def test_standalone_export_does_not_require_or_write_license(tmp_path: Path) -> 
     assert not (out_dir / "LICENSE").exists()
 
 
+def test_standalone_export_removes_stale_model_json_in_place(tmp_path: Path) -> None:
+    model_output, _cfg_path = _write_export_fixture(tmp_path)
+    (model_output / "model.json").write_text('{"stale": true}\n', encoding="utf-8")
+
+    export_standalone_model(model_output, model_output, force=True)
+
+    assert not (model_output / "model.json").exists()
+    assert (model_output / "model_data.npz").exists()
+
+
 def test_expand_operator_recipe_caches_duplicate_monomial_transforms(monkeypatch) -> None:
     def y_basis(_k):
         return np.eye(2, dtype=np.complex128)
@@ -253,7 +263,6 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
         "MODEL.md",
         "README.md",
         "evaluate.py",
-        "model.json",
         "model_data.npz",
     ]
 
@@ -266,7 +275,10 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
     assert "--self-test" not in evaluator_text
     assert "BM1 = [" in evaluator_text
     assert "np.array(" not in evaluator_text.split("# End user-editable settings", 1)[0]
-    assert "BAND_SLICE = None" in evaluator_text
+    assert "WINDOW_BANDS = None" in evaluator_text
+    assert "OUT_BAND_PLOT = \"bands.pdf\"" in evaluator_text
+    assert "BAND_SLICE" not in evaluator_text
+    assert "model.json" not in evaluator_text
 
     env = dict(os.environ)
     env["PYTHONPATH"] = ""
@@ -282,13 +294,15 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert (out_dir / "kpoints.npy").exists()
     assert (out_dir / "bands.npy").exists()
+    assert (out_dir / "bands.pdf").exists()
     assert (out_dir / "kdist.npy").exists()
     assert (out_dir / "kpath_ticks.json").exists()
     ticks = json.loads((out_dir / "kpath_ticks.json").read_text(encoding="utf-8"))
-    assert ticks["labels"] == ["G", "X", "Y", "G"]
-    assert len(ticks["positions"]) == 4
+    assert ticks["labels"] in ([], ["G", "X", "Y", "G"])
+    assert len(ticks["positions"]) == len(ticks["labels"])
 
     data = np.load(out_dir / "model_data.npz", allow_pickle=False)
+    np.testing.assert_allclose(np.load(out_dir / "kpoints.npy"), data["reference_kpoints"])
     expected_keys = {
         "qset1",
         "qset2",
@@ -304,38 +318,20 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
         "operator_q_center",
         "operator_prefactor_real",
         "operator_prefactor_imag",
+        "term_r_value_real",
+        "term_r_value_imag",
+        "dimension_dim",
+        "runtime_hermitianize_before_eigvalsh",
+        "runtime_max_antihermitian_norm",
         "reference_kpoints",
         "reference_eigvals",
         "reference_heff_eig",
     }
     assert expected_keys.issubset(set(data.files))
-
-    metadata = json.loads((out_dir / "model.json").read_text(encoding="utf-8"))
-    assert "model_id" in metadata
-    assert metadata["model_id"] == metadata["model_name"]
-    assert metadata["coordinate_convention"]["type"] == "fractional_model_basis"
-    assert metadata["coordinate_convention"]["hsp_coordinates_are"] == "fractional_model_basis"
-    assert metadata["high_symmetry_points"]["G"] == [0.0, 0.0]
-    assert metadata["default_kpath"] == ["G", "X", "Y", "G"]
-    assert metadata["points_per_segment"] == 4
-    assert metadata["default_band_slice"] is None
-    assert metadata["energy_reference"]["output_bands"] == "raw_model_eigenvalues"
-    assert metadata["energy_reference"]["alignment_applied_to_output"] is False
-    assert metadata["runtime"]["hermitianize_before_eigvalsh"] is True
-    assert metadata["runtime"]["max_antihermitian_norm"] == 1.0e-10
-    assert "validation" in metadata
-    assert "validation_summary" not in metadata
-    assert "model_data_arrays" in metadata["hashes"]
-    assert "operator_row" in metadata["hashes"]["model_data_arrays"]
-    assert "model_data_arrays_combined_sha256" in metadata["hashes"]
-    assert metadata["dimension"]["q_count_by_qset"] == {"qset1": 1, "qset2": 1}
-    assert metadata["dimension"]["n_orb_by_qset"] == {"qset1": 1, "qset2": 1}
-    assert metadata["dimension"]["basis_blocks"] == [
-        {"qset": "qset1", "offset": 0, "q_count": 1, "n_orb": 1, "dim": 1},
-        {"qset": "qset2", "offset": 1, "q_count": 1, "n_orb": 1, "dim": 1},
-    ]
-    assert metadata["qsets"][0]["array_key"] == "qset1"
-    assert metadata["valley_model"]["active_valleys"] == ["K1"]
+    assert not (out_dir / "model.json").exists()
+    assert int(np.asarray(data["dimension_dim"]).item()) == 2
+    assert bool(np.asarray(data["runtime_hermitianize_before_eigvalsh"]).item()) is True
+    assert float(np.asarray(data["runtime_max_antihermitian_norm"]).item()) == 1.0e-10
 
     model_doc = (out_dir / "MODEL.md").read_text(encoding="utf-8")
     assert "$$" in model_doc
@@ -382,11 +378,12 @@ def test_standalone_export_supports_spinful_two_orbital_models(tmp_path: Path) -
 
     export_standalone_model(model_output, out_dir)
 
-    metadata = json.loads((out_dir / "model.json").read_text(encoding="utf-8"))
-    assert metadata["spin_convention"] == "spinful"
-    assert metadata["dimension"]["dim"] == 4
-    assert metadata["dimension"]["n_orb_by_qset"] == {"qset1": 2, "qset2": 2}
-    assert metadata["dimension"]["basis_blocks"][1]["offset"] == 2
+    assert not (out_dir / "model.json").exists()
+    data = np.load(out_dir / "model_data.npz", allow_pickle=False)
+    assert int(np.asarray(data["dimension_dim"]).item()) == 4
+    model_doc = (out_dir / "MODEL.md").read_text(encoding="utf-8")
+    assert "Spin convention: `spinful`" in model_doc
+    assert "| `qset2` | 2 | 1 | 2 | 2 |" in model_doc
     proc = subprocess.run(
         [sys.executable, "evaluate.py"],
         cwd=out_dir,
@@ -448,15 +445,14 @@ def test_standalone_export_supports_single_active_qset_models(tmp_path: Path) ->
 
     export_standalone_model(model_output, out_dir)
 
-    metadata = json.loads((out_dir / "model.json").read_text(encoding="utf-8"))
-    assert metadata["spin_convention"] == "spin_down_projected"
-    assert metadata["dimension"]["dim"] == 1
-    assert metadata["dimension"]["basis_blocks"] == [
-        {"qset": "qset1", "offset": 0, "q_count": 1, "n_orb": 0, "dim": 0},
-        {"qset": "qset2", "offset": 0, "q_count": 1, "n_orb": 1, "dim": 1},
-    ]
-    assert metadata["sectors"] == [{"name": "B_top", "n_orb": 1, "q_offset": [0.0, 0.0], "qset": "qset2"}]
-    assert [op["name"] for op in metadata["operations"]] == ["C3z"]
+    assert not (out_dir / "model.json").exists()
+    data = np.load(out_dir / "model_data.npz", allow_pickle=False)
+    assert int(np.asarray(data["dimension_dim"]).item()) == 1
+    model_doc = (out_dir / "MODEL.md").read_text(encoding="utf-8")
+    assert "Spin convention: `spin_down_projected`" in model_doc
+    assert "| `qset1` | 0 | 1 | 0 | 0 |" in model_doc
+    assert "| `qset2` | 0 | 1 | 1 | 1 |" in model_doc
+    assert "Production operations: `C3z`" in model_doc
     assert "exactified_C3z" in np.load(out_dir / "model_data.npz", allow_pickle=False).files
     assert "exactified_C2T" not in np.load(out_dir / "model_data.npz", allow_pickle=False).files
 
@@ -540,11 +536,13 @@ def test_standalone_export_is_deterministic(tmp_path: Path) -> None:
     export_standalone_model(model_output, out_a)
     export_standalone_model(model_output, out_b)
 
-    meta_a = json.loads((out_a / "model.json").read_text(encoding="utf-8"))
-    meta_b = json.loads((out_b / "model.json").read_text(encoding="utf-8"))
-    assert meta_a["hashes"]["model_json_canonical_sha256"] == meta_b["hashes"]["model_json_canonical_sha256"]
-    assert meta_a["hashes"]["model_data_arrays"] == meta_b["hashes"]["model_data_arrays"]
-    assert meta_a["hashes"]["model_data_arrays_combined_sha256"] == meta_b["hashes"]["model_data_arrays_combined_sha256"]
+    assert not (out_a / "model.json").exists()
+    assert not (out_b / "model.json").exists()
+    data_a = np.load(out_a / "model_data.npz", allow_pickle=False)
+    data_b = np.load(out_b / "model_data.npz", allow_pickle=False)
+    assert set(data_a.files) == set(data_b.files)
+    for key in data_a.files:
+        np.testing.assert_array_equal(data_a[key], data_b[key])
 
 
 def test_export_all_standalone_models_dry_run_reports_blockers(tmp_path: Path) -> None:

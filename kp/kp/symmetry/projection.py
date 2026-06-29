@@ -1798,6 +1798,7 @@ class _ProjectionRunConfig:
     spin_sector_sewing: Any
     q_rotation_raw: Any
     tolerance: float
+    canonical_layout: bool
 
 
 @dataclass
@@ -1867,6 +1868,10 @@ def _load_projection_run_config(
         spin_sector_sewing=symm_cfg.get("spin_sector_sewing"),
         q_rotation_raw=plot_cfg.get("q_rotation_deg", symm_cfg.get("q_rotation_deg")),
         tolerance=float(symm_cfg.get("tolerance", 1.0e-2)),
+        canonical_layout=(
+            isinstance(cfg.get("case"), Mapping)
+            and all(cfg["case"].get(key) not in (None, "") for key in ("profile", "q_shell", "output_root"))
+        ),
     )
 
 
@@ -2656,6 +2661,70 @@ def _append_projected_operation_summaries(
     return raw_low_matrices
 
 
+def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, Any]) -> None:
+    operations = summary.get("operations", [])
+    if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
+        return
+
+    matrices: dict[str, np.ndarray] = {}
+    packed_operations: list[dict[str, Any]] = []
+    residual_rows = ["operation,status,unitarity,exactification_distance"]
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            continue
+        name = str(operation.get("name", ""))
+        if not name:
+            continue
+        matrix_file = operation.get("matrix_file")
+        if matrix_file not in (None, ""):
+            matrix_path = Path(str(matrix_file))
+            if not matrix_path.is_absolute():
+                matrix_path = output_dir / matrix_path
+            if matrix_path.exists():
+                matrices[name] = np.asarray(np.load(matrix_path), dtype=np.complex128)
+                packed_operation = dict(operation)
+                packed_operation["matrix_file"] = "representations.npz"
+                packed_operation["matrix_array_key"] = name
+                packed_operations.append(packed_operation)
+        residuals = operation.get("residuals", {})
+        unitarity = ""
+        if isinstance(residuals, Mapping) and residuals.get("unitarity") is not None:
+            unitarity = str(residuals.get("unitarity"))
+        exactification_distance = operation.get("exactification_distance")
+        if exactification_distance is None and isinstance(operation.get("source_matrix_projection_report"), Mapping):
+            report = operation["source_matrix_projection_report"]
+            if isinstance(report.get("report"), Mapping):
+                exactification_distance = report["report"].get("distance")
+        residual_rows.append(
+            ",".join(
+                [
+                    name,
+                    str(operation.get("status", "")),
+                    unitarity,
+                    "" if exactification_distance is None else str(exactification_distance),
+                ]
+            )
+        )
+
+    if matrices:
+        metadata = dict(summary)
+        metadata["operations"] = packed_operations
+        metadata.setdefault("exactification_owner", "kp_symm")
+        metadata.setdefault(
+            "kp_symm_exactification",
+            {"status": "exactified", "matrix_source": "kp_symm_exactified_action"},
+        )
+        payload = dict(matrices)
+        payload["__metadata_json__"] = np.asarray(json.dumps(metadata, sort_keys=True))
+        np.savez_compressed(output_dir / "representations.npz", **payload)
+    (output_dir / "residuals.csv").write_text("\n".join(residual_rows) + "\n", encoding="utf-8")
+    _write_summary_md(output_dir / "summary.md", summary)
+    keep = {"representations.npz", "residuals.csv", "summary.md"}
+    for path in output_dir.iterdir():
+        if path.is_file() and path.name not in keep:
+            path.unlink()
+
+
 def _exactify_and_write_projection_summary(
     ctx: _ProjectionRunContext,
     *,
@@ -2732,6 +2801,8 @@ def _exactify_and_write_projection_summary(
     (ctx.output_dir / "manifest.json").write_text(payload, encoding="utf-8")
     (ctx.output_dir / "summary.json").write_text(payload, encoding="utf-8")
     _write_summary_md(ctx.output_dir / "summary.md", summary)
+    if ctx.config.canonical_layout:
+        _write_canonical_symmetry_outputs(ctx.output_dir, summary)
     return summary
 
 

@@ -24,6 +24,21 @@ from .blocks import (
     set_projector_blas_threads,
 )
 from .basis.selection import GaugeAnchorReport, write_basis_selection_report
+from .basis.selection import _format_report_markdown as _format_basis_report_markdown
+from .plot_style import (
+    KP_BAND_BOX_ASPECT,
+    KP_BAND_FIGSIZE,
+    KP_DPI,
+    KP_INSPECT_FIGSIZE,
+    KP_LEGEND_KWARGS,
+    KP_MARKER_STYLE,
+    KP_PRIMARY_STYLE,
+    KP_REFERENCE_STYLE,
+    apply_kp_axis_style,
+    kp_font_family,
+    kp_plot_rc_context,
+    relative_energy_ylabel,
+)
 # Reporting-only downfold helpers were removed from the active core. Keep the
 # old imports here as a reference while the workflow is simplified.
 # from .blocks.downfold import (
@@ -37,6 +52,108 @@ from .symmetry.projection import run_symmetry_projection_from_config
 from .config.case import normalize_case_config
 
 HARTREE_TO_EV = 27.2113845
+
+
+def _is_canonical_case_config(cfg: dict[str, Any]) -> bool:
+    case = cfg.get("case")
+    if not isinstance(case, dict):
+        return False
+    return all(case.get(key) not in (None, "") for key in ("profile", "q_shell", "output_root"))
+
+
+def _config_path_uses_canonical_case(config_path: str | Path) -> bool:
+    try:
+        with open(config_path, "r", encoding="utf-8") as handle:
+            cfg = normalize_case_config(yaml.safe_load(handle), config_path=config_path)
+        return _is_canonical_case_config(cfg)
+    except Exception:
+        return False
+
+
+def _write_text(path: str | Path, text: str) -> None:
+    target = Path(path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(text, encoding="utf-8")
+
+
+def _remove_known_stale_files(directory: str | Path, filenames: Sequence[str]) -> None:
+    root = Path(directory)
+    if not root.exists():
+        return
+    for name in filenames:
+        path = root / name
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+
+
+def _write_case_summary(cfg: dict[str, Any], workflow_dir: str | Path, workflow: str) -> None:
+    if not _is_canonical_case_config(cfg):
+        return
+    workflow_path = Path(workflow_dir)
+    case_dir = workflow_path.parent
+    summary = case_dir / "summary.md"
+    case = cfg.get("case", {})
+    lines = [
+        "# KP Case Summary",
+        "",
+        f"- profile: `{case.get('profile')}`",
+        f"- q_shell: `{case.get('q_shell')}`",
+        f"- updated_workflow: `{workflow}`",
+        "",
+        "## Workflows",
+    ]
+    for name in ("inspect", "projection", "symmetry", "model"):
+        status = "ready" if (case_dir / name).exists() else "pending"
+        lines.append(f"- {name}: {status}")
+    _write_text(summary, "\n".join(lines) + "\n")
+
+    root = case_dir.parent.parent
+    manifest = root / "manifest.yaml"
+    profile_dir = case_dir.parent
+    targets = []
+    if root.exists():
+        for profile in sorted(p for p in root.iterdir() if p.is_dir()):
+            for q_shell in sorted(q for q in profile.iterdir() if q.is_dir()):
+                targets.append(
+                    {
+                        "profile": profile.name,
+                        "q_shell": q_shell.name,
+                        "path": f"{profile.name}/{q_shell.name}",
+                    }
+                )
+    _write_text(
+        manifest,
+        yaml.safe_dump(
+            {
+                "schema": "kp_outputs/v1",
+                "updated_workflow": workflow,
+                "targets": targets
+                or [
+                    {
+                        "profile": profile_dir.name,
+                        "q_shell": case_dir.name,
+                        "path": f"{profile_dir.name}/{case_dir.name}",
+                    }
+                ],
+            },
+            sort_keys=False,
+        ),
+    )
+
+
+def _write_inspect_sidecars(
+    cfg: dict[str, Any],
+    *,
+    output_dir: str | Path,
+    eigs_list: Sequence[np.ndarray],
+    efermi: float,
+    ref_q_index: int,
+) -> None:
+    if not _is_canonical_case_config(cfg):
+        return
+    out = Path(output_dir)
+    out.mkdir(parents=True, exist_ok=True)
+    _write_case_summary(cfg, out, "inspect")
 
 
 def _default_standalone_export_dir(model_output_dir: Path) -> Path:
@@ -62,6 +179,24 @@ def _record_standalone_export(model_output_dir: Path, export_path: Path) -> None
     except ValueError:
         summary["standalone_export"] = str(export_resolved)
     summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
+
+
+def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
+    keep = {
+        "README.md",
+        "MODEL.md",
+        "evaluate.py",
+        "model_data.npz",
+        "eigvals.npy",
+        "band_comparison.pdf",
+        "q_lattice_harmonics.pdf",
+    }
+    root = Path(model_output_dir)
+    if not root.exists():
+        return
+    for path in root.iterdir():
+        if path.is_file() and path.name not in keep:
+            path.unlink()
 
 
 def _energy_scale_from_material(material: dict[str, Any]) -> float:
@@ -245,11 +380,15 @@ def plot_eigs_scatter(
     top_bands: int | None = None,
     bottom_bands: int | None = None,
     band_slice: Sequence[int] | None = None,
+    plot_all_bands: bool = True,
     align: str = "fermi",
     x_values: Sequence[float] | None = None,
     x_ticks: Sequence[float] | None = None,
     x_ticklabels: Sequence[str] | None = None,
     xlabel: str = "k-path point",
+    figsize: tuple[float, float] | list[float] | None = None,
+    box_aspect: float | None = None,
+    font_family: str | None = None,
     return_fig: bool = False,
 ):
     """Plot all bands as lines across Q (2nd dim is band index).
@@ -304,14 +443,21 @@ def plot_eigs_scatter(
             raise ValueError(f"Empty band plotting window start={start}, stop={stop}, nbands={nbands}")
         return arr[:, start:stop]
 
-    E = select_window(E)
+    E_full = E
+    E_window = select_window(E)
     if E0 is not None:
-        E0 = select_window(E0)
+        E0_full = E0
+        E0_window = select_window(E0)
+    else:
+        E0_full = None
+        E0_window = None
+    E = E_full if plot_all_bands else E_window
+    E0 = E0_full if (plot_all_bands and E0_full is not None) else E0_window
 
     x = np.asarray(x_values, dtype=float) if x_values is not None else np.arange(E.shape[0], dtype=float)
     if x.shape[0] != E.shape[0]:
         raise ValueError(f"x-axis length {x.shape[0]} does not match band rows {E.shape[0]}")
-    fig, ax = plt.subplots(figsize=(5.6, 9.0))
+    fig, ax = plt.subplots(figsize=tuple(figsize) if figsize is not None else (5.6, 9.0))
     align_key = str(align or "fermi").strip().lower()
 
     def shift_for(arr: np.ndarray) -> float:
@@ -325,29 +471,24 @@ def plot_eigs_scatter(
             return 0.0
         raise ValueError(f"Unsupported band plot align={align!r}; expected 'top', 'bottom', 'fermi', or 'none'")
 
-    shift = shift_for(E)
-    original_shift = shift_for(E0) if E0 is not None else shift
+    shift = shift_for(E_window)
+    original_shift = shift_for(E0_window) if E0_window is not None else shift
     if E0 is not None:
         for i in range(E0.shape[1]):
             ax.plot(
                 x,
                 E0[:, i] - original_shift,
-                color="#9AA0A6",
-                lw=0.7,
-                alpha=0.45,
+                **KP_REFERENCE_STYLE,
                 zorder=1,
-                label="Original" if i == 0 else "_nolegend_",
+                label="Reference" if i == 0 else "_nolegend_",
             )
-    heff_color = "#1f77b4"
     for i in range(E.shape[1]):
         ax.plot(
             x,
             E[:, i] - shift,
-            lw=0.95,
-            alpha=0.95,
-            color=heff_color,
+            **KP_PRIMARY_STYLE,
             zorder=2,
-            label="Heff" if i == 0 else "_nolegend_",
+            label="KP" if i == 0 else "_nolegend_",
         )
 
     ax.axhline(0.0, color="#555555", lw=0.8, ls="--", alpha=0.8, zorder=0)
@@ -360,11 +501,11 @@ def plot_eigs_scatter(
     else:
         ax.set_xlabel(xlabel)
     if align_key in {"top", "top_band", "top-band"}:
-        ax.set_ylabel(r"$E - E_{\mathrm{top}}$ (eV)")
+        ax.set_ylabel(relative_energy_ylabel("top"))
     elif align_key in {"bottom", "bottom_band", "bottom-band"}:
-        ax.set_ylabel(r"$E - E_{\mathrm{bottom}}$ (eV)")
+        ax.set_ylabel(relative_energy_ylabel("bottom"))
     elif align_key in {"fermi", "ef", "efermi"} and efermi is not None:
-        ax.set_ylabel("Energy - E_F (eV)")
+        ax.set_ylabel(relative_energy_ylabel("F"))
     else:
         ax.set_ylabel("Energy (eV)")
     ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
@@ -374,14 +515,180 @@ def plot_eigs_scatter(
         ax.set_title(title)
     if ylim is not None:
         ax.set_ylim(ylim)
+    elif plot_all_bands and (top_bands is not None or bottom_bands is not None or band_slice is not None):
+        window_shifted = E_window - shift
+        ymin = float(np.min(window_shifted))
+        ymax = float(np.max(window_shifted))
+        pad = max(0.02, 0.05 * (ymax - ymin if ymax > ymin else 1.0))
+        ax.set_ylim(ymin - pad, ymax + pad)
     if E0 is not None:
-        ax.legend(loc="best", frameon=False, fontsize=9)
+        ax.legend(**KP_LEGEND_KWARGS)
+    apply_kp_axis_style(
+        ax,
+        box_aspect=None if box_aspect is None else float(box_aspect),
+        font_family=font_family,
+    )
     fig.tight_layout()
     os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
-    fig.savefig(out, dpi=220)
+    fig.savefig(out, dpi=KP_DPI)
     if return_fig:
         return fig, ax
     plt.close(fig)
+    return None
+
+
+def _stack_band_rows(rows: Sequence[np.ndarray]) -> np.ndarray:
+    arrs = [np.asarray(ev, dtype=float).ravel() for ev in rows]
+    if not arrs:
+        raise ValueError("No band rows to plot")
+    width = arrs[0].shape[0]
+    for arr in arrs:
+        if arr.shape[0] != width:
+            raise ValueError("Band rows have inconsistent widths")
+    return np.stack(arrs, axis=0)
+
+
+def _fermi_window_band_indices(
+    rows: Sequence[np.ndarray],
+    *,
+    efermi: float,
+    ref_q_index: int,
+    count: int,
+) -> list[int]:
+    E = _stack_band_rows(rows)
+    ref = max(0, min(int(ref_q_index), E.shape[0] - 1))
+    nbands = int(E.shape[1])
+    width = max(1, min(int(count), nbands))
+    order = np.argsort(np.abs(E[ref] - float(efermi)))
+    return sorted(int(item) for item in order[:width])
+
+
+def _default_inspect_relative_ylim() -> tuple[float, float]:
+    return (-1.0, 1.0)
+
+
+def plot_inspect_band_and_qblock(
+    band_eigs_list: Sequence[np.ndarray],
+    qblock_eigs_list: Sequence[np.ndarray],
+    efermi: float,
+    *,
+    out: str,
+    title: str | None = None,
+    ylim: tuple[float, float] | None = None,
+    q_index_order: Sequence[int] | None = None,
+    q_sector_lengths: Sequence[int] | None = None,
+    ref_q_index: int = 0,
+    q_window_bands: int = 10,
+    k_x_values: Sequence[float] | None = None,
+    k_x_ticks: Sequence[float] | None = None,
+    k_x_ticklabels: Sequence[str] | None = None,
+    return_fig: bool = False,
+):
+    """Plot normal k-path bands beside Q-block diagonalization for inspect."""
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    with kp_plot_rc_context():
+        E_band = _stack_band_rows(band_eigs_list)
+        E_q = _stack_band_rows(qblock_eigs_list)
+        if q_index_order is not None:
+            idx = np.asarray(q_index_order, dtype=int)
+            E_q = E_q[idx]
+
+        q_band_indices = _fermi_window_band_indices(
+            [row for row in E_q],
+            efermi=efermi,
+            ref_q_index=ref_q_index,
+            count=q_window_bands,
+        )
+        if ylim is None:
+            ylim = _default_inspect_relative_ylim()
+
+        fig, (ax_band, ax_q) = plt.subplots(
+            1,
+            2,
+            figsize=KP_INSPECT_FIGSIZE,
+            sharey=True,
+            gridspec_kw={"width_ratios": [1.0, 1.0], "wspace": 0.08},
+        )
+
+        x_band = (
+            np.asarray(k_x_values, dtype=float)
+            if k_x_values is not None
+            else np.arange(E_band.shape[0], dtype=float)
+        )
+        if x_band.shape[0] != E_band.shape[0]:
+            raise ValueError(f"k-path axis length {x_band.shape[0]} does not match band rows {E_band.shape[0]}")
+        for band_index in range(E_band.shape[1]):
+            ax_band.plot(
+                x_band,
+                E_band[:, band_index] - efermi,
+                **KP_REFERENCE_STYLE,
+                label="Band path" if band_index == 0 else "_nolegend_",
+            )
+        if k_x_ticks is not None and k_x_ticklabels is not None and len(k_x_ticks) == len(k_x_ticklabels):
+            ax_band.set_xticks([float(item) for item in k_x_ticks])
+            ax_band.set_xticklabels([str(item) for item in k_x_ticklabels])
+            for tick in k_x_ticks:
+                ax_band.axvline(float(tick), color="0.84", linewidth=0.7, zorder=0)
+            if x_band.size:
+                ax_band.set_xlim(float(x_band[0]), float(x_band[-1]))
+        else:
+            ax_band.set_xlabel("k-path point")
+        ax_band.set_title("Band path")
+
+        x_q = np.arange(E_q.shape[0], dtype=float)
+        q_window_set = set(q_band_indices)
+        for band_index in range(E_q.shape[1]):
+            style = {**KP_PRIMARY_STYLE, **KP_MARKER_STYLE}
+            style["alpha"] = 1.0 if band_index in q_window_set else 0.32
+            ax_q.plot(
+                x_q,
+                E_q[:, band_index] - efermi,
+                **style,
+                label="Q block" if band_index == 0 else "_nolegend_",
+            )
+        if q_sector_lengths:
+            cumulative = 0
+            for sector_index, length in enumerate(q_sector_lengths[:-1], start=1):
+                cumulative += int(length)
+                if 0 < cumulative < E_q.shape[0]:
+                    ax_q.axvline(float(cumulative) - 0.5, color="#555555", lw=0.9, ls="--", alpha=0.8)
+                    ax_q.text(
+                        float(cumulative) - 0.5,
+                        0.98,
+                        f"sector {sector_index + 1}",
+                        transform=ax_q.get_xaxis_transform(),
+                        ha="left",
+                        va="top",
+                        fontsize=8,
+                        color="#555555",
+                        rotation=90,
+                    )
+        ax_q.set_xlabel("Q block index")
+        ax_q.set_title("Q-block diagonalization")
+
+        for ax in (ax_band, ax_q):
+            ax.axhline(0.0, color="#555555", lw=0.8, ls=":", alpha=0.8, zorder=0)
+            ax.grid(axis="y", color="#D9D9D9", lw=0.6, alpha=0.65)
+            ax.grid(axis="x", visible=False)
+            ax.set_axisbelow(True)
+        ax_band.set_ylabel(relative_energy_ylabel("F"))
+        ax_q.tick_params(labelleft=False)
+        ax_band.set_ylim(ylim)
+        ax_band.legend(**KP_LEGEND_KWARGS)
+        ax_q.legend(**KP_LEGEND_KWARGS)
+        for ax in (ax_band, ax_q):
+            apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT)
+        if title:
+            fig.suptitle(title, y=0.995)
+        fig.subplots_adjust(left=0.11, right=0.98, bottom=0.11, top=0.90 if title else 0.94, wspace=0.08)
+        os.makedirs(os.path.dirname(out) or ".", exist_ok=True)
+        fig.savefig(out, dpi=KP_DPI)
+        if return_fig:
+            return fig, (ax_band, ax_q)
+        plt.close(fig)
     return None
 
 
@@ -728,6 +1035,11 @@ def _normalize_nlow_state_list(project_cfg: dict[str, Any]) -> list[list[int]]:
     if active is not None:
         return [parse_int_list(active)]
     nlow_state_list = project_cfg.get("nlow_state_list", [])
+    if not nlow_state_list:
+        raise ValueError(
+            "project.nlow_state_list is required before projection/model fitting; "
+            "run `kp inspect -c <config>` and choose low-state bands first."
+        )
     if nlow_state_list and not isinstance(nlow_state_list[0], (list, tuple)):
         return [[int(x) for x in nlow_state_list]]
     return nlow_state_list
@@ -854,6 +1166,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     num_layers = int(material.get("num_layers", 2))
 
     eigs_list: list[np.ndarray]
+    band_eigs_list: list[np.ndarray] | None = None
     target = str(plot_cfg.get("target", "valence"))
     print(f"[kp] Target: {target}")
 
@@ -863,12 +1176,15 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     q2 = None
     vecs_list = None
 
-    if band_file and target.lower() != "all":
-        # Prefer precomputed band energies (fast path)
-        print(f"[kp] Using band file (fast path): {band_file}")
+    if band_file:
+        print(f"[kp] Using band file for k-path panel: {band_file}")
         rows = _load_bands_from_text(band_file)
-        eigs_list = [np.array(sorted(r)) for r in rows]
-        print(f"[kp] Loaded {len(eigs_list)} Q points from band file.")
+        band_eigs_list = [np.array(sorted(r)) for r in rows]
+        print(f"[kp] Loaded {len(band_eigs_list)} k-path rows from band file.")
+
+    if band_eigs_list is not None and target.lower() != "all":
+        # Keep normal bands for the left panel, then compute Q-block bands below.
+        eigs_list = band_eigs_list
     else:
         # Build from Hamiltonian (heavy). Keep for generality.
         hamk_file = resolve(material["hamk_file"])
@@ -952,7 +1268,59 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         efermi = float(np.median(concat[-max(10, len(concat)//10):]))
         print(f"[kp] Using fallback efermi estimate: {efermi:.6f} eV")
 
-    out_path = resolve(plot_cfg.get("out", f"plot_{mode}_scatter.png"))
+    if band_eigs_list is not None and target.lower() != "all":
+        hamk_file = resolve(material["hamk_file"])
+        qset1_file = resolve(material["qset1_file"])
+        qset2_file = resolve(material["qset2_file"])
+        print(f"[kp] Using Hamiltonian for Q-block panel: {hamk_file}")
+        print(f"[kp] Using Q-set files: {qset1_file}, {qset2_file}")
+
+        hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
+        q1, q2 = load_Q_sets(qset1_file, qset2_file)
+        print(f"[kp] Q1 shape={q1.shape}, Q2 shape={q2.shape}")
+
+        hamk_index = int(plot_cfg.get("hamk_index", 0))
+        if hamk.ndim == 3:
+            hamk2d = hamk[hamk_index]
+        elif hamk.ndim == 2:
+            hamk2d = hamk
+        else:
+            raise ValueError(f"Unexpected hamk ndim: {hamk.ndim}")
+
+        print(f"[kp] spin={spin}, num_layers={num_layers}")
+        num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
+            material,
+            hamk2d,
+            len(q1),
+            spin=spin,
+            mode=mode,
+        )
+        Qlayer_list = [[q1], [q2]]
+        print(f"[kp] num_layer_list = {num_layer_list}")
+        print(f"[kp] num_orb_per_layer_list = {num_orb_per_layer_list}")
+        block_n = (sum(num_layer_list) * orb0) * (2 if spin == "all" else 1)
+        print(f"[kp] block dimension per Q (with spin) = {block_n}")
+        nlow_state_list = plot_cfg.get("nlow_state_list", [])
+        norb_fix_list = plot_cfg.get("norb_fix_list", [])
+        print("[kp] nlow_state_list = ", nlow_state_list)
+        print("[kp] norb_fix_list = ", norb_fix_list)
+        hamk2d, block_spin = _selected_spin_block_for_projection(hamk2d, spin)
+        H_eig, H_vec, H_blocks, U_new = get_H_block(
+            hamk2d,
+            Qlayer_list,
+            num_layer_list,
+            num_orb_per_layer_list,
+            nlow_state_list,
+            norb_fix_list,
+            spin=block_spin,
+            mode=mode,
+        )
+        eigs_list = [np.asarray(ev, dtype=np.float64) for ev in H_eig]
+        vecs_list = [np.asarray(v, dtype=np.complex128) for v in H_vec]
+        print(f"[kp] Diagonalized {len(eigs_list)} Q blocks.")
+        print(f"[kp] {np.array(eigs_list).shape}")
+
+    out_path = resolve(plot_cfg.get("out", f"plot_{mode}_scatter.pdf"))
     data_out = resolve(plot_cfg.get("data_out", os.path.splitext(out_path)[0] + ".txt"))
     ref_q_index = int(plot_cfg.get("ref_q_index", 0))
     title = plot_cfg.get("title", None)
@@ -1002,15 +1370,55 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     # H_eig is an array of object vectors; normalize to list
     # Save spectrum to text
     save_spectrum_txt(eigs_list, data_out, index_order=index_order)
-    plot_eigs_scatter(
-        eigs_list,
-        efermi,
-        out=out_path,
-        # target=target,
-        # ref_q_index=ref_q_index,
-        title=title,
-        ylim=ylim,
-        index_order=index_order,
+    if band_eigs_list is not None and eigs_list is not band_eigs_list:
+        q_sector_lengths = None
+        if q1 is not None and q2 is not None:
+            if mode == "gamma":
+                q_sector_lengths = [len(eigs_list)]
+            else:
+                q_lengths = [len(q1), len(q2)]
+                q_sector_lengths = [
+                    int(n_layers) * int(q_lengths[group_index])
+                    for group_index, n_layers in enumerate(num_layer_list)
+                ]
+        k_axis = _kpath_axis_from_config(
+            cfg,
+            cfg_dir=cfg_dir,
+            project_indices=list(range(len(band_eigs_list))),
+            row_count=len(band_eigs_list),
+        )
+        plot_inspect_band_and_qblock(
+            band_eigs_list,
+            eigs_list,
+            efermi,
+            out=out_path,
+            title=title,
+            ylim=ylim,
+            q_index_order=index_order,
+            q_sector_lengths=q_sector_lengths,
+            ref_q_index=ref_q_index,
+            q_window_bands=int(plot_cfg.get("q_window_bands", 10)),
+            k_x_values=k_axis.get("x_values"),
+            k_x_ticks=k_axis.get("x_ticks"),
+            k_x_ticklabels=k_axis.get("x_ticklabels"),
+        )
+    else:
+        plot_eigs_scatter(
+            eigs_list,
+            efermi,
+            out=out_path,
+            # target=target,
+            # ref_q_index=ref_q_index,
+            title=title,
+            ylim=ylim,
+            index_order=index_order,
+        )
+    _write_inspect_sidecars(
+        cfg,
+        output_dir=os.path.dirname(out_path) or ".",
+        eigs_list=eigs_list,
+        efermi=efermi,
+        ref_q_index=ref_q_index,
     )
 
     # # -------------------- Optional low-energy projection (Heff) --------------------
@@ -1357,6 +1765,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     out_dir = resolve(project_cfg.get("out_dir", "plots"))
     if out_dir is None:
         out_dir = os.path.join(cfg_dir, "plots")
+    canonical_project = _is_canonical_case_config(cfg)
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     nk = hamk3d.shape[0]
     has_explicit_k_indices = project_cfg.get("k_indices") is not None
@@ -1447,9 +1856,36 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             mode=mode,
         )
     norb_fix_list = resolved_norb_fix_list
-    write_basis_selection_report(out_dir, gauge_report)
+    if canonical_project:
+        _remove_known_stale_files(
+            out_dir,
+            (
+                "auto_norb_fix_list.yaml",
+                "basis_selection.json",
+                "basis_selection.md",
+                "eigvals.npy",
+                "heff_eig.npy",
+                "heff_list.npy",
+                "heff_vec.npy",
+                "scatter.png",
+                "vectors.npy",
+            ),
+        )
+        basis_payload = gauge_report.to_dict()
+        _write_text(Path(out_dir) / "basis.md", _format_basis_report_markdown(basis_payload))
+        np.savez(
+            Path(out_dir) / "basis.npz",
+            nlow_state_list=np.asarray(nlow_state_list, dtype=object),
+            norb_fix_list=np.asarray(norb_fix_list, dtype=object),
+        )
+    else:
+        write_basis_selection_report(out_dir, gauge_report)
+    if canonical_project:
+        basis_report_path = os.path.join(out_dir, "basis.md")
+    else:
+        basis_report_path = os.path.join(out_dir, "basis_selection.json")
     print(f"[kp]   gauge={gauge_report.gauge_mode}")
-    print(f"[kp]   basis selection report={os.path.join(out_dir, 'basis_selection.json')}")
+    print(f"[kp]   basis selection report={basis_report_path}")
     print(f"[kp]   output directory={out_dir}")
     if verbose:
         print(f"[kp]   hamk={hamk_file}")
@@ -1459,11 +1895,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp]   nlow_state_list={nlow_state_list}")
         print(f"[kp]   norb_fix_list={norb_fix_list}")
     # Unified output directory for all artifacts
-    out_heff = os.path.join(out_dir, "heff_list.npy")
-    out_eig = os.path.join(out_dir, "heff_eig.npy")
-    out_vec = os.path.join(out_dir, "heff_vec.npy")
-    plot_out = os.path.join(out_dir, "heff_scatter.png")
-    data_out = os.path.join(out_dir, "heff_spectrum.txt")
+    out_heff = os.path.join(out_dir, "heff.npy" if canonical_project else "heff_list.npy")
+    out_eig = None if canonical_project else os.path.join(out_dir, "heff_eig.npy")
+    out_vec = os.path.join(out_dir, "wavefunctions.npy" if canonical_project else "heff_vec.npy")
+    plot_out = os.path.join(out_dir, "scatter.pdf" if canonical_project else "heff_scatter.png")
+    data_out = os.path.join(out_dir, "eigvals.txt" if canonical_project else "heff_spectrum.txt")
     original_eigs_list = None
     band_file = resolve(material.get("band_file"))
     if band_file:
@@ -1576,7 +2012,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     # Save
     os.makedirs(os.path.dirname(out_heff) or ".", exist_ok=True)
     np.save(out_heff, heff_arr)
-    np.save(out_eig, heig_arr)
+    if out_eig is not None:
+        np.save(out_eig, heig_arr)
     np.save(out_vec, hvec_arr)
     if has_explicit_k_indices:
         np.save(os.path.join(out_dir, "k_indices.npy"), np.asarray(project_indices, dtype=int))
@@ -1584,7 +2021,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp] Heff shape: {heff_arr.shape}")
     print("[kp] Saved arrays:")
     print(f"[kp]   {out_heff}")
-    print(f"[kp]   {out_eig}")
+    if out_eig is not None:
+        print(f"[kp]   {out_eig}")
     print(f"[kp]   {out_vec}")
     _print_project_diagnostics(
         diag_list,
@@ -1593,9 +2031,9 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print_k_diagnostics=print_k_diagnostics,
     )
 
-    # Plot projected bands
-    # Shift: subtract only if project.efermi is provided; otherwise no shift
-    proj_ef = project_cfg.get("efermi")
+    # Plot projected bands.  Project-specific E_F wins; canonical one-file
+    # configs normally define it once under material.
+    proj_ef = project_cfg.get("efermi", material.get("efermi"))
     efermi = float(proj_ef) if proj_ef is not None else None
     ylim_cfg = project_cfg.get("ylim")
     ylim = (float(ylim_cfg[0]), float(ylim_cfg[1])) if isinstance(ylim_cfg, (list, tuple)) and len(ylim_cfg) == 2 else None
@@ -1605,8 +2043,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     if not isinstance(project_plot_cfg, dict):
         raise ValueError("project.plot must be a mapping when provided")
     project_top_bands = project_plot_cfg.get("top_bands", project_cfg.get("plot_top_bands"))
+    if canonical_project and project_top_bands is None:
+        project_top_bands = 10
     project_bottom_bands = project_plot_cfg.get("bottom_bands", project_cfg.get("plot_bottom_bands"))
     project_band_slice = project_plot_cfg.get("band_slice", project_cfg.get("plot_band_slice"))
+    project_plot_all_bands = _as_bool(project_plot_cfg.get("plot_all_bands", project_cfg.get("plot_all_bands", canonical_project)))
     project_align = str(project_plot_cfg.get("align", project_cfg.get("plot_align", "fermi")))
     kpath_axis = _kpath_axis_from_config(
         cfg,
@@ -1640,12 +2081,18 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         top_bands=None if project_top_bands is None else int(project_top_bands),
         bottom_bands=None if project_bottom_bands is None else int(project_bottom_bands),
         band_slice=project_band_slice,
+        plot_all_bands=project_plot_all_bands,
         align=project_align,
         xlabel="k-path point",
+        figsize=KP_BAND_FIGSIZE if canonical_project else None,
+        box_aspect=KP_BAND_BOX_ASPECT if canonical_project else None,
+        font_family=kp_font_family() if canonical_project else None,
         **kpath_axis,
     )
     save_spectrum_txt(heig_list, data_out)
     print(f"[kp] Saved Heff spectrum: {data_out}")
+    if canonical_project:
+        _write_case_summary(cfg, out_dir, "projection")
 
 
 def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:
@@ -1802,25 +2249,116 @@ def expand_orbital_order_pattern(pattern: str) -> list[str]:
     return _expand_orbital_order_pattern(pattern)
 
 
+def _add_project_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("-c", "--config", required=True, help="YAML config path")
+    parser.add_argument("--active-indices", help="Comma-separated active band indices, e.g. 46,47")
+    parser.add_argument("--downfold-method", choices=["first_order", "fixed_schur", "linearized_lowdin"])
+    parser.add_argument("--e-ref", type=float, help="Reference energy for fixed_schur/linearized_lowdin in eV")
+    parser.add_argument("--top-n", help="Comma-separated top-N values for diagnostics, e.g. 2,4,6,10,20")
+    parser.add_argument("--k-indices", help="Comma-separated k indices; default is all")
+    parser.add_argument("--pole-warning-mev", type=float)
+    parser.add_argument("--pole-danger-mev", type=float)
+    parser.add_argument("--fail-on-near-pole", action="store_true")
+    parser.add_argument("--compute-pole-diagnostics", action="store_true")
+    parser.add_argument("--compute-condition-number", action="store_true")
+
+
+def _project_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "active_indices": args.active_indices,
+        "downfold_method": args.downfold_method,
+        "e_ref": args.e_ref,
+        "top_n": args.top_n,
+        "k_indices": args.k_indices,
+        "pole_warning_mev": args.pole_warning_mev,
+        "pole_danger_mev": args.pole_danger_mev,
+        "fail_on_near_pole": args.fail_on_near_pole if args.fail_on_near_pole else None,
+        "compute_pole_diagnostics": args.compute_pole_diagnostics if args.compute_pole_diagnostics else None,
+        "compute_condition_number": args.compute_condition_number if args.compute_condition_number else None,
+    }
+
+
+def _model_output_dir_from_config(cfg_path: str) -> Path:
+    config_path = Path(cfg_path).expanduser()
+    if not config_path.is_absolute():
+        config_path = Path.cwd() / config_path
+    with config_path.open("r", encoding="utf-8") as f:
+        cfg = normalize_case_config(yaml.safe_load(f), config_path=config_path)
+
+    output_cfg = cfg.get("output", {})
+    if not isinstance(output_cfg, dict) or not output_cfg.get("dir"):
+        raise SystemExit("kp export -c/--config requires output.dir in the model config")
+
+    model_output_dir = Path(str(output_cfg["dir"])).expanduser()
+    if model_output_dir.is_absolute():
+        return model_output_dir
+    return config_path.parent / model_output_dir
+
+
+def _run_standalone_export_command(args: argparse.Namespace, action_args: Sequence[str]) -> None:
+    from .model import export as export_mod
+
+    if args.all_examples:
+        if getattr(args, "config", None):
+            raise SystemExit("kp export --all-examples cannot be combined with -c/--config")
+        all_output_root = action_args[0] if action_args else None
+        if all_output_root is None:
+            all_output_root = getattr(args, "export_output_dir", None)
+        if all_output_root is None:
+            raise SystemExit("kp export --all-examples requires <output_root>")
+        report = export_mod.export_all_standalone_models(
+            args.all_examples,
+            all_output_root,
+            force=bool(args.force),
+            debug_files=bool(args.debug_files),
+            dry_run=bool(args.dry_run),
+        )
+        print(f"[kp model] standalone exportable: {len(report['exportable'])}")
+        print(f"[kp model] standalone exported: {len(report['exported'])}")
+        print(f"[kp model] standalone blocked: {len(report['blocked'])}")
+        for row in report["blocked"]:
+            print(f"[kp model]   blocked: {row['model_output_dir']}: {row['reason']}")
+        return
+
+    if getattr(args, "config", None):
+        if action_args:
+            raise SystemExit("kp export -c/--config cannot be combined with <model_output_dir>")
+        output_dir = getattr(args, "export_output_dir", None)
+        if output_dir is None:
+            raise SystemExit("kp export -c/--config requires -o/--out")
+        model_output_dir = _model_output_dir_from_config(args.config)
+    else:
+        if len(action_args) < 2:
+            raise SystemExit("kp export requires <model_output_dir> <output_dir>")
+        model_output_dir = Path(action_args[0])
+        output_dir = action_args[1]
+
+    export_path = export_mod.export_standalone_model(
+        model_output_dir,
+        output_dir,
+        force=bool(args.force),
+        debug_files=bool(args.debug_files),
+    )
+    print(f"[kp model]   standalone export: {export_path}")
+
+
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kp", description="kp CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
+    p_show = sub.add_parser("show", help="Inspect source bands and Q-block spectra")
+    p_show.add_argument("-c", "--config", required=True, help="YAML config path")
+    p_inspect = sub.add_parser("inspect", help="Inspect source bands and Q-block spectra")
+    p_inspect.add_argument("-c", "--config", required=True, help="YAML config path")
+
     p_plot = sub.add_parser("plot", help="Plot scatter of band vs Q from config")
     p_plot.add_argument("-c", "--config", required=True, help="YAML config path")
 
+    p_proj_short = sub.add_parser("proj", help="Project selected bands to Heff across Q")
+    _add_project_arguments(p_proj_short)
+
     p_proj = sub.add_parser("project", help="Project selected bands to Heff across Q and plot")
-    p_proj.add_argument("-c", "--config", required=True, help="YAML config path")
-    p_proj.add_argument("--active-indices", help="Comma-separated active band indices, e.g. 46,47")
-    p_proj.add_argument("--downfold-method", choices=["first_order", "fixed_schur", "linearized_lowdin"])
-    p_proj.add_argument("--e-ref", type=float, help="Reference energy for fixed_schur/linearized_lowdin in eV")
-    p_proj.add_argument("--top-n", help="Comma-separated top-N values for diagnostics, e.g. 2,4,6,10,20")
-    p_proj.add_argument("--k-indices", help="Comma-separated k indices; default is all")
-    p_proj.add_argument("--pole-warning-mev", type=float)
-    p_proj.add_argument("--pole-danger-mev", type=float)
-    p_proj.add_argument("--fail-on-near-pole", action="store_true")
-    p_proj.add_argument("--compute-pole-diagnostics", action="store_true")
-    p_proj.add_argument("--compute-condition-number", action="store_true")
+    _add_project_arguments(p_proj)
 
     p_sweep = sub.add_parser("sweep", help="Sweep E_ref for fixed Schur downfolding")
     p_sweep.add_argument("-c", "--config", required=True, help="YAML config path")
@@ -1838,6 +2376,11 @@ def build_argparser() -> argparse.ArgumentParser:
     p_symm.add_argument("-c", "--config", required=True, help="YAML config path")
     p_symm.add_argument("--developer-outputs", action="store_true", help="Write developer-only projection matrices under diagnostics/")
 
+    p_fit = sub.add_parser("fit", help="Fit/build a configured continuum model")
+    p_fit.add_argument("-c", "--config", required=True, help="YAML model config path")
+    p_fit.add_argument("--export-standalone", help="Write a minimal NumPy-only standalone model package")
+    p_fit.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
+
     p_model = sub.add_parser("model", help="Build/fit/export a configured continuum model")
     p_model.add_argument("model_action", nargs="?", help="Optional action, e.g. export-standalone")
     p_model.add_argument("model_args", nargs="*", help="Arguments for optional model action")
@@ -1848,6 +2391,16 @@ def build_argparser() -> argparse.ArgumentParser:
     p_model.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")
     p_model.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
 
+    p_export = sub.add_parser("export", help="Export a standalone continuum model package")
+    p_export.add_argument("model_output_dir", nargs="?", help="Model output directory")
+    p_export.add_argument("output_dir", nargs="?", help="Standalone package output directory")
+    p_export.add_argument("-c", "--config", help="YAML model config path")
+    p_export.add_argument("-o", "--out", dest="export_output_dir", help="Standalone package output directory")
+    p_export.add_argument("--all-examples", help="Inventory/export all examples under this root")
+    p_export.add_argument("--dry-run", action="store_true", help="Report standalone exportability without writing packages")
+    p_export.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")
+    p_export.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
+
     return p
 
 
@@ -1856,21 +2409,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     args, extra_args = p.parse_known_args(argv)
     if extra_args and not (args.cmd == "model" and args.model_action == "export-standalone"):
         p.error(f"unrecognized arguments: {' '.join(extra_args)}")
-    if args.cmd == "plot":
+    if args.cmd in {"plot", "show", "inspect"}:
         cmd_plot_from_config(args.config)
-    elif args.cmd == "project":
-        overrides = {
-            "active_indices": args.active_indices,
-            "downfold_method": args.downfold_method,
-            "e_ref": args.e_ref,
-            "top_n": args.top_n,
-            "k_indices": args.k_indices,
-            "pole_warning_mev": args.pole_warning_mev,
-            "pole_danger_mev": args.pole_danger_mev,
-            "fail_on_near_pole": args.fail_on_near_pole if args.fail_on_near_pole else None,
-            "compute_pole_diagnostics": args.compute_pole_diagnostics if args.compute_pole_diagnostics else None,
-            "compute_condition_number": args.compute_condition_number if args.compute_condition_number else None,
-        }
+    elif args.cmd in {"project", "proj"}:
+        overrides = _project_overrides_from_args(args)
         cmd_project_from_config(args.config, overrides)
     elif args.cmd == "sweep":
         overrides = {
@@ -1890,37 +2432,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.config,
             developer_outputs=True if args.developer_outputs else None,
         )
-    elif args.cmd == "model":
-        if args.model_action == "export-standalone":
-            from .model import export as export_mod
+    elif args.cmd == "export":
+        action_args = [x for x in [args.model_output_dir, args.output_dir] if x is not None]
+        _run_standalone_export_command(args, action_args)
+    elif args.cmd in {"model", "fit"}:
+        if args.cmd == "model" and args.model_action == "export-standalone":
             action_args = list(args.model_args) + list(extra_args)
-
-            if args.all_examples:
-                all_output_root = action_args[0] if action_args else None
-                if all_output_root is None:
-                    raise SystemExit("kp model export-standalone --all-examples requires <output_root>")
-                report = export_mod.export_all_standalone_models(
-                    args.all_examples,
-                    all_output_root,
-                    force=bool(args.force),
-                    debug_files=bool(args.debug_files),
-                    dry_run=bool(args.dry_run),
-                )
-                print(f"[kp model] standalone exportable: {len(report['exportable'])}")
-                print(f"[kp model] standalone exported: {len(report['exported'])}")
-                print(f"[kp model] standalone blocked: {len(report['blocked'])}")
-                for row in report["blocked"]:
-                    print(f"[kp model]   blocked: {row['model_output_dir']}: {row['reason']}")
-                return
-            if len(action_args) < 2:
-                raise SystemExit("kp model export-standalone requires <model_output_dir> <output_dir>")
-            export_path = export_mod.export_standalone_model(
-                Path(action_args[0]),
-                action_args[1],
-                force=bool(args.force),
-                debug_files=bool(args.debug_files),
-            )
-            print(f"[kp model]   standalone export: {export_path}")
+            _run_standalone_export_command(args, action_args)
             return
         if not args.config:
             raise SystemExit("kp model requires --config unless using 'export-standalone'")
@@ -1947,12 +2465,14 @@ def main(argv: Sequence[str] | None = None) -> None:
             print(f"[kp model]   harmonics: intra={intra_count}, inter={inter_count}")
             if sym_ops:
                 print(f"[kp model]   symmetry: {', '.join(str(op) for op in sym_ops)}")
-            if results.get("model_log"):
+            if results.get("model_log") and not _config_path_uses_canonical_case(args.config):
                 print(f"[kp model]   detailed log: {results['model_log']}")
             if results.get("runtime_s") is not None:
                 print(f"[kp model]   runtime: {float(results['runtime_s']):.2f} s")
         if results.get("band_plot"):
             print(f"[kp model]   band plot: {results['band_plot']}")
+        if results.get("q_lattice_plot"):
+            print(f"[kp model]   q lattice plot: {results['q_lattice_plot']}")
         if results.get("all_band_plot"):
             print(f"[kp model]   all-band plot: {results['all_band_plot']}")
         if comparison:
@@ -1992,7 +2512,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         standalone_dir = (
             Path(args.export_standalone)
             if args.export_standalone
-            else _default_standalone_export_dir(Path(model_cfg.output_dir))
+            else (
+                Path(model_cfg.output_dir)
+                if _config_path_uses_canonical_case(args.config)
+                else _default_standalone_export_dir(Path(model_cfg.output_dir))
+            )
         )
         export_path = export_standalone_model(
             model_cfg.output_dir,
@@ -2001,6 +2525,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             debug_files=bool(args.debug_files),
         )
         _record_standalone_export(Path(model_cfg.output_dir), Path(export_path))
+        if _config_path_uses_canonical_case(args.config):
+            _cleanup_canonical_model_output(model_cfg.output_dir)
         print(f"[kp model]   standalone export: {export_path}")
     else:
         raise SystemExit(2)
