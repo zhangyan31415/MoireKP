@@ -279,6 +279,8 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
     assert "OUT_BAND_PLOT = \"bands.pdf\"" in evaluator_text
     assert "BAND_SLICE" not in evaluator_text
     assert "model.json" not in evaluator_text
+    assert "max_antihermitian_norm" not in evaluator_text
+    assert "anti-Hermitian residual" not in evaluator_text
 
     env = dict(os.environ)
     env["PYTHONPATH"] = ""
@@ -322,7 +324,6 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
         "term_r_value_imag",
         "dimension_dim",
         "runtime_hermitianize_before_eigvalsh",
-        "runtime_max_antihermitian_norm",
         "reference_kpoints",
         "reference_eigvals",
         "reference_heff_eig",
@@ -331,7 +332,7 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
     assert not (out_dir / "model.json").exists()
     assert int(np.asarray(data["dimension_dim"]).item()) == 2
     assert bool(np.asarray(data["runtime_hermitianize_before_eigvalsh"]).item()) is True
-    assert float(np.asarray(data["runtime_max_antihermitian_norm"]).item()) == 1.0e-10
+    assert "runtime_max_antihermitian_norm" not in data.files
 
     model_doc = (out_dir / "MODEL.md").read_text(encoding="utf-8")
     assert "$$" in model_doc

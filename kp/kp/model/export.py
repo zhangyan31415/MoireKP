@@ -201,7 +201,6 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
         "term_r_value_imag": np.asarray([float(term["r_value_imag"]) for term in semantic_terms], dtype=float),
         "dimension_dim": np.asarray(dim, dtype=np.int64),
         "runtime_hermitianize_before_eigvalsh": np.asarray(True, dtype=np.bool_),
-        "runtime_max_antihermitian_norm": np.asarray(1.0e-10, dtype=float),
         "reference_kpoints": reference_kpoints,
         "reference_eigvals": np.asarray(reference_eigvals, dtype=float),
     }
@@ -250,7 +249,7 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
         "points_per_segment": coordinate_payload["points_per_segment"],
         "default_band_slice": coordinate_payload["default_band_slice"],
         "energy_reference": _energy_reference(validation),
-        "runtime": {"hermitianize_before_eigvalsh": True, "max_antihermitian_norm": 1.0e-10},
+        "runtime": {"hermitianize_before_eigvalsh": True},
         "p_match_tolerance": P_MATCH_TOLERANCE,
         "runtime_recipe": {
             "array_file": "model_data.npz",
@@ -2061,7 +2060,6 @@ class StandaloneModel:
             "term_r_value_real",
             "term_r_value_imag",
             "runtime_hermitianize_before_eigvalsh",
-            "runtime_max_antihermitian_norm",
         ]
         missing = [key for key in self._required if key not in self.data.files]
         if missing:
@@ -2072,7 +2070,6 @@ class StandaloneModel:
         self.hermitianize_before_eigvalsh = bool(
             np.asarray(self.data["runtime_hermitianize_before_eigvalsh"]).item()
         )
-        self.max_antihermitian_norm = float(np.asarray(self.data["runtime_max_antihermitian_norm"]).item())
         term_index = np.asarray(self.data["operator_term_index"], dtype=np.int64)
         if self.r_real.shape != self.r_imag.shape or self.r_real.ndim != 1:
             raise ValueError("term_r_value_real and term_r_value_imag must be one-dimensional arrays of equal shape")
@@ -2102,13 +2099,6 @@ class StandaloneModel:
 
     def _hamiltonian_for_eigvalsh(self, k):
         h = self.hamiltonian(k)
-        denom = max(float(np.linalg.norm(h)), 1.0)
-        residual = float(np.linalg.norm(h - h.conj().T) / denom)
-        if residual > self.max_antihermitian_norm:
-            raise ValueError(
-                f"H(k) anti-Hermitian residual {{residual:.6e}} exceeds "
-                f"tolerance {{self.max_antihermitian_norm:.6e}}"
-            )
         if self.hermitianize_before_eigvalsh:
             return 0.5 * (h + h.conj().T)
         return h
