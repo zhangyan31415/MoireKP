@@ -34,6 +34,7 @@ from kp.model.pipeline import (  # noqa: E402
     _run_harmonic_ablation_selection,
     _select_harmonic_ablation_candidate,
     _auto_low_energy_fit_candidate_sets,
+    _band_overlap_weights,
     _choose_auto_fit_candidate_record,
     _low_subspace_matrix_residual,
     _matrix_loss_block_masks,
@@ -723,11 +724,104 @@ def _write_auto_fixture(tmp_path: Path) -> Path:
     return path
 
 
-def _write_symm_frame_manifest(tmp_path: Path, *, rotation_deg: float, path_name: str = "symm") -> Path:
+def _write_k_inter_direction_fixture(tmp_path: Path) -> Path:
+    p_vec = np.array([0.0, 1.0], dtype=float)
+    q1 = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=float)
+    q2 = q1 - p_vec
+    kpoints = np.array([[0.0, 0.0]], dtype=float)
+    dim = q1.shape[0] + q2.shape[0]
+    heff = np.diag(np.arange(dim, dtype=float))[None, :, :].astype(np.complex128)
+
+    np.save(tmp_path / "q1.npy", q1)
+    np.save(tmp_path / "q2.npy", q2)
+    np.save(tmp_path / "kpoints.npy", kpoints)
+    out_dir = tmp_path / "project"
+    out_dir.mkdir()
+    np.save(out_dir / "heff_list.npy", heff)
+    np.save(out_dir / "heff_eig.npy", np.linalg.eigvalsh(heff))
+
+    source_cfg = {
+        "material": {
+            "qset1_file": "q1.npy",
+            "qset2_file": "q2.npy",
+        },
+        "plot": {},
+        "project": {
+            "out_dir": "project",
+        },
+    }
+    (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_cfg), encoding="utf-8")
+    _write_symm_frame_manifest(
+        tmp_path,
+        rotation_deg=0.0,
+        q_model_files={"layer1": "../q1.npy", "layer2": "../q2.npy"},
+    )
+
+    model_cfg = {
+        "source_config": "source.yaml",
+        "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
+        "valley_model": {
+            "lattice": "hexagonal",
+            "system": "bilayer",
+            "valley_type": "K",
+            "mode": "single_valley",
+            "active_valleys": ["K1"],
+            "spin_convention": "spin_down_projected",
+            "allowed_internal_symmetries": [],
+            "external_sewing_symmetries": [],
+        },
+        "sectors": [
+            {"name": "L1", "qset": "qset1", "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "n_orb": 1},
+        ],
+        "kpoints_file": "kpoints.npy",
+        "model": {
+            "n_orb": [1, 1],
+            "nlow_state": [1, 1],
+            "bM": {"bM1": [1.0, 0.0], "bM2": [0.0, 1.0]},
+            "harmonics": {
+                "intra": 1,
+                "inter": {1: "[0.0, 1.0]"},
+            },
+            "max_order": {"Kinect": 0, "intra": 0, "inter": 0},
+            "symmetry_map": {
+                "Kinect": [],
+                "Onsite": [],
+                "intra": [],
+                "inter": [],
+            },
+        },
+        "fit": {
+            "indices": [0],
+            "coeff_tol": 1.0e-8,
+        },
+        "bands": {
+            "indices": [0],
+            "compare_to_heff": True,
+        },
+        "output": {
+            "dir": "model_out",
+        },
+    }
+    path = tmp_path / "model_k_inter_direction.yaml"
+    path.write_text(yaml.safe_dump(model_cfg, sort_keys=False), encoding="utf-8")
+    return path
+
+
+def _write_symm_frame_manifest(
+    tmp_path: Path,
+    *,
+    rotation_deg: float,
+    path_name: str = "symm",
+    q_model_files: dict[str, str] | None = None,
+) -> Path:
     symm_dir = tmp_path / path_name
     symm_dir.mkdir(exist_ok=True)
+    manifest = {"frame": {"q_transform": {"rotation_deg": float(rotation_deg)}}, "operations": []}
+    if q_model_files is not None:
+        manifest["q_model"] = {"files": dict(q_model_files)}
     (symm_dir / "manifest.json").write_text(
-        json.dumps({"frame": {"q_transform": {"rotation_deg": float(rotation_deg)}}, "operations": []}),
+        json.dumps(manifest),
         encoding="utf-8",
     )
     return symm_dir
@@ -3740,6 +3834,27 @@ def test_default_k_term_templates_omit_inter_for_single_active_sector() -> None:
     assert all(row["source"] != "tunneling" for row in templates)
 
 
+def test_default_k_inter_template_uses_supported_raw_q_direction(tmp_path: Path) -> None:
+    cfg_path = _write_k_inter_direction_fixture(tmp_path)
+
+    moire_cfg, _model_cfg = build_moire_config_from_file(cfg_path)
+    model = build_model(moire_cfg)
+
+    inter_terms = [
+        term
+        for term in model.terms.values()
+        if (term.registry_metadata or {}).get("term_kind") == "inter"
+    ]
+    assert inter_terms
+    support = sum(
+        int(np.count_nonzero(np.abs(term.Y_basis(np.array([0.0, 0.0], dtype=float))) > 1.0e-14))
+        for term in inter_terms
+    )
+    assert support > 0
+    assert {(term.registry_metadata or {})["sector_pair"][0] for term in inter_terms} == {"L1"}
+    assert {(term.registry_metadata or {})["sector_pair"][1] for term in inter_terms} == {"L2"}
+
+
 def test_auto_harmonics_are_generated_from_qset_symmetry_orbits() -> None:
     bM1 = np.array([1.0, 0.0], dtype=float)
     bM2 = np.array([0.5, np.sqrt(3.0) / 2.0], dtype=float)
@@ -5939,6 +6054,39 @@ def test_save_q_lattice_harmonics_plot_draws_model_qsets(tmp_path: Path) -> None
     assert out.stat().st_size > 0
 
 
+def test_q_lattice_inter_arrow_uses_selected_sector_pair_direction() -> None:
+    p_vec = np.array([0.0, 1.0], dtype=float)
+    qset1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    qset2 = qset1 - p_vec
+
+    start, target = pipeline_module._q_lattice_inter_arrow_endpoints(
+        qset1=qset1,
+        qset2=qset2,
+        sectors=[
+            {"name": "L1", "qset": "qset1"},
+            {"name": "L2", "qset": "qset2"},
+        ],
+        inter_sector_pairs=[["L1", "L2"]],
+        vector=p_vec,
+        fallback_anchor=np.array([10.0, 10.0], dtype=float),
+        tol=1.0e-8,
+    )
+
+    np.testing.assert_allclose(start, qset1[0], atol=1.0e-12)
+    np.testing.assert_allclose(target, qset2[0], atol=1.0e-12)
+
+
+def test_q_lattice_hex_shell_uses_outer_vertex_radius_for_offset_valleys() -> None:
+    b1 = np.array([1.0, 0.0], dtype=float)
+    b2 = np.array([0.5, np.sqrt(3.0) / 2.0], dtype=float)
+    angle = np.linspace(0.0, 2.0 * np.pi, 12, endpoint=False)
+    offset_valley_points = np.column_stack([2.52 * np.cos(angle), 2.52 * np.sin(angle)])
+    gamma_points = np.column_stack([2.65 * np.cos(angle), 2.65 * np.sin(angle)])
+
+    assert pipeline_module._q_lattice_hex_shell_from_radius(offset_valley_points, b1, b2) == 2
+    assert pipeline_module._q_lattice_hex_shell_from_radius(gamma_points, b1, b2) == 3
+
+
 def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
@@ -6117,6 +6265,91 @@ def test_save_band_comparison_plot_uses_release_style_by_default(monkeypatch, tm
     assert saved_axes[0].get_ylabel() == "Energy - E_top (eV)"
     assert "$" not in saved_axes[0].get_ylabel()
     assert saved_axes[0].yaxis.label.get_fontfamily()[0] == kp_font_family()
+
+
+def test_save_band_comparison_plot_colors_model_bands_by_overlap(monkeypatch, tmp_path: Path) -> None:
+    import matplotlib.axes
+    import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+
+    model = np.array([[0.0, 0.1, 0.2], [0.02, 0.12, 0.24], [0.03, 0.15, 0.27]])
+    heff = model + 0.001
+    overlap = np.array([[0.5, 0.8, 0.95], [0.6, 0.85, 0.96], [0.7, 0.9, 0.98]])
+    collections: list[LineCollection] = []
+    ylims: list[tuple[float, float]] = []
+    saved_axes = []
+
+    original_add_collection = matplotlib.axes.Axes.add_collection
+    original_set_ylim = matplotlib.axes.Axes.set_ylim
+
+    def spy_add_collection(self, collection, *args, **kwargs):
+        if isinstance(collection, LineCollection):
+            collections.append(collection)
+        return original_add_collection(self, collection, *args, **kwargs)
+
+    def spy_set_ylim(self, bottom=None, top=None, *args, **kwargs):
+        if bottom is not None and top is not None:
+            ylims.append((float(bottom), float(top)))
+        return original_set_ylim(self, bottom, top, *args, **kwargs)
+
+    def spy_close(fig=None):
+        saved_axes.extend(fig.axes if fig is not None else [])
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "add_collection", spy_add_collection)
+    monkeypatch.setattr(matplotlib.axes.Axes, "set_ylim", spy_set_ylim)
+    monkeypatch.setattr(plt, "close", spy_close)
+
+    save_band_comparison_plot(
+        model,
+        heff,
+        tmp_path / "bands.pdf",
+        plot_config={"top_bands": 2, "plot_all_bands": True, "align": "top"},
+        overlap_weights=overlap,
+    )
+
+    assert (tmp_path / "bands.pdf").exists()
+    assert len(saved_axes) >= 2
+    assert saved_axes[-1].get_ylabel() == "Wavefunction overlap"
+    np.testing.assert_allclose(saved_axes[-1].get_ylim(), (0.8, 0.98))
+    model_collections = [item for item in collections if item.get_array() is not None and len(item.get_array()) == model.shape[0] - 1]
+    assert len(model_collections) == model.shape[1]
+    assert ylims
+    assert ylims[-1][0] > -0.22
+
+
+def test_band_overlap_weights_clusters_when_either_side_is_nearly_degenerate() -> None:
+    reference_vec = np.broadcast_to(np.eye(3, dtype=complex), (1, 3, 3)).copy()
+    theta = np.pi / 4.0
+    model_vec = reference_vec.copy()
+    model_vec[0, :2, :2] = np.array(
+        [
+            [np.cos(theta), -np.sin(theta)],
+            [np.sin(theta), np.cos(theta)],
+        ],
+        dtype=complex,
+    )
+
+    naive = _band_overlap_weights(model_vec, reference_vec)
+    np.testing.assert_allclose(naive[0, :2], [0.5, 0.5])
+
+    reference_touch = _band_overlap_weights(
+        model_vec,
+        reference_vec,
+        model_eigvals=np.array([[0.0, 0.02, 0.1]]),
+        reference_eigvals=np.array([[0.0, 1.0e-5, 0.1]]),
+        degeneracy_tol=1.0e-4,
+    )
+    model_touch = _band_overlap_weights(
+        model_vec,
+        reference_vec,
+        model_eigvals=np.array([[0.0, 1.0e-5, 0.1]]),
+        reference_eigvals=np.array([[0.0, 0.02, 0.1]]),
+        degeneracy_tol=1.0e-4,
+    )
+
+    np.testing.assert_allclose(reference_touch[0, :2], [1.0, 1.0], atol=1.0e-12)
+    np.testing.assert_allclose(model_touch[0, :2], [1.0, 1.0], atol=1.0e-12)
+    np.testing.assert_allclose(reference_touch[0, 2], 1.0, atol=1.0e-12)
 
 
 def test_all_band_plot_config_drops_zoom_selection_and_annotations() -> None:

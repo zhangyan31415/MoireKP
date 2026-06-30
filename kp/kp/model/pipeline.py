@@ -5,6 +5,7 @@ import copy
 import contextlib
 import hashlib
 import json
+import math
 import shutil
 import time
 from dataclasses import dataclass, field, replace
@@ -2153,6 +2154,139 @@ def _default_k_sector_term_templates(
     return templates
 
 
+def _template_inter_harmonic_vectors(
+    template: Mapping[str, Any],
+    inter_harmonics_map: Mapping[int, np.ndarray],
+) -> list[np.ndarray]:
+    raw = template.get("harmonics", "inter")
+    sign = float(template.get("harmonic_sign", 1.0))
+    indices = None
+    if isinstance(raw, Mapping):
+        sign = float(raw.get("sign", sign))
+        indices = raw.get("indices")
+        raw = raw.get("kind", "inter")
+    if str(raw) != "inter":
+        return []
+    items = sorted(inter_harmonics_map.items()) if indices is None else [
+        (int(index), inter_harmonics_map[int(index)])
+        for index in indices
+        if int(index) in inter_harmonics_map
+    ]
+    return [sign * np.asarray(vector, dtype=float) for _index, vector in items]
+
+
+def _raw_q_support_count_for_sector_pair(
+    *,
+    sector_from: Mapping[str, Any],
+    sector_to: Mapping[str, Any],
+    harmonic_vectors: Sequence[np.ndarray],
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    tol: float = 1.0e-5,
+) -> int:
+    q_from = sector_qset(sector_from, Q_set1, Q_set2)
+    q_to = sector_qset(sector_to, Q_set1, Q_set2)
+    count = 0
+    for p_vector in harmonic_vectors:
+        diff = q_from[:, None, :] - np.asarray(p_vector, dtype=float) - q_to[None, :, :]
+        count += int(np.count_nonzero(np.linalg.norm(diff, axis=2) < tol))
+    return count
+
+
+def _orient_k_sector_inter_templates_by_raw_support(
+    templates: Sequence[Mapping[str, Any]],
+    *,
+    valley_model: Mapping[str, Any],
+    n_orb: tuple[int, int],
+    sectors: Sequence[Mapping[str, Any]],
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    inter_harmonics_map: Mapping[int, np.ndarray],
+    term_template_metadata: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    out = [dict(row) for row in templates]
+    if str(valley_model.get("valley_type", "")) != "K":
+        return out, []
+    if str(term_template_metadata.get("input_kind", "")) != "default":
+        return out, []
+    if "k_sector_aware" not in list(term_template_metadata.get("profiles", [])):
+        return out, []
+    active = _active_template_sectors(sectors, n_orb)
+    candidate_pairs = [
+        (sector_from, sector_to)
+        for sector_from in active
+        for sector_to in active
+        if str(sector_from.get("qset")) != str(sector_to.get("qset"))
+    ]
+    if not candidate_pairs:
+        return out, []
+
+    by_name = {str(sector.get("name")): sector for sector in active}
+    diagnostics: list[dict[str, Any]] = []
+    for row in out:
+        if str(row.get("source", "")) != "tunneling":
+            continue
+        harmonic_vectors = _template_inter_harmonic_vectors(row, inter_harmonics_map)
+        if not harmonic_vectors:
+            continue
+        scores = [
+            (
+                _raw_q_support_count_for_sector_pair(
+                    sector_from=sector_from,
+                    sector_to=sector_to,
+                    harmonic_vectors=harmonic_vectors,
+                    Q_set1=Q_set1,
+                    Q_set2=Q_set2,
+                ),
+                str(sector_from["name"]),
+                str(sector_to["name"]),
+            )
+            for sector_from, sector_to in candidate_pairs
+        ]
+        current_pairs = row.get("sector_pairs", [])
+        if not isinstance(current_pairs, Sequence) or isinstance(current_pairs, (str, bytes)):
+            current_pairs = []
+        current_support = 0
+        for pair in current_pairs:
+            if not isinstance(pair, Sequence) or isinstance(pair, (str, bytes)) or len(pair) != 2:
+                continue
+            sector_from = by_name.get(str(pair[0]))
+            sector_to = by_name.get(str(pair[1]))
+            if sector_from is None or sector_to is None:
+                continue
+            current_support += _raw_q_support_count_for_sector_pair(
+                sector_from=sector_from,
+                sector_to=sector_to,
+                harmonic_vectors=harmonic_vectors,
+                Q_set1=Q_set1,
+                Q_set2=Q_set2,
+            )
+        best_support = max((score[0] for score in scores), default=0)
+        best_pairs = [[from_name, to_name] for support, from_name, to_name in scores if support == best_support and support > 0]
+        changed = bool(best_pairs) and best_support > current_support
+        if changed:
+            row["sector_pairs"] = best_pairs
+            if len(best_pairs) == 1:
+                row["name"] = (
+                    f"inter_{_term_name_fragment(best_pairs[0][0])}"
+                    f"_to_{_term_name_fragment(best_pairs[0][1])}"
+                )
+        diagnostics.append(
+            {
+                "template": str(row.get("name", "inter")),
+                "current_support": int(current_support),
+                "best_support": int(best_support),
+                "scores": [
+                    {"sector_pair": [from_name, to_name], "support": int(support)}
+                    for support, from_name, to_name in scores
+                ],
+                "selected_sector_pairs": copy.deepcopy(row.get("sector_pairs", [])),
+                "changed": changed,
+            }
+        )
+    return out, diagnostics
+
+
 def _default_term_template_profile_metadata(
     *,
     valley_model: Mapping[str, Any],
@@ -3264,6 +3398,20 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         symmetry_map=preliminary_symmetry_map,
     )
     config.harmonics_diagnostics = harmonics_diagnostics
+    term_templates, inter_direction_diagnostics = _orient_k_sector_inter_templates_by_raw_support(
+        config.term_templates,
+        valley_model=config.valley_model,
+        n_orb=config.n_orb,
+        sectors=sectors,
+        Q_set1=Q_set1,
+        Q_set2=Q_set2,
+        inter_harmonics_map=inter,
+        term_template_metadata=config.term_template_metadata,
+    )
+    config.term_templates = term_templates
+    if inter_direction_diagnostics:
+        config.term_template_metadata = dict(config.term_template_metadata)
+        config.term_template_metadata["inter_sector_pair_resolution"] = inter_direction_diagnostics
     kpoints_all = _load_kpoints(config)
     band_kpoints = _select_rows(kpoints_all, config.band_indices)
     fit_kpoints = _select_rows(kpoints_all, config.fit_indices)
@@ -3789,6 +3937,63 @@ def _band_plot_title(config: ConfiguredModel) -> str:
     return config.path.stem
 
 
+def _band_overlap_weights(
+    model_eigvecs: np.ndarray,
+    reference_eigvecs: np.ndarray,
+    *,
+    model_eigvals: np.ndarray | None = None,
+    reference_eigvals: np.ndarray | None = None,
+    degeneracy_tol: float = 0.0,
+) -> np.ndarray:
+    model_vec = np.asarray(model_eigvecs)
+    ref_vec = np.asarray(reference_eigvecs)
+    if model_vec.ndim != 3 or ref_vec.ndim != 3:
+        raise ValueError(
+            "band overlap expects eigenvectors with shape (Nk,dim,N), "
+            f"got {model_vec.shape} and {ref_vec.shape}"
+        )
+    if model_vec.shape != ref_vec.shape:
+        raise ValueError(f"band overlap eigenvector shapes differ: model={model_vec.shape}, reference={ref_vec.shape}")
+    weights = np.abs(np.einsum("kdn,kdn->kn", np.conjugate(model_vec), ref_vec)) ** 2
+    weights = np.clip(np.asarray(weights, dtype=float), 0.0, 1.0)
+    tol = float(degeneracy_tol)
+    if tol <= 0.0:
+        return weights
+    if model_eigvals is None or reference_eigvals is None:
+        return weights
+    model_val = np.asarray(model_eigvals, dtype=float)
+    ref_val = np.asarray(reference_eigvals, dtype=float)
+    if model_val.shape != weights.shape or ref_val.shape != weights.shape:
+        raise ValueError(
+            "band overlap degeneracy eigvals must match overlap shape, "
+            f"got model={model_val.shape}, reference={ref_val.shape}, overlap={weights.shape}"
+        )
+
+    nk, nbands = weights.shape
+    clustered = weights.copy()
+    for ik in range(nk):
+        start = 0
+        for ib in range(nbands - 1):
+            model_gap = abs(float(model_val[ik, ib + 1] - model_val[ik, ib]))
+            ref_gap = abs(float(ref_val[ik, ib + 1] - ref_val[ik, ib]))
+            if model_gap <= tol or ref_gap <= tol:
+                continue
+            stop = ib + 1
+            if stop - start > 1:
+                model_subspace = model_vec[ik, :, start:stop]
+                ref_subspace = ref_vec[ik, :, start:stop]
+                value = float(np.linalg.norm(model_subspace.conj().T @ ref_subspace, ord="fro") ** 2 / (stop - start))
+                clustered[ik, start:stop] = np.clip(value, 0.0, 1.0)
+            start = stop
+        stop = nbands
+        if stop - start > 1:
+            model_subspace = model_vec[ik, :, start:stop]
+            ref_subspace = ref_vec[ik, :, start:stop]
+            value = float(np.linalg.norm(model_subspace.conj().T @ ref_subspace, ord="fro") ** 2 / (stop - start))
+            clustered[ik, start:stop] = np.clip(value, 0.0, 1.0)
+    return clustered
+
+
 def save_band_comparison_plot(
     model_eigvals: np.ndarray,
     heff_eigvals: np.ndarray,
@@ -3800,6 +4005,7 @@ def save_band_comparison_plot(
     x_ticks: Sequence[float] | None = None,
     x_ticklabels: Sequence[str] | None = None,
     title: str | None = None,
+    overlap_weights: np.ndarray | None = None,
 ) -> Path:
     model = np.asarray(model_eigvals, dtype=float)
     heff = np.asarray(heff_eigvals)
@@ -3816,8 +4022,20 @@ def save_band_comparison_plot(
     start, stop = _resolve_plot_band_slice(nbands=nbands, metric_band_slice=band_slice, plot_config=plot_options)
     model_sorted = np.sort(model, axis=1)[:, :nbands]
     heff_sorted = np.sort(heff, axis=1)[:, :nbands]
+    overlap_sorted = None
+    if overlap_weights is not None:
+        overlap = np.asarray(overlap_weights, dtype=float)
+        if overlap.ndim != 2:
+            raise ValueError(f"overlap_weights must be 2D, got {overlap.shape}")
+        if overlap.shape[0] != model.shape[0] or overlap.shape[1] < nbands:
+            raise ValueError(
+                "overlap_weights must have one row per k-point and at least the plotted band count, "
+                f"got overlap={overlap.shape}, model={model.shape}, heff={heff.shape}"
+            )
+        overlap_sorted = np.clip(overlap[:, :nbands], 0.0, 1.0)
     model_sel = model_sorted[:, start:stop]
     heff_sel = heff_sorted[:, start:stop]
+    overlap_sel = overlap_sorted[:, start:stop] if overlap_sorted is not None else None
     align = str(plot_options.get("align", "none")).lower()
     model_ref = 0.0
     heff_ref = 0.0
@@ -3837,15 +4055,21 @@ def save_band_comparison_plot(
     if plot_all_bands:
         model_plot = model_sorted - model_ref
         heff_plot = heff_sorted - heff_ref
+        overlap_plot = overlap_sorted
     else:
         model_plot = model_sel
         heff_plot = heff_sel
+        overlap_plot = overlap_sel
 
     import matplotlib
 
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
+    from matplotlib.collections import LineCollection
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
     from matplotlib.lines import Line2D
+    from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -3857,10 +4081,60 @@ def save_band_comparison_plot(
         raise ValueError(f"bands.plot.figsize must be [width, height], got {figsize_raw!r}")
     dpi = int(plot_options.get("dpi", KP_DPI))
     fig, ax = plt.subplots(figsize=(float(figsize_raw[0]), float(figsize_raw[1])), dpi=dpi)
+    overlap_scalar = None
+    overlap_label = str(plot_options.get("overlap_label", "Wavefunction overlap"))
     for ib in range(heff_plot.shape[1]):
         ax.plot(x_values, heff_plot[:, ib], **KP_REFERENCE_STYLE)
-    for ib in range(model_plot.shape[1]):
-        ax.plot(x_values, model_plot[:, ib], **KP_MODEL_STYLE)
+    if overlap_plot is not None:
+        cmap = plt.get_cmap(str(plot_options.get("overlap_cmap", "Blues")))
+        colorbar_values = overlap_sel if overlap_sel is not None and overlap_sel.size else overlap_plot
+        default_vmin = float(np.nanmin(colorbar_values))
+        default_vmax = float(np.nanmax(colorbar_values))
+        vmin = float(plot_options.get("overlap_vmin", default_vmin))
+        vmax = float(plot_options.get("overlap_vmax", default_vmax))
+        if not np.isfinite(vmin) or not np.isfinite(vmax):
+            vmin, vmax = 0.0, 1.0
+        if vmax <= vmin:
+            center = 0.5 * (vmin + vmax)
+            pad = max(1.0e-6, 0.01 * max(abs(center), 1.0))
+            vmin = center - pad
+            vmax = center + pad
+        norm = Normalize(
+            vmin=vmin,
+            vmax=vmax,
+        )
+        linewidth = float(plot_options.get("overlap_linewidth", KP_MODEL_STYLE.get("linewidth", 1.0)))
+        alpha = float(plot_options.get("overlap_alpha", KP_MODEL_STYLE.get("alpha", 0.95)))
+        linestyle = str(plot_options.get("overlap_linestyle", KP_MODEL_STYLE.get("linestyle", "-")))
+        for ib in range(model_plot.shape[1]):
+            points = np.column_stack([x_values, model_plot[:, ib]])
+            if points.shape[0] < 2:
+                ax.plot(
+                    x_values,
+                    model_plot[:, ib],
+                    color=cmap(norm(float(overlap_plot[0, ib]))),
+                    linewidth=linewidth,
+                    alpha=alpha,
+                    linestyle=linestyle,
+                )
+                continue
+            segments = np.stack([points[:-1], points[1:]], axis=1)
+            values = 0.5 * (overlap_plot[:-1, ib] + overlap_plot[1:, ib])
+            collection = LineCollection(
+                segments,
+                cmap=cmap,
+                norm=norm,
+                linewidths=linewidth,
+                alpha=alpha,
+                linestyles=linestyle,
+            )
+            collection.set_array(np.asarray(values, dtype=float))
+            ax.add_collection(collection)
+        overlap_scalar = ScalarMappable(norm=norm, cmap=cmap)
+        overlap_scalar.set_array([])
+    else:
+        for ib in range(model_plot.shape[1]):
+            ax.plot(x_values, model_plot[:, ib], **KP_MODEL_STYLE)
     if x_ticks is not None and x_ticklabels is not None and len(x_ticks) == len(x_ticklabels):
         ax.set_xticks([float(item) for item in x_ticks])
         ax.set_xticklabels(list(x_ticklabels))
@@ -3934,12 +4208,40 @@ def save_band_comparison_plot(
         resolved_box_aspect = None
     else:
         resolved_box_aspect = float(box_aspect)
+    font_family = str(plot_options.get("font_family") or kp_font_family())
     apply_kp_axis_style(
         ax,
         box_aspect=resolved_box_aspect,
-        font_family=str(plot_options.get("font_family") or kp_font_family()),
+        font_family=font_family,
     )
     fig.tight_layout()
+    if overlap_scalar is not None:
+        colorbar_ax = inset_axes(
+            ax,
+            width=str(plot_options.get("overlap_colorbar_size", "4%")),
+            height="100%",
+            loc="lower left",
+            bbox_to_anchor=(float(plot_options.get("overlap_colorbar_x", 1.07)), 0.0, 1.0, 1.0),
+            bbox_transform=ax.transAxes,
+            borderpad=0.0,
+        )
+        vmin = float(overlap_scalar.norm.vmin)
+        vmax = float(overlap_scalar.norm.vmax)
+        gradient = np.linspace(vmin, vmax, 256, dtype=float).reshape(-1, 1)
+        colorbar_ax.imshow(
+            gradient,
+            aspect="auto",
+            origin="lower",
+            cmap=overlap_scalar.cmap,
+            norm=overlap_scalar.norm,
+            extent=(0.0, 1.0, vmin, vmax),
+        )
+        colorbar_ax.set_xticks([])
+        colorbar_ax.set_yticks(np.linspace(vmin, vmax, 6))
+        colorbar_ax.yaxis.tick_right()
+        colorbar_ax.yaxis.set_label_position("right")
+        colorbar_ax.set_ylabel(overlap_label)
+        apply_kp_axis_style(colorbar_ax, box_aspect=None, font_family=font_family)
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     return out
@@ -4180,6 +4482,59 @@ def _draw_q_lattice_segments(ax: Any, points: np.ndarray, *, alpha: float = 1.0,
     ax.add_collection(LineCollection(segments, colors=_Q_LATTICE_PALETTE["edge"], linewidths=linewidth, alpha=alpha, zorder=1))
 
 
+def _q_lattice_hex_shell_from_radius(points: np.ndarray, bM1: np.ndarray, bM2: np.ndarray) -> int:
+    arr = np.asarray(points, dtype=float)
+    if arr.size == 0:
+        return 0
+    b1 = np.asarray(bM1, dtype=float)
+    b2 = np.asarray(bM2, dtype=float)
+    spacing = max(float(np.linalg.norm(b1)), float(np.linalg.norm(b2)), 1.0e-12)
+    radius = float(np.max(np.linalg.norm(arr, axis=1)))
+    outer_vertex_allowance = 1.0 / math.sqrt(3.0)
+    return max(0, int(math.ceil(max(0.0, radius / spacing - outer_vertex_allowance) - 1.0e-10)))
+
+
+def _q_lattice_hex_centers(bM1: np.ndarray, bM2: np.ndarray, shell: int) -> np.ndarray:
+    b1 = np.asarray(bM1, dtype=float)
+    b2 = np.asarray(bM2, dtype=float)
+    centers = []
+    for i in range(-shell, shell + 1):
+        for j in range(-shell, shell + 1):
+            if max(abs(i), abs(j), abs(i + j)) <= shell:
+                centers.append(i * b1 + j * b2)
+    return np.asarray(centers, dtype=float)
+
+
+def _draw_q_lattice_hex_cells(ax: Any, *, bM1: np.ndarray, bM2: np.ndarray, points: np.ndarray, linewidth: float = 1.0) -> np.ndarray:
+    from matplotlib.collections import LineCollection
+
+    shell = _q_lattice_hex_shell_from_radius(points, bM1, bM2)
+    centers = _q_lattice_hex_centers(bM1, bM2, shell)
+    try:
+        base_hex = _first_bz_vertices(np.asarray(bM1, dtype=float), np.asarray(bM2, dtype=float))
+    except Exception:
+        return np.empty((0, 2), dtype=float)
+    if centers.size == 0 or base_hex.size == 0:
+        return base_hex
+    segments = []
+    vertices = []
+    for center in centers:
+        poly = base_hex + center
+        vertices.append(poly)
+        for idx in range(len(poly)):
+            segments.append((poly[idx], poly[(idx + 1) % len(poly)]))
+    ax.add_collection(
+        LineCollection(
+            segments,
+            colors=_Q_LATTICE_PALETTE["edge"],
+            linewidths=linewidth,
+            alpha=0.92,
+            zorder=1,
+        )
+    )
+    return np.vstack(vertices)
+
+
 def _q_lattice_nearest_spacing(points: np.ndarray) -> float:
     arr = np.asarray(points, dtype=float)
     distances = [
@@ -4235,6 +4590,34 @@ def _draw_q_lattice_harmonic_arrow(
     ax.add_patch(arrow_head)
 
 
+def _q_lattice_inter_arrow_endpoints(
+    *,
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    sectors: Sequence[Mapping[str, Any]] | None,
+    inter_sector_pairs: Sequence[Sequence[str]] | None,
+    vector: np.ndarray,
+    fallback_anchor: np.ndarray,
+    tol: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    if sectors and inter_sector_pairs:
+        by_name = {str(sector.get("name")): sector for sector in sectors}
+        for pair in inter_sector_pairs:
+            if not isinstance(pair, Sequence) or isinstance(pair, (str, bytes)) or len(pair) != 2:
+                continue
+            sector_from = by_name.get(str(pair[0]))
+            sector_to = by_name.get(str(pair[1]))
+            if sector_from is None or sector_to is None:
+                continue
+            q_from = sector_qset(sector_from, qset1, qset2)
+            q_to = sector_qset(sector_to, qset1, qset2)
+            for point in q_from:
+                target, distance = _nearest_point(q_to, np.asarray(point, dtype=float) - np.asarray(vector, dtype=float))
+                if distance <= tol:
+                    return np.asarray(point, dtype=float), np.asarray(target, dtype=float)
+    return np.asarray(fallback_anchor, dtype=float), np.asarray(fallback_anchor, dtype=float) + np.asarray(vector, dtype=float)
+
+
 def save_q_lattice_harmonics_plot(
     *,
     Q_set1: np.ndarray,
@@ -4245,13 +4628,14 @@ def save_q_lattice_harmonics_plot(
     inter_harmonics: Mapping[int, np.ndarray],
     path: str | Path,
     title: str | None = None,
+    sectors: Sequence[Mapping[str, Any]] | None = None,
+    inter_sector_pairs: Sequence[Sequence[str]] | None = None,
 ) -> Path:
     import matplotlib
 
     matplotlib.use("Agg", force=True)
     import matplotlib.pyplot as plt
     from matplotlib.lines import Line2D
-    from matplotlib.patches import Polygon
 
     q1 = np.asarray(Q_set1, dtype=float)
     q2 = np.asarray(Q_set2, dtype=float)
@@ -4268,24 +4652,7 @@ def save_q_lattice_harmonics_plot(
 
     with kp_plot_rc_context():
         fig, ax = plt.subplots(figsize=(5.0, 5.0), dpi=KP_DPI, constrained_layout=True)
-        try:
-            bz = _first_bz_vertices(b1, b2)
-            ax.add_patch(
-                Polygon(
-                    bz,
-                    closed=True,
-                    facecolor="none",
-                    edgecolor=_Q_LATTICE_PALETTE["frame"],
-                    linewidth=0.9,
-                    linestyle="--",
-                    alpha=0.7,
-                    zorder=0,
-                )
-            )
-        except Exception:
-            bz = np.empty((0, 2), dtype=float)
-
-        _draw_q_lattice_segments(ax, np.vstack([q1, q2]), alpha=1.0, linewidth=1.05)
+        hex_vertices = _draw_q_lattice_hex_cells(ax, bM1=b1, bM2=b2, points=np.vstack([q1, q2]), linewidth=1.0)
         ax.scatter(q1[:, 0], q1[:, 1], s=40, color=_Q_LATTICE_PALETTE["red"], edgecolor="none", linewidth=0.0, zorder=3)
         ax.scatter(q2[:, 0], q2[:, 1], s=40, color=_Q_LATTICE_PALETTE["blue"], edgecolor="none", linewidth=0.0, zorder=3)
 
@@ -4294,28 +4661,41 @@ def save_q_lattice_harmonics_plot(
             "intra": {"color": _Q_LATTICE_PALETTE["gold"], "label": "intra"},
             "inter": {"color": _Q_LATTICE_PALETTE["green"], "label": "inter"},
         }
-        for kind, vectors, target_qset, sign in (
-            ("intra", intra_vectors, q1, -1.0),
-            ("inter", inter_vectors, q2, 1.0),
-        ):
-            style = styles[kind]
-            for index, vector in vectors:
-                ideal_target = anchor + sign * vector
-                target, distance = _nearest_point(target_qset, ideal_target)
-                if distance > tol:
-                    target = ideal_target
-                arrow_targets.append(np.asarray(target, dtype=float))
-                _draw_q_lattice_harmonic_arrow(
-                    ax,
-                    anchor,
-                    target,
-                    color=style["color"],
-                    spacing=spacing,
-                )
+        for _index, vector in intra_vectors:
+            ideal_target = anchor - vector
+            target, distance = _nearest_point(q1, ideal_target)
+            if distance > tol:
+                target = ideal_target
+            arrow_targets.append(np.asarray(target, dtype=float))
+            _draw_q_lattice_harmonic_arrow(
+                ax,
+                anchor,
+                target,
+                color=styles["intra"]["color"],
+                spacing=spacing,
+            )
+        for _index, vector in inter_vectors:
+            start, target = _q_lattice_inter_arrow_endpoints(
+                qset1=q1,
+                qset2=q2,
+                sectors=sectors,
+                inter_sector_pairs=inter_sector_pairs,
+                vector=vector,
+                fallback_anchor=anchor,
+                tol=tol,
+            )
+            arrow_targets.extend([np.asarray(start, dtype=float), np.asarray(target, dtype=float)])
+            _draw_q_lattice_harmonic_arrow(
+                ax,
+                start,
+                target,
+                color=styles["inter"]["color"],
+                spacing=spacing,
+            )
 
         all_points = [q1, q2, np.asarray([anchor]), np.asarray(arrow_targets, dtype=float)]
-        if bz.size:
-            all_points.append(bz)
+        if hex_vertices.size:
+            all_points.append(hex_vertices)
         stacked = np.vstack(all_points)
         span = max(float(np.ptp(stacked[:, 0])), float(np.ptp(stacked[:, 1])), float(np.linalg.norm(b1)), float(np.linalg.norm(b2)), 1.0)
         center = np.mean(stacked, axis=0)
@@ -8690,9 +9070,15 @@ def _run_model_pipeline(
                 )
     if moire_config.kpoints is None:
         raise ValueError("config.kpoints must be provided for band computation.")
+    want_band_overlap_vectors = bool(model_config.compare_to_heff)
     eigvals = run_stage(
         f"computing bands on {len(moire_config.kpoints)} k-points",
-        lambda: compute_bands(moire_config, model, moire_config.kpoints, return_eigvecs=moire_config.save_eigvecs),
+        lambda: compute_bands(
+            moire_config,
+            model,
+            moire_config.kpoints,
+            return_eigvecs=bool(moire_config.save_eigvecs or want_band_overlap_vectors),
+        ),
     )
     return {
         "model": model,
@@ -9011,8 +9397,11 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     finally:
         moire_config.output_dir = output_dir
     eigvals = results["eigvals"]
+    model_eigvecs = None
     if isinstance(eigvals, tuple):
         eigvals_array = eigvals[0]
+        if len(eigvals) > 1:
+            model_eigvecs = eigvals[1]
     else:
         eigvals_array = eigvals
 
@@ -9032,13 +9421,36 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         intra_harmonics=getattr(moire_config, "intra_harmonics_map", {}) or {},
         inter_harmonics=getattr(moire_config, "inter_harmonics_map", {}) or {},
         path=output_dir / "q_lattice_harmonics.pdf",
+        sectors=getattr(moire_config, "sectors", []),
+        inter_sector_pairs=[
+            list(pair)
+            for row in getattr(moire_config, "term_templates", [])
+            if str(row.get("source", "")) == "tunneling"
+            for pair in row.get("sector_pairs", [])
+            if isinstance(pair, Sequence) and not isinstance(pair, (str, bytes)) and len(pair) == 2
+        ],
     )
     if model_config.compare_to_heff:
+        heff_eigvecs = None
         if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
             heff_eig = np.load(model_config.heff_eig_file)
         else:
             heff_eig = np.linalg.eigvalsh(np.load(model_config.heff_file, mmap_mode="r"))
+        if model_eigvecs is not None and model_config.heff_file is not None and model_config.heff_file.exists():
+            _, heff_eigvecs = np.linalg.eigh(np.load(model_config.heff_file, mmap_mode="r"))
         heff_selected = _select_rows(heff_eig, model_config.band_indices)
+        overlap_weights = None
+        if model_eigvecs is not None and heff_eigvecs is not None:
+            model_eigvecs_selected = _select_rows(np.asarray(model_eigvecs), model_config.band_indices)
+            heff_eigvecs_selected = _select_rows(heff_eigvecs, model_config.band_indices)
+            if model_eigvecs_selected.shape == heff_eigvecs_selected.shape:
+                overlap_weights = _band_overlap_weights(
+                    model_eigvecs_selected,
+                    heff_eigvecs_selected,
+                    model_eigvals=np.asarray(eigvals_array, dtype=float),
+                    reference_eigvals=np.asarray(heff_selected, dtype=float),
+                    degeneracy_tol=float(model_config.band_plot_config.get("overlap_degeneracy_tol", 3.0e-3)),
+                )
         comparison = compare_bands(eigvals_array, heff_selected, band_slice=model_config.band_slice)
         if diagnostics_dir is not None:
             diagnostics_dir.mkdir(parents=True, exist_ok=True)
@@ -9046,13 +9458,17 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
                 json.dump(comparison, handle, indent=2)
         target_bands = str(model_config.raw.get("model", {}).get("target_bands", "top")).strip().lower()
         window_plot_config = _window_band_plot_config(model_config.band_plot_config, target_bands=target_bands)
+        band_plot_config = dict(window_plot_config)
+        if overlap_weights is not None:
+            band_plot_config["top_bands"] = 6
+            band_plot_config["plot_all_bands"] = True
         plot_comparison = compare_bands_for_plot(
             eigvals_array,
             heff_selected,
             band_slice=model_config.band_slice,
-            plot_config=window_plot_config,
+            plot_config=band_plot_config,
         )
-        plot_comparison_name = _plot_comparison_filename(window_plot_config)
+        plot_comparison_name = _plot_comparison_filename(band_plot_config)
         if diagnostics_dir is not None:
             with (diagnostics_dir / "comparison_plot.json").open("w", encoding="utf-8") as handle:
                 json.dump(plot_comparison, handle, indent=2)
@@ -9064,11 +9480,12 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             heff_selected,
             output_dir / "band_comparison.pdf",
             band_slice=model_config.band_slice,
-            plot_config=window_plot_config,
+            plot_config=band_plot_config,
             x=x_values,
             x_ticks=x_ticks,
             x_ticklabels=x_ticklabels,
             title=_band_plot_title(model_config),
+            overlap_weights=overlap_weights,
         )
         if not canonical_output:
             all_band_config = _all_band_plot_config(model_config.band_plot_config)
