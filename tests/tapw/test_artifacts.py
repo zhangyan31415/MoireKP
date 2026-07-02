@@ -10,6 +10,7 @@ from tapw.artifacts import (
     canonical_profile_name,
     canonical_qshell_name,
     canonical_topology_band_label,
+    canonical_topology_grid_name,
     chern_flux_filename,
     chern_summary_filename,
     gvec_output_filename,
@@ -99,6 +100,18 @@ def test_canonical_topology_band_labels_avoid_dash_collisions():
     assert canonical_topology_band_label([-1]) == "band_m1"
     assert canonical_topology_band_label([-1, -2]) == "bands_m1_m2"
     assert canonical_topology_band_label([0, 2]) == "bands_0_2"
+
+
+def test_canonical_topology_grid_name_includes_nondefault_ranges():
+    assert canonical_topology_grid_name(31, 31) == "grid31x31"
+    assert (
+        canonical_topology_grid_name(21, 41, range_b1=(0.0, 0.5), range_b2=(-0.5, 0.5))
+        == "grid21x41_b1_0p0_0p5_b2_m0p5_0p5"
+    )
+    assert (
+        canonical_topology_grid_name(21, 41, range_b1=(-0.5, 0.0), range_b2=(-0.5, 0.5))
+        == "grid21x41_b1_m0p5_0p0_b2_m0p5_0p5"
+    )
 
 
 def test_band_calculation_writes_canonical_manifest_and_filenames(tmp_path):
@@ -195,6 +208,7 @@ def test_chern_calculation_writes_canonical_topology_files(tmp_path):
     assert (topology_dir / "berry_flux_bands_m1_m2.npy").is_file()
     assert (topology_dir / "chern_summary.json").is_file()
     manifest = json.loads((topology_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema"] == "tapw_topology_outputs/v1"
+    assert manifest["schema"] == "tapw_topology_grid/v1"
+    assert manifest["grid_order"] == "ij"
     assert manifest["files"]["chern_summary"] == "chern_summary.json"
     assert "berry_flux_bands_m1_m2" in manifest["files"]

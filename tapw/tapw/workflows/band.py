@@ -3034,17 +3034,35 @@ class BandStructureCalculator:
 
         return projectors
 
+    def _resolve_topology_mesh(self, num_k1, num_k2=None):
+        topology_mesh = (getattr(getattr(self, "config", None), "topology", {}) or {}).get("mesh", {}) or {}
+        if topology_mesh:
+            num_k1 = int(topology_mesh.get("n_b1", topology_mesh.get("b1", num_k1)))
+            num_k2 = int(
+                topology_mesh.get(
+                    "n_b2",
+                    topology_mesh.get("b2", num_k2 if num_k2 is not None else num_k1),
+                )
+            )
+            range_k1 = topology_mesh.get("range_b1", [-0.5, 0.5])
+            range_k2 = topology_mesh.get("range_b2", [-0.5, 0.5])
+        else:
+            if num_k2 is None:
+                num_k2 = num_k1
+            range_k1 = [-0.5, 0.5]
+            range_k2 = [-0.5, 0.5]
+        return int(num_k1), int(num_k2), (float(range_k1[0]), float(range_k1[1])), (float(range_k2[0]), float(range_k2[1]))
+
     def generate_kmesh(self, num_k1, num_k2=None):
         """Generate a uniform fractional kappa-grid for Chern calculations.
 
         The flattened order is always the row-major order of an `indexing='ij'`
         mesh, matching `chern_post.reshape_wavefunction_grid`.
         """
-        if num_k2 is None:
-            num_k2 = num_k1
+        num_k1, num_k2, range_k1, range_k2 = self._resolve_topology_mesh(num_k1, num_k2)
 
-        kappa1 = np.linspace(-0.5, 0.5, int(num_k1), endpoint=True)
-        kappa2 = np.linspace(-0.5, 0.5, int(num_k2), endpoint=True)
+        kappa1 = np.linspace(float(range_k1[0]), float(range_k1[1]), int(num_k1), endpoint=True)
+        kappa2 = np.linspace(float(range_k2[0]), float(range_k2[1]), int(num_k2), endpoint=True)
         kappa1_mesh, kappa2_mesh = np.meshgrid(kappa1, kappa2, indexing='ij')
         kpoints = np.stack(
             (
@@ -3269,8 +3287,13 @@ class BandStructureCalculator:
         canonical_layout = _is_canonical_output_layout(self.config)
         if mode == "chern":
             if canonical_layout:
-                num_k1, num_k2 = self.config.get_chern_grid_shape()
-                out_path = os.path.join(path, "topology", canonical_topology_grid_name(num_k1, num_k2))
+                num_k1, num_k2 = self._resolve_topology_mesh(*self.config.get_chern_grid_shape())[:2]
+                _, _, range_k1, range_k2 = self._resolve_topology_mesh(num_k1, num_k2)
+                out_path = os.path.join(
+                    path,
+                    "topology",
+                    canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2),
+                )
             else:
                 os.makedirs(os.path.join(path, "topo"), exist_ok=True)
                 out_path = os.path.join(path, "topo")
@@ -3463,7 +3486,8 @@ class BandStructureCalculator:
             )
 
         # Generate uniform k-point mesh
-        num_k1, num_k2 = self.config.get_chern_grid_shape()
+        num_k1, num_k2 = self._resolve_topology_mesh(*self.config.get_chern_grid_shape())[:2]
+        _, _, range_k1, range_k2 = self._resolve_topology_mesh(num_k1, num_k2)
         kpoints = self.generate_kmesh(num_k1, num_k2)
         reporter = ensure_reporter(getattr(self, "reporter", None))
         reporter.kv("Chern k-points shape", kpoints.shape)
@@ -3502,7 +3526,8 @@ class BandStructureCalculator:
 
         canonical_layout = _is_canonical_output_layout(self.config)
         if canonical_layout:
-            topo_path = os.path.join(os.fspath(path), "topology", canonical_topology_grid_name(num_k1, num_k2))
+            grid_name = canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2)
+            topo_path = os.path.join(os.fspath(path), "topology", grid_name)
         else:
             topo_path = os.path.join(os.fspath(path), "topo")
         os.makedirs(topo_path, exist_ok=True)
@@ -3590,8 +3615,17 @@ class BandStructureCalculator:
             _write_json(
                 Path(topo_path) / "manifest.json",
                 {
-                    "schema": "tapw_topology_outputs/v1",
+                    "schema": "tapw_topology_grid/v1",
+                    "grid_id": canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2),
                     "grid_shape": [int(num_k1), int(num_k2)],
+                    "n_b1": int(num_k1),
+                    "n_b2": int(num_k2),
+                    "range_b1": [float(range_k1[0]), float(range_k1[1])],
+                    "range_b2": [float(range_k2[0]), float(range_k2[1])],
+                    "grid_order": "ij",
+                    "flatten_order": "row-major",
+                    "axes": ["kappa1", "kappa2"],
+                    "endpoint": True,
                     "valley": self.valley_flag,
                     "files": files,
                 },
@@ -3603,8 +3637,8 @@ class BandStructureCalculator:
                     "schema": "tapw_topology_collection/v1",
                     "grids": [
                         {
-                            "grid": canonical_topology_grid_name(num_k1, num_k2),
-                            "manifest": f"{canonical_topology_grid_name(num_k1, num_k2)}/manifest.json",
+                            "grid": grid_name,
+                            "manifest": f"{grid_name}/manifest.json",
                         }
                     ],
                 },

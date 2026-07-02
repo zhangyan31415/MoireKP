@@ -1,13 +1,21 @@
 import argparse
+import json
 import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import yaml
 
-from .artifacts import array_output_filename, berry_flux_output_filename, chern_summary_output_filename
+from .artifacts import (
+    array_output_filename,
+    berry_flux_output_filename,
+    canonical_band_filename,
+    canonical_topology_grid_name,
+    chern_summary_output_filename,
+)
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
 
 
@@ -34,6 +42,15 @@ _DEFAULT_SAVEFIG_KWARGS = {
 }
 
 
+@dataclass(frozen=True)
+class BoundarySewing:
+    target_rows: np.ndarray
+    source_rows: np.ndarray
+    dim: int
+    matched_blocks: int
+    missing_blocks: int
+
+
 def load_config(config_path):
     with open(config_path, "r") as handle:
         return yaml.safe_load(handle)
@@ -53,22 +70,22 @@ def _resolve_path_like_config(config_path, path_value):
     return str((_config_base_dir(config_path) / path).resolve())
 
 
-def build_fractional_axis(num_k):
+def build_fractional_axis(num_k, start=-0.5, end=0.5):
     """Fractional reciprocal coordinate along one moire reciprocal direction."""
-    return np.linspace(-0.5, 0.5, int(num_k), endpoint=True)
+    return np.linspace(float(start), float(end), int(num_k), endpoint=True)
 
 
-def build_fractional_vertex_mesh(num_k1, num_k2):
+def build_fractional_vertex_mesh(num_k1, num_k2, range_k1=(-0.5, 0.5), range_k2=(-0.5, 0.5)):
     """Return the fractional vertex mesh `(kappa1, kappa2)` with `indexing='ij'`."""
-    kappa1_values = build_fractional_axis(num_k1)
-    kappa2_values = build_fractional_axis(num_k2)
+    kappa1_values = build_fractional_axis(num_k1, *range_k1)
+    kappa2_values = build_fractional_axis(num_k2, *range_k2)
     kappa1_mesh, kappa2_mesh = np.meshgrid(kappa1_values, kappa2_values, indexing="ij")
     return np.stack((kappa1_mesh, kappa2_mesh), axis=-1)
 
 
-def build_fractional_plaquette_center_mesh(num_k1, num_k2):
+def build_fractional_plaquette_center_mesh(num_k1, num_k2, range_k1=(-0.5, 0.5), range_k2=(-0.5, 0.5)):
     """Return plaquette centers in fractional coordinates for Berry-flux data."""
-    vertex_mesh = build_fractional_vertex_mesh(num_k1, num_k2)
+    vertex_mesh = build_fractional_vertex_mesh(num_k1, num_k2, range_k1, range_k2)
     return 0.25 * (
         vertex_mesh[:-1, :-1]
         + vertex_mesh[1:, :-1]
@@ -77,9 +94,9 @@ def build_fractional_plaquette_center_mesh(num_k1, num_k2):
     )
 
 
-def build_fractional_interior_mesh(num_k1, num_k2):
+def build_fractional_interior_mesh(num_k1, num_k2, range_k1=(-0.5, 0.5), range_k2=(-0.5, 0.5)):
     """Return the interior fractional mesh used by centered-difference QGT fields."""
-    return build_fractional_vertex_mesh(num_k1, num_k2)[1:-1, 1:-1]
+    return build_fractional_vertex_mesh(num_k1, num_k2, range_k1, range_k2)[1:-1, 1:-1]
 
 
 def build_axis_edges_from_centers(center_values):
@@ -137,10 +154,10 @@ def flatten_output_coordinate_meshes(fractional_mesh, cartesian_mesh, plot_mesh)
     return frac_points, cart_points, plot_points
 
 
-def compute_fractional_spacings(num_k1, num_k2):
+def compute_fractional_spacings(num_k1, num_k2, range_k1=(-0.5, 0.5), range_k2=(-0.5, 0.5)):
     """Return `(delta_kappa1, delta_kappa2, axis1, axis2)` for the stored vertex grid."""
-    axis1 = build_fractional_axis(num_k1)
-    axis2 = build_fractional_axis(num_k2)
+    axis1 = build_fractional_axis(num_k1, *range_k1)
+    axis2 = build_fractional_axis(num_k2, *range_k2)
     if len(axis1) < 2 or len(axis2) < 2:
         raise ValueError("Need at least 2 grid points along each fractional axis.")
     return float(axis1[1] - axis1[0]), float(axis2[1] - axis2[0]), axis1, axis2
@@ -765,11 +782,82 @@ def parallel_transport_path(vecs_path):
     return vecs_path
 
 
-def wilson_loop(vecs_occ_path):
+def build_boundary_sewing(g_vectors_by_group, reciprocal_shift, dim_h, atol=1e-6, spin_blocks=1):
+    """Build row indices that relabel endpoint `G` blocks across a BZ boundary."""
+    groups = [np.asarray(group, dtype=float)[:, :2] for group in g_vectors_by_group if len(group) > 0]
+    total_g = sum(group.shape[0] for group in groups)
+    dim_h = int(dim_h)
+    spin_blocks = int(spin_blocks)
+    if total_g <= 0:
+        raise ValueError("Cannot build boundary sewing without G vectors.")
+    if spin_blocks <= 0:
+        raise ValueError(f"spin_blocks must be positive, got {spin_blocks}.")
+    if dim_h % spin_blocks != 0:
+        raise ValueError(f"Cannot split boundary sewing dimension {dim_h} into {spin_blocks} spin blocks.")
+    spinless_dim = dim_h // spin_blocks
+    if spinless_dim % total_g != 0:
+        raise ValueError(
+            "Cannot infer internal block size for boundary sewing: "
+            f"spinless_dim={spinless_dim}, total_g={total_g}."
+        )
+    internal_dim = spinless_dim // total_g
+    reciprocal_shift = np.asarray(reciprocal_shift, dtype=float)[:2]
+
+    target_rows = []
+    source_rows = []
+    matched_blocks = 0
+    missing_blocks = 0
+    inner = np.arange(internal_dim, dtype=np.int64)
+    for spin_index in range(spin_blocks):
+        spin_offset = spin_index * spinless_dim
+        block_offset = 0
+        for group in groups:
+            for source_index, source_g in enumerate(group):
+                wanted = source_g + reciprocal_shift
+                distances = np.linalg.norm(group - wanted, axis=1)
+                target_index = int(np.argmin(distances))
+                if float(distances[target_index]) > float(atol):
+                    missing_blocks += 1
+                    continue
+                source_start = spin_offset + (block_offset + source_index) * internal_dim
+                target_start = spin_offset + (block_offset + target_index) * internal_dim
+                source_rows.append(source_start + inner)
+                target_rows.append(target_start + inner)
+                matched_blocks += 1
+            block_offset += group.shape[0]
+
+    if source_rows:
+        source_rows_arr = np.concatenate(source_rows).astype(np.int64, copy=False)
+        target_rows_arr = np.concatenate(target_rows).astype(np.int64, copy=False)
+    else:
+        source_rows_arr = np.empty((0,), dtype=np.int64)
+        target_rows_arr = np.empty((0,), dtype=np.int64)
+    return BoundarySewing(
+        target_rows=target_rows_arr,
+        source_rows=source_rows_arr,
+        dim=dim_h,
+        matched_blocks=matched_blocks,
+        missing_blocks=missing_blocks,
+    )
+
+
+def apply_boundary_sewing(vecs, sewing):
+    vecs = np.asarray(vecs)
+    if vecs.shape[0] != sewing.dim:
+        raise ValueError(f"Boundary sewing dimension mismatch: vecs dim={vecs.shape[0]}, sewing dim={sewing.dim}.")
+    sewn = np.zeros_like(vecs)
+    sewn[sewing.target_rows, ...] = vecs[sewing.source_rows, ...]
+    return sewn
+
+
+def wilson_loop(vecs_occ_path, boundary_sewing=None):
     n_path, _, n_occ = vecs_occ_path.shape
     wilson = np.eye(n_occ, dtype=np.complex128)
     for i in range(n_path):
-        overlap = np.conj(vecs_occ_path[(i + 1) % n_path].T) @ vecs_occ_path[i]
+        current = vecs_occ_path[i]
+        if i == n_path - 1 and boundary_sewing is not None:
+            current = apply_boundary_sewing(current, boundary_sewing)
+        overlap = np.conj(vecs_occ_path[(i + 1) % n_path].T) @ current
         wilson = overlap @ wilson
     phases = np.angle(np.linalg.eigvals(wilson)) / (2.0 * np.pi)
     return np.sort(phases) % 1.0
@@ -789,7 +877,7 @@ def wcc_sweep_axis_label(direction):
     raise ValueError("direction must be 'kx' or 'ky'")
 
 
-def sweep_wcc(eig_vec_grid, occ_bands, kappa1_values, kappa2_values, direction="ky"):
+def sweep_wcc(eig_vec_grid, occ_bands, kappa1_values, kappa2_values, direction="ky", boundary_sewing=None):
     """Sweep Wilson loops along one fractional axis while fixing the other."""
     if direction == "ky":
         sweep_values = np.asarray(kappa1_values)
@@ -811,8 +899,137 @@ def sweep_wcc(eig_vec_grid, occ_bands, kappa1_values, kappa2_values, direction="
             else:
                 eigvec = eig_vec_grid[loop_index, fixed_index]
             vecs.append(eigvec[:, occ_bands])
-        all_wcc.append(wilson_loop(np.stack(vecs, axis=0)))
+        vecs_path = np.stack(vecs, axis=0)
+        if boundary_sewing is None:
+            all_wcc.append(wilson_loop(vecs_path))
+        else:
+            all_wcc.append(wilson_loop(vecs_path, boundary_sewing=boundary_sewing))
     return sweep_values, np.stack(all_wcc, axis=0)
+
+
+def _load_wcc_g_vectors(output_dir, valley_str):
+    output_dir = Path(output_dir)
+    search_roots = [
+        output_dir,
+        output_dir.parent,
+        output_dir / "band",
+        output_dir.parent / "band",
+        output_dir.parent.parent / "band",
+    ]
+    seen = set()
+    roots = []
+    for root in search_roots:
+        try:
+            resolved = root.resolve()
+        except Exception:
+            resolved = root
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        roots.append(root)
+
+    for root in roots:
+        group1 = root / "g_vectors_group1.npy"
+        group2 = root / "g_vectors_group2.npy"
+        if group1.exists() and group2.exists():
+            return [np.load(group1), np.load(group2)], [str(group1), str(group2)]
+
+        legacy1 = sorted(root.glob(f"g_vec_list_*_{valley_str}_1layer.npy"))
+        legacy2 = sorted(root.glob(f"g_vec_list_*_{valley_str}_2layer.npy"))
+        if legacy1 and legacy2:
+            return [np.load(legacy1[0]), np.load(legacy2[0])], [str(legacy1[0]), str(legacy2[0])]
+
+    return None, []
+
+
+def _first_nonzero_ordered_vector(vectors, tol=1.0e-10):
+    vectors = np.asarray(vectors, dtype=float)[:, :2]
+    if vectors.size == 0:
+        return None
+    origin = vectors[int(np.argmin(np.linalg.norm(vectors, axis=1)))]
+    for vector in vectors:
+        delta = np.asarray(vector - origin, dtype=float)
+        if float(np.linalg.norm(delta)) > float(tol):
+            return delta
+    return None
+
+
+def _first_noncollinear_ordered_vector(vectors, reference, tol=1.0e-10):
+    vectors = np.asarray(vectors, dtype=float)[:, :2]
+    reference = np.asarray(reference, dtype=float).reshape(2)
+    ref_norm = float(np.linalg.norm(reference))
+    if vectors.size == 0 or ref_norm <= float(tol):
+        return None
+    origin = vectors[int(np.argmin(np.linalg.norm(vectors, axis=1)))]
+    for vector in vectors:
+        delta = np.asarray(vector - origin, dtype=float)
+        delta_norm = float(np.linalg.norm(delta))
+        if delta_norm <= float(tol):
+            continue
+        cross = float(abs(reference[0] * delta[1] - reference[1] * delta[0]))
+        if cross > float(tol) * ref_norm * delta_norm:
+            return delta
+    return None
+
+
+def _shortest_vector_aligned_with_reference(vectors, reference, tol=1.0e-10):
+    vectors = np.asarray(vectors, dtype=float)[:, :2]
+    reference = np.asarray(reference, dtype=float).reshape(2)
+    ref_norm = float(np.linalg.norm(reference))
+    if vectors.size == 0 or ref_norm <= float(tol):
+        return None
+    origin = vectors[int(np.argmin(np.linalg.norm(vectors, axis=1)))]
+    deltas = vectors - origin
+    norms = np.linalg.norm(deltas, axis=1)
+    nonzero = norms > float(tol)
+    if not np.any(nonzero):
+        return None
+    min_norm = float(np.min(norms[nonzero]))
+    primitive = nonzero & (norms <= min_norm * (1.0 + 1.0e-6))
+    candidates = deltas[primitive]
+    scores = np.abs(candidates @ reference) / (np.linalg.norm(candidates, axis=1) * ref_norm)
+    return candidates[int(np.argmax(scores))]
+
+
+def _orient_like(vector, reference):
+    vector = np.asarray(vector, dtype=float).reshape(2)
+    reference = np.asarray(reference, dtype=float).reshape(2)
+    if float(np.dot(vector, reference)) < 0.0:
+        return -vector
+    return vector
+
+
+def _wcc_boundary_shift_from_g_vectors(direction, b_phys_2d, g_vectors_by_group):
+    if not g_vectors_by_group:
+        return None
+    first_group = None
+    for group in g_vectors_by_group:
+        group = np.asarray(group, dtype=float)
+        if group.ndim == 2 and group.shape[0] > 1 and group.shape[1] >= 2:
+            first_group = group[:, :2]
+            break
+    if first_group is None:
+        return None
+
+    b_phys_2d = np.asarray(b_phys_2d, dtype=float)[:2, :2]
+    if direction == "kx":
+        vector = _shortest_vector_aligned_with_reference(first_group, b_phys_2d[1])
+        return None if vector is None else _orient_like(vector, b_phys_2d[1])
+    if direction == "ky":
+        vector = _shortest_vector_aligned_with_reference(first_group, b_phys_2d[0])
+        return None if vector is None else _orient_like(vector, b_phys_2d[0])
+    raise ValueError("direction must be 'kx' or 'ky'")
+
+
+def _wcc_boundary_shift(direction, b_phys_2d, g_vectors_by_group=None):
+    inferred = _wcc_boundary_shift_from_g_vectors(direction, b_phys_2d, g_vectors_by_group)
+    if inferred is not None:
+        return inferred
+    if direction == "ky":
+        return np.asarray(b_phys_2d[0], dtype=float)
+    if direction == "kx":
+        return np.asarray(b_phys_2d[1], dtype=float)
+    raise ValueError("direction must be 'kx' or 'ky'")
 
 
 def plot_wcc(kappa_sweep_values, wcc_branches, output_path, direction, title=None):
@@ -847,12 +1064,301 @@ def plot_wcc(kappa_sweep_values, wcc_branches, output_path, direction, title=Non
 
 def _resolve_chern_grid_from_config(config):
     compute_config = config.get("compute", {})
+    topology_mesh = (config.get("topology", {}) or {}).get("mesh", {}) or {}
+    if topology_mesh:
+        return _resolve_topology_mesh(config)[:2]
     num_chern = compute_config.get("num_chern", 40)
     return resolve_chern_grid_shape(
         num_chern=num_chern,
         num_k1=compute_config.get("num_k1"),
         num_k2=compute_config.get("num_k2"),
     )
+
+
+def _coerce_fractional_range(value, field_name):
+    if value is None:
+        return (-0.5, 0.5)
+    if not isinstance(value, (list, tuple)) or len(value) != 2:
+        raise ValueError(f"topology.mesh.{field_name} must be a two-entry list, e.g. [-0.5, 0.5].")
+    start = float(value[0])
+    end = float(value[1])
+    if np.isclose(start, end):
+        raise ValueError(f"topology.mesh.{field_name} must span a nonzero interval.")
+    return (start, end)
+
+
+def _resolve_topology_mesh(config):
+    compute_config = config.get("compute", {}) or {}
+    topology_mesh = (config.get("topology", {}) or {}).get("mesh", {}) or {}
+    if topology_mesh:
+        num_k1 = int(
+            topology_mesh.get(
+                "n_b1",
+                topology_mesh.get("b1", topology_mesh.get("num_b1", compute_config.get("num_k1", 0))),
+            )
+        )
+        num_k2 = int(
+            topology_mesh.get(
+                "n_b2",
+                topology_mesh.get("b2", topology_mesh.get("num_b2", compute_config.get("num_k2", 0))),
+            )
+        )
+        if num_k1 < 2 or num_k2 < 2:
+            raise ValueError("topology.mesh.n_b1 and topology.mesh.n_b2 must both be >= 2.")
+        range_k1 = _coerce_fractional_range(topology_mesh.get("range_b1"), "range_b1")
+        range_k2 = _coerce_fractional_range(topology_mesh.get("range_b2"), "range_b2")
+        return num_k1, num_k2, range_k1, range_k2
+
+    num_k1, num_k2 = resolve_chern_grid_shape(
+        num_chern=compute_config.get("num_chern", 40),
+        num_k1=compute_config.get("num_k1"),
+        num_k2=compute_config.get("num_k2"),
+    )
+    return num_k1, num_k2, (-0.5, 0.5), (-0.5, 0.5)
+
+
+def _topology_uses_grid_layout(config):
+    topology_mesh = (config.get("topology", {}) or {}).get("mesh", {}) or {}
+    return bool(topology_mesh)
+
+
+def _topology_grid_id(config):
+    num_k1, num_k2, range_k1, range_k2 = _resolve_topology_mesh(config)
+    return canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2)
+
+
+def _topology_grid_output_dir(output_dir, config):
+    output_dir = Path(output_dir)
+    grid_id = _topology_grid_id(config)
+    if output_dir.name == grid_id:
+        return output_dir
+    return output_dir / grid_id
+
+
+def _topology_collection_dir(grid_output_dir, config):
+    grid_output_dir = Path(grid_output_dir)
+    return grid_output_dir.parent if grid_output_dir.name == _topology_grid_id(config) else grid_output_dir
+
+
+def _read_topology_grid_manifest(output_dir):
+    manifest_path = Path(output_dir) / "manifest.json"
+    if not manifest_path.exists():
+        return None
+    try:
+        with manifest_path.open("r", encoding="utf-8") as handle:
+            manifest = json.load(handle)
+    except Exception:
+        return None
+    if not isinstance(manifest, dict):
+        return None
+    if str(manifest.get("schema", "")) not in {"tapw_topology_grid/v1", "tapw_topology_outputs/v1"}:
+        return None
+    return manifest
+
+
+def _write_topology_manifests(output_dir, config, *, grid_order, b_phys_2d, files=None):
+    if not _topology_uses_grid_layout(config):
+        return
+    output_dir = Path(output_dir)
+    collection_dir = _topology_collection_dir(output_dir, config)
+    grid_id = _topology_grid_id(config)
+    num_k1, num_k2, range_k1, range_k2 = _resolve_topology_mesh(config)
+    files = dict(files or {})
+    manifest = {
+        "schema": "tapw_topology_grid/v1",
+        "grid_id": grid_id,
+        "grid_shape": [int(num_k1), int(num_k2)],
+        "n_b1": int(num_k1),
+        "n_b2": int(num_k2),
+        "range_b1": [float(range_k1[0]), float(range_k1[1])],
+        "range_b2": [float(range_k2[0]), float(range_k2[1])],
+        "grid_order": str(grid_order),
+        "flatten_order": "row-major",
+        "axes": ["kappa1", "kappa2"],
+        "endpoint": True,
+        "reciprocal_basis": np.asarray(b_phys_2d, dtype=float).tolist(),
+        "wavefunction_basis": "k_minus_G",
+        "files": files,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "manifest.json").open("w", encoding="utf-8") as handle:
+        json.dump(manifest, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+    collection_dir.mkdir(parents=True, exist_ok=True)
+    collection_path = collection_dir / "manifest.json"
+    collection = {"schema": "tapw_topology_collection/v1", "grids": []}
+    if collection_path.exists():
+        try:
+            loaded = json.loads(collection_path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and isinstance(loaded.get("grids"), list):
+                collection = loaded
+        except Exception:
+            collection = {"schema": "tapw_topology_collection/v1", "grids": []}
+    entry = {"grid": grid_id, "manifest": f"{grid_id}/manifest.json"}
+    grids = [item for item in collection.get("grids", []) if item.get("grid") != grid_id]
+    grids.append(entry)
+    collection["schema"] = "tapw_topology_collection/v1"
+    collection["grids"] = grids
+    with collection_path.open("w", encoding="utf-8") as handle:
+        json.dump(collection, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+
+
+def _band_type_from_sector(sector):
+    normalized = str(sector).strip().lower()
+    if normalized in {"valence", "vbm"}:
+        return "VBM"
+    if normalized in {"conduction", "cbm"}:
+        return "CBM"
+    raise ValueError(f"Unknown topology band sector {sector!r}; use valence/VBM or conduction/CBM.")
+
+
+def _resolve_topology_band_spec(topology_config, band_ref):
+    bands = topology_config.get("bands", {}) or {}
+    if isinstance(band_ref, str):
+        if band_ref not in bands:
+            raise ValueError(f"topology references unknown band set {band_ref!r}.")
+        spec = dict(bands[band_ref] or {})
+        label = band_ref
+    elif isinstance(band_ref, dict):
+        spec = dict(band_ref)
+        label = str(spec.get("name", "inline"))
+    else:
+        raise ValueError("topology task bands must be a band-set name or inline mapping.")
+    if "indices" not in spec:
+        raise ValueError(f"topology band set {label!r} requires indices.")
+    band_type = str(spec.get("band_type", "")).upper()
+    if not band_type:
+        band_type = _band_type_from_sector(spec.get("sector", ""))
+    indices = [int(index) for index in spec["indices"]]
+    if not indices:
+        raise ValueError(f"topology band set {label!r} must contain at least one index.")
+    return {"label": label, "band_type": band_type, "indices": indices}
+
+
+def _iter_topology_task_specs(topology_config, key):
+    raw_tasks = topology_config.get(key, []) or []
+    if isinstance(raw_tasks, dict):
+        raw_tasks = [raw_tasks]
+    if isinstance(raw_tasks, str):
+        raw_tasks = [{"bands": raw_tasks}]
+    for item in raw_tasks:
+        if isinstance(item, str):
+            yield {"bands": item}
+        elif isinstance(item, dict):
+            yield item
+        else:
+            raise ValueError(f"topology.{key} entries must be band names or mappings.")
+
+
+def _resolve_topology_tasks(config):
+    topology_config = config.get("topology", {}) or {}
+    band_tasks = {}
+    for task_key in ("berry_curvature", "quantum_geometry"):
+        for item in _iter_topology_task_specs(topology_config, task_key):
+            spec = _resolve_topology_band_spec(topology_config, item.get("bands", item))
+            key = (spec["band_type"], tuple(spec["indices"]))
+            merged = band_tasks.setdefault(
+                key,
+                {"band_type": spec["band_type"], "indices": spec["indices"], "bc": False, "qgt": False},
+            )
+            if task_key == "berry_curvature":
+                merged["bc"] = True
+            else:
+                merged["qgt"] = True
+
+    wcc_tasks = []
+    for item in _iter_topology_task_specs(topology_config, "wcc"):
+        spec = _resolve_topology_band_spec(topology_config, item.get("bands", item))
+        loop = str(item.get("loop", "b2")).strip().lower()
+        if loop not in {"b1", "b2"}:
+            raise ValueError(f"topology.wcc.loop must be b1 or b2, got {loop!r}.")
+        wcc_tasks.append({"band_type": spec["band_type"], "indices": spec["indices"], "loop": loop})
+    return list(band_tasks.values()), wcc_tasks
+
+
+def _topology_config_has_tasks(config):
+    try:
+        band_tasks, wcc_tasks = _resolve_topology_tasks(config)
+    except ValueError:
+        raise
+    return bool(band_tasks or wcc_tasks)
+
+
+def _wcc_direction_from_loop(loop, *, grid_order="ij"):
+    if grid_order == "legacy_xy":
+        if loop == "b1":
+            return "ky"
+        if loop == "b2":
+            return "kx"
+    if loop == "b1":
+        return "kx"
+    if loop == "b2":
+        return "ky"
+    raise ValueError(f"WCC loop must be b1 or b2, got {loop!r}.")
+
+
+def _validate_wcc_loop_range(loop, range_k1, range_k2):
+    span = (range_k1[1] - range_k1[0]) if loop == "b1" else (range_k2[1] - range_k2[0])
+    if not np.isclose(abs(float(span)), 1.0, atol=1.0e-10):
+        raise ValueError(
+            f"topology.wcc.loop={loop} requires that axis range to span one reciprocal period; got span={span}."
+        )
+
+
+def _wcc_boundary_shift_for_loop(loop, b_phys_2d, g_vectors_by_group):
+    reference = np.asarray(b_phys_2d, dtype=float)[0 if loop == "b1" else 1]
+    for group in g_vectors_by_group or []:
+        group = np.asarray(group, dtype=float)
+        if group.ndim == 2 and group.shape[0] > 1 and group.shape[1] >= 2:
+            vector = _shortest_vector_aligned_with_reference(group[:, :2], reference)
+            if vector is not None:
+                return _orient_like(vector, reference)
+    return reference
+
+
+def _dispatch_topology_tasks(config_path, args, config):
+    band_tasks, wcc_tasks = _resolve_topology_tasks(config)
+    _, _, range_k1, range_k2 = _resolve_topology_mesh(config)
+    for task in band_tasks:
+        if not (task["bc"] or task["qgt"]):
+            continue
+        argv = [
+            "--config",
+            str(config_path),
+            "--output-dir",
+            str(args.output_dir),
+            "--valley",
+            str(args.valley),
+            "--band-type",
+            task["band_type"],
+            "--band",
+            *[str(index) for index in task["indices"]],
+        ]
+        main(argv, prog=args.prog if hasattr(args, "prog") else None)
+
+    for task in wcc_tasks:
+        _validate_wcc_loop_range(task["loop"], range_k1, range_k2)
+        argv = [
+            "--config",
+            str(config_path),
+            "--output-dir",
+            str(args.output_dir),
+            "--valley",
+            str(args.valley),
+            "--band-type",
+            task["band_type"],
+            "--wcc-bands",
+            *[str(index) for index in task["indices"]],
+            "--wcc-loop",
+            task["loop"],
+            "--wcc-sewing",
+            str(args.wcc_sewing),
+            "--wcc-sewing-atol",
+            str(args.wcc_sewing_atol),
+        ]
+        main(argv, prog=args.prog if hasattr(args, "prog") else None)
 
 
 def _reject_generalized_eigenvectors(config):
@@ -896,28 +1402,56 @@ def _candidate_suffixes(num_k1, num_k2, num_chern):
 
 
 def _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2, num_chern):
+    output_path = Path(output_dir)
+    manifest = _read_topology_grid_manifest(output_path)
+    edge = "vbm" if str(band_type).upper() == "VBM" else "cbm"
+    if manifest is not None:
+        files = manifest.get("files", {}) or {}
+        for key in (f"wavefunctions_{edge}", f"vec_{str(band_type).upper()}", "wavefunctions"):
+            value = files.get(key)
+            if value:
+                candidate = output_path / value
+                if candidate.exists():
+                    return str(candidate)
+
+    canonical_candidate = output_path / canonical_band_filename("wavefunctions", edge)
+    if canonical_candidate.exists():
+        return str(canonical_candidate)
+
     suffixes = _candidate_suffixes(num_k1, num_k2, num_chern)
     seen = set()
-    for suffix in suffixes:
-        candidate = os.path.join(
-            output_dir,
-            array_output_filename(f"vec_{band_type}", valley_flag=valley_str, suffix=suffix, tapw=True),
-        )
-        seen.add(candidate)
-        if os.path.exists(candidate):
-            return candidate
-    prefixes = [
-        "vec_{0}_{1}_valley".format(band_type, valley_str),
-        "vec_{0}_valley".format(valley_str),
-    ]
-    for prefix in prefixes:
+    search_roots = [output_path, output_path.parent]
+    for root in search_roots:
         for suffix in suffixes:
-            candidate = os.path.join(output_dir, prefix + suffix + ".npy")
-            if candidate in seen:
-                continue
+            candidate = os.path.join(
+                root,
+                array_output_filename(f"vec_{band_type}", valley_flag=valley_str, suffix=suffix, tapw=True),
+            )
+            seen.add(candidate)
             if os.path.exists(candidate):
                 return candidate
+        prefixes = [
+            "vec_{0}_{1}_valley".format(band_type, valley_str),
+            "vec_{0}_valley".format(valley_str),
+        ]
+        for prefix in prefixes:
+            for suffix in suffixes:
+                candidate = os.path.join(root, prefix + suffix + ".npy")
+                if candidate in seen:
+                    continue
+                if os.path.exists(candidate):
+                    return candidate
     return None
+
+
+def _infer_wavefunction_grid_order(output_dir, vec_file):
+    manifest = _read_topology_grid_manifest(output_dir)
+    if manifest is not None and manifest.get("grid_order"):
+        return str(manifest["grid_order"])
+    vec_path = Path(vec_file)
+    if vec_path.name.startswith("wavefunctions_"):
+        return "ij"
+    return "legacy_xy"
 
 
 def _default_summary_band_indices(band_type, resolved_indices, num_bands):
@@ -1057,6 +1591,26 @@ def build_parser(*, prog=None):
         choices=["kx", "ky"],
         help="Wilson-loop direction along the stored fractional grid (default: ky)",
     )
+    parser.add_argument(
+        "--wcc-loop",
+        type=str,
+        default=None,
+        choices=["b1", "b2"],
+        help="Release-facing Wilson-loop axis. b1 loops along topology.mesh.b1; b2 loops along topology.mesh.b2.",
+    )
+    parser.add_argument(
+        "--wcc-sewing",
+        type=str,
+        default="auto",
+        choices=["auto", "off", "required"],
+        help="Boundary sewing for Wilson loops in k-G basis (default: auto)",
+    )
+    parser.add_argument(
+        "--wcc-sewing-atol",
+        type=float,
+        default=1.0e-6,
+        help="Cartesian G-vector matching tolerance for Wilson-loop boundary sewing",
+    )
     parser.add_argument("-o", "--output-dir", type=str, default="./", help="Output directory for topology files")
     parser.add_argument(
         "-v",
@@ -1073,19 +1627,23 @@ def main(argv=None, *, prog=None):
     parser = build_parser(prog=prog)
     args = parser.parse_args(argv)
 
-    if not args.band and not args.wcc_bands:
-        parser.error("No action requested, add --band or --wcc-bands")
-
     valley_str = VALLEY_MAP.get(args.valley, "valley{0}".format(args.valley))
     config = load_config(args.config)
     _reject_generalized_eigenvectors(config)
-    output_dir = args.output_dir
-    os.makedirs(output_dir, exist_ok=True)
-
-    num_k1, num_k2 = _resolve_chern_grid_from_config(config)
+    if not args.band and not args.wcc_bands:
+        if _topology_config_has_tasks(config):
+            _dispatch_topology_tasks(args.config, args, config)
+            return
+        parser.error("No action requested, add --band/--wcc-bands or topology tasks in the config")
+    num_k1, num_k2, range_k1, range_k2 = _resolve_topology_mesh(config)
     num_chern = config.get("compute", {}).get("num_chern", num_k1)
     grid_label = _grid_label(num_k1, num_k2)
     band_type = args.band_type if args.band_type else config.get("compute", {}).get("band_type", "VBM")
+    if _topology_uses_grid_layout(config):
+        output_dir = str(_topology_grid_output_dir(args.output_dir, config))
+    else:
+        output_dir = args.output_dir
+    os.makedirs(output_dir, exist_ok=True)
 
     input_file = config["paths"].get("input_file", "openmx.dat")
     openmx_path = _resolve_path_like_config(args.config, input_file)
@@ -1112,6 +1670,8 @@ def main(argv=None, *, prog=None):
         )
         raise SystemExit(1)
 
+    grid_order = _infer_wavefunction_grid_order(output_dir, vec_file)
+
     band_vec = np.load(vec_file)
     try:
         band_vec_grid = reshape_wavefunction_grid(band_vec, num_k1, num_k2)
@@ -1119,14 +1679,19 @@ def main(argv=None, *, prog=None):
         print("[ERROR] 波函数文件形状不正确: {0}".format(exc))
         raise SystemExit(1)
 
-    delta_kappa1, delta_kappa2, kappa1_values, kappa2_values = compute_fractional_spacings(num_k1, num_k2)
+    delta_kappa1, delta_kappa2, kappa1_values, kappa2_values = compute_fractional_spacings(
+        num_k1,
+        num_k2,
+        range_k1,
+        range_k2,
+    )
     # `kappa1`, `kappa2` are dimensionless fractional moire reciprocal coordinates.
-    plaquette_fractional_mesh = build_fractional_plaquette_center_mesh(num_k1, num_k2)
+    plaquette_fractional_mesh = build_fractional_plaquette_center_mesh(num_k1, num_k2, range_k1, range_k2)
     # `kx_cart`, `ky_cart` come from the physical reciprocal basis and are in 1/Angstrom.
     # `kx_plot`, `ky_plot` use the same k / |b1| normalization as the figure axes.
     plaquette_cart_mesh = fractional_mesh_to_cartesian(plaquette_fractional_mesh, b_phys_2d)
     plaquette_plot_mesh = fractional_mesh_to_cartesian(plaquette_fractional_mesh, b_plot)
-    interior_fractional_mesh = build_fractional_interior_mesh(num_k1, num_k2)
+    interior_fractional_mesh = build_fractional_interior_mesh(num_k1, num_k2, range_k1, range_k2)
     interior_cart_mesh = fractional_mesh_to_cartesian(interior_fractional_mesh, b_phys_2d)
     interior_plot_mesh = fractional_mesh_to_cartesian(interior_fractional_mesh, b_plot)
     fig_suffix = "{0}_{1}_{2}".format(band_type, valley_str, grid_label)
@@ -1357,35 +1922,89 @@ def main(argv=None, *, prog=None):
             )
 
     if args.wcc_bands:
+        wcc_direction = args.wcc_direction
+        if args.wcc_loop is not None:
+            _validate_wcc_loop_range(args.wcc_loop, range_k1, range_k2)
+            wcc_direction = _wcc_direction_from_loop(args.wcc_loop, grid_order=grid_order)
         try:
             occ_bands = _resolve_band_indices(args.wcc_bands, band_vec_grid.shape[-1])
         except IndexError as exc:
             print("[ERROR] {0}".format(exc))
             raise SystemExit(1)
 
+        boundary_sewing = None
+        if args.wcc_sewing != "off":
+            g_vectors_by_group, g_vector_files = _load_wcc_g_vectors(output_dir, valley_str)
+            if g_vectors_by_group is None:
+                message = (
+                    "WCC boundary sewing requested but no G-vector files were found near "
+                    f"{output_dir}; falling back to legacy naked boundary overlap."
+                )
+                if args.wcc_sewing == "required":
+                    print("[ERROR] " + message)
+                    raise SystemExit(1)
+                print("[WARN] " + message)
+            else:
+                if args.wcc_loop is not None:
+                    boundary_shift = _wcc_boundary_shift_for_loop(args.wcc_loop, b_phys_2d, g_vectors_by_group)
+                else:
+                    boundary_shift = _wcc_boundary_shift(wcc_direction, b_phys_2d, g_vectors_by_group)
+                boundary_sewing = build_boundary_sewing(
+                    g_vectors_by_group,
+                    boundary_shift,
+                    dim_h=band_vec_grid.shape[-2],
+                    atol=float(args.wcc_sewing_atol),
+                    spin_blocks=2 if bool(config.get("twist", {}).get("spin", False)) else 1,
+                )
+                print(
+                    "[INFO] WCC boundary sewing enabled: direction={0}, loop={1}, shift={2}, "
+                    "matched G blocks={3}, missing G blocks={4}, files={5}".format(
+                        wcc_direction,
+                        args.wcc_loop or "legacy",
+                        np.array2string(boundary_shift, precision=8),
+                        boundary_sewing.matched_blocks,
+                        boundary_sewing.missing_blocks,
+                        ", ".join(g_vector_files),
+                    )
+                )
+
         sweep_values, wcc_branches = sweep_wcc(
             band_vec_grid,
             occ_bands,
             kappa1_values,
             kappa2_values,
-            direction=args.wcc_direction,
+            direction=wcc_direction,
+            boundary_sewing=boundary_sewing,
         )
         wcc_bands_str = "_".join(str(i) for i in args.wcc_bands)
-        wcc_img = os.path.join(output_dir, "wcc_{0}_{1}_{2}.pdf".format(args.wcc_direction, wcc_bands_str, fig_suffix))
+        wcc_img = os.path.join(output_dir, "wcc_{0}_{1}_{2}.pdf".format(wcc_direction, wcc_bands_str, fig_suffix))
         plot_wcc(
             sweep_values,
             wcc_branches,
             wcc_img,
-            args.wcc_direction,
+            wcc_direction,
             title="WCC bands {0}".format(args.wcc_bands),
         )
         print(
             "[INFO] WCC for bands {0} in direction {1} saved to {2}".format(
                 args.wcc_bands,
-                args.wcc_direction,
+                wcc_direction,
                 wcc_img,
             )
         )
+
+    if _topology_uses_grid_layout(config):
+        manifest_files = {}
+        if vec_file:
+            try:
+                manifest_files[f"wavefunctions_{'vbm' if str(band_type).upper() == 'VBM' else 'cbm'}"] = str(
+                    Path(vec_file).resolve().relative_to(Path(output_dir).resolve())
+                )
+            except ValueError:
+                manifest_files[f"wavefunctions_{'vbm' if str(band_type).upper() == 'VBM' else 'cbm'}"] = str(
+                    Path(vec_file).resolve()
+                )
+        _write_topology_manifests(output_dir, config, grid_order=grid_order, b_phys_2d=b_phys_2d, files=manifest_files)
 
 
 if __name__ == "__main__":

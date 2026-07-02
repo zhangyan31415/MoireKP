@@ -80,6 +80,19 @@ def test_fractional_mesh_flatten_order_matches_ndarray_flatten_order():
     )
 
 
+def test_fractional_mesh_accepts_topology_ranges():
+    vertex_mesh = chern_post.build_fractional_vertex_mesh(3, 5, (0.0, 0.5), (-0.5, 0.5))
+    vertex_pairs = chern_post.flatten_coordinate_mesh(vertex_mesh)
+
+    assert np.allclose(
+        vertex_pairs,
+        _expected_flattened_pairs(
+            np.array([0.0, 0.25, 0.5]),
+            np.array([-0.5, -0.25, 0.0, 0.25, 0.5]),
+        ),
+    )
+
+
 def test_build_axis_edges_from_centers_matches_expected_half_step_edges():
     edges = chern_post.build_axis_edges_from_centers(np.array([-0.25, 0.0, 0.25]))
     assert np.allclose(edges, np.array([-0.375, -0.125, 0.125, 0.375]))
@@ -97,6 +110,80 @@ def test_explicit_num_k1_num_k2_override_num_chern_list():
 def test_candidate_suffixes_accept_num_chern_list():
     suffixes = chern_post._candidate_suffixes(30, 50, [30, 50])
     assert "_2d_30x50" in suffixes
+
+
+def test_topology_mesh_overrides_legacy_num_chern():
+    cfg = {
+        "compute": {"num_chern": 31},
+        "topology": {
+            "mesh": {
+                "b1": 21,
+                "b2": 41,
+                "range_b1": [0.0, 0.5],
+                "range_b2": [-0.5, 0.5],
+            }
+        },
+    }
+
+    assert chern_post._resolve_topology_mesh(cfg) == (21, 41, (0.0, 0.5), (-0.5, 0.5))
+
+
+def test_wcc_loop_requires_full_period_axis():
+    with pytest.raises(ValueError, match="span one reciprocal period"):
+        chern_post._validate_wcc_loop_range("b1", (0.0, 0.5), (-0.5, 0.5))
+
+    chern_post._validate_wcc_loop_range("b2", (0.0, 0.5), (-0.5, 0.5))
+
+
+def test_wcc_loop_uses_legacy_xy_storage_mapping_without_manifest():
+    assert chern_post._wcc_direction_from_loop("b1", grid_order="legacy_xy") == "ky"
+    assert chern_post._wcc_direction_from_loop("b2", grid_order="legacy_xy") == "kx"
+
+
+def test_wcc_loop_uses_canonical_ij_storage_mapping_with_manifest():
+    assert chern_post._wcc_direction_from_loop("b1", grid_order="ij") == "kx"
+    assert chern_post._wcc_direction_from_loop("b2", grid_order="ij") == "ky"
+
+
+def test_topology_grid_output_dir_separates_nondefault_ranges(tmp_path):
+    config = {
+        "compute": {"num_chern": 31},
+        "topology": {
+            "mesh": {
+                "n_b1": 21,
+                "n_b2": 41,
+                "range_b1": [0.0, 0.5],
+                "range_b2": [-0.5, 0.5],
+            }
+        },
+    }
+    output_dir = tmp_path / "topology"
+
+    grid_dir = chern_post._topology_grid_output_dir(output_dir, config)
+
+    assert grid_dir == output_dir / "grid21x41_b1_0p0_0p5_b2_m0p5_0p5"
+
+
+def test_topology_tasks_resolve_named_band_sets():
+    cfg = {
+        "topology": {
+            "bands": {
+                "vbm2": {"sector": "valence", "indices": [-1, -2]},
+                "cbm2": {"sector": "conduction", "indices": [0, 1]},
+            },
+            "berry_curvature": [{"bands": "vbm2"}],
+            "quantum_geometry": [{"bands": "cbm2"}],
+            "wcc": [{"bands": "vbm2", "loop": "b2"}],
+        }
+    }
+
+    band_tasks, wcc_tasks = chern_post._resolve_topology_tasks(cfg)
+
+    assert {"band_type": "VBM", "indices": [-1, -2], "bc": True, "qgt": False} in band_tasks
+    assert {"band_type": "CBM", "indices": [0, 1], "bc": False, "qgt": True} in band_tasks
+    assert wcc_tasks == [{"band_type": "VBM", "indices": [-1, -2], "loop": "b2"}]
+
+
 
 
 def test_rectangular_wavefunction_reshape_preserves_flatten_order():
@@ -287,6 +374,51 @@ def test_wcc_axis_labels_use_fractional_coordinates():
     assert chern_post.wcc_sweep_axis_label("kx") == r"$\kappa_2$"
 
 
+def test_wcc_boundary_shift_uses_positive_loop_closing_vector():
+    basis = np.array([[2.0, 0.5], [0.0, 3.0]])
+
+    assert np.allclose(chern_post._wcc_boundary_shift("ky", basis), [2.0, 0.5])
+    assert np.allclose(chern_post._wcc_boundary_shift("kx", basis), [0.0, 3.0])
+
+
+def test_wcc_boundary_shift_prefers_g_vector_basis_for_sewing():
+    g_vectors = [
+        np.array(
+            [
+                [0.0, 0.0],
+                [0.0, 0.28908146],
+                [0.0, 0.57816292],
+                [-0.25035189, -0.14454073],
+                [-0.25035189, 0.14454073],
+                [0.25035189, 0.14454073],
+            ]
+        ),
+        np.array(
+            [
+                [0.0, 0.0],
+                [0.0, 0.28908146],
+                [0.0, 0.57816292],
+                [-0.25035189, -0.14454073],
+                [-0.25035189, 0.14454073],
+                [0.25035189, 0.14454073],
+            ]
+        ),
+    ]
+    openmx_basis = np.array([[0.25035189, 0.14454073], [0.0, 0.28908146]])
+
+    shift = chern_post._wcc_boundary_shift("ky", openmx_basis, g_vectors)
+
+    assert np.allclose(shift, [0.25035189, 0.14454073])
+
+
+def test_chern_post_wcc_sewing_defaults_to_auto():
+    parser = chern_post.build_parser()
+
+    args = parser.parse_args(["--config", "config.yaml", "-wb", "-1", "-2"])
+
+    assert args.wcc_sewing == "auto"
+
+
 def test_sweep_wcc_keeps_periodic_endpoint_like_legacy_behavior(monkeypatch):
     eig_vec_grid = _random_orthonormal_grid(seed=4, shape=(3, 4), dim_h=5, num_bands=2)
     kappa1_values = np.linspace(-0.5, 0.5, 3)
@@ -304,6 +436,40 @@ def test_sweep_wcc_keeps_periodic_endpoint_like_legacy_behavior(monkeypatch):
 
     assert path_lengths[:3] == [4, 4, 4]
     assert path_lengths[3:] == [3, 3, 3, 3]
+
+
+def test_boundary_sewing_shifts_g_blocks_for_wilson_loop():
+    g_vectors = [np.array([[0.0, 0.0], [1.0, 0.0]])]
+    sewing = chern_post.build_boundary_sewing(g_vectors, np.array([-1.0, 0.0]), dim_h=4)
+    start = np.array([[1.0], [0.0], [0.0], [0.0]], dtype=np.complex128)
+    end = np.array([[0.0], [0.0], [1.0], [0.0]], dtype=np.complex128)
+
+    naked_overlap = np.conj(start.T) @ end
+    sewn_overlap = np.conj(start.T) @ chern_post.apply_boundary_sewing(end, sewing)
+
+    assert np.allclose(naked_overlap, [[0.0]])
+    assert np.allclose(sewn_overlap, [[1.0]])
+    assert sewing.matched_blocks == 1
+    assert sewing.missing_blocks == 1
+
+
+def test_boundary_sewing_respects_spin_block_row_order():
+    g_vectors = [np.array([[0.0, 0.0], [1.0, 0.0]])]
+    sewing = chern_post.build_boundary_sewing(
+        g_vectors,
+        np.array([-1.0, 0.0]),
+        dim_h=8,
+        spin_blocks=2,
+    )
+    vec = np.zeros((8, 1), dtype=np.complex128)
+    vec[6, 0] = 1.0
+
+    sewn = chern_post.apply_boundary_sewing(vec, sewing)
+
+    assert sewn[4, 0] == 1.0
+    assert np.count_nonzero(sewn) == 1
+    assert sewing.matched_blocks == 2
+    assert sewing.missing_blocks == 2
 
 
 def test_field_labels_expose_normalization_and_units():

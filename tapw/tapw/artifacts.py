@@ -131,8 +131,32 @@ def canonical_band_filename(kind: str, edge_or_group) -> str:
     raise ValueError(f"Unsupported canonical band artifact kind: {kind!r}")
 
 
-def canonical_topology_grid_name(num_k1: int, num_k2: int) -> str:
-    return f"grid{int(num_k1)}x{int(num_k2)}"
+def _canonical_range_token(value) -> str:
+    number = float(value)
+    text = f"{number:.12g}"
+    if "e" in text.lower():
+        text = f"{number:.6f}".rstrip("0").rstrip(".")
+    if "." not in text:
+        text = f"{text}.0"
+    return text.replace("-", "m").replace(".", "p")
+
+
+def canonical_topology_grid_name(
+    num_k1: int,
+    num_k2: int,
+    *,
+    range_b1=(-0.5, 0.5),
+    range_b2=(-0.5, 0.5),
+) -> str:
+    base = f"grid{int(num_k1)}x{int(num_k2)}"
+    r1 = (float(range_b1[0]), float(range_b1[1]))
+    r2 = (float(range_b2[0]), float(range_b2[1]))
+    if r1 == (-0.5, 0.5) and r2 == (-0.5, 0.5):
+        return base
+    return (
+        f"{base}_b1_{_canonical_range_token(r1[0])}_{_canonical_range_token(r1[1])}"
+        f"_b2_{_canonical_range_token(r2[0])}_{_canonical_range_token(r2[1])}"
+    )
 
 
 def canonical_topology_band_token(index: int) -> str:
