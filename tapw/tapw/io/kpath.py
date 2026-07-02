@@ -1,4 +1,5 @@
 import numpy as np
+from pathlib import Path
 
 class KPathGenerator:
     def __init__(self, Amat):
@@ -49,6 +50,7 @@ class KPathGenerator:
         self.labels_ticks = []
         self.kpoints = []
 
+        Path(output_file_path).parent.mkdir(parents=True, exist_ok=True)
         with open(output_file_path, 'w') as output_file:
             self.x_ticks.append(x)
             self.labels_ticks.append(self.labels[0])
@@ -112,4 +114,3 @@ class KPathGenerator:
             for j in range(num):
                 kpoints[i * num + j] = i / (num - 1) * a1 + j / (num - 1) * a2
         return kpoints
-

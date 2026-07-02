@@ -81,6 +81,25 @@ def test_config_resolves_canonical_output_layout_from_config_file_directory(tmp_
     assert config.output_layout.profile is None
 
 
+def test_canonical_config_may_omit_kpath_out_and_q_shell(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config_path = _write_relative_path_config(config_dir)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    del payload["paths"]["kpath_out"]
+    payload["output_layout"] = {
+        "style": "canonical_v1",
+        "root": "../outputs",
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = Config.from_yaml(str(config_path))
+
+    assert config.paths.kpath_out is None
+    assert config.output_layout is not None
+    assert config.output_layout.q_shell is None
+
+
 def test_path_config_has_no_filesystem_or_stack_inspection_side_effects(tmp_path, monkeypatch):
     output_dir = tmp_path / "not_created"
     original_import = builtins.__import__

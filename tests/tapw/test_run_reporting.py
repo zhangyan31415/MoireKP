@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 
 import logging
+import os
 import numpy as np
 import pandas as pd
+import pytest
 
 
 class _ListLogger:
@@ -164,6 +166,39 @@ def test_structure_processor_summary_uses_reporter_lines():
     assert "  Layer 0: 2 sublayers" in output
     assert "    Atom type 0 (Te): 2 atoms" in output
     assert "--- Clustering Summary ---" not in output
+
+
+def test_spglib_stderr_incomplete_cleaning_is_hard_error():
+    from tapw.io.structure import StructureProcessorSpglib
+
+    def noisy_spglib_call():
+        os.write(2, b"spglib: Primitive lattice cleaning is incomplete\n")
+        return object()
+
+    with pytest.raises(RuntimeError, match="rigid/reference OpenMX input"):
+        StructureProcessorSpglib._call_spglib_checked(
+            noisy_spglib_call,
+            "Twist group 0: spglib.standardize_cell",
+        )
+
+
+def test_primitive_basis_count_rejects_relaxed_degenerate_assignment():
+    from tapw.io.structure import StructureProcessorSpglib
+
+    processor = StructureProcessorSpglib.__new__(StructureProcessorSpglib)
+    processor.twist_index = 8
+    processor.Tmat = np.array(
+        [
+            [60.95086595, 0.0, 0.0],
+            [-30.47543298, 52.78499830, 0.0],
+            [0.0, 0.0, 50.0],
+        ]
+    )
+    group_df = pd.DataFrame({"species": ["Mg"] * 651})
+    mapping = np.arange(651)
+
+    with pytest.raises(RuntimeError, match="one-to-one"):
+        processor._validate_primitive_basis_count(0, group_df, mapping)
 
 
 def test_generate_g_vec_list_reports_summary_by_default_and_arrays_in_verbose():

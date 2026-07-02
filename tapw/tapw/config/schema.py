@@ -100,7 +100,7 @@ class PathConfig:
     input_file: str
     output_dir: str
     kpath_in: str
-    kpath_out: str
+    kpath_out: Optional[str] = None
     S_file: Optional[str] = None
 
     def __post_init__(self):
@@ -123,7 +123,8 @@ class PathConfig:
         self.input_file = self._resolve_path(self.input_file, base_dir)
         self.output_dir = self._resolve_path(self.output_dir, base_dir)
         self.kpath_in = self._resolve_path(self.kpath_in, base_dir)
-        self.kpath_out = self._resolve_path(self.kpath_out, base_dir)
+        if self.kpath_out is not None:
+            self.kpath_out = self._resolve_path(self.kpath_out, base_dir)
         if self.S_file is not None:
             self.S_file = self._resolve_path(self.S_file, base_dir)
 
@@ -418,6 +419,8 @@ class Config:
         paths_config = PathConfig(**config_dict.get('paths', {}))
         paths_config.normalize(config_dir)
         compute_config = ComputeConfig(**compute_raw)
+        topology_config = config_dict.get("topology", {}) or {}
+        compute_config.topology = topology_config
         symmetry_analysis_config = SymmetryAnalysisConfig(**config_dict.get('symmetry_analysis', {}))
         output_layout_config = None
         if config_dict.get("output_layout") is not None:
@@ -432,8 +435,9 @@ class Config:
             compute=compute_config,
             symmetry_analysis=symmetry_analysis_config,
             output_layout=output_layout_config,
-            cluster=cluster_config
+            cluster=cluster_config,
         )
+        config_obj.topology = topology_config
         # Propagate twist bravais to compute for downstream logic
         config_obj.compute.bravais = config_obj.twist.bravais
         config_obj.validate()
@@ -444,12 +448,14 @@ class Config:
         config_dict = {
             'twist': self.twist.__dict__,
             'paths': {k: v for k, v in self.paths.__dict__.items() if not k.startswith('_')},
-            'compute': {k: v for k, v in self.compute.__dict__.items() if k != 'valley'},
+            'compute': {k: v for k, v in self.compute.__dict__.items() if k not in {'valley', 'topology'}},
             'symmetry_analysis': self.symmetry_analysis.__dict__,
             # Don't save cluster config as it uses fixed values
         }
         if self.output_layout is not None:
             config_dict['output_layout'] = self.output_layout.__dict__
+        if getattr(self, "topology", None):
+            config_dict["topology"] = self.topology
         with open(yaml_path, 'w') as f:
             yaml.dump(config_dict, f, default_flow_style=False)
 

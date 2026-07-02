@@ -2,6 +2,7 @@ import numpy as np
 import re
 from collections import defaultdict
 import os
+import tempfile
 
 
 import pandas as pd
@@ -3346,6 +3347,79 @@ class StructureProcessorSpglib:
             raise ValueError(f"Unknown chemical symbols for spglib/ase mapping: {sorted(unknown)}")
         return np.asarray(nums, dtype=int)
 
+    @staticmethod
+    def _raise_for_spglib_stderr(stderr_text: str, context: str) -> None:
+        if "Primitive lattice cleaning is incomplete" not in stderr_text:
+            return
+        raise RuntimeError(
+            f"{context}: spglib reported incomplete primitive-lattice cleaning. "
+            "This usually means paths.input_file contains relaxed/distorted coordinates, "
+            "so spglib cannot recover the primitive basis. Use a rigid/reference OpenMX "
+            "input file for paths.input_file. Its atom count, original atom order, and "
+            "orbital order must correspond one-to-one to paths.H_file and paths.S_file."
+        )
+
+    @classmethod
+    def _call_spglib_checked(cls, func, context: str):
+        """Run a spglib call while converting known C-stderr failures to hard errors."""
+        stderr_fd = 2
+        saved_stderr = os.dup(stderr_fd)
+        try:
+            with tempfile.TemporaryFile(mode="w+b") as stderr_tmp:
+                os.dup2(stderr_tmp.fileno(), stderr_fd)
+                try:
+                    result = func()
+                finally:
+                    os.dup2(saved_stderr, stderr_fd)
+                stderr_tmp.seek(0)
+                stderr_text = stderr_tmp.read().decode("utf-8", errors="replace")
+        finally:
+            os.close(saved_stderr)
+        cls._raise_for_spglib_stderr(stderr_text, context)
+        if stderr_text:
+            os.write(stderr_fd, stderr_text.encode("utf-8", errors="replace"))
+        return result
+
+    def _moire_cell_count_from_twist_index(self) -> int | None:
+        if self.twist_index is None:
+            return None
+        m = int(self.twist_index)
+        if m < 1:
+            return None
+        if self.Tmat is not None:
+            a1 = np.asarray(self.Tmat[0, :2], dtype=np.float64)
+            a2 = np.asarray(self.Tmat[1, :2], dtype=np.float64)
+            n1 = float(np.linalg.norm(a1))
+            n2 = float(np.linalg.norm(a2))
+            if n1 > 0.0 and n2 > 0.0:
+                cos_abs = float(np.abs(np.dot(a1, a2)) / (n1 * n2))
+                rel_len = float(np.abs(n1 - n2) / n1)
+                if cos_abs < 1.0e-3 and rel_len < 1.0e-3:
+                    return int((2 * m + 1) ** 2 + 1)
+        return int(3 * m ** 2 + 3 * m + 1)
+
+    def _validate_primitive_basis_count(self, twist_group: int, group_df, mapping: np.ndarray) -> None:
+        moire_cells = self._moire_cell_count_from_twist_index()
+        if moire_cells is None or moire_cells <= 0:
+            return
+        atom_count = len(group_df)
+        if atom_count % moire_cells != 0:
+            raise RuntimeError(
+                f"Twist group {twist_group}: atom count {atom_count} is not divisible by the "
+                f"commensurate moire cell count {moire_cells}. Check paths.input_file and twist_index_m."
+            )
+        expected_basis = atom_count // moire_cells
+        actual_basis = int(np.unique(mapping).size)
+        if actual_basis != expected_basis:
+            raise RuntimeError(
+                f"Twist group {twist_group}: spglib primitive basis assignment produced {actual_basis} "
+                f"basis ids, expected {expected_basis} from atom_count={atom_count} and "
+                f"moire_cell_count={moire_cells}. This usually means paths.input_file uses relaxed "
+                "coordinates rather than a rigid/reference structure. Use a rigid/reference OpenMX "
+                "input file whose atom count, original atom order, and orbital order match paths.H_file "
+                "and paths.S_file one-to-one."
+            )
+
     def _compute_layer_lattice_and_basis_spglib(self, twist_group: int):
         """
         Compute lattice vectors and basis_id for a twist_group using spglib.
@@ -3386,11 +3460,16 @@ class StructureProcessorSpglib:
         self.reporter.kv("Atoms", len(numS))
         self.reporter.kv("Lattice shape", latS.shape)
         self.reporter.kv("Positions shape", pos_frac.shape)
-        dataset = spglib.get_symmetry_dataset(cellS, symprec=self.symprec)
+        dataset = self._call_spglib_checked(
+            lambda: spglib.get_symmetry_dataset(cellS, symprec=self.symprec),
+            f"Twist group {twist_group}: spglib.get_symmetry_dataset",
+        )
         if dataset is None:
             raise RuntimeError(
                 f"Twist group {twist_group}: spglib.get_symmetry_dataset failed with symprec={self.symprec}. "
-                f"Try adjusting symprec."
+                "Use a rigid/reference OpenMX input file for paths.input_file. Its atom count, "
+                "original atom order, and orbital order must correspond one-to-one to paths.H_file "
+                "and paths.S_file."
             )
 
         mapping = self._get_mapping_to_primitive(dataset)
@@ -3399,6 +3478,7 @@ class StructureProcessorSpglib:
                 f"Twist group {twist_group}: mapping_to_primitive length mismatch "
                 f"({mapping.shape[0]} vs {numS.shape[0]})."
             )
+        self._validate_primitive_basis_count(twist_group, group_df, mapping)
 
         # Sanity check: each basis_id should correspond to a single atomic number.
         for basis_id in np.unique(mapping):
@@ -3417,17 +3497,27 @@ class StructureProcessorSpglib:
         self.df.loc[idx, "basis_id"] = mapping
 
         # Primitive lattice for reciprocal vectors.
-        prim = spglib.standardize_cell(cellS, to_primitive=True, no_idealize=True, symprec=self.symprec)
+        prim = self._call_spglib_checked(
+            lambda: spglib.standardize_cell(cellS, to_primitive=True, no_idealize=True, symprec=self.symprec),
+            f"Twist group {twist_group}: spglib.standardize_cell",
+        )
         if prim is None:
             # Fallback tries: progressively relax symprec.
             for symprec_try in (max(self.symprec * 2.0, 5e-2), 1e-1, 5e-1):
-                prim = spglib.standardize_cell(cellS, to_primitive=True, no_idealize=True, symprec=symprec_try)
+                prim = self._call_spglib_checked(
+                    lambda symprec_try=symprec_try: spglib.standardize_cell(
+                        cellS, to_primitive=True, no_idealize=True, symprec=symprec_try
+                    ),
+                    f"Twist group {twist_group}: spglib.standardize_cell",
+                )
                 if prim is not None:
                     break
         if prim is None:
             raise RuntimeError(
                 f"Twist group {twist_group}: spglib.standardize_cell(to_primitive=True) failed. "
-                f"Try adjusting symprec (current {self.symprec})."
+                "Use a rigid/reference OpenMX input file for paths.input_file. Its atom count, "
+                "original atom order, and orbital order must correspond one-to-one to paths.H_file "
+                "and paths.S_file."
             )
 
         latP, _, _ = prim

@@ -144,6 +144,23 @@ def canonical_target_output_dir(config, calculator) -> Path | None:
     return Path(layout.root) / profile / q_shell
 
 
+def canonical_kpath_output_path(config) -> Path | None:
+    layout = getattr(config, "output_layout", None)
+    if str(getattr(layout, "style", "")).lower() != "canonical_v1":
+        return None
+    valley_label = getattr(config.compute, "valley_flag", None)
+    if valley_label is None:
+        valleys = list(getattr(config.compute, "valleys", []) or [])
+        valley_label = _valley_label_for_target(valleys[0]) if valleys else "unknown"
+    profile = canonical_profile_name(
+        valley_label,
+        spin=getattr(config.twist, "spin", True),
+        profile=getattr(layout, "profile", None),
+    )
+    q_shell = getattr(layout, "q_shell", None) or canonical_qshell_name(config.compute.n_g)
+    return Path(layout.root) / profile / q_shell / "KPATH.out"
+
+
 def calculation_targets(compute_cfg) -> list:
     if not bool(getattr(compute_cfg, "TAPW", True)):
         return [None]
@@ -411,6 +428,14 @@ def run_calc(args):
         # Initialize k-path if needed
         kpath_config = None
         if config.compute.mode == "band":
+            if not config.paths.kpath_out:
+                canonical_kpath_out = canonical_kpath_output_path(config)
+                if canonical_kpath_out is None:
+                    raise ValueError(
+                        "paths.kpath_out is required for legacy TAPW band configs. "
+                        "For release-style automatic paths, set output_layout.style=canonical_v1."
+                    )
+                config.paths.kpath_out = str(canonical_kpath_out)
             # Avoid multiple MPI ranks clobbering the same KPATH.out.
             if mpi_size > 1 and mpi_rank != 0:
                 config.paths.kpath_out = str(config.paths.kpath_out) + f".rank{mpi_rank}"
