@@ -146,6 +146,8 @@ def _write_inspect_sidecars(
     *,
     output_dir: str | Path,
     eigs_list: Sequence[np.ndarray],
+    vecs_list: Sequence[np.ndarray] | None,
+    q_index_order: Sequence[int] | np.ndarray | None,
     efermi: float,
     ref_q_index: int,
 ) -> None:
@@ -153,7 +155,39 @@ def _write_inspect_sidecars(
         return
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
+    if vecs_list is not None:
+        eigs = _stack_inspect_arrays(eigs_list, "eigenvalues")
+        vecs = _stack_inspect_arrays(vecs_list, "eigenvectors")
+        if q_index_order is None:
+            order = np.arange(len(eigs), dtype=np.int64)
+        else:
+            order = np.asarray(q_index_order, dtype=np.int64)
+        if len(order) != len(eigs) or len(order) != len(vecs):
+            raise ValueError(
+                "Cannot save inspect wavefunctions: "
+                f"q_index_order length {len(order)} does not match "
+                f"eigenvalues/eigenvectors lengths {len(eigs)}/{len(vecs)}"
+            )
+        np.savez(
+            out / "wavefunctions.npz",
+            eigenvectors=vecs[order],
+            eigenvalues=eigs[order],
+            q_index_order=order,
+            efermi=np.asarray(float(efermi), dtype=np.float64),
+            ref_q_index=np.asarray(int(ref_q_index), dtype=np.int64),
+        )
     _write_case_summary(cfg, out, "inspect")
+
+
+def _stack_inspect_arrays(rows: Sequence[np.ndarray], role: str) -> np.ndarray:
+    arrays = [np.asarray(row) for row in rows]
+    if not arrays:
+        return np.empty((0,), dtype=np.float64)
+    try:
+        return np.stack(arrays)
+    except ValueError as exc:
+        shapes = [arr.shape for arr in arrays]
+        raise ValueError(f"Cannot save inspect {role}: inconsistent row shapes {shapes}") from exc
 
 
 def _default_standalone_export_dir(model_output_dir: Path) -> Path:
@@ -1343,11 +1377,12 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     if sort_by_qnorm and q1 is not None and q2 is not None:
         q_base = q1
         q_base2 = q2
-        center = q_base.mean(axis=0)
+        center1 = q_base.mean(axis=0)
+        center2 = q_base2.mean(axis=0)
         ca, sa = np.cos(np.deg2rad(q_rotation_deg)), np.sin(np.deg2rad(q_rotation_deg))
         R = np.array([[ca, -sa], [sa, ca]])
-        Q_set1 = np.array([(R @ (center - q_base[i])[:2]) for i in range(len(q_base))])
-        Q_set2 = np.array([(R @ (center - q_base2[i])[:2]) for i in range(len(q_base2))])
+        Q_set1 = np.array([(R @ (center1 - q_base[i])[:2]) for i in range(len(q_base))])
+        Q_set2 = np.array([(R @ (center2 - q_base2[i])[:2]) for i in range(len(q_base2))])
 
         if mode == "gamma":
             # gamma mode: eigs_list length = len(q1) (one block per Q combining all layers)
@@ -1417,6 +1452,8 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         cfg,
         output_dir=os.path.dirname(out_path) or ".",
         eigs_list=eigs_list,
+        vecs_list=vecs_list,
+        q_index_order=index_order,
         efermi=efermi,
         ref_q_index=ref_q_index,
     )

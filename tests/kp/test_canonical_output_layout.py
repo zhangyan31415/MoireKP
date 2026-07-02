@@ -113,6 +113,12 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path,
     inspect_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "inspect"
     assert (inspect_dir / "spectrum.txt").exists()
     assert (inspect_dir / "scatter.pdf").read_text(encoding="utf-8") == "plot"
+    wavefunctions = np.load(inspect_dir / "wavefunctions.npz")
+    np.testing.assert_allclose(wavefunctions["eigenvalues"], np.array([[-0.2, 0.1]]))
+    np.testing.assert_allclose(wavefunctions["eigenvectors"], np.eye(2, dtype=np.complex128)[None, :, :])
+    np.testing.assert_array_equal(wavefunctions["q_index_order"], np.array([0]))
+    assert float(wavefunctions["efermi"]) == 0.0
+    assert int(wavefunctions["ref_q_index"]) == 0
     assert not (inspect_dir / "candidates.md").exists()
     assert not (inspect_dir / "blocks.csv").exists()
     assert "[kp] Selected bands at ref_Q=0: below EF [0], above EF [1]" in stdout
@@ -165,6 +171,49 @@ def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp
         "q_sector_lengths": [1, 1],
     }
     assert (inspect_dir / "spectrum.txt").read_text(encoding="utf-8").splitlines()[0] == "-0.2000000000 0.1000000000"
+
+
+def test_inspect_qsort_uses_each_qset_center(monkeypatch, tmp_path: Path) -> None:
+    q1 = np.array([[0.0, 0.0], [10.0, 0.0], [20.0, 0.0]], dtype=float)
+    q2 = np.array([[100.0, 0.0], [101.0, 0.0], [103.0, 0.0]], dtype=float)
+    hamk = np.zeros((1, 12, 12), dtype=np.complex128)
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_load_hamk_with_energy_unit", lambda *_args, **_kwargs: hamk)
+    monkeypatch.setattr(cli, "load_Q_sets", lambda *_args, **_kwargs: (q1, q2))
+    monkeypatch.setattr(
+        cli,
+        "_orbital_layout_from_material",
+        lambda *_args, **_kwargs: ([1, 1], 1, [[1], [1]]),
+    )
+
+    def fake_get_H_block(*_args, **_kwargs):
+        eigs = np.empty(6, dtype=object)
+        vecs = np.empty(6, dtype=object)
+        for i in range(6):
+            eigs[i] = np.array([float(i)])
+            vecs[i] = np.eye(1, dtype=np.complex128)
+        return eigs, vecs, np.empty(0, dtype=object), np.empty(0, dtype=object)
+
+    def fake_combined_plot(*_args, q_index_order=None, **_kwargs):
+        captured["q_index_order"] = list(q_index_order)
+        Path(_kwargs["out"]).write_text("combined", encoding="utf-8")
+
+    monkeypatch.setattr(cli, "get_H_block", fake_get_H_block)
+    monkeypatch.setattr(cli, "plot_inspect_band_and_qblock", fake_combined_plot)
+
+    cfg_path = tmp_path / "kp" / "configs" / "K1_q06.yaml"
+    cfg_path.parent.mkdir(parents=True)
+    (cfg_path.parent / "bands.txt").write_text("-0.3 -0.2\n-0.28 -0.18\n", encoding="utf-8")
+    cfg = _canonical_case_config()
+    cfg["material"]["band_file"] = "bands.txt"
+    cfg["material"]["efermi"] = -0.15
+    cfg["plot"] = {"mode": "K1", "target": "valence", "sort_by_qnorm": True}
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+    cli.main(["inspect", "-c", str(cfg_path)])
+
+    assert captured["q_index_order"] == [1, 0, 2, 4, 3, 5]
 
 
 def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Path) -> None:
