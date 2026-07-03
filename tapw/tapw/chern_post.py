@@ -13,6 +13,7 @@ from .artifacts import (
     array_output_filename,
     berry_flux_output_filename,
     canonical_band_filename,
+    canonical_topology_band_label,
     canonical_topology_grid_name,
     chern_summary_output_filename,
 )
@@ -32,6 +33,20 @@ VALLEY_MAP = {
     31: "M1",
     32: "M2",
     33: "M3",
+}
+
+VALLEY_LABEL_TO_INT = {
+    "K1": 1,
+    "K2": 2,
+    "GAMMA": 5,
+    "G": 5,
+    "Γ": 5,
+    "K1_120": 11,
+    "K1_240": 12,
+    "M": 31,
+    "M1": 31,
+    "M2": 32,
+    "M3": 33,
 }
 
 _DEFAULT_SAVEFIG_KWARGS = {
@@ -674,6 +689,8 @@ def save_qgt_outputs(
     delta_kappa1,
     delta_kappa2,
     band_indices=None,
+    trace_plot_path=None,
+    trace_condition_prefix=None,
 ):
     qgt_fields = dict(qgt_fields)
     # `kx_cart`, `ky_cart` use the physical reciprocal basis (1/Angstrom).
@@ -725,7 +742,7 @@ def save_qgt_outputs(
     plot_scalar_field(
         plot_mesh,
         qgt_fields["trace_g_scaled"],
-        output_prefix + "_trace_g_scaled.pdf",
+        trace_plot_path or (output_prefix + "_trace_g_scaled.pdf"),
         trace_g_plot_title(title_prefix, qgt_fields["trace_g_cart"], b_phys_2d, delta_kappa1, delta_kappa2),
         field_colorbar_label("trace_g_scaled"),
         save_table=False,
@@ -733,7 +750,7 @@ def save_qgt_outputs(
     if band_indices is not None:
         try:
             save_trace_condition_output(
-                output_prefix,
+                trace_condition_prefix or output_prefix,
                 band_indices,
                 qgt_fields["trace_g_cart"],
                 qgt_fields["omega_xy_cart"],
@@ -1214,6 +1231,18 @@ def _band_type_from_sector(sector):
     raise ValueError(f"Unknown topology band sector {sector!r}; use valence/VBM or conduction/CBM.")
 
 
+def _normalized_topology_config(config):
+    topology = dict((config.get("topology", {}) or {}))
+    if "bandsets" in topology and "bands" not in topology:
+        topology["bands"] = dict(topology.get("bandsets") or {})
+    observables = topology.get("observables") or {}
+    if isinstance(observables, dict):
+        for key in ("berry_curvature", "quantum_geometry", "wcc"):
+            if key in observables and key not in topology:
+                topology[key] = observables[key]
+    return topology
+
+
 def _resolve_topology_band_spec(topology_config, band_ref):
     bands = topology_config.get("bands", {}) or {}
     if isinstance(band_ref, str):
@@ -1234,7 +1263,9 @@ def _resolve_topology_band_spec(topology_config, band_ref):
     indices = [int(index) for index in spec["indices"]]
     if not indices:
         raise ValueError(f"topology band set {label!r} must contain at least one index.")
-    return {"label": label, "band_type": band_type, "indices": indices}
+    if label == "inline":
+        label = canonical_topology_band_label(indices)
+    return {"label": str(label), "band_type": band_type, "indices": indices}
 
 
 def _iter_topology_task_specs(topology_config, key):
@@ -1253,7 +1284,7 @@ def _iter_topology_task_specs(topology_config, key):
 
 
 def _resolve_topology_tasks(config):
-    topology_config = config.get("topology", {}) or {}
+    topology_config = _normalized_topology_config(config)
     band_tasks = {}
     for task_key in ("berry_curvature", "quantum_geometry"):
         for item in _iter_topology_task_specs(topology_config, task_key):
@@ -1261,7 +1292,13 @@ def _resolve_topology_tasks(config):
             key = (spec["band_type"], tuple(spec["indices"]))
             merged = band_tasks.setdefault(
                 key,
-                {"band_type": spec["band_type"], "indices": spec["indices"], "bc": False, "qgt": False},
+                {
+                    "label": spec["label"],
+                    "band_type": spec["band_type"],
+                    "indices": spec["indices"],
+                    "bc": False,
+                    "qgt": False,
+                },
             )
             if task_key == "berry_curvature":
                 merged["bc"] = True
@@ -1274,7 +1311,7 @@ def _resolve_topology_tasks(config):
         loop = str(item.get("loop", "b2")).strip().lower()
         if loop not in {"b1", "b2"}:
             raise ValueError(f"topology.wcc.loop must be b1 or b2, got {loop!r}.")
-        wcc_tasks.append({"band_type": spec["band_type"], "indices": spec["indices"], "loop": loop})
+        wcc_tasks.append({"label": spec["label"], "band_type": spec["band_type"], "indices": spec["indices"], "loop": loop})
     return list(band_tasks.values()), wcc_tasks
 
 
@@ -1321,6 +1358,7 @@ def _wcc_boundary_shift_for_loop(loop, b_phys_2d, g_vectors_by_group):
 def _dispatch_topology_tasks(config_path, args, config):
     band_tasks, wcc_tasks = _resolve_topology_tasks(config)
     _, _, range_k1, range_k2 = _resolve_topology_mesh(config)
+    valley = _resolve_cli_valley(args.valley, config)
     for task in band_tasks:
         if not (task["bc"] or task["qgt"]):
             continue
@@ -1330,9 +1368,11 @@ def _dispatch_topology_tasks(config_path, args, config):
             "--output-dir",
             str(args.output_dir),
             "--valley",
-            str(args.valley),
+            str(valley),
             "--band-type",
             task["band_type"],
+            "--topology-band-label",
+            task["label"],
             "--band",
             *[str(index) for index in task["indices"]],
         ]
@@ -1346,9 +1386,11 @@ def _dispatch_topology_tasks(config_path, args, config):
             "--output-dir",
             str(args.output_dir),
             "--valley",
-            str(args.valley),
+            str(valley),
             "--band-type",
             task["band_type"],
+            "--topology-band-label",
+            task["label"],
             "--wcc-bands",
             *[str(index) for index in task["indices"]],
             "--wcc-loop",
@@ -1359,6 +1401,29 @@ def _dispatch_topology_tasks(config_path, args, config):
             str(args.wcc_sewing_atol),
         ]
         main(argv, prog=args.prog if hasattr(args, "prog") else None)
+
+
+def _resolve_cli_valley(cli_valley, config):
+    if cli_valley is not None:
+        return int(cli_valley)
+    compute = config.get("compute", {}) or {}
+    if "valley" in compute:
+        return _parse_valley_label(compute["valley"])
+    topology = config.get("topology", {}) or {}
+    if "valley" in topology:
+        return _parse_valley_label(topology["valley"])
+    return 1
+
+
+def _parse_valley_label(value):
+    if isinstance(value, int):
+        return int(value)
+    if isinstance(value, float) and float(value).is_integer():
+        return int(value)
+    key = str(value).strip().upper()
+    if key in VALLEY_LABEL_TO_INT:
+        return VALLEY_LABEL_TO_INT[key]
+    return int(value)
 
 
 def _reject_generalized_eigenvectors(config):
@@ -1611,13 +1676,14 @@ def build_parser(*, prog=None):
         default=1.0e-6,
         help="Cartesian G-vector matching tolerance for Wilson-loop boundary sewing",
     )
+    parser.add_argument("--topology-band-label", type=str, default=None, help=argparse.SUPPRESS)
     parser.add_argument("-o", "--output-dir", type=str, default="./", help="Output directory for topology files")
     parser.add_argument(
         "-v",
         "--valley",
         type=int,
-        default=1,
-        help="Valley number (1:K1, 2:K2, 5:Gamma, 11:K1_120, 12:K1_240, 31:M1, 32:M2, 33:M3)",
+        default=None,
+        help="Valley number (1:K1, 2:K2, 5:Gamma, 11:K1_120, 12:K1_240, 31:M1, 32:M2, 33:M3). Defaults to config compute.valley.",
     )
     parser.add_argument("-bt", "--band-type", type=str, default="VBM", help="Band type (default: VBM)")
     return parser
@@ -1627,8 +1693,9 @@ def main(argv=None, *, prog=None):
     parser = build_parser(prog=prog)
     args = parser.parse_args(argv)
 
-    valley_str = VALLEY_MAP.get(args.valley, "valley{0}".format(args.valley))
     config = load_config(args.config)
+    args.valley = _resolve_cli_valley(args.valley, config)
+    valley_str = VALLEY_MAP.get(args.valley, "valley{0}".format(args.valley))
     _reject_generalized_eigenvectors(config)
     if not args.band and not args.wcc_bands:
         if _topology_config_has_tasks(config):
@@ -1644,6 +1711,19 @@ def main(argv=None, *, prog=None):
     else:
         output_dir = args.output_dir
     os.makedirs(output_dir, exist_ok=True)
+    canonical_grid_layout = _topology_uses_grid_layout(config)
+    generated_files = {}
+
+    def _artifact_label(raw_indices):
+        if args.topology_band_label:
+            return str(args.topology_band_label)
+        return canonical_topology_band_label(raw_indices)
+
+    def _generated_file(key, path):
+        try:
+            generated_files[key] = str(Path(path).resolve().relative_to(Path(output_dir).resolve()))
+        except ValueError:
+            generated_files[key] = str(Path(path).resolve())
 
     input_file = config["paths"].get("input_file", "openmx.dat")
     openmx_path = _resolve_path_like_config(args.config, input_file)
@@ -1703,7 +1783,10 @@ def main(argv=None, *, prog=None):
             print("[ERROR] {0}".format(exc))
             raise SystemExit(1)
 
+        emit_individual_bands = not (canonical_grid_layout and args.topology_band_label and len(resolved_band_indices) > 1)
         for raw_band_index, band_index in zip(args.band, resolved_band_indices):
+            if not emit_individual_bands:
+                continue
             berry_flux = compute_berry_flux_single_band(band_vec_grid, band_index)
             berry_curvature_density_cart = berry_flux_to_cartesian_density(
                 berry_flux,
@@ -1736,7 +1819,25 @@ def main(argv=None, *, prog=None):
                     berry_curvature_density_scaled.reshape(-1),
                 ]
             )
-            bc_path = os.path.join(output_dir, "bc_band_{0}_{1}.txt".format(raw_band_index, fig_suffix))
+            if canonical_grid_layout:
+                label = _artifact_label([raw_band_index])
+                bc_path = os.path.join(output_dir, "berry_curvature_{0}.txt".format(label))
+                bc_pdf = os.path.join(output_dir, "berry_curvature_{0}.pdf".format(label))
+                qgt_prefix = os.path.join(output_dir, "quantum_geometry_{0}".format(label))
+                qgt_pdf = os.path.join(output_dir, "quantum_geometry_{0}.pdf".format(label))
+                chern_path = os.path.join(output_dir, "chern_{0}.txt".format(label))
+            else:
+                bc_path = os.path.join(output_dir, "bc_band_{0}_{1}.txt".format(raw_band_index, fig_suffix))
+                bc_pdf = os.path.join(
+                    output_dir,
+                    "berry_curvature_density_band_{0}_{1}_scaled.pdf".format(raw_band_index, fig_suffix),
+                )
+                qgt_prefix = os.path.join(output_dir, "qgt_band_{0}_{1}".format(raw_band_index, fig_suffix))
+                qgt_pdf = None
+                chern_path = os.path.join(
+                    output_dir,
+                    "chern_{0}_{1}_band{2}.txt".format(band_type, valley_str, raw_band_index),
+                )
             np.savetxt(
                 bc_path,
                 bc_table,
@@ -1750,10 +1851,7 @@ def main(argv=None, *, prog=None):
             plot_scalar_field(
                 plaquette_plot_mesh,
                 berry_curvature_density_scaled,
-                os.path.join(
-                    output_dir,
-                    "berry_curvature_density_band_{0}_{1}_scaled.pdf".format(raw_band_index, fig_suffix),
-                ),
+                bc_pdf,
                 berry_curvature_density_plot_title(
                     "BC for Band {0} in {1}".format(raw_band_index, valley_str),
                     berry_curvature_density_cart,
@@ -1777,7 +1875,7 @@ def main(argv=None, *, prog=None):
                 )
             )
             save_qgt_outputs(
-                os.path.join(output_dir, "qgt_band_{0}_{1}".format(raw_band_index, fig_suffix)),
+                qgt_prefix,
                 interior_fractional_mesh,
                 interior_cart_mesh,
                 interior_plot_mesh,
@@ -1787,12 +1885,11 @@ def main(argv=None, *, prog=None):
                 delta_kappa1,
                 delta_kappa2,
                 band_indices=[raw_band_index],
+                trace_plot_path=qgt_pdf,
+                trace_condition_prefix=qgt_prefix if canonical_grid_layout else None,
             )
 
-            with open(
-                os.path.join(output_dir, "chern_{0}_{1}_band{2}.txt".format(band_type, valley_str, raw_band_index)),
-                "w",
-            ) as handle:
+            with open(chern_path, "w") as handle:
                 handle.write(
                     "Chern number from Berry flux for band {0} ({1}): {2:.8f}\n".format(
                         raw_band_index,
@@ -1805,12 +1902,15 @@ def main(argv=None, *, prog=None):
                     raw_band_index,
                     chern_number,
                     bc_path,
-                    os.path.join(
-                        output_dir,
-                        "berry_curvature_density_band_{0}_{1}_scaled.pdf".format(raw_band_index, fig_suffix),
-                    ),
+                    bc_pdf,
                 )
             )
+            if canonical_grid_layout:
+                _generated_file(f"berry_curvature_{label}", bc_path)
+                _generated_file(f"berry_curvature_{label}_pdf", bc_pdf)
+                _generated_file(f"quantum_geometry_{label}", qgt_prefix + ".txt")
+                _generated_file(f"quantum_geometry_{label}_pdf", qgt_pdf)
+                _generated_file(f"chern_{label}", chern_path)
 
         if len(resolved_band_indices) > 1:
             band_str = "_".join(str(i) for i in args.band)
@@ -1833,7 +1933,25 @@ def main(argv=None, *, prog=None):
                 plaquette_plot_mesh,
             )
 
-            bc_multiband_path = os.path.join(output_dir, "bc_bands_{0}_{1}.txt".format(band_str, fig_suffix))
+            if canonical_grid_layout:
+                label = _artifact_label(args.band)
+                bc_multiband_path = os.path.join(output_dir, "berry_curvature_{0}.txt".format(label))
+                bc_multiband_pdf = os.path.join(output_dir, "berry_curvature_{0}.pdf".format(label))
+                qgt_prefix = os.path.join(output_dir, "quantum_geometry_{0}".format(label))
+                qgt_pdf = os.path.join(output_dir, "quantum_geometry_{0}.pdf".format(label))
+                chern_path = os.path.join(output_dir, "chern_{0}.txt".format(label))
+            else:
+                bc_multiband_path = os.path.join(output_dir, "bc_bands_{0}_{1}.txt".format(band_str, fig_suffix))
+                bc_multiband_pdf = os.path.join(
+                    output_dir,
+                    "berry_curvature_density_bands_{0}_{1}_scaled.pdf".format(band_str, fig_suffix),
+                )
+                qgt_prefix = os.path.join(output_dir, "qgt_bands_{0}_{1}".format(band_str, fig_suffix))
+                qgt_pdf = None
+                chern_path = os.path.join(
+                    output_dir,
+                    "chern_{0}_{1}_bands_{2}.txt".format(band_type, valley_str, band_str),
+                )
             np.savetxt(
                 bc_multiband_path,
                 np.column_stack(
@@ -1859,10 +1977,7 @@ def main(argv=None, *, prog=None):
             plot_scalar_field(
                 plaquette_plot_mesh,
                 berry_curvature_density_scaled_multiband,
-                os.path.join(
-                    output_dir,
-                    "berry_curvature_density_bands_{0}_{1}_scaled.pdf".format(band_str, fig_suffix),
-                ),
+                bc_multiband_pdf,
                 berry_curvature_density_plot_title(
                     "BC for Bands {0} in {1}".format(band_str, valley_str),
                     berry_curvature_density_multiband,
@@ -1886,7 +2001,7 @@ def main(argv=None, *, prog=None):
                 )
             )
             save_qgt_outputs(
-                os.path.join(output_dir, "qgt_bands_{0}_{1}".format(band_str, fig_suffix)),
+                qgt_prefix,
                 interior_fractional_mesh,
                 interior_cart_mesh,
                 interior_plot_mesh,
@@ -1896,12 +2011,11 @@ def main(argv=None, *, prog=None):
                 delta_kappa1,
                 delta_kappa2,
                 band_indices=args.band,
+                trace_plot_path=qgt_pdf,
+                trace_condition_prefix=qgt_prefix if canonical_grid_layout else None,
             )
 
-            with open(
-                os.path.join(output_dir, "chern_{0}_{1}_bands_{2}.txt".format(band_type, valley_str, band_str)),
-                "w",
-            ) as handle:
+            with open(chern_path, "w") as handle:
                 handle.write(
                     "Chern number from Berry flux for bands {0} ({1}): {2:.8f}\n".format(
                         band_str,
@@ -1914,12 +2028,15 @@ def main(argv=None, *, prog=None):
                     band_str,
                     chern_number,
                     bc_multiband_path,
-                    os.path.join(
-                        output_dir,
-                        "berry_curvature_density_bands_{0}_{1}_scaled.pdf".format(band_str, fig_suffix),
-                    ),
+                    bc_multiband_pdf,
                 )
             )
+            if canonical_grid_layout:
+                _generated_file(f"berry_curvature_{label}", bc_multiband_path)
+                _generated_file(f"berry_curvature_{label}_pdf", bc_multiband_pdf)
+                _generated_file(f"quantum_geometry_{label}", qgt_prefix + ".txt")
+                _generated_file(f"quantum_geometry_{label}_pdf", qgt_pdf)
+                _generated_file(f"chern_{label}", chern_path)
 
     if args.wcc_bands:
         wcc_direction = args.wcc_direction
@@ -1977,7 +2094,12 @@ def main(argv=None, *, prog=None):
             boundary_sewing=boundary_sewing,
         )
         wcc_bands_str = "_".join(str(i) for i in args.wcc_bands)
-        wcc_img = os.path.join(output_dir, "wcc_{0}_{1}_{2}.pdf".format(wcc_direction, wcc_bands_str, fig_suffix))
+        if canonical_grid_layout:
+            label = _artifact_label(args.wcc_bands)
+            loop_label = args.wcc_loop or wcc_direction
+            wcc_img = os.path.join(output_dir, "wcc_{0}_loop_{1}.pdf".format(label, loop_label))
+        else:
+            wcc_img = os.path.join(output_dir, "wcc_{0}_{1}_{2}.pdf".format(wcc_direction, wcc_bands_str, fig_suffix))
         plot_wcc(
             sweep_values,
             wcc_branches,
@@ -1992,9 +2114,13 @@ def main(argv=None, *, prog=None):
                 wcc_img,
             )
         )
+        if canonical_grid_layout:
+            _generated_file(f"wcc_{label}_loop_{loop_label}", wcc_img.replace(".pdf", ".txt"))
+            _generated_file(f"wcc_{label}_loop_{loop_label}_pdf", wcc_img)
 
     if _topology_uses_grid_layout(config):
         manifest_files = {}
+        manifest_files.update(generated_files)
         if vec_file:
             try:
                 manifest_files[f"wavefunctions_{'vbm' if str(band_type).upper() == 'VBM' else 'cbm'}"] = str(

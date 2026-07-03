@@ -1,13 +1,149 @@
 from dataclasses import dataclass, field
-from typing import List, Dict, Optional, Sequence, Tuple, Union
+from typing import Any, List, Dict, Optional, Sequence, Tuple, Union
 import yaml
 from pathlib import Path
+
+from ..artifacts import canonical_qshell_name
 
 
 _GridLike = Union[int, Sequence[int]]
 _SymmetrizeSpec = Union[bool, List[str]]
 CANONICAL_HAMILTONIAN_SYMMETRY_OPERATIONS = ("C3z", "C2", "C2T", "TR")
 LEGACY_HAMILTONIAN_SYMMETRY_OPERATION_ALIASES = {"T": "TR"}
+VALLEY_LABEL_TO_INT = {
+    "K1": 1,
+    "K2": 2,
+    "K1_120": 11,
+    "K1_240": 12,
+    "GAMMA": 5,
+    "Γ": 5,
+    "M": 3,
+    "M1": 31,
+    "M2": 32,
+    "M3": 33,
+    "X": 41,
+    "Y": 42,
+}
+
+
+def _parse_valley(value) -> int:
+    if isinstance(value, int):
+        return int(value)
+    text = str(value).strip()
+    if text.lstrip("+-").isdigit():
+        return int(text)
+    key = text.upper()
+    if key not in VALLEY_LABEL_TO_INT:
+        raise ValueError(f"Unknown TAPW valley {value!r}; use labels such as K1, Gamma, M1 or an integer id.")
+    return VALLEY_LABEL_TO_INT[key]
+
+
+def _parse_q_shell(value) -> int:
+    text = str(value).strip()
+    if text.lower().startswith("q"):
+        text = text[1:]
+    return int(text)
+
+
+def _copy_section(value) -> dict[str, Any]:
+    return dict(value or {})
+
+
+def _apply_release_section_to_mapping(target: dict[str, Any], section: dict[str, Any], *, workflow: str) -> None:
+    """Map release-facing workflow fields onto the internal ComputeConfig names."""
+    if not section:
+        return
+    if "valley" in section:
+        target["valleys"] = [_parse_valley(section["valley"])]
+    if "q_shell" in section:
+        target["n_g"] = _parse_q_shell(section["q_shell"])
+    if "efermi" in section:
+        target["efermi"] = float(section["efermi"])
+    if "num_processes" in section:
+        target["num_processes"] = int(section["num_processes"])
+    if "blas_threads" in section:
+        target["blas_threads"] = int(section["blas_threads"])
+    if "num_bands" in section:
+        target["num_bands_cal"] = int(section["num_bands"])
+    if "num_bands_cal" in section:
+        target["num_bands_cal"] = int(section["num_bands_cal"])
+    if "save_hamiltonian" in section:
+        target["hamk_save"] = bool(section["save_hamiltonian"])
+    if "save_wavefunctions" in section:
+        target["eig_vec_cal"] = bool(section["save_wavefunctions"])
+    if workflow == "chern":
+        mesh = _copy_section(section.get("mesh"))
+        if mesh:
+            if "n_b1" in mesh:
+                target["num_k1"] = int(mesh["n_b1"])
+            if "n_b2" in mesh:
+                target["num_k2"] = int(mesh["n_b2"])
+        band_type, indices = _primary_topology_band_request(section)
+        if indices is not None:
+            target["chern_band_indices"] = indices
+            target["band_type"] = band_type
+
+
+def _apply_release_section_to_object(target, section: dict[str, Any], *, workflow: str) -> None:
+    updates: dict[str, Any] = {}
+    _apply_release_section_to_mapping(updates, dict(section or {}), workflow=workflow)
+    for key, value in updates.items():
+        setattr(target, key, value)
+
+
+def _band_type_from_release_sector(sector) -> str:
+    normalized = str(sector).strip().lower()
+    if normalized in {"valence", "vbm"}:
+        return "VBM"
+    if normalized in {"conduction", "cbm"}:
+        return "CBM"
+    raise ValueError(f"Unknown band sector {sector!r}; use valence/VBM or conduction/CBM.")
+
+
+def _primary_topology_band_request(topology: dict[str, Any]) -> tuple[str, Optional[list[int]]]:
+    """Return the first requested topology bandset as legacy `(band_type, indices)`."""
+    normalized = _normalize_topology_config(topology)
+    bands = normalized.get("bands", {}) or {}
+    task_refs: list[Any] = []
+    for key in ("berry_curvature", "quantum_geometry", "wcc"):
+        value = normalized.get(key)
+        if value is None:
+            continue
+        if isinstance(value, dict):
+            task_refs.append(value)
+        elif isinstance(value, list):
+            task_refs.extend(value)
+        else:
+            task_refs.append(value)
+    if not task_refs and bands:
+        task_refs.append(next(iter(bands)))
+    if not task_refs:
+        return "BOTH", None
+    first = task_refs[0]
+    if isinstance(first, str):
+        spec = dict(bands.get(first, {}))
+    elif isinstance(first, dict):
+        ref = first.get("bands", first.get("bandset"))
+        spec = dict(bands.get(ref, {})) if isinstance(ref, str) else dict(first)
+    else:
+        raise ValueError("topology observable entries must be band-set names or mappings.")
+    if "indices" not in spec:
+        raise ValueError("topology bandset requires indices.")
+    band_type = str(spec.get("band_type", "")).upper() or _band_type_from_release_sector(spec.get("sector", ""))
+    return band_type, [int(value) for value in spec["indices"]]
+
+
+def _normalize_topology_config(raw_topology: dict[str, Any]) -> dict[str, Any]:
+    """Accept both legacy topology keys and the release-facing bandsets/observables shape."""
+    topology = dict(raw_topology or {})
+    if "bandsets" in topology and "bands" not in topology:
+        topology["bands"] = dict(topology.get("bandsets") or {})
+    observables = topology.get("observables") or {}
+    if isinstance(observables, dict):
+        for key in ("berry_curvature", "quantum_geometry", "wcc"):
+            if key in observables and key not in topology:
+                topology[key] = observables[key]
+    return topology
 
 
 def normalize_symmetrize_hamiltonian(value) -> _SymmetrizeSpec:
@@ -370,7 +506,35 @@ class Config:
     compute: ComputeConfig
     symmetry_analysis: SymmetryAnalysisConfig = field(default_factory=SymmetryAnalysisConfig)
     output_layout: Optional[OutputLayoutConfig] = None
+    case: Dict[str, Any] = field(default_factory=dict)
+    bands: Dict[str, Any] = field(default_factory=dict)
+    symmetry: Dict[str, Any] = field(default_factory=dict)
+    topology: Dict[str, Any] = field(default_factory=dict)
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
+
+    def apply_workflow_section(self, mode: Optional[str] = None) -> None:
+        """Apply release-facing workflow section fields to the internal runtime config."""
+        mode = str(mode or self.compute.mode)
+        section_by_mode = {
+            "band": ("bands", self.bands),
+            "chern": ("topology", self.topology),
+            "symmetry": ("symmetry", self.symmetry),
+        }
+        if mode not in section_by_mode:
+            return
+        _, section = section_by_mode[mode]
+        section = dict(section or {})
+        self.compute.mode = mode
+        if mode == "chern":
+            # Topology often reuses band diagonalization controls. Use bands as defaults,
+            # then let topology override valley/q-shell/mesh/bandsets.
+            _apply_release_section_to_object(self.compute, self.bands, workflow="band")
+        _apply_release_section_to_object(self.compute, section, workflow=mode)
+        if self.compute.valleys:
+            self.compute.set_valley(self.compute.valleys[0])
+        self.compute.validate()
+        if self.output_layout is not None and getattr(self.output_layout, "style", "") == "canonical_v1":
+            self.output_layout.q_shell = canonical_qshell_name(self.compute.n_g)
 
     def validate(self) -> None:
         """Validate cross-section configuration constraints."""
@@ -396,10 +560,31 @@ class Config:
         config_dir = config_path.parent
 
         with open(config_path, 'r') as f:
-            config_dict = yaml.safe_load(f)
+            config_dict = yaml.safe_load(f) or {}
         if 'slab' in config_dict:
             raise ValueError("The release TAPW package does not support slab configuration.")
-        compute_raw = config_dict.get('compute', {})
+        case_raw = _copy_section(config_dict.get("case"))
+        bands_raw = _copy_section(config_dict.get("bands"))
+        symmetry_raw = _copy_section(config_dict.get("symmetry"))
+        field_raw = _copy_section(config_dict.get("field"))
+        topology_config = _normalize_topology_config(config_dict.get("topology", {}) or {})
+        release_sections_present = bool(case_raw or bands_raw or symmetry_raw)
+
+        compute_raw = dict(config_dict.get('compute', {}) or {})
+        if release_sections_present:
+            compute_raw.setdefault("mode", "band")
+            compute_raw.setdefault("TAPW", True)
+            _apply_release_section_to_mapping(compute_raw, bands_raw, workflow="band")
+            if not bands_raw:
+                fallback_section = topology_config or symmetry_raw
+                fallback_workflow = "chern" if topology_config else "symmetry"
+                _apply_release_section_to_mapping(compute_raw, fallback_section, workflow=fallback_workflow)
+            if "zero_potential_layers" in field_raw:
+                compute_raw["zero_potential_layers"] = field_raw["zero_potential_layers"]
+            if "electric_field_eVpA" in field_raw:
+                compute_raw["Electric_field_in_eVpA"] = float(field_raw["electric_field_eVpA"])
+            if "inner_symmetric" in field_raw:
+                compute_raw["Inner_symmetrical_Electric_Field"] = bool(field_raw["inner_symmetric"])
         removed = {'gpu', 'gpu_index', 'delay_time'} & set(compute_raw)
         if removed:
             raise ValueError(f"The release TAPW package does not support GPU options: {sorted(removed)}")
@@ -414,18 +599,41 @@ class Config:
                 "TAPW configurations require compute.n_g. "
                 "Automatic n_g inference from twist.twist_angle is not supported by Config.from_yaml."
             )
-        
-        twist_config = TwistConfig(**config_dict.get('twist', {}))
-        paths_config = PathConfig(**config_dict.get('paths', {}))
+
+        twist_raw = dict(config_dict.get('twist', {}) or {})
+        if "num_layers" not in twist_raw and "twist_layer" in twist_raw:
+            twist_raw["num_layers"] = int(sum(int(value) for value in twist_raw["twist_layer"]))
+        twist_config = TwistConfig(**twist_raw)
+
+        paths_raw = dict(config_dict.get('paths', {}) or {})
+        if "output_dir" not in paths_raw and case_raw.get("output_root") not in (None, ""):
+            paths_raw["output_dir"] = case_raw["output_root"]
+        paths_config = PathConfig(**paths_raw)
         paths_config.normalize(config_dir)
+        if "orthogonal_basis" not in compute_raw and paths_raw.get("S_file") in (None, ""):
+            compute_raw["orthogonal_basis"] = True
         compute_config = ComputeConfig(**compute_raw)
-        topology_config = config_dict.get("topology", {}) or {}
         compute_config.topology = topology_config
-        symmetry_analysis_config = SymmetryAnalysisConfig(**config_dict.get('symmetry_analysis', {}))
+        symmetry_analysis_raw = dict(config_dict.get('symmetry_analysis', {}) or {})
+        if symmetry_raw:
+            if "enable" in symmetry_raw:
+                symmetry_analysis_raw["enable"] = bool(symmetry_raw["enable"])
+            if "valley" in symmetry_raw:
+                symmetry_analysis_raw["valleys"] = [_parse_valley(symmetry_raw["valley"])]
+            for key in ("tolerance", "spglib_symprec", "debug", "developer_outputs"):
+                if key in symmetry_raw:
+                    symmetry_analysis_raw[key] = symmetry_raw[key]
+        symmetry_analysis_config = SymmetryAnalysisConfig(**symmetry_analysis_raw)
         output_layout_config = None
         if config_dict.get("output_layout") is not None:
             output_layout_config = OutputLayoutConfig(**config_dict.get("output_layout", {}))
             output_layout_config.normalize(config_dir)
+        elif case_raw.get("output_root") not in (None, ""):
+            output_layout_config = OutputLayoutConfig(
+                style="canonical_v1",
+                root=str(paths_config.output_dir),
+                q_shell=canonical_qshell_name(compute_config.n_g),
+            )
         # Use default cluster config if not provided
         cluster_config = ClusterConfig(**config_dict.get('cluster', {})) if 'cluster' in config_dict else ClusterConfig()
         
@@ -435,11 +643,17 @@ class Config:
             compute=compute_config,
             symmetry_analysis=symmetry_analysis_config,
             output_layout=output_layout_config,
+            case=case_raw,
+            bands=bands_raw,
+            symmetry=symmetry_raw,
+            topology=topology_config,
             cluster=cluster_config,
         )
-        config_obj.topology = topology_config
         # Propagate twist bravais to compute for downstream logic
         config_obj.compute.bravais = config_obj.twist.bravais
+        config_obj.release_sections_present = release_sections_present
+        if release_sections_present:
+            config_obj.apply_workflow_section(config_obj.compute.mode)
         config_obj.validate()
         return config_obj
 

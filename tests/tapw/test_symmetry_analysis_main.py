@@ -228,6 +228,29 @@ def test_band_mode_can_run_symmetry_analysis_after_normal_calculation(monkeypatc
     assert "runner.run" in events
 
 
+def test_release_style_band_mode_does_not_auto_run_symmetry_analysis(monkeypatch, tmp_path):
+    events = []
+    config = _make_config(tmp_path, mode="band", symmetry_enable=True)
+    config.release_sections_present = True
+    args = _patch_main_dependencies(monkeypatch, config, events)
+
+    class FakeCalculator:
+        def __init__(self, *args, **kwargs):
+            self.valley_flag = "Gamma"
+            self.uses_hamiltonian_symmetrization = False
+            events.append("band.init")
+
+        def run_calculation(self, path):
+            events.append(("band.run", str(path)))
+
+    monkeypatch.setattr(main_mod, "BandStructureCalculator", FakeCalculator)
+
+    main_mod.run_calc(args)
+
+    assert any(isinstance(event, tuple) and event[0] == "band.run" for event in events)
+    assert "runner.run" not in events
+
+
 def test_band_mode_runs_symmetry_analysis_when_hamiltonian_symmetrization_is_requested(monkeypatch, tmp_path):
     events = []
     config = _make_config(tmp_path, mode="band", symmetry_enable=False)

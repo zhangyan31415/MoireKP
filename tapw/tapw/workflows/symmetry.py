@@ -361,6 +361,15 @@ def _raw_h_file_from_record(record: dict[str, Any]) -> str:
     return f"representations/{valley_label}/{operation}_rawH.npz"
 
 
+def _csr_packed_entries(name: str, matrix: scipy.sparse.csr_matrix) -> dict[str, np.ndarray]:
+    return {
+        f"{name}_data": np.asarray(matrix.data),
+        f"{name}_indices": np.asarray(matrix.indices, dtype=np.int64),
+        f"{name}_indptr": np.asarray(matrix.indptr, dtype=np.int64),
+        f"{name}_shape": np.asarray(matrix.shape, dtype=np.int64),
+    }
+
+
 @dataclass(frozen=True)
 class ValleyContext:
     valley: int
@@ -4783,6 +4792,11 @@ class SymmetryAnalysisRunner:
             },
             "matrices": [],
         }
+        if canonical_layout:
+            manifest["packed_matrix_file"] = "../representations.npz"
+            manifest["packed_storage_format"] = "scipy_csr_components_v1"
+        packed_payload: dict[str, np.ndarray] = {}
+        packed_keys_seen: set[str] = set()
 
         for record in representations:
             matrix = record.get("matrix")
@@ -4869,6 +4883,7 @@ class SymmetryAnalysisRunner:
             raw_h_relative_path = None
             raw_h_shape = None
             raw_h_nnz = None
+            packed_key = None
             if raw_h_matrix is not None:
                 if not scipy.sparse.issparse(raw_h_matrix):
                     raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
@@ -4882,6 +4897,12 @@ class SymmetryAnalysisRunner:
                 scipy.sparse.save_npz(representations_dir / raw_h_relative_path, raw_h_matrix)
                 raw_h_shape = [int(raw_h_matrix.shape[0]), int(raw_h_matrix.shape[1])]
                 raw_h_nnz = int(raw_h_matrix.nnz)
+                if canonical_layout:
+                    packed_key = _safe_path_component(operation)
+                    if packed_key in packed_keys_seen:
+                        packed_key = f"{valley_label}_{packed_key}"
+                    packed_keys_seen.add(packed_key)
+                    packed_payload.update(_csr_packed_entries(packed_key, raw_h_matrix))
             if raw_h_matrix is None:
                 continue
             action_metadata: dict[str, Any]
@@ -4973,12 +4994,21 @@ class SymmetryAnalysisRunner:
                 "source_action": source_action,
                 **action_metadata,
             }
+            if packed_key is not None:
+                manifest_row["packed_matrix_file"] = "../representations.npz"
+                manifest_row["packed_matrix_key"] = packed_key
+                manifest_row["packed_storage_format"] = "scipy_csr_components_v1"
             if developer_files:
                 manifest_row["developer_outputs"] = developer_files
             manifest["matrices"].append(manifest_row)
 
         manifest_path = representations_dir / "manifest.json"
         manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+        packed_path = output_dir / "representations.npz"
+        if canonical_layout and packed_payload:
+            np.savez_compressed(packed_path, **packed_payload)
+        elif canonical_layout and packed_path.exists():
+            packed_path.unlink()
 
     def _write_canonical_workflow_manifest(self, output_dir: Path) -> None:
         if not _is_canonical_output_layout(self.config):
@@ -4989,6 +5019,7 @@ class SymmetryAnalysisRunner:
                 "summary_json": "summary.json",
                 "summary_markdown": "summary.md",
                 "details_csv": "details.csv",
+                "representations_npz": "representations.npz",
                 "representations_manifest": "representations/manifest.json",
             },
         }

@@ -1,78 +1,72 @@
-# Twisted Material Configuration File
+# TAPW single-case configuration
 
-# Twist parameters
+case:
+  name: K1_q06
+  output_root: outputs
+
 twist:
-  twist_index_m: 3          # Twist index m, determines the twist angle
-  bravais: "hex"           # Bravais lattice type: "hex" or "square"
-  num_layers: 2             # Total number of physical layers (must equal sum(twist_layer))
-  twist_layer: [1, 1]       # Twist group layer counts (twist_layer_counts): number of physical layers per twist group
-                            # Example: [1, 1] = bilayer (A-B)
-                            # Example: [1, 2, 1] = A-AA-A (4 physical layers, 3 twist groups)
-                            # Example: [2, 1, 1] = AA-A-A (4 physical layers, 3 twist groups)
-                            # Must satisfy: sum(twist_layer) == num_layers
-  # type_structure: [1, 1]  # DEPRECATED: No longer used. Structure types are determined automatically via spglib.
-  spin: true               # Whether to include spin in calculations
+  bravais: hex
+  twist_index_m: 3
+  twist_layer: [1, 1]
+  spin: true
 
-# File paths and IO configuration
 paths:
-  H_file: "H.dat"   # Hamiltonian file, can be .dat or .npz
-  S_file: "S.dat"   # Overlap file, can be .dat or .npz
-  input_file: "openmx.dat"   # Input structure file name
-  output_dir: "output"   # Output directory for results (will be created if it doesn't exist)
-  kpath_in: "KPATH_GMKG.in"   # K-path input file for band structure calculation
+  H_file: H.dat
+  S_file: S.dat
+  input_file: openmx.dat
+  kpath_in: KPATH_GMKG.in
 
-# Optional release-facing output layout. Remove this section to use the legacy
-# output/Q_shell_<n_g> layout.
-output_layout:
-  style: "canonical_v1"
-  root: "outputs"
-  # profile defaults to the valley label for spinful runs, for example K1.
-  # Use an explicit non-default profile for spin-filtered or spinless runs:
-  # profile: "K1_up"
-  # q_shell is inferred from compute.n_g, for example n_g: 3 -> q03.
+bands:
+  enable: true
+  valley: K1
+  q_shell: 6
+  efermi: -4.6
+  num_processes: 61
+  blas_threads: 4
+  num_bands: 100
+  save_hamiltonian: true
+  save_wavefunctions: false
 
-# Computation parameters
-compute:
-  # Valley configuration
-  valleys: [1,2]    # List of valleys to calculate
-                          # Available valleys:
-                          # 1: K1 valley
-                          # 2: K2 valley
-                          # 11: K1_120 valley
-                          # 12: K1_240 valley
-                          # 5: Gamma valley
-                          # 31: M1 valley
-                          # 32: M2 valley
-                          # 33: M3 valley
-                          # 3: M (square/rect)
-                          # 41: X (square/rect)
-                          # 42: Y (square/rect)
-  
-  # Calculation mode
-  mode: "band"            # Calculation mode: "band", "chern", or "symmetry"
-  
-  # Energy parameters
-  efermi: -4.6           # Fermi energy level, unit: eV
-  n_g: 3                  # Harmonic of G vectors
-  
-  # Band structure calculation parameters
-  num_processes: 61       # Number of k-point worker processes
-  blas_threads: 4         # BLAS/OpenMP threads per worker; increase carefully to avoid oversubscription
-  num_bands_cal: 100      # Number of bands to calculate
-  num_chern: [31, 31]    # Chern/Wilson-loop grid in fractional coordinates; supports either a scalar (square grid) or [num_k1, num_k2]
-  
-  # Calculation flags
-  hamk_save: false       # Whether to save Hamiltonian matrices
-  TAPW: true            # Use TAPW method
-  eigsh_cal: true       # Use eigsh for eigenvalue calculation
-  symmetrize_hamiltonian: false  # false, true, or canonical operation list such as [C3z]
-  ge: false             # Use generalized eigenvalue solver
-  eigensolver: "slepc"  # "scipy" or "slepc"; SLEPc currently requires joblib+loky and eig_vec_cal=false
-  eig_vec_cal: false     # Calculate eigenvectors 
+symmetry:
+  enable: false
+  valley: K1
+  q_shell: 6
+  tolerance: 2.0e-2
+  spglib_symprec: 5.0e-2
+  developer_outputs: false
+  debug: false
 
-  # Electric field parameters
-  Electric_field_in_eVpA: 0.00  # Electric field strength in eV/Å
-  zero_potential_layers: [1]     # Layers with zero potential
-  Inner_symmetrical_Electric_Field: false  # Whether to use inner symmetrical electric field
+topology:
+  enable: false
+  valley: K1
+  q_shell: 6
+  efermi: -4.6
+  num_processes: 61
+  num_bands: 100
+  save_wavefunctions: true
 
-  orthogonal_basis: false
+  mesh:
+    n_b1: 31
+    n_b2: 31
+    range_b1: [-0.5, 0.5]
+    range_b2: [-0.5, 0.5]
+
+  bandsets:
+    vbm2:
+      sector: valence
+      indices: [-1, -2]
+    cbm2:
+      sector: conduction
+      indices: [0, 1]
+
+  observables:
+    berry_curvature: [vbm2]
+    quantum_geometry: [vbm2]
+    wcc:
+      - bands: vbm2
+        loop: b2
+
+field:
+  zero_potential_layers: [1]
+  electric_field_eVpA: 0.0
+  inner_symmetric: false

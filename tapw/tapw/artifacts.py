@@ -151,8 +151,6 @@ def canonical_topology_grid_name(
     base = f"grid{int(num_k1)}x{int(num_k2)}"
     r1 = (float(range_b1[0]), float(range_b1[1]))
     r2 = (float(range_b2[0]), float(range_b2[1]))
-    if r1 == (-0.5, 0.5) and r2 == (-0.5, 0.5):
-        return base
     return (
         f"{base}_b1_{_canonical_range_token(r1[0])}_{_canonical_range_token(r1[1])}"
         f"_b2_{_canonical_range_token(r2[0])}_{_canonical_range_token(r2[1])}"

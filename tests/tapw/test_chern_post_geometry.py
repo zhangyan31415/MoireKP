@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+from types import SimpleNamespace
 
 from tapw.workflows.band import BandStructureCalculator
 from tapw import chern_post
@@ -179,11 +180,81 @@ def test_topology_tasks_resolve_named_band_sets():
 
     band_tasks, wcc_tasks = chern_post._resolve_topology_tasks(cfg)
 
-    assert {"band_type": "VBM", "indices": [-1, -2], "bc": True, "qgt": False} in band_tasks
-    assert {"band_type": "CBM", "indices": [0, 1], "bc": False, "qgt": True} in band_tasks
-    assert wcc_tasks == [{"band_type": "VBM", "indices": [-1, -2], "loop": "b2"}]
+    assert {"label": "vbm2", "band_type": "VBM", "indices": [-1, -2], "bc": True, "qgt": False} in band_tasks
+    assert {"label": "cbm2", "band_type": "CBM", "indices": [0, 1], "bc": False, "qgt": True} in band_tasks
+    assert wcc_tasks == [{"label": "vbm2", "band_type": "VBM", "indices": [-1, -2], "loop": "b2"}]
 
 
+
+
+def test_topology_tasks_resolve_release_bandsets_and_observables():
+    cfg = {
+        "topology": {
+            "bandsets": {
+                "vbm2": {"sector": "valence", "indices": [-1, -2]},
+                "cbm2": {"sector": "conduction", "indices": [0, 1]},
+            },
+            "observables": {
+                "berry_curvature": ["vbm2"],
+                "quantum_geometry": ["cbm2"],
+                "wcc": [{"bands": "vbm2", "loop": "b1"}],
+            },
+        }
+    }
+
+    band_tasks, wcc_tasks = chern_post._resolve_topology_tasks(cfg)
+
+    assert {"label": "vbm2", "band_type": "VBM", "indices": [-1, -2], "bc": True, "qgt": False} in band_tasks
+    assert {"label": "cbm2", "band_type": "CBM", "indices": [0, 1], "bc": False, "qgt": True} in band_tasks
+    assert wcc_tasks == [{"label": "vbm2", "band_type": "VBM", "indices": [-1, -2], "loop": "b1"}]
+
+
+def test_topology_task_dispatch_defaults_to_config_valley(monkeypatch, tmp_path):
+    cfg = {
+        "topology": {
+            "valley": "Gamma",
+            "mesh": {"n_b1": 3, "n_b2": 3, "range_b1": [-0.5, 0.5], "range_b2": [-0.5, 0.5]},
+            "bandsets": {"vbm2": {"sector": "valence", "indices": [-1, -2]}},
+            "observables": {"berry_curvature": ["vbm2"]},
+        },
+    }
+    calls = []
+
+    def fake_main(argv=None, **_kwargs):
+        calls.append(list(argv))
+
+    monkeypatch.setattr(chern_post, "main", fake_main)
+
+    args = SimpleNamespace(output_dir=str(tmp_path), valley=None, wcc_sewing="auto", wcc_sewing_atol=1.0e-6)
+    chern_post._dispatch_topology_tasks("config.yaml", args, cfg)
+
+    assert calls
+    assert calls[0][calls[0].index("--valley") + 1] == "5"
+    assert calls[0][calls[0].index("--topology-band-label") + 1] == "vbm2"
+
+
+def test_topology_task_dispatch_explicit_valley_overrides_config(monkeypatch, tmp_path):
+    cfg = {
+        "compute": {"valley": 5},
+        "topology": {
+            "mesh": {"n_b1": 3, "n_b2": 3, "range_b1": [-0.5, 0.5], "range_b2": [-0.5, 0.5]},
+            "bandsets": {"vbm2": {"sector": "valence", "indices": [-1, -2]}},
+            "observables": {"berry_curvature": ["vbm2"]},
+        },
+    }
+    calls = []
+
+    def fake_main(argv=None, **_kwargs):
+        calls.append(list(argv))
+
+    monkeypatch.setattr(chern_post, "main", fake_main)
+
+    args = SimpleNamespace(output_dir=str(tmp_path), valley=31, wcc_sewing="auto", wcc_sewing_atol=1.0e-6)
+    chern_post._dispatch_topology_tasks("config.yaml", args, cfg)
+
+    assert calls
+    assert calls[0][calls[0].index("--valley") + 1] == "31"
+    assert calls[0][calls[0].index("--topology-band-label") + 1] == "vbm2"
 
 
 def test_rectangular_wavefunction_reshape_preserves_flatten_order():
@@ -285,6 +356,67 @@ def test_chern_post_rejects_generalized_eigenvectors_before_file_lookup(tmp_path
         chern_post.main(["--config", str(config_path), "--output-dir", str(tmp_path), "-b", "0"])
 
     assert excinfo.value.code == 1
+
+
+def test_chern_post_config_tasks_write_canonical_topology_artifact_names(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    input_file = config_dir / "openmx.dat"
+    input_file.write_text(
+        "Atoms.UnitVectors.Unit Ang\n<Atoms.UnitVectors\n1 0 0\n0 1 0\n0 0 1\nAtoms.UnitVectors>\n",
+        encoding="utf-8",
+    )
+    output_root = tmp_path / "outputs"
+    grid_dir = output_root / "grid4x4_b1_m0p5_0p5_b2_m0p5_0p5"
+    grid_dir.mkdir(parents=True)
+
+    vec_grid = np.zeros((4, 4, 2, 2), dtype=np.complex128)
+    vec_grid[:, :, 0, 0] = 1.0
+    vec_grid[:, :, 1, 1] = 1.0
+    np.save(grid_dir / "wavefunctions_vbm.npy", vec_grid.reshape(16, 2, 2))
+
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "paths:",
+                "  input_file: openmx.dat",
+                "twist:",
+                "  spin: false",
+                "compute:",
+                "  valley: 5",
+                "  band_type: VBM",
+                "topology:",
+                "  mesh:",
+                "    n_b1: 4",
+                "    n_b2: 4",
+                "    range_b1: [-0.5, 0.5]",
+                "    range_b2: [-0.5, 0.5]",
+                "  bandsets:",
+                "    vbm2:",
+                "      sector: valence",
+                "      indices: [-1, -2]",
+                "  observables:",
+                "    berry_curvature: [vbm2]",
+                "    quantum_geometry: [vbm2]",
+                "    wcc:",
+                "      - bands: vbm2",
+                "        loop: b2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    chern_post.main(["--config", str(config_path), "--output-dir", str(output_root)])
+
+    assert (grid_dir / "berry_curvature_vbm2.txt").is_file()
+    assert (grid_dir / "berry_curvature_vbm2.pdf").is_file()
+    assert (grid_dir / "quantum_geometry_vbm2.txt").is_file()
+    assert (grid_dir / "quantum_geometry_vbm2.pdf").is_file()
+    assert (grid_dir / "wcc_vbm2_loop_b2.txt").is_file()
+    assert (grid_dir / "wcc_vbm2_loop_b2.pdf").is_file()
+    assert not list(grid_dir.glob("bc_bands_*"))
+    assert not list(grid_dir.glob("qgt_bands_*"))
 
 
 def test_single_band_berry_flux_supports_rectangular_grids():

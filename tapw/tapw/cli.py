@@ -277,13 +277,18 @@ def run_calc(args):
     # Override config with command line arguments
     if args.twist_index is not None:
         config.twist.twist_index_m = args.twist_index
+    if args.mode:
+        config.compute.mode = args.mode
+    if hasattr(config, "apply_workflow_section"):
+        config.apply_workflow_section(config.compute.mode)
     if args.output_dir:
         config.paths.output_dir = args.output_dir
+        layout = getattr(config, "output_layout", None)
+        if layout is not None and getattr(layout, "style", "") == "canonical_v1":
+            layout.root = args.output_dir
     if args.valleys:
         config.compute.valleys = args.valleys
         set_compute_valley(config.compute, args.valleys[0])
-    if args.mode:
-        config.compute.mode = args.mode
     if args.n_g is not None:
         config.compute.n_g = args.n_g
     if args.num_chern is not None:
@@ -517,7 +522,11 @@ def run_calc(args):
                 if reuse_m_valley_band_outputs and getattr(calculator, "use_M_valley_threefold_symm", False):
                     reused_reference_valley_flag = calculator.valley_flag
 
-        if getattr(config.symmetry_analysis, "enable", False) and not hamiltonian_symmetrization_requested(config.compute):
+        if (
+            getattr(config.symmetry_analysis, "enable", False)
+            and not bool(getattr(config, "release_sections_present", False))
+            and not hamiltonian_symmetrization_requested(config.compute)
+        ):
             _run_symmetry_analysis(config, processor, hr, sr, logger)
 
     except Exception as e:

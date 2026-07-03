@@ -399,9 +399,11 @@ def test_runner_writes_canonical_symmetry_manifest_and_rawh_layout(tmp_path):
 
     output_dir = Path(runner.output_dir)
     raw_h_path = output_dir / "representations" / "raw_h" / "C2T.npz"
+    packed_path = output_dir / "representations.npz"
     manifest_path = output_dir / "representations" / "manifest.json"
     workflow_manifest_path = output_dir / "manifest.json"
     assert raw_h_path.is_file()
+    assert packed_path.is_file()
     assert not (output_dir / "representations" / "K1" / "C2T_rawH.npz").exists()
     assert (output_dir / "representations" / "diagnostics" / "C2T_source.npz").is_file()
     assert (output_dir / "representations" / "diagnostics" / "C2T_pin.npz").is_file()
@@ -409,13 +411,22 @@ def test_runner_writes_canonical_symmetry_manifest_and_rawh_layout(tmp_path):
 
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
     assert manifest["matrices"][0]["raw_h_operator_file"] == "raw_h/C2T.npz"
+    assert manifest["matrices"][0]["packed_matrix_file"] == "../representations.npz"
+    assert manifest["matrices"][0]["packed_matrix_key"] == "C2T"
+    assert manifest["matrices"][0]["packed_storage_format"] == "scipy_csr_components_v1"
     assert manifest["matrices"][0]["developer_outputs"] == {
         "file": "diagnostics/C2T_source.npz",
         "pin_file": "diagnostics/C2T_pin.npz",
         "pg_file": "diagnostics/C2T_pg.npz",
     }
+    with np.load(packed_path, allow_pickle=False) as payload:
+        assert payload["C2T_shape"].tolist() == [2, 2]
+        assert payload["C2T_data"].dtype == np.complex128
+        assert "C2T_indices" in payload.files
+        assert "C2T_indptr" in payload.files
     workflow_manifest = json.loads(workflow_manifest_path.read_text(encoding="utf-8"))
     assert workflow_manifest["schema"] == "tapw_symmetry_outputs/v1"
+    assert workflow_manifest["files"]["representations_npz"] == "representations.npz"
     assert workflow_manifest["files"]["representations_manifest"] == "representations/manifest.json"
 
 

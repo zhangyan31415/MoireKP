@@ -48,11 +48,25 @@ tapw chern -c config.yaml  # when topology settings are present
 tapw plot -c bands.yaml
 ```
 
-New configs prefer `output_layout.style: canonical_v1`, which writes
-`outputs/<profile>/<q_shell>/<workflow>/manifest.json`. For the default spinful
-profile, K1 with `n_g: 6` should be named `outputs/K1/q06`; non-default spin
-profiles should be explicit, for example `K1_up/q06` or `K1_spinless/q06`.
-Legacy configs without `output_layout` continue to write `Q_shell_*`.
+New TAPW configs use `case.output_root` plus per-workflow sections
+(`bands`, `symmetry`, `topology`) and write
+`outputs/<profile>/<q_shell>/<workflow>/manifest.json` by default. For the
+default spinful profile, `bands.valley: K1` with `bands.q_shell: 6` writes
+`outputs/K1/q06`; non-default spin profiles should be explicit, for example
+`K1_up/q06` or `K1_spinless/q06`. Legacy configs with only `compute` continue
+to write `Q_shell_*`.
+
+Canonical TAPW symmetry output also writes a packed sparse
+`symmetry/representations.npz` file. The per-operation
+`symmetry/representations/raw_h/*.npz` files are still written for compatibility.
+Canonical topology grid directories include the sampled reciprocal-coordinate
+range, for example `grid21x21_b1_m0p5_0p5_b2_m0p5_0p5`.
+
+Compatibility outputs are still written during the transition, but new scripts
+should not depend on them: `Q_shell_*` directories from legacy `compute` configs,
+`symmetry/representations/raw_h/*.npz` per-operation files, old topology names
+such as `bc_bands_*` or `qgt_bands_*`, and long legacy command forms. Prefer
+the canonical manifests and packed outputs instead.
 
 Longer TAPW forms remain available for compatibility: `tapw run --config ... --mode symmetry` is equivalent to `tapw symm -c ...`, and `tapw postprocess-memmap` is equivalent to `tapw final`. Legacy script entry points also remain available: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 

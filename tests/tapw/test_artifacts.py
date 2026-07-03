@@ -103,7 +103,10 @@ def test_canonical_topology_band_labels_avoid_dash_collisions():
 
 
 def test_canonical_topology_grid_name_includes_nondefault_ranges():
-    assert canonical_topology_grid_name(31, 31) == "grid31x31"
+    assert (
+        canonical_topology_grid_name(31, 31)
+        == "grid31x31_b1_m0p5_0p5_b2_m0p5_0p5"
+    )
     assert (
         canonical_topology_grid_name(21, 41, range_b1=(0.0, 0.5), range_b2=(-0.5, 0.5))
         == "grid21x41_b1_0p0_0p5_b2_m0p5_0p5"
@@ -202,7 +205,7 @@ def test_chern_calculation_writes_canonical_topology_files(tmp_path):
 
     calc.calculate_chern(str(target_dir))
 
-    topology_dir = target_dir / "topology" / "grid3x3"
+    topology_dir = target_dir / "topology" / "grid3x3_b1_m0p5_0p5_b2_m0p5_0p5"
     assert (topology_dir / "berry_flux_band_m1.npy").is_file()
     assert (topology_dir / "berry_flux_band_m2.npy").is_file()
     assert (topology_dir / "berry_flux_bands_m1_m2.npy").is_file()
