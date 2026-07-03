@@ -21,35 +21,27 @@ def _write_minimal_layerwise_model(tmp_path: Path, *, n_orb: list[int], nlow_sta
     np.save(tmp_path / "q1.npy", q1)
     np.save(tmp_path / "q2.npy", q2)
     np.save(tmp_path / "kpoints.npy", kpoints)
-    project_dir = tmp_path / "project"
-    project_dir.mkdir()
-    np.save(project_dir / "heff_list.npy", heff)
-
-    (tmp_path / "source.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "material": {
-                    "num_layers": 3,
-                    "num_layer_list": [1, 2],
-                    "qset1_file": "q1.npy",
-                    "qset2_file": "q2.npy",
-                },
-                "project": {"out_dir": "project"},
-            },
-            sort_keys=False,
-        ),
-        encoding="utf-8",
-    )
-    symm_dir = tmp_path / "symm"
-    symm_dir.mkdir()
+    project_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    project_dir.mkdir(parents=True)
+    np.save(project_dir / "heff.npy", heff)
+    symm_dir = tmp_path / "outputs" / "K1" / "q06" / "symmetry"
+    symm_dir.mkdir(parents=True)
     (symm_dir / "manifest.json").write_text(
         json.dumps({"frame": {"q_transform": {"rotation_deg": 0.0}}, "operations": []}),
         encoding="utf-8",
     )
 
     raw = {
-        "source_config": "source.yaml",
-        "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
+        "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
+        "material": {
+            "num_layers": 3,
+            "num_layer_list": [1, 2],
+            "qset1_file": "q1.npy",
+            "qset2_file": "q2.npy",
+        },
+        "plot": {},
+        "project": {},
+        "symmetry_source": {"type": "kp_symm_output", "path": "outputs/K1/q06/symmetry"},
         "valley_model": {
             "lattice": "hexagonal",
             "system": "bilayer",

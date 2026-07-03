@@ -23,25 +23,17 @@ Expected outputs:
 
 ```text
 examples/kp_canonical_smoke/kp/outputs/K1/q01/
-  summary.md
   inspect/
     spectrum.txt
-    candidates.md
     scatter.pdf
+    wavefunctions.npz
   projection/
     heff.npy
-    eigvals.npy
     eigvals.txt
     basis.md
     basis.npz
     scatter.pdf
-    vectors.npy
-    k_indices.npy
-    basis_selection.json
-    basis_selection.md
-    heff_list.npy
-    heff_eig.npy
-    heff_vec.npy
+    wavefunctions.npz
 ```
 
 ## Gamma Example
@@ -55,23 +47,15 @@ Expected outputs:
 
 ```text
 examples/kp_canonical_smoke/kp/outputs/Gamma/q01/
-  summary.md
   inspect/
     spectrum.txt
-    candidates.md
     scatter.pdf
+    wavefunctions.npz
   projection/
     heff.npy
-    eigvals.npy
     eigvals.txt
     basis.md
     basis.npz
     scatter.pdf
-    vectors.npy
-    k_indices.npy
-    basis_selection.json
-    basis_selection.md
-    heff_list.npy
-    heff_eig.npy
-    heff_vec.npy
+    wavefunctions.npz
 ```

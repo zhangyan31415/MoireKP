@@ -19,6 +19,7 @@ def _write_tiny_project_config(tmp_path: Path, project: dict) -> Path:
     np.save(tmp_path / "q2.npy", np.array([[0.0, 0.0]], dtype=float))
 
     cfg = {
+        "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
         "material": {
             "name": "tiny",
             "hamk_file": "hamk.npy",
@@ -46,6 +47,18 @@ def _write_tiny_project_config_with_symm(tmp_path: Path, project: dict, symm: di
     return cfg_path
 
 
+def _write_cached_symmetry_basis(symm_dir: Path, report: dict) -> None:
+    symm_dir.mkdir(parents=True, exist_ok=True)
+    metadata = {"project_basis": report}
+    np.savez_compressed(
+        symm_dir / "representations.npz",
+        __metadata_json__=np.asarray(json.dumps(metadata, sort_keys=True)),
+        TR=np.eye(2, dtype=np.complex128),
+    )
+    (symm_dir / "residuals.csv").write_text("operation,status\nTR,ok\n", encoding="utf-8")
+    (symm_dir / "summary.md").write_text("# KP Symmetry Projection\n", encoding="utf-8")
+
+
 def test_project_gauge_auto_writes_basis_selection_reports(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr(
         cli,
@@ -68,18 +81,16 @@ def test_project_gauge_auto_writes_basis_selection_reports(monkeypatch, tmp_path
     cli.cmd_project_from_config(str(cfg_path))
 
     out_dir = tmp_path / "project"
-    assert (out_dir / "heff_list.npy").exists()
-    assert (out_dir / "basis_selection.json").exists()
-    assert (out_dir / "basis_selection.md").exists()
-    assert (out_dir / "auto_norb_fix_list.yaml").exists()
+    assert (out_dir / "heff.npy").exists()
+    assert (out_dir / "basis.npz").exists()
+    assert (out_dir / "basis.md").exists()
 
-    report = json.loads((out_dir / "basis_selection.json").read_text(encoding="utf-8"))
-    assert report["gauge_mode"] == "auto_scdm"
-    assert report["resolved_norb_fix_list"] == [[[[0, 1.0]]], [[[0, 1.0]]]]
-    assert report["symmetry_closure_quality"]["status"] == "not_available"
-    assert report["symmetry_closure_quality"]["subspace_leakage"] is None
-    assert report["selections"][0]["sigma_min"] > 0.0
-    assert "condition_number" in report["selections"][0]
+    with np.load(out_dir / "basis.npz", allow_pickle=True) as payload:
+        assert payload["norb_fix_list"].tolist() == [[[[0, 1.0]]], [[[0, 1.0]]]]
+    report_text = (out_dir / "basis.md").read_text(encoding="utf-8")
+    assert "gauge_mode: `auto_scdm`" in report_text
+    assert "symmetry_closure_quality: `not_available`" in report_text
+    assert "condition_number" in report_text
 
 
 def test_project_auto_uses_symmetry_validated_resolved_anchors(monkeypatch, tmp_path: Path) -> None:
@@ -92,7 +103,6 @@ def test_project_auto_uses_symmetry_validated_resolved_anchors(monkeypatch, tmp_
 
     def fake_symm(_cfg_path: str, *, developer_outputs=None):
         symm_dir = tmp_path / "symm"
-        symm_dir.mkdir()
         report = {
             "gauge_mode": "auto_scdm",
             "resolved_norb_fix_list": selected,
@@ -106,12 +116,11 @@ def test_project_auto_uses_symmetry_validated_resolved_anchors(monkeypatch, tmp_
             },
             "warnings": [],
         }
-        (symm_dir / "basis_selection.json").write_text(json.dumps(report), encoding="utf-8")
+        _write_cached_symmetry_basis(symm_dir, report)
         return {
             "project_basis": {
                 "gauge_mode": "auto_scdm",
                 "resolved_norb_fix_list": selected,
-                "basis_selection_report": "basis_selection.json",
             }
         }
 
@@ -138,9 +147,9 @@ def test_project_auto_uses_symmetry_validated_resolved_anchors(monkeypatch, tmp_
 
     cli.cmd_project_from_config(str(cfg_path))
 
-    report = json.loads((tmp_path / "project" / "basis_selection.json").read_text(encoding="utf-8"))
-    assert report["resolved_norb_fix_list"] == selected
-    assert report["symmetry_closure_quality"]["status"] == "validated"
+    with np.load(tmp_path / "project" / "basis.npz", allow_pickle=True) as payload:
+        assert payload["norb_fix_list"].tolist() == selected
+    assert "symmetry_closure_quality: `validated`" in (tmp_path / "project" / "basis.md").read_text(encoding="utf-8")
 
 
 def test_project_auto_reuses_cached_symmetry_basis_selection(monkeypatch, tmp_path: Path) -> None:
@@ -165,10 +174,10 @@ def test_project_auto_reuses_cached_symmetry_basis_selection(monkeypatch, tmp_pa
         },
         "warnings": [],
     }
-    (symm_dir / "basis_selection.json").write_text(json.dumps(report), encoding="utf-8")
+    _write_cached_symmetry_basis(symm_dir, report)
 
     def fail_symm(_cfg_path: str, *, developer_outputs=None):
-        raise AssertionError("kp project should reuse cached basis_selection.json")
+        raise AssertionError("kp project should reuse cached symmetry metadata")
 
     monkeypatch.setattr(cli, "run_symmetry_projection_from_config", fail_symm)
 
@@ -193,9 +202,9 @@ def test_project_auto_reuses_cached_symmetry_basis_selection(monkeypatch, tmp_pa
 
     cli.cmd_project_from_config(str(cfg_path))
 
-    payload = json.loads((tmp_path / "project" / "basis_selection.json").read_text(encoding="utf-8"))
-    assert payload["resolved_norb_fix_list"] == selected
-    assert payload["symmetry_closure_quality"]["selected_candidate_id"] == "cached_candidate"
+    with np.load(tmp_path / "project" / "basis.npz", allow_pickle=True) as basis_payload:
+        assert basis_payload["norb_fix_list"].tolist() == selected
+    assert "symmetry_closure_quality: `validated`" in (tmp_path / "project" / "basis.md").read_text(encoding="utf-8")
 
 
 def test_project_auto_defers_symmetry_validation_without_cached_basis(monkeypatch, tmp_path: Path) -> None:
@@ -231,10 +240,9 @@ def test_project_auto_defers_symmetry_validation_without_cached_basis(monkeypatc
 
     cli.cmd_project_from_config(str(cfg_path))
 
-    payload = json.loads((tmp_path / "project" / "basis_selection.json").read_text(encoding="utf-8"))
-    assert payload["resolved_norb_fix_list"] == [[[[0, 1.0]]], [[[0, 1.0]]]]
-    assert payload["symmetry_closure_quality"]["status"] == "deferred"
-    assert payload["symmetry_closure_quality"]["source"] == "kp_symm"
+    with np.load(tmp_path / "project" / "basis.npz", allow_pickle=True) as basis_payload:
+        assert basis_payload["norb_fix_list"].tolist() == [[[[0, 1.0]]], [[[0, 1.0]]]]
+    assert "symmetry_closure_quality: `deferred`" in (tmp_path / "project" / "basis.md").read_text(encoding="utf-8")
 
 
 def test_project_rejects_manual_norb_fix_with_auto_gauge(tmp_path: Path) -> None:

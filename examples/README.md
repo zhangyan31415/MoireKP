@@ -39,33 +39,22 @@ examples/<material>_<angle>/
       K1_q06.yaml
       K1_up_q06.yaml
     outputs/
-      manifest.json
       K1/
         q06/
-          manifest.json
           band/
           symmetry/
           topology/
   kp/
     configs/
       K1_q06.yaml
-      source/
-      model/
-        reference/
-        diagnostics/
-    notebooks/
     outputs/
-      plot/<case_id>/
-      project/<case_id>/
-      symm/<case_id>/
-      model/
-        <case_id>/
-        reference/<case_id>/
-        diagnostics/<case_id>/
+      K1/
+        q06/
+          inspect/
+          projection/
+          symmetry/
+          model/
 ```
-
-`case_id` uses `<material>_<angle>_<valley>`, for example
-`mote2_3.89_K1`, `mgi2_3.89_Gamma`, or `mgi2_3.89_M1`.
 
 For TAPW, use one config per material/angle/valley/q-shell case. The default
 spinful profile omits a spin suffix, for example `tapw/configs/K1_q06.yaml`
@@ -96,28 +85,19 @@ clean-clone test:
 
 - `tapw run -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW band outputs)
 - `tapw symm -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW raw-H symmetry outputs)
-- `tapw chern -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical topology outputs)
+- `tapw topo -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical topology outputs)
 - `kp inspect -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: inspect source bands before selecting low states)
 - `kp project -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
 - `kp symm -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes TAPW symmetry-analysis exports)
 - `kp model -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes projection and symmetry outputs)
-- `kp export -c examples/<case>/kp/configs/K1_q06.yaml -o exported/<case_id>` (precomputed: optionally writes a standalone package from the model output)
 
 New KP case configs should use `project.gauge: auto` with an explicit
 `project.nlow_state_list`. Existing hand-written `project.norb_fix_list` entries
 remain valid as expert overrides, but they should not be required for ordinary
-finite-basis projection. Auto-gauge reports are written next to `heff_list.npy`
-as `basis_selection.json` and `basis_selection.md`.
+finite-basis projection. Auto-gauge reports are written in
+`kp/outputs/<profile>/<q_shell>/projection/` as `basis.npz` and `basis.md`.
 
-When TAPW outputs use the canonical layout, KP case configs should prefer the
-band manifest instead of repeating every TAPW filename:
-
-```yaml
-material:
-  tapw_band_manifest: ../../../tapw/outputs/K1/q06/band/manifest.json
-```
-
-If the same source config has a TAPW raw-H symmetry source in `symm`, `kp proj`
+If the same case config has a TAPW raw-H symmetry source in `symm`, `kp project`
 and `kp symm` both use the symmetry-scored auto-gauge resolver. The report then
 lists all gauge candidates and rejected residuals. Auto gauge still does not
 choose `nlow_state_list`; it only fixes the gauge of the low subspace the user
@@ -132,10 +112,8 @@ and expected-output description.
 
 - `examples/tapw/basic/`: small TAPW configuration templates.
 - `examples/tapw/kpaths/`: canonical hexagonal KMGMK K-path input.
-- `examples/tapw/mote2_9.43/`: MoTe2 rigid-OpenMX TAPW and direct
-  diagonalization configs.
-- `examples/tapw/mgi2_9.43/`: MgI2 rigid-OpenMX TAPW and direct
-  diagonalization configs.
+- `examples/tapw/mote2_9.43/`: MoTe2 rigid-OpenMX TAPW configs.
+- `examples/tapw/mgi2_9.43/`: MgI2 rigid-OpenMX TAPW configs.
 
 The `tapw init` command uses package templates under `tapw/tapw/templates/`.
 Those templates are not material-specific examples.

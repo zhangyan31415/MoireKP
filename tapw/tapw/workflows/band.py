@@ -115,6 +115,18 @@ def _update_canonical_manifests(workflow_dir: Path, workflow: str) -> None:
         {"schema": "tapw_outputs/v1", "updated_workflow": workflow, "targets": targets},
     )
 
+
+def _remove_canonical_manifest_files(workflow_dir: Path) -> None:
+    """Remove old canonical manifests from pre-release compatibility layouts."""
+    workflow_dir = Path(workflow_dir)
+    for candidate in (
+        workflow_dir / "manifest.json",
+        workflow_dir.parent / "manifest.json",
+        workflow_dir.parent.parent.parent / "manifest.json" if len(workflow_dir.parents) >= 3 else None,
+    ):
+        if candidate is not None and candidate.exists():
+            candidate.unlink()
+
 # Optional MKL-accelerated sparse GEMM (can be a big speedup for g@H@g^H)
 try:
     from sparse_dot_mkl import dot_product_mkl  # type: ignore
@@ -3436,35 +3448,7 @@ class BandStructureCalculator:
                 self.result['hamk'],
             )
         if canonical_layout and mode != "chern":
-            files = {
-                "kpoints": canonical_band_filename("kpoints", None),
-                "g_vectors_group1": canonical_band_filename("g_vectors", 1),
-                "g_vectors_group2": canonical_band_filename("g_vectors", 2),
-            }
-            if want_vbm and vbm.size > 0:
-                files["energies_vbm"] = canonical_band_filename("energies", "vbm")
-                if self.config.eig_vec_cal:
-                    files["wavefunctions_vbm"] = canonical_band_filename("wavefunctions", "vbm")
-            if want_cbm and cbm.size > 0:
-                files["energies_cbm"] = canonical_band_filename("energies", "cbm")
-                if self.config.eig_vec_cal:
-                    files["wavefunctions_cbm"] = canonical_band_filename("wavefunctions", "cbm")
-            if self.config.hamk_save:
-                files["hamiltonian_k"] = canonical_band_filename("hamiltonian", None)
-            _write_json(
-                Path(out_path) / "manifest.json",
-                {
-                    "schema": "tapw_band_outputs/v1",
-                    "valley": self.valley_flag,
-                    "q_shell": Path(path).name,
-                    "files": files,
-                    "group_mapping": {
-                        "g_vectors_group1": {"source_group": 1},
-                        "g_vectors_group2": {"source_group": 2},
-                    },
-                },
-            )
-            _update_canonical_manifests(Path(out_path), "band")
+            _remove_canonical_manifest_files(Path(out_path))
 
     def calculate_chern(self, path):
         """Calculate Chern number using uniform k-point mesh
@@ -3473,15 +3457,15 @@ class BandStructureCalculator:
             path: Output path for results
         """
         if not getattr(self.config, "eig_vec_cal", False):
-            raise ValueError("tapw chern requires compute.eig_vec_cal=true so Berry flux can be computed.")
+            raise ValueError("tapw topo requires compute.eig_vec_cal=true so Berry flux can be computed.")
         if bool(getattr(self.config, "ge", False)):
             raise ValueError(
-                "tapw chern does not support ge=true in this release because generalized eigenvectors "
+                "tapw topo does not support ge=true in this release because generalized eigenvectors "
                 "require overlap-metric Berry phases, not Euclidean overlaps."
             )
         if int(getattr(self.config, "kpoint_chunk_count", 1)) != 1:
             raise ValueError(
-                "tapw chern cannot produce a Chern number from unfinished k-point chunks. "
+                "tapw topo cannot produce a Chern number from unfinished k-point chunks. "
                 "Finalize chunked wavefunctions first, then run topology post-processing."
             )
 
@@ -3497,7 +3481,7 @@ class BandStructureCalculator:
 
         vec = getattr(self, "result", {}).get("vec")
         if vec is None:
-            raise RuntimeError("tapw chern did not produce wavefunctions; check eig_vec_cal and solver output.")
+            raise RuntimeError("tapw topo did not produce wavefunctions; check eig_vec_cal and solver output.")
 
         band_vec_grid = reshape_wavefunction_grid(np.asarray(vec), int(num_k1), int(num_k2))
         num_bands = int(band_vec_grid.shape[-1])
@@ -3539,8 +3523,7 @@ class BandStructureCalculator:
             berry_flux = compute_berry_flux_single_band(band_vec_grid, band_index)
             if canonical_layout:
                 label = canonical_topology_band_label([raw_band_index])
-                filename = f"berry_flux_{label}.npy"
-                files[f"berry_flux_{label}"] = filename
+                filename = None
             else:
                 filename = chern_flux_filename(
                     band_type=band_type,
@@ -3548,7 +3531,7 @@ class BandStructureCalculator:
                     suffix=suffix,
                     band_label=f"band{band_index}",
                 )
-            np.save(os.path.join(topo_path, filename), berry_flux)
+                np.save(os.path.join(topo_path, filename), berry_flux)
             entries.append(
                 {
                     "band_indices": [raw_band_index],
@@ -3562,8 +3545,7 @@ class BandStructureCalculator:
             berry_flux = compute_berry_flux_multiband(band_vec_grid, resolved_band_indices)
             if canonical_layout:
                 label = canonical_topology_band_label(raw_band_indices)
-                filename = f"berry_flux_{label}.npy"
-                files[f"berry_flux_{label}"] = filename
+                filename = None
             else:
                 label = "bands" + "_".join(str(index) for index in resolved_band_indices)
                 filename = chern_flux_filename(
@@ -3572,7 +3554,7 @@ class BandStructureCalculator:
                     suffix=suffix,
                     band_label=label,
                 )
-            np.save(os.path.join(topo_path, filename), berry_flux)
+                np.save(os.path.join(topo_path, filename), berry_flux)
             entries.append(
                 {
                     "band_indices": raw_band_indices,
@@ -3611,39 +3593,11 @@ class BandStructureCalculator:
             json.dump(summary, handle, indent=2, sort_keys=True)
             handle.write("\n")
         if canonical_layout:
-            files["chern_summary"] = summary_filename
-            _write_json(
-                Path(topo_path) / "manifest.json",
-                {
-                    "schema": "tapw_topology_grid/v1",
-                    "grid_id": canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2),
-                    "grid_shape": [int(num_k1), int(num_k2)],
-                    "n_b1": int(num_k1),
-                    "n_b2": int(num_k2),
-                    "range_b1": [float(range_k1[0]), float(range_k1[1])],
-                    "range_b2": [float(range_k2[0]), float(range_k2[1])],
-                    "grid_order": "ij",
-                    "flatten_order": "row-major",
-                    "axes": ["kappa1", "kappa2"],
-                    "endpoint": True,
-                    "valley": self.valley_flag,
-                    "files": files,
-                },
-            )
             topology_dir = Path(os.fspath(path)) / "topology"
-            _write_json(
-                topology_dir / "manifest.json",
-                {
-                    "schema": "tapw_topology_collection/v1",
-                    "grids": [
-                        {
-                            "grid": grid_name,
-                            "manifest": f"{grid_name}/manifest.json",
-                        }
-                    ],
-                },
-            )
-            _update_canonical_manifests(topology_dir, "topology")
+            for stale in (Path(topo_path) / "manifest.json", topology_dir / "manifest.json"):
+                if stale.exists():
+                    stale.unlink()
+            _remove_canonical_manifest_files(topology_dir)
 
         reporter.kv(
             "Chern number",

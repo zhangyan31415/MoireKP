@@ -87,16 +87,19 @@ symmetry actions, exactifies in memory, and scores the candidates by:
 
 If every candidate fails, or if indistinguishable candidates remain after all
 metrics and priorities, the command fails instead of silently writing a model.
-`kp project` and `kp symm` use this same resolver, so `heff_list.npy` and the
-symmetry manifest are produced in the same resolved gauge.
+`kp project` and `kp symm` use this same resolver, so `projection/heff.npy` and
+the symmetry representations are produced in the same resolved gauge.
 
 ## Outputs
 
-`kp project` writes these files in `project.out_dir`:
+`kp project` writes these canonical files in `projection/`:
 
-- `basis_selection.json`
-- `basis_selection.md`
-- `auto_norb_fix_list.yaml` for auto-gauge runs
+- `heff.npy`
+- `eigvals.txt`
+- `wavefunctions.npz`
+- `basis.npz`
+- `basis.md`
+- `scatter.pdf`
 
 The JSON report separates:
 

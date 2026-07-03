@@ -53,48 +53,13 @@ def setup_logging(log_file: str = None):
     return logger
 
 def build_calc_parser(prog: str = None, *, fixed_mode: str | None = None):
-    """Build the TAPW calculation parser used by both tapw calc and tapw-calc."""
+    """Build the TAPW calculation parser used by release-facing TAPW commands."""
     parser = argparse.ArgumentParser(
         prog=prog,
-        description='Twisted Material Band Structure Calculator',
+        description="Run a TAPW workflow from a release-style YAML config",
     )
     parser.add_argument('-c', '--config', type=str, default='config.yaml',
                        help='Path to configuration file')
-    parser.add_argument('--twist-index', type=int,
-                       help='Twist index (overrides config file)')
-    parser.add_argument('--output-dir', type=str,
-                       help='Output directory (overrides config file)')
-    parser.add_argument('--valleys', type=int, nargs='+',
-                       help='List of valleys to calculate (overrides config file)')
-    if fixed_mode is None:
-        parser.add_argument('--mode', choices=['band', 'chern', 'symmetry'],
-                           help='Calculation mode (overrides config file)')
-    parser.add_argument('--n_g', type=int,
-                       help='Harmonic of G vectors (overrides config file)')
-    parser.add_argument('--num_chern', type=int,
-                       help='Number of k-points for Chern number calculation (overrides config file)')
-    parser.add_argument('--num_k1', type=int,
-                       help='Number of fractional-grid points along kappa1 for Chern mode (overrides config file)')
-    parser.add_argument('--num_k2', type=int,
-                       help='Number of fractional-grid points along kappa2 for Chern mode (overrides config file)')
-    parser.add_argument('--num_processes', type=int,
-                       help='Number of processes (overrides config file)')
-    parser.add_argument('--blas_threads', type=int,
-                       help='BLAS/OpenMP threads per worker (overrides config file)')
-    parser.add_argument('--parallel_impl', choices=['joblib', 'mp'],
-                       help='Parallel implementation for k-point loop (overrides config file)')
-    parser.add_argument('--parallel_backend', choices=['loky', 'multiprocessing'],
-                       help='Joblib backend when parallel_impl=joblib (overrides config file)')
-    parser.add_argument('--vec_store', choices=['memory', 'memmap'],
-                       help='Where to store eigenvectors (overrides config file)')
-    parser.add_argument('--memmap_dir', type=str,
-                       help='Optional directory for memmap outputs (overrides config file)')
-    parser.add_argument('--kpoint_chunk_id', type=int,
-                       help='0-based chunk id for job-array sharding (overrides config file)')
-    parser.add_argument('--kpoint_chunk_count', type=int,
-                       help='Total chunk count for job-array sharding (overrides config file)')
-    parser.add_argument('--developer-outputs', action='store_true',
-                       help='Write developer-only symmetry intermediate matrices under diagnostics/')
     parser.add_argument('--verbose', action='store_true',
                        help='Show detailed TAPW construction diagnostics in the terminal')
     return parser
@@ -275,45 +240,45 @@ def run_calc(args):
     mpi_rank, mpi_size = _mpi_world_rank_size()
     
     # Override config with command line arguments
-    if args.twist_index is not None:
+    if getattr(args, "twist_index", None) is not None:
         config.twist.twist_index_m = args.twist_index
-    if args.mode:
+    if getattr(args, "mode", None):
         config.compute.mode = args.mode
     if hasattr(config, "apply_workflow_section"):
         config.apply_workflow_section(config.compute.mode)
-    if args.output_dir:
+    if getattr(args, "output_dir", None):
         config.paths.output_dir = args.output_dir
         layout = getattr(config, "output_layout", None)
         if layout is not None and getattr(layout, "style", "") == "canonical_v1":
             layout.root = args.output_dir
-    if args.valleys:
+    if getattr(args, "valleys", None):
         config.compute.valleys = args.valleys
         set_compute_valley(config.compute, args.valleys[0])
-    if args.n_g is not None:
+    if getattr(args, "n_g", None) is not None:
         config.compute.n_g = args.n_g
-    if args.num_chern is not None:
+    if getattr(args, "num_chern", None) is not None:
         config.compute.num_chern = args.num_chern
-    if args.num_k1 is not None:
+    if getattr(args, "num_k1", None) is not None:
         config.compute.num_k1 = args.num_k1
-    if args.num_k2 is not None:
+    if getattr(args, "num_k2", None) is not None:
         config.compute.num_k2 = args.num_k2
-    if args.num_processes is not None:
+    if getattr(args, "num_processes", None) is not None:
         config.compute.num_processes = args.num_processes
-    if args.blas_threads is not None:
+    if getattr(args, "blas_threads", None) is not None:
         config.compute.blas_threads = args.blas_threads
-    if args.parallel_impl:
+    if getattr(args, "parallel_impl", None):
         config.compute.parallel_impl = args.parallel_impl
-    if args.parallel_backend:
+    if getattr(args, "parallel_backend", None):
         config.compute.parallel_backend = args.parallel_backend
-    if args.vec_store:
+    if getattr(args, "vec_store", None):
         config.compute.vec_store = args.vec_store
-    if args.memmap_dir:
+    if getattr(args, "memmap_dir", None):
         config.compute.memmap_dir = args.memmap_dir
-    if args.kpoint_chunk_id is not None:
+    if getattr(args, "kpoint_chunk_id", None) is not None:
         config.compute.kpoint_chunk_id = args.kpoint_chunk_id
-    if args.kpoint_chunk_count is not None:
+    if getattr(args, "kpoint_chunk_count", None) is not None:
         config.compute.kpoint_chunk_count = args.kpoint_chunk_count
-    if args.developer_outputs:
+    if getattr(args, "developer_outputs", False):
         config.symmetry_analysis.developer_outputs = True
 
     # Re-check constraints after applying CLI overrides.
@@ -437,8 +402,8 @@ def run_calc(args):
                 canonical_kpath_out = canonical_kpath_output_path(config)
                 if canonical_kpath_out is None:
                     raise ValueError(
-                        "paths.kpath_out is required for legacy TAPW band configs. "
-                        "For release-style automatic paths, set output_layout.style=canonical_v1."
+                        "Release TAPW band configs require case.output_root so KPATH.out can be placed "
+                        "under the canonical output tree."
                     )
                 config.paths.kpath_out = str(canonical_kpath_out)
             # Avoid multiple MPI ranks clobbering the same KPATH.out.
@@ -496,7 +461,7 @@ def run_calc(args):
             
             out_path = canonical_target_output_dir(config, calculator)
             if out_path is None:
-                out_path = Path(config.paths.output_dir) / resolve_qshell_dir_name(config, calculator)
+                raise RuntimeError("Release TAPW configs must use canonical case.output_root output layout.")
             out_path.mkdir(parents=True, exist_ok=True)
             reporter.stage("Outputs", "Primary files for this target are written under this run directory.")
             reporter.kv("Target output directory", out_path)
@@ -515,6 +480,13 @@ def run_calc(args):
                 )
             else:
                 calculator.run_calculation(str(out_path))
+                if config.compute.mode == "chern" and any(
+                    getattr(config, "topology", {}).get(key)
+                    for key in ("berry_curvature", "quantum_geometry", "wcc")
+                ):
+                    from . import chern_post
+
+                    chern_post.main(["--config", str(args.config), "--output-dir", str(out_path)])
                 if target is None:
                     logger.info("Completed non-TAPW direct calculation")
                 else:
@@ -547,14 +519,16 @@ def run_calc(args):
 
 def main_calc(argv=None, *, prog="tapw run", finalize: bool = True):
     """Run the TAPW calculator entry point."""
-    code = _coerce_exit_code(run_calc(build_calc_parser(prog=prog).parse_args(argv)))
+    args = build_calc_parser(prog=prog, fixed_mode="band").parse_args(argv)
+    args.mode = "band"
+    code = _coerce_exit_code(run_calc(args))
     if finalize:
         return finish_calculation_process(code)
     return code
 
 
-def main_chern(argv=None, *, prog="tapw chern", finalize: bool = True):
-    """Run TAPW Chern calculation with mode fixed to `chern`."""
+def main_topo(argv=None, *, prog="tapw topo", finalize: bool = True):
+    """Run TAPW topology calculation with mode fixed to `chern`."""
     args = build_calc_parser(prog=prog, fixed_mode="chern").parse_args(argv)
     args.mode = "chern"
     code = _coerce_exit_code(run_calc(args))
@@ -581,27 +555,18 @@ def build_main_parser():
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.add_parser("init", help="Generate TAPW configuration files")
-    subparsers.add_parser("run", help="Run TAPW band, Chern, or symmetry calculations")
+    subparsers.add_parser("run", help="Run TAPW band calculations")
     subparsers.add_parser("symm", help="Run TAPW source-symmetry analysis")
-    subparsers.add_parser("chern", help="Run TAPW Chern calculation")
+    subparsers.add_parser("topo", help="Run TAPW topology calculations")
     subparsers.add_parser("plot", help="Plot TAPW band structures")
-    subparsers.add_parser("topo", help="Post-process TAPW Chern/Wilson-loop outputs")
-    subparsers.add_parser("final", help="Finalize chunked TAPW outputs")
-    subparsers.add_parser("postprocess-memmap", help="Finalize chunked TAPW memmap outputs")
     subparsers.add_parser("orbital", help="Analyze TAPW orbital weights")
     subparsers.add_parser("fatband", help="Plot orbital-weighted bands")
     return parser
 
 
 def _main_orbital(argv):
-    if argv and argv[0] == "analyze":
-        from . import orbital_analysis_tool
-
-        return orbital_analysis_tool.main(argv[1:], prog="tapw orbital")
-    if argv and argv[0] == "plot":
-        from . import plot_orbital_tool
-
-        return plot_orbital_tool.main(argv[1:], prog="tapw fatband")
+    if argv and argv[0] in {"analyze", "plot"}:
+        raise SystemExit("Use `tapw orbital` for analysis and `tapw fatband` for plotting.")
     from . import orbital_analysis_tool
 
     return orbital_analysis_tool.main(argv, prog="tapw orbital")
@@ -609,31 +574,11 @@ def _main_orbital(argv):
 
 def main(argv=None):
     """Unified TAPW command dispatcher."""
+    argv_was_none = argv is None
     argv = list(sys.argv[1:] if argv is None else argv)
     program = Path(sys.argv[0]).name
-
-    if program == "tapw-calc":
-        return main_calc(argv, prog="tapw-calc")
-    if program == "tapw-config":
-        from . import config_generator
-
-        return config_generator.main(argv)
-    if program == "tapw-plot":
-        from . import plot_band_01
-
-        return plot_band_01.main(argv)
-    if program == "tapw-chernpost":
-        from . import chern_post
-
-        return chern_post.main(argv)
-    if program == "tapw-orbital":
-        from . import orbital_analysis_tool
-
-        return orbital_analysis_tool.main(argv)
-    if program == "tapw-plot-orbital":
-        from . import plot_orbital_tool
-
-        return plot_orbital_tool.main(argv)
+    if argv_was_none and program not in {"tapw", "cli.py"}:
+        raise SystemExit(f"Unsupported TAPW console script {program!r}; use `tapw`.")
 
     if not argv:
         parser = build_main_parser()
@@ -643,28 +588,20 @@ def main(argv=None):
         build_main_parser().parse_args(argv)
 
     command, rest = argv[0], argv[1:]
-    if command in {"init", "config"}:
+    if command == "init":
         from . import config_generator
 
         return config_generator.main(rest, prog="tapw init")
-    if command in {"run", "calc"}:
+    if command == "run":
         return main_calc(rest, prog="tapw run")
-    if command in {"symm", "symmetry"}:
-        return main_symm(rest, prog=f"tapw {command}")
-    if command == "chern":
-        return main_chern(rest, prog="tapw chern")
+    if command == "symm":
+        return main_symm(rest, prog="tapw symm")
+    if command == "topo":
+        return main_topo(rest, prog="tapw topo")
     if command == "plot":
         from . import plot_band_01
 
         return plot_band_01.main(rest, prog="tapw plot")
-    if command in {"topo", "chern-post"}:
-        from . import chern_post
-
-        return chern_post.main(rest, prog="tapw topo")
-    if command in {"final", "postprocess-memmap"}:
-        from . import postprocess_memmap
-
-        return postprocess_memmap.main(rest, prog=f"tapw {command}")
     if command == "orbital":
         return _main_orbital(rest)
     if command == "fatband":

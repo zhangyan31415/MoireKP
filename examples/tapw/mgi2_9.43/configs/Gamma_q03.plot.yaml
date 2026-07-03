@@ -1,0 +1,25 @@
+kpath_in: KPATH.in
+title: "MgI2 9.43 Gamma TAPW bands"
+ymin: -2.2
+ymax: 2.2
+output: outputs/Gamma/q03/band/band_comparison.pdf
+legend_show: true
+legend_loc: upper right
+legend_fontsize: 8
+global_plot_type: line
+marker_size: 1
+marker: o
+fermi_energy: -4.093002
+fermi_line: true
+
+bands:
+  - file: outputs/Gamma/q03/band/energies_vbm.txt
+    label: Gamma VBM
+    color: "#DE6E66"
+    linestyle: "-"
+    linewidth: 1.2
+  - file: outputs/Gamma/q03/band/energies_cbm.txt
+    label: Gamma CBM
+    color: dodgerblue
+    linestyle: "-"
+    linewidth: 1.2

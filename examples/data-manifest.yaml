@@ -26,23 +26,23 @@ external_data:
     - examples/tapw/mgi2_9.43/openmx/soc/H.npz
     - examples/tapw/mgi2_9.43/openmx/soc/S.npz
     - examples/mote2_3.89/tapw/KPATH.in
-    - examples/mote2_3.89/tapw/Q_shell_6
-    - examples/mote2_3.89/tapw/symmetry_analysis_test_k
-    - examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1
-    - examples/mote2_3.89/kp/outputs/project/mote2_3.89_K1_spinful
-    - examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1
-    - examples/mote2_3.89/kp/outputs/symm/mote2_3.89_K1_spinful
+    - examples/mote2_3.89/tapw/outputs/K1/q06/band
+    - examples/mote2_3.89/tapw/outputs/K1/q06/symmetry
+    - examples/mote2_3.89/kp/outputs/K1/q06/projection
+    - examples/mote2_3.89/kp/outputs/K1_up/q06/projection
+    - examples/mote2_3.89/kp/outputs/K1/q06/symmetry
+    - examples/mote2_3.89/kp/outputs/K1_up/q06/symmetry
     - examples/mgi2_3.89/tapw/KPATH.in
-    - examples/mgi2_3.89/tapw/Q_shell_5_symm
-    - examples/mgi2_3.89/tapw/Q_shell_7
-    - examples/mgi2_3.89/tapw/symmetry_analysis_test_gamma_q5
-    - examples/mgi2_3.89/tapw/symmetry_analysis_test_m_q7
-    - examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_Gamma_formal
-    - examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1
-    - examples/mgi2_3.89/kp/outputs/project/mgi2_3.89_M1_spinful
-    - examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_Gamma_formal
-    - examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1
-    - examples/mgi2_3.89/kp/outputs/symm/mgi2_3.89_M1_spinful
+    - examples/mgi2_3.89/tapw/outputs/Gamma/q05/band
+    - examples/mgi2_3.89/tapw/outputs/M1/q07/band
+    - examples/mgi2_3.89/tapw/outputs/Gamma/q05/symmetry
+    - examples/mgi2_3.89/tapw/outputs/M1/q07/symmetry
+    - examples/mgi2_3.89/kp/outputs/Gamma/q05/projection
+    - examples/mgi2_3.89/kp/outputs/M1/q07/projection
+    - examples/mgi2_3.89/kp/outputs/M1_spinless/q07/projection
+    - examples/mgi2_3.89/kp/outputs/Gamma/q05/symmetry
+    - examples/mgi2_3.89/kp/outputs/M1/q07/symmetry
+    - examples/mgi2_3.89/kp/outputs/M1_spinless/q07/symmetry
 clean_clone_smoke:
   runtime_class: clean-clone
   description: >-
@@ -82,22 +82,14 @@ datasets:
         kind: file
         size_bytes: 378
         sha256: 7c658ede9b6fd8d559e0d1c4baecde88baa725b606b3c11a60f627182b353cdf
-      - path: examples/tapw/mote2_9.43/configs/mote2_k_tapw.yaml
+      - path: examples/tapw/mote2_9.43/configs/K1_q03.yaml
         kind: file
-        size_bytes: 675
-        sha256: dd94fec18535363019d637ec378b28904c333cb412288a8e71e971cab9f0c3d5
-      - path: examples/tapw/mote2_9.43/configs/mote2_direct.yaml
+        size_bytes: 882
+        sha256: bf6b9ce9f0edc7161f9c4153193212c5a5d01f7ccbc0576ae0fc41740eb26671
+      - path: examples/tapw/mote2_9.43/configs/K1_q03.plot.yaml
         kind: file
-        size_bytes: 672
-        sha256: 1798a52344be482e8bbc1b77d9f0079946747b1d3eb36f2a2d0201641a90cb8a
-      - path: examples/tapw/mote2_9.43/configs/mote2_k_tapw_bands.yaml
-        kind: file
-        size_bytes: 623
-        sha256: f84fabc74fedc467a81153d03ae45966405fe148e573f597528e4a23baca1b4e
-      - path: examples/tapw/mote2_9.43/configs/mote2_direct_bands.yaml
-        kind: file
-        size_bytes: 605
-        sha256: c5b5520547f3d5eabd0fea411882de619d5e9c4dc7048d9f29554dc4fd1ff090
+        size_bytes: 529
+        sha256: e2584c9253557c4196984cf7342cc31faa61693ab977f91277658a42e2be980e
       - path: examples/tapw/mote2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
@@ -118,32 +110,18 @@ datasets:
           reason: Large OpenMX overlap matrix is not tracked in the source clone.
     commands:
       - id: tapw-k1
-        command: tapw run --config examples/tapw/mote2_9.43/configs/mote2_k_tapw.yaml
+        command: tapw run -c examples/tapw/mote2_9.43/configs/K1_q03.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/tapw/mote2_9.43/runs/mote2_k_tapw/KPATH.out
+          - path: examples/tapw/mote2_9.43/outputs/K1/q03/band/energies_vbm.txt
             status: generated
-          - path: examples/tapw/mote2_9.43/runs/mote2_k_tapw/Q_shell_3/band/band_VBM_K1_valley.txt
-            status: generated
-      - id: direct-band
-        command: tapw run --config examples/tapw/mote2_9.43/configs/mote2_direct.yaml
-        runtime_class: external-data
-        expected_outputs:
-          - path: examples/tapw/mote2_9.43/runs/mote2_direct/KPATH.out
-            status: generated
-          - path: examples/tapw/mote2_9.43/runs/mote2_direct/direct/band/band_VBM.txt
+          - path: examples/tapw/mote2_9.43/outputs/K1/q03/band/hamiltonian_k.npy
             status: generated
       - id: plot-k1-bands
-        command: tapw plot --config examples/tapw/mote2_9.43/configs/mote2_k_tapw_bands.yaml
+        command: tapw plot -c examples/tapw/mote2_9.43/configs/K1_q03.plot.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/tapw/mote2_9.43/runs/mote2_k_tapw/Q_shell_3/band/tapw_mote2_k1_bands.pdf
-            status: generated
-      - id: plot-direct-bands
-        command: tapw plot --config examples/tapw/mote2_9.43/configs/mote2_direct_bands.yaml
-        runtime_class: external-data
-        expected_outputs:
-          - path: examples/tapw/mote2_9.43/runs/mote2_direct/direct/band/tapw_mote2_direct_bands.pdf
+          - path: examples/tapw/mote2_9.43/outputs/K1/q03/band/band_comparison.pdf
             status: generated
 
   - id: tapw-mgi2-9.43-rigid-openmx
@@ -158,22 +136,22 @@ datasets:
         kind: file
         size_bytes: 378
         sha256: 7c658ede9b6fd8d559e0d1c4baecde88baa725b606b3c11a60f627182b353cdf
-      - path: examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw.yaml
+      - path: examples/tapw/mgi2_9.43/configs/M1_q03.yaml
         kind: file
-        size_bytes: 688
-        sha256: 05e6ce5222154770246654c5f7b4530dd9f9e085f263d9c2bdec3f97144b04c3
-      - path: examples/tapw/mgi2_9.43/configs/mgi2_direct.yaml
+        size_bytes: 881
+        sha256: a2a86595d0605991aa7e3ed7ce9ef3738256ffe1f7d78e5f355de30d7a7f4267
+      - path: examples/tapw/mgi2_9.43/configs/Gamma_q03.yaml
         kind: file
-        size_bytes: 670
-        sha256: 2073eab9d090379129360f99da3479e823a7ca3a5f33cedda1cab1f84578cc0f
-      - path: examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw_bands.yaml
+        size_bytes: 890
+        sha256: bad55de7f0223b6281adf53ead9e9db6275db7088980fee976f02fe528117791
+      - path: examples/tapw/mgi2_9.43/configs/M1_q03.plot.yaml
         kind: file
-        size_bytes: 801
-        sha256: f90b0a2d87a1fc760e36b01d98a20eb85ef1d3c25bc410f2ded23e15151202ad
-      - path: examples/tapw/mgi2_9.43/configs/mgi2_direct_bands.yaml
+        size_bytes: 528
+        sha256: fdaefe898564438ff91654b3de16e6c0efddb2a29942a0e7409a8505f4013831
+      - path: examples/tapw/mgi2_9.43/configs/Gamma_q03.plot.yaml
         kind: file
-        size_bytes: 599
-        sha256: 6a3bf7e53424e64611f9728086bf29e6b354a1cc34856647178cf740fac330d4
+        size_bytes: 546
+        sha256: 7541e9d55a648ea52af011e79f46e7fce7f57d8e5caa6e36439bd107356464d1
       - path: examples/tapw/mgi2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
@@ -193,33 +171,33 @@ datasets:
           marker: pending_external
           reason: Large OpenMX overlap matrix is not tracked in the source clone.
     commands:
-      - id: tapw-m1-gamma
-        command: tapw run --config examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw.yaml
+      - id: tapw-m1
+        command: tapw run -c examples/tapw/mgi2_9.43/configs/M1_q03.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/tapw/mgi2_9.43/runs/mgi2_m_gamma_tapw/KPATH.out
+          - path: examples/tapw/mgi2_9.43/outputs/M1/q03/band/energies_vbm.txt
             status: generated
-          - path: examples/tapw/mgi2_9.43/runs/mgi2_m_gamma_tapw/Q_shell_3/band/band_VBM_Gamma_valley.txt
+          - path: examples/tapw/mgi2_9.43/outputs/M1/q03/band/hamiltonian_k.npy
             status: generated
-      - id: direct-band
-        command: tapw run --config examples/tapw/mgi2_9.43/configs/mgi2_direct.yaml
+      - id: tapw-gamma
+        command: tapw run -c examples/tapw/mgi2_9.43/configs/Gamma_q03.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/KPATH.out
+          - path: examples/tapw/mgi2_9.43/outputs/Gamma/q03/band/energies_vbm.txt
             status: generated
-          - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/direct/band/band_VBM.txt
+          - path: examples/tapw/mgi2_9.43/outputs/Gamma/q03/band/hamiltonian_k.npy
             status: generated
-      - id: plot-m1-gamma-bands
-        command: tapw plot --config examples/tapw/mgi2_9.43/configs/mgi2_m_gamma_tapw_bands.yaml
+      - id: plot-m1-bands
+        command: tapw plot -c examples/tapw/mgi2_9.43/configs/M1_q03.plot.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/tapw/mgi2_9.43/runs/mgi2_m_gamma_tapw/Q_shell_3/band/tapw_mgi2_m_gamma_bands.pdf
+          - path: examples/tapw/mgi2_9.43/outputs/M1/q03/band/band_comparison.pdf
             status: generated
-      - id: plot-direct-bands
-        command: tapw plot --config examples/tapw/mgi2_9.43/configs/mgi2_direct_bands.yaml
+      - id: plot-gamma-bands
+        command: tapw plot -c examples/tapw/mgi2_9.43/configs/Gamma_q03.plot.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/tapw/mgi2_9.43/runs/mgi2_direct/direct/band/tapw_mgi2_direct_bands.pdf
+          - path: examples/tapw/mgi2_9.43/outputs/Gamma/q03/band/band_comparison.pdf
             status: generated
 
   - id: kp-mote2-3.89
@@ -232,23 +210,23 @@ datasets:
     required_files:
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         kind: file
-        size_bytes: 1475
-        sha256: 233949dfb120bed5c40ccf9054ccfb3346f94cb7a6ffb26fa5c949491a1e5b6d
+        size_bytes: 1484
+        sha256: 623aef997dfb117941b0f391184b98a34e76952afde8ee8ba6769edf08ac2abd
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         kind: file
-        size_bytes: 1476
-        sha256: 96f7ead8fdd0dc74a8144b9ca8e6f564fc52f5fe119ee2b2ba159bca852b192d
+        size_bytes: 1486
+        sha256: a5e46541b550bbb14710f3ed54a8df0d596b71a7e483a94552575fcf32987589
       - path: examples/mote2_3.89/tapw/KPATH.in
         kind: file
         external:
           marker: pending_external
           reason: K-path input used by KP model configs is not tracked in the source clone.
-      - path: examples/mote2_3.89/tapw/Q_shell_6
+      - path: examples/mote2_3.89/tapw/outputs/K1/q06/band
         kind: directory
         external:
           marker: pending_external
           reason: TAPW Q-shell arrays and band projections are not tracked in the source clone.
-      - path: examples/mote2_3.89/tapw/symmetry_analysis_test_k
+      - path: examples/mote2_3.89/tapw/outputs/K1/q06/symmetry
         kind: directory
         external:
           marker: pending_external
@@ -275,7 +253,7 @@ datasets:
           reason: Precomputed spinful KP symmetry output is not tracked in the source clone.
     commands:
       - id: inspect-k1
-        command: kp inspect --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+        command: kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1/q06/inspect/spectrum.txt
@@ -283,7 +261,7 @@ datasets:
           - path: examples/mote2_3.89/kp/outputs/K1/q06/inspect/scatter.pdf
             status: generated
       - id: inspect-k1-up
-        command: kp inspect --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+        command: kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1_up/q06/inspect/spectrum.txt
@@ -291,40 +269,40 @@ datasets:
           - path: examples/mote2_3.89/kp/outputs/K1_up/q06/inspect/scatter.pdf
             status: generated
       - id: project-k1
-        command: kp project --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+        command: kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1/q06/projection/heff.npy
             status: generated
       - id: project-k1-up
-        command: kp project --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+        command: kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1_up/q06/projection/heff.npy
             status: generated
       - id: symm-k1
-        command: kp symm --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+        command: kp symm -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1/q06/symmetry/summary.md
             status: generated
       - id: symm-k1-up
-        command: kp symm --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+        command: kp symm -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mote2_3.89/kp/outputs/K1_up/q06/symmetry/summary.md
             status: generated
       - id: model-k1
-        command: kp model --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+        command: kp model -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/mote2_3.89/kp/outputs/K1/q06/model/model.json
+          - path: examples/mote2_3.89/kp/outputs/K1/q06/model/model_data.npz
             status: generated
       - id: model-k1-up
-        command: kp model --config examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
+        command: kp model -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/mote2_3.89/kp/outputs/K1_up/q06/model/model.json
+          - path: examples/mote2_3.89/kp/outputs/K1_up/q06/model/model_data.npz
             status: generated
 
   - id: kp-mgi2-3.89
@@ -337,37 +315,37 @@ datasets:
     required_files:
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         kind: file
-        size_bytes: 1885
-        sha256: abf9b2f0da51aee7ecf1f239e1fdab828d026a8bd926882bfed1039732ff07ed
+        size_bytes: 1871
+        sha256: f9f99f69d875911051e23676886d11303ebc56015f1b4867b22bbcdc67f42cf1
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         kind: file
-        size_bytes: 1496
-        sha256: 65fc4ce4f212ed3edab0459359e6b4c6068d4c6a3749261e0897d43f2c86612b
+        size_bytes: 1503
+        sha256: 474ebee15c1a3345de3a7346715b794b2af9bd55379883f3ce618ed19318fc62
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         kind: file
-        size_bytes: 1543
-        sha256: 28fd45b2e12ae11902d5aa0cbda1c052f04632212624ea689465c0b5321f6360
+        size_bytes: 1550
+        sha256: 6811c448dbd88d4d71a9e4476c5ecda9b629dc9ed8eb8dcb0b6c348defd8708e
       - path: examples/mgi2_3.89/tapw/KPATH.in
         kind: file
         external:
           marker: pending_external
           reason: K-path input used by KP model configs is not tracked in the source clone.
-      - path: examples/mgi2_3.89/tapw/Q_shell_5_symm
+      - path: examples/mgi2_3.89/tapw/outputs/Gamma/q05/band
         kind: directory
         external:
           marker: pending_external
           reason: Gamma-valley TAPW Q-shell arrays and band projections are not tracked in the source clone.
-      - path: examples/mgi2_3.89/tapw/Q_shell_7
+      - path: examples/mgi2_3.89/tapw/outputs/M1/q07/band
         kind: directory
         external:
           marker: pending_external
           reason: M-valley TAPW Q-shell arrays and band projections are not tracked in the source clone.
-      - path: examples/mgi2_3.89/tapw/symmetry_analysis_test_gamma_q5
+      - path: examples/mgi2_3.89/tapw/outputs/Gamma/q05/symmetry
         kind: directory
         external:
           marker: pending_external
           reason: Gamma-valley TAPW symmetry-analysis export consumed by kp symm is not tracked.
-      - path: examples/mgi2_3.89/tapw/symmetry_analysis_test_m_q7
+      - path: examples/mgi2_3.89/tapw/outputs/M1/q07/symmetry
         kind: directory
         external:
           marker: pending_external
@@ -404,7 +382,7 @@ datasets:
           reason: Precomputed spinless M1 KP symmetry output is not tracked in the source clone.
     commands:
       - id: inspect-gamma
-        command: kp inspect --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+        command: kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/inspect/spectrum.txt
@@ -412,7 +390,7 @@ datasets:
           - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/inspect/scatter.pdf
             status: generated
       - id: inspect-m1
-        command: kp inspect --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+        command: kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1/q07/inspect/spectrum.txt
@@ -420,7 +398,7 @@ datasets:
           - path: examples/mgi2_3.89/kp/outputs/M1/q07/inspect/scatter.pdf
             status: generated
       - id: inspect-m1-spinless
-        command: kp inspect --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+        command: kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/inspect/spectrum.txt
@@ -428,56 +406,56 @@ datasets:
           - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/inspect/scatter.pdf
             status: generated
       - id: project-gamma
-        command: kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+        command: kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/projection/heff.npy
             status: generated
       - id: project-m1
-        command: kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+        command: kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1/q07/projection/heff.npy
             status: generated
       - id: project-m1-spinless
-        command: kp project --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+        command: kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/projection/heff.npy
             status: generated
       - id: symm-gamma
-        command: kp symm --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+        command: kp symm -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/symmetry/summary.md
             status: generated
       - id: symm-m1
-        command: kp symm --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+        command: kp symm -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1/q07/symmetry/summary.md
             status: generated
       - id: symm-m1-spinless
-        command: kp symm --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+        command: kp symm -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         runtime_class: external-data
         expected_outputs:
           - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/symmetry/summary.md
             status: generated
       - id: model-gamma
-        command: kp model --config examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
+        command: kp model -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/model/model.json
+          - path: examples/mgi2_3.89/kp/outputs/Gamma/q05/model/model_data.npz
             status: generated
       - id: model-m1
-        command: kp model --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
+        command: kp model -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/mgi2_3.89/kp/outputs/M1/q07/model/model.json
+          - path: examples/mgi2_3.89/kp/outputs/M1/q07/model/model_data.npz
             status: generated
       - id: model-m1-spinless
-        command: kp model --config examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+        command: kp model -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         runtime_class: external-data
         expected_outputs:
-          - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/model/model.json
+          - path: examples/mgi2_3.89/kp/outputs/M1_spinless/q07/model/model_data.npz
             status: generated

@@ -99,10 +99,12 @@ def export_all_standalone_models(
     """Export or inventory all standalone-capable model outputs under examples_root."""
     examples = Path(examples_root)
     out_root = Path(output_root)
-    candidates = sorted(path for path in examples.glob("**/kp/outputs/model/*") if path.is_dir())
+    candidates = sorted(path for path in examples.glob("**/kp/outputs/*/*/model") if path.is_dir())
     report: dict[str, list[dict[str, Any]]] = {"exportable": [], "blocked": [], "exported": []}
     for model_output in candidates:
-        out_dir = out_root / f"{model_output.name}_numpy"
+        profile = model_output.parent.parent.name
+        q_shell = model_output.parent.name
+        out_dir = out_root / f"{profile}_{q_shell}_numpy"
         try:
             if dry_run:
                 _build_standalone_export(model_output.resolve(), include_debug=debug_files)
@@ -307,20 +309,23 @@ def _infer_model_config_path(model_output: Path) -> Path:
             if candidate.exists():
                 return candidate.resolve()
 
-    case_id = model_output.name
-    if model_output.parent.name == "model" and model_output.parent.parent.name == "outputs":
-        kp_root = model_output.parent.parent.parent
-        candidate = kp_root / "configs" / "model" / f"{case_id}.yaml"
-        if candidate.exists():
-            return candidate.resolve()
+    if model_output.name == "model" and model_output.parent.parent.parent.name == "outputs":
+        q_shell = model_output.parent.name
+        profile = model_output.parent.parent.name
+        kp_root = model_output.parent.parent.parent.parent
+        for filename in (f"{profile}_{q_shell}.yaml", f"{profile}.yaml"):
+            candidate = kp_root / "configs" / filename
+            if candidate.exists():
+                return candidate.resolve()
 
     nearby = _find_model_config_near_output(model_output)
     if nearby is not None:
         return nearby
 
     raise FileNotFoundError(
-        "Unable to infer model config path. Expected model_output_dir like outputs/model/<case> "
-        "or a model YAML next to the output directory with output.dir pointing at it."
+        "Unable to infer model config path. Expected model_output_dir like "
+        "outputs/<profile>/<q_shell>/model or a model YAML next to the output directory "
+        "with output.dir pointing at it."
     )
 
 
@@ -1816,7 +1821,7 @@ def _render_validation_section(model: Mapping[str, Any]) -> str:
     if heff_shape is None and validation.get("reference_heff_eig_available"):
         heff_text = "`reference_heff_eig` is present; shape was not recorded."
     elif heff_shape is not None:
-        heff_text = f"`reference_heff_eig` is present with shape `{heff_shape}`. It is compact validation data, not the raw `heff_list.npy`."
+        heff_text = f"`reference_heff_eig` is present with shape `{heff_shape}`. It is compact validation data."
     else:
         heff_text = "`reference_heff_eig` is not included."
     return f"""Reference source: {reference_note}.

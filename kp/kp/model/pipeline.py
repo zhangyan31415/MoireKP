@@ -1104,15 +1104,13 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         raise ValueError("validation section must be a mapping when provided")
     raw["validation"] = dict(validation)
 
-    source_config = _resolve_path(raw.get("source_config"), base)
-    if source_config is None:
-        if all(isinstance(raw.get(section), Mapping) for section in ("material", "project", "plot")):
-            source_config = cfg_path
-            source_raw = dict(raw)
-        else:
-            raise ValueError("Configured model YAML requires source_config or inline material/project/plot sections")
+    if raw.get("source_config") not in (None, ""):
+        raise ValueError("source_config is not supported in release-only KP configs; use one case YAML.")
+    if all(isinstance(raw.get(section), Mapping) for section in ("material", "project", "plot")):
+        source_config = cfg_path
+        source_raw = dict(raw)
     else:
-        source_raw = normalize_case_config(_load_yaml(source_config), config_path=source_config)
+        raise ValueError("Configured model YAML requires inline material/project/plot sections")
     source_base = source_config.parent
     material = source_raw.get("material", {})
     project = source_raw.get("project", {})
@@ -1133,12 +1131,10 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         project_out = _resolve_path(project.get("out_dir"), source_base)
         if project_out is None:
             raise ValueError("heff_file is missing and source_config project.out_dir is unavailable")
-        canonical_case = isinstance(raw.get("case"), Mapping) and bool(raw["case"].get("profile")) and bool(raw["case"].get("q_shell"))
-        heff_file = project_out / ("heff.npy" if canonical_case else "heff_list.npy")
+        heff_file = project_out / "heff.npy"
     heff_eig_file = _resolve_path(_get_path_value(raw, "heff_eig_file"), base)
-    if heff_eig_file is None:
-        candidate = heff_file.with_name("heff_eig.npy")
-        heff_eig_file = candidate if candidate.exists() else None
+    if heff_eig_file is not None:
+        raise ValueError("heff_eig_file is not supported in release-only KP configs; use projection/heff.npy.")
 
     kpoints_file = _resolve_path(_get_path_value(raw, "kpoints_file"), base)
 
@@ -9487,28 +9483,27 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             title=_band_plot_title(model_config),
             overlap_weights=overlap_weights,
         )
-        if not canonical_output:
-            all_band_config = _all_band_plot_config(model_config.band_plot_config)
-            all_band_plot_comparison = compare_bands_for_plot(
-                eigvals_array,
-                heff_selected,
-                band_slice=None,
-                plot_config=all_band_config,
-            )
-            if diagnostics_dir is not None:
-                with (diagnostics_dir / "comparison_all_bands.json").open("w", encoding="utf-8") as handle:
-                    json.dump(all_band_plot_comparison, handle, indent=2)
-            all_band_plot_path = save_band_comparison_plot(
-                eigvals_array,
-                heff_selected,
-                output_dir / "band_comparison_all.pdf",
-                band_slice=None,
-                plot_config=all_band_config,
-                x=x_values,
-                x_ticks=x_ticks,
-                x_ticklabels=x_ticklabels,
-                title=f"{_band_plot_title(model_config)} (all bands)",
-            )
+        all_band_config = _all_band_plot_config(model_config.band_plot_config)
+        all_band_plot_comparison = compare_bands_for_plot(
+            eigvals_array,
+            heff_selected,
+            band_slice=None,
+            plot_config=all_band_config,
+        )
+        if diagnostics_dir is not None:
+            with (diagnostics_dir / "comparison_all_bands.json").open("w", encoding="utf-8") as handle:
+                json.dump(all_band_plot_comparison, handle, indent=2)
+        all_band_plot_path = save_band_comparison_plot(
+            eigvals_array,
+            heff_selected,
+            output_dir / "band_comparison_all.pdf",
+            band_slice=None,
+            plot_config=all_band_config,
+            x=x_values,
+            x_ticks=x_ticks,
+            x_ticklabels=x_ticklabels,
+            title=f"{_band_plot_title(model_config)} (all bands)",
+        )
     results["configured_model"] = model_config
     results["moire_config"] = moire_config
     results["comparison"] = comparison

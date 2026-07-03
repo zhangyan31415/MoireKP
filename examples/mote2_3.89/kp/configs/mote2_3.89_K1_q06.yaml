@@ -11,10 +11,10 @@ material:
   num_layer_list: [1, 1]
   orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
   efermi: -4.1
-  hamk_file: ../../tapw/Q_shell_6/band/hamk_K1_valley.npy
-  qset1_file: ../../tapw/Q_shell_6/g_vec_list_6_K1_1layer.npy
-  qset2_file: ../../tapw/Q_shell_6/g_vec_list_6_K1_2layer.npy
-  band_file: ../../tapw/Q_shell_6/band/band_VBM_K1_valley.txt
+  hamk_file: ../../tapw/outputs/K1/q06/band/hamiltonian_k.npy
+  qset1_file: ../../tapw/outputs/K1/q06/band/g_vectors_group1.npy
+  qset2_file: ../../tapw/outputs/K1/q06/band/g_vectors_group2.npy
+  band_file: ../../tapw/outputs/K1/q06/band/energies_vbm.txt
 
 plot:
   mode: K1
@@ -37,10 +37,10 @@ project:
     - [44, 45]
   gauge: auto
   downfold_method: fixed_schur
-  e_ref: -4.575
+  e_ref: -4.65
 
 symm:
-  tapw_symmetry_dir: ../../tapw/symmetry_analysis_test_k
+  tapw_symmetry_dir: ../../tapw/outputs/K1/q06/symmetry
   tolerance: 2.0e-2
 
 kpath:

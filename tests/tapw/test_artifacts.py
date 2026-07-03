@@ -1,6 +1,5 @@
 from types import SimpleNamespace
 
-import json
 import numpy as np
 
 from tapw.artifacts import (
@@ -162,11 +161,7 @@ def test_band_calculation_writes_canonical_manifest_and_filenames(tmp_path):
     assert (band_dir / "g_vectors_group2.npy").is_file()
     assert (band_dir / "kpoints.npy").is_file()
 
-    manifest = json.loads((band_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema"] == "tapw_band_outputs/v1"
-    assert manifest["files"]["hamiltonian_k"] == "hamiltonian_k.npy"
-    assert manifest["files"]["g_vectors_group1"] == "g_vectors_group1.npy"
-    assert manifest["files"]["energies_vbm"] == "energies_vbm.txt"
+    assert not (band_dir / "manifest.json").exists()
 
 
 def test_chern_calculation_writes_canonical_topology_files(tmp_path):
@@ -206,12 +201,6 @@ def test_chern_calculation_writes_canonical_topology_files(tmp_path):
     calc.calculate_chern(str(target_dir))
 
     topology_dir = target_dir / "topology" / "grid3x3_b1_m0p5_0p5_b2_m0p5_0p5"
-    assert (topology_dir / "berry_flux_band_m1.npy").is_file()
-    assert (topology_dir / "berry_flux_band_m2.npy").is_file()
-    assert (topology_dir / "berry_flux_bands_m1_m2.npy").is_file()
     assert (topology_dir / "chern_summary.json").is_file()
-    manifest = json.loads((topology_dir / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["schema"] == "tapw_topology_grid/v1"
-    assert manifest["grid_order"] == "ij"
-    assert manifest["files"]["chern_summary"] == "chern_summary.json"
-    assert "berry_flux_bands_m1_m2" in manifest["files"]
+    assert not list(topology_dir.glob("berry_flux_*.npy"))
+    assert not (topology_dir / "manifest.json").exists()

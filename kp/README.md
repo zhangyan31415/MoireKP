@@ -34,10 +34,9 @@ These commands require external TAPW arrays listed in `examples/data-manifest.ya
 See `examples/README.md` for the full input/output workflow and the meaning of
 `nlow_state_list`.
 
-Longer compatibility forms remain supported: `kp plot` is equivalent to
-`kp show`, `kp project` is equivalent to `kp proj`, and `kp model --config ...`
-is equivalent to `kp fit -c ...`. `kp export outputs/model/case exported/case`
-remains valid for direct export from a generated model output directory.
+The release CLI exposes only `kp inspect`, `kp project`, `kp symm`, and
+`kp model`. `kp model` writes the standalone evaluator directly into the
+canonical `model/` output directory.
 
 ## Package Layout
 

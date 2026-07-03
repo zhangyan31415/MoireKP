@@ -36,12 +36,12 @@
 ### Task 3: MgI2 Gamma Example
 
 **Files:**
-- Create: `examples/mgi2_3.89/kp/configs/model/mgi2_3.89_Gamma.yaml`
+- Create: `examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml`
 
 **Steps:**
 1. Encode the current notebook Gamma settings: formal project output, 2+2 orbitals, Gamma harmonics, `C3z/TR/C2` symmetry map, fit indices `[0, 40]`.
 2. Run the configured pipeline against the formal `(61,124,124)` heff.
-3. Save model eigenvalues and comparison metrics under `outputs/model/mgi2_3.89_Gamma_formal`.
+3. Save model eigenvalues and comparison metrics under `outputs/Gamma/q05/model`.
 
 ### Task 4: Verification And Commit
 

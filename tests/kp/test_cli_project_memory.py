@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import copy
 import json
 import sys
 from pathlib import Path
@@ -29,6 +30,12 @@ class _GuardedHamk:
         if key == 2:
             raise AssertionError("project read an unselected k-point")
         return np.eye(4, dtype=np.complex128) * float(key + 1)
+
+
+def _canonical_case_cfg(cfg: dict) -> dict:
+    out = copy.deepcopy(cfg)
+    out.setdefault("case", {"profile": "K1", "q_shell": "q06", "output_root": "outputs"})
+    return out
 
 
 def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, tmp_path: Path) -> None:
@@ -83,13 +90,14 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
 
     cli.cmd_project_from_config(str(cfg_path))
 
     assert guarded.accessed == [0, 1]
     assert len(projected_blocks) == 1
-    assert (tmp_path / "project" / "k_indices.npy").exists()
+    wavefunctions = np.load(tmp_path / "project" / "wavefunctions.npz")
+    np.testing.assert_array_equal(wavefunctions["k_indices"], np.array([1], dtype=int))
 
 
 def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path) -> None:
@@ -157,7 +165,7 @@ def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path)
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -215,7 +223,7 @@ def test_plot_spin_down_uses_single_spin_block_indexing(monkeypatch, tmp_path: P
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
 
     cli.cmd_plot_from_config(str(cfg_path))
 
@@ -269,12 +277,14 @@ def test_project_full_path_does_not_emit_k_indices_selection_file(monkeypatch, t
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
 
     cli.cmd_project_from_config(str(cfg_path))
 
-    assert np.load(tmp_path / "project" / "heff_eig.npy").shape == (2, 2)
+    assert np.loadtxt(tmp_path / "project" / "eigvals.txt").shape == (2, 2)
     assert not (tmp_path / "project" / "k_indices.npy").exists()
+    wavefunctions = np.load(tmp_path / "project" / "wavefunctions.npz")
+    np.testing.assert_array_equal(wavefunctions["k_indices"], np.array([0, 1], dtype=int))
 
 
 def test_parallel_project_uses_worker_initializer_without_hamk_payload(monkeypatch, tmp_path: Path) -> None:
@@ -371,7 +381,7 @@ def test_parallel_project_uses_worker_initializer_without_hamk_payload(monkeypat
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -384,7 +394,7 @@ def test_parallel_project_uses_worker_initializer_without_hamk_payload(monkeypat
     assert seen["progress_leave"] is True
     assert seen["progress_updates"] == [2, 2, 2, 2, 1]
     assert seen["progress_closed"] is True
-    assert np.load(tmp_path / "project" / "heff_eig.npy")[:, 0].tolist() == [
+    assert np.loadtxt(tmp_path / "project" / "eigvals.txt")[:, 0].tolist() == [
         float(i + 1) for i in range(9)
     ]
 
@@ -503,20 +513,20 @@ def test_project_passes_downfold_diagnostic_options_when_supported(monkeypatch, 
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
     cli.cmd_project_from_config(str(cfg_path))
 
     cfg["project"]["compute_pole_diagnostics"] = True
     cfg["project"]["compute_condition_number"] = True
     cfg["project"]["out_dir"] = "project-enabled"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
     cli.cmd_project_from_config(str(cfg_path))
 
     cfg["project"]["compute_pole_diagnostics"] = False
     cfg["project"]["compute_condition_number"] = False
     cfg["project"]["fail_on_near_pole"] = True
     cfg["project"]["out_dir"] = "project-fail-on-near-pole"
-    cfg_path.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
     cli.cmd_project_from_config(str(cfg_path))
 
     assert seen == [(False, False, False), (True, True, False), (False, False, True)]

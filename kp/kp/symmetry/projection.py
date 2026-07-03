@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Mapping, Sequence
@@ -2685,6 +2686,7 @@ def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, An
                 packed_operation = dict(operation)
                 packed_operation["matrix_file"] = "representations.npz"
                 packed_operation["matrix_array_key"] = name
+                packed_operation.pop("developer_outputs", None)
                 packed_operations.append(packed_operation)
         residuals = operation.get("residuals", {})
         unitarity = ""
@@ -2723,6 +2725,8 @@ def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, An
     for path in output_dir.iterdir():
         if path.is_file() and path.name not in keep:
             path.unlink()
+        elif path.is_dir() and path.name == "diagnostics":
+            shutil.rmtree(path)
 
 
 def _exactify_and_write_projection_summary(

@@ -11,10 +11,10 @@ material:
   num_layer_list: [1, 1]
   orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2
   efermi: -4.168612
-  hamk_file: ../../tapw/Q_shell_5_symm/band/hamk_Gamma_valley.npy
-  qset1_file: ../../tapw/Q_shell_5_symm/g_vec_list_5_Gamma_1layer.npy
-  qset2_file: ../../tapw/Q_shell_5_symm/g_vec_list_5_Gamma_2layer.npy
-  band_file: ../../tapw/Q_shell_5_symm/band/band_VBM_Gamma_valley.txt
+  hamk_file: ../../tapw/outputs/Gamma/q05/band/hamiltonian_k.npy
+  qset1_file: ../../tapw/outputs/Gamma/q05/band/g_vectors_group1.npy
+  qset2_file: ../../tapw/outputs/Gamma/q05/band/g_vectors_group2.npy
+  band_file: ../../tapw/outputs/Gamma/q05/band/energies_vbm.txt
 
 plot:
   mode: gamma
@@ -28,7 +28,7 @@ plot:
   report_above: 0
   report_components: 12
   q_window_bands: 10
-  ylim: [-1.0, 1.0]
+  ylim: [-2.0, 2.0]
   title: "MgI2 Gamma q05: VBM band vs Q"
 
 project:
@@ -40,7 +40,7 @@ project:
   e_ref: -5.75
 
 symm:
-  tapw_symmetry_dir: ../../tapw/symmetry_analysis_test_gamma_q5
+  tapw_symmetry_dir: ../../tapw/outputs/Gamma/q05/symmetry
   tolerance: 1.0e-2
 
 kpath:

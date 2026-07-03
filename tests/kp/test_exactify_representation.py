@@ -1831,20 +1831,9 @@ def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path
     np.save(tmp_path / "q1.npy", q)
     np.save(tmp_path / "q2.npy", q)
     np.save(tmp_path / "kpoints.npy", q)
-    out_dir = tmp_path / "project"
-    out_dir.mkdir()
-    np.save(out_dir / "heff_list.npy", heff)
-    np.save(out_dir / "heff_eig.npy", np.linalg.eigvalsh(heff))
-    (tmp_path / "source.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "material": {"qset1_file": "q1.npy", "qset2_file": "q2.npy"},
-                "plot": {},
-                "project": {"out_dir": "project"},
-            }
-        ),
-        encoding="utf-8",
-    )
+    out_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    out_dir.mkdir(parents=True)
+    np.save(out_dir / "heff.npy", heff)
     symm_dir = tmp_path / "symm"
     symm_dir.mkdir()
     np.save(symm_dir / "C3_low_raw.npy", np.eye(2, dtype=complex))
@@ -1877,7 +1866,10 @@ def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path
     cfg_path.write_text(
         yaml.safe_dump(
             {
-                "source_config": "source.yaml",
+                "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
+                "material": {"qset1_file": "q1.npy", "qset2_file": "q2.npy"},
+                "plot": {},
+                "project": {},
                 "valley_model": {
                     "lattice": "hexagonal",
                     "system": "bilayer",

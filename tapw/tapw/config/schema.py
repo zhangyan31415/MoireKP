@@ -49,6 +49,28 @@ def _copy_section(value) -> dict[str, Any]:
     return dict(value or {})
 
 
+def _reject_keys(section: dict[str, Any], keys: set[str], *, section_name: str) -> None:
+    present = sorted(keys & set(section))
+    if present:
+        raise ValueError(f"{section_name} contains removed release parameter(s): {present}")
+
+
+def _section_enabled(section: dict[str, Any]) -> bool:
+    return bool(section) and bool(section.get("enable", False))
+
+
+def _require_release_workflow_fields(section: dict[str, Any], *, section_name: str) -> None:
+    if not section:
+        return
+    if "enable" not in section:
+        raise ValueError(f"{section_name}.enable is required in release-only TAPW configs.")
+    if not _section_enabled(section):
+        return
+    missing = [key for key in ("valley", "q_shell") if section.get(key) in (None, "")]
+    if missing:
+        raise ValueError(f"{section_name} enabled workflow requires field(s): {missing}")
+
+
 def _apply_release_section_to_mapping(target: dict[str, Any], section: dict[str, Any], *, workflow: str) -> None:
     """Map release-facing workflow fields onto the internal ComputeConfig names."""
     if not section:
@@ -101,12 +123,11 @@ def _band_type_from_release_sector(sector) -> str:
 
 
 def _primary_topology_band_request(topology: dict[str, Any]) -> tuple[str, Optional[list[int]]]:
-    """Return the first requested topology bandset as legacy `(band_type, indices)`."""
-    normalized = _normalize_topology_config(topology)
-    bands = normalized.get("bands", {}) or {}
+    """Return the first requested topology bandset as internal `(band_type, indices)`."""
+    bands = dict(topology.get("bands", {}) or {})
     task_refs: list[Any] = []
     for key in ("berry_curvature", "quantum_geometry", "wcc"):
-        value = normalized.get(key)
+        value = topology.get(key)
         if value is None:
             continue
         if isinstance(value, dict):
@@ -129,20 +150,18 @@ def _primary_topology_band_request(topology: dict[str, Any]) -> tuple[str, Optio
         raise ValueError("topology observable entries must be band-set names or mappings.")
     if "indices" not in spec:
         raise ValueError("topology bandset requires indices.")
-    band_type = str(spec.get("band_type", "")).upper() or _band_type_from_release_sector(spec.get("sector", ""))
+    if "band_type" in spec:
+        raise ValueError("topology bandsets use sector: valence/conduction; band_type is not supported.")
+    band_type = _band_type_from_release_sector(spec.get("sector", ""))
     return band_type, [int(value) for value in spec["indices"]]
 
 
-def _normalize_topology_config(raw_topology: dict[str, Any]) -> dict[str, Any]:
-    """Accept both legacy topology keys and the release-facing bandsets/observables shape."""
+def _copy_release_topology_config(raw_topology: dict[str, Any]) -> dict[str, Any]:
+    """Return release-facing topology config and reject removed compatibility shapes."""
     topology = dict(raw_topology or {})
-    if "bandsets" in topology and "bands" not in topology:
-        topology["bands"] = dict(topology.get("bandsets") or {})
-    observables = topology.get("observables") or {}
-    if isinstance(observables, dict):
-        for key in ("berry_curvature", "quantum_geometry", "wcc"):
-            if key in observables and key not in topology:
-                topology[key] = observables[key]
+    removed = {"bandsets", "observables"} & set(topology)
+    if removed:
+        raise ValueError(f"topology contains removed release parameter(s): {sorted(removed)}")
     return topology
 
 
@@ -563,21 +582,55 @@ class Config:
             config_dict = yaml.safe_load(f) or {}
         if 'slab' in config_dict:
             raise ValueError("The release TAPW package does not support slab configuration.")
+        if config_dict.get("output_layout") is not None:
+            raise ValueError("output_layout is not supported in release-only TAPW configs; use case.output_root.")
+        if config_dict.get("compute") not in (None, {}):
+            raise ValueError("Top-level compute is not supported in release-only TAPW configs; use bands/symmetry/topology.")
         case_raw = _copy_section(config_dict.get("case"))
         bands_raw = _copy_section(config_dict.get("bands"))
         symmetry_raw = _copy_section(config_dict.get("symmetry"))
         field_raw = _copy_section(config_dict.get("field"))
-        topology_config = _normalize_topology_config(config_dict.get("topology", {}) or {})
-        release_sections_present = bool(case_raw or bands_raw or symmetry_raw)
+        topology_config = _copy_release_topology_config(config_dict.get("topology", {}) or {})
+        release_sections_present = bool(case_raw or bands_raw or symmetry_raw or topology_config)
+        if not release_sections_present:
+            raise ValueError("Release TAPW configs require case plus at least one of bands, symmetry, or topology.")
+        if case_raw.get("output_root") in (None, ""):
+            raise ValueError("case.output_root is required in release-only TAPW configs.")
+        for section_name, section in (
+            ("bands", bands_raw),
+            ("symmetry", symmetry_raw),
+            ("topology", topology_config),
+        ):
+            _require_release_workflow_fields(section, section_name=section_name)
+        if not any(_section_enabled(section) for section in (bands_raw, symmetry_raw, topology_config)):
+            raise ValueError("Release TAPW configs require at least one enabled workflow section.")
+        forbidden_user_keys = {"band_type", "eigensolver", "orthogonal_basis", "num_layers"}
+        _reject_keys(bands_raw, forbidden_user_keys, section_name="bands")
+        _reject_keys(symmetry_raw, forbidden_user_keys, section_name="symmetry")
+        _reject_keys(topology_config, forbidden_user_keys, section_name="topology")
+        mesh = topology_config.get("mesh")
+        if isinstance(mesh, dict):
+            _reject_keys(mesh, forbidden_user_keys, section_name="topology.mesh")
+        for bandset_name, bandset in dict(topology_config.get("bands", {}) or {}).items():
+            if isinstance(bandset, dict):
+                _reject_keys(dict(bandset), forbidden_user_keys, section_name=f"topology.bands.{bandset_name}")
 
-        compute_raw = dict(config_dict.get('compute', {}) or {})
+        compute_raw: dict[str, Any] = {}
         if release_sections_present:
-            compute_raw.setdefault("mode", "band")
+            if _section_enabled(bands_raw):
+                compute_raw.setdefault("mode", "band")
+            elif _section_enabled(topology_config):
+                compute_raw.setdefault("mode", "chern")
+            elif _section_enabled(symmetry_raw):
+                compute_raw.setdefault("mode", "symmetry")
+            else:
+                compute_raw.setdefault("mode", "band")
             compute_raw.setdefault("TAPW", True)
-            _apply_release_section_to_mapping(compute_raw, bands_raw, workflow="band")
-            if not bands_raw:
-                fallback_section = topology_config or symmetry_raw
-                fallback_workflow = "chern" if topology_config else "symmetry"
+            if _section_enabled(bands_raw):
+                _apply_release_section_to_mapping(compute_raw, bands_raw, workflow="band")
+            if "n_g" not in compute_raw:
+                fallback_section = topology_config if _section_enabled(topology_config) else symmetry_raw
+                fallback_workflow = "chern" if _section_enabled(topology_config) else "symmetry"
                 _apply_release_section_to_mapping(compute_raw, fallback_section, workflow=fallback_workflow)
             if "zero_potential_layers" in field_raw:
                 compute_raw["zero_potential_layers"] = field_raw["zero_potential_layers"]
@@ -596,16 +649,20 @@ class Config:
             )
         if compute_raw.get('TAPW', True) and 'n_g' not in compute_raw:
             raise ValueError(
-                "TAPW configurations require compute.n_g. "
-                "Automatic n_g inference from twist.twist_angle is not supported by Config.from_yaml."
+                "Enabled TAPW workflows require q_shell. "
+                "Automatic q-shell inference from twist.twist_angle is not supported."
             )
 
         twist_raw = dict(config_dict.get('twist', {}) or {})
+        if "num_layers" in twist_raw:
+            raise ValueError("twist.num_layers is not supported in release-only TAPW configs; use twist.twist_layer.")
         if "num_layers" not in twist_raw and "twist_layer" in twist_raw:
             twist_raw["num_layers"] = int(sum(int(value) for value in twist_raw["twist_layer"]))
         twist_config = TwistConfig(**twist_raw)
 
         paths_raw = dict(config_dict.get('paths', {}) or {})
+        if paths_raw.get("kpath_out") not in (None, ""):
+            raise ValueError("paths.kpath_out is not supported in release-only TAPW configs; it is inferred from case/output.")
         if "output_dir" not in paths_raw and case_raw.get("output_root") not in (None, ""):
             paths_raw["output_dir"] = case_raw["output_root"]
         paths_config = PathConfig(**paths_raw)
@@ -624,16 +681,11 @@ class Config:
                 if key in symmetry_raw:
                     symmetry_analysis_raw[key] = symmetry_raw[key]
         symmetry_analysis_config = SymmetryAnalysisConfig(**symmetry_analysis_raw)
-        output_layout_config = None
-        if config_dict.get("output_layout") is not None:
-            output_layout_config = OutputLayoutConfig(**config_dict.get("output_layout", {}))
-            output_layout_config.normalize(config_dir)
-        elif case_raw.get("output_root") not in (None, ""):
-            output_layout_config = OutputLayoutConfig(
-                style="canonical_v1",
-                root=str(paths_config.output_dir),
-                q_shell=canonical_qshell_name(compute_config.n_g),
-            )
+        output_layout_config = OutputLayoutConfig(
+            style="canonical_v1",
+            root=str(paths_config.output_dir),
+            q_shell=canonical_qshell_name(compute_config.n_g),
+        )
         # Use default cluster config if not provided
         cluster_config = ClusterConfig(**config_dict.get('cluster', {})) if 'cluster' in config_dict else ClusterConfig()
         

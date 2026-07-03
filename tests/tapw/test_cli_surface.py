@@ -14,16 +14,18 @@ def test_unified_tapw_help_lists_subcommands(capsys):
     assert "symm" in out
     assert "plot" in out
     assert "topo" in out
-    assert "final" in out
-    assert "postprocess-memmap" in out
     assert "orbital" in out
     assert "fatband" in out
+    assert "chern" not in out
+    assert "final" not in out
+    assert "postprocess-memmap" not in out
     assert "chern-post" not in out
+    assert "\n    calc" not in out
+    assert "\n    symmetry" not in out
 
 
 def test_unified_tapw_dispatches_to_tool_mains(monkeypatch):
     from tapw import cli
-    from tapw import chern_post
     from tapw import config_generator
     from tapw import plot_band_01
 
@@ -31,16 +33,17 @@ def test_unified_tapw_dispatches_to_tool_mains(monkeypatch):
 
     monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("init", argv)))
     monkeypatch.setattr(plot_band_01, "main", lambda argv=None, **_kwargs: calls.append(("plot", argv)))
-    monkeypatch.setattr(chern_post, "main", lambda argv=None, **_kwargs: calls.append(("topo", argv)))
+    monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(("topo", args.config, args.mode)) or 0)
+    monkeypatch.setattr(cli, "finish_calculation_process", lambda code: code)
 
     cli.main(["init", "-o", "cfg"])
     cli.main(["plot", "--config", "bands.yaml"])
-    cli.main(["topo", "--config", "config.yaml", "-b", "-1", "-2"])
+    cli.main(["topo", "--config", "config.yaml"])
 
     assert calls == [
         ("init", ["-o", "cfg"]),
         ("plot", ["--config", "bands.yaml"]),
-        ("topo", ["--config", "config.yaml", "-b", "-1", "-2"]),
+        ("topo", "config.yaml", "chern"),
     ]
 
 
@@ -80,16 +83,19 @@ def test_tapw_short_symm_alias_dispatches_fixed_symmetry_mode(monkeypatch):
     assert calls == [("tapw.yaml", "symmetry")]
 
 
-def test_tapw_short_final_alias_dispatches_memmap_postprocess(monkeypatch):
+def test_tapw_removed_top_level_commands_are_rejected():
     from tapw import cli
-    from tapw import postprocess_memmap
 
-    calls = []
-    monkeypatch.setattr(postprocess_memmap, "main", lambda argv=None, **_kwargs: calls.append(argv))
-
-    cli.main(["final", "--root-dir", "Q_shell_6", "--mode", "band"])
-
-    assert calls == [["--root-dir", "Q_shell_6", "--mode", "band"]]
+    for argv in (
+        ["chern", "-c", "config.yaml"],
+        ["calc", "-c", "config.yaml"],
+        ["symmetry", "-c", "config.yaml"],
+        ["chern-post", "-c", "config.yaml"],
+        ["final", "--root-dir", "outputs/K1/q06"],
+        ["postprocess-memmap", "--root-dir", "outputs/K1/q06"],
+    ):
+        with pytest.raises(SystemExit):
+            cli.main(argv)
 
 
 def test_unified_tapw_treats_none_calc_result_as_success(monkeypatch):
@@ -181,14 +187,19 @@ def test_finish_calculation_process_treats_none_as_success(monkeypatch):
     assert calls == [("shutdown", {"wait": False, "kill_workers": True}), "logging", "stdout", "stderr"]
 
 
-def test_tapw_run_help_lists_developer_outputs(capsys):
+def test_tapw_run_help_is_single_config_surface(capsys):
     from tapw import cli
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main(["run", "--help"])
 
     assert excinfo.value.code == 0
-    assert "--developer-outputs" in capsys.readouterr().out
+    out = capsys.readouterr().out
+    assert "-c CONFIG" in out
+    assert "--developer-outputs" not in out
+    assert "--valleys" not in out
+    assert "--n_g" not in out
+    assert "--num_chern" not in out
 
 
 @pytest.mark.parametrize("command", ["plot", "topo"])
@@ -220,16 +231,11 @@ def test_unified_tapw_dispatches_orbital_commands(monkeypatch):
     ]
 
 
-def test_unified_tapw_dispatches_postprocess_memmap(monkeypatch):
+def test_postprocess_memmap_is_not_a_public_tapw_command():
     from tapw import cli
-    from tapw import postprocess_memmap
 
-    calls = []
-    monkeypatch.setattr(postprocess_memmap, "main", lambda argv=None, **_kwargs: calls.append(argv))
-
-    cli.main(["postprocess-memmap", "--root-dir", "Q_shell_6", "--mode", "band", "--valley", "31", "--efermi", "0"])
-
-    assert calls == [["--root-dir", "Q_shell_6", "--mode", "band", "--valley", "31", "--efermi", "0"]]
+    with pytest.raises(SystemExit):
+        cli.main(["postprocess-memmap", "--root-dir", "outputs/K1/q06"])
 
 
 def test_tapw_orbital_exits_nonzero_when_required_inputs_are_missing(tmp_path):
@@ -244,72 +250,36 @@ def test_tapw_orbital_exits_nonzero_when_required_inputs_are_missing(tmp_path):
     assert excinfo.value.code == 1
 
 
-def test_legacy_tapw_subcommands_still_dispatch(monkeypatch):
-    from tapw import chern_post
+def test_legacy_tapw_subcommands_are_rejected():
     from tapw import cli
-    from tapw import config_generator
-    from tapw import orbital_analysis_tool
-    from tapw import plot_orbital_tool
 
-    calls = []
-    monkeypatch.setattr(cli, "main_calc", lambda argv=None, **_kwargs: calls.append(("calc", argv)))
-    monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("config", argv)))
-    monkeypatch.setattr(chern_post, "main", lambda argv=None, **_kwargs: calls.append(("chern-post", argv)))
-    monkeypatch.setattr(orbital_analysis_tool, "main", lambda argv=None, **_kwargs: calls.append(("orbital-analyze", argv)))
-    monkeypatch.setattr(plot_orbital_tool, "main", lambda argv=None, **_kwargs: calls.append(("orbital-plot", argv)))
-
-    cli.main(["config", "-o", "cfg"])
-    cli.main(["calc", "--config", "config.yaml"])
-    cli.main(["chern-post", "--config", "config.yaml", "-b", "-1"])
-    cli.main(["orbital", "analyze", ".", "--config", "config.yaml"])
-    cli.main(["orbital", "plot", ".", "--valley", "Gamma"])
-
-    assert calls == [
-        ("config", ["-o", "cfg"]),
-        ("calc", ["--config", "config.yaml"]),
-        ("chern-post", ["--config", "config.yaml", "-b", "-1"]),
-        ("orbital-analyze", [".", "--config", "config.yaml"]),
-        ("orbital-plot", [".", "--valley", "Gamma"]),
-    ]
+    for argv in (
+        ["config", "-o", "cfg"],
+        ["calc", "--config", "config.yaml"],
+        ["chern-post", "--config", "config.yaml", "-b", "-1"],
+        ["orbital", "analyze", ".", "--config", "config.yaml"],
+        ["orbital", "plot", ".", "--valley", "Gamma"],
+    ):
+        with pytest.raises(SystemExit):
+            cli.main(argv)
 
 
-def test_legacy_aliases_dispatch_through_unified_main(monkeypatch):
+def test_legacy_console_script_names_are_rejected(monkeypatch):
     import sys
 
-    from tapw import chern_post
     from tapw import cli
-    from tapw import config_generator
-    from tapw import orbital_analysis_tool
-    from tapw import plot_band_01
-    from tapw import plot_orbital_tool
 
-    calls = []
-    monkeypatch.setattr(cli, "main_calc", lambda argv=None, **_kwargs: calls.append(("calc", argv)))
-    monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("config", argv)))
-    monkeypatch.setattr(plot_band_01, "main", lambda argv=None, **_kwargs: calls.append(("plot", argv)))
-    monkeypatch.setattr(chern_post, "main", lambda argv=None, **_kwargs: calls.append(("chern-post", argv)))
-    monkeypatch.setattr(orbital_analysis_tool, "main", lambda argv=None, **_kwargs: calls.append(("orbital", argv)))
-    monkeypatch.setattr(plot_orbital_tool, "main", lambda argv=None, **_kwargs: calls.append(("plot-orbital", argv)))
-
-    for alias in [
+    for alias in (
         "tapw-calc",
         "tapw-config",
         "tapw-plot",
         "tapw-chernpost",
         "tapw-orbital",
         "tapw-plot-orbital",
-    ]:
+    ):
         monkeypatch.setattr(sys, "argv", [alias, "--help"])
-        cli.main()
-
-    assert calls == [
-        ("calc", ["--help"]),
-        ("config", ["--help"]),
-        ("plot", ["--help"]),
-        ("chern-post", ["--help"]),
-        ("orbital", ["--help"]),
-        ("plot-orbital", ["--help"]),
-    ]
+        with pytest.raises(SystemExit):
+            cli.main()
 
 
 @pytest.mark.parametrize(
@@ -337,3 +307,7 @@ def test_pyproject_defines_unified_tapw_script():
     pyproject = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
 
     assert pyproject["project"]["scripts"]["tapw"] == "tapw.cli:main"
+    assert pyproject["project"]["scripts"] == {
+        "kp": "kp.cli:main",
+        "tapw": "tapw.cli:main",
+    }

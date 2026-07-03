@@ -4,6 +4,7 @@ import copy
 import csv
 import hashlib
 import json
+import shutil
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -35,7 +36,7 @@ from .band import (
     resolve_reference_m_valley_c2_symmetry,
     reference_m_valley_c2_linear_map,
     transform_k_by_cartesian_linear_map,
-    _update_canonical_manifests,
+    _remove_canonical_manifest_files,
 )
 
 
@@ -4675,7 +4676,7 @@ class SymmetryAnalysisRunner:
         lines.extend(
             [
                 "",
-                "Note: summary.md is human-facing only. Use summary.json and representations/manifest.json as machine-readable outputs.",
+                "Note: summary.md is human-facing. Use representations.npz and residuals.csv for release outputs.",
             ]
         )
         return lines
@@ -4766,6 +4767,63 @@ class SymmetryAnalysisRunner:
                 payload = {column: row.get(column, "") for column in DETAIL_COLUMNS}
                 writer.writerow(payload)
 
+    def _write_residuals_csv(self, details: list[dict[str, Any]], representations: list[dict[str, Any]], output_dir: Path) -> None:
+        path = output_dir / "residuals.csv"
+        packed_keys: dict[tuple[str, str], str] = {}
+        seen: set[str] = set()
+        for record in representations:
+            operation = representation_operation_name(record.get("operation", "unknown"))
+            valley_label = str(record.get("valley_label", record.get("valley", "")))
+            key = _safe_path_component(operation)
+            if key in seen:
+                key = f"{_safe_path_component(valley_label)}_{key}"
+            seen.add(key)
+            packed_keys[(valley_label, operation)] = key
+        fieldnames = [
+            "valley",
+            "operation",
+            "packed_matrix_key",
+            "raw_h_operator_shape",
+            "raw_h_operator_nnz",
+            "residual_H_raw",
+            "status",
+            "axis_deg",
+            "antiunitary",
+            "source_valley",
+            "target_valley",
+            "role",
+            "supported",
+        ]
+        with path.open("w", encoding="utf-8", newline="") as handle:
+            writer = csv.DictWriter(handle, fieldnames=fieldnames)
+            writer.writeheader()
+            for record in representations:
+                raw_h_matrix = record.get("raw_h_matrix")
+                if raw_h_matrix is None:
+                    continue
+                if not scipy.sparse.issparse(raw_h_matrix):
+                    raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
+                raw_h_matrix = raw_h_matrix.tocsr()
+                operation = representation_operation_name(record.get("operation", "unknown"))
+                valley_label = str(record.get("valley_label", record.get("valley", "")))
+                writer.writerow(
+                    {
+                        "valley": valley_label,
+                        "operation": operation,
+                        "packed_matrix_key": packed_keys.get((valley_label, operation), _safe_path_component(operation)),
+                        "raw_h_operator_shape": f"{raw_h_matrix.shape[0]}x{raw_h_matrix.shape[1]}",
+                        "raw_h_operator_nnz": int(raw_h_matrix.nnz),
+                        "residual_H_raw": record.get("residual_H_raw", ""),
+                        "status": record.get("status", ""),
+                        "axis_deg": record.get("axis_angle_deg", ""),
+                        "antiunitary": bool(record.get("antiunitary", False)),
+                        "source_valley": record.get("source_valley", valley_label),
+                        "target_valley": record.get("target_valley", valley_label),
+                        "role": record.get("role", "internal"),
+                        "supported": bool(record.get("supported", True)),
+                    }
+                )
+
     def _write_representations(
         self,
         representations: list[dict[str, Any]],
@@ -4773,9 +4831,36 @@ class SymmetryAnalysisRunner:
         *,
         developer_outputs: bool = False,
     ) -> None:
+        canonical_layout = _is_canonical_output_layout(self.config)
+        if canonical_layout:
+            packed_payload: dict[str, np.ndarray] = {}
+            packed_keys_seen: set[str] = set()
+            for record in representations:
+                raw_h_matrix = record.get("raw_h_matrix")
+                if raw_h_matrix is None:
+                    continue
+                if not scipy.sparse.issparse(raw_h_matrix):
+                    raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
+                raw_h_matrix = raw_h_matrix.tocsr()
+                operation = representation_operation_name(record.get("operation", "unknown"))
+                packed_key = _safe_path_component(operation)
+                if packed_key in packed_keys_seen:
+                    valley_label = _safe_path_component(record.get("valley_label", record.get("valley", "unknown")))
+                    packed_key = f"{valley_label}_{packed_key}"
+                packed_keys_seen.add(packed_key)
+                packed_payload.update(_csr_packed_entries(packed_key, raw_h_matrix))
+            packed_path = output_dir / "representations.npz"
+            if packed_payload:
+                np.savez_compressed(packed_path, **packed_payload)
+            elif packed_path.exists():
+                packed_path.unlink()
+            stale_dir = output_dir / "representations"
+            if stale_dir.exists():
+                shutil.rmtree(stale_dir)
+            return
+
         representations_dir = output_dir / "representations"
         representations_dir.mkdir(parents=True, exist_ok=True)
-        canonical_layout = _is_canonical_output_layout(self.config)
         manifest = {
             "output_schema": "tapw_source_symmetry/v2",
             "schema_version": 2,
@@ -5013,21 +5098,7 @@ class SymmetryAnalysisRunner:
     def _write_canonical_workflow_manifest(self, output_dir: Path) -> None:
         if not _is_canonical_output_layout(self.config):
             return
-        manifest = {
-            "schema": "tapw_symmetry_outputs/v1",
-            "files": {
-                "summary_json": "summary.json",
-                "summary_markdown": "summary.md",
-                "details_csv": "details.csv",
-                "representations_npz": "representations.npz",
-                "representations_manifest": "representations/manifest.json",
-            },
-        }
-        (output_dir / "manifest.json").write_text(
-            json.dumps(manifest, indent=2, sort_keys=True) + "\n",
-            encoding="utf-8",
-        )
-        _update_canonical_manifests(output_dir, "symmetry")
+        _remove_canonical_manifest_files(output_dir)
 
     def run(self):
         payload = self._analyze()
@@ -5038,6 +5109,17 @@ class SymmetryAnalysisRunner:
 
         output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+        if _is_canonical_output_layout(self.config):
+            for stale_name in ("manifest.json", "summary.json", "details.csv", "debug.json"):
+                stale_path = output_dir / stale_name
+                if stale_path.exists():
+                    stale_path.unlink()
+            stale_representations_dir = output_dir / "representations"
+            if stale_representations_dir.exists():
+                shutil.rmtree(stale_representations_dir)
+            stale_diagnostics_dir = output_dir / "diagnostics"
+            if stale_diagnostics_dir.exists():
+                shutil.rmtree(stale_diagnostics_dir)
         developer_outputs = bool(getattr(self.config.symmetry_analysis, "developer_outputs", False))
         self._write_summary_markdown(
             summary,
@@ -5045,8 +5127,11 @@ class SymmetryAnalysisRunner:
             representations=representations,
             developer_outputs=developer_outputs,
         )
-        self._write_summary_json(summary, output_dir)
-        self._write_details_csv(details, output_dir)
+        if _is_canonical_output_layout(self.config):
+            self._write_residuals_csv(details, representations, output_dir)
+        else:
+            self._write_summary_json(summary, output_dir)
+            self._write_details_csv(details, output_dir)
         self._write_representations(
             representations,
             output_dir,

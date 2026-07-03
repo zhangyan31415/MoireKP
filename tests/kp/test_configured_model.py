@@ -662,10 +662,11 @@ def _write_auto_fixture(tmp_path: Path) -> Path:
     np.save(tmp_path / "kpoints.npy", kpoints)
     out_dir = tmp_path / "project"
     out_dir.mkdir()
-    np.save(out_dir / "heff_list.npy", heff)
-    np.save(out_dir / "heff_eig.npy", np.linalg.eigvalsh(heff))
+    np.save(out_dir / "heff.npy", heff)
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
 
-    source_cfg = {
+    model_cfg = {
+        "case": {"profile": "test", "q_shell": "q00", "output_root": "."},
         "material": {
             "qset1_file": "q1.npy",
             "qset2_file": "q2.npy",
@@ -674,12 +675,7 @@ def _write_auto_fixture(tmp_path: Path) -> Path:
         "project": {
             "out_dir": "project",
         },
-    }
-    (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_cfg), encoding="utf-8")
-    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
-
-    model_cfg = {
-        "source_config": "source.yaml",
+        "symm": {"output_dir": "symm"},
         "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
         "valley_model": {
             "lattice": "hexagonal",
@@ -737,10 +733,15 @@ def _write_k_inter_direction_fixture(tmp_path: Path) -> Path:
     np.save(tmp_path / "kpoints.npy", kpoints)
     out_dir = tmp_path / "project"
     out_dir.mkdir()
-    np.save(out_dir / "heff_list.npy", heff)
-    np.save(out_dir / "heff_eig.npy", np.linalg.eigvalsh(heff))
+    np.save(out_dir / "heff.npy", heff)
+    _write_symm_frame_manifest(
+        tmp_path,
+        rotation_deg=0.0,
+        q_model_files={"layer1": "../q1.npy", "layer2": "../q2.npy"},
+    )
 
-    source_cfg = {
+    model_cfg = {
+        "case": {"profile": "K1", "q_shell": "q00", "output_root": "."},
         "material": {
             "qset1_file": "q1.npy",
             "qset2_file": "q2.npy",
@@ -749,16 +750,7 @@ def _write_k_inter_direction_fixture(tmp_path: Path) -> Path:
         "project": {
             "out_dir": "project",
         },
-    }
-    (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_cfg), encoding="utf-8")
-    _write_symm_frame_manifest(
-        tmp_path,
-        rotation_deg=0.0,
-        q_model_files={"layer1": "../q1.npy", "layer2": "../q2.npy"},
-    )
-
-    model_cfg = {
-        "source_config": "source.yaml",
+        "symm": {"output_dir": "symm"},
         "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
         "valley_model": {
             "lattice": "hexagonal",
@@ -835,15 +827,15 @@ def _write_unified_case_fixture(tmp_path: Path) -> Path:
     np.save(cfg_dir / "q2.npy", -qset)
     np.save(cfg_dir / "kpoints.npy", np.array([[0.0, 0.0], [0.1, 0.0], [0.2, 0.0]], dtype=float))
 
-    case = "tiny_K1_B_Q4"
-    project_out = tmp_path / "kp" / "outputs" / "project" / case
+    profile = "tiny_K1_B"
+    q_shell = "q04"
+    project_out = tmp_path / "kp" / "outputs" / profile / q_shell / "projection"
     project_out.mkdir(parents=True)
     dim = len(qset)
     heff = np.stack([np.diag(np.arange(dim, dtype=float) + shift) for shift in (0.0, 0.1, 0.2)]).astype(np.complex128)
-    np.save(project_out / "heff_list.npy", heff)
-    np.save(project_out / "heff_eig.npy", np.linalg.eigvalsh(heff))
+    np.save(project_out / "heff.npy", heff)
 
-    symm_out = tmp_path / "kp" / "outputs" / "symm" / case
+    symm_out = tmp_path / "kp" / "outputs" / profile / q_shell / "symmetry"
     symm_out.mkdir(parents=True)
     (symm_out / "manifest.json").write_text(
         json.dumps(
@@ -863,7 +855,7 @@ def _write_unified_case_fixture(tmp_path: Path) -> Path:
     )
 
     cfg = {
-        "case": case,
+        "case": {"profile": profile, "q_shell": q_shell, "output_root": "../outputs"},
         "valley": "K1",
         "spin": "down",
         "material": {
@@ -891,7 +883,7 @@ def _write_unified_case_fixture(tmp_path: Path) -> Path:
             "bands": {"compare_to_heff": True, "band_slice": [0, dim]},
         },
     }
-    path = cfg_dir / f"{case}.yaml"
+    path = cfg_dir / f"{profile}_{q_shell}.yaml"
     path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
     return path
 
@@ -923,7 +915,7 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
     cli.main(["model", "--config", str(cfg_path)])
 
     assert seen["path"] == str(cfg_path)
-    assert seen["export"] == (model_output, model_output / "standalone", True, False)
+    assert seen["export"] == (model_output, model_output, True, False)
 
 
 def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path, capsys) -> None:
@@ -969,35 +961,15 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
     assert "[kp model]   all-band RMS: 2.000 meV, Max: 3.000 meV (bands=124, align=top)" in out
 
 
-def test_cli_model_subcommand_uses_explicit_standalone_export_path(monkeypatch, tmp_path: Path) -> None:
+def test_cli_model_subcommand_rejects_explicit_standalone_export_path(tmp_path: Path) -> None:
     import kp.cli as cli
-    import kp.model.export as export_mod
-    import kp.model.pipeline as configured
 
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
-    model_output = tmp_path / "model_out"
     export_output = tmp_path / "portable"
-    calls: dict[str, object] = {}
 
-    class FakeModelConfig:
-        output_dir = model_output
-
-    def fake_run(path: str) -> dict:
-        calls["run"] = path
-        return {"configured_model": FakeModelConfig(), "comparison": None}
-
-    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
-        calls["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
-        return Path(output_dir)
-
-    monkeypatch.setattr(configured, "run_configured_model", fake_run)
-    monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
-
-    cli.main(["model", "--config", str(cfg_path), "--export-standalone", str(export_output)])
-
-    assert calls["run"] == str(cfg_path)
-    assert calls["export"] == (model_output, export_output, True, False)
+    with pytest.raises(SystemExit):
+        cli.main(["model", "--config", str(cfg_path), "--export-standalone", str(export_output)])
 
 
 def test_standalone_export_dense_symmetry_action_expands_sparse_entries() -> None:
@@ -1147,10 +1119,11 @@ def _write_fixture(tmp_path: Path) -> Path:
     np.save(tmp_path / "kpoints.npy", kpoints)
     out_dir = tmp_path / "project"
     out_dir.mkdir()
-    np.save(out_dir / "heff_list.npy", heff)
-    np.save(out_dir / "heff_eig.npy", np.linalg.eigvalsh(heff))
+    np.save(out_dir / "heff.npy", heff)
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
 
-    source_cfg = {
+    model_cfg = {
+        "case": {"profile": "test", "q_shell": "q00", "output_root": "."},
         "material": {
             "qset1_file": "q1.npy",
             "qset2_file": "q2.npy",
@@ -1159,12 +1132,7 @@ def _write_fixture(tmp_path: Path) -> Path:
         "project": {
             "out_dir": "project",
         },
-    }
-    (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_cfg), encoding="utf-8")
-    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
-
-    model_cfg = {
-        "source_config": "source.yaml",
+        "symm": {"output_dir": "symm"},
         "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
         "valley_model": {
             "lattice": "hexagonal",
@@ -1210,15 +1178,19 @@ def _write_fixture(tmp_path: Path) -> Path:
     return path
 
 
+def _expected_project_eigvals(tmp_path: Path) -> np.ndarray:
+    return np.linalg.eigvalsh(np.load(tmp_path / "project" / "heff.npy"))
+
+
 def test_load_model_config_resolves_paths_relative_to_yaml(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
 
     cfg = load_model_config(cfg_path)
 
     assert cfg.path == cfg_path
-    assert cfg.source_config == tmp_path / "source.yaml"
+    assert cfg.source_config == cfg_path
     assert cfg.kpoints_file == tmp_path / "kpoints.npy"
-    assert cfg.heff_file == tmp_path / "project" / "heff_list.npy"
+    assert cfg.heff_file == tmp_path / "project" / "heff.npy"
     assert cfg.output_dir == tmp_path / "model_out"
     assert cfg.fit_indices == [0, 2]
     assert cfg.coeff_prune_threshold == 2.0e-4
@@ -1230,16 +1202,15 @@ def test_load_model_config_accepts_single_case_yaml_with_nested_model_sections(t
 
     cfg = load_model_config(cfg_path)
 
-    case = "tiny_K1_B_Q4"
     assert cfg.source_config == cfg_path
-    assert cfg.source_raw["case"] == case
-    assert cfg.heff_file == tmp_path / "kp" / "outputs" / "project" / case / "heff_list.npy"
-    assert cfg.output_dir == tmp_path / "kp" / "outputs" / "model" / case
+    assert cfg.source_raw["case"] == {"profile": "tiny_K1_B", "q_shell": "q04", "output_root": "../outputs"}
+    assert cfg.heff_file == tmp_path / "kp" / "outputs" / "tiny_K1_B" / "q04" / "projection" / "heff.npy"
+    assert cfg.output_dir == tmp_path / "kp" / "outputs" / "tiny_K1_B" / "q04" / "model"
     assert cfg.valley_model["valley_type"] == "K"
     assert cfg.valley_model["active_valleys"] == ["K1"]
     assert cfg.valley_model["spin_convention"] == "spin_down_projected"
     assert cfg.symmetry_source_config["type"] == "kp_symm_output"
-    assert cfg.symmetry_source_config["path"] == str((tmp_path / "kp" / "outputs" / "symm" / case).resolve())
+    assert cfg.symmetry_source_config["path"] == str((tmp_path / "kp" / "outputs" / "tiny_K1_B" / "q04" / "symmetry").resolve())
     assert "operations" not in cfg.symmetry_source_config
     assert {tag: [row["name"] for row in rows] for tag, rows in cfg.symmetry_map.items()} == {
         "Kinect": ["C3z"],
@@ -2152,8 +2123,7 @@ def test_load_model_config_auto_low_energy_can_select_harmonics_from_heff(tmp_pa
         heff[ik, 1, 1] = 0.10
         heff[ik, 0, 1] = heff[ik, 1, 0] = 0.10
         heff[ik, 0, 2] = heff[ik, 2, 0] = 1.0e-5
-    np.save(tmp_path / "project" / "heff_list.npy", heff)
-    np.save(tmp_path / "project" / "heff_eig.npy", np.linalg.eigvalsh(heff))
+    np.save(tmp_path / "project" / "heff.npy", heff)
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     config = load_model_config(cfg_path)
@@ -3242,7 +3212,6 @@ def test_load_model_config_rejects_negative_null_channel_rel_tol(tmp_path: Path)
 def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["source_config"] = "source.yaml"
     raw["valley_model"]["allowed_internal_symmetries"] = []
     raw["model"] = {
         "bM": {"bM1": [1.0, 0.0], "bM2": [0.0, 1.0]},
@@ -3272,10 +3241,7 @@ def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> Non
 def test_load_model_config_resolves_layerwise_n_orb_from_num_layer_list(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    source_path = tmp_path / "source.yaml"
-    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
-    source_raw["material"]["num_layer_list"] = [1, 2]
-    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw["material"]["num_layer_list"] = [1, 2]
     raw["model"]["n_orb"] = [1, 1, 0]
     raw["model"].pop("nlow_state", None)
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -3298,10 +3264,7 @@ def test_load_model_config_resolves_layerwise_n_orb_from_num_layer_list(tmp_path
 def test_load_model_config_drops_inactive_layer_for_gamma_1plus2_model(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    source_path = tmp_path / "source.yaml"
-    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
-    source_raw["material"]["num_layer_list"] = [1, 2]
-    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw["material"]["num_layer_list"] = [1, 2]
     raw["model"]["n_orb"] = [0, 2, 2]
     raw["model"]["nlow_state"] = [0, 2, 2]
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -3317,10 +3280,7 @@ def test_load_model_config_drops_inactive_layer_for_gamma_1plus2_model(tmp_path:
 def test_load_model_config_resolves_layerwise_nlow_state_independently(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    source_path = tmp_path / "source.yaml"
-    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
-    source_raw["material"]["num_layer_list"] = [1, 2]
-    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw["material"]["num_layer_list"] = [1, 2]
     raw["model"]["n_orb"] = [2, 2, 0]
     raw["model"]["nlow_state"] = [0, 2, 2]
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -3336,10 +3296,9 @@ def test_load_model_config_resolves_layerwise_nlow_state_independently(tmp_path:
 
 def test_load_model_config_rejects_legacy_two_entry_n_orb_with_num_layer_list(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
-    source_path = tmp_path / "source.yaml"
-    source_raw = yaml.safe_load(source_path.read_text(encoding="utf-8"))
-    source_raw["material"]["num_layer_list"] = [1, 2]
-    source_path.write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["material"]["num_layer_list"] = [1, 2]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     with pytest.raises(ValueError, match="model.n_orb"):
         load_model_config(cfg_path)
@@ -3407,14 +3366,12 @@ def test_ptse2_release_config_hides_internal_exactification_knobs() -> None:
     assert model.get("fit") == {"mode": "auto_low_energy"}
 
 
-def test_load_model_config_marks_symmetry_source_inferred_from_source_config(tmp_path: Path) -> None:
+def test_load_model_config_marks_symmetry_source_inferred_from_case_symm_section(tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     symm_dir = _write_symm_frame_manifest(tmp_path, rotation_deg=0.0, path_name="symm_from_source")
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw.pop("symmetry_source", None)
-    source_raw = yaml.safe_load((tmp_path / "source.yaml").read_text(encoding="utf-8"))
-    source_raw["symm"] = {"output_dir": "symm_from_source"}
-    (tmp_path / "source.yaml").write_text(yaml.safe_dump(source_raw, sort_keys=False), encoding="utf-8")
+    raw["symm"] = {"output_dir": "symm_from_source"}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     cfg = load_model_config(cfg_path)
@@ -4111,7 +4068,7 @@ def test_build_moire_config_loads_fit_block_and_band_kpoints(tmp_path: Path) -> 
 
     moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
 
-    assert model_cfg.heff_file == tmp_path / "project" / "heff_list.npy"
+    assert model_cfg.heff_file == tmp_path / "project" / "heff.npy"
     assert moire_cfg.Q_set1.shape == (2, 2)
     assert moire_cfg.Q_set2.shape == (2, 2)
     assert moire_cfg.n_orb1 == 1
@@ -4150,24 +4107,17 @@ def test_build_moire_config_infers_bM_from_q_distances_not_q_norm(tmp_path: Path
     np.save(tmp_path / "kpoints.npy", kpoints)
     out_dir = tmp_path / "project"
     out_dir.mkdir()
-    np.save(out_dir / "heff_list.npy", heff)
-    np.save(out_dir / "heff_eig.npy", np.linalg.eigvalsh(heff))
-    (tmp_path / "source.yaml").write_text(
-        yaml.safe_dump(
-            {
-                "material": {"qset1_file": "q1.npy", "qset2_file": "q2.npy"},
-                "plot": {},
-                "project": {"out_dir": "project"},
-            }
-        ),
-        encoding="utf-8",
-    )
+    np.save(out_dir / "heff.npy", heff)
     _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
     cfg_path = tmp_path / "model.yaml"
     cfg_path.write_text(
         yaml.safe_dump(
             {
-                "source_config": "source.yaml",
+                "case": {"profile": "test", "q_shell": "q00", "output_root": "."},
+                "material": {"qset1_file": "q1.npy", "qset2_file": "q2.npy"},
+                "plot": {},
+                "project": {"out_dir": "project"},
+                "symm": {"output_dir": "symm"},
                 "symmetry_source": {"type": "kp_symm_output", "path": "symm"},
                 "valley_model": {
                     "lattice": "hexagonal",
@@ -5025,7 +4975,7 @@ def test_joint_fit_does_not_double_count_duplicate_diagonal_terms_across_tags() 
 
 def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
@@ -5059,7 +5009,7 @@ def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> 
 
 def test_release_output_profile_serializes_only_active_terms(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
     active_key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
     inactive_key = ContinuumTermKey(1, 0, 1, 1, 1, 1, (0.0, 0.0))
 
@@ -5113,7 +5063,7 @@ def test_release_output_profile_serializes_only_active_terms(monkeypatch, tmp_pa
 
 def test_release_active_terms_use_compact_symmetry_ops(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
     key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
     heavy_symmetry = [
         {
@@ -5172,7 +5122,7 @@ def test_debug_output_profile_writes_diagnostics_subdir(monkeypatch, tmp_path: P
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["output"]["profile"] = "debug"
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
@@ -5200,7 +5150,7 @@ def test_debug_output_profile_writes_diagnostics_subdir(monkeypatch, tmp_path: P
 
 def test_run_configured_model_quiet_writes_detailed_log(monkeypatch, capsys, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
     fake_model = type("Model", (), {"terms": {}})()
 
     def fake_build_model(moire_config):
@@ -6013,7 +5963,7 @@ def test_full_bilayer_block_detection_accepts_generic_two_sector_exchange() -> N
 
 def test_run_configured_model_saves_auto_harmonics_diagnostic_plot(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_auto_fixture(tmp_path)
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}
@@ -6089,7 +6039,7 @@ def test_q_lattice_hex_shell_uses_outer_vertex_radius_for_offset_valleys() -> No
 
 def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         assert moire_config.output_dir is None
@@ -6414,7 +6364,7 @@ def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_pat
     raw["bands"]["plot"]["ylim"] = [0.0, 0.16]
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}
@@ -6483,7 +6433,7 @@ def test_validation_strict_rejects_unavailable_validation_outputs(monkeypatch, t
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["validation"] = {"strict": True}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}
@@ -6499,7 +6449,7 @@ def test_validation_production_mode_rejects_unavailable_validation_outputs(monke
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["validation"] = {"mode": "production"}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
-    expected_eigvals = np.load(tmp_path / "project" / "heff_eig.npy")
+    expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}

@@ -187,7 +187,7 @@ def test_topology_tasks_resolve_named_band_sets():
 
 
 
-def test_topology_tasks_resolve_release_bandsets_and_observables():
+def test_topology_tasks_reject_removed_bandsets_and_observables():
     cfg = {
         "topology": {
             "bandsets": {
@@ -202,11 +202,8 @@ def test_topology_tasks_resolve_release_bandsets_and_observables():
         }
     }
 
-    band_tasks, wcc_tasks = chern_post._resolve_topology_tasks(cfg)
-
-    assert {"label": "vbm2", "band_type": "VBM", "indices": [-1, -2], "bc": True, "qgt": False} in band_tasks
-    assert {"label": "cbm2", "band_type": "CBM", "indices": [0, 1], "bc": False, "qgt": True} in band_tasks
-    assert wcc_tasks == [{"label": "vbm2", "band_type": "VBM", "indices": [-1, -2], "loop": "b1"}]
+    with pytest.raises(ValueError, match="bandsets|observables"):
+        chern_post._resolve_topology_tasks(cfg)
 
 
 def test_topology_task_dispatch_defaults_to_config_valley(monkeypatch, tmp_path):
@@ -214,8 +211,8 @@ def test_topology_task_dispatch_defaults_to_config_valley(monkeypatch, tmp_path)
         "topology": {
             "valley": "Gamma",
             "mesh": {"n_b1": 3, "n_b2": 3, "range_b1": [-0.5, 0.5], "range_b2": [-0.5, 0.5]},
-            "bandsets": {"vbm2": {"sector": "valence", "indices": [-1, -2]}},
-            "observables": {"berry_curvature": ["vbm2"]},
+            "bands": {"vbm2": {"sector": "valence", "indices": [-1, -2]}},
+            "berry_curvature": [{"bands": "vbm2"}],
         },
     }
     calls = []
@@ -238,8 +235,8 @@ def test_topology_task_dispatch_explicit_valley_overrides_config(monkeypatch, tm
         "compute": {"valley": 5},
         "topology": {
             "mesh": {"n_b1": 3, "n_b2": 3, "range_b1": [-0.5, 0.5], "range_b2": [-0.5, 0.5]},
-            "bandsets": {"vbm2": {"sector": "valence", "indices": [-1, -2]}},
-            "observables": {"berry_curvature": ["vbm2"]},
+            "bands": {"vbm2": {"sector": "valence", "indices": [-1, -2]}},
+            "berry_curvature": [{"bands": "vbm2"}],
         },
     }
     calls = []
@@ -383,25 +380,23 @@ def test_chern_post_config_tasks_write_canonical_topology_artifact_names(tmp_pat
                 "  input_file: openmx.dat",
                 "twist:",
                 "  spin: false",
-                "compute:",
-                "  valley: 5",
-                "  band_type: VBM",
                 "topology:",
                 "  mesh:",
                 "    n_b1: 4",
                 "    n_b2: 4",
                 "    range_b1: [-0.5, 0.5]",
                 "    range_b2: [-0.5, 0.5]",
-                "  bandsets:",
+                "  bands:",
                 "    vbm2:",
                 "      sector: valence",
                 "      indices: [-1, -2]",
-                "  observables:",
-                "    berry_curvature: [vbm2]",
-                "    quantum_geometry: [vbm2]",
-                "    wcc:",
-                "      - bands: vbm2",
-                "        loop: b2",
+                "  berry_curvature:",
+                "    - bands: vbm2",
+                "  quantum_geometry:",
+                "    - bands: vbm2",
+                "  wcc:",
+                "    - bands: vbm2",
+                "      loop: b2",
             ]
         ),
         encoding="utf-8",
@@ -415,6 +410,9 @@ def test_chern_post_config_tasks_write_canonical_topology_artifact_names(tmp_pat
     assert (grid_dir / "quantum_geometry_vbm2.pdf").is_file()
     assert (grid_dir / "wcc_vbm2_loop_b2.txt").is_file()
     assert (grid_dir / "wcc_vbm2_loop_b2.pdf").is_file()
+    assert (grid_dir / "chern_summary.json").is_file()
+    assert not (grid_dir / "manifest.json").exists()
+    assert not (grid_dir / "chern_vbm2.txt").exists()
     assert not list(grid_dir.glob("bc_bands_*"))
     assert not list(grid_dir.glob("qgt_bands_*"))
 

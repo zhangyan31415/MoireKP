@@ -104,7 +104,12 @@ class Dependency:
 
 
 def _active_kp_configs() -> list[Path]:
-    return sorted(EXAMPLES_ROOT.glob("*_3.89/kp/configs/**/*.yaml"))
+    tracked = _git_tracked_files()
+    return sorted(
+        path
+        for path in EXAMPLES_ROOT.glob("*_3.89/kp/configs/**/*.yaml")
+        if path.relative_to(REPO_ROOT).as_posix() in tracked
+    )
 
 
 def _is_path_like(value: str) -> bool:
@@ -288,7 +293,7 @@ def test_active_kp_config_input_dependencies_exist_or_are_manifested() -> None:
 
 
 def test_dependency_audit_fixture_allows_existing_files_and_manifested_external_data() -> None:
-    config = FIXTURE_ROOT / "configs/source/tiny_source.yaml"
+    config = FIXTURE_ROOT / "configs/tiny_q01.yaml"
     manifest = yaml.safe_load((FIXTURE_ROOT / "data-manifest.yaml").read_text(encoding="utf-8"))
     manifest_paths = set(manifest["external_data"])
     raw = yaml.safe_load(config.read_text(encoding="utf-8"))

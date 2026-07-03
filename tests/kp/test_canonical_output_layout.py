@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import yaml
 
 import kp.cli as cli
@@ -58,17 +59,13 @@ def test_canonical_case_defaults_point_all_workflows_to_one_case_directory(tmp_p
     assert cfg["output"]["dir"] == "../outputs/K1/q06/model"
 
 
-def test_legacy_unified_defaults_keep_existing_split_output_directories(tmp_path: Path) -> None:
+def test_legacy_unified_defaults_are_rejected(tmp_path: Path) -> None:
     cfg_path = tmp_path / "kp" / "configs" / "legacy_case.yaml"
     raw = _canonical_case_config()
     raw["case"] = "legacy_case"
 
-    cfg = normalize_case_config(raw, config_path=cfg_path)
-
-    assert cfg["project"]["out_dir"] == "../outputs/project/legacy_case"
-    assert cfg["plot"]["out"] == "../outputs/project/legacy_case/heff_scatter.png"
-    assert cfg["symm"]["output_dir"] == "../outputs/symm/legacy_case"
-    assert cfg["output"]["dir"] == "../outputs/model/legacy_case"
+    with pytest.raises(ValueError, match="case.*profile.*q_shell.*output_root"):
+        normalize_case_config(raw, config_path=cfg_path)
 
 
 def test_kp_inspect_alias_dispatches_to_plot() -> None:
@@ -254,7 +251,9 @@ def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Pa
 
     projection_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "projection"
     assert np.load(projection_dir / "heff.npy").shape == (1, 2, 2)
-    assert np.load(projection_dir / "wavefunctions.npy").shape == (1, 2, 2)
+    wavefunctions = np.load(projection_dir / "wavefunctions.npz")
+    assert wavefunctions["wavefunctions"].shape == (1, 2, 2)
+    np.testing.assert_array_equal(wavefunctions["k_indices"], np.array([0], dtype=int))
     assert (projection_dir / "eigvals.txt").exists()
     assert (projection_dir / "basis.md").exists()
     assert (projection_dir / "basis.npz").exists()
@@ -265,7 +264,7 @@ def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Pa
         "eigvals.txt",
         "heff.npy",
         "scatter.pdf",
-        "wavefunctions.npy",
+        "wavefunctions.npz",
     }
     assert not (projection_dir / "heff_list.npy").exists()
     assert not (projection_dir / "heff_eig.npy").exists()
@@ -480,9 +479,9 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
     def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
         seen["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
         Path(output_dir).mkdir(parents=True, exist_ok=True)
-        for name in ("README.md", "MODEL.md", "evaluate.py", "model_data.npz", "eigvals.npy", "band_comparison.pdf", "q_lattice_harmonics.pdf"):
+        for name in ("README.md", "MODEL.md", "evaluate.py", "model_data.npz", "eigvals.npy", "band_comparison.pdf", "band_comparison_all.pdf", "q_lattice_harmonics.pdf"):
             (Path(output_dir) / name).write_text("x", encoding="utf-8")
-        for stale in ("active_terms.json", "active_terms.sha256", "fit_selection.json", "run_summary.json", "model_run.log", "band_comparison_all.pdf"):
+        for stale in ("active_terms.json", "active_terms.sha256", "fit_selection.json", "run_summary.json", "model_run.log"):
             (Path(output_dir) / stale).write_text("stale", encoding="utf-8")
         return Path(output_dir)
 
@@ -496,6 +495,7 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
         "MODEL.md",
         "README.md",
         "band_comparison.pdf",
+        "band_comparison_all.pdf",
         "eigvals.npy",
         "evaluate.py",
         "model_data.npz",

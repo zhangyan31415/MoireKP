@@ -11,10 +11,10 @@ material:
   num_layer_list: [1, 1]
   orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2
   efermi: -4.168612
-  hamk_file: ../../tapw/Q_shell_7/band/hamk_M1_valley.npy
-  qset1_file: ../../tapw/Q_shell_7/g_vec_list_7_M1_1layer.npy
-  qset2_file: ../../tapw/Q_shell_7/g_vec_list_7_M1_2layer.npy
-  band_file: ../../tapw/Q_shell_7/band/band_CBM_M1_valley.txt
+  hamk_file: ../../tapw/outputs/M1/q07/band/hamiltonian_k.npy
+  qset1_file: ../../tapw/outputs/M1/q07/band/g_vectors_group1.npy
+  qset2_file: ../../tapw/outputs/M1/q07/band/g_vectors_group2.npy
+  band_file: ../../tapw/outputs/M1/q07/band/energies_cbm.txt
 
 plot:
   mode: M1
@@ -40,7 +40,7 @@ project:
   e_ref: -2.6
 
 symm:
-  tapw_symmetry_dir: ../../tapw/symmetry_analysis_test_m_q7
+  tapw_symmetry_dir: ../../tapw/outputs/M1/q07/symmetry
   spin_sector_sewing: up_to_down
   tolerance: 1.0e-2
 

@@ -1,64 +1,47 @@
-# TAPW single-case configuration
-
 case:
-  name: K1_q06
-  output_root: outputs
+  output_root: ../outputs
 
 twist:
   bravais: hex
+  spin: true
   twist_index_m: 3
   twist_layer: [1, 1]
-  spin: true
 
 paths:
-  H_file: H.dat
-  S_file: S.dat
-  input_file: openmx.dat
-  kpath_in: KPATH_GMKG.in
+  H_file: ../openmx/soc/H.npz
+  S_file: ../openmx/soc/S.npz
+  input_file: ../openmx/soc/openmx.dat_rigid
+  kpath_in: ../KPATH.in
 
 bands:
   enable: true
   valley: K1
-  q_shell: 6
-  efermi: -4.6
+  q_shell: 3
+  efermi: -4.128442
   num_processes: 61
-  blas_threads: 4
-  num_bands: 100
+  blas_threads: 0
+  num_bands: 20
   save_hamiltonian: true
-  save_wavefunctions: false
+  save_wavefunctions: true
 
 symmetry:
   enable: false
   valley: K1
-  q_shell: 6
-  tolerance: 2.0e-2
-  spglib_symprec: 5.0e-2
-  developer_outputs: false
-  debug: false
+  q_shell: 3
 
 topology:
   enable: false
   valley: K1
-  q_shell: 6
-  efermi: -4.6
-  num_processes: 61
-  num_bands: 100
-  save_wavefunctions: true
-
+  q_shell: 3
   mesh:
-    n_b1: 31
-    n_b2: 31
+    n_b1: 21
+    n_b2: 21
     range_b1: [-0.5, 0.5]
     range_b2: [-0.5, 0.5]
-
   bands:
     vbm2:
       sector: valence
       indices: [-1, -2]
-    cbm2:
-      sector: conduction
-      indices: [0, 1]
-
   berry_curvature:
     - bands: vbm2
   quantum_geometry:

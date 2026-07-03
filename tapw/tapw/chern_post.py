@@ -1174,52 +1174,54 @@ def _read_topology_grid_manifest(output_dir):
 
 
 def _write_topology_manifests(output_dir, config, *, grid_order, b_phys_2d, files=None):
-    if not _topology_uses_grid_layout(config):
-        return
     output_dir = Path(output_dir)
     collection_dir = _topology_collection_dir(output_dir, config)
-    grid_id = _topology_grid_id(config)
-    num_k1, num_k2, range_k1, range_k2 = _resolve_topology_mesh(config)
-    files = dict(files or {})
-    manifest = {
-        "schema": "tapw_topology_grid/v1",
-        "grid_id": grid_id,
-        "grid_shape": [int(num_k1), int(num_k2)],
-        "n_b1": int(num_k1),
-        "n_b2": int(num_k2),
-        "range_b1": [float(range_k1[0]), float(range_k1[1])],
-        "range_b2": [float(range_k2[0]), float(range_k2[1])],
-        "grid_order": str(grid_order),
-        "flatten_order": "row-major",
-        "axes": ["kappa1", "kappa2"],
-        "endpoint": True,
-        "reciprocal_basis": np.asarray(b_phys_2d, dtype=float).tolist(),
-        "wavefunction_basis": "k_minus_G",
-        "files": files,
-    }
-    output_dir.mkdir(parents=True, exist_ok=True)
-    with (output_dir / "manifest.json").open("w", encoding="utf-8") as handle:
-        json.dump(manifest, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    for stale in (output_dir / "manifest.json", collection_dir / "manifest.json"):
+        if stale.exists():
+            stale.unlink()
 
-    collection_dir.mkdir(parents=True, exist_ok=True)
-    collection_path = collection_dir / "manifest.json"
-    collection = {"schema": "tapw_topology_collection/v1", "grids": []}
-    if collection_path.exists():
+
+def _update_canonical_chern_summary(
+    output_dir,
+    *,
+    label,
+    band_type,
+    valley,
+    raw_indices,
+    resolved_indices,
+    chern_number,
+):
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+    path = output_path / "chern_summary.json"
+    summary = {"schema": "tapw_chern_summary/v1", "entries": []}
+    if path.exists():
         try:
-            loaded = json.loads(collection_path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict) and isinstance(loaded.get("grids"), list):
-                collection = loaded
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+            if isinstance(loaded, dict) and isinstance(loaded.get("entries"), list):
+                summary = loaded
         except Exception:
-            collection = {"schema": "tapw_topology_collection/v1", "grids": []}
-    entry = {"grid": grid_id, "manifest": f"{grid_id}/manifest.json"}
-    grids = [item for item in collection.get("grids", []) if item.get("grid") != grid_id]
-    grids.append(entry)
-    collection["schema"] = "tapw_topology_collection/v1"
-    collection["grids"] = grids
-    with collection_path.open("w", encoding="utf-8") as handle:
-        json.dump(collection, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+            summary = {"schema": "tapw_chern_summary/v1", "entries": []}
+    entry = {
+        "label": str(label),
+        "band_type": str(band_type).upper(),
+        "valley": str(valley),
+        "band_indices": [int(item) for item in raw_indices],
+        "resolved_band_indices": [int(item) for item in resolved_indices],
+        "chern_number": float(chern_number),
+    }
+    entries = [item for item in summary.get("entries", []) if item.get("label") != str(label)]
+    entries.append(entry)
+    summary["schema"] = "tapw_chern_summary/v1"
+    summary["entries"] = entries
+    summary["primary"] = entry
+    summary["band_type"] = entry["band_type"]
+    summary["valley"] = entry["valley"]
+    summary["band_indices"] = entry["band_indices"]
+    summary["resolved_band_indices"] = entry["resolved_band_indices"]
+    summary["chern_number"] = entry["chern_number"]
+    path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return str(path)
 
 
 def _band_type_from_sector(sector):
@@ -1233,13 +1235,9 @@ def _band_type_from_sector(sector):
 
 def _normalized_topology_config(config):
     topology = dict((config.get("topology", {}) or {}))
-    if "bandsets" in topology and "bands" not in topology:
-        topology["bands"] = dict(topology.get("bandsets") or {})
-    observables = topology.get("observables") or {}
-    if isinstance(observables, dict):
-        for key in ("berry_curvature", "quantum_geometry", "wcc"):
-            if key in observables and key not in topology:
-                topology[key] = observables[key]
+    removed = {"bandsets", "observables"} & set(topology)
+    if removed:
+        raise ValueError(f"topology contains removed release parameter(s): {sorted(removed)}")
     return topology
 
 
@@ -1257,9 +1255,9 @@ def _resolve_topology_band_spec(topology_config, band_ref):
         raise ValueError("topology task bands must be a band-set name or inline mapping.")
     if "indices" not in spec:
         raise ValueError(f"topology band set {label!r} requires indices.")
-    band_type = str(spec.get("band_type", "")).upper()
-    if not band_type:
-        band_type = _band_type_from_sector(spec.get("sector", ""))
+    if "band_type" in spec:
+        raise ValueError("topology band sets use sector: valence/conduction; band_type is not supported.")
+    band_type = _band_type_from_sector(spec.get("sector", ""))
     indices = [int(index) for index in spec["indices"]]
     if not indices:
         raise ValueError(f"topology band set {label!r} must contain at least one index.")
@@ -1825,7 +1823,7 @@ def main(argv=None, *, prog=None):
                 bc_pdf = os.path.join(output_dir, "berry_curvature_{0}.pdf".format(label))
                 qgt_prefix = os.path.join(output_dir, "quantum_geometry_{0}".format(label))
                 qgt_pdf = os.path.join(output_dir, "quantum_geometry_{0}.pdf".format(label))
-                chern_path = os.path.join(output_dir, "chern_{0}.txt".format(label))
+                chern_path = os.path.join(output_dir, "chern_summary.json")
             else:
                 bc_path = os.path.join(output_dir, "bc_band_{0}_{1}.txt".format(raw_band_index, fig_suffix))
                 bc_pdf = os.path.join(
@@ -1889,14 +1887,25 @@ def main(argv=None, *, prog=None):
                 trace_condition_prefix=qgt_prefix if canonical_grid_layout else None,
             )
 
-            with open(chern_path, "w") as handle:
-                handle.write(
-                    "Chern number from Berry flux for band {0} ({1}): {2:.8f}\n".format(
-                        raw_band_index,
-                        band_type,
-                        chern_number,
-                    )
+            if canonical_grid_layout:
+                chern_path = _update_canonical_chern_summary(
+                    output_dir,
+                    label=label,
+                    band_type=band_type,
+                    valley=valley_str,
+                    raw_indices=[raw_band_index],
+                    resolved_indices=[band_index],
+                    chern_number=chern_number,
                 )
+            else:
+                with open(chern_path, "w") as handle:
+                    handle.write(
+                        "Chern number from Berry flux for band {0} ({1}): {2:.8f}\n".format(
+                            raw_band_index,
+                            band_type,
+                            chern_number,
+                        )
+                    )
             print(
                 "[INFO] Band {0}: Chern number = {1:.8f}, BC table -> {2}, scaled Berry density -> {3}".format(
                     raw_band_index,
@@ -1910,7 +1919,6 @@ def main(argv=None, *, prog=None):
                 _generated_file(f"berry_curvature_{label}_pdf", bc_pdf)
                 _generated_file(f"quantum_geometry_{label}", qgt_prefix + ".txt")
                 _generated_file(f"quantum_geometry_{label}_pdf", qgt_pdf)
-                _generated_file(f"chern_{label}", chern_path)
 
         if len(resolved_band_indices) > 1:
             band_str = "_".join(str(i) for i in args.band)
@@ -1939,7 +1947,7 @@ def main(argv=None, *, prog=None):
                 bc_multiband_pdf = os.path.join(output_dir, "berry_curvature_{0}.pdf".format(label))
                 qgt_prefix = os.path.join(output_dir, "quantum_geometry_{0}".format(label))
                 qgt_pdf = os.path.join(output_dir, "quantum_geometry_{0}.pdf".format(label))
-                chern_path = os.path.join(output_dir, "chern_{0}.txt".format(label))
+                chern_path = os.path.join(output_dir, "chern_summary.json")
             else:
                 bc_multiband_path = os.path.join(output_dir, "bc_bands_{0}_{1}.txt".format(band_str, fig_suffix))
                 bc_multiband_pdf = os.path.join(
@@ -2015,14 +2023,25 @@ def main(argv=None, *, prog=None):
                 trace_condition_prefix=qgt_prefix if canonical_grid_layout else None,
             )
 
-            with open(chern_path, "w") as handle:
-                handle.write(
-                    "Chern number from Berry flux for bands {0} ({1}): {2:.8f}\n".format(
-                        band_str,
-                        band_type,
-                        chern_number,
-                    )
+            if canonical_grid_layout:
+                chern_path = _update_canonical_chern_summary(
+                    output_dir,
+                    label=label,
+                    band_type=band_type,
+                    valley=valley_str,
+                    raw_indices=args.band,
+                    resolved_indices=resolved_band_indices,
+                    chern_number=chern_number,
                 )
+            else:
+                with open(chern_path, "w") as handle:
+                    handle.write(
+                        "Chern number from Berry flux for bands {0} ({1}): {2:.8f}\n".format(
+                            band_str,
+                            band_type,
+                            chern_number,
+                        )
+                    )
             print(
                 "[INFO] Bands {0}: Chern number = {1:.8f}, BC table -> {2}, scaled Berry density -> {3}".format(
                     band_str,
@@ -2036,7 +2055,6 @@ def main(argv=None, *, prog=None):
                 _generated_file(f"berry_curvature_{label}_pdf", bc_multiband_pdf)
                 _generated_file(f"quantum_geometry_{label}", qgt_prefix + ".txt")
                 _generated_file(f"quantum_geometry_{label}_pdf", qgt_pdf)
-                _generated_file(f"chern_{label}", chern_path)
 
     if args.wcc_bands:
         wcc_direction = args.wcc_direction

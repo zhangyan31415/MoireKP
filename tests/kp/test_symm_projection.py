@@ -38,6 +38,13 @@ from kp.symmetry.projection import (
 )
 
 
+def _load_canonical_symmetry_payload(out_dir: Path) -> tuple[dict[str, np.ndarray], dict]:
+    with np.load(out_dir / "representations.npz", allow_pickle=False) as payload:
+        arrays = {name: np.asarray(payload[name]) for name in payload.files if name != "__metadata_json__"}
+        metadata = json.loads(str(payload["__metadata_json__"].item()))
+    return arrays, metadata
+
+
 def test_orbital_order_accepts_per_layer_patterns() -> None:
     labels = expand_orbital_order_by_sector(
         {
@@ -418,7 +425,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         hamk_file = tmp / f"{operation}_hamk.npy"
         symm_dir = tmp / f"{operation}_symmetry_analysis"
         rep_dir = symm_dir / "representations" / valley
-        out_dir = tmp / f"{operation}_symm_project"
+        out_dir = tmp / "outputs" / valley / "q06" / "symmetry"
         cfg_path = tmp / f"{operation}_symm.yaml"
 
         np.save(q1_file, np.array([[0.0, 0.0]], dtype=float))
@@ -458,6 +465,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         if q_rotation_deg is not None:
             plot_section["q_rotation_deg"] = q_rotation_deg
         cfg = {
+            "case": {"profile": valley, "q_shell": "q06", "output_root": "outputs"},
             "material": {
                 "hamk_file": str(hamk_file),
                 "energy_unit": "eV",
@@ -479,7 +487,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 "valley": valley,
                 "spin": "up",
                 "tapw_symmetry_dir": str(symm_dir),
-                "output_dir": str(out_dir),
                 "tolerance": 1.0e-8,
             },
         }
@@ -512,7 +519,10 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 include_energy_unit=False,
             )
 
-            self.assertTrue((out_dir / "manifest.json").exists())
+            self.assertTrue((out_dir / "representations.npz").exists())
+            self.assertTrue((out_dir / "residuals.csv").exists())
+            self.assertTrue((out_dir / "summary.md").exists())
+            self.assertFalse((out_dir / "manifest.json").exists())
 
     def test_symm_infers_operations_from_tapw_manifest_when_omitted(self) -> None:
         manifest = {
@@ -547,7 +557,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     include_operations=False,
                 )
 
-            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            _arrays, summary = _load_canonical_symmetry_payload(out_dir)
             self.assertIn("inferred symmetry operations: C3z", stream.getvalue())
             self.assertEqual([row["operation"] for row in summary["operations"]], ["C3z"])
             self.assertEqual(summary["kp_symm_exactification"]["config"]["reject_if_off_support_rel_gt"], 5.0e-3)
@@ -608,8 +618,11 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 include_representation_file=False,
             )
 
-            row = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["operations"][0]
-            self.assertEqual(row["matrix_file"], "exactified_C3z.npy")
+            arrays, summary = _load_canonical_symmetry_payload(out_dir)
+            row = summary["operations"][0]
+            self.assertIn("C3z", arrays)
+            self.assertEqual(row["matrix_file"], "representations.npz")
+            self.assertEqual(row["matrix_array_key"], "C3z")
             self.assertEqual(row["matrix_source"], "kp_symm_exactified_action")
             self.assertNotIn("representation_file", row)
             self.assertFalse((out_dir / "diagnostics" / "C3_low_representation_raw.npy").exists())
@@ -640,7 +653,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 q_rotation_deg=None,
             )
 
-            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            _arrays, summary = _load_canonical_symmetry_payload(out_dir)
             self.assertAlmostEqual(summary["frame"]["k_transform"]["rotation_deg"], 210.0)
             self.assertEqual(summary["frame"]["inference"]["source"], "reflection_axis")
             op = summary["operations"][0]
@@ -799,7 +812,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             hamk_file = tmp / "hamk.npy"
             symm_dir = tmp / "symmetry_analysis_test"
             rep_dir = symm_dir / "representations" / "K1"
-            out_dir = tmp / "symm_project"
+            out_dir = tmp / "outputs" / "K1" / "q06" / "symmetry"
             cfg_path = tmp / "mote2_4_K.yaml"
 
             np.save(q1_file, np.array([[0.0, 0.0]], dtype=float))
@@ -860,6 +873,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             )
 
             cfg = {
+                "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
                 "material": {
                     "hamk_file": str(hamk_file),
                     "energy_unit": "eV",
@@ -883,7 +897,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     "spin": "up",
                     "tapw_symmetry_dir": str(symm_dir),
                     "operations": ["C3", "C2T"],
-                    "output_dir": str(out_dir),
                     "tolerance": 1.0e-8,
                 },
             }
@@ -891,22 +904,19 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
             cli.main(["symm", "--config", str(cfg_path)])
 
-            raw = np.load(out_dir / "C2T_low_raw.npy")
-            c3_raw = np.load(out_dir / "C3_low_raw.npy")
+            arrays, summary = _load_canonical_symmetry_payload(out_dir)
+            raw = arrays["C2T"]
+            c3_raw = arrays["C3z"]
             self.assertEqual(raw.shape, (2, 2))
             np.testing.assert_allclose(raw, np.array([[0.0, 1.0], [1.0, 0.0]]), atol=1e-12)
-            np.testing.assert_allclose(c3_raw, np.eye(2), atol=1e-12)
+            np.testing.assert_allclose(c3_raw / c3_raw[0, 0], np.eye(2), atol=1e-12)
             self.assertFalse((out_dir / "C2T_low_polar.npy").exists())
             self.assertFalse((out_dir / "C2T_low_representation_raw.npy").exists())
 
-            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
-            manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest["frame"], summary["frame"])
             self.assertEqual(summary["frame"]["q_transform"]["formula"], "q_model = R(rotation_deg) @ (layer_mean - q_source)")
             self.assertEqual(summary["frame"]["q_transform"]["rotation_deg"], 30.0)
             self.assertEqual(summary["q_model"]["files"]["layer1"], "q_model_layer1.npy")
             self.assertEqual(summary["q_model"]["files"]["layer2"], "q_model_layer2.npy")
-            np.testing.assert_allclose(np.load(out_dir / "q_model_layer1.npy"), [[0.0, 0.0]], atol=1.0e-12)
             by_name = {op["operation"]: op for op in summary["operations"]}
             self.assertFalse(by_name["C3"]["antiunitary"])
             self.assertTrue(by_name["C2T"]["antiunitary"])
@@ -928,7 +938,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             hamk_file = tmp / "hamk.npy"
             symm_dir = tmp / "symmetry_analysis_test"
             rep_dir = symm_dir / "representations" / "K1"
-            out_dir = tmp / "symm_project"
+            out_dir = tmp / "outputs" / "K1" / "q06" / "symmetry"
             cfg_path = tmp / "k1.yaml"
 
             np.save(q1_file, np.array([[0.0, 0.0]], dtype=float))
@@ -989,6 +999,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             )
 
             cfg = {
+                "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
                 "material": {
                     "hamk_file": str(hamk_file),
                     "energy_unit": "eV",
@@ -1012,7 +1023,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     "spin": "up",
                     "tapw_symmetry_dir": str(symm_dir),
                     "operations": ["C3", "C2"],
-                    "output_dir": str(out_dir),
                     "tolerance": 1.0e-8,
                 },
             }
@@ -1020,11 +1030,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
             cli.main(["symm", "--config", str(cfg_path)])
 
-            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
-            manifest = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))
-            self.assertEqual(manifest, summary)
+            _arrays, summary = _load_canonical_symmetry_payload(out_dir)
             rows = {operation["operation"]: operation for operation in summary["operations"]}
-            manifest_rows = {operation["operation"]: operation for operation in manifest["operations"]}
             c3 = rows["C3"]
             self.assertEqual(c3["declared_model_action"]["sector_map"], "identity")
             self.assertEqual(c3["model_action"]["sector_map"], "identity")
@@ -1032,7 +1039,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertTrue(c3["model_basis_action"]["complete"])
             self.assertEqual(c3["model_basis_action"]["sector_map"], "identity")
             self.assertFalse(c3["model_basis_action"]["support_resolution"]["action_mismatch"])
-            self.assertEqual(manifest_rows["C3"]["model_basis_action"], c3["model_basis_action"])
 
             row = rows["C2"]
             self.assertEqual(row["source_action"]["sector_map"], "layer_exchange")
@@ -1041,13 +1047,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(row["sector_map"], "layer_exchange")
             self.assertTrue(row["model_basis_action"]["complete"])
             self.assertEqual(row["model_basis_action"]["sector_map"], "layer_exchange")
-            self.assertEqual(manifest_rows["C2"]["model_basis_action"], row["model_basis_action"])
             self.assertFalse(row["model_basis_action"]["support_resolution"]["action_mismatch"])
             self.assertEqual(row["model_basis_action"]["support_resolution"]["block_off_support_rel"], 0.0)
             self.assertEqual(row["matrix_kind"], "continuum_internal_rep_exact")
             self.assertEqual(row["matrix_source"], "kp_symm_exactified_action")
-            self.assertEqual(row["matrix_file"], "exactified_C2.npy")
-            self.assertEqual(row["raw_matrix_file"], "C2_low_raw.npy")
+            self.assertEqual(row["matrix_file"], "representations.npz")
+            self.assertEqual(row["matrix_array_key"], "C2")
             self.assertEqual(row["source_matrix_projection_report"]["report"]["status"], "exactified")
             self.assertEqual(row["internal_resolved_action"]["sector_map"], "layer_exchange")
             self.assertEqual(
@@ -1096,7 +1101,8 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 },
             )
 
-            row = json.loads((out_dir / "manifest.json").read_text(encoding="utf-8"))["operations"][0]
+            _arrays, summary = _load_canonical_symmetry_payload(out_dir)
+            row = summary["operations"][0]
             self.assertEqual(row["declared_model_action"]["sector_map"], "identity")
             self.assertEqual(row["model_action"]["sector_map"], "identity")
             self.assertEqual(row["model_basis_action"]["sector_map"], "identity")
@@ -1153,7 +1159,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             hamk_file = tmp / "hamk.npy"
             symm_dir = tmp / "symmetry_analysis_test"
             rep_dir = symm_dir / "representations" / "M1"
-            out_dir = tmp / "symm_project"
+            out_dir = tmp / "outputs" / "M1" / "q06" / "symmetry"
             cfg_path = tmp / "mgi2_M1.yaml"
 
             np.save(q1_file, np.array([[0.0, 0.0]], dtype=float))
@@ -1204,6 +1210,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             )
 
             cfg = {
+                "case": {"profile": "M1", "q_shell": "q06", "output_root": "outputs"},
                 "material": {
                     "hamk_file": str(hamk_file),
                     "energy_unit": "eV",
@@ -1228,7 +1235,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     "spin_sector_sewing": "up_to_down",
                     "tapw_symmetry_dir": str(symm_dir),
                     "operations": ["TR"],
-                    "output_dir": str(out_dir),
                     "tolerance": 1.0e-8,
                 },
             }
@@ -1236,18 +1242,19 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
             cli.main(["symm", "--config", str(cfg_path)])
 
-            raw = np.load(out_dir / "TR_low_raw.npy")
+            arrays, summary = _load_canonical_symmetry_payload(out_dir)
+            raw = arrays["TR"]
             np.testing.assert_allclose(raw, np.array([[0.0, 1.0], [1.0, 0.0]]), atol=1.0e-12)
             self.assertFalse((out_dir / "TR_low_polar.npy").exists())
             self.assertFalse((out_dir / "TR_low_representation_raw.npy").exists())
-            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
             row = summary["operations"][0]
             self.assertEqual(row["spin_sector_sewing"], "up_to_down")
             self.assertEqual(row["source_spin"], "up")
             self.assertEqual(row["target_spin"], "down")
             self.assertEqual(row["matrix_kind"], "continuum_internal_rep_exact")
             self.assertEqual(row["matrix_source"], "kp_symm_exactified_action")
-            self.assertEqual(row["matrix_file"], "exactified_TR.npy")
+            self.assertEqual(row["matrix_file"], "representations.npz")
+            self.assertEqual(row["matrix_array_key"], "TR")
             self.assertEqual(row["model_action"]["sector_map"], "layer_exchange")
             self.assertEqual(row["source_matrix_projection_report"]["report"]["status"], "exactified")
             self.assertLess(row["pairs"][0]["raw"]["heff_covariance_residual"], 1.0e-12)
@@ -1289,14 +1296,10 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
             self.assertFalse((out_dir / "C3_low_polar.npy").exists())
             self.assertFalse((out_dir / "C3_low_representation_raw.npy").exists())
-            self.assertTrue((out_dir / "diagnostics" / "C3_low_polar.npy").exists())
-            self.assertTrue((out_dir / "diagnostics" / "C3_low_representation_raw.npy").exists())
-            self.assertTrue((out_dir / "diagnostics" / "C3_low_representation_polar.npy").exists())
-            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            self.assertFalse((out_dir / "diagnostics").exists())
+            _arrays, summary = _load_canonical_symmetry_payload(out_dir)
             row = summary["operations"][0]
-            self.assertEqual(row["developer_outputs"]["representation_matrix_file"], "diagnostics/C3_low_representation_raw.npy")
-            self.assertEqual(row["developer_outputs"]["polar_matrix_file"], "diagnostics/C3_low_polar.npy")
-            self.assertIn("polar", row["pairs"][0])
+            self.assertNotIn("developer_outputs", row)
 
             cfg["symm"]["developer_outputs"] = False
             cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
@@ -1381,6 +1384,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             cfg = {
+                "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
                 "material": {
                     "hamk_file": str(hamk_file),
                     "energy_unit": "eV",
@@ -1404,7 +1408,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     "spin": "up",
                     "tapw_symmetry_dir": str(symm_dir),
                     "operations": ["C3"],
-                    "output_dir": str(tmp / "symm_project"),
                     "tolerance": 1.0e-8,
                 },
             }
@@ -1421,7 +1424,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             hamk_file = tmp / "hamk.npy"
             symm_dir = tmp / "symmetry_analysis_test"
             rep_dir = symm_dir / "representations" / "K1"
-            out_dir = tmp / "symm_project"
+            out_dir = tmp / "outputs" / "K1" / "q06" / "symmetry"
             cfg_path = tmp / "mote2_4_K.yaml"
 
             np.save(q1_file, np.array([[0.0, 0.0]], dtype=float))
@@ -1475,6 +1478,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             )
 
             cfg = {
+                "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
                 "material": {
                     "hamk_file": str(hamk_file),
                     "energy_unit": "eV",
@@ -1498,7 +1502,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                     "spin": "up",
                     "tapw_symmetry_dir": str(symm_dir),
                     "operations": ["C3"],
-                    "output_dir": str(out_dir),
                     "tolerance": 1.0e-8,
                 },
             }
@@ -1506,9 +1509,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
             cli.main(["symm", "--config", str(cfg_path)])
 
-            raw = np.load(out_dir / "C3_low_raw.npy")
-            np.testing.assert_allclose(raw, np.eye(2), atol=1.0e-12)
-            summary = json.loads((out_dir / "summary.json").read_text(encoding="utf-8"))
+            arrays, summary = _load_canonical_symmetry_payload(out_dir)
+            raw = arrays["C3z"]
+            np.testing.assert_allclose(raw / raw[0, 0], np.eye(2), atol=1.0e-12)
             pair = summary["operations"][0]["pairs"][0]
             self.assertLess(pair["full_space_covariance_residual"], 1.0e-12)
             self.assertLess(pair["raw"]["heff_covariance_residual"], 1.0e-12)

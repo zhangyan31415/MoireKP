@@ -36,6 +36,13 @@ def _canonical_case_base(case_raw: Any) -> str | None:
     return _path_join(str(output_root), str(profile), str(q_shell))
 
 
+def _require_canonical_case(case_raw: Any) -> str:
+    case_base = _canonical_case_base(case_raw)
+    if case_base is None:
+        raise ValueError("KP case config requires case.profile, case.q_shell, and case.output_root.")
+    return case_base
+
+
 def _case_name(raw_case: Any, fallback: str) -> str:
     if isinstance(raw_case, Mapping):
         profile = raw_case.get("profile")
@@ -95,15 +102,10 @@ def _apply_tapw_band_manifest(material: dict[str, Any], *, config_dir: Path) -> 
 
 
 def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | Path) -> dict[str, Any]:
-    """Normalize the compact one-file KP case YAML into legacy section views.
-
-    The returned mapping keeps legacy split-config files unchanged while adding
-    defaults for release-facing case YAMLs that contain material/project/model
-    sections in one file.
-    """
+    """Normalize the compact one-file KP case YAML into internal section views."""
     out = dict(raw or {})
     path = Path(config_path)
-    case_base = _canonical_case_base(out.get("case"))
+    case_base = _require_canonical_case(out.get("case"))
     case_name = _case_name(out.get("case"), path.stem)
 
     material_raw = out.get("material")
@@ -148,39 +150,37 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
     if "model" in out or model:
         out["model"] = model
 
-    is_unified = all(key in out for key in ("material", "project", "model"))
-    if is_unified:
+    is_canonical_case = case_base is not None
+    if is_canonical_case and "project" in out:
         project = dict(out.get("project", {}) or {})
         _set_default_path(
             project,
             "out_dir",
-            _path_join(case_base, "projection") if case_base else f"../outputs/project/{case_name}",
+            _path_join(case_base, "projection"),
         )
         out["project"] = project
 
+    if is_canonical_case and "symm" in out:
         symm = dict(out.get("symm", {}) or {})
         _set_default_path(
             symm,
             "output_dir",
-            _path_join(case_base, "symmetry") if case_base else f"../outputs/symm/{case_name}",
+            _path_join(case_base, "symmetry"),
         )
         out["symm"] = symm
 
+    if is_canonical_case and ("model" in out or "output" in out):
         output = dict(out.get("output", {}) or {})
         _set_default_path(
             output,
             "dir",
-            _path_join(case_base, "model") if case_base else f"../outputs/model/{case_name}",
+            _path_join(case_base, "model"),
         )
         out["output"] = output
 
         plot = dict(out.get("plot", {}) or {})
-        if case_base:
-            _set_default_path(plot, "out", _path_join(case_base, "inspect", "scatter.pdf"))
-            _set_default_path(plot, "data_out", _path_join(case_base, "inspect", "spectrum.txt"))
-        else:
-            _set_default_path(plot, "out", f"../outputs/project/{case_name}/heff_scatter.png")
-            _set_default_path(plot, "data_out", f"../outputs/project/{case_name}/heff_spectrum.txt")
+        _set_default_path(plot, "out", _path_join(case_base, "inspect", "scatter.pdf"))
+        _set_default_path(plot, "data_out", _path_join(case_base, "inspect", "spectrum.txt"))
         out["plot"] = plot
 
         if valley is not None and "valley_model" not in out:

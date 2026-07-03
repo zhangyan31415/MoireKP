@@ -30,27 +30,24 @@ def _write_symm_frame_manifest(
     base: Path,
     *,
     case_id: str = "toy_K1",
+    q_shell: str = "q01",
     dim: int = 2,
     rotation_deg: float = 0.0,
     operations: tuple[str, ...] = ("C3z", "C2T"),
 ) -> Path:
-    symm_dir = base / "outputs" / "symm" / case_id
+    symm_dir = base / "outputs" / case_id / q_shell / "symmetry"
     symm_dir.mkdir(parents=True, exist_ok=True)
-    for operation in operations:
-        np.save(symm_dir / f"exactified_{operation}.npy", np.eye(dim, dtype=np.complex128))
-    np.save(symm_dir / "q_model_layer1.npy", np.array([[0.0, 0.0]], dtype=float))
-    np.save(symm_dir / "q_model_layer2.npy", np.array([[0.0, 0.0]], dtype=float))
     manifest = {
         "exactification_owner": "kp_symm",
         "frame": {"q_transform": {"rotation_deg": float(rotation_deg)}},
-        "q_model": {"files": {"layer1": "q_model_layer1.npy", "layer2": "q_model_layer2.npy"}},
         "operations": [
             {
                 "name": operation,
                 "operation": operation,
                 "matrix_kind": "continuum_internal_rep_exact",
                 "matrix_source": "kp_symm_exactified_action",
-                "matrix_file": f"exactified_{operation}.npy",
+                "matrix_file": "representations.npz",
+                "matrix_array_key": operation,
                 "antiunitary": operation in {"C2T", "TR"},
                 "k_map": {"type": "identity"},
                 "q_map": {"type": "identity"},
@@ -66,7 +63,11 @@ def _write_symm_frame_manifest(
             for operation in operations
         ],
     }
-    (symm_dir / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    payload = {operation: np.eye(dim, dtype=np.complex128) for operation in operations}
+    payload["__metadata_json__"] = np.asarray(json.dumps(manifest, sort_keys=True))
+    np.savez_compressed(symm_dir / "representations.npz", **payload)
+    (symm_dir / "residuals.csv").write_text("operation,status,unitarity,exactification_distance\n", encoding="utf-8")
+    (symm_dir / "summary.md").write_text("# KP Symmetry Projection\n", encoding="utf-8")
     return symm_dir
 
 
@@ -96,26 +97,11 @@ def _write_export_fixture(
     np.save(root / "q1.npy", q1)
     np.save(root / "q2.npy", q2)
     np.save(root / "kpoints.npy", kpoints)
-    project_dir = root / "outputs" / "project" / case_id
+    q_shell = "q01"
+    project_dir = root / "outputs" / case_id / q_shell / "projection"
     project_dir.mkdir(parents=True)
-    np.save(project_dir / "heff_list.npy", heff)
-    np.save(project_dir / "heff_eig.npy", np.linalg.eigvalsh(heff))
-
-    source_cfg = {
-        "material": {
-            "name": "Toy",
-            "spin": "up",
-            "energy_unit": "eV",
-            "qset1_file": "../../q1.npy",
-            "qset2_file": "../../q2.npy",
-        },
-        "plot": {},
-        "project": {"out_dir": f"../../outputs/project/{case_id}"},
-    }
-    source_dir = root / "configs" / "source"
-    source_dir.mkdir(parents=True)
-    (source_dir / f"{case_id}.yaml").write_text(yaml.safe_dump(source_cfg), encoding="utf-8")
-    _write_symm_frame_manifest(root, case_id=case_id, dim=dim, operations=operations)
+    np.save(project_dir / "heff.npy", heff)
+    _write_symm_frame_manifest(root, case_id=case_id, q_shell=q_shell, dim=dim, operations=operations)
 
     if term_templates is None:
         term_templates = [
@@ -139,8 +125,17 @@ def _write_export_fixture(
         ]
 
     model_cfg = {
-        "source_config": f"../source/{case_id}.yaml",
-        "symmetry_source": {"type": "kp_symm_output", "path": f"../../outputs/symm/{case_id}"},
+        "case": {"profile": case_id, "q_shell": q_shell, "output_root": "../outputs"},
+        "material": {
+            "name": "Toy",
+            "spin": "up",
+            "energy_unit": "eV",
+            "qset1_file": "../q1.npy",
+            "qset2_file": "../q2.npy",
+        },
+        "plot": {},
+        "project": {},
+        "symmetry_source": {"type": "kp_symm_output", "path": f"../outputs/{case_id}/{q_shell}/symmetry"},
         "valley_model": {
             "lattice": "hexagonal",
             "system": "bilayer",
@@ -151,7 +146,7 @@ def _write_export_fixture(
             "allowed_internal_symmetries": list(operations),
             "external_sewing_symmetries": [],
         },
-        "kpoints_file": "../../kpoints.npy",
+        "kpoints_file": "../kpoints.npy",
         "model": {
             "n_orb": list(n_orb),
             "nlow_state": list(n_orb),
@@ -163,11 +158,11 @@ def _write_export_fixture(
         },
         "fit": {"indices": [0, 1, 2], "coeff_tol": 1.0e-8},
         "bands": {"indices": [0, 1, 2], "compare_to_heff": True},
-        "output": {"dir": f"../../outputs/model/{case_id}", "progress": False},
+        "output": {"progress": False},
     }
     if sectors is not None:
         model_cfg["sectors"] = sectors
-    model_dir = root / "configs" / "model"
+    model_dir = root / "configs"
     model_dir.mkdir(parents=True)
     cfg_path = model_dir / f"{case_id}.yaml"
     cfg_path.write_text(yaml.safe_dump(model_cfg, sort_keys=False), encoding="utf-8")
@@ -190,7 +185,7 @@ def _write_export_fixture(
         )
 
     run_configured_model(cfg_path)
-    return root / "outputs" / "model" / case_id, cfg_path
+    return root / "outputs" / case_id / q_shell / "model", cfg_path
 
 
 def _load_exported_evaluator(package_dir: Path):
@@ -326,7 +321,6 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
         "runtime_hermitianize_before_eigvalsh",
         "reference_kpoints",
         "reference_eigvals",
-        "reference_heff_eig",
     }
     assert expected_keys.issubset(set(data.files))
     assert not (out_dir / "model.json").exists()
@@ -579,17 +573,18 @@ def test_cli_model_export_standalone_subcommand(monkeypatch, tmp_path: Path) -> 
 
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
 
-    cli.main(
-        [
-            "model",
-            "export-standalone",
-            str(model_output),
-            str(export_output),
-            "--debug-files",
-        ]
-    )
+    with pytest.raises(SystemExit):
+        cli.main(
+            [
+                "model",
+                "export-standalone",
+                str(model_output),
+                str(export_output),
+                "--debug-files",
+            ]
+        )
 
-    assert calls["export"] == (model_output, str(export_output), False, True)
+    assert calls == {}
 
 
 def test_cli_model_config_exports_standalone_inside_output_dir_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -598,7 +593,10 @@ def test_cli_model_config_exports_standalone_inside_output_dir_by_default(monkey
     import kp.model.pipeline as configured
 
     cfg_path = tmp_path / "model.yaml"
-    cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump({"case": {"profile": "toy", "q_shell": "q01", "output_root": "outputs"}}),
+        encoding="utf-8",
+    )
     model_output = tmp_path / "model_out"
     model_output.mkdir()
     (model_output / "run_summary.json").write_text("{}", encoding="utf-8")
@@ -637,9 +635,8 @@ def test_cli_model_config_exports_standalone_inside_output_dir_by_default(monkey
     cli.main(["model", "--config", str(cfg_path)])
 
     assert calls["run"] == str(cfg_path)
-    assert calls["export"] == (model_output, model_output / "standalone", True, False)
-    summary = json.loads((model_output / "run_summary.json").read_text(encoding="utf-8"))
-    assert summary["standalone_export"] == "standalone"
+    assert calls["export"] == (model_output, model_output, True, False)
+    assert not (model_output / "run_summary.json").exists()
 
 
 def test_cli_model_config_uses_explicit_standalone_export_path(monkeypatch, tmp_path: Path) -> None:
@@ -667,9 +664,10 @@ def test_cli_model_config_uses_explicit_standalone_export_path(monkeypatch, tmp_
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
 
-    cli.main(["model", "--config", str(cfg_path), "--export-standalone", str(export_output)])
+    with pytest.raises(SystemExit):
+        cli.main(["model", "--config", str(cfg_path), "--export-standalone", str(export_output)])
 
-    assert calls["export"] == (model_output, export_output, True, False)
+    assert calls == {}
 
 
 def test_cli_model_config_propagates_explicit_standalone_export_failure(monkeypatch, tmp_path: Path) -> None:
@@ -693,7 +691,7 @@ def test_cli_model_config_propagates_explicit_standalone_export_failure(monkeypa
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
     monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
 
-    with pytest.raises(RuntimeError, match="missing standalone metadata"):
+    with pytest.raises(SystemExit):
         cli.main(["model", "--config", str(cfg_path), "--export-standalone", str(tmp_path / "portable")])
 
 
@@ -713,9 +711,10 @@ def test_cli_model_export_standalone_all_examples_dry_run(monkeypatch, tmp_path:
 
     monkeypatch.setattr(export_mod, "export_all_standalone_models", fake_export_all)
 
-    cli.main(["model", "export-standalone", "--all-examples", "examples", str(tmp_path / "out"), "--dry-run"])
+    with pytest.raises(SystemExit):
+        cli.main(["model", "export-standalone", "--all-examples", "examples", str(tmp_path / "out"), "--dry-run"])
 
-    assert calls["export_all"] == ("examples", str(tmp_path / "out"), False, False, True)
+    assert calls == {}
     captured = capsys.readouterr()
-    assert "exportable" in captured.out
-    assert "blocked" in captured.out
+    assert "exportable" not in captured.out
+    assert "blocked" not in captured.out

@@ -77,9 +77,7 @@ The canonical band workflow writes user-facing names:
 
 ```text
 outputs/K1/q04/
-  manifest.json
   band/
-    manifest.json
     energies_vbm.txt
     energies_cbm.txt
     wavefunctions_vbm.npy
@@ -89,24 +87,11 @@ outputs/K1/q04/
     g_vectors_group2.npy
     kpoints.npy
   symmetry/
-    manifest.json
-    summary.json
-    summary.md
-    details.csv
     representations.npz
-    representations/
-      manifest.json
-      raw_h/
-        C3z.npz
-        C2.npz
-        C2T.npz
-      diagnostics/
-        C3z_source.npz
-        C3z_pin.npz
-        C3z_pg.npz
+    residuals.csv
+    summary.md
   topology/
     grid31x31_b1_m0p5_0p5_b2_m0p5_0p5/
-      manifest.json
       chern_summary.json
       berry_curvature_vbm2.txt
       berry_curvature_vbm2.pdf
@@ -119,26 +104,10 @@ outputs/K1/q04/
 
 `symmetry/representations.npz` packs the TAPW raw-H sparse symmetry matrices as
 CSR components, with keys such as `C2T_data`, `C2T_indices`, `C2T_indptr`, and
-`C2T_shape`. The `representations/raw_h/*.npz` files remain as compatibility
-aliases for older scripts. Topology grid directories always include the sampled
-`b1` and `b2` ranges so partial grids do not overwrite each other, for example
-`grid21x41_b1_0p0_0p5_b2_m0p5_0p5`.
-
-Compatibility outputs that should be migrated away from in new workflows:
-
-- `Q_shell_<n_g>/`: legacy root output used by old `compute` configs. New
-  configs should use `outputs/<valley>/qNN/<workflow>/`.
-- `symmetry/representations/raw_h/*.npz`: legacy per-operation raw-H matrix
-  files. New readers should use `symmetry/representations.npz` plus
-  `symmetry/representations/manifest.json`.
-- `band_data/`: legacy band output directory name. New configs write `band/`.
-- Old topology filenames such as `bc_bands_*`, `qgt_bands_*`, and
-  `wcc_*_VBM_*`: new configs write bandset-labeled files such as
-  `berry_curvature_vbm2.*`, `quantum_geometry_vbm2.*`, and
-  `wcc_vbm2_loop_b2.*` under a range-aware `grid.../` directory.
-- Long compatibility commands such as `tapw run --mode symmetry` and
-  `tapw-chernpost`: release-facing examples should use `tapw symm` and
-  `tapw chern`.
+`C2T_shape`. TAPW symmetry writes only three release files:
+`representations.npz`, `residuals.csv`, and `summary.md`. Topology grid
+directories always include the sampled `b1` and `b2` ranges so partial grids do
+not overwrite each other, for example `grid21x41_b1_0p0_0p5_b2_m0p5_0p5`.
 
 Plot the generated bands:
 
@@ -147,28 +116,20 @@ cd output_dir/outputs/K1/q04/band
 tapw plot -c ../../../../bands.yaml
 ```
 
-Legacy configs that only use `compute` keep the existing `Q_shell_<n_g>` names
-and may use `band_data/` instead of `band/`.
-
 ## Chern Post-Processing
 
 ```bash
 cd output_dir
-tapw chern -c config.yaml
-cd outputs/K1/q04
-tapw topo -c ../../../config.yaml -b -1 -2 -v 1 > tapw_chern.log
+tapw topo -c config.yaml
 ```
 
 ## Orbital Analysis
 
 ```bash
-Q_SHELL_DIR=Q_shell_4
-cd "output_dir/${Q_SHELL_DIR}"
-tapw orbital . --config ../config.yaml --valley Gamma --band CBM
+cd output_dir/outputs/Gamma/q04
+tapw orbital . --config ../../../config.yaml --valley Gamma --band CBM
 tapw fatband . --valley Gamma --band CBM --orbital-dir orbital_analysis --output-dir orbital_plots
 ```
-
-Short aliases are the recommended release-facing commands. Longer compatibility forms remain supported: `tapw run --config ... --mode symmetry` is equivalent to `tapw symm -c ...`, and `tapw postprocess-memmap` is equivalent to `tapw final`. Legacy script entry points remain supported for existing scripts: `tapw-calc`, `tapw-config`, `tapw-plot`, `tapw-chernpost`, `tapw-orbital`, and `tapw-plot-orbital`.
 
 ## Examples
 

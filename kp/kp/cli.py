@@ -23,7 +23,7 @@ from .blocks import (
     resolve_project_gauge_anchors,
     set_projector_blas_threads,
 )
-from .basis.selection import GaugeAnchorReport, write_basis_selection_report
+from .basis.selection import GaugeAnchorReport
 from .basis.selection import _format_report_markdown as _format_basis_report_markdown
 from .plot_style import (
     KP_BAND_BOX_ASPECT,
@@ -87,58 +87,7 @@ def _remove_known_stale_files(directory: str | Path, filenames: Sequence[str]) -
 
 
 def _write_case_summary(cfg: dict[str, Any], workflow_dir: str | Path, workflow: str) -> None:
-    if not _is_canonical_case_config(cfg):
-        return
-    workflow_path = Path(workflow_dir)
-    case_dir = workflow_path.parent
-    summary = case_dir / "summary.md"
-    case = cfg.get("case", {})
-    lines = [
-        "# KP Case Summary",
-        "",
-        f"- profile: `{case.get('profile')}`",
-        f"- q_shell: `{case.get('q_shell')}`",
-        f"- updated_workflow: `{workflow}`",
-        "",
-        "## Workflows",
-    ]
-    for name in ("inspect", "projection", "symmetry", "model"):
-        status = "ready" if (case_dir / name).exists() else "pending"
-        lines.append(f"- {name}: {status}")
-    _write_text(summary, "\n".join(lines) + "\n")
-
-    root = case_dir.parent.parent
-    manifest = root / "manifest.yaml"
-    profile_dir = case_dir.parent
-    targets = []
-    if root.exists():
-        for profile in sorted(p for p in root.iterdir() if p.is_dir()):
-            for q_shell in sorted(q for q in profile.iterdir() if q.is_dir()):
-                targets.append(
-                    {
-                        "profile": profile.name,
-                        "q_shell": q_shell.name,
-                        "path": f"{profile.name}/{q_shell.name}",
-                    }
-                )
-    _write_text(
-        manifest,
-        yaml.safe_dump(
-            {
-                "schema": "kp_outputs/v1",
-                "updated_workflow": workflow,
-                "targets": targets
-                or [
-                    {
-                        "profile": profile_dir.name,
-                        "q_shell": case_dir.name,
-                        "path": f"{profile_dir.name}/{case_dir.name}",
-                    }
-                ],
-            },
-            sort_keys=False,
-        ),
-    )
+    return
 
 
 def _write_inspect_sidecars(
@@ -190,31 +139,6 @@ def _stack_inspect_arrays(rows: Sequence[np.ndarray], role: str) -> np.ndarray:
         raise ValueError(f"Cannot save inspect {role}: inconsistent row shapes {shapes}") from exc
 
 
-def _default_standalone_export_dir(model_output_dir: Path) -> Path:
-    return model_output_dir / "standalone"
-
-
-def _record_standalone_export(model_output_dir: Path, export_path: Path) -> None:
-    summary_path = model_output_dir / "run_summary.json"
-    summary_path.parent.mkdir(parents=True, exist_ok=True)
-    if summary_path.exists():
-        try:
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            summary = {}
-    else:
-        summary = {}
-    if not isinstance(summary, dict):
-        summary = {}
-    model_output_resolved = model_output_dir.resolve()
-    export_resolved = export_path.resolve()
-    try:
-        summary["standalone_export"] = str(export_resolved.relative_to(model_output_resolved))
-    except ValueError:
-        summary["standalone_export"] = str(export_resolved)
-    summary_path.write_text(json.dumps(summary, indent=2) + "\n", encoding="utf-8")
-
-
 def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
     keep = {
         "README.md",
@@ -223,6 +147,7 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "model_data.npz",
         "eigvals.npy",
         "band_comparison.pdf",
+        "band_comparison_all.pdf",
         "q_lattice_harmonics.pdf",
     }
     root = Path(model_output_dir)
@@ -871,14 +796,18 @@ def _cached_symmetry_basis_payload(symm_cfg: Any, resolve) -> dict[str, Any] | N
     resolved = resolve(output_dir)
     if resolved is None:
         return None
-    basis_path = Path(resolved) / "basis_selection.json"
-    if not basis_path.exists():
+    representations_path = Path(resolved) / "representations.npz"
+    if not representations_path.exists():
         return None
-    payload = json.loads(basis_path.read_text(encoding="utf-8"))
+    with np.load(representations_path, allow_pickle=False) as payload_file:
+        if "__metadata_json__" not in payload_file.files:
+            return None
+        metadata = json.loads(str(np.asarray(payload_file["__metadata_json__"]).item()))
+    payload = metadata.get("project_basis")
     if not isinstance(payload, dict):
-        raise ValueError(f"Cached basis selection must be a JSON object: {basis_path}")
+        return None
     if not isinstance(payload.get("resolved_norb_fix_list"), list):
-        raise ValueError(f"Cached basis selection lacks resolved_norb_fix_list: {basis_path}")
+        raise ValueError(f"Cached symmetry metadata lacks project_basis.resolved_norb_fix_list: {representations_path}")
     return payload
 
 
@@ -1458,140 +1387,6 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         ref_q_index=ref_q_index,
     )
 
-    # # -------------------- Optional low-energy projection (Heff) --------------------
-    # project_cfg = cfg.get("project", {})
-    # if project_cfg and project_cfg.get("enable", False):
-    #     try:
-    #         from joblib import Parallel, delayed  # noqa: F401
-    #         have_joblib = True
-    #     except Exception:
-    #         have_joblib = False
-
-    #     nlow_state_list = project_cfg.get("nlow_state_list", [])
-    #     norb_fix_list = project_cfg.get("norb_fix_list", [])
-    #     workers = int(project_cfg.get("workers", 4))
-    #     out_heff = resolve(project_cfg.get("out_heff", os.path.join(os.path.dirname(out_path) or ".", "heff_list.npy")))
-    #     out_eig = resolve(project_cfg.get("out_eig", os.path.join(os.path.dirname(out_path) or ".", "heff_eig.npy")))
-    #     out_vec = resolve(project_cfg.get("out_vec", os.path.join(os.path.dirname(out_path) or ".", "heff_vec.npy")))
-
-    #     # Prepare per-Q blocks; reuse H_diag_block logic by recomputing indices via get_H_block
-    #     # We already have eigs_list & vecs_list, but need the block Hamiltonians as input to projection.
-    #     # So recompute H_diag_block using get_H_block result kept earlier? Not stored — recompute quickly.
-    #     H_eig2, H_vec2, H_blocks, _ = get_H_block(
-    #         hamk2d,
-    #         [[q1], [q2]],
-    #         [1, 1],
-    #         [[orb0], [orb0]],
-    #         [[], []],
-    #         [[], []],
-    #         spin=spin,
-    #         mode="gamma",
-    #     )
-    #     blocks = [np.asarray(b) for b in H_blocks]
-    #     # Apply same Q ordering
-    #     if index_order is not None:
-    #         blocks = [blocks[i] for i in index_order]
-
-    #     print(f"[kp] Projecting to low-energy subspace: workers={workers}")
-    #     if have_joblib and workers > 1:
-    #         from joblib import Parallel, delayed
-    #         from tqdm import tqdm
-    #         results = Parallel(n_jobs=workers)(
-    #             delayed(get_h_dft_low)(blocks[i], nlow_state_list, norb_fix_list, q1, q2)
-    #             for i in tqdm(range(len(blocks)))
-    #         )
-    #     else:
-    #         results = [get_h_dft_low(blocks[i], nlow_state_list, norb_fix_list, q1, q2) for i in range(len(blocks))]
-
-    #     heff_list = [r[0] for r in results]
-    #     heig_list = [r[1] for r in results]
-    #     hvec_list = [r[2] for r in results]
-
-    #     os.makedirs(os.path.dirname(out_heff) or ".", exist_ok=True)
-    #     np.save(out_heff, np.array(heff_list, dtype=object))
-    #     np.save(out_eig, np.array(heig_list, dtype=object))
-    #     np.save(out_vec, np.array(hvec_list, dtype=object))
-    #     print(f"[kp] Saved Heff to: {out_heff}")
-    #     print(f"[kp] Saved Heff eig to: {out_eig}")
-    #     print(f"[kp] Saved Heff vec to: {out_vec}")
-
-    # # -------------------- Inline band analysis (around EF) --------------------
-    # try:
-    #     tt
-    #     E2 = np.vstack([np.asarray(ev, dtype=np.float64) for ev in eigs_list])
-    #     if index_order is not None:
-    #         E2 = E2[index_order]
-    #         if 'vecs_list' in locals():
-    #             vecs_ord = [vecs_list[i] for i in index_order]
-    #         else:
-    #             vecs_ord = None
-    #     else:
-    #         vecs_ord = vecs_list if 'vecs_list' in locals() else None
-
-    #     ref_q = ref_q_index if 0 <= ref_q_index < E2.shape[0] else 0
-    #     below_n = int(plot_cfg.get('report_below', 2))
-    #     above_n = int(plot_cfg.get('report_above', 2))
-    #     top_n = int(plot_cfg.get('report_components', 4))
-
-    #     e_row = E2[ref_q]
-    #     below_idx = np.where(e_row < efermi)[0]
-    #     above_idx = np.where(e_row >= efermi)[0]
-    #     sel_below = below_idx[-below_n:].tolist() if below_idx.size else []
-    #     sel_above = above_idx[:above_n].tolist() if above_idx.size else []
-    #     print(f"[kp] Selected bands at ref_Q={ref_q}: below EF {sel_below}, above EF {sel_above}")
-
-    #     if vecs_ord is not None and len(vecs_ord) == E2.shape[0]:
-    #         labels_pattern = material.get("orbital_order")
-    #         per_layer_labels = None
-    #         if labels_pattern:
-    #             try:
-    #                 per_layer_labels = expand_orbital_order_pattern(str(labels_pattern))
-    #             except Exception:
-    #                 per_layer_labels = None
-    #         if per_layer_labels is not None and len(per_layer_labels) != orb0:
-    #             if len(per_layer_labels) < orb0:
-    #                 per_layer_labels += [f"orb_{i}" for i in range(len(per_layer_labels), orb0)]
-    #             else:
-    #                 per_layer_labels = per_layer_labels[:orb0]
-
-    #         block_dim = int(vecs_ord[0].shape[0])
-    #         half = block_dim // 2 if spin == 'all' else block_dim
-
-    #         def map_index(idx: int):
-    #             if spin == 'all':
-    #                 spin_tag = 'up' if idx < half else 'down'
-    #                 idx0 = idx if idx < half else idx - half
-    #             else:
-    #                 spin_tag = spin
-    #                 idx0 = idx
-    #             layer = idx0 // orb0
-    #             orb_local = idx0 % orb0
-    #             label = None
-    #             if per_layer_labels is not None and 0 <= orb_local < len(per_layer_labels):
-    #                 label = per_layer_labels[orb_local]
-    #             return spin_tag, int(layer), int(orb_local), label
-
-    #         for b in sel_below + sel_above:
-    #             w = np.zeros(block_dim, dtype=np.float64)
-    #             for V in vecs_ord:
-    #                 vec = np.asarray(V[:, b], dtype=np.complex128)
-    #                 w += np.abs(vec) ** 2
-    #             print(np.shape(vec))
-    #             top_idx = np.argsort(-w)[:top_n]
-    #             w_top = w[top_idx]
-    #             tot = float(w.sum()) if float(w.sum()) != 0.0 else 1.0
-    #             frac = w_top / tot
-    #             print(f"[kp] Band {b}: top-{top_n} orbital components (aggregated over Q)")
-    #             print("        rank   idx   spin  layer  orb   weight        frac     label")
-    #             for rk, (t, wt, fr) in enumerate(zip(top_idx.tolist(), w_top.tolist(), frac.tolist()), start=1):
-    #                 spin_tag, layer, orb_local, label = map_index(int(t))
-    #                 label_str = label if label is not None else "-"
-    #                 print(f"        {rk:>4}  {int(t):>5}  {spin_tag:<5}  {layer:>5}  {orb_local:>3}  {wt:>9.4f}   {fr*100:>7.2f}%   {label_str}")
-    #     else:
-    #         print("[kp] Eigenvectors not available; skip orbital decomposition. Set target:'all' or remove band_file.")
-    # except Exception as ex:
-    #     print(f"[kp] Analysis step warning: {ex}")
-
     # -------------------- Inline band analysis (around EF) --------------------
 
     def _format_complex(z: complex) -> str:
@@ -1802,7 +1597,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     out_dir = resolve(project_cfg.get("out_dir", "plots"))
     if out_dir is None:
         out_dir = os.path.join(cfg_dir, "plots")
-    canonical_project = _is_canonical_case_config(cfg)
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     nk = hamk3d.shape[0]
     has_explicit_k_indices = project_cfg.get("k_indices") is not None
@@ -1893,34 +1687,25 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             mode=mode,
         )
     norb_fix_list = resolved_norb_fix_list
-    if canonical_project:
-        _remove_known_stale_files(
-            out_dir,
-            (
-                "auto_norb_fix_list.yaml",
-                "basis_selection.json",
-                "basis_selection.md",
-                "eigvals.npy",
-                "heff_eig.npy",
-                "heff_list.npy",
-                "heff_vec.npy",
-                "scatter.png",
-                "vectors.npy",
-            ),
-        )
-        basis_payload = gauge_report.to_dict()
-        _write_text(Path(out_dir) / "basis.md", _format_basis_report_markdown(basis_payload))
-        np.savez(
-            Path(out_dir) / "basis.npz",
-            nlow_state_list=np.asarray(nlow_state_list, dtype=object),
-            norb_fix_list=np.asarray(norb_fix_list, dtype=object),
-        )
-    else:
-        write_basis_selection_report(out_dir, gauge_report)
-    if canonical_project:
-        basis_report_path = os.path.join(out_dir, "basis.md")
-    else:
-        basis_report_path = os.path.join(out_dir, "basis_selection.json")
+    _remove_known_stale_files(
+        out_dir,
+        (
+            "auto_norb_fix_list.yaml",
+            "basis_selection.json",
+            "basis_selection.md",
+            "eigvals.npy",
+            "scatter.png",
+            "vectors.npy",
+        ),
+    )
+    basis_payload = gauge_report.to_dict()
+    _write_text(Path(out_dir) / "basis.md", _format_basis_report_markdown(basis_payload))
+    np.savez(
+        Path(out_dir) / "basis.npz",
+        nlow_state_list=np.asarray(nlow_state_list, dtype=object),
+        norb_fix_list=np.asarray(norb_fix_list, dtype=object),
+    )
+    basis_report_path = os.path.join(out_dir, "basis.md")
     print(f"[kp]   gauge={gauge_report.gauge_mode}")
     print(f"[kp]   basis selection report={basis_report_path}")
     print(f"[kp]   output directory={out_dir}")
@@ -1932,11 +1717,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp]   nlow_state_list={nlow_state_list}")
         print(f"[kp]   norb_fix_list={norb_fix_list}")
     # Unified output directory for all artifacts
-    out_heff = os.path.join(out_dir, "heff.npy" if canonical_project else "heff_list.npy")
-    out_eig = None if canonical_project else os.path.join(out_dir, "heff_eig.npy")
-    out_vec = os.path.join(out_dir, "wavefunctions.npy" if canonical_project else "heff_vec.npy")
-    plot_out = os.path.join(out_dir, "scatter.pdf" if canonical_project else "heff_scatter.png")
-    data_out = os.path.join(out_dir, "eigvals.txt" if canonical_project else "heff_spectrum.txt")
+    out_heff = os.path.join(out_dir, "heff.npy")
+    out_eig = None
+    out_vec = os.path.join(out_dir, "wavefunctions.npz")
+    plot_out = os.path.join(out_dir, "scatter.pdf")
+    data_out = os.path.join(out_dir, "eigvals.txt")
     original_eigs_list = None
     band_file = resolve(material.get("band_file"))
     if band_file:
@@ -2031,18 +1816,18 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             print(f"[kp] Parallel projection failed, falling back to serial: {ex}")
             results = [_project_one_from_context(i, project_context) for i in project_indices]
 
-    heff_list = [np.asarray(r[0], dtype=np.complex128) for r in results]  # (nk, M, M)
+    heff_rows = [np.asarray(r[0], dtype=np.complex128) for r in results]  # (nk, M, M)
     heig_list = [np.asarray(r[1], dtype=np.float64) for r in results]      # (nk, M)
     hvec_list = [np.asarray(r[2], dtype=np.complex128) for r in results]  # (nk, M, M)
     diag_list = [r[3] for r in results if len(r) > 3]
 
     # Stack to numeric arrays if possible
     try:
-        heff_arr = np.stack(heff_list, axis=0)  # (Q, M, M)
+        heff_arr = np.stack(heff_rows, axis=0)  # (Q, M, M)
         heig_arr = np.stack(heig_list, axis=0)  # (Q, M)
         hvec_arr = np.stack(hvec_list, axis=0)  # (Q, M, M)
     except Exception:
-        heff_arr = np.array(heff_list, dtype=object)
+        heff_arr = np.array(heff_rows, dtype=object)
         heig_arr = np.array(heig_list, dtype=object)
         hvec_arr = np.array(hvec_list, dtype=object)
 
@@ -2051,9 +1836,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     np.save(out_heff, heff_arr)
     if out_eig is not None:
         np.save(out_eig, heig_arr)
-    np.save(out_vec, hvec_arr)
-    if has_explicit_k_indices:
-        np.save(os.path.join(out_dir, "k_indices.npy"), np.asarray(project_indices, dtype=int))
+    np.savez_compressed(
+        out_vec,
+        wavefunctions=hvec_arr,
+        k_indices=np.asarray(project_indices, dtype=int),
+    )
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
         print(f"[kp] Heff shape: {heff_arr.shape}")
     print("[kp] Saved arrays:")
@@ -2080,11 +1867,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     if not isinstance(project_plot_cfg, dict):
         raise ValueError("project.plot must be a mapping when provided")
     project_top_bands = project_plot_cfg.get("top_bands", project_cfg.get("plot_top_bands"))
-    if canonical_project and project_top_bands is None:
+    if project_top_bands is None:
         project_top_bands = 10
     project_bottom_bands = project_plot_cfg.get("bottom_bands", project_cfg.get("plot_bottom_bands"))
     project_band_slice = project_plot_cfg.get("band_slice", project_cfg.get("plot_band_slice"))
-    project_plot_all_bands = _as_bool(project_plot_cfg.get("plot_all_bands", project_cfg.get("plot_all_bands", canonical_project)))
+    project_plot_all_bands = _as_bool(project_plot_cfg.get("plot_all_bands", project_cfg.get("plot_all_bands", True)))
     project_align = str(project_plot_cfg.get("align", project_cfg.get("plot_align", "fermi")))
     kpath_axis = _kpath_axis_from_config(
         cfg,
@@ -2121,15 +1908,14 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         plot_all_bands=project_plot_all_bands,
         align=project_align,
         xlabel="k-path point",
-        figsize=KP_BAND_FIGSIZE if canonical_project else None,
-        box_aspect=KP_BAND_BOX_ASPECT if canonical_project else None,
-        font_family=kp_font_family() if canonical_project else None,
+        figsize=KP_BAND_FIGSIZE,
+        box_aspect=KP_BAND_BOX_ASPECT,
+        font_family=kp_font_family(),
         **kpath_axis,
     )
     save_spectrum_txt(heig_list, data_out)
     print(f"[kp] Saved Heff spectrum: {data_out}")
-    if canonical_project:
-        _write_case_summary(cfg, out_dir, "projection")
+    _write_case_summary(cfg, out_dir, "projection")
 
 
 def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:
@@ -2315,170 +2101,40 @@ def _project_overrides_from_args(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def _model_output_dir_from_config(cfg_path: str) -> Path:
-    config_path = Path(cfg_path).expanduser()
-    if not config_path.is_absolute():
-        config_path = Path.cwd() / config_path
-    with config_path.open("r", encoding="utf-8") as f:
-        cfg = normalize_case_config(yaml.safe_load(f), config_path=config_path)
-
-    output_cfg = cfg.get("output", {})
-    if not isinstance(output_cfg, dict) or not output_cfg.get("dir"):
-        raise SystemExit("kp export -c/--config requires output.dir in the model config")
-
-    model_output_dir = Path(str(output_cfg["dir"])).expanduser()
-    if model_output_dir.is_absolute():
-        return model_output_dir
-    return config_path.parent / model_output_dir
-
-
-def _run_standalone_export_command(args: argparse.Namespace, action_args: Sequence[str]) -> None:
-    from .model import export as export_mod
-
-    if args.all_examples:
-        if getattr(args, "config", None):
-            raise SystemExit("kp export --all-examples cannot be combined with -c/--config")
-        all_output_root = action_args[0] if action_args else None
-        if all_output_root is None:
-            all_output_root = getattr(args, "export_output_dir", None)
-        if all_output_root is None:
-            raise SystemExit("kp export --all-examples requires <output_root>")
-        report = export_mod.export_all_standalone_models(
-            args.all_examples,
-            all_output_root,
-            force=bool(args.force),
-            debug_files=bool(args.debug_files),
-            dry_run=bool(args.dry_run),
-        )
-        print(f"[kp model] standalone exportable: {len(report['exportable'])}")
-        print(f"[kp model] standalone exported: {len(report['exported'])}")
-        print(f"[kp model] standalone blocked: {len(report['blocked'])}")
-        for row in report["blocked"]:
-            print(f"[kp model]   blocked: {row['model_output_dir']}: {row['reason']}")
-        return
-
-    if getattr(args, "config", None):
-        if action_args:
-            raise SystemExit("kp export -c/--config cannot be combined with <model_output_dir>")
-        output_dir = getattr(args, "export_output_dir", None)
-        if output_dir is None:
-            raise SystemExit("kp export -c/--config requires -o/--out")
-        model_output_dir = _model_output_dir_from_config(args.config)
-    else:
-        if len(action_args) < 2:
-            raise SystemExit("kp export requires <model_output_dir> <output_dir>")
-        model_output_dir = Path(action_args[0])
-        output_dir = action_args[1]
-
-    export_path = export_mod.export_standalone_model(
-        model_output_dir,
-        output_dir,
-        force=bool(args.force),
-        debug_files=bool(args.debug_files),
-    )
-    print(f"[kp model]   standalone export: {export_path}")
-
-
 def build_argparser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="kp", description="kp CLI")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_show = sub.add_parser("show", help="Inspect source bands and Q-block spectra")
-    p_show.add_argument("-c", "--config", required=True, help="YAML config path")
     p_inspect = sub.add_parser("inspect", help="Inspect source bands and Q-block spectra")
     p_inspect.add_argument("-c", "--config", required=True, help="YAML config path")
 
-    p_plot = sub.add_parser("plot", help="Plot scatter of band vs Q from config")
-    p_plot.add_argument("-c", "--config", required=True, help="YAML config path")
-
-    p_proj_short = sub.add_parser("proj", help="Project selected bands to Heff across Q")
-    _add_project_arguments(p_proj_short)
-
     p_proj = sub.add_parser("project", help="Project selected bands to Heff across Q and plot")
     _add_project_arguments(p_proj)
-
-    p_sweep = sub.add_parser("sweep", help="Sweep E_ref for fixed Schur downfolding")
-    p_sweep.add_argument("-c", "--config", required=True, help="YAML config path")
-    p_sweep.add_argument("--active-indices", help="Comma-separated active band indices, e.g. 46,47")
-    p_sweep.add_argument("--e-ref-values", help="Comma-separated E_ref values in eV")
-    p_sweep.add_argument("--top-n", help="Comma-separated top-N values for diagnostics")
-    p_sweep.add_argument("--k-indices", help="Comma-separated k indices; default is all")
-    p_sweep.add_argument("--pole-warning-mev", type=float)
-    p_sweep.add_argument("--pole-danger-mev", type=float)
-    p_sweep.add_argument("--fail-on-near-pole", action="store_true")
-    p_sweep.add_argument("--compute-pole-diagnostics", action="store_true")
-    p_sweep.add_argument("--compute-condition-number", action="store_true")
 
     p_symm = sub.add_parser("symm", help="Project TAPW symmetry representations into the KP basis")
     p_symm.add_argument("-c", "--config", required=True, help="YAML config path")
     p_symm.add_argument("--developer-outputs", action="store_true", help="Write developer-only projection matrices under diagnostics/")
 
-    p_fit = sub.add_parser("fit", help="Fit/build a configured continuum model")
-    p_fit.add_argument("-c", "--config", required=True, help="YAML model config path")
-    p_fit.add_argument("--export-standalone", help="Write a minimal NumPy-only standalone model package")
-    p_fit.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
-
     p_model = sub.add_parser("model", help="Build/fit/export a configured continuum model")
-    p_model.add_argument("model_action", nargs="?", help="Optional action, e.g. export-standalone")
-    p_model.add_argument("model_args", nargs="*", help="Arguments for optional model action")
-    p_model.add_argument("-c", "--config", help="YAML model config path")
-    p_model.add_argument("--export-standalone", help="Write a minimal NumPy-only standalone model package")
-    p_model.add_argument("--all-examples", help="Inventory/export all examples under this root")
-    p_model.add_argument("--dry-run", action="store_true", help="Report standalone exportability without writing packages")
-    p_model.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")
-    p_model.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
-
-    p_export = sub.add_parser("export", help="Export a standalone continuum model package")
-    p_export.add_argument("model_output_dir", nargs="?", help="Model output directory")
-    p_export.add_argument("output_dir", nargs="?", help="Standalone package output directory")
-    p_export.add_argument("-c", "--config", help="YAML model config path")
-    p_export.add_argument("-o", "--out", dest="export_output_dir", help="Standalone package output directory")
-    p_export.add_argument("--all-examples", help="Inventory/export all examples under this root")
-    p_export.add_argument("--dry-run", action="store_true", help="Report standalone exportability without writing packages")
-    p_export.add_argument("--force", action="store_true", help="Overwrite existing standalone export dirs")
-    p_export.add_argument("--debug-files", action="store_true", help="Include debug files in standalone export")
+    p_model.add_argument("-c", "--config", required=True, help="YAML model config path")
 
     return p
 
 
 def main(argv: Sequence[str] | None = None) -> None:
     p = build_argparser()
-    args, extra_args = p.parse_known_args(argv)
-    if extra_args and not (args.cmd == "model" and args.model_action == "export-standalone"):
-        p.error(f"unrecognized arguments: {' '.join(extra_args)}")
-    if args.cmd in {"plot", "show", "inspect"}:
+    args = p.parse_args(argv)
+    if args.cmd == "inspect":
         cmd_plot_from_config(args.config)
-    elif args.cmd in {"project", "proj"}:
+    elif args.cmd == "project":
         overrides = _project_overrides_from_args(args)
         cmd_project_from_config(args.config, overrides)
-    elif args.cmd == "sweep":
-        overrides = {
-            "active_indices": args.active_indices,
-            "e_ref_values": args.e_ref_values,
-            "top_n": args.top_n,
-            "k_indices": args.k_indices,
-            "pole_warning_mev": args.pole_warning_mev,
-            "pole_danger_mev": args.pole_danger_mev,
-            "fail_on_near_pole": args.fail_on_near_pole if args.fail_on_near_pole else None,
-            "compute_pole_diagnostics": args.compute_pole_diagnostics if args.compute_pole_diagnostics else None,
-            "compute_condition_number": args.compute_condition_number if args.compute_condition_number else None,
-        }
-        cmd_sweep_from_config(args.config, overrides)
     elif args.cmd == "symm":
         run_symmetry_projection_from_config(
             args.config,
             developer_outputs=True if args.developer_outputs else None,
         )
-    elif args.cmd == "export":
-        action_args = [x for x in [args.model_output_dir, args.output_dir] if x is not None]
-        _run_standalone_export_command(args, action_args)
-    elif args.cmd in {"model", "fit"}:
-        if args.cmd == "model" and args.model_action == "export-standalone":
-            action_args = list(args.model_args) + list(extra_args)
-            _run_standalone_export_command(args, action_args)
-            return
-        if not args.config:
-            raise SystemExit("kp model requires --config unless using 'export-standalone'")
+    elif args.cmd == "model":
         from .model.pipeline import run_configured_model
 
         results = run_configured_model(args.config)
@@ -2546,22 +2202,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             raise RuntimeError("standalone export requires configured model results")
         from .model.export import export_standalone_model
 
-        standalone_dir = (
-            Path(args.export_standalone)
-            if args.export_standalone
-            else (
-                Path(model_cfg.output_dir)
-                if _config_path_uses_canonical_case(args.config)
-                else _default_standalone_export_dir(Path(model_cfg.output_dir))
-            )
-        )
+        standalone_dir = Path(model_cfg.output_dir)
         export_path = export_standalone_model(
             model_cfg.output_dir,
             standalone_dir,
             force=True,
-            debug_files=bool(args.debug_files),
+            debug_files=False,
         )
-        _record_standalone_export(Path(model_cfg.output_dir), Path(export_path))
         if _config_path_uses_canonical_case(args.config):
             _cleanup_canonical_model_output(model_cfg.output_dir)
         print(f"[kp model]   standalone export: {export_path}")

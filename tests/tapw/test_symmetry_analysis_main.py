@@ -70,6 +70,12 @@ def _make_config(tmp_path: Path, *, mode: str, symmetry_enable: bool = False):
             output_dir="symmetry_analysis",
             debug=False,
         ),
+        output_layout=SimpleNamespace(
+            style="canonical_v1",
+            root=str(output_dir),
+            profile=None,
+            q_shell="q06",
+        ),
     )
     config.validate = lambda: None
     return config
@@ -275,6 +281,6 @@ def test_band_mode_runs_symmetry_analysis_when_hamiltonian_symmetrization_is_req
     assert any(
         isinstance(event, tuple)
         and event[0] == "band.run"
-        and event[1].endswith("Q_shell_6_symm")
+        and event[1].endswith("Gamma_spinless/q06")
         for event in events
     )
