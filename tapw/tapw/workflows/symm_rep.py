@@ -193,6 +193,19 @@ def project_operation_to_subspace(raw_action: Any, vectors: np.ndarray, *, antiu
     return basis.conj().T @ matrix @ rhs
 
 
+def spin_diagonalize_block_vectors(vectors: np.ndarray) -> np.ndarray:
+    """Rotate a degenerate subspace to diagonalize projected S_z."""
+    basis = np.asarray(vectors, dtype=np.complex128)
+    if basis.ndim != 2 or basis.shape[0] % 2 != 0 or basis.shape[1] <= 1:
+        return basis
+    half = basis.shape[0] // 2
+    projected_sz = basis[:half].conj().T @ basis[:half] - basis[half:].conj().T @ basis[half:]
+    projected_sz = 0.5 * (projected_sz + projected_sz.conj().T)
+    values, rotation = np.linalg.eigh(projected_sz)
+    order = np.argsort(values)[::-1]
+    return basis @ rotation[:, order]
+
+
 def _k_map_linear_matrix(k_map: dict[str, Any]) -> np.ndarray:
     kind = str(k_map.get("type", "")).lower()
     if kind == "rotation":
@@ -716,6 +729,30 @@ def group_degenerate_blocks(
     return blocks
 
 
+def _spin_diagonalize_sector_payloads(
+    sector_payloads: dict[str, dict[str, Any]],
+    *,
+    degeneracy_tol: float,
+) -> dict[str, dict[str, Any]]:
+    aligned: dict[str, dict[str, Any]] = {}
+    for sector, payload in sector_payloads.items():
+        energies = np.asarray(payload["energies"], dtype=float)
+        positions = np.asarray(payload["positions"], dtype=int)
+        band_indices = np.asarray(payload["band_indices"], dtype=int)
+        vectors = np.array(payload["vectors"], dtype=np.complex128, copy=True)
+        for block in group_degenerate_blocks(
+            energies,
+            positions,
+            sector=sector,
+            degeneracy_tol=degeneracy_tol,
+            band_indices=band_indices,
+        ):
+            block_positions = list(block.indices)
+            vectors[:, block_positions] = spin_diagonalize_block_vectors(vectors[:, block_positions])
+        aligned[sector] = {**payload, "vectors": vectors}
+    return aligned
+
+
 def _resolve_stack_index(count: int, requested: int, path: Path) -> int:
     index = int(requested)
     if index < 0:
@@ -1053,8 +1090,6 @@ def run_symm_rep_from_point_sources(
             raise ValueError(f"Point {point} has no valence/conduction sector data.")
         source_kind = str(source.get("source_kind", "computed_config_points"))
         sector_payloads: dict[str, dict[str, Any]] = {}
-        vectors_by_sector: list[np.ndarray] = []
-        energies_by_sector: list[np.ndarray] = []
         selected_indices: list[int] = []
         for sector in ("valence", "conduction"):
             if sector not in sectors:
@@ -1074,9 +1109,21 @@ def run_symm_rep_from_point_sources(
                 "positions": positions,
                 "band_indices": band_indices,
             }
-            energies_by_sector.append(energies)
-            vectors_by_sector.append(vectors)
             selected_indices.extend(int(value) for value in band_indices)
+        sector_payloads = _spin_diagonalize_sector_payloads(
+            sector_payloads,
+            degeneracy_tol=degeneracy_tol,
+        )
+        energies_by_sector = [
+            sector_payloads[sector]["energies"]
+            for sector in ("valence", "conduction")
+            if sector in sector_payloads
+        ]
+        vectors_by_sector = [
+            sector_payloads[sector]["vectors"]
+            for sector in ("valence", "conduction")
+            if sector in sector_payloads
+        ]
         energies_all = np.concatenate(energies_by_sector)
         vectors_all = np.hstack(vectors_by_sector)
 
@@ -1266,6 +1313,15 @@ def run_symm_rep(
                 for sector, indices in selections.items()
             }
             selected_indices = sorted(set(int(idx) for values in selections.values() for idx in values))
+            sector_payloads = _spin_diagonalize_sector_payloads(
+                sector_payloads,
+                degeneracy_tol=degeneracy_tol,
+            )
+            output_vectors = np.array(vectors, dtype=np.complex128, copy=True)
+            for payload in sector_payloads.values():
+                positions = np.asarray(payload["positions"], dtype=int)
+                output_vectors[:, positions] = payload["vectors"][:, positions]
+            vectors = output_vectors
         else:
             saved = load_saved_wavefunction_point(
                 source,
@@ -1287,6 +1343,17 @@ def run_symm_rep(
                 }
                 for sector, payload in saved["sectors"].items()
             }
+            sector_payloads = _spin_diagonalize_sector_payloads(
+                sector_payloads,
+                degeneracy_tol=degeneracy_tol,
+            )
+            vectors = np.hstack(
+                [
+                    sector_payloads[sector]["vectors"]
+                    for sector in ("valence", "conduction")
+                    if sector in sector_payloads
+                ]
+            )
         spin_up: list[float] = []
         spin_down: list[float] = []
         spin_label: list[str] = []

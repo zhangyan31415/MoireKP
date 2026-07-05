@@ -393,6 +393,62 @@ def test_symm_rep_writes_from_in_memory_point_sources(tmp_path):
         assert payload["Gamma_selected_indices"].tolist() == [0, 1, 2, 3]
 
 
+def test_symm_rep_diagonalizes_sz_inside_degenerate_blocks(tmp_path):
+    from tapw.workflows.symm_rep import run_symm_rep_from_point_sources
+
+    symmetry_dir = tmp_path / "symmetry"
+    rawh_dir = symmetry_dir / "representations" / "Gamma"
+    rawh_dir.mkdir(parents=True)
+    scipy.sparse.save_npz(
+        rawh_dir / "C2_rawH.npz",
+        scipy.sparse.csr_matrix(np.diag([1.0, -1.0]).astype(np.complex128)),
+    )
+
+    mixed_vectors = np.array(
+        [
+            [1.0 / np.sqrt(2.0), 1.0 / np.sqrt(2.0)],
+            [1.0 / np.sqrt(2.0), -1.0 / np.sqrt(2.0)],
+        ],
+        dtype=np.complex128,
+    )
+    point_sources = {
+        "Gamma": {
+            "source_kind": "computed_config_points",
+            "sectors": {
+                "valence": {
+                    "energies": np.array([-1.0, -1.0]),
+                    "vectors": mixed_vectors,
+                    "band_indices": np.array([0, 1]),
+                },
+            },
+        }
+    }
+
+    output_dir = tmp_path / "rep-spin-gauge"
+    run_symm_rep_from_point_sources(
+        point_sources=point_sources,
+        symmetry_dir=symmetry_dir,
+        output_dir=output_dir,
+        fermi_energy=0.0,
+        degeneracy_tol=1.0e-6,
+    )
+
+    with np.load(output_dir / "band_representations.npz", allow_pickle=False) as payload:
+        d_block = payload["Gamma__valence__block0__C2"]
+
+    assert d_block[0, 0] == pytest.approx(1.0)
+    assert d_block[1, 1] == pytest.approx(-1.0)
+    assert d_block[0, 1] == pytest.approx(0.0)
+    assert d_block[1, 0] == pytest.approx(0.0)
+
+    bands = list(csv.DictReader((output_dir / "bands.csv").open(newline="", encoding="utf-8")))
+    spin_weights = sorted(
+        (float(row["spin_up_weight"]), float(row["spin_down_weight"]))
+        for row in bands
+    )
+    assert spin_weights == pytest.approx([(0.0, 1.0), (1.0, 0.0)])
+
+
 def test_symm_rep_config_resolves_canonical_paths_and_fractional_points(tmp_path):
     from tapw.symm_rep import resolve_config_request
 
