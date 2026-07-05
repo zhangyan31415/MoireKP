@@ -43,6 +43,16 @@ symm:
   tapw_symmetry_dir: ../../tapw/outputs/Gamma/q05/symmetry
   tolerance: 1.0e-2
 
+symm_rep:
+  output_dir: symm_rep
+  valence_count: 20
+  conduction_count: 20
+  degeneracy_tol: 2.0e-3
+  points:
+    Gamma: [0.0, 0.0]
+    M: [0.5, 0.0]
+    K: [0.3333333333, 0.3333333333]
+
 kpath:
   labels: [G, M, K, G]
   points_per_segment: 40

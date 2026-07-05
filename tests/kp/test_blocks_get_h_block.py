@@ -287,6 +287,30 @@ class GetHBlockTests(unittest.TestCase):
 
         np.testing.assert_allclose(heig, np.array([10.0, 20.0]))
 
+    def test_project_heff_full_returns_projected_single_spin_sz(self) -> None:
+        from kp.blocks import blocks
+
+        ham = np.diag([0.0, 1.0]).astype(np.complex128)
+
+        _heff, _heig, _hvec, sz = blocks.project_heff_full(
+            ham,
+            q_count=1,
+            orb_per_layer0=1,
+            num_layer_list=[1, 1],
+            spin="up",
+            Qlayer_list=[[np.array([[0.0, 0.0]])], [np.array([[0.0, 0.0]])]],
+            num_orb_per_layer_list=[[1], [1]],
+            nlow_state_list=[[0], [0]],
+            norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+            mode="K1",
+            downfold_method="first_order",
+            second_order=False,
+            return_spin_operator=True,
+            spin_operator_sign=-1,
+        )
+
+        np.testing.assert_allclose(sz, -np.eye(2, dtype=np.complex128))
+
     def test_project_heff_full_avoids_dead_projector_allocation_and_preserves_methods(self) -> None:
         from kp.blocks import blocks
 

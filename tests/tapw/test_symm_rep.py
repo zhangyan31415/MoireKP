@@ -129,6 +129,28 @@ def test_select_band_indices_returns_empty_sector_for_zero_count():
     assert selected["conduction"].tolist() == [3, 4]
 
 
+def test_symm_rep_phase_label_uses_spinful_c3_omega():
+    from tapw.workflows.symm_rep import _phase_label
+
+    assert _phase_label(np.exp(1.0j * np.pi / 3.0)) == "ω"
+    assert _phase_label(np.exp(2.0j * np.pi / 3.0)) == "ω²"
+    assert _phase_label(np.exp(-2.0j * np.pi / 3.0)) == "ω⁴"
+    assert _phase_label(np.exp(-1.0j * np.pi / 3.0)) == "ω⁵"
+    assert _phase_label(-1.0 + 0.0j) == "-1"
+
+
+def test_symm_rep_polar_unitary_part_removes_projection_scale():
+    from tapw.workflows.symm_rep import _unitarity_residual, polar_unitary_part
+
+    raw = np.diag([0.8, 1.2]).astype(np.complex128)
+    unitary, distance = polar_unitary_part(raw)
+
+    assert np.allclose(unitary, np.eye(2))
+    assert _unitarity_residual(unitary) == pytest.approx(0.0)
+    assert _unitarity_residual(raw) > 0.0
+    assert distance > 0.0
+
+
 def test_symm_rep_uses_configured_slice_for_3d_hamk(tmp_path):
     from tapw.workflows.symm_rep import run_symm_rep
 

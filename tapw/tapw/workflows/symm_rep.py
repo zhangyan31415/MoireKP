@@ -98,10 +98,10 @@ def _phase_label(value: complex, *, tol: float = 0.15) -> str:
         (-1.0 + 0.0j, "-1"),
         (1.0j, "i"),
         (-1.0j, "-i"),
-        (np.exp(2.0j * np.pi / 3.0), "ω"),
-        (np.exp(-2.0j * np.pi / 3.0), "ω²"),
-        (np.exp(1.0j * np.pi / 3.0), "e^{+iπ/3}"),
-        (np.exp(-1.0j * np.pi / 3.0), "e^{-iπ/3}"),
+        (np.exp(1.0j * np.pi / 3.0), "ω"),
+        (np.exp(2.0j * np.pi / 3.0), "ω²"),
+        (np.exp(-2.0j * np.pi / 3.0), "ω⁴"),
+        (np.exp(-1.0j * np.pi / 3.0), "ω⁵"),
     ]
     target, label = min(roots, key=lambda item: abs(unit - item[0]))
     if abs(unit - target) <= tol and abs(magnitude - 1.0) <= 0.25:
@@ -230,6 +230,16 @@ def project_operation_to_subspace(raw_action: Any, vectors: np.ndarray, *, antiu
     basis = orthonormalize_block_vectors(vectors)
     rhs = basis.conj() if antiunitary else basis
     return basis.conj().T @ matrix @ rhs
+
+
+def polar_unitary_part(matrix: np.ndarray) -> tuple[np.ndarray, float]:
+    arr = np.asarray(matrix, dtype=np.complex128)
+    if arr.size == 0:
+        return arr.copy(), 0.0
+    x, _singular_values, yh = np.linalg.svd(arr, full_matrices=False)
+    unitary = x @ yh
+    denom = max(float(np.linalg.norm(unitary)), 1.0e-30)
+    return unitary, float(np.linalg.norm(arr - unitary) / denom)
 
 
 def spin_diagonalize_block_vectors(vectors: np.ndarray) -> np.ndarray:
@@ -1000,7 +1010,9 @@ def _write_representation_npz(output_dir: Path, rep_entries: list[dict[str, Any]
             ]
         )
         payload[key] = entry["matrix"]
-        metadata.append({k: v for k, v in entry.items() if k != "matrix"})
+        if "raw_matrix" in entry:
+            payload[f"{key}__raw_projected"] = entry["raw_matrix"]
+        metadata.append({k: v for k, v in entry.items() if k not in {"matrix", "raw_matrix"}})
     payload["metadata_json"] = np.array(json.dumps(metadata, indent=2, sort_keys=True), dtype=str)
     np.savez_compressed(output_dir / "band_representations.npz", **payload)
 
@@ -1028,6 +1040,8 @@ def _write_characters_csv(output_dir: Path, character_rows: list[dict[str, Any]]
         "trace_real",
         "trace_imag",
         "unitarity_residual",
+        "raw_unitarity_residual",
+        "polar_distance",
     ]
     with (output_dir / "characters.csv").open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
@@ -1279,13 +1293,15 @@ def run_symm_rep_from_point_sources(
                     if sewn_action is None:
                         continue
                     action_matrix, sewing_shift = sewn_action
-                    projected = project_operation_to_subspace(
+                    raw_projected = project_operation_to_subspace(
                         action_matrix,
                         block_vectors,
                         antiunitary=operation.antiunitary,
                     )
+                    projected, polar_distance = polar_unitary_part(raw_projected)
                     trace = np.trace(projected)
                     residual = _unitarity_residual(projected)
+                    raw_residual = _unitarity_residual(raw_projected)
                     rep_label = symmetry_rep_label(
                         projected,
                         block_vectors,
@@ -1306,6 +1322,8 @@ def run_symm_rep_from_point_sources(
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",
                             "unitarity_residual": f"{residual:.12g}",
+                            "raw_unitarity_residual": f"{raw_residual:.12g}",
+                            "polar_distance": f"{polar_distance:.12g}",
                         }
                     )
                     rep_entries.append(
@@ -1319,6 +1337,9 @@ def run_symm_rep_from_point_sources(
                             "antiunitary": bool(operation.antiunitary),
                             "sewing_shift": sewing_shift,
                             "unitarity_residual": residual,
+                            "raw_unitarity_residual": raw_residual,
+                            "polar_distance": polar_distance,
+                            "raw_matrix": raw_projected,
                             "matrix": projected,
                         }
                     )
@@ -1508,13 +1529,15 @@ def run_symm_rep(
                     if sewn_action is None:
                         continue
                     action_matrix, sewing_shift = sewn_action
-                    projected = project_operation_to_subspace(
+                    raw_projected = project_operation_to_subspace(
                         action_matrix,
                         block_vectors,
                         antiunitary=operation.antiunitary,
                     )
+                    projected, polar_distance = polar_unitary_part(raw_projected)
                     trace = np.trace(projected)
                     residual = _unitarity_residual(projected)
+                    raw_residual = _unitarity_residual(raw_projected)
                     rep_label = symmetry_rep_label(
                         projected,
                         block_vectors,
@@ -1535,6 +1558,8 @@ def run_symm_rep(
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",
                             "unitarity_residual": f"{residual:.12g}",
+                            "raw_unitarity_residual": f"{raw_residual:.12g}",
+                            "polar_distance": f"{polar_distance:.12g}",
                         }
                     )
                     rep_entries.append(
@@ -1548,6 +1573,9 @@ def run_symm_rep(
                             "antiunitary": bool(operation.antiunitary),
                             "sewing_shift": sewing_shift,
                             "unitarity_residual": residual,
+                            "raw_unitarity_residual": raw_residual,
+                            "polar_distance": polar_distance,
+                            "raw_matrix": raw_projected,
                             "matrix": projected,
                         }
                     )

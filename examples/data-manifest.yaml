@@ -268,8 +268,8 @@ datasets:
     required_files:
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         kind: file
-        size_bytes: 1978
-        sha256: 0c95551890bff1d50771d83ad8c9508f6a437c72cf2aa985d28bb77656656a5c
+        size_bytes: 2166
+        sha256: 1f685e400c34054277e23383c27bb31bb6434388f19022d3b314b717f1aa98d6
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         kind: file
         size_bytes: 1610

@@ -11,8 +11,8 @@ def test_kp_help_lists_only_release_facing_commands(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "{inspect,project,symm,model}" in out
-    for command in ("inspect", "project", "symm", "model"):
+    assert "{inspect,project,symm,symm-rep,model}" in out
+    for command in ("inspect", "project", "symm", "symm-rep", "model"):
         assert command in out
     for removed in ("{show", "plot,", "{proj", " sweep", " fit", " export"):
         assert removed not in out

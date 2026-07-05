@@ -197,6 +197,15 @@ def _selected_spin_project_input(hamk2d: np.ndarray, spin: str) -> np.ndarray:
     return np.asarray(block, dtype=np.complex128)
 
 
+def _spin_operator_sign_for_projection(spin: str) -> int | None:
+    spin_norm = str(spin).lower()
+    if spin_norm == "up":
+        return 1
+    if spin_norm == "down":
+        return -1
+    return None
+
+
 def load_efermi_from_vbm_txt(path: str) -> float:
     """Load VBM text file and return max energy as efermi (in eV)."""
     vals: List[float] = []
@@ -954,6 +963,10 @@ def _project_one_from_context(k_index: int, context: dict[str, Any]) -> tuple[An
         kwargs["compute_condition_number"] = context["compute_condition_number"]
     if context["supports_compute_pole_diagnostics"]:
         kwargs["compute_pole_diagnostics"] = context["compute_pole_diagnostics"]
+    if context.get("supports_return_spin_operator"):
+        kwargs["return_spin_operator"] = True
+    if context.get("supports_spin_operator_sign") and context.get("spin_operator_sign") is not None:
+        kwargs["spin_operator_sign"] = int(context["spin_operator_sign"])
     return project_heff_full(
         ham_for_projection,
         context["q_count"],
@@ -1758,6 +1771,9 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         "compute_pole_diagnostics": compute_pole_diagnostics,
         "supports_compute_condition_number": _project_heff_full_kwargs_supports("compute_condition_number"),
         "supports_compute_pole_diagnostics": _project_heff_full_kwargs_supports("compute_pole_diagnostics"),
+        "supports_return_spin_operator": _project_heff_full_kwargs_supports("return_spin_operator"),
+        "supports_spin_operator_sign": _project_heff_full_kwargs_supports("spin_operator_sign"),
+        "spin_operator_sign": _spin_operator_sign_for_projection(spin),
         "mode": mode,
     }
 
@@ -1820,6 +1836,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     heig_list = [np.asarray(r[1], dtype=np.float64) for r in results]      # (nk, M)
     hvec_list = [np.asarray(r[2], dtype=np.complex128) for r in results]  # (nk, M, M)
     diag_list = [r[3] for r in results if len(r) > 3]
+    spin_operator_rows = [np.asarray(r[4], dtype=np.complex128) for r in results if len(r) > 4]
 
     # Stack to numeric arrays if possible
     try:
@@ -1836,6 +1853,13 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     np.save(out_heff, heff_arr)
     if out_eig is not None:
         np.save(out_eig, heig_arr)
+    out_spin_operator = os.path.join(out_dir, "spin_operator.npy")
+    if len(spin_operator_rows) == len(results):
+        try:
+            spin_operator_arr = np.stack(spin_operator_rows, axis=0)
+        except Exception:
+            spin_operator_arr = np.array(spin_operator_rows, dtype=object)
+        np.save(out_spin_operator, spin_operator_arr)
     np.savez_compressed(
         out_vec,
         wavefunctions=hvec_arr,
@@ -1847,6 +1871,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     print(f"[kp]   {out_heff}")
     if out_eig is not None:
         print(f"[kp]   {out_eig}")
+    if len(spin_operator_rows) == len(results):
+        print(f"[kp]   {out_spin_operator}")
     print(f"[kp]   {out_vec}")
     _print_project_diagnostics(
         diag_list,
@@ -2115,6 +2141,9 @@ def build_argparser() -> argparse.ArgumentParser:
     p_symm.add_argument("-c", "--config", required=True, help="YAML config path")
     p_symm.add_argument("--developer-outputs", action="store_true", help="Write developer-only projection matrices under diagnostics/")
 
+    p_symm_rep = sub.add_parser("symm-rep", help="Compute symmetry reps of projected Heff bands")
+    p_symm_rep.add_argument("-c", "--config", required=True, help="YAML config path")
+
     p_model = sub.add_parser("model", help="Build/fit/export a configured continuum model")
     p_model.add_argument("-c", "--config", required=True, help="YAML model config path")
 
@@ -2134,6 +2163,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             args.config,
             developer_outputs=True if args.developer_outputs else None,
         )
+    elif args.cmd == "symm-rep":
+        from . import symm_rep
+
+        symm_rep.main(["-c", args.config])
     elif args.cmd == "model":
         from .model.pipeline import run_configured_model
 

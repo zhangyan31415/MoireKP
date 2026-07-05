@@ -43,6 +43,38 @@ def set_projector_blas_threads(threads: int) -> None:
     _set_downfold_projector_blas_threads(PROJECTOR_BLAS_THREADS)
 
 
+def _hermitize(matrix: np.ndarray) -> np.ndarray:
+    mat = np.asarray(matrix, dtype=np.complex128)
+    return 0.5 * (mat + mat.conj().T)
+
+
+def _project_sz_from_low_groups(
+    *,
+    full_dim: int,
+    low_groups: Any,
+    spin: Literal["up", "down", "all"],
+    spin_operator_sign: int | None = None,
+) -> np.ndarray:
+    n_columns = int(low_groups.n_columns)
+    if n_columns == 0:
+        return np.zeros((0, 0), dtype=np.complex128)
+    spin_norm = str(spin).lower()
+    if spin_norm != "all":
+        sign = 1 if spin_operator_sign is None else (1 if int(spin_operator_sign) >= 0 else -1)
+        return np.eye(n_columns, dtype=np.complex128) * float(sign)
+    if int(full_dim) % 2 != 0:
+        raise ValueError("spin='all' Sz projection requires an even full Hamiltonian dimension")
+    half = int(full_dim) // 2
+    projected = np.zeros((n_columns, n_columns), dtype=np.complex128)
+    for group in low_groups.groups:
+        rows = np.asarray(group.rows, dtype=np.intp)
+        cols = np.asarray(group.cols, dtype=np.intp)
+        local = np.asarray(group.local, dtype=np.complex128)
+        signs = np.where(rows < half, 1.0, -1.0).astype(np.complex128)
+        projected[np.ix_(cols, cols)] += local.conj().T @ (signs[:, np.newaxis] * local)
+    return _hermitize(projected)
+
+
 def _extract_square_block(matrix: np.ndarray, index: np.ndarray) -> np.ndarray:
     idx = np.asarray(index, dtype=np.intp)
     if idx.ndim != 1:
@@ -2496,6 +2528,8 @@ def project_heff_full(
     compute_pole_diagnostics: bool = False,
     compute_condition_number: bool = False,
     return_diagnostics: bool = False,
+    return_spin_operator: bool = False,
+    spin_operator_sign: int | None = None,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Project full H(k) to Heff(k).
 
@@ -2642,6 +2676,18 @@ def project_heff_full(
 
     Heff = result.heff
     heig, hvec = _hermitian_eigh(Heff)
+    extras: list[Any] = []
     if return_diagnostics:
-        return Heff, heig, hvec, result
+        extras.append(result)
+    if return_spin_operator:
+        extras.append(
+            _project_sz_from_low_groups(
+                full_dim=int(hamk_full.shape[0]),
+                low_groups=low_groups,
+                spin=spin,
+                spin_operator_sign=spin_operator_sign,
+            )
+        )
+    if extras:
+        return (Heff, heig, hvec, *extras)
     return Heff, heig, hvec

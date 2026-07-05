@@ -27,6 +27,7 @@ Release examples are under the repository-level `examples/` directory. Start wit
 kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
 kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
 kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+kp symm-rep -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
 kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
 ```
 
@@ -34,9 +35,19 @@ These commands require external TAPW arrays listed in `examples/data-manifest.ya
 See `examples/README.md` for the full input/output workflow and the meaning of
 `nlow_state_list`.
 
-The release CLI exposes only `kp inspect`, `kp project`, `kp symm`, and
-`kp model`. `kp model` writes the standalone evaluator directly into the
-canonical `model/` output directory.
+The release CLI exposes only `kp inspect`, `kp project`, `kp symm`,
+`kp symm-rep`, and `kp model`. `kp symm-rep` reads the configured
+`projection/heff.npy` and `symmetry/representations.npz`, diagonalizes the
+selected high-symmetry Heff rows, and writes `summary.md`,
+`high_symmetry_wavefunctions.npz`, `band_representations.npz`,
+`characters.csv`, and `bands.csv` under the canonical `symm_rep/` output
+directory. Add an optional `symm_rep` section to the case config to override
+`points`, `valence_count`, `conduction_count`, `degeneracy_tol`, or
+`output_dir`; otherwise the command uses `material.efermi` and infers points
+from `kpath.coordinates`.
+
+`kp model` writes the standalone evaluator directly into the canonical
+`model/` output directory.
 
 ## Package Layout
 
