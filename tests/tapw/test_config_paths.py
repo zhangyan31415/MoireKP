@@ -2,10 +2,12 @@ import builtins
 from pathlib import Path
 from typing import Optional
 
+import numpy as np
 import pytest
 import yaml
 
 from tapw.config import Config, PathConfig
+from tapw.io.kpath import KPathGenerator
 
 
 def _write_relative_path_config(
@@ -43,7 +45,7 @@ def _write_relative_path_config(
 
 
 def _write_release_path_config(config_dir: Path) -> Path:
-    for name in ("H.dat", "S.dat", "openmx.dat", "KPATH.in"):
+    for name in ("H.dat", "S.dat", "openmx.dat"):
         (config_dir / name).write_text("placeholder\n", encoding="utf-8")
 
     payload = {
@@ -53,12 +55,19 @@ def _write_release_path_config(config_dir: Path) -> Path:
             "H_file": "H.dat",
             "S_file": "S.dat",
             "input_file": "openmx.dat",
-            "kpath_in": "KPATH.in",
         },
         "bands": {
-            "enable": True,
             "valley": "K1",
             "q_shell": 6,
+            "kpath": {
+                "labels": ["G", "M", "K", "G"],
+                "points_per_segment": 4,
+                "coordinates": {
+                    "G": [0.0, 0.0],
+                    "M": [0.5, 0.0],
+                    "K": [0.3333333333, 0.3333333333],
+                },
+            },
         },
     }
     config_path = config_dir / "config.yaml"
@@ -113,9 +122,11 @@ def test_config_relative_paths_resolve_from_config_file_directory(tmp_path, monk
     assert Path(config.paths.H_file) == config_dir / "H.dat"
     assert Path(config.paths.S_file) == config_dir / "S.dat"
     assert Path(config.paths.input_file) == config_dir / "openmx.dat"
-    assert Path(config.paths.kpath_in) == config_dir / "KPATH.in"
+    assert config.paths.kpath_in is None
     assert config.paths.kpath_out is None
     assert Path(config.paths.output_dir) == config_dir / "results"
+    assert config.kpath["labels"] == ["G", "M", "K", "G"]
+    assert config.kpath["points_per_segment"] == 4
 
 
 def test_config_resolves_internal_canonical_output_layout_from_case_root(tmp_path):
@@ -147,6 +158,37 @@ def test_release_config_may_omit_kpath_out(tmp_path):
     assert config.output_layout.q_shell == "q06"
 
 
+def test_inline_kpath_generates_kpoints_without_kpath_input_file(tmp_path):
+    generator = KPathGenerator(
+        [
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    out = tmp_path / "outputs" / "K1" / "q06" / "KPATH.out"
+
+    generator.generate_from_config(
+        {
+            "labels": ["G", "M", "K", "G"],
+            "points_per_segment": 2,
+            "coordinates": {
+                "G": [0.0, 0.0],
+                "M": [0.5, 0.0],
+                "K": [1.0 / 3.0, 1.0 / 3.0],
+            },
+        },
+        out,
+    )
+
+    assert out.is_file()
+    assert len(generator.kpoints) == 7
+    assert generator.segment_points == 2
+    assert generator.labels_ticks == [r"$\Gamma$", "M", "K", r"$\Gamma$"]
+    assert len(generator.x_ticks) == 4
+    assert np.loadtxt(out).shape == (7, 4)
+
+
 def test_release_sections_normalize_to_runtime_config(tmp_path):
     config_dir = tmp_path / "case" / "tapw" / "configs"
     config_dir.mkdir(parents=True)
@@ -154,7 +196,6 @@ def test_release_sections_normalize_to_runtime_config(tmp_path):
         "../../openmx/soc/H_symm.npz",
         "../../openmx/soc/S_symm.npz",
         "../../openmx/soc/openmx.dat_rigid",
-        "../KPATH.in",
     ):
         path = config_dir / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -178,10 +219,8 @@ def test_release_sections_normalize_to_runtime_config(tmp_path):
                     "H_file": "../../openmx/soc/H_symm.npz",
                     "S_file": "../../openmx/soc/S_symm.npz",
                     "input_file": "../../openmx/soc/openmx.dat_rigid",
-                    "kpath_in": "../KPATH.in",
                 },
                 "bands": {
-                    "enable": True,
                     "valley": "K1",
                     "q_shell": 6,
                     "efermi": -4.1,
@@ -189,9 +228,17 @@ def test_release_sections_normalize_to_runtime_config(tmp_path):
                     "num_bands": 100,
                     "save_hamiltonian": True,
                     "save_wavefunctions": False,
+                    "kpath": {
+                        "labels": ["G", "M", "K", "G"],
+                        "points_per_segment": 40,
+                        "coordinates": {
+                            "G": [0.0, 0.0],
+                            "M": [0.5, 0.0],
+                            "K": [0.3333333333, 0.3333333333],
+                        },
+                    },
                 },
                 "symmetry": {
-                    "enable": True,
                     "valley": "K1",
                     "q_shell": 6,
                     "tolerance": 2.0e-2,
@@ -246,7 +293,7 @@ def test_release_sections_normalize_to_runtime_config(tmp_path):
     assert config.compute.zero_potential_layers == [1]
     assert config.compute.Electric_field_in_eVpA == 0.1
     assert config.compute.Inner_symmetrical_Electric_Field is True
-    assert config.symmetry_analysis.enable is True
+    assert config.symmetry_analysis.enable is False
     assert config.symmetry_analysis.valleys == [1]
     assert config.symmetry_analysis.tolerance == 2.0e-2
     assert config.topology["bands"]["vbm2"]["indices"] == [-1, -2]
@@ -267,7 +314,7 @@ def test_release_sections_normalize_to_runtime_config(tmp_path):
 def test_release_section_without_s_file_defaults_to_orthogonal_basis(tmp_path):
     config_dir = tmp_path / "case"
     config_dir.mkdir()
-    for name in ("H.dat", "openmx.dat", "KPATH.in"):
+    for name in ("H.dat", "openmx.dat"):
         (config_dir / name).write_text("placeholder\n", encoding="utf-8")
     config_path = config_dir / "config.yaml"
     config_path.write_text(
@@ -278,13 +325,16 @@ def test_release_section_without_s_file_defaults_to_orthogonal_basis(tmp_path):
                 "paths": {
                     "H_file": "H.dat",
                     "input_file": "openmx.dat",
-                    "kpath_in": "KPATH.in",
                 },
                 "bands": {
-                    "enable": True,
                     "valley": "Gamma",
                     "q_shell": 4,
                     "efermi": 0.0,
+                    "kpath": {
+                        "labels": ["G", "M"],
+                        "points_per_segment": 2,
+                        "coordinates": {"G": [0.0, 0.0], "M": [0.5, 0.0]},
+                    },
                 },
             },
             sort_keys=False,
@@ -351,5 +401,6 @@ def test_release_tapw_example_paths_are_config_relative(config_path):
     assert Path(config.paths.H_file).parent == case_root / "openmx" / "soc"
     assert Path(config.paths.S_file).parent == case_root / "openmx" / "soc"
     assert Path(config.paths.input_file).parent == case_root / "openmx" / "soc"
-    assert Path(config.paths.kpath_in) == case_root / "KPATH.in"
+    assert config.paths.kpath_in is None
+    assert config.kpath["labels"] == ["G", "M", "K", "G"]
     assert Path(config.paths.output_dir) == case_root / "outputs"

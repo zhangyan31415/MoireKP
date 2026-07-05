@@ -1,8 +1,6 @@
 import os
-import shutil
 import argparse
 import yaml
-import re
 import subprocess
 
 class PreservedScalarString(str):
@@ -25,11 +23,10 @@ yaml.add_representer(PreservedScalarString, string_presenter)
 yaml.add_representer(list, list_presenter)
 
 def get_default_config_path():
-    """Get the path to the default config files in the package."""
+    """Get the path to the default config file in the package."""
     current_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
     config_yaml = os.path.join(current_dir, 'config.yaml')
-    bands_yaml = os.path.join(current_dir, 'bands.yaml')
-    return config_yaml, bands_yaml
+    return config_yaml
 
 def read_yaml_with_comments(file_path):
     """Read YAML file while preserving comments."""
@@ -74,75 +71,12 @@ def get_real_path(output_dir, use_logical_path=True):
 
 def customize_config(config_content, config_data, output_dir, use_logical_path):
     """Customize configuration based on the current environment."""
-    # 获取路径
-    real_path = get_real_path(output_dir, use_logical_path)
-    # logical_path = get_real_path(output_dir, True)
-    # physical_path = get_real_path(output_dir, False)
-    
-    # print("Logical path (pwd -L):", logical_path)
-    # print("Physical path (pwd -P):", physical_path)
-    # print("Using path:", real_path)
-    
-    # 使用正则表达式更新 base_path，保留注释
-    # config_content = re.sub(
-    #     r'(base_path:).*',
-    #     f'\\1 {real_path}',
-    #     config_content
-    # )
-    
-    # 使用正则表达式更新其他路径，保留注释
-    config_content = re.sub(
-        r'(kpath_in:).*',
-        f'\\1 {real_path}/KPATH.in',
-        config_content
-    )
-    config_content = re.sub(
-        r'(kpath_out:).*',
-        f'\\1 {real_path}/KPATH.out',
-        config_content
-    )
-    config_content = re.sub(
-        r'(output_dir:).*',
-        f'\\1 {real_path}',
-        config_content
-    )
-    
-    # 更新 num_processes
-    # config_content = re.sub(
-    #     r'(num_processes:).*',
-    #     f'\\1 {os.cpu_count() or 1}',
-    #     config_content
-    # )
-    
     return config_content
 
-def customize_bands(bands_content, bands_data,output_dir):
-    """Customize bands configuration."""
-    real_path = get_real_path(output_dir)
-    # 更新标题
-    bands_content = re.sub(
-        r'(title:).*',
-        '\\1 "Band Structure"',
-        bands_content
-    )
-    
-    # 使用正则表达式更新配置，保留注释
-    bands_content = re.sub(
-        r'(kpath_in:).*',
-        f'\\1 {real_path}/KPATH.in',
-        bands_content
-    )
-    bands_content = re.sub(
-        r'(kpath_out:).*',
-        f'\\1 {real_path}/KPATH.out',
-        bands_content
-    )
-    
-    return bands_content
 
 def generate_config(output_dir='.', use_logical_path=True):
-    """Generate configuration files in the specified directory."""
-    config_yaml, bands_yaml = get_default_config_path()
+    """Generate a single release-style TAPW configuration file."""
+    config_yaml = get_default_config_path()
     
     # 创建输出目录
     os.makedirs(output_dir, exist_ok=True)
@@ -151,29 +85,14 @@ def generate_config(output_dir='.', use_logical_path=True):
     config_content, config_data = read_yaml_with_comments(config_yaml)
     config_content = customize_config(config_content, config_data, output_dir, use_logical_path)
     
-    # 读取并自定义 bands.yaml
-    bands_content, bands_data = read_yaml_with_comments(bands_yaml)
-    bands_content = customize_bands(bands_content, bands_data,output_dir)
-    
     # 保存自定义后的配置文件
     config_out = os.path.join(output_dir, 'config.yaml')
-    bands_out = os.path.join(output_dir, 'bands.yaml')
     
     with open(config_out, 'w') as f:
         f.write(config_content)
     
-    with open(bands_out, 'w') as f:
-        f.write(bands_content)
-    
-    # 复制 KPATH 文件，但使用新的名字
-    current_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'templates')
-    kpath_in = os.path.join(current_dir, 'KPATH.in')
-    shutil.copy2(kpath_in, os.path.join(output_dir, 'KPATH.in'))
-    
     print(f"Configuration files generated in {output_dir}:")
-    print(f"  - config.yaml (customized for current directory)")
-    print(f"  - bands.yaml (with default settings)")
-    print(f"  - KPATH.in")
+    print(f"  - config.yaml")
     
     # 创建输出目录
     # os.makedirs(os.path.join(output_dir, 'output'), exist_ok=True)

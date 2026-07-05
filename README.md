@@ -1,5 +1,7 @@
 # moirekp
 
+中文说明见 [README.zh.md](README.zh.md).
+
 `moirekp` provides Python workflows for moire electronic-structure studies:
 
 - `tapw`: truncated atomic plane-wave calculations and post-processing for twisted bilayer systems.
@@ -38,14 +40,14 @@ Generate starter configuration files:
 tapw init -o output_dir
 ```
 
-Edit `output_dir/config.yaml` and `output_dir/bands.yaml` to point to the required OpenMX-derived input files, then run the same config through the requested TAPW workflows:
+Edit `output_dir/config.yaml` to point to the required OpenMX-derived input
+files, then run the same config through the requested TAPW workflows:
 
 ```bash
 cd output_dir
 tapw run -c config.yaml
 tapw symm -c config.yaml
 tapw topo -c config.yaml  # when topology settings are present
-tapw plot -c bands.yaml
 ```
 
 New TAPW configs use `case.output_root` plus per-workflow sections
@@ -89,10 +91,18 @@ kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-
 
 `kp model` writes the standalone evaluator and data directly into
 `kp/outputs/<profile>/<q_shell>/model/` as part of the release workflow.
+The exported `model/evaluate.py` also contains user-editable topology switches
+for model Berry curvature, quantum geometry, and WCC calculations; there is no
+separate `kp topo` command in the release interface.
 
-For new `kp project` configs, prefer `project.gauge: auto` instead of hand
-writing `project.norb_fix_list`. See `docs/project_auto_gauge.md` for the
-finite-basis auto-gauge anchor report and failure checks.
+KP uses `inspect`, not a top-level `plot` section. `inspect.energy_window`
+controls the displayed `E - material.efermi` range while still drawing all
+available bands. `material.efermi` is the shared energy reference; `project.e_ref`
+is the projection/downfolding reference and should be set explicitly for
+reproducible models.
+
+For symmetry projection, KP reads the TAPW symmetry output directory from
+`symm.tapw_symmetry_dir`; users do not list operations in the KP config.
 
 For `kp model`, prefer `model.fit.mode: auto_low_energy` when the target is a
 low-energy continuum model. See `docs/project_auto_low_energy.md` for the

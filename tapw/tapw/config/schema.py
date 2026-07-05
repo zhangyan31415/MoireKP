@@ -56,19 +56,51 @@ def _reject_keys(section: dict[str, Any], keys: set[str], *, section_name: str) 
 
 
 def _section_enabled(section: dict[str, Any]) -> bool:
-    return bool(section) and bool(section.get("enable", False))
+    return bool(section) and bool(section.get("enable", True))
 
 
 def _require_release_workflow_fields(section: dict[str, Any], *, section_name: str) -> None:
     if not section:
         return
-    if "enable" not in section:
-        raise ValueError(f"{section_name}.enable is required in release-only TAPW configs.")
     if not _section_enabled(section):
         return
     missing = [key for key in ("valley", "q_shell") if section.get(key) in (None, "")]
     if missing:
         raise ValueError(f"{section_name} enabled workflow requires field(s): {missing}")
+
+
+def _normalise_release_kpath(kpath: Any) -> dict[str, Any] | None:
+    if kpath in (None, ""):
+        return None
+    if not isinstance(kpath, dict):
+        raise ValueError("bands.kpath must be a mapping with labels, points_per_segment, and coordinates.")
+    labels = kpath.get("labels")
+    coordinates = kpath.get("coordinates")
+    if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)) or len(labels) < 2:
+        raise ValueError("bands.kpath.labels must contain at least two labels.")
+    if not isinstance(coordinates, dict) or not coordinates:
+        raise ValueError("bands.kpath.coordinates must map each label to a two- or three-component coordinate.")
+    normalised_labels = [str(label) for label in labels]
+    missing = [label for label in normalised_labels if label not in coordinates]
+    if missing:
+        raise ValueError(f"bands.kpath.coordinates is missing label(s): {missing}")
+    normalised_coordinates: dict[str, list[float]] = {}
+    for label in normalised_labels:
+        raw = coordinates[label]
+        values = [float(value) for value in raw]
+        if len(values) == 2:
+            values.append(0.0)
+        if len(values) != 3:
+            raise ValueError(f"bands.kpath.coordinates.{label} must have two or three values.")
+        normalised_coordinates[label] = values
+    points = int(kpath.get("points_per_segment", 40))
+    if points <= 0:
+        raise ValueError("bands.kpath.points_per_segment must be positive.")
+    return {
+        "labels": normalised_labels,
+        "points_per_segment": points,
+        "coordinates": normalised_coordinates,
+    }
 
 
 def _apply_release_section_to_mapping(target: dict[str, Any], section: dict[str, Any], *, workflow: str) -> None:
@@ -254,7 +286,7 @@ class PathConfig:
     H_file: str
     input_file: str
     output_dir: str
-    kpath_in: str
+    kpath_in: Optional[str] = None
     kpath_out: Optional[str] = None
     S_file: Optional[str] = None
 
@@ -277,7 +309,8 @@ class PathConfig:
         self.H_file = self._resolve_path(self.H_file, base_dir)
         self.input_file = self._resolve_path(self.input_file, base_dir)
         self.output_dir = self._resolve_path(self.output_dir, base_dir)
-        self.kpath_in = self._resolve_path(self.kpath_in, base_dir)
+        if self.kpath_in is not None:
+            self.kpath_in = self._resolve_path(self.kpath_in, base_dir)
         if self.kpath_out is not None:
             self.kpath_out = self._resolve_path(self.kpath_out, base_dir)
         if self.S_file is not None:
@@ -529,6 +562,7 @@ class Config:
     bands: Dict[str, Any] = field(default_factory=dict)
     symmetry: Dict[str, Any] = field(default_factory=dict)
     topology: Dict[str, Any] = field(default_factory=dict)
+    kpath: Optional[Dict[str, Any]] = None
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
 
     def apply_workflow_section(self, mode: Optional[str] = None) -> None:
@@ -569,6 +603,8 @@ class Config:
                 "paths.S_file is required for non-orthogonal band/chern calculations. "
                 "Set compute.orthogonal_basis=true for orthogonal bases or use mode='symmetry'."
             )
+        if self.compute.mode == "band" and self.kpath is None and not self.paths.kpath_in:
+            raise ValueError("TAPW band workflow requires bands.kpath in release configs.")
 
     @classmethod
     def from_yaml(cls, yaml_path: str) -> 'Config':
@@ -614,6 +650,7 @@ class Config:
         for bandset_name, bandset in dict(topology_config.get("bands", {}) or {}).items():
             if isinstance(bandset, dict):
                 _reject_keys(dict(bandset), forbidden_user_keys, section_name=f"topology.bands.{bandset_name}")
+        kpath_config = _normalise_release_kpath(bands_raw.get("kpath"))
 
         compute_raw: dict[str, Any] = {}
         if release_sections_present:
@@ -699,6 +736,7 @@ class Config:
             bands=bands_raw,
             symmetry=symmetry_raw,
             topology=topology_config,
+            kpath=kpath_config,
             cluster=cluster_config,
         )
         # Propagate twist bravais to compute for downstream logic

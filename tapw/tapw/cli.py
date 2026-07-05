@@ -410,7 +410,12 @@ def run_calc(args):
             if mpi_size > 1 and mpi_rank != 0:
                 config.paths.kpath_out = str(config.paths.kpath_out) + f".rank{mpi_rank}"
             kpath_config = KPathGenerator(structure.Tmat)
-            kpath_config.read_and_generate_kpath(config.paths.kpath_in, config.paths.kpath_out)
+            if getattr(config, "kpath", None):
+                kpath_config.generate_from_config(config.kpath, config.paths.kpath_out)
+            elif config.paths.kpath_in:
+                kpath_config.read_and_generate_kpath(config.paths.kpath_in, config.paths.kpath_out)
+            else:
+                raise ValueError("TAPW band workflow requires bands.kpath in the YAML config.")
 
         if config.compute.mode == "symmetry":
             _run_symmetry_analysis(config, processor, hr, sr, logger)

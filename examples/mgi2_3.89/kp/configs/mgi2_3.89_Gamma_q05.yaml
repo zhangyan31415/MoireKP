@@ -44,7 +44,12 @@ symm:
   tolerance: 1.0e-2
 
 kpath:
-  file: ../../tapw/KPATH.in
+  labels: [G, M, K, G]
+  points_per_segment: 40
+  coordinates:
+    G: [0.0, 0.0]
+    M: [0.5, 0.0]
+    K: [0.3333333333, 0.3333333333]
   tmat: [[60.9508659523, 0.0, 0.0], [-30.4754329751, 52.7849982976, 0.0], [0.0, 0.0, 50.0]]
 
 model:

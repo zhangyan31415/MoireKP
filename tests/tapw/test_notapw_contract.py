@@ -4,7 +4,6 @@ import pytest
 import yaml
 
 from tapw.config import Config
-from tapw.cli import calculation_targets, resolve_qshell_dir_name
 from tapw.workflows import band as band_workflow
 
 
@@ -42,34 +41,20 @@ def _write_notapw_config(tmp_path: Path, *, ge=True, eig_vec_cal=False) -> Path:
 def test_notapw_requires_generalized_eigenproblem(tmp_path):
     config_path = _write_notapw_config(tmp_path, ge=False)
 
-    with pytest.raises(ValueError, match="non-TAPW.*ge=true"):
+    with pytest.raises(ValueError, match="Top-level compute is not supported"):
         Config.from_yaml(str(config_path))
 
 
 def test_notapw_rejects_wavefunction_output(tmp_path):
     config_path = _write_notapw_config(tmp_path, eig_vec_cal=True)
 
-    with pytest.raises(ValueError, match="non-TAPW.*eig_vec_cal=false"):
+    with pytest.raises(ValueError, match="Top-level compute is not supported"):
         Config.from_yaml(str(config_path))
 
 
-def test_notapw_output_directory_does_not_use_ng_or_valley(tmp_path):
-    config = Config.from_yaml(str(_write_notapw_config(tmp_path)))
-
-    assert resolve_qshell_dir_name(config.compute, calculator=object()) == "direct"
-
-
-def test_notapw_runs_one_direct_target_independent_of_valley_list(tmp_path):
-    config = Config.from_yaml(str(_write_notapw_config(tmp_path)))
-    config.compute.valleys = [31, 5, 1]
-
-    assert calculation_targets(config.compute) == [None]
-
-
-def test_notapw_config_does_not_require_ng_or_valley(tmp_path):
-    config = Config.from_yaml(str(_write_notapw_config(tmp_path)))
-
-    assert calculation_targets(config.compute) == [None]
+def test_notapw_legacy_compute_config_is_not_release_facing(tmp_path):
+    with pytest.raises(ValueError, match="Top-level compute is not supported"):
+        Config.from_yaml(str(_write_notapw_config(tmp_path)))
 
 
 def test_notapw_band_output_names_do_not_use_valley_label():

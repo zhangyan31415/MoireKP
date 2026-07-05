@@ -76,6 +76,11 @@ def _make_config(tmp_path: Path, *, mode: str, symmetry_enable: bool = False):
             profile=None,
             q_shell="q06",
         ),
+        kpath={
+            "labels": ["G", "M"],
+            "points_per_segment": 2,
+            "coordinates": {"G": [0.0, 0.0, 0.0], "M": [0.5, 0.0, 0.0]},
+        },
     )
     config.validate = lambda: None
     return config
@@ -146,6 +151,9 @@ def _patch_main_dependencies(monkeypatch, config, events):
         def read_and_generate_kpath(self, kpath_in, kpath_out):
             events.append(("kpath", str(kpath_in), str(kpath_out)))
 
+        def generate_from_config(self, kpath_config, kpath_out):
+            events.append(("kpath.inline", tuple(kpath_config["labels"]), str(kpath_out)))
+
     class FakeRunner:
         def __init__(self, **kwargs):
             events.append(("runner.init", sorted(kwargs)))
@@ -209,6 +217,7 @@ def test_normal_band_mode_still_uses_existing_band_calculator(monkeypatch, tmp_p
     assert any(isinstance(event, tuple) and event[0] == "plot.loc" for event in events)
     assert any(isinstance(event, tuple) and event[0] == "plot.phase" for event in events)
     assert any(isinstance(event, tuple) and event[0] == "band.run" for event in events)
+    assert any(isinstance(event, tuple) and event[0] == "kpath.inline" for event in events)
     assert "runner.run" not in events
 
 

@@ -1,6 +1,6 @@
 # TAPW
 
-TAPW provides truncated atomic plane-wave workflows for twisted-material band calculations, orbital analysis, and topology post-processing.
+TAPW provides truncated atomic plane-wave workflows for twisted-material band calculations, source-symmetry analysis, and topology post-processing.
 
 ## Features
 
@@ -8,7 +8,6 @@ TAPW provides truncated atomic plane-wave workflows for twisted-material band ca
 - Valley workflows for K, K prime, Gamma, and M points.
 - C3-aware configuration and analysis utilities.
 - MPI, PETSc, and SLEPc based solver support through the release conda environment.
-- Orbital analysis and fatband plotting tools.
 
 ## Installation
 
@@ -29,7 +28,8 @@ Create a starter TAPW working directory:
 tapw init -o output_dir
 ```
 
-Edit `output_dir/config.yaml` and `output_dir/bands.yaml`, especially the paths to `H.dat`, `S.dat`, and `openmx.dat`.
+Edit `output_dir/config.yaml`, especially the paths to `H.dat`, `S.dat`, and
+`openmx.dat`.
 
 Run a band calculation and optional symmetry analysis with the same config:
 
@@ -48,18 +48,22 @@ case:
   output_root: outputs
 
 bands:
-  enable: true
   valley: K1
   q_shell: 4
   efermi: -4.6
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 40
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
 
 symmetry:
-  enable: true
   valley: K1
   q_shell: 4
 
 topology:
-  enable: false
   valley: K1
   q_shell: 4
   mesh:
@@ -68,6 +72,10 @@ topology:
     range_b1: [-0.5, 0.5]
     range_b2: [-0.5, 0.5]
 ```
+
+The command selects the workflow. Release-style configs do not use per-section
+`enable` switches: `tapw run` reads `bands`, `tapw symm` reads `symmetry`, and
+`tapw topo` reads `topology`.
 
 For the default spinful profile, TAPW writes `outputs/K1/q04` for a K1 valley
 run. Non-default spin profiles should be explicit in the case/profile naming
@@ -109,26 +117,11 @@ CSR components, with keys such as `C2T_data`, `C2T_indices`, `C2T_indptr`, and
 directories always include the sampled `b1` and `b2` ranges so partial grids do
 not overwrite each other, for example `grid21x41_b1_0p0_0p5_b2_m0p5_0p5`.
 
-Plot the generated bands:
-
-```bash
-cd output_dir/outputs/K1/q04/band
-tapw plot -c ../../../../bands.yaml
-```
-
 ## Chern Post-Processing
 
 ```bash
 cd output_dir
 tapw topo -c config.yaml
-```
-
-## Orbital Analysis
-
-```bash
-cd output_dir/outputs/Gamma/q04
-tapw orbital . --config ../../../config.yaml --valley Gamma --band CBM
-tapw fatband . --valley Gamma --band CBM --orbital-dir orbital_analysis --output-dir orbital_plots
 ```
 
 ## Examples

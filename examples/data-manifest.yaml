@@ -25,14 +25,12 @@ external_data:
     - examples/tapw/mote2_9.43/openmx/soc/S.npz
     - examples/tapw/mgi2_9.43/openmx/soc/H.npz
     - examples/tapw/mgi2_9.43/openmx/soc/S.npz
-    - examples/mote2_3.89/tapw/KPATH.in
     - examples/mote2_3.89/tapw/outputs/K1/q06/band
     - examples/mote2_3.89/tapw/outputs/K1/q06/symmetry
     - examples/mote2_3.89/kp/outputs/K1/q06/projection
     - examples/mote2_3.89/kp/outputs/K1_up/q06/projection
     - examples/mote2_3.89/kp/outputs/K1/q06/symmetry
     - examples/mote2_3.89/kp/outputs/K1_up/q06/symmetry
-    - examples/mgi2_3.89/tapw/KPATH.in
     - examples/mgi2_3.89/tapw/outputs/Gamma/q05/band
     - examples/mgi2_3.89/tapw/outputs/M1/q07/band
     - examples/mgi2_3.89/tapw/outputs/Gamma/q05/symmetry
@@ -78,18 +76,10 @@ datasets:
     doi: null
     data_url: null
     required_files:
-      - path: examples/tapw/mote2_9.43/KPATH.in
-        kind: file
-        size_bytes: 378
-        sha256: 7c658ede9b6fd8d559e0d1c4baecde88baa725b606b3c11a60f627182b353cdf
       - path: examples/tapw/mote2_9.43/configs/K1_q03.yaml
         kind: file
-        size_bytes: 882
-        sha256: bf6b9ce9f0edc7161f9c4153193212c5a5d01f7ccbc0576ae0fc41740eb26671
-      - path: examples/tapw/mote2_9.43/configs/K1_q03.plot.yaml
-        kind: file
-        size_bytes: 529
-        sha256: e2584c9253557c4196984cf7342cc31faa61693ab977f91277658a42e2be980e
+        size_bytes: 967
+        sha256: ddbece6e32b3f2e2896af0d281f3a0ff2ed0370a224bdc07c04bae4e8d0649ea
       - path: examples/tapw/mote2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
@@ -117,13 +107,6 @@ datasets:
             status: generated
           - path: examples/tapw/mote2_9.43/outputs/K1/q03/band/hamiltonian_k.npy
             status: generated
-      - id: plot-k1-bands
-        command: tapw plot -c examples/tapw/mote2_9.43/configs/K1_q03.plot.yaml
-        runtime_class: external-data
-        expected_outputs:
-          - path: examples/tapw/mote2_9.43/outputs/K1/q03/band/band_comparison.pdf
-            status: generated
-
   - id: tapw-mgi2-9.43-rigid-openmx
     path: examples/tapw/mgi2_9.43
     description: TAPW MgI2 9.43 degree rigid-OpenMX example inputs and configs.
@@ -132,26 +115,14 @@ datasets:
     doi: null
     data_url: null
     required_files:
-      - path: examples/tapw/mgi2_9.43/KPATH.in
-        kind: file
-        size_bytes: 378
-        sha256: 7c658ede9b6fd8d559e0d1c4baecde88baa725b606b3c11a60f627182b353cdf
       - path: examples/tapw/mgi2_9.43/configs/M1_q03.yaml
         kind: file
-        size_bytes: 881
-        sha256: a2a86595d0605991aa7e3ed7ce9ef3738256ffe1f7d78e5f355de30d7a7f4267
+        size_bytes: 966
+        sha256: 0c835de77cc732117b8f86f8df35ab98c20996df8a88f2940ce9d629b3c9840c
       - path: examples/tapw/mgi2_9.43/configs/Gamma_q03.yaml
         kind: file
-        size_bytes: 890
-        sha256: bad55de7f0223b6281adf53ead9e9db6275db7088980fee976f02fe528117791
-      - path: examples/tapw/mgi2_9.43/configs/M1_q03.plot.yaml
-        kind: file
-        size_bytes: 528
-        sha256: fdaefe898564438ff91654b3de16e6c0efddb2a29942a0e7409a8505f4013831
-      - path: examples/tapw/mgi2_9.43/configs/Gamma_q03.plot.yaml
-        kind: file
-        size_bytes: 546
-        sha256: 7541e9d55a648ea52af011e79f46e7fce7f57d8e5caa6e36439bd107356464d1
+        size_bytes: 975
+        sha256: 11696483f7e72bd5276cd74dc7b14dcf1f6028acf8936e136404b718d33c6c98
       - path: examples/tapw/mgi2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102
@@ -187,19 +158,6 @@ datasets:
             status: generated
           - path: examples/tapw/mgi2_9.43/outputs/Gamma/q03/band/hamiltonian_k.npy
             status: generated
-      - id: plot-m1-bands
-        command: tapw plot -c examples/tapw/mgi2_9.43/configs/M1_q03.plot.yaml
-        runtime_class: external-data
-        expected_outputs:
-          - path: examples/tapw/mgi2_9.43/outputs/M1/q03/band/band_comparison.pdf
-            status: generated
-      - id: plot-gamma-bands
-        command: tapw plot -c examples/tapw/mgi2_9.43/configs/Gamma_q03.plot.yaml
-        runtime_class: external-data
-        expected_outputs:
-          - path: examples/tapw/mgi2_9.43/outputs/Gamma/q03/band/band_comparison.pdf
-            status: generated
-
   - id: kp-mote2-3.89
     path: examples/mote2_3.89
     description: MoTe2 3.89 degree KP single-case configurations and saved-output contract.
@@ -210,17 +168,12 @@ datasets:
     required_files:
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
         kind: file
-        size_bytes: 1484
-        sha256: 623aef997dfb117941b0f391184b98a34e76952afde8ee8ba6769edf08ac2abd
+        size_bytes: 1591
+        sha256: 8bce2e9da535c23f425d34cfbe6c691a8a59f1714ff439ef6b0003b3a25df649
       - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml
         kind: file
-        size_bytes: 1486
-        sha256: a5e46541b550bbb14710f3ed54a8df0d596b71a7e483a94552575fcf32987589
-      - path: examples/mote2_3.89/tapw/KPATH.in
-        kind: file
-        external:
-          marker: pending_external
-          reason: K-path input used by KP model configs is not tracked in the source clone.
+        size_bytes: 1593
+        sha256: 9e2a83659aa69d55ecdf80795687a71dcff748bf7da16cc1c99d9e29b593b8e8
       - path: examples/mote2_3.89/tapw/outputs/K1/q06/band
         kind: directory
         external:
@@ -315,21 +268,16 @@ datasets:
     required_files:
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml
         kind: file
-        size_bytes: 1871
-        sha256: f9f99f69d875911051e23676886d11303ebc56015f1b4867b22bbcdc67f42cf1
+        size_bytes: 1978
+        sha256: 0c95551890bff1d50771d83ad8c9508f6a437c72cf2aa985d28bb77656656a5c
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml
         kind: file
-        size_bytes: 1503
-        sha256: 474ebee15c1a3345de3a7346715b794b2af9bd55379883f3ce618ed19318fc62
+        size_bytes: 1610
+        sha256: 67ab363ac606c173a5b32283a388d8db94911278af60b345af142b8d06d5dbfe
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         kind: file
-        size_bytes: 1550
-        sha256: 6811c448dbd88d4d71a9e4476c5ecda9b629dc9ed8eb8dcb0b6c348defd8708e
-      - path: examples/mgi2_3.89/tapw/KPATH.in
-        kind: file
-        external:
-          marker: pending_external
-          reason: K-path input used by KP model configs is not tracked in the source clone.
+        size_bytes: 1657
+        sha256: 8383234dee4a3ce3bc35b1ae7a843b5398fa7ee5b3a8b132f7409640faa0516d
       - path: examples/mgi2_3.89/tapw/outputs/Gamma/q05/band
         kind: directory
         external:

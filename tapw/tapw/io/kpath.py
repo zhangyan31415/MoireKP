@@ -14,6 +14,13 @@ class KPathGenerator:
         self.segment_points = 0
 
     @staticmethod
+    def _format_label(label):
+        text = str(label)
+        if text.upper() in ['GAMMA', '\\GAMMA', 'G', 'Γ']:
+            return r'$\Gamma$'
+        return text
+
+    @staticmethod
     def calculate_reciprocal_vectors(Amat):
         a, b, c = Amat
         vol = np.dot(a, np.cross(b, c))
@@ -35,8 +42,7 @@ class KPathGenerator:
             coordinates = np.array([float(coord) for coord in lines[i].split()[:3]])
             if len(coordinates) == 3:
                 label = lines[i].split()[-1]
-                if label in ['GAMMA', '\\GAMMA', 'G']:
-                    label = r'$\Gamma$'
+                label = self._format_label(label)
                 self.high_symmetry_points.append(coordinates)
                 self.labels.append(label)
 
@@ -84,6 +90,59 @@ class KPathGenerator:
             self.labels_ticks.append(self.labels[-1])
             output_file.write(f'{self.high_symmetry_points[2 * i + 1][0]:>10.6f} {self.high_symmetry_points[2 * i + 1][1]:>10.6f} {self.high_symmetry_points[2 * i + 1][2]:>10.6f} {x:>10.6f}\n')
             self.kpoints.append(np.append(self.high_symmetry_points[2 * i + 1], x))
+
+    def generate_from_config(self, kpath_config, output_file_path: str) -> None:
+        labels = [str(label) for label in kpath_config.get("labels", [])]
+        coordinates = dict(kpath_config.get("coordinates", {}) or {})
+        self.segment_points = int(kpath_config.get("points_per_segment", 40))
+        if len(labels) < 2:
+            raise ValueError("kpath.labels must contain at least two labels")
+        if self.segment_points <= 0:
+            raise ValueError("kpath.points_per_segment must be positive")
+
+        points = []
+        for label in labels:
+            if label not in coordinates:
+                raise ValueError(f"kpath.coordinates is missing label {label!r}")
+            point = np.asarray(coordinates[label], dtype=float).ravel()
+            if point.size == 2:
+                point = np.array([point[0], point[1], 0.0], dtype=float)
+            if point.size != 3:
+                raise ValueError(f"kpath coordinate for {label!r} must have two or three values")
+            points.append(point)
+        self.high_symmetry_points = np.asarray(points, dtype=float)
+        self.labels = [self._format_label(label) for label in labels]
+
+        Amat_reciprocal = np.array([self.astar, self.bstar, self.cstar])
+        x = 0.0
+        self.x_ticks = [x]
+        self.labels_ticks = [self.labels[0]]
+        self.kpoints = []
+
+        Path(output_file_path).parent.mkdir(parents=True, exist_ok=True)
+        with open(output_file_path, 'w') as output_file:
+            for iseg in range(len(points) - 1):
+                start = self.high_symmetry_points[iseg]
+                stop = self.high_symmetry_points[iseg + 1]
+                delta = self.distance(
+                    self.direct_cart_real(Amat_reciprocal, stop),
+                    self.direct_cart_real(Amat_reciprocal, start),
+                ) / self.segment_points
+                for j in range(self.segment_points):
+                    if iseg > 0 and j == 0:
+                        continue
+                    fraction = float(j) / float(self.segment_points)
+                    interpolated_point = (1.0 - fraction) * start + fraction * stop
+                    output_file.write(
+                        f'{interpolated_point[0]:>10.6f} {interpolated_point[1]:>10.6f} '
+                        f'{interpolated_point[2]:>10.6f} {x:>10.6f}\n'
+                    )
+                    self.kpoints.append(np.append(interpolated_point, x))
+                    x += delta
+                output_file.write(f'{stop[0]:>10.6f} {stop[1]:>10.6f} {stop[2]:>10.6f} {x:>10.6f}\n')
+                self.kpoints.append(np.append(stop, x))
+                self.x_ticks.append(x)
+                self.labels_ticks.append(self.labels[iseg + 1])
 
     @staticmethod
     def distance(p1, p2):

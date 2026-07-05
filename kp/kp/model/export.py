@@ -148,6 +148,8 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
     qsets = _qset_arrays(moire_config)
     n_orb_by_qset = _n_orb_by_qset(moire_config)
     basis_blocks = _basis_blocks(qsets, n_orb_by_qset)
+    basis_metadata = _basis_row_metadata(qsets, n_orb_by_qset, basis_blocks)
+    reciprocal_basis = _model_reciprocal_basis(moire_config)
     dim = sum(int(block["dim"]) for block in basis_blocks)
     exactified = _load_exactified_matrices(model_config, dim)
     semantic_terms, runtime_terms = _runtime_terms_from_active_terms(active_terms, moire_config)
@@ -205,6 +207,14 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
         "runtime_hermitianize_before_eigvalsh": np.asarray(True, dtype=np.bool_),
         "reference_kpoints": reference_kpoints,
         "reference_eigvals": np.asarray(reference_eigvals, dtype=float),
+        "basis_qset_id": basis_metadata["basis_qset_id"],
+        "basis_q_index": basis_metadata["basis_q_index"],
+        "basis_orbital": basis_metadata["basis_orbital"],
+        "basis_q_vector": basis_metadata["basis_q_vector"],
+        "basis_block_offset": basis_metadata["basis_block_offset"],
+        "basis_block_q_count": basis_metadata["basis_block_q_count"],
+        "basis_block_n_orb": basis_metadata["basis_block_n_orb"],
+        "model_reciprocal_basis": reciprocal_basis,
     }
     for name, matrix in exactified.items():
         model_data[f"exactified_{name}"] = matrix
@@ -616,6 +626,54 @@ def _basis_blocks(qsets: Mapping[str, np.ndarray], n_orb_by_qset: Mapping[str, i
         blocks.append({"qset": qset_name, "offset": int(offset), "q_count": q_count, "n_orb": n_orb, "dim": int(dim)})
         offset += dim
     return blocks
+
+
+def _basis_row_metadata(
+    qsets: Mapping[str, np.ndarray],
+    n_orb_by_qset: Mapping[str, int],
+    basis_blocks: Sequence[Mapping[str, int | str]],
+) -> dict[str, np.ndarray]:
+    qset_ids: list[int] = []
+    q_indices: list[int] = []
+    orbitals: list[int] = []
+    q_vectors: list[np.ndarray] = []
+    block_offsets: list[int] = []
+    block_q_counts: list[int] = []
+    block_n_orb: list[int] = []
+    for slot, qset_name in enumerate(("qset1", "qset2"), start=1):
+        qset = np.asarray(qsets[qset_name], dtype=float)
+        n_orb = int(n_orb_by_qset[qset_name])
+        block = next(item for item in basis_blocks if item["qset"] == qset_name)
+        block_offsets.append(int(block["offset"]))
+        block_q_counts.append(int(qset.shape[0]))
+        block_n_orb.append(n_orb)
+        for orbital in range(n_orb):
+            for q_index, q_vector in enumerate(qset):
+                qset_ids.append(slot)
+                q_indices.append(int(q_index))
+                orbitals.append(int(orbital))
+                q_vectors.append(np.asarray(q_vector, dtype=float))
+    if q_vectors:
+        q_vector_array = np.vstack(q_vectors).astype(float)
+    else:
+        q_vector_array = np.zeros((0, 2), dtype=float)
+    return {
+        "basis_qset_id": np.asarray(qset_ids, dtype=np.int64),
+        "basis_q_index": np.asarray(q_indices, dtype=np.int64),
+        "basis_orbital": np.asarray(orbitals, dtype=np.int64),
+        "basis_q_vector": q_vector_array,
+        "basis_block_offset": np.asarray(block_offsets, dtype=np.int64),
+        "basis_block_q_count": np.asarray(block_q_counts, dtype=np.int64),
+        "basis_block_n_orb": np.asarray(block_n_orb, dtype=np.int64),
+    }
+
+
+def _model_reciprocal_basis(moire_config: Any) -> np.ndarray:
+    b1 = np.asarray(getattr(moire_config, "bM1", None), dtype=float).ravel()
+    b2 = np.asarray(getattr(moire_config, "bM2", None), dtype=float).ravel()
+    if b1.shape[0] < 2 or b2.shape[0] < 2:
+        raise ValueError("standalone export requires bM1/bM2 to save model_reciprocal_basis")
+    return np.asarray([[float(b1[0]), float(b1[1])], [float(b2[0]), float(b2[1])]], dtype=float)
 
 
 def _portable_sectors(sectors: Any) -> list[dict[str, Any]]:
@@ -2045,6 +2103,24 @@ OUT_BAND_PLOT = "bands.pdf"
 OUT_KDIST = "kdist.npy"
 OUT_TICKS = "kpath_ticks.json"
 
+# Standalone topology. Keep this off by default for quick band checks; set it
+# to True and tune the grid/band set below when you want model BC/QGT/WCC.
+RUN_BANDS = True
+RUN_TOPOLOGY = False
+
+TOPO_N_B1 = 31
+TOPO_N_B2 = 31
+TOPO_RANGE_B1 = (-0.5, 0.5)
+TOPO_RANGE_B2 = (-0.5, 0.5)
+TOPO_BAND_SETS = {{
+    "vbm2": {{"sector": "valence", "indices": [-1, -2]}},
+}}
+CALC_BERRY_CURVATURE = True
+CALC_QUANTUM_GEOMETRY = True
+CALC_WCC = False
+WCC_LOOP = "b2"
+TOPOLOGY_OUTPUT_DIR = "outputs/topology"
+
 # End user-editable settings
 
 
@@ -2120,6 +2196,10 @@ class StandaloneModel:
                 raise ValueError(f"band_slice must be [start, stop], got {{band_slice!r}}")
             out = out[:, int(band_slice[0]):int(band_slice[1])]
         return out
+
+    def eigensystem(self, k):
+        h = self._hamiltonian_for_eigvalsh(k)
+        return np.linalg.eigh(h)
 
 
 def load_model(root="."):
@@ -2269,6 +2349,274 @@ def _plot_bands(kdist, bands, ticks, out_path):
     return out_path
 
 
+def _float_token(value):
+    text = f"{{float(value):.6g}}".replace("-", "m").replace(".", "p")
+    return text.replace("+", "")
+
+
+def _topology_grid_id():
+    return (
+        f"grid{{int(TOPO_N_B1)}}x{{int(TOPO_N_B2)}}"
+        f"_b1_{{_float_token(TOPO_RANGE_B1[0])}}_{{_float_token(TOPO_RANGE_B1[1])}}"
+        f"_b2_{{_float_token(TOPO_RANGE_B2[0])}}_{{_float_token(TOPO_RANGE_B2[1])}}"
+    )
+
+
+def _topology_mesh():
+    n1 = int(TOPO_N_B1)
+    n2 = int(TOPO_N_B2)
+    if n1 < 2 or n2 < 2:
+        raise ValueError("TOPO_N_B1 and TOPO_N_B2 must be at least 2")
+    b1_values = np.linspace(float(TOPO_RANGE_B1[0]), float(TOPO_RANGE_B1[1]), n1)
+    b2_values = np.linspace(float(TOPO_RANGE_B2[0]), float(TOPO_RANGE_B2[1]), n2)
+    points = np.asarray([[x, y] for x in b1_values for y in b2_values], dtype=float)
+    return b1_values, b2_values, points
+
+
+def _resolve_topology_band_indices(dim, spec):
+    if not isinstance(spec, dict):
+        raise ValueError(f"band-set spec must be a dict, got {{spec!r}}")
+    sector = str(spec.get("sector", "valence")).strip().lower()
+    raw_indices = list(spec.get("indices", []))
+    if not raw_indices:
+        raise ValueError("topology band-set indices cannot be empty")
+    resolved = []
+    for raw in raw_indices:
+        idx = int(raw)
+        if sector == "valence":
+            resolved_idx = dim + idx if idx < 0 else idx
+        elif sector == "conduction":
+            resolved_idx = idx if idx >= 0 else dim + idx
+        else:
+            raise ValueError(f"Unsupported topology sector {{sector!r}}")
+        if resolved_idx < 0 or resolved_idx >= dim:
+            raise ValueError(f"Resolved band index {{resolved_idx}} is outside 0..{{dim - 1}}")
+        resolved.append(resolved_idx)
+    return sorted(set(resolved))
+
+
+def _eigensystem_on_grid(model, points, n1, n2):
+    eigvals = np.empty((n1, n2, model.dim), dtype=float)
+    eigvecs = np.empty((n1, n2, model.dim, model.dim), dtype=np.complex128)
+    for flat_index, k in enumerate(points):
+        i = flat_index // n2
+        j = flat_index % n2
+        vals, vecs = model.eigensystem(k)
+        eigvals[i, j] = vals
+        eigvecs[i, j] = vecs
+    return eigvals, eigvecs
+
+
+def _projectors_for_bandset(eigvecs, band_indices):
+    n1, n2, dim, _ = eigvecs.shape
+    projectors = np.empty((n1, n2, dim, dim), dtype=np.complex128)
+    for i in range(n1):
+        for j in range(n2):
+            u = eigvecs[i, j, :, band_indices]
+            projectors[i, j] = u @ u.conj().T
+    return projectors
+
+
+def _finite_difference(arr, values, axis, index):
+    i, j = index
+    if axis == 0:
+        if i == 0:
+            return (arr[1, j] - arr[0, j]) / float(values[1] - values[0])
+        if i == arr.shape[0] - 1:
+            return (arr[i, j] - arr[i - 1, j]) / float(values[i] - values[i - 1])
+        return (arr[i + 1, j] - arr[i - 1, j]) / float(values[i + 1] - values[i - 1])
+    if j == 0:
+        return (arr[i, 1] - arr[i, 0]) / float(values[1] - values[0])
+    if j == arr.shape[1] - 1:
+        return (arr[i, j] - arr[i, j - 1]) / float(values[j] - values[j - 1])
+    return (arr[i, j + 1] - arr[i, j - 1]) / float(values[j + 1] - values[j - 1])
+
+
+def _berry_and_qgt_from_projectors(projectors, b1_values, b2_values):
+    n1, n2 = projectors.shape[:2]
+    berry = np.empty((n1, n2), dtype=float)
+    qgt = np.empty((n1, n2, 4), dtype=float)
+    for i in range(n1):
+        for j in range(n2):
+            p = projectors[i, j]
+            dp1 = _finite_difference(projectors, b1_values, 0, (i, j))
+            dp2 = _finite_difference(projectors, b2_values, 1, (i, j))
+            berry[i, j] = float(-2.0 * np.imag(np.trace(p @ dp1 @ dp2)))
+            g11 = float(np.real(np.trace(dp1 @ dp1)))
+            g22 = float(np.real(np.trace(dp2 @ dp2)))
+            g12 = float(np.real(np.trace(dp1 @ dp2)))
+            qgt[i, j] = [g11 + g22, g11, g22, g12]
+    return berry, qgt
+
+
+def _save_grid_table(path, b1_values, b2_values, values, columns):
+    rows = []
+    for i, x in enumerate(b1_values):
+        for j, y in enumerate(b2_values):
+            value = np.asarray(values[i, j], dtype=float).ravel()
+            rows.append([float(x), float(y), *[float(v) for v in value]])
+    header = "kappa1 kappa2 " + " ".join(columns)
+    np.savetxt(path, np.asarray(rows, dtype=float), header=header)
+
+
+def _plot_grid_scalar(path, b1_values, b2_values, values, colorbar_label):
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        print(f"matplotlib is not installed; skipped {{path.name}}")
+        return None
+
+    arr = np.asarray(values, dtype=float)
+    fig, ax = plt.subplots(figsize=(3.0, 3.0))
+    image = ax.imshow(
+        arr.T,
+        origin="lower",
+        extent=[float(b1_values[0]), float(b1_values[-1]), float(b2_values[0]), float(b2_values[-1])],
+        aspect="equal",
+        interpolation="bilinear",
+    )
+    ax.set_xlabel(r"$k_1/|b_M|$")
+    ax.set_ylabel(r"$k_2/|b_M|$")
+    cbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.035)
+    cbar.set_label(colorbar_label)
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+    return path
+
+
+def _sewing_permutation(model, shift):
+    required = ["basis_qset_id", "basis_q_index", "basis_orbital", "basis_q_vector"]
+    missing = [key for key in required if key not in model.data.files]
+    if missing:
+        raise KeyError(
+            "WCC requires basis metadata in model_data.npz; regenerate this standalone package with a newer kp model export. "
+            f"Missing: {{missing}}"
+        )
+    qset_id = np.asarray(model.data["basis_qset_id"], dtype=np.int64)
+    orbital = np.asarray(model.data["basis_orbital"], dtype=np.int64)
+    qvec = np.asarray(model.data["basis_q_vector"], dtype=float)
+    shift = np.asarray(shift, dtype=float)
+    target_by_source = np.empty(model.dim, dtype=np.int64)
+    used = set()
+    for source in range(model.dim):
+        wanted = qvec[source] + shift
+        matches = np.where(
+            (qset_id == qset_id[source])
+            & (orbital == orbital[source])
+            & (np.linalg.norm(qvec - wanted[None, :], axis=1) < 1.0e-7)
+        )[0]
+        if matches.size != 1:
+            raise ValueError(
+                f"WCC boundary sewing failed for row {{source}} with shift={{shift.tolist()}}; matched {{matches.size}} rows"
+            )
+        target = int(matches[0])
+        if target in used:
+            raise ValueError("WCC boundary sewing is not one-to-one")
+        used.add(target)
+        target_by_source[source] = target
+    return target_by_source
+
+
+def _apply_sewing(matrix, target_by_source):
+    out = np.zeros_like(matrix)
+    out[target_by_source, :] = matrix
+    return out
+
+
+def _wilson_wcc(model, eigvecs, band_indices, loop):
+    loop = str(loop).strip().lower()
+    if loop == "b1":
+        shift = np.array([1.0, 0.0], dtype=float)
+        target_by_source = _sewing_permutation(model, shift)
+        sweep_count = eigvecs.shape[1]
+        branches = []
+        for j in range(sweep_count):
+            product = np.eye(len(band_indices), dtype=np.complex128)
+            for i in range(eigvecs.shape[0] - 1):
+                u0 = eigvecs[i, j, :, band_indices]
+                u1 = eigvecs[i + 1, j, :, band_indices]
+                product = (u1.conj().T @ u0) @ product
+            u_start = eigvecs[0, j, :, band_indices]
+            u_end = _apply_sewing(eigvecs[-1, j, :, :], target_by_source)[:, band_indices]
+            product = (u_start.conj().T @ u_end) @ product
+            phases = np.sort((np.angle(np.linalg.eigvals(product)) / (2.0 * np.pi)) % 1.0)
+            branches.append(phases)
+        return np.asarray(branches, dtype=float)
+    if loop == "b2":
+        shift = np.array([0.0, 1.0], dtype=float)
+        target_by_source = _sewing_permutation(model, shift)
+        sweep_count = eigvecs.shape[0]
+        branches = []
+        for i in range(sweep_count):
+            product = np.eye(len(band_indices), dtype=np.complex128)
+            for j in range(eigvecs.shape[1] - 1):
+                u0 = eigvecs[i, j, :, band_indices]
+                u1 = eigvecs[i, j + 1, :, band_indices]
+                product = (u1.conj().T @ u0) @ product
+            u_start = eigvecs[i, 0, :, band_indices]
+            u_end = _apply_sewing(eigvecs[i, -1, :, :], target_by_source)[:, band_indices]
+            product = (u_start.conj().T @ u_end) @ product
+            phases = np.sort((np.angle(np.linalg.eigvals(product)) / (2.0 * np.pi)) % 1.0)
+            branches.append(phases)
+        return np.asarray(branches, dtype=float)
+    raise ValueError(f"WCC_LOOP must be 'b1' or 'b2', got {{loop!r}}")
+
+
+def _plot_wcc(path, sweep_values, branches):
+    try:
+        import matplotlib
+        matplotlib.use("Agg", force=True)
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        print(f"matplotlib is not installed; skipped {{path.name}}")
+        return None
+
+    fig, ax = plt.subplots(figsize=(3.0, 3.0))
+    for branch in range(branches.shape[1]):
+        ax.scatter(sweep_values, branches[:, branch], s=8, color="#4a4f55")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_xlabel(r"$k/|b_M|$")
+    ax.set_ylabel(r"$\\theta/2\\pi$")
+    fig.tight_layout()
+    fig.savefig(path, dpi=300)
+    plt.close(fig)
+    return path
+
+
+def _run_topology(root, model):
+    b1_values, b2_values, points = _topology_mesh()
+    grid_dir = _resolve_path(root, Path(TOPOLOGY_OUTPUT_DIR) / _topology_grid_id())
+    grid_dir.mkdir(parents=True, exist_ok=True)
+    eigvals, eigvecs = _eigensystem_on_grid(model, points, int(TOPO_N_B1), int(TOPO_N_B2))
+    np.save(grid_dir / "eigvals.npy", eigvals.reshape((-1, model.dim)))
+    for name, spec in TOPO_BAND_SETS.items():
+        band_indices = _resolve_topology_band_indices(model.dim, spec)
+        projectors = _projectors_for_bandset(eigvecs, band_indices)
+        berry, qgt = _berry_and_qgt_from_projectors(projectors, b1_values, b2_values)
+        if CALC_BERRY_CURVATURE:
+            txt = grid_dir / f"berry_curvature_{{name}}.txt"
+            _save_grid_table(txt, b1_values, b2_values, berry[:, :, None], ["omega"])
+            _plot_grid_scalar(grid_dir / f"berry_curvature_{{name}}.pdf", b1_values, b2_values, berry, r"$\\Omega$")
+        if CALC_QUANTUM_GEOMETRY:
+            txt = grid_dir / f"quantum_geometry_{{name}}.txt"
+            _save_grid_table(txt, b1_values, b2_values, qgt, ["trace_g", "g11", "g22", "g12"])
+            _plot_grid_scalar(grid_dir / f"quantum_geometry_{{name}}.pdf", b1_values, b2_values, qgt[:, :, 0], r"$\\mathrm{{Tr}}\\,g$")
+        if CALC_WCC:
+            branches = _wilson_wcc(model, eigvecs, band_indices, WCC_LOOP)
+            sweep_values = b2_values if str(WCC_LOOP).lower() == "b1" else b1_values
+            txt = grid_dir / f"wcc_{{name}}_loop_{{str(WCC_LOOP).lower()}}.txt"
+            np.savetxt(
+                txt,
+                np.column_stack([sweep_values, branches]),
+                header="sweep " + " ".join(f"branch{{i}}" for i in range(branches.shape[1])),
+            )
+            _plot_wcc(grid_dir / f"wcc_{{name}}_loop_{{str(WCC_LOOP).lower()}}.pdf", sweep_values, branches)
+    print(f"wrote topology outputs: {{grid_dir}}")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Evaluate standalone NumPy continuum model bands.")
     parser.add_argument("--model-root", default=".", help="Standalone package root")
@@ -2278,28 +2626,31 @@ def main(argv=None):
 
     root = Path(args.model_root).resolve()
     model = load_model(root)
-    if args.kpoints is None:
-        if "reference_kpoints" in model.data.files:
-            kpoints = np.asarray(model.data["reference_kpoints"], dtype=float)
-            kdist = _kdist_from_kpoints(kpoints)
-            ticks = _ticks_for_reference_kpath(kdist)
+    if RUN_BANDS:
+        if args.kpoints is None:
+            if "reference_kpoints" in model.data.files:
+                kpoints = np.asarray(model.data["reference_kpoints"], dtype=float)
+                kdist = _kdist_from_kpoints(kpoints)
+                ticks = _ticks_for_reference_kpath(kdist)
+            else:
+                kpoints, kdist, ticks = _generate_kpath()
         else:
-            kpoints, kdist, ticks = _generate_kpath()
-    else:
-        kpoints = _load_kpoints(args.kpoints, root)
-        kdist = _kdist_from_kpoints(kpoints)
-        ticks = {{"labels": [], "positions": []}}
-    bands = model.bands(kpoints, band_slice=None)
-    np.save(_resolve_path(root, OUT_KPOINTS), kpoints)
-    np.save(_resolve_path(root, args.out or OUT_BANDS), bands)
-    np.save(_resolve_path(root, OUT_KDIST), kdist)
-    with _resolve_path(root, OUT_TICKS).open("w", encoding="utf-8") as handle:
-        json.dump(ticks, handle, indent=2, allow_nan=False)
-        handle.write("\\n")
-    plot_path = _plot_bands(kdist, bands, ticks, _resolve_path(root, OUT_BAND_PLOT))
-    print(f"wrote {{kpoints.shape[0]}} k-points and {{bands.shape[1]}} bands")
-    if plot_path is not None:
-        print(f"wrote band plot: {{plot_path}}")
+            kpoints = _load_kpoints(args.kpoints, root)
+            kdist = _kdist_from_kpoints(kpoints)
+            ticks = {{"labels": [], "positions": []}}
+        bands = model.bands(kpoints, band_slice=None)
+        np.save(_resolve_path(root, OUT_KPOINTS), kpoints)
+        np.save(_resolve_path(root, args.out or OUT_BANDS), bands)
+        np.save(_resolve_path(root, OUT_KDIST), kdist)
+        with _resolve_path(root, OUT_TICKS).open("w", encoding="utf-8") as handle:
+            json.dump(ticks, handle, indent=2, allow_nan=False)
+            handle.write("\\n")
+        plot_path = _plot_bands(kdist, bands, ticks, _resolve_path(root, OUT_BAND_PLOT))
+        print(f"wrote {{kpoints.shape[0]}} k-points and {{bands.shape[1]}} bands")
+        if plot_path is not None:
+            print(f"wrote band plot: {{plot_path}}")
+    if RUN_TOPOLOGY:
+        _run_topology(root, model)
     return 0
 
 

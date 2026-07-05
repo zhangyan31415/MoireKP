@@ -14,10 +14,8 @@ paths:
   H_file: H.dat
   S_file: S.dat
   input_file: openmx.dat
-  kpath_in: KPATH_GMKG.in
 
 bands:
-  enable: true
   valley: K1
   q_shell: 6
   efermi: -4.6
@@ -26,9 +24,15 @@ bands:
   num_bands: 100
   save_hamiltonian: true
   save_wavefunctions: false
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 40
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
 
 symmetry:
-  enable: false
   valley: K1
   q_shell: 6
   tolerance: 2.0e-2
@@ -37,7 +41,6 @@ symmetry:
   debug: false
 
 topology:
-  enable: false
   valley: K1
   q_shell: 6
   efermi: -4.6

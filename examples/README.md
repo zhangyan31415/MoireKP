@@ -91,17 +91,14 @@ clean-clone test:
 - `kp symm -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes TAPW symmetry-analysis exports)
 - `kp model -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes projection and symmetry outputs)
 
-New KP case configs should use `project.gauge: auto` with an explicit
-`project.nlow_state_list`. Existing hand-written `project.norb_fix_list` entries
-remain valid as expert overrides, but they should not be required for ordinary
-finite-basis projection. Auto-gauge reports are written in
-`kp/outputs/<profile>/<q_shell>/projection/` as `basis.npz` and `basis.md`.
+New KP case configs should use `kp inspect` first, then write the selected low
+states in `project.nlow_state_list` and the projection reference in
+`project.e_ref`. The shared energy reference belongs in `material.efermi`, and
+inspect/model plots use windows relative to that value.
 
-If the same case config has a TAPW raw-H symmetry source in `symm`, `kp project`
-and `kp symm` both use the symmetry-scored auto-gauge resolver. The report then
-lists all gauge candidates and rejected residuals. Auto gauge still does not
-choose `nlow_state_list`; it only fixes the gauge of the low subspace the user
-already selected.
+For symmetry projection, KP reads TAPW raw-H symmetry output from
+`symm.tapw_symmetry_dir`. Users do not list symmetry operations in the KP case
+config; the operation set comes from the TAPW symmetry export.
 
 Dataset provenance and unresolved release metadata are tracked in
 `examples/data-manifest.yaml`. The release cannot be archived until every

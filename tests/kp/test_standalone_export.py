@@ -272,6 +272,11 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
     assert "np.array(" not in evaluator_text.split("# End user-editable settings", 1)[0]
     assert "WINDOW_BANDS = None" in evaluator_text
     assert "OUT_BAND_PLOT = \"bands.pdf\"" in evaluator_text
+    assert "RUN_TOPOLOGY = False" in evaluator_text
+    assert "TOPO_BAND_SETS" in evaluator_text
+    assert "CALC_BERRY_CURVATURE = True" in evaluator_text
+    assert "CALC_QUANTUM_GEOMETRY = True" in evaluator_text
+    assert "CALC_WCC = False" in evaluator_text
     assert "BAND_SLICE" not in evaluator_text
     assert "model.json" not in evaluator_text
     assert "max_antihermitian_norm" not in evaluator_text
@@ -321,12 +326,61 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
         "runtime_hermitianize_before_eigvalsh",
         "reference_kpoints",
         "reference_eigvals",
+        "basis_qset_id",
+        "basis_q_index",
+        "basis_orbital",
+        "basis_q_vector",
+        "basis_block_offset",
+        "basis_block_q_count",
+        "basis_block_n_orb",
+        "model_reciprocal_basis",
     }
     assert expected_keys.issubset(set(data.files))
     assert not (out_dir / "model.json").exists()
     assert int(np.asarray(data["dimension_dim"]).item()) == 2
     assert bool(np.asarray(data["runtime_hermitianize_before_eigvalsh"]).item()) is True
     assert "runtime_max_antihermitian_norm" not in data.files
+    np.testing.assert_array_equal(data["basis_qset_id"], np.array([1, 2]))
+    np.testing.assert_array_equal(data["basis_q_index"], np.array([0, 0]))
+    np.testing.assert_array_equal(data["basis_orbital"], np.array([0, 0]))
+    np.testing.assert_allclose(data["basis_q_vector"], np.zeros((2, 2)))
+    np.testing.assert_array_equal(data["basis_block_offset"], np.array([0, 1]))
+    np.testing.assert_array_equal(data["basis_block_q_count"], np.array([1, 1]))
+    np.testing.assert_array_equal(data["basis_block_n_orb"], np.array([1, 1]))
+    np.testing.assert_allclose(data["model_reciprocal_basis"], np.eye(2))
+
+
+def test_standalone_evaluate_can_run_model_topology_from_user_settings(tmp_path: Path) -> None:
+    model_output, _cfg_path = _write_export_fixture(tmp_path)
+    out_dir = tmp_path / "standalone"
+    export_standalone_model(model_output, out_dir)
+    module = _load_exported_evaluator(out_dir)
+
+    module.RUN_BANDS = False
+    module.RUN_TOPOLOGY = True
+    module.TOPO_N_B1 = 3
+    module.TOPO_N_B2 = 3
+    module.TOPO_RANGE_B1 = (-0.5, 0.5)
+    module.TOPO_RANGE_B2 = (-0.5, 0.5)
+    module.TOPO_BAND_SETS = {
+        "vbm2": {"sector": "valence", "indices": [-1, -2]},
+    }
+    module.CALC_BERRY_CURVATURE = True
+    module.CALC_QUANTUM_GEOMETRY = True
+    module.CALC_WCC = False
+    module.TOPOLOGY_OUTPUT_DIR = "topology_test"
+
+    assert module.main(["--model-root", str(out_dir)]) == 0
+
+    grid_dir = out_dir / "topology_test" / "grid3x3_b1_m0p5_0p5_b2_m0p5_0p5"
+    assert (grid_dir / "berry_curvature_vbm2.txt").exists()
+    assert (grid_dir / "berry_curvature_vbm2.pdf").exists()
+    assert (grid_dir / "quantum_geometry_vbm2.txt").exists()
+    assert (grid_dir / "quantum_geometry_vbm2.pdf").exists()
+    berry = np.loadtxt(grid_dir / "berry_curvature_vbm2.txt", comments="#")
+    qgt = np.loadtxt(grid_dir / "quantum_geometry_vbm2.txt", comments="#")
+    assert berry.shape == (9, 3)
+    assert qgt.shape == (9, 6)
 
     model_doc = (out_dir / "MODEL.md").read_text(encoding="utf-8")
     assert "$$" in model_doc
