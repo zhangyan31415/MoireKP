@@ -107,6 +107,8 @@ def test_symm_rep_groups_degenerate_blocks_and_writes_outputs(tmp_path):
     assert "## Gamma" in summary
     assert "### Valence" in summary
     assert "### Conduction" in summary
+    assert "### Symmetry Representations" in summary
+    assert "| valence | 1 | 1 2 | -1.000000000000, -1.000000000000 | C2 | (-1↑, -1↑) |" in summary
     assert "| valence | 1 | 1 2 | -1.000000000000, -1.000000000000 | C2 | false | -2.000000 | 0 |" in summary
 
 

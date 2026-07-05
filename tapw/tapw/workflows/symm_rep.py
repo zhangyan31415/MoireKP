@@ -65,6 +65,58 @@ def spin_weights_and_label(vector: np.ndarray, *, threshold: float = 0.8) -> tup
     return up, down, label
 
 
+def _spin_suffix(label: str) -> str:
+    return {"up": "↑", "down": "↓", "mixed": " mixed", "spinless": ""}.get(label, f" {label}")
+
+
+def _phase_label(value: complex, *, tol: float = 0.15) -> str:
+    value = complex(value)
+    magnitude = abs(value)
+    if magnitude > 0.0:
+        unit = value / magnitude
+    else:
+        unit = value
+    roots = [
+        (1.0 + 0.0j, "1"),
+        (-1.0 + 0.0j, "-1"),
+        (1.0j, "i"),
+        (-1.0j, "-i"),
+        (np.exp(2.0j * np.pi / 3.0), "ω"),
+        (np.exp(-2.0j * np.pi / 3.0), "ω²"),
+        (np.exp(1.0j * np.pi / 3.0), "e^{+iπ/3}"),
+        (np.exp(-1.0j * np.pi / 3.0), "e^{-iπ/3}"),
+    ]
+    target, label = min(roots, key=lambda item: abs(unit - item[0]))
+    if abs(unit - target) <= tol and abs(magnitude - 1.0) <= 0.25:
+        return label
+    angle = np.angle(value) / np.pi
+    return f"{magnitude:.3g}e^{{{angle:+.3g}iπ}}"
+
+
+def symmetry_rep_label(projected: np.ndarray, block_vectors: np.ndarray, *, antiunitary: bool = False) -> str:
+    if antiunitary:
+        return ""
+    matrix = np.asarray(projected, dtype=np.complex128)
+    vectors = np.asarray(block_vectors, dtype=np.complex128)
+    if matrix.size == 0:
+        return "()"
+    if matrix.shape == (1, 1):
+        symm_vectors = vectors
+        values = np.array([matrix[0, 0]], dtype=np.complex128)
+    else:
+        values, coeffs = np.linalg.eig(matrix)
+        order = np.argsort(np.angle(values))
+        values = values[order]
+        coeffs = coeffs[:, order]
+        symm_vectors = vectors @ coeffs
+    labels = []
+    for value, vector in zip(values, symm_vectors.T):
+        _up, _down, spin_label = spin_weights_and_label(vector)
+        suffix = _spin_suffix(spin_label)
+        labels.append(f"{_phase_label(value)}{suffix}")
+    return "(" + ", ".join(labels) + ")"
+
+
 def project_operation_to_subspace(raw_action: Any, vectors: np.ndarray, *, antiunitary: bool = False) -> np.ndarray:
     """Project a raw-H action into the column span of ``vectors``."""
     matrix = raw_action.toarray() if scipy.sparse.issparse(raw_action) else np.asarray(raw_action)
@@ -583,6 +635,7 @@ def _write_characters_csv(output_dir: Path, character_rows: list[dict[str, Any]]
         "energies",
         "operation",
         "antiunitary",
+        "symm_rep",
         "trace_real",
         "trace_imag",
         "unitarity_residual",
@@ -655,10 +708,28 @@ def _write_summary(
                 lines.append("|  |  | unavailable |  |  |")
             lines.append("")
 
+        point_chars = chars_by_point.get(point, [])
+        rep_rows = [
+            row
+            for row in point_chars
+            if row.get("symm_rep") and str(row.get("antiunitary", "false")).lower() == "false"
+        ]
+        lines.extend(["### Symmetry Representations", ""])
+        lines.append("| sector | block | bands | energies | operation | rep |")
+        lines.append("| --- | ---: | --- | --- | --- | --- |")
+        for row in rep_rows:
+            lines.append(
+                "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {symm_rep} |".format(
+                    **row,
+                )
+            )
+        if not rep_rows:
+            lines.append("|  |  |  |  | unavailable |  |")
+        lines.append("")
+
         lines.extend(["### Characters", ""])
         lines.append("| sector | block | bands | energies | operation | antiunitary | trace | residual |")
         lines.append("| --- | ---: | --- | --- | --- | --- | ---: | ---: |")
-        point_chars = chars_by_point.get(point, [])
         for row in point_chars:
             trace = f"{float(row['trace_real']):.6f}"
             imag = float(row["trace_imag"])
@@ -799,6 +870,11 @@ def run_symm_rep_from_point_sources(
                     )
                     trace = np.trace(projected)
                     residual = _unitarity_residual(projected)
+                    rep_label = symmetry_rep_label(
+                        projected,
+                        block_vectors,
+                        antiunitary=operation.antiunitary,
+                    )
                     character_rows.append(
                         {
                             "point": point,
@@ -808,6 +884,7 @@ def run_symm_rep_from_point_sources(
                             "energies": _format_energies(block.energies),
                             "operation": operation.operation,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
+                            "symm_rep": rep_label,
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",
                             "unitarity_residual": f"{residual:.12g}",
@@ -995,6 +1072,11 @@ def run_symm_rep(
                     )
                     trace = np.trace(projected)
                     residual = _unitarity_residual(projected)
+                    rep_label = symmetry_rep_label(
+                        projected,
+                        block_vectors,
+                        antiunitary=operation.antiunitary,
+                    )
                     character_rows.append(
                         {
                             "point": point,
@@ -1004,6 +1086,7 @@ def run_symm_rep(
                             "energies": _format_energies(block.energies),
                             "operation": operation.operation,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
+                            "symm_rep": rep_label,
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",
                             "unitarity_residual": f"{residual:.12g}",
