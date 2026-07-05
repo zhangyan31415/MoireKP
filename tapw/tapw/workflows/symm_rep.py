@@ -13,6 +13,8 @@ from typing import Any
 import numpy as np
 import scipy.sparse
 
+from ..chern_post import build_boundary_sewing
+
 
 _HAMK_RE = re.compile(r"^hamk_(?P<point>.+)_valley\.npy$")
 _SAVED_BAND_RE = re.compile(r"^band_(?P<edge>VBM|CBM)_(?P<point>.+)_valley\.txt$")
@@ -27,6 +29,7 @@ class RawHSymmetryOperation:
     matrix: scipy.sparse.spmatrix
     antiunitary: bool
     source: str
+    source_action: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +193,100 @@ def project_operation_to_subspace(raw_action: Any, vectors: np.ndarray, *, antiu
     return basis.conj().T @ matrix @ rhs
 
 
+def _k_map_linear_matrix(k_map: dict[str, Any]) -> np.ndarray:
+    kind = str(k_map.get("type", "")).lower()
+    if kind == "rotation":
+        angle = np.deg2rad(float(k_map.get("angle_deg", 0.0)))
+        c = float(np.cos(angle))
+        s = float(np.sin(angle))
+        return np.array([[c, -s], [s, c]], dtype=float)
+    if kind == "negation":
+        return -np.eye(2, dtype=float)
+    if kind == "reflection":
+        axis = np.deg2rad(float(k_map.get("axis_deg", 0.0)))
+        c = float(np.cos(axis))
+        s = float(np.sin(axis))
+        direction = np.array([c, s], dtype=float)
+        return 2.0 * np.outer(direction, direction) - np.eye(2, dtype=float)
+    raise ValueError(f"Unsupported source_action k_map type: {k_map.get('type')!r}")
+
+
+def _reciprocal_shift_for_closed_action(
+    operation: RawHSymmetryOperation,
+    coords: np.ndarray,
+    reciprocal_basis: np.ndarray,
+    *,
+    atol: float = 1.0e-6,
+) -> np.ndarray | None:
+    if not operation.source_action:
+        return np.zeros(2, dtype=int)
+    k_map = dict(operation.source_action.get("k_map", {}) or {})
+    linear = _k_map_linear_matrix(k_map)
+    basis = np.asarray(reciprocal_basis, dtype=float).reshape(2, 2)
+    coord2 = np.asarray(coords, dtype=float).reshape(-1)[:2]
+    k_cart = coord2 @ basis
+    mapped = linear @ k_cart
+    delta = mapped - k_cart
+    coeffs = np.linalg.solve(basis.T, delta)
+    rounded = np.rint(coeffs).astype(int)
+    residual = np.linalg.norm(delta - rounded @ basis)
+    if float(residual) > float(atol):
+        return None
+    return rounded
+
+
+def _sewing_matrix_from_shift(
+    *,
+    g_vectors_by_group: list[np.ndarray],
+    reciprocal_basis: np.ndarray,
+    reciprocal_shift_coeffs: np.ndarray,
+    dim: int,
+    spin_blocks: int,
+    atol: float = 1.0e-6,
+) -> scipy.sparse.csr_matrix:
+    shift_cart = np.asarray(reciprocal_shift_coeffs, dtype=float).reshape(2) @ np.asarray(reciprocal_basis, dtype=float).reshape(2, 2)
+    if float(np.linalg.norm(shift_cart)) <= float(atol):
+        return scipy.sparse.identity(int(dim), dtype=np.complex128, format="csr")
+    sewing = build_boundary_sewing(
+        g_vectors_by_group,
+        shift_cart,
+        dim_h=int(dim),
+        atol=atol,
+        spin_blocks=int(spin_blocks),
+    )
+    if sewing.missing_blocks:
+        raise ValueError(
+            "Cannot build complete reciprocal sewing matrix: "
+            f"matched={sewing.matched_blocks}, missing={sewing.missing_blocks}, shift={reciprocal_shift_coeffs.tolist()}."
+        )
+    data = np.ones_like(sewing.target_rows, dtype=np.complex128)
+    return scipy.sparse.csr_matrix((data, (sewing.target_rows, sewing.source_rows)), shape=(int(dim), int(dim)))
+
+
+def _sewn_raw_action(
+    operation: RawHSymmetryOperation,
+    point_source: dict[str, Any],
+    dim: int,
+) -> tuple[Any, str] | None:
+    sewing_context = dict(point_source.get("sewing_context", {}) or {})
+    if not sewing_context:
+        return operation.matrix, ""
+    coords = np.asarray(point_source.get("coords", (0.0, 0.0, 0.0)), dtype=float)
+    reciprocal_basis = np.asarray(sewing_context["reciprocal_basis"], dtype=float)
+    shift = _reciprocal_shift_for_closed_action(operation, coords, reciprocal_basis)
+    if shift is None:
+        return None
+    sewing = _sewing_matrix_from_shift(
+        g_vectors_by_group=[np.asarray(item, dtype=float) for item in sewing_context["g_vectors_by_group"]],
+        reciprocal_basis=reciprocal_basis,
+        reciprocal_shift_coeffs=shift,
+        dim=int(dim),
+        spin_blocks=int(sewing_context.get("spin_blocks", 1)),
+    )
+    raw = operation.matrix.tocsr() if scipy.sparse.issparse(operation.matrix) else scipy.sparse.csr_matrix(operation.matrix)
+    return (sewing @ raw).tocsr(), f"{int(shift[0])} {int(shift[1])}"
+
+
 def _safe_npz_key(text: str) -> str:
     return re.sub(r"[^0-9A-Za-z_]+", "_", text).strip("_") or "item"
 
@@ -269,12 +366,17 @@ def _load_operations_from_manifest(
                 or record.get("source_valley")
                 or ""
             ).strip()
-            if point and point not in point_labels:
-                continue
-            if not point and len(point_labels) == 1:
-                point = next(iter(point_labels))
-            if not point:
-                continue
+            source_action = dict(record.get("source_action", {}) or {})
+            if source_action:
+                target_points = sorted(point_labels)
+            else:
+                if point and point not in point_labels:
+                    continue
+                if not point and len(point_labels) == 1:
+                    point = next(iter(point_labels))
+                if not point:
+                    continue
+                target_points = [point]
 
             matrix: scipy.sparse.csr_matrix | None = None
             raw_file = record.get("raw_h_operator_file")
@@ -291,15 +393,17 @@ def _load_operations_from_manifest(
                     matrix = _csr_from_packed(packed_cache[packed_path], str(record["packed_matrix_key"]))
             if matrix is None:
                 continue
-            operations.append(
-                RawHSymmetryOperation(
-                    point=point,
-                    operation=operation,
-                    matrix=matrix,
-                    antiunitary=bool(record.get("antiunitary", _infer_antiunitary(operation))),
-                    source="manifest",
+            for target_point in target_points:
+                operations.append(
+                    RawHSymmetryOperation(
+                        point=target_point,
+                        operation=operation,
+                        matrix=matrix,
+                        antiunitary=bool(record.get("antiunitary", _infer_antiunitary(operation))),
+                        source="manifest",
+                        source_action=source_action or None,
+                    )
                 )
-            )
     finally:
         for payload in packed_cache.values():
             payload.close()
@@ -334,6 +438,15 @@ def _load_packed_operations(symmetry_dir: Path, point_labels: set[str]) -> list[
     if not packed_path.is_file():
         return []
     operations: list[RawHSymmetryOperation] = []
+    profile_point = ""
+    try:
+        q_name = symmetry_dir.parent.name
+        if not re.match(r"^q\d+$", q_name):
+            q_name = ""
+        if q_name:
+            profile_point = symmetry_dir.parent.parent.name
+    except IndexError:
+        profile_point = ""
     with np.load(packed_path, allow_pickle=False) as payload:
         bases = sorted(name[: -len("_data")] for name in payload.files if name.endswith("_data"))
         for base in bases:
@@ -349,10 +462,15 @@ def _load_packed_operations(symmetry_dir: Path, point_labels: set[str]) -> list[
                     matched = True
             if matched:
                 continue
-            for point in sorted(point_labels):
-                operation = base
+            if profile_point in point_labels:
+                target_points = [profile_point]
+            elif not profile_point and len(point_labels) == 1:
+                target_points = sorted(point_labels)
+            else:
+                target_points = []
+            for point in target_points:
                 operations.append(
-                    RawHSymmetryOperation(point, operation, matrix, _infer_antiunitary(operation), str(packed_path))
+                    RawHSymmetryOperation(point, base, matrix, _infer_antiunitary(base), str(packed_path))
                 )
     return operations
 
@@ -701,6 +819,7 @@ def _write_characters_csv(output_dir: Path, character_rows: list[dict[str, Any]]
         "operation",
         "antiunitary",
         "symm_rep",
+        "sewing_shift",
         "trace_real",
         "trace_imag",
         "unitarity_residual",
@@ -786,8 +905,8 @@ def _write_summary(
         ]
         rep_rows.sort(key=_symm_row_sort_key)
         lines.extend(["### Symmetry Representations", ""])
-        lines.append("| sector | block | bands | energies | operation | rep | D_block |")
-        lines.append("| --- | ---: | --- | --- | --- | --- | --- |")
+        lines.append("| sector | block | bands | energies | operation | sewing G | rep | D_block |")
+        lines.append("| --- | ---: | --- | --- | --- | --- | --- | --- |")
         for row in rep_rows:
             display_row = {
                 **row,
@@ -795,12 +914,12 @@ def _write_summary(
                 "d_block": row.get("d_block", ""),
             }
             lines.append(
-                "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {symm_rep} | `{d_block}` |".format(
+                "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {sewing_shift} | {symm_rep} | `{d_block}` |".format(
                     **display_row,
                 )
             )
         if not rep_rows:
-            lines.append("|  |  |  |  | unavailable |  |  |")
+            lines.append("|  |  |  |  | unavailable |  |  |  |")
         lines.append("")
 
         lines.extend(["### Characters", ""])
@@ -941,8 +1060,12 @@ def run_symm_rep_from_point_sources(
                             f"Raw-H matrix {operation.operation} at {point} has shape {operation.matrix.shape}, "
                             f"but wavefunctions have dimension {sector_vectors.shape[0]}."
                         )
+                    sewn_action = _sewn_raw_action(operation, source, sector_vectors.shape[0])
+                    if sewn_action is None:
+                        continue
+                    action_matrix, sewing_shift = sewn_action
                     projected = project_operation_to_subspace(
-                        operation.matrix,
+                        action_matrix,
                         block_vectors,
                         antiunitary=operation.antiunitary,
                     )
@@ -963,6 +1086,7 @@ def run_symm_rep_from_point_sources(
                             "operation": operation.operation,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
                             "symm_rep": rep_label,
+                            "sewing_shift": sewing_shift,
                             "d_block": "" if operation.antiunitary else _format_d_block(projected),
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",
@@ -1144,8 +1268,12 @@ def run_symm_rep(
                             f"Raw-H matrix {operation.operation} at {point} has shape {operation.matrix.shape}, "
                             f"but wavefunctions have dimension {sector_vectors.shape[0]}."
                         )
+                    sewn_action = _sewn_raw_action(operation, source, sector_vectors.shape[0])
+                    if sewn_action is None:
+                        continue
+                    action_matrix, sewing_shift = sewn_action
                     projected = project_operation_to_subspace(
-                        operation.matrix,
+                        action_matrix,
                         block_vectors,
                         antiunitary=operation.antiunitary,
                     )
@@ -1166,6 +1294,7 @@ def run_symm_rep(
                             "operation": operation.operation,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
                             "symm_rep": rep_label,
+                            "sewing_shift": sewing_shift,
                             "d_block": "" if operation.antiunitary else _format_d_block(projected),
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",

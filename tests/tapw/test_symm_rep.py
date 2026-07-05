@@ -1,4 +1,5 @@
 import csv
+import json
 from pathlib import Path
 
 import numpy as np
@@ -109,7 +110,7 @@ def test_symm_rep_groups_degenerate_blocks_and_writes_outputs(tmp_path):
     assert "### Conduction" in summary
     assert "### Symmetry Representations" in summary
     assert "### D_block Matrices" not in summary
-    assert "| valence | 1 | 1 2 | -1.000000, -1.000000 | C2 | (-1[↑1.000,↓0.000], -1[↑1.000,↓0.000]) | `" in summary
+    assert "| valence | 1 | 1 2 | -1.000000, -1.000000 | C2 |  | (-1[↑1.000,↓0.000], -1[↑1.000,↓0.000]) | `" in summary
     assert "| valence | 1 | 1 2 | -1.000000, -1.000000 | C2 | false | -2.000000 | 0 |" in summary
 
 
@@ -174,6 +175,69 @@ def test_symm_rep_loads_packed_canonical_representations(tmp_path):
     rows = list(csv.DictReader((output_dir / "characters.csv").open(newline="", encoding="utf-8")))
     assert {row["operation"] for row in rows} == {"C2"}
     assert {row["antiunitary"] for row in rows} == {"false"}
+
+
+def test_unscoped_packed_operations_apply_only_to_profile_point(tmp_path):
+    from tapw.workflows.symm_rep import load_raw_h_symmetry_operations
+
+    symmetry_dir = tmp_path / "outputs" / "Gamma" / "q04" / "symmetry"
+    symmetry_dir.mkdir(parents=True)
+    c2 = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    np.savez_compressed(
+        symmetry_dir / "representations.npz",
+        C2_data=c2.data,
+        C2_indices=c2.indices,
+        C2_indptr=c2.indptr,
+        C2_shape=np.array(c2.shape, dtype=int),
+    )
+
+    operations = load_raw_h_symmetry_operations(symmetry_dir, {"Gamma", "K"})
+
+    assert [op.operation for op in operations["Gamma"]] == ["C2"]
+    assert operations["K"] == []
+
+
+def test_manifest_source_actions_are_available_for_each_requested_point(tmp_path):
+    from tapw.workflows.symm_rep import load_raw_h_symmetry_operations
+
+    symmetry_dir = tmp_path / "outputs" / "Gamma" / "q04" / "symmetry"
+    representations_dir = symmetry_dir / "representations"
+    representations_dir.mkdir(parents=True)
+    c3 = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    np.savez_compressed(
+        symmetry_dir / "representations.npz",
+        C3z_data=c3.data,
+        C3z_indices=c3.indices,
+        C3z_indptr=c3.indptr,
+        C3z_shape=np.array(c3.shape, dtype=int),
+    )
+    (representations_dir / "manifest.json").write_text(
+        json.dumps(
+            {
+                "matrices": [
+                    {
+                        "operation": "C3z",
+                        "antiunitary": False,
+                        "packed_matrix_file": "../representations.npz",
+                        "packed_matrix_key": "C3z",
+                        "source_action": {
+                            "antiunitary": False,
+                            "k_map": {"type": "rotation", "angle_deg": 120.0},
+                            "q_map": {"type": "rotation", "angle_deg": 120.0},
+                            "sector_map": "identity",
+                        },
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    operations = load_raw_h_symmetry_operations(symmetry_dir, {"Gamma", "K"})
+
+    assert [op.operation for op in operations["Gamma"]] == ["C3z"]
+    assert [op.operation for op in operations["K"]] == ["C3z"]
+    assert operations["K"][0].source_action["k_map"]["type"] == "rotation"
 
 
 def test_symm_rep_falls_back_to_saved_vec_and_band_files_without_hamk(tmp_path):

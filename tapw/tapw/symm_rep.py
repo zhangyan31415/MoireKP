@@ -163,6 +163,22 @@ def calculate_config_point_sources(request: ConfigSymmRepRequest) -> dict[str, d
     )
     config.compute.num_bands_cal = initial_num_bands
     calculator = _build_point_calculator(config)
+    tapw_parameters = getattr(calculator, "TAPW_parameters", None)
+    sewing_context = None
+    if tapw_parameters is not None:
+        g1 = np.asarray(getattr(tapw_parameters, "g_vec_list_K1", np.zeros((0, 2))), dtype=float)
+        g2 = np.asarray(getattr(tapw_parameters, "g_vec_list_K2", np.zeros((0, 2))), dtype=float)
+        reciprocal = np.vstack(
+            [
+                np.asarray(getattr(calculator.structure, "reciprocal_Tmat", np.eye(3))[0][:2], dtype=float),
+                np.asarray(getattr(calculator.structure, "reciprocal_Tmat", np.eye(3))[1][:2], dtype=float),
+            ]
+        )
+        sewing_context = {
+            "g_vectors_by_group": [g1, g2],
+            "reciprocal_basis": reciprocal,
+            "spin_blocks": 2 if bool(getattr(config.twist, "spin", True)) else 1,
+        }
     point_sources: dict[str, dict[str, Any]] = {}
     for point_index, (label, coords) in enumerate(request.points.items()):
         eig, vec, selections = _solve_config_point_with_requested_window(
@@ -190,8 +206,11 @@ def calculate_config_point_sources(request: ConfigSymmRepRequest) -> dict[str, d
             "source_kind": "computed_config_points",
             "source_index": 0,
             "source_count": 1,
+            "coords": tuple(float(x) for x in coords),
             "sectors": sectors,
         }
+        if sewing_context is not None:
+            point_sources[label]["sewing_context"] = sewing_context
     return point_sources
 
 
