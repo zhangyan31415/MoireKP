@@ -146,7 +146,7 @@ def _format_d_block(matrix: np.ndarray) -> str:
     rows = []
     for row in arr:
         rows.append("[" + ", ".join(_format_complex_entry(value) for value in row) + "]")
-    return "[\n " + "\n ".join(rows) + "\n]"
+    return "[" + "; ".join(rows) + "]"
 
 
 def _parse_energies_text(text: str) -> list[float]:
@@ -154,6 +154,17 @@ def _parse_energies_text(text: str) -> list[float]:
         return [float(item.strip()) for item in str(text).split(",") if item.strip()]
     except ValueError:
         return []
+
+
+def _format_summary_energy(value: Any) -> str:
+    return f"{float(value):.6f}"
+
+
+def _format_summary_energies(text: str) -> str:
+    energies = _parse_energies_text(text)
+    if not energies:
+        return str(text)
+    return ", ".join(f"{energy:.6f}" for energy in energies)
 
 
 def _symm_row_sort_key(row: dict[str, Any]) -> tuple[int, float, int, str]:
@@ -745,22 +756,26 @@ def _write_summary(
             lines.extend(["No raw-H symmetry matrices were available for this point.", ""])
         for sector in ("valence", "conduction"):
             lines.extend([f"### {sector.capitalize()}", ""])
-            lines.append("| band | energy | spin | w_up | w_down |")
-            lines.append("| ---: | ---: | --- | ---: | ---: |")
+            lines.append("| band | energy | spin weights |")
+            lines.append("| ---: | ---: | --- |")
             sector_rows = list(rows_by_point_sector.get((point, sector), []))
             if sector == "valence":
                 sector_rows.sort(key=lambda row: float(row["energy"]), reverse=True)
             else:
                 sector_rows.sort(key=lambda row: float(row["energy"]))
             for row in sector_rows:
+                display_row = {
+                    **row,
+                    "energy": _format_summary_energy(row["energy"]),
+                    "spin_text": _spin_weight_text(row.get("spin_up_weight"), row.get("spin_down_weight")),
+                }
                 lines.append(
-                    "| {band_index} | {energy} | {spin_text} | {spin_up_weight} | {spin_down_weight} |".format(
-                        spin_text=_spin_weight_text(row.get("spin_up_weight"), row.get("spin_down_weight")),
-                        **row
+                    "| {band_index} | {energy} | {spin_text} |".format(
+                        **display_row
                     )
                 )
             if not sector_rows:
-                lines.append("|  |  | unavailable |  |  |")
+                lines.append("|  |  | unavailable |")
             lines.append("")
 
         point_chars = chars_by_point.get(point, [])
@@ -771,40 +786,22 @@ def _write_summary(
         ]
         rep_rows.sort(key=_symm_row_sort_key)
         lines.extend(["### Symmetry Representations", ""])
-        lines.append("| sector | block | bands | energies | operation | rep |")
-        lines.append("| --- | ---: | --- | --- | --- | --- |")
+        lines.append("| sector | block | bands | energies | operation | rep | D_block |")
+        lines.append("| --- | ---: | --- | --- | --- | --- | --- |")
         for row in rep_rows:
+            display_row = {
+                **row,
+                "energies": _format_summary_energies(row["energies"]),
+                "d_block": row.get("d_block", ""),
+            }
             lines.append(
-                "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {symm_rep} |".format(
-                    **row,
+                "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {symm_rep} | `{d_block}` |".format(
+                    **display_row,
                 )
             )
         if not rep_rows:
-            lines.append("|  |  |  |  | unavailable |  |")
+            lines.append("|  |  |  |  | unavailable |  |  |")
         lines.append("")
-
-        d_block_rows = [
-            row
-            for row in point_chars
-            if row.get("d_block") and str(row.get("antiunitary", "false")).lower() == "false"
-        ]
-        d_block_rows.sort(key=_symm_row_sort_key)
-        lines.extend(["### D_block Matrices", ""])
-        if d_block_rows:
-            for row in d_block_rows:
-                lines.extend(
-                    [
-                        f"- {row['sector']} block {row['block_id']} bands {row['band_indices']} "
-                        f"energies {row['energies']} operation {row['operation']}",
-                        "",
-                        "```text",
-                        str(row["d_block"]),
-                        "```",
-                        "",
-                    ]
-                )
-        else:
-            lines.extend(["No unitary D_block matrices available.", ""])
 
         lines.extend(["### Characters", ""])
         lines.append("| sector | block | bands | energies | operation | antiunitary | trace | residual |")
@@ -815,10 +812,11 @@ def _write_summary(
             imag = float(row["trace_imag"])
             if abs(imag) > 1.0e-12:
                 trace += f"{imag:+.6f}i"
+            display_row = {**row, "energies": _format_summary_energies(row["energies"])}
             lines.append(
                 "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {antiunitary} | {trace} | {unitarity_residual} |".format(
                     trace=trace,
-                    **row,
+                    **display_row,
                 )
             )
         if not point_chars:
