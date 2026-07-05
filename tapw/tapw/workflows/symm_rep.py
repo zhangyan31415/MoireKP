@@ -65,8 +65,22 @@ def spin_weights_and_label(vector: np.ndarray, *, threshold: float = 0.8) -> tup
     return up, down, label
 
 
-def _spin_suffix(label: str) -> str:
-    return {"up": "↑", "down": "↓", "mixed": " mixed", "spinless": ""}.get(label, f" {label}")
+def _spin_weight_label(vector: np.ndarray) -> str:
+    up, down, _label = spin_weights_and_label(vector)
+    if up is None or down is None:
+        return "[spinless]"
+    return f"[↑{up:.3f},↓{down:.3f}]"
+
+
+def _spin_weight_text(up: Any, down: Any) -> str:
+    try:
+        up_value = float(up)
+        down_value = float(down)
+    except (TypeError, ValueError):
+        return "spinless"
+    if np.isnan(up_value) or np.isnan(down_value):
+        return "spinless"
+    return f"↑{up_value:.3f}, ↓{down_value:.3f}"
 
 
 def _phase_label(value: complex, *, tol: float = 0.15) -> str:
@@ -111,10 +125,50 @@ def symmetry_rep_label(projected: np.ndarray, block_vectors: np.ndarray, *, anti
         symm_vectors = vectors @ coeffs
     labels = []
     for value, vector in zip(values, symm_vectors.T):
-        _up, _down, spin_label = spin_weights_and_label(vector)
-        suffix = _spin_suffix(spin_label)
+        suffix = _spin_weight_label(vector)
         labels.append(f"{_phase_label(value)}{suffix}")
     return "(" + ", ".join(labels) + ")"
+
+
+def _format_complex_entry(value: complex, *, digits: int = 4) -> str:
+    value = complex(value)
+    real = 0.0 if abs(value.real) < 10 ** (-digits) else value.real
+    imag = 0.0 if abs(value.imag) < 10 ** (-digits) else value.imag
+    if imag == 0.0:
+        return f"{real:.{digits}f}"
+    if real == 0.0:
+        return f"{imag:.{digits}f}j"
+    return f"{real:.{digits}f}{imag:+.{digits}f}j"
+
+
+def _format_d_block(matrix: np.ndarray) -> str:
+    arr = np.asarray(matrix, dtype=np.complex128)
+    rows = []
+    for row in arr:
+        rows.append("[" + ", ".join(_format_complex_entry(value) for value in row) + "]")
+    return "[\n " + "\n ".join(rows) + "\n]"
+
+
+def _parse_energies_text(text: str) -> list[float]:
+    try:
+        return [float(item.strip()) for item in str(text).split(",") if item.strip()]
+    except ValueError:
+        return []
+
+
+def _symm_row_sort_key(row: dict[str, Any]) -> tuple[int, float, int, str]:
+    sector = str(row.get("sector", ""))
+    energies = _parse_energies_text(str(row.get("energies", "")))
+    if sector == "valence":
+        sector_order = 0
+        energy_key = -max(energies) if energies else float("inf")
+    elif sector == "conduction":
+        sector_order = 1
+        energy_key = min(energies) if energies else float("inf")
+    else:
+        sector_order = 2
+        energy_key = min(energies) if energies else float("inf")
+    return (sector_order, energy_key, int(row.get("block_id", 0)), str(row.get("operation", "")))
 
 
 def project_operation_to_subspace(raw_action: Any, vectors: np.ndarray, *, antiunitary: bool = False) -> np.ndarray:
@@ -700,7 +754,8 @@ def _write_summary(
                 sector_rows.sort(key=lambda row: float(row["energy"]))
             for row in sector_rows:
                 lines.append(
-                    "| {band_index} | {energy} | {spin_label} | {spin_up_weight} | {spin_down_weight} |".format(
+                    "| {band_index} | {energy} | {spin_text} | {spin_up_weight} | {spin_down_weight} |".format(
+                        spin_text=_spin_weight_text(row.get("spin_up_weight"), row.get("spin_down_weight")),
                         **row
                     )
                 )
@@ -714,6 +769,7 @@ def _write_summary(
             for row in point_chars
             if row.get("symm_rep") and str(row.get("antiunitary", "false")).lower() == "false"
         ]
+        rep_rows.sort(key=_symm_row_sort_key)
         lines.extend(["### Symmetry Representations", ""])
         lines.append("| sector | block | bands | energies | operation | rep |")
         lines.append("| --- | ---: | --- | --- | --- | --- |")
@@ -727,9 +783,33 @@ def _write_summary(
             lines.append("|  |  |  |  | unavailable |  |")
         lines.append("")
 
+        d_block_rows = [
+            row
+            for row in point_chars
+            if row.get("d_block") and str(row.get("antiunitary", "false")).lower() == "false"
+        ]
+        d_block_rows.sort(key=_symm_row_sort_key)
+        lines.extend(["### D_block Matrices", ""])
+        if d_block_rows:
+            for row in d_block_rows:
+                lines.extend(
+                    [
+                        f"- {row['sector']} block {row['block_id']} bands {row['band_indices']} "
+                        f"energies {row['energies']} operation {row['operation']}",
+                        "",
+                        "```text",
+                        str(row["d_block"]),
+                        "```",
+                        "",
+                    ]
+                )
+        else:
+            lines.extend(["No unitary D_block matrices available.", ""])
+
         lines.extend(["### Characters", ""])
         lines.append("| sector | block | bands | energies | operation | antiunitary | trace | residual |")
         lines.append("| --- | ---: | --- | --- | --- | --- | ---: | ---: |")
+        point_chars = sorted(point_chars, key=_symm_row_sort_key)
         for row in point_chars:
             trace = f"{float(row['trace_real']):.6f}"
             imag = float(row["trace_imag"])
@@ -885,6 +965,7 @@ def run_symm_rep_from_point_sources(
                             "operation": operation.operation,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
                             "symm_rep": rep_label,
+                            "d_block": "" if operation.antiunitary else _format_d_block(projected),
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",
                             "unitarity_residual": f"{residual:.12g}",
@@ -1087,6 +1168,7 @@ def run_symm_rep(
                             "operation": operation.operation,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
                             "symm_rep": rep_label,
+                            "d_block": "" if operation.antiunitary else _format_d_block(projected),
                             "trace_real": f"{float(trace.real):.12g}",
                             "trace_imag": f"{float(trace.imag):.12g}",
                             "unitarity_residual": f"{residual:.12g}",

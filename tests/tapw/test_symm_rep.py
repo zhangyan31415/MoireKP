@@ -108,7 +108,9 @@ def test_symm_rep_groups_degenerate_blocks_and_writes_outputs(tmp_path):
     assert "### Valence" in summary
     assert "### Conduction" in summary
     assert "### Symmetry Representations" in summary
-    assert "| valence | 1 | 1 2 | -1.000000000000, -1.000000000000 | C2 | (-1↑, -1↑) |" in summary
+    assert "### D_block Matrices" in summary
+    assert "| valence | 1 | 1 2 | -1.000000000000, -1.000000000000 | C2 | (-1[↑1.000,↓0.000], -1[↑1.000,↓0.000]) |" in summary
+    assert "- valence block 1 bands 1 2 energies -1.000000000000, -1.000000000000 operation C2" in summary
     assert "| valence | 1 | 1 2 | -1.000000000000, -1.000000000000 | C2 | false | -2.000000 | 0 |" in summary
 
 
