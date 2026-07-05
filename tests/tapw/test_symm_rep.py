@@ -240,6 +240,53 @@ def test_manifest_source_actions_are_available_for_each_requested_point(tmp_path
     assert operations["K"][0].source_action["k_map"]["type"] == "rotation"
 
 
+def test_residuals_csv_metadata_is_enough_for_packed_source_actions(tmp_path):
+    from tapw.workflows.symm_rep import load_raw_h_symmetry_operations
+
+    symmetry_dir = tmp_path / "outputs" / "Gamma" / "q04" / "symmetry"
+    symmetry_dir.mkdir(parents=True)
+    c3 = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    np.savez_compressed(
+        symmetry_dir / "representations.npz",
+        C3z_data=c3.data,
+        C3z_indices=c3.indices,
+        C3z_indptr=c3.indptr,
+        C3z_shape=np.array(c3.shape, dtype=int),
+    )
+    (symmetry_dir / "residuals.csv").write_text(
+        "\n".join(
+            [
+                "valley,operation,packed_matrix_key,raw_h_operator_shape,raw_h_operator_nnz,residual_H_raw,status,axis_deg,antiunitary,source_valley,target_valley,role,supported",
+                "Gamma,C3z,C3z,2x2,2,0.0,exact,,False,Gamma,Gamma,internal,True",
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    operations = load_raw_h_symmetry_operations(symmetry_dir, {"Gamma", "K"})
+
+    assert [op.operation for op in operations["Gamma"]] == ["C3z"]
+    assert [op.operation for op in operations["K"]] == ["C3z"]
+    assert operations["K"][0].source_action["k_map"] == {"type": "rotation", "angle_deg": 120.0}
+
+
+def test_partial_reciprocal_sewing_allows_finite_g_truncation():
+    from tapw.workflows.symm_rep import _sewing_matrix_from_shift
+
+    matrix = _sewing_matrix_from_shift(
+        g_vectors_by_group=[np.array([[0.0, 0.0], [1.0, 0.0]])],
+        reciprocal_basis=np.eye(2),
+        reciprocal_shift_coeffs=np.array([1, 0]),
+        dim=2,
+        spin_blocks=1,
+    )
+
+    assert matrix.shape == (2, 2)
+    assert matrix[1, 0] == pytest.approx(1.0)
+    assert matrix[0, 1] == pytest.approx(0.0)
+
+
 def test_symm_rep_falls_back_to_saved_vec_and_band_files_without_hamk(tmp_path):
     from tapw.workflows.symm_rep import run_symm_rep
 

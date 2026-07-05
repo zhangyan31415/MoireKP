@@ -254,11 +254,6 @@ def _sewing_matrix_from_shift(
         atol=atol,
         spin_blocks=int(spin_blocks),
     )
-    if sewing.missing_blocks:
-        raise ValueError(
-            "Cannot build complete reciprocal sewing matrix: "
-            f"matched={sewing.matched_blocks}, missing={sewing.missing_blocks}, shift={reciprocal_shift_coeffs.tolist()}."
-        )
     data = np.ones_like(sewing.target_rows, dtype=np.complex128)
     return scipy.sparse.csr_matrix((data, (sewing.target_rows, sewing.source_rows)), shape=(int(dim), int(dim)))
 
@@ -293,6 +288,73 @@ def _safe_npz_key(text: str) -> str:
 
 def _infer_antiunitary(operation: str) -> bool:
     return operation in _ANTIUNITARY_NAMES or operation.endswith("T")
+
+
+def _bool_from_csv(value: Any) -> bool:
+    return str(value).strip().lower() in {"1", "true", "yes", "y"}
+
+
+def _source_action_from_operation_metadata(operation: str, *, antiunitary: bool, axis_deg: Any = "") -> dict[str, Any]:
+    if operation == "C3z":
+        return {
+            "antiunitary": bool(antiunitary),
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+        }
+    if operation == "TR":
+        return {
+            "antiunitary": bool(antiunitary),
+            "k_map": {"type": "negation"},
+            "q_map": {"type": "negation"},
+            "sector_map": "identity",
+        }
+    if operation in {"C2", "C2T"}:
+        if axis_deg in (None, ""):
+            return {}
+        axis = float(axis_deg)
+        if operation == "C2T":
+            axis = (axis + 90.0) % 180.0
+        reflection = {
+            "type": "reflection",
+            "axis_deg": axis,
+            "reflection_axis_convention": "mirror_axis_deg",
+        }
+        return {
+            "antiunitary": bool(antiunitary),
+            "k_map": dict(reflection),
+            "q_map": dict(reflection),
+            "sector_map": "layer_exchange",
+        }
+    return {}
+
+
+def _load_residual_metadata(symmetry_dir: Path) -> dict[str, dict[str, Any]]:
+    path = symmetry_dir / "residuals.csv"
+    if not path.is_file():
+        return {}
+    metadata: dict[str, dict[str, Any]] = {}
+    with path.open(newline="", encoding="utf-8") as handle:
+        for row in csv.DictReader(handle):
+            if not _bool_from_csv(row.get("supported", True)):
+                continue
+            if str(row.get("role", "internal")) != "internal":
+                continue
+            operation = str(row.get("operation", "")).strip()
+            key = str(row.get("packed_matrix_key", operation)).strip()
+            if not operation or not key:
+                continue
+            antiunitary = _bool_from_csv(row.get("antiunitary", _infer_antiunitary(operation)))
+            metadata[key] = {
+                "operation": operation,
+                "antiunitary": antiunitary,
+                "source_action": _source_action_from_operation_metadata(
+                    operation,
+                    antiunitary=antiunitary,
+                    axis_deg=row.get("axis_deg", ""),
+                ),
+            }
+    return metadata
 
 
 def _csr_from_packed(payload: np.lib.npyio.NpzFile, key: str) -> scipy.sparse.csr_matrix:
@@ -447,10 +509,28 @@ def _load_packed_operations(symmetry_dir: Path, point_labels: set[str]) -> list[
             profile_point = symmetry_dir.parent.parent.name
     except IndexError:
         profile_point = ""
+    residual_metadata = _load_residual_metadata(symmetry_dir)
     with np.load(packed_path, allow_pickle=False) as payload:
         bases = sorted(name[: -len("_data")] for name in payload.files if name.endswith("_data"))
         for base in bases:
             matrix = _csr_from_packed(payload, base)
+            metadata = residual_metadata.get(base, {})
+            metadata_operation = str(metadata.get("operation", "")).strip()
+            metadata_antiunitary = bool(metadata.get("antiunitary", _infer_antiunitary(metadata_operation or base)))
+            metadata_source_action = dict(metadata.get("source_action", {}) or {})
+            if metadata_operation and metadata_source_action:
+                for point in sorted(point_labels):
+                    operations.append(
+                        RawHSymmetryOperation(
+                            point,
+                            metadata_operation,
+                            matrix,
+                            metadata_antiunitary,
+                            str(packed_path),
+                            source_action=metadata_source_action,
+                        )
+                    )
+                continue
             matched = False
             for point in sorted(point_labels):
                 prefix = f"{_safe_npz_key(point)}_"
@@ -1102,6 +1182,7 @@ def run_symm_rep_from_point_sources(
                             "energies": list(block.energies),
                             "operation": operation.operation,
                             "antiunitary": bool(operation.antiunitary),
+                            "sewing_shift": sewing_shift,
                             "unitarity_residual": residual,
                             "matrix": projected,
                         }
@@ -1310,6 +1391,7 @@ def run_symm_rep(
                             "energies": list(block.energies),
                             "operation": operation.operation,
                             "antiunitary": bool(operation.antiunitary),
+                            "sewing_shift": sewing_shift,
                             "unitarity_residual": residual,
                             "matrix": projected,
                         }
