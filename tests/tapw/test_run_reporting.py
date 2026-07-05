@@ -49,7 +49,9 @@ def test_reporter_stage_and_step_make_run_flow_clear():
     reporter.step("Layer clustering", "3 physical layers, 2 source orientation groups")
 
     assert logger.messages == [
+        "=" * 72,
         "[TAPW] Preprocessing",
+        "-" * 72,
         "  Prepare structure and TAPW basis inputs.",
         "  - Layer clustering: 3 physical layers, 2 source orientation groups",
     ]
@@ -65,11 +67,12 @@ def test_reporter_formats_sections_key_values_and_arrays():
     reporter.kv("Twist index", 6)
     reporter.array("Moire lattice vectors (Angstrom)", np.array([[1.0, 0.0], [0.5, 0.866025]]))
 
-    assert logger.messages[0] == "[TAPW] Structure"
-    assert logger.messages[1] == "  Twist index: 6"
-    assert logger.messages[2] == "  Moire lattice vectors (Angstrom):"
-    assert logger.messages[3].startswith("    [[1.")
-    assert all("===" not in message for message in logger.messages)
+    assert logger.messages[0] == "=" * 72
+    assert logger.messages[1] == "[TAPW] Structure"
+    assert logger.messages[2] == "-" * 72
+    assert logger.messages[3] == "  Twist index: 6"
+    assert logger.messages[4] == "  Moire lattice vectors (Angstrom):"
+    assert logger.messages[5].startswith("    [[1.")
 
 
 def test_reporter_indents_multiline_key_values():
@@ -137,7 +140,8 @@ def test_openmx_display_properties_uses_english_reporter_output():
     assert "Twist angle from twist_index_m (deg): 5.085848" in output
     assert "Moire lattice vectors (Angstrom):" in output
     assert "扭转角度" not in output
-    assert "===" not in output
+    assert "=" * 72 in output
+    assert "-" * 72 in output
 
 
 def test_structure_processor_summary_uses_reporter_lines():
@@ -229,7 +233,8 @@ def test_generate_g_vec_list_reports_summary_by_default_and_arrays_in_verbose():
     assert "G-vector count: K1 set=" in output
     assert "m_g_unitvec_1:" not in output
     assert "K1 G-vectors:" not in output
-    assert "======================" not in output
+    assert "=" * 72 in output
+    assert "-" * 72 in output
 
     verbose_logger = _ListLogger()
     verbose = TapwReporter(verbose_logger, verbose=True)

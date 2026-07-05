@@ -149,14 +149,87 @@ def _valley_label_for_target(target) -> str:
 
 
 def _run_symmetry_analysis(config, processor, hr, sr, logger):
-    payload = SymmetryAnalysisRunner(
+    runner = SymmetryAnalysisRunner(
         config=config,
         structure=processor,
         hr_supercell=hr,
         sr_supercell=sr,
         logger=logger,
-    ).run()
-    logger.info("Completed symmetry analysis")
+    )
+    started = time.perf_counter()
+    payload = runner.run()
+    elapsed = time.perf_counter() - started
+    output_dir_text = getattr(runner, "output_dir", None)
+    if output_dir_text is not None:
+        output_dir = Path(output_dir_text)
+        logger.info("")
+        logger.info("=" * 72)
+        logger.info("[TAPW] Symmetry analysis complete")
+        logger.info("-" * 72)
+        logger.info(f"  output directory : {output_dir}")
+        logger.info(f"  summary          : {output_dir / 'summary.md'}")
+        logger.info(f"  raw-H package    : {output_dir / 'representations.npz'}")
+        timings = getattr(runner, "timing_breakdown", {}) or {}
+        analysis_timings = getattr(runner, "analysis_timing_breakdown", {}) or {}
+        min_timing_seconds = 0.05
+        hidden_time = 0.0
+        logger.info("  time breakdown   :")
+        for key, label in [
+            ("analyze", "analyze"),
+            ("canonicalize", "canonicalize"),
+            ("prepare_output", "prepare output"),
+            ("write_summary", "write summary"),
+            ("write_tables", "write tables"),
+            ("write_representations", "write raw-H pkg"),
+            ("write_debug_cleanup", "debug/cleanup"),
+        ]:
+            value = float(timings.get(key, 0.0) or 0.0)
+            if value >= min_timing_seconds:
+                logger.info(f"    {label:<14}: {value:.1f}s")
+                if key == "analyze" and isinstance(analysis_timings, dict):
+                    spglib_time = float(analysis_timings.get("spglib_symmetry", 0.0) or 0.0)
+                    if spglib_time >= min_timing_seconds:
+                        logger.info(f"      spglib symmetry : {spglib_time:.1f}s")
+                    for valley in analysis_timings.get("valleys", []) or []:
+                        valley_time = float(valley.get("total", 0.0) or 0.0)
+                        if valley_time < min_timing_seconds:
+                            continue
+                        logger.info(f"      {str(valley.get('valley', 'valley')):<15}: {valley_time:.1f}s")
+                        for subkey, sublabel in [
+                            ("setup_candidates", "setup/candidates"),
+                            ("candidate_checks", "candidate checks"),
+                            ("raw_h_export", "raw-H export"),
+                        ]:
+                            subvalue = float(valley.get(subkey, 0.0) or 0.0)
+                            if subvalue >= min_timing_seconds:
+                                logger.info(f"        {sublabel:<17}: {subvalue:.1f}s")
+                        operations = sorted(
+                            list(valley.get("operations", []) or []),
+                            key=lambda item: float(item.get("total", 0.0) or 0.0),
+                            reverse=True,
+                        )
+                        for operation in operations[:6]:
+                            op_total = float(operation.get("total", 0.0) or 0.0)
+                            if op_total < min_timing_seconds:
+                                continue
+                            exported = "exported" if operation.get("exported") else "not exported"
+                            logger.info(
+                                "          {op:<8}: {total:.1f}s  checks={checks:.1f}s export={export:.1f}s {exported}".format(
+                                    op=str(operation.get("operation", "")),
+                                    total=op_total,
+                                    checks=float(operation.get("candidate_checks", 0.0) or 0.0),
+                                    export=float(operation.get("raw_h_export", 0.0) or 0.0),
+                                    exported=exported,
+                                )
+                            )
+                    aggregate_time = float(analysis_timings.get("aggregate", 0.0) or 0.0)
+                    if aggregate_time >= min_timing_seconds:
+                        logger.info(f"      aggregate       : {aggregate_time:.1f}s")
+            else:
+                hidden_time += value
+        if hidden_time >= min_timing_seconds:
+            logger.info(f"    other/write    : {hidden_time:.1f}s")
+        logger.info(f"    total         : {float(timings.get('total', elapsed) or elapsed):.1f}s")
     return payload
 
 

@@ -114,7 +114,7 @@ def symmetry_rep_label(projected: np.ndarray, block_vectors: np.ndarray, *, anti
     if antiunitary:
         return ""
     matrix = np.asarray(projected, dtype=np.complex128)
-    vectors = np.asarray(block_vectors, dtype=np.complex128)
+    vectors = orthonormalize_block_vectors(block_vectors)
     if matrix.size == 0:
         return "()"
     if matrix.shape == (1, 1):
@@ -125,7 +125,26 @@ def symmetry_rep_label(projected: np.ndarray, block_vectors: np.ndarray, *, anti
         order = np.argsort(np.angle(values))
         values = values[order]
         coeffs = coeffs[:, order]
-        symm_vectors = vectors @ coeffs
+        value_groups: dict[str, list[int]] = {}
+        for index, value in enumerate(values):
+            value_groups.setdefault(_phase_label(value), []).append(index)
+        grouped_values: list[complex] = []
+        grouped_vectors: list[np.ndarray] = []
+        for index, value in enumerate(values):
+            group = value_groups[_phase_label(value)]
+            if group[0] != index:
+                continue
+            if len(group) == 1:
+                grouped_values.append(value)
+                grouped_vectors.append(vectors @ coeffs[:, index])
+                continue
+            group_values = values[group]
+            group_vectors = spin_diagonalize_block_vectors(vectors @ coeffs[:, group])
+            for group_value, group_vector in zip(group_values, group_vectors.T):
+                grouped_values.append(group_value)
+                grouped_vectors.append(group_vector)
+        values = np.asarray(grouped_values, dtype=np.complex128)
+        symm_vectors = np.column_stack(grouped_vectors) if grouped_vectors else vectors[:, :0]
     labels = []
     for value, vector in zip(values, symm_vectors.T):
         suffix = _spin_weight_label(vector)
@@ -185,17 +204,37 @@ def _symm_row_sort_key(row: dict[str, Any]) -> tuple[int, float, int, str]:
     return (sector_order, energy_key, int(row.get("block_id", 0)), str(row.get("operation", "")))
 
 
+def orthonormalize_block_vectors(vectors: np.ndarray, *, tol: float = 1.0e-10) -> np.ndarray:
+    """Return an orthonormal basis spanning the same block subspace."""
+    basis = np.asarray(vectors, dtype=np.complex128)
+    if basis.ndim != 2 or basis.shape[1] == 0:
+        return basis
+    gram = basis.conj().T @ basis
+    eye = np.eye(gram.shape[0], dtype=np.complex128)
+    if np.linalg.norm(gram - eye) <= tol * max(1, gram.shape[0]):
+        return basis
+    gram = 0.5 * (gram + gram.conj().T)
+    values, rotation = np.linalg.eigh(gram)
+    floor = max(tol, tol * float(np.max(np.abs(values))) if values.size else tol)
+    if np.any(values <= floor):
+        raise ValueError(
+            "Degenerate symmetry block contains linearly dependent wavefunctions; "
+            f"minimum Gram eigenvalue is {float(np.min(values)):.3e}."
+        )
+    return basis @ (rotation @ np.diag(values**-0.5) @ rotation.conj().T)
+
+
 def project_operation_to_subspace(raw_action: Any, vectors: np.ndarray, *, antiunitary: bool = False) -> np.ndarray:
     """Project a raw-H action into the column span of ``vectors``."""
     matrix = raw_action.toarray() if scipy.sparse.issparse(raw_action) else np.asarray(raw_action)
-    basis = np.asarray(vectors, dtype=np.complex128)
+    basis = orthonormalize_block_vectors(vectors)
     rhs = basis.conj() if antiunitary else basis
     return basis.conj().T @ matrix @ rhs
 
 
 def spin_diagonalize_block_vectors(vectors: np.ndarray) -> np.ndarray:
     """Rotate a degenerate subspace to diagonalize projected S_z."""
-    basis = np.asarray(vectors, dtype=np.complex128)
+    basis = orthonormalize_block_vectors(vectors)
     if basis.ndim != 2 or basis.shape[0] % 2 != 0 or basis.shape[1] <= 1:
         return basis
     half = basis.shape[0] // 2
@@ -370,6 +409,52 @@ def _load_residual_metadata(symmetry_dir: Path) -> dict[str, dict[str, Any]]:
     return metadata
 
 
+def _metadata_json_from_packed(payload: np.lib.npyio.NpzFile) -> dict[str, Any]:
+    for key in ("metadata_json", "__metadata_json__"):
+        if key not in payload.files:
+            continue
+        raw = payload[key]
+        try:
+            text = str(raw.item())
+        except ValueError:
+            text = str(raw.tolist())
+        if not text:
+            return {}
+        loaded = json.loads(text)
+        return loaded if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _load_packed_metadata_records(payload: np.lib.npyio.NpzFile) -> dict[str, dict[str, Any]]:
+    metadata = _metadata_json_from_packed(payload)
+    records = metadata.get("matrices", [])
+    if not isinstance(records, list):
+        return {}
+    by_key: dict[str, dict[str, Any]] = {}
+    for item in records:
+        if not isinstance(item, dict):
+            continue
+        if not _bool_from_csv(item.get("supported", True)):
+            continue
+        if str(item.get("role", "internal")) != "internal":
+            continue
+        operation = str(item.get("operation", "")).strip()
+        key = str(item.get("key") or item.get("packed_matrix_key") or operation).strip()
+        if not operation or not key:
+            continue
+        antiunitary_raw = item.get("antiunitary", _infer_antiunitary(operation))
+        antiunitary = _bool_from_csv(antiunitary_raw) if isinstance(antiunitary_raw, str) else bool(antiunitary_raw)
+        source_action = dict(item.get("source_action", {}) or {})
+        by_key[key] = {
+            "operation": operation,
+            "antiunitary": antiunitary,
+            "source_action": source_action,
+            "source_valley": str(item.get("source_valley", "")).strip(),
+            "target_valley": str(item.get("target_valley", "")).strip(),
+        }
+    return by_key
+
+
 def _csr_from_packed(payload: np.lib.npyio.NpzFile, key: str) -> scipy.sparse.csr_matrix:
     required = [f"{key}_data", f"{key}_indices", f"{key}_indptr", f"{key}_shape"]
     missing = [name for name in required if name not in payload.files]
@@ -524,10 +609,11 @@ def _load_packed_operations(symmetry_dir: Path, point_labels: set[str]) -> list[
         profile_point = ""
     residual_metadata = _load_residual_metadata(symmetry_dir)
     with np.load(packed_path, allow_pickle=False) as payload:
+        packed_metadata = _load_packed_metadata_records(payload)
         bases = sorted(name[: -len("_data")] for name in payload.files if name.endswith("_data"))
         for base in bases:
             matrix = _csr_from_packed(payload, base)
-            metadata = residual_metadata.get(base, {})
+            metadata = packed_metadata.get(base) or residual_metadata.get(base, {})
             metadata_operation = str(metadata.get("operation", "")).strip()
             metadata_antiunitary = bool(metadata.get("antiunitary", _infer_antiunitary(metadata_operation or base)))
             metadata_source_action = dict(metadata.get("source_action", {}) or {})
@@ -679,11 +765,13 @@ def select_band_indices(
     valence_count: int,
     conduction_count: int,
 ) -> dict[str, np.ndarray]:
+    requested_valence = max(0, int(valence_count))
+    requested_conduction = max(0, int(conduction_count))
     valence = np.where(energies < fermi_energy)[0]
     conduction = np.where(energies >= fermi_energy)[0]
     return {
-        "valence": valence[-max(0, int(valence_count)) :],
-        "conduction": conduction[: max(0, int(conduction_count))],
+        "valence": valence[-requested_valence:] if requested_valence else valence[:0],
+        "conduction": conduction[:requested_conduction] if requested_conduction else conduction[:0],
     }
 
 

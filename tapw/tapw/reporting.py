@@ -8,6 +8,10 @@ from typing import Iterable
 import numpy as np
 
 
+_SECTION_RULE = "=" * 72
+_SUBSECTION_RULE = "-" * 72
+
+
 class TapwReporter:
     """Emit TAPW status lines through a logger or stdout with one style."""
 
@@ -27,7 +31,9 @@ class TapwReporter:
     def section(self, title: str) -> None:
         if self._has_output:
             self.line("")
+        self.line(_SECTION_RULE)
         self.line(f"[TAPW] {title}")
+        self.line(_SUBSECTION_RULE)
 
     def stage(self, title: str, description: str | None = None) -> None:
         self.section(title)

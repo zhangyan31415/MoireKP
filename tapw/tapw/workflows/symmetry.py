@@ -5,6 +5,7 @@ import csv
 import hashlib
 import json
 import shutil
+import time
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -360,6 +361,16 @@ def _raw_h_file_from_record(record: dict[str, Any]) -> str:
     valley_label = _safe_path_component(record.get("valley_label", record.get("valley", "unknown")))
     operation = _safe_path_component(representation_operation_name(record.get("operation", "unknown")))
     return f"representations/{valley_label}/{operation}_rawH.npz"
+
+
+def _packed_raw_h_key_from_record(record: dict[str, Any], seen: set[str]) -> str:
+    operation = _safe_path_component(representation_operation_name(record.get("operation", "unknown")))
+    key = operation
+    if key in seen:
+        valley_label = _safe_path_component(record.get("valley_label", record.get("valley", "unknown")))
+        key = f"{valley_label}_{key}"
+    seen.add(key)
+    return key
 
 
 def _csr_packed_entries(name: str, matrix: scipy.sparse.csr_matrix) -> dict[str, np.ndarray]:
@@ -2493,6 +2504,8 @@ class SymmetryAnalysisRunner:
         self._transport_cache: dict[Any, np.ndarray] = {}
         self._legacy_c3_matrix_cache: dict[int, np.ndarray] = {}
         self._valley_context_cache: dict[int, ValleyContext] = {}
+        self.timing_breakdown: dict[str, float] = {}
+        self.analysis_timing_breakdown: dict[str, Any] = {}
 
     def _calculator_for_valley(self, valley: int) -> BandStructureCalculator:
         calculator = self._calculator_cache.get(int(valley))
@@ -4252,6 +4265,7 @@ class SymmetryAnalysisRunner:
         }
 
     def _analyze(self) -> dict[str, Any]:
+        analysis_timing: dict[str, Any] = {"valleys": []}
         valleys = getattr(self.config.symmetry_analysis, "valleys", None) or getattr(self.config.compute, "valleys", [])
         tolerance = float(getattr(self.config.symmetry_analysis, "tolerance", 1.0e-2))
         spglib_symprec = _spglib_symprec_from_config(self.config.symmetry_analysis, tolerance)
@@ -4263,9 +4277,13 @@ class SymmetryAnalysisRunner:
         representations: list[dict[str, Any]] = []
         validation_q_points = _default_validation_q_points()
 
+        started = time.perf_counter()
         spatial_operations = collect_spglib_spatial_operations(self.structure, symprec=spglib_symprec)
+        analysis_timing["spglib_symmetry"] = time.perf_counter() - started
 
         for valley in valleys:
+            valley_started = time.perf_counter()
+            valley_setup_started = time.perf_counter()
             calculator = self._calculator_for_valley(int(valley))
             valley_label = getattr(calculator, "valley_flag", str(valley))
             valley_ctx = self._valley_context_for_valley(int(valley))
@@ -4293,13 +4311,24 @@ class SymmetryAnalysisRunner:
                     self.structure,
                     spatial_operations,
                 )
-            for candidate in _minimal_symmetry_candidates_for_valley(
+            candidates = list(
+                _minimal_symmetry_candidates_for_valley(
                 valley_ctx,
                 getattr(self.config.twist, "bravais", "hex"),
                 spatial_operations=spatial_operations,
                 structure=self.structure,
                 selected_c2_operation=source_c2_operation,
-            ):
+                )
+            )
+            valley_timing: dict[str, Any] = {
+                "valley": valley_label,
+                "setup_candidates": time.perf_counter() - valley_setup_started,
+                "candidate_checks": 0.0,
+                "raw_h_export": 0.0,
+                "operations": [],
+            }
+            for candidate in candidates:
+                candidate_started = time.perf_counter()
                 candidate = dict(candidate)
                 candidate["index"] = int(candidate["index"])
                 candidate["spatial_operations"] = spatial_operations
@@ -4383,6 +4412,8 @@ class SymmetryAnalysisRunner:
                         for q_label, q_value in candidate_validation_q_points
                     ]
                 all_details.extend(candidate_rows)
+                candidate_elapsed = time.perf_counter() - candidate_started
+                valley_timing["candidate_checks"] += candidate_elapsed
 
                 candidate_status = combine_statuses(row["status"] for row in candidate_rows)
                 candidate_supported = all(row["supported"] for row in candidate_rows)
@@ -4401,6 +4432,7 @@ class SymmetryAnalysisRunner:
                     and _is_saved_minimal_generator(representation_name, saved_representation_operations)
                 )
                 if export_raw_h_matrix:
+                    export_started = time.perf_counter()
                     try:
                         representations.append(
                             self._representation_record_for_candidate(
@@ -4416,6 +4448,20 @@ class SymmetryAnalysisRunner:
                             c3_generator_validated = True
                     except SymmetrySupportError:
                         export_raw_h_matrix = False
+                    export_elapsed = time.perf_counter() - export_started
+                    valley_timing["raw_h_export"] += export_elapsed
+                else:
+                    export_elapsed = 0.0
+                valley_timing["operations"].append(
+                    {
+                        "operation": operation_display_name,
+                        "candidate_checks": candidate_elapsed,
+                        "raw_h_export": export_elapsed,
+                        "total": candidate_elapsed + export_elapsed,
+                        "supported": bool(candidate_supported),
+                        "exported": bool(export_raw_h_matrix),
+                    }
+                )
                 valley_entries.append(
                     {
                         "operation": operation_display_name,
@@ -4439,7 +4485,10 @@ class SymmetryAnalysisRunner:
                 )
 
             operations_summary[valley_label] = valley_entries
+            valley_timing["total"] = time.perf_counter() - valley_started
+            analysis_timing["valleys"].append(valley_timing)
 
+        started = time.perf_counter()
         valley_results = {}
         for valley_label, entries in operations_summary.items():
             valley_rows = [row for row in all_details if row["valley"] == valley_label]
@@ -4466,6 +4515,8 @@ class SymmetryAnalysisRunner:
             }
 
         minimal_generators = _minimal_generators_by_valley(operations_summary)
+        analysis_timing["aggregate"] = time.perf_counter() - started
+        self.analysis_timing_breakdown = analysis_timing
 
         return {
             "summary": {
@@ -4600,6 +4651,8 @@ class SymmetryAnalysisRunner:
             ]
         )
         exported_rows = []
+        canonical_layout = _is_canonical_output_layout(self.config)
+        packed_keys_seen: set[str] = set()
         for record in representations:
             if record.get("matrix") is None:
                 continue
@@ -4613,8 +4666,13 @@ class SymmetryAnalysisRunner:
             matrix_role = str(record.get("matrix_role", "raw_h_action"))
             if matrix_role == "D_g^(0)":
                 matrix_role = "raw_h_action"
+            matrix_location = (
+                f"representations.npz:{_packed_raw_h_key_from_record(record, packed_keys_seen)}"
+                if canonical_layout
+                else _raw_h_file_from_record(record)
+            )
             exported_rows.append(
-                f"| {valley_label} -> {target_valley} | {operation} | {_raw_h_file_from_record(record)} | {matrix_role} |"
+                f"| {valley_label} -> {target_valley} | {operation} | {matrix_location} | {matrix_role} |"
             )
         if exported_rows:
             lines.extend(exported_rows)
@@ -4676,7 +4734,7 @@ class SymmetryAnalysisRunner:
         lines.extend(
             [
                 "",
-                "Note: summary.md is human-facing. Use representations.npz and residuals.csv for release outputs.",
+                "Note: summary.md is human-facing. Use `representations.npz` for release machine inputs; it contains CSR matrices and `metadata_json`.",
             ]
         )
         return lines
@@ -4824,6 +4882,96 @@ class SymmetryAnalysisRunner:
                     }
                 )
 
+    def _raw_h_source_action_metadata(self, record: dict[str, Any], operation: str) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+        action_metadata: dict[str, Any]
+        if operation == "C3z":
+            action_metadata = {
+                "k_map": {"type": "rotation", "angle_deg": 120.0},
+                "q_map": {"type": "rotation", "angle_deg": 120.0},
+                "sector_map": "identity",
+            }
+        elif operation == "TR":
+            action_metadata = {
+                "k_map": {"type": "negation"},
+                "q_map": {"type": "negation"},
+                "sector_map": "identity",
+            }
+        elif operation in {"C2", "C2T"}:
+            axis = _json_optional_float(record.get("axis_angle_deg"))
+            if axis is None:
+                raise ValueError(f"{operation} raw-H manifest row requires axis_angle_deg")
+            if operation == "C2T":
+                axis = (axis + 90.0) % 180.0
+            reflection = {
+                "type": "reflection",
+                "axis_deg": axis,
+                "reflection_axis_convention": "mirror_axis_deg",
+            }
+            action_metadata = {
+                "k_map": dict(reflection),
+                "q_map": dict(reflection),
+                "sector_map": "layer_exchange",
+            }
+        else:
+            raise ValueError(f"Unsupported production operation in raw-H manifest: {operation!r}")
+        source_action = {
+            "antiunitary": bool(record.get("antiunitary", False)),
+            "k_map": copy.deepcopy(action_metadata["k_map"]),
+            "q_map": copy.deepcopy(action_metadata["q_map"]),
+            "sector_map": action_metadata["sector_map"],
+            "spin_map": str(record.get("spin_map", "from_tapw_source")),
+            "valley_map": str(record.get("valley_map", "identity")),
+        }
+        conventions = {
+            "antiunitary_convention": "U_K" if bool(record.get("antiunitary", False)) else "none",
+            "gauge_correction": {"kind": "none"},
+            "source_action_frame": "tapw_source",
+        }
+        return action_metadata, source_action, conventions
+
+    def _packed_raw_h_metadata_record(
+        self,
+        record: dict[str, Any],
+        operation: str,
+        packed_key: str,
+        raw_h_matrix: scipy.sparse.csr_matrix,
+    ) -> dict[str, Any]:
+        action_metadata, source_action, conventions = self._raw_h_source_action_metadata(record, operation)
+        valley_label = str(record.get("valley_label", record.get("valley", "")))
+        raw_h_shape = [int(raw_h_matrix.shape[0]), int(raw_h_matrix.shape[1])]
+        return {
+            "key": packed_key,
+            "operation": operation,
+            "antiunitary": bool(record.get("antiunitary", False)),
+            "spglib_index": _json_optional_int(record.get("spglib_index", "")),
+            "axis_deg": _json_optional_float(record.get("axis_angle_deg")),
+            "dtype": str(raw_h_matrix.dtype),
+            "raw_h_operator_shape": raw_h_shape,
+            "raw_h_operator_nnz": int(raw_h_matrix.nnz),
+            "raw_h_action_rule": str(record.get("raw_h_action_rule", RAW_H_ACTION_RULE)),
+            "source_form": str(record.get("source_form", "ld_source_rule")),
+            "ld_source_rule": str(record.get("ld_source_rule", "")),
+            "basis_hash": str(record.get("basis_hash", "")),
+            "residual_H_raw": _json_optional_float(record.get("residual_H_raw")),
+            "status": record.get("status", ""),
+            "g_perm_max_delta": _json_optional_float(record.get("g_perm_max_delta")),
+            "nonzero_reciprocal_shift_count": _json_optional_int(record.get("nonzero_reciprocal_shift_count", "")),
+            "square_residual": _json_optional_float(record.get("square_residual")),
+            "source_valley": str(record.get("source_valley", valley_label)),
+            "target_valley": str(record.get("target_valley", valley_label)),
+            "closed_in_active_set": bool(record.get("closed_in_active_set", True)),
+            "role": str(record.get("role", "internal")),
+            "supported": bool(record.get("supported", True)),
+            "packed_storage_format": "scipy_csr_components_v1",
+            "source_matrix_role": "raw_h_action",
+            "source_gauge": "tapw_raw_hamiltonian",
+            "target_role": "kp_source_action",
+            "matrix_kind": "action",
+            "conventions": conventions,
+            "source_action": source_action,
+            **action_metadata,
+        }
+
     def _write_representations(
         self,
         representations: list[dict[str, Any]],
@@ -4835,6 +4983,7 @@ class SymmetryAnalysisRunner:
         if canonical_layout:
             packed_payload: dict[str, np.ndarray] = {}
             packed_keys_seen: set[str] = set()
+            metadata_matrices: list[dict[str, Any]] = []
             for record in representations:
                 raw_h_matrix = record.get("raw_h_matrix")
                 if raw_h_matrix is None:
@@ -4843,14 +4992,29 @@ class SymmetryAnalysisRunner:
                     raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
                 raw_h_matrix = raw_h_matrix.tocsr()
                 operation = representation_operation_name(record.get("operation", "unknown"))
-                packed_key = _safe_path_component(operation)
-                if packed_key in packed_keys_seen:
-                    valley_label = _safe_path_component(record.get("valley_label", record.get("valley", "unknown")))
-                    packed_key = f"{valley_label}_{packed_key}"
-                packed_keys_seen.add(packed_key)
+                packed_key = _packed_raw_h_key_from_record(record, packed_keys_seen)
                 packed_payload.update(_csr_packed_entries(packed_key, raw_h_matrix))
+                metadata_matrices.append(self._packed_raw_h_metadata_record(record, operation, packed_key, raw_h_matrix))
             packed_path = output_dir / "representations.npz"
             if packed_payload:
+                metadata = {
+                    "schema": "tapw.raw_h_representations.v1",
+                    "output_schema": "tapw_source_symmetry/v2",
+                    "storage": "scipy_csr_components_v1",
+                    "basis": "tapw_projected",
+                    "basis_order": "spin_outermost; group -> g_index -> atom_type -> orbital",
+                    "operation_name_convention": {
+                        "time_reversal": "TR",
+                        "legacy_input_aliases": {"T": "TR"},
+                    },
+                    "source_action_definition": {
+                        "schema": "tapw_source_action/v1",
+                        "required_fields": ["k_map", "q_map", "sector_map", "source_action"],
+                        "frame": "tapw_source",
+                    },
+                    "matrices": metadata_matrices,
+                }
+                packed_payload["metadata_json"] = np.array(json.dumps(metadata, indent=2, sort_keys=True), dtype=str)
                 np.savez_compressed(packed_path, **packed_payload)
             elif packed_path.exists():
                 packed_path.unlink()
@@ -4990,53 +5154,7 @@ class SymmetryAnalysisRunner:
                     packed_payload.update(_csr_packed_entries(packed_key, raw_h_matrix))
             if raw_h_matrix is None:
                 continue
-            action_metadata: dict[str, Any]
-            if operation == "C3z":
-                action_metadata = {
-                    "k_map": {"type": "rotation", "angle_deg": 120.0},
-                    "q_map": {"type": "rotation", "angle_deg": 120.0},
-                    "sector_map": "identity",
-                }
-            elif operation == "TR":
-                action_metadata = {
-                    "k_map": {"type": "negation"},
-                    "q_map": {"type": "negation"},
-                    "sector_map": "identity",
-                }
-            elif operation in {"C2", "C2T"}:
-                axis = _json_optional_float(record.get("axis_angle_deg"))
-                if axis is None:
-                    raise ValueError(f"{operation} raw-H manifest row requires axis_angle_deg")
-                if operation == "C2T":
-                    # In 2D, applying time reversal after a C2 mirror-like source
-                    # action multiplies the linear map by -I, shifting the mirror
-                    # axis by 90 degrees.
-                    axis = (axis + 90.0) % 180.0
-                reflection = {
-                    "type": "reflection",
-                    "axis_deg": axis,
-                    "reflection_axis_convention": "mirror_axis_deg",
-                }
-                action_metadata = {
-                    "k_map": dict(reflection),
-                    "q_map": dict(reflection),
-                    "sector_map": "layer_exchange",
-                }
-            else:
-                raise ValueError(f"Unsupported production operation in raw-H manifest: {operation!r}")
-            source_action = {
-                "antiunitary": bool(record.get("antiunitary", False)),
-                "k_map": copy.deepcopy(action_metadata["k_map"]),
-                "q_map": copy.deepcopy(action_metadata["q_map"]),
-                "sector_map": action_metadata["sector_map"],
-                "spin_map": str(record.get("spin_map", "from_tapw_source")),
-                "valley_map": str(record.get("valley_map", "identity")),
-            }
-            conventions = {
-                "antiunitary_convention": "U_K" if bool(record.get("antiunitary", False)) else "none",
-                "gauge_correction": {"kind": "none"},
-                "source_action_frame": "tapw_source",
-            }
+            action_metadata, source_action, conventions = self._raw_h_source_action_metadata(record, operation)
 
             manifest_row = {
                 "valley": int(record.get("valley")),
@@ -5101,16 +5219,23 @@ class SymmetryAnalysisRunner:
         _remove_canonical_manifest_files(output_dir)
 
     def run(self):
+        timings: dict[str, float] = {}
+        total_started = time.perf_counter()
+        started = time.perf_counter()
         payload = self._analyze()
+        timings["analyze"] = time.perf_counter() - started
+        started = time.perf_counter()
         summary = dict(payload.get("summary", {}))
         details = list(payload.get("details", []))
         representations = list(payload.get("representations", []))
         summary, details = self._canonicalize_operation_outputs(summary, details)
+        timings["canonicalize"] = time.perf_counter() - started
 
+        started = time.perf_counter()
         output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
         if _is_canonical_output_layout(self.config):
-            for stale_name in ("manifest.json", "summary.json", "details.csv", "debug.json"):
+            for stale_name in ("manifest.json", "summary.json", "details.csv", "debug.json", "residuals.csv"):
                 stale_path = output_dir / stale_name
                 if stale_path.exists():
                     stale_path.unlink()
@@ -5120,23 +5245,29 @@ class SymmetryAnalysisRunner:
             stale_diagnostics_dir = output_dir / "diagnostics"
             if stale_diagnostics_dir.exists():
                 shutil.rmtree(stale_diagnostics_dir)
+        timings["prepare_output"] = time.perf_counter() - started
         developer_outputs = bool(getattr(self.config.symmetry_analysis, "developer_outputs", False))
+        started = time.perf_counter()
         self._write_summary_markdown(
             summary,
             output_dir,
             representations=representations,
             developer_outputs=developer_outputs,
         )
-        if _is_canonical_output_layout(self.config):
-            self._write_residuals_csv(details, representations, output_dir)
-        else:
+        timings["write_summary"] = time.perf_counter() - started
+        if not _is_canonical_output_layout(self.config):
+            started = time.perf_counter()
             self._write_summary_json(summary, output_dir)
             self._write_details_csv(details, output_dir)
+            timings["write_tables"] = time.perf_counter() - started
+        started = time.perf_counter()
         self._write_representations(
             representations,
             output_dir,
             developer_outputs=developer_outputs,
         )
+        timings["write_representations"] = time.perf_counter() - started
+        started = time.perf_counter()
         self._write_canonical_workflow_manifest(output_dir)
         debug_path = output_dir / "debug.json"
         if debug_path.exists():
@@ -5147,6 +5278,9 @@ class SymmetryAnalysisRunner:
             diagnostics_debug_path = output_dir / "diagnostics" / "debug.json"
             if diagnostics_debug_path.exists():
                 diagnostics_debug_path.unlink()
+        timings["write_debug_cleanup"] = time.perf_counter() - started
+        timings["total"] = time.perf_counter() - total_started
+        self.timing_breakdown = timings
 
         if self.logger is not None:
             self.logger.info("Wrote symmetry-analysis outputs to %s", output_dir)

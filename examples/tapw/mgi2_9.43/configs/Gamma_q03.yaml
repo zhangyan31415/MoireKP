@@ -32,6 +32,17 @@ bands:
 symmetry:
   valley: Gamma
   q_shell: 3
+  efermi: -4.093002
+  representation:
+    output_dir: symm_rep
+    num_bands: 50
+    valence_count: 10
+    conduction_count: 0
+    degeneracy_tol: 2.0e-3
+    points:
+      Gamma: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
 
 topology:
   valley: Gamma

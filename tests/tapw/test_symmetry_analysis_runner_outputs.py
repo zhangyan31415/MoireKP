@@ -383,7 +383,7 @@ def test_runner_writes_release_rawh_representation_and_manifest_by_default(tmp_p
     assert "M" + "_C2_eta" not in serialized_outputs
 
 
-def test_runner_writes_canonical_symmetry_three_file_layout(tmp_path):
+def test_runner_writes_canonical_symmetry_two_file_layout_with_packed_metadata(tmp_path):
     runner = _make_runner(tmp_path)
     runner.config.output_layout = SimpleNamespace(
         style="canonical_v1",
@@ -402,11 +402,10 @@ def test_runner_writes_canonical_symmetry_three_file_layout(tmp_path):
     residuals_path = output_dir / "residuals.csv"
     summary_path = output_dir / "summary.md"
     assert packed_path.is_file()
-    assert residuals_path.is_file()
+    assert not residuals_path.exists()
     assert summary_path.is_file()
     assert sorted(path.name for path in output_dir.iterdir()) == [
         "representations.npz",
-        "residuals.csv",
         "summary.md",
     ]
     with np.load(packed_path, allow_pickle=False) as payload:
@@ -414,10 +413,17 @@ def test_runner_writes_canonical_symmetry_three_file_layout(tmp_path):
         assert payload["C2T_data"].dtype == np.complex128
         assert "C2T_indices" in payload.files
         assert "C2T_indptr" in payload.files
-    residuals_text = residuals_path.read_text(encoding="utf-8")
-    assert "operation" in residuals_text
-    assert "packed_matrix_key" in residuals_text
-    assert "C2T" in residuals_text
+        metadata = json.loads(str(payload["metadata_json"].item()))
+    assert metadata["schema"] == "tapw.raw_h_representations.v1"
+    assert metadata["storage"] == "scipy_csr_components_v1"
+    assert metadata["basis_order"] == "spin_outermost; group -> g_index -> atom_type -> orbital"
+    assert metadata["matrices"][0]["key"] == "C2T"
+    assert metadata["matrices"][0]["operation"] == "C2T"
+    assert metadata["matrices"][0]["source_action"]["antiunitary"] is True
+    summary_text = summary_path.read_text(encoding="utf-8")
+    assert "Use `representations.npz` for release machine inputs; it contains CSR matrices and `metadata_json`." in summary_text
+    assert "| K1 -> K1 | C2T | representations.npz:C2T | raw_h_action |" in summary_text
+    assert "representations/K1/C2T_rawH.npz" not in summary_text
 
 
 def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_path):
