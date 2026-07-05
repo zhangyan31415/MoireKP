@@ -12,6 +12,7 @@ def test_unified_tapw_help_lists_subcommands(capsys):
     assert "init" in out
     assert "run" in out
     assert "symm" in out
+    assert "symm-rep" in out
     assert "plot" in out
     assert "topo" in out
     assert "orbital" in out
@@ -28,21 +29,25 @@ def test_unified_tapw_dispatches_to_tool_mains(monkeypatch):
     from tapw import cli
     from tapw import config_generator
     from tapw import plot_band_01
+    from tapw import symm_rep
 
     calls = []
 
     monkeypatch.setattr(config_generator, "main", lambda argv=None, **_kwargs: calls.append(("init", argv)))
     monkeypatch.setattr(plot_band_01, "main", lambda argv=None, **_kwargs: calls.append(("plot", argv)))
+    monkeypatch.setattr(symm_rep, "main", lambda argv=None, **_kwargs: calls.append(("symm-rep", argv)))
     monkeypatch.setattr(cli, "run_calc", lambda args: calls.append(("topo", args.config, args.mode)) or 0)
     monkeypatch.setattr(cli, "finish_calculation_process", lambda code: code)
 
     cli.main(["init", "-o", "cfg"])
     cli.main(["plot", "--config", "bands.yaml"])
+    cli.main(["symm-rep", "--band-dir", "band", "--symmetry-dir", "symmetry", "--output-dir", "rep"])
     cli.main(["topo", "--config", "config.yaml"])
 
     assert calls == [
         ("init", ["-o", "cfg"]),
         ("plot", ["--config", "bands.yaml"]),
+        ("symm-rep", ["--band-dir", "band", "--symmetry-dir", "symmetry", "--output-dir", "rep"]),
         ("topo", "config.yaml", "chern"),
     ]
 
@@ -200,6 +205,21 @@ def test_tapw_run_help_is_single_config_surface(capsys):
     assert "--valleys" not in out
     assert "--n_g" not in out
     assert "--num_chern" not in out
+
+
+def test_tapw_symm_rep_help_lists_postprocess_inputs(capsys):
+    from tapw import cli
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(["symm-rep", "--help"])
+
+    assert excinfo.value.code == 0
+    out = capsys.readouterr().out
+    assert "--band-dir" in out
+    assert "--symmetry-dir" in out
+    assert "--output-dir" in out
+    assert "--fermi-energy" in out
+    assert "--hamiltonian-index" in out
 
 
 @pytest.mark.parametrize("command", ["plot", "topo"])

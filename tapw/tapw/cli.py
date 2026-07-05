@@ -562,6 +562,7 @@ def build_main_parser():
     subparsers.add_parser("init", help="Generate TAPW configuration files")
     subparsers.add_parser("run", help="Run TAPW band calculations")
     subparsers.add_parser("symm", help="Run TAPW source-symmetry analysis")
+    subparsers.add_parser("symm-rep", help="Post-process TAPW symmetry representations")
     subparsers.add_parser("topo", help="Run TAPW topology calculations")
     subparsers.add_parser("plot", help="Plot TAPW band structures")
     subparsers.add_parser("orbital", help="Analyze TAPW orbital weights")
@@ -601,6 +602,10 @@ def main(argv=None):
         return main_calc(rest, prog="tapw run")
     if command == "symm":
         return main_symm(rest, prog="tapw symm")
+    if command == "symm-rep":
+        from . import symm_rep
+
+        return symm_rep.main(rest, prog="tapw symm-rep")
     if command == "topo":
         return main_topo(rest, prog="tapw topo")
     if command == "plot":
