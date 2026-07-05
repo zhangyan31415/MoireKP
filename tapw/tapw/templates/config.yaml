@@ -35,10 +35,20 @@ bands:
 symmetry:
   valley: K1
   q_shell: 6
+  efermi: -4.6
   tolerance: 2.0e-2
   spglib_symprec: 5.0e-2
   developer_outputs: false
   debug: false
+  representation:
+    points:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
+    valence_count: 20
+    conduction_count: 20
+    degeneracy_tol: 2.0e-3
+    output_dir: symm_rep
 
 topology:
   valley: K1

@@ -215,12 +215,15 @@ def test_tapw_symm_rep_help_lists_postprocess_inputs(capsys):
 
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
-    assert "--band-dir" in out
-    assert "--symmetry-dir" in out
-    assert "--output-dir" in out
-    assert "--fermi-energy" in out
-    assert "--hamiltonian-index" in out
-    assert "--points" in out
+    assert "-c CONFIG" in out
+    assert "--valence-count" in out
+    assert "--conduction-count" in out
+    assert "--degeneracy-tol" in out
+    assert "--band-dir" not in out
+    assert "--symmetry-dir" not in out
+    assert "--output-dir" not in out
+    assert "--hamiltonian-index" not in out
+    assert "--points" not in out
 
 
 @pytest.mark.parametrize("command", ["plot", "topo"])

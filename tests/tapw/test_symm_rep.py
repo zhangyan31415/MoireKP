@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 import scipy.sparse
+import yaml
 
 
 def _write_legacy_inputs(tmp_path: Path):
@@ -21,6 +22,38 @@ def _write_legacy_inputs(tmp_path: Path):
     scipy.sparse.save_npz(rawh_dir / "C2_rawH.npz", scipy.sparse.csr_matrix(c2))
     scipy.sparse.save_npz(rawh_dir / "TR_rawH.npz", scipy.sparse.csr_matrix(tr))
     return band_dir, symmetry_dir
+
+
+def _write_release_symm_rep_config(tmp_path: Path, *, output_root: Path | None = None) -> Path:
+    config_path = tmp_path / "config.yaml"
+    payload = {
+        "case": {"output_root": str(output_root or (tmp_path / "outputs"))},
+        "twist": {"bravais": "hex", "twist_index_m": 3, "twist_layer": [1, 1], "spin": True},
+        "paths": {
+            "H_file": str(tmp_path / "H.dat"),
+            "S_file": str(tmp_path / "S.dat"),
+            "input_file": str(tmp_path / "openmx.dat"),
+        },
+        "symmetry": {
+            "valley": "Gamma",
+            "q_shell": 4,
+            "efermi": -4.055365,
+            "tolerance": 0.02,
+            "spglib_symprec": 0.05,
+            "representation": {
+                "points": {
+                    "Gamma": [0.0, 0.0],
+                    "M": [0.5, 0.0],
+                    "K": [1.0 / 3.0, 1.0 / 3.0],
+                },
+                "valence_count": 12,
+                "conduction_count": 8,
+                "degeneracy_tol": 1.0e-3,
+            },
+        },
+    }
+    config_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    return config_path
 
 
 def test_symm_rep_groups_degenerate_blocks_and_writes_outputs(tmp_path):
@@ -204,6 +237,171 @@ def test_symm_rep_can_filter_points(tmp_path):
     with np.load(output_dir / "high_symmetry_wavefunctions.npz", allow_pickle=False) as payload:
         assert payload["points"].tolist() == ["Gamma"]
         assert "M1_energies" not in payload.files
+
+
+def test_symm_rep_writes_from_in_memory_point_sources(tmp_path):
+    from tapw.workflows.symm_rep import run_symm_rep_from_point_sources
+
+    _band_dir, symmetry_dir = _write_legacy_inputs(tmp_path)
+    basis = np.eye(6, dtype=np.complex128)
+    point_sources = {
+        "Gamma": {
+            "source_kind": "computed_config_points",
+            "source_index": 0,
+            "source_count": 1,
+            "sectors": {
+                "valence": {
+                    "energies": np.array([-2.0, -1.0]),
+                    "vectors": basis[:, [0, 1]],
+                    "band_indices": np.array([0, 1]),
+                },
+                "conduction": {
+                    "energies": np.array([1.0, 2.0]),
+                    "vectors": basis[:, [3, 4]],
+                    "band_indices": np.array([2, 3]),
+                },
+            },
+        }
+    }
+
+    output_dir = tmp_path / "rep-memory"
+    run_symm_rep_from_point_sources(
+        point_sources=point_sources,
+        symmetry_dir=symmetry_dir,
+        output_dir=output_dir,
+        fermi_energy=0.0,
+        degeneracy_tol=1.0e-6,
+    )
+
+    assert (output_dir / "summary.md").is_file()
+    with np.load(output_dir / "high_symmetry_wavefunctions.npz", allow_pickle=False) as payload:
+        assert payload["Gamma_source_kind"].item() == "computed_config_points"
+        assert payload["Gamma_selected_indices"].tolist() == [0, 1, 2, 3]
+
+
+def test_symm_rep_config_resolves_canonical_paths_and_fractional_points(tmp_path):
+    from tapw.symm_rep import resolve_config_request
+
+    config_path = _write_release_symm_rep_config(tmp_path)
+    rawh_path = tmp_path / "outputs" / "Gamma" / "q04" / "symmetry" / "representations.npz"
+    rawh_path.parent.mkdir(parents=True)
+    np.savez_compressed(rawh_path, C3z_data=np.array([1.0]), C3z_indices=np.array([0]), C3z_indptr=np.array([0, 1]), C3z_shape=np.array([1, 1]))
+
+    request = resolve_config_request(config_path)
+
+    assert request.symmetry_dir == rawh_path.parent
+    assert request.output_dir == tmp_path / "outputs" / "Gamma" / "q04" / "symm_rep"
+    assert request.fermi_energy == pytest.approx(-4.055365)
+    assert request.valence_count == 12
+    assert request.conduction_count == 8
+    assert request.degeneracy_tol == pytest.approx(1.0e-3)
+    assert request.points == {"Gamma": (0.0, 0.0, 0.0), "M": (0.5, 0.0, 0.0), "K": (1.0 / 3.0, 1.0 / 3.0, 0.0)}
+
+
+def test_symm_rep_config_missing_rawh_errors_without_running_symmetry(tmp_path):
+    from tapw.symm_rep import resolve_config_request
+
+    config_path = _write_release_symm_rep_config(tmp_path)
+
+    with pytest.raises(FileNotFoundError, match="Run `tapw symm -c"):
+        resolve_config_request(config_path)
+
+
+def test_symm_rep_cli_accepts_config_only(monkeypatch, tmp_path):
+    from tapw import symm_rep
+
+    config_path = _write_release_symm_rep_config(tmp_path)
+    calls = []
+
+    monkeypatch.setattr(
+        symm_rep,
+        "run_configured_symm_rep",
+        lambda config_path, **kwargs: calls.append((config_path, kwargs)) or (tmp_path / "out"),
+    )
+
+    code = symm_rep.main(["-c", str(config_path), "--valence-count", "6", "--conduction-count", "4", "--overwrite"])
+
+    assert code == 0
+    assert calls == [
+        (
+            config_path,
+            {
+                "valence_count": 6,
+                "conduction_count": 4,
+                "degeneracy_tol": None,
+                "overwrite": True,
+            },
+        )
+    ]
+
+
+def test_run_configured_symm_rep_solves_points_and_writes_outputs(monkeypatch, tmp_path):
+    from tapw import symm_rep
+
+    config_path = _write_release_symm_rep_config(tmp_path)
+    rawh_path = tmp_path / "outputs" / "Gamma" / "q04" / "symmetry" / "representations.npz"
+    rawh_path.parent.mkdir(parents=True)
+    np.savez_compressed(rawh_path, C3z_data=np.array([1.0]), C3z_indices=np.array([0]), C3z_indptr=np.array([0, 1]), C3z_shape=np.array([1, 1]))
+    calls = []
+
+    def fake_calculate(request):
+        calls.append(("calculate", request.points))
+        return {"Gamma": {"sectors": {"valence": {"energies": np.array([-1.0]), "vectors": np.ones((1, 1)), "band_indices": np.array([0])}}}}
+
+    def fake_write(**kwargs):
+        calls.append(("write", kwargs["symmetry_dir"], kwargs["output_dir"], kwargs["fermi_energy"], kwargs["degeneracy_tol"], kwargs["overwrite"]))
+        return type("Result", (), {"output_dir": kwargs["output_dir"]})()
+
+    monkeypatch.setattr(symm_rep, "calculate_config_point_sources", fake_calculate)
+    monkeypatch.setattr(symm_rep, "run_symm_rep_from_point_sources", fake_write)
+
+    output_dir = symm_rep.run_configured_symm_rep(config_path, overwrite=True)
+
+    assert output_dir == tmp_path / "outputs" / "Gamma" / "q04" / "symm_rep"
+    assert calls == [
+        ("calculate", {"Gamma": (0.0, 0.0, 0.0), "M": (0.5, 0.0, 0.0), "K": (1.0 / 3.0, 1.0 / 3.0, 0.0)}),
+        ("write", rawh_path.parent, tmp_path / "outputs" / "Gamma" / "q04" / "symm_rep", -4.055365, 1.0e-3, True),
+    ]
+
+
+def test_config_point_solve_expands_until_valence_and_conduction_are_available(monkeypatch, tmp_path):
+    from tapw import symm_rep
+
+    config_path = _write_release_symm_rep_config(tmp_path)
+    calls = []
+
+    class FakeCalculator:
+        def __init__(self, config):
+            self.config = config
+
+        def calculate_band_01(self, _coords, _point_index):
+            calls.append(int(self.config.num_bands_cal))
+            if self.config.num_bands_cal < 80:
+                energies = np.array([-6.0, -5.0, -4.0, -3.0])
+            else:
+                energies = np.array([-6.0, -5.0, -1.0, -0.5, 0.5, 1.0])
+            vectors = np.eye(128, len(energies), dtype=np.complex128)
+            return energies, vectors, None, None
+
+    monkeypatch.setattr(symm_rep, "_build_point_calculator", lambda config: FakeCalculator(config.compute))
+
+    request = symm_rep.ConfigSymmRepRequest(
+        config_path=config_path,
+        symmetry_dir=tmp_path / "symmetry",
+        output_dir=tmp_path / "out",
+        fermi_energy=0.0,
+        valence_count=2,
+        conduction_count=2,
+        degeneracy_tol=1.0e-3,
+        points={"Gamma": (0.0, 0.0, 0.0)},
+    )
+
+    point_sources = symm_rep.calculate_config_point_sources(request)
+
+    assert calls == [50, 100]
+    sectors = point_sources["Gamma"]["sectors"]
+    assert sectors["valence"]["energies"].tolist() == [-1.0, -0.5]
+    assert sectors["conduction"]["energies"].tolist() == [0.5, 1.0]
 
 
 def test_antiunitary_projection_uses_conjugated_eigenvectors():

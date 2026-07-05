@@ -119,24 +119,41 @@ not overwrite each other, for example `grid21x41_b1_0p0_0p5_b2_m0p5_0p5`.
 
 ## Symmetry Representation Post-Processing
 
-After saving high-symmetry Hamiltonians and TAPW raw-H symmetry matrices, compute
-band-subspace representation matrices with:
+After running source-symmetry analysis, compute band-subspace representation
+matrices from the same config:
 
 ```bash
-tapw symm-rep \
-  --band-dir outputs/Gamma/q05/band \
-  --symmetry-dir outputs/Gamma/q05/symmetry \
-  --output-dir outputs/Gamma/q05/symm_rep \
-  --fermi-energy -4.6
+tapw symm -c config.yaml
+tapw symm-rep -c config.yaml
 ```
 
-The command diagonalizes `hamk_<point>_valley.npy`, groups selected states by
-energy degeneracy, projects unitary and antiunitary raw-H actions into each band
-block, and writes `summary.md`, `bands.csv`, `characters.csv`,
-`high_symmetry_wavefunctions.npz`, and `band_representations.npz`. By default it
-reports the top 20 valence and bottom 20 conduction states per high-symmetry
-point. If `--fermi-energy` is omitted, TAPW tries to infer it from saved
-VBM/CBM split energies or nearby config YAML files.
+Configure the reported points as fractional reciprocal coordinates under the
+`symmetry` section:
+
+```yaml
+symmetry:
+  valley: Gamma
+  q_shell: 4
+  efermi: -4.055365
+  tolerance: 2.0e-2
+  spglib_symprec: 5.0e-2
+  representation:
+    points:
+      Gamma: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
+    valence_count: 20
+    conduction_count: 20
+    degeneracy_tol: 2.0e-3
+```
+
+`tapw symm-rep -c` requires the raw-H `representations.npz` from `tapw symm`.
+If it is missing, the command fails and asks you to run `tapw symm -c` first.
+The command solves the configured high-symmetry points directly, groups selected
+states by energy degeneracy, projects unitary and antiunitary raw-H actions into
+each band block, and writes `summary.md`, `bands.csv`, `characters.csv`,
+`high_symmetry_wavefunctions.npz`, and `band_representations.npz` under
+`outputs/<valley>/<q_shell>/symm_rep/`.
 
 ## Chern Post-Processing
 

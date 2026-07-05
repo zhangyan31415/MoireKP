@@ -625,6 +625,8 @@ def _write_summary(
         lines.extend([f"## {point}", ""])
         if data.get("source_kind") == "saved_wavefunctions":
             lines.extend(["Source: saved wavefunctions.", ""])
+        elif data.get("source_kind") == "computed_config_points":
+            lines.extend(["Source: computed from config fractional points.", ""])
         if int(data["hamiltonian_count"]) > 1:
             lines.extend(
                 [
@@ -673,6 +675,174 @@ def _write_summary(
         lines.append("")
 
     (output_dir / "summary.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+
+
+def run_symm_rep_from_point_sources(
+    *,
+    point_sources: dict[str, dict[str, Any]],
+    symmetry_dir: Path,
+    output_dir: Path,
+    fermi_energy: float,
+    degeneracy_tol: float = 2.0e-3,
+    overwrite: bool = False,
+    source_label: str = "configured TAPW points",
+) -> SymmRepResult:
+    symmetry_dir = Path(symmetry_dir)
+    output_dir = Path(output_dir)
+    _prepare_output_dir(output_dir, overwrite=overwrite)
+
+    if not point_sources:
+        raise ValueError("point_sources must contain at least one high-symmetry point.")
+    operations_by_point = load_raw_h_symmetry_operations(symmetry_dir, set(point_sources))
+    point_results: dict[str, dict[str, Any]] = {}
+    band_rows: list[dict[str, Any]] = []
+    character_rows: list[dict[str, Any]] = []
+    rep_entries: list[dict[str, Any]] = []
+
+    for point, source in point_sources.items():
+        sectors = dict(source.get("sectors", {}) or {})
+        if not sectors:
+            raise ValueError(f"Point {point} has no valence/conduction sector data.")
+        source_kind = str(source.get("source_kind", "computed_config_points"))
+        sector_payloads: dict[str, dict[str, Any]] = {}
+        vectors_by_sector: list[np.ndarray] = []
+        energies_by_sector: list[np.ndarray] = []
+        selected_indices: list[int] = []
+        for sector in ("valence", "conduction"):
+            if sector not in sectors:
+                continue
+            payload = sectors[sector]
+            energies = np.asarray(payload["energies"], dtype=float)
+            vectors = np.asarray(payload["vectors"], dtype=np.complex128)
+            if vectors.ndim != 2 or vectors.shape[1] != len(energies):
+                raise ValueError(f"Point {point} sector {sector} vectors must have shape (basis, bands).")
+            band_indices = np.asarray(payload.get("band_indices", np.arange(len(energies))), dtype=int)
+            if len(band_indices) != len(energies):
+                raise ValueError(f"Point {point} sector {sector} band_indices length does not match energies.")
+            positions = np.arange(len(energies), dtype=int)
+            sector_payloads[sector] = {
+                "energies": energies,
+                "vectors": vectors,
+                "positions": positions,
+                "band_indices": band_indices,
+            }
+            energies_by_sector.append(energies)
+            vectors_by_sector.append(vectors)
+            selected_indices.extend(int(value) for value in band_indices)
+        energies_all = np.concatenate(energies_by_sector)
+        vectors_all = np.hstack(vectors_by_sector)
+
+        spin_up: list[float] = []
+        spin_down: list[float] = []
+        spin_label: list[str] = []
+        for state_index in range(vectors_all.shape[1]):
+            up, down, label = spin_weights_and_label(vectors_all[:, state_index])
+            spin_up.append(np.nan if up is None else up)
+            spin_down.append(np.nan if down is None else down)
+            spin_label.append(label)
+
+        operations = operations_by_point.get(point, [])
+        point_results[point] = {
+            "energies": energies_all,
+            "vectors": vectors_all,
+            "source_kind": source_kind,
+            "hamiltonian_index": int(source.get("source_index", 0)),
+            "hamiltonian_count": int(source.get("source_count", 1)),
+            "selected_indices": selected_indices,
+            "spin_up": spin_up,
+            "spin_down": spin_down,
+            "spin_label": spin_label,
+            "operations": operations,
+        }
+
+        spin_offset = 0
+        for sector, payload in sector_payloads.items():
+            sector_energies = payload["energies"]
+            sector_vectors = payload["vectors"]
+            positions = np.asarray(payload["positions"], dtype=int)
+            band_indices = np.asarray(payload["band_indices"], dtype=int)
+            row_positions = positions[::-1] if sector == "valence" else positions
+            label_by_position = {int(pos): int(label) for pos, label in zip(positions, band_indices)}
+            for idx in row_positions:
+                spin_lookup_index = spin_offset + int(np.where(positions == idx)[0][0])
+                band_rows.append(
+                    {
+                        "point": point,
+                        "sector": sector,
+                        "band_index": label_by_position[int(idx)],
+                        "energy": _format_float(float(sector_energies[idx])),
+                        "spin_up_weight": "" if np.isnan(spin_up[spin_lookup_index]) else _format_float(spin_up[spin_lookup_index], digits=6),
+                        "spin_down_weight": "" if np.isnan(spin_down[spin_lookup_index]) else _format_float(spin_down[spin_lookup_index], digits=6),
+                        "spin_label": spin_label[spin_lookup_index],
+                    }
+                )
+
+            blocks = group_degenerate_blocks(
+                sector_energies,
+                positions,
+                sector=sector,
+                degeneracy_tol=degeneracy_tol,
+                band_indices=band_indices,
+            )
+            for block in blocks:
+                block_vectors = sector_vectors[:, list(block.indices)]
+                for operation in operations:
+                    if operation.matrix.shape != (sector_vectors.shape[0], sector_vectors.shape[0]):
+                        raise ValueError(
+                            f"Raw-H matrix {operation.operation} at {point} has shape {operation.matrix.shape}, "
+                            f"but wavefunctions have dimension {sector_vectors.shape[0]}."
+                        )
+                    projected = project_operation_to_subspace(
+                        operation.matrix,
+                        block_vectors,
+                        antiunitary=operation.antiunitary,
+                    )
+                    trace = np.trace(projected)
+                    residual = _unitarity_residual(projected)
+                    character_rows.append(
+                        {
+                            "point": point,
+                            "sector": sector,
+                            "block_id": block.block_id,
+                            "band_indices": _format_indices(block.band_indices),
+                            "energies": _format_energies(block.energies),
+                            "operation": operation.operation,
+                            "antiunitary": str(bool(operation.antiunitary)).lower(),
+                            "trace_real": f"{float(trace.real):.12g}",
+                            "trace_imag": f"{float(trace.imag):.12g}",
+                            "unitarity_residual": f"{residual:.12g}",
+                        }
+                    )
+                    rep_entries.append(
+                        {
+                            "point": point,
+                            "sector": sector,
+                            "block_id": block.block_id,
+                            "band_indices": list(block.band_indices),
+                            "energies": list(block.energies),
+                            "operation": operation.operation,
+                            "antiunitary": bool(operation.antiunitary),
+                            "unitarity_residual": residual,
+                            "matrix": projected,
+                        }
+                    )
+            spin_offset += len(sector_energies)
+
+    _write_wavefunctions_npz(output_dir, point_results)
+    _write_representation_npz(output_dir, rep_entries)
+    _write_bands_csv(output_dir, band_rows)
+    _write_characters_csv(output_dir, character_rows)
+    _write_summary(
+        output_dir,
+        band_dir=Path(source_label),
+        symmetry_dir=symmetry_dir,
+        fermi_energy=float(fermi_energy),
+        degeneracy_tol=degeneracy_tol,
+        point_results=point_results,
+        band_rows=band_rows,
+        character_rows=character_rows,
+    )
+    return SymmRepResult(output_dir=output_dir, points=tuple(point_results), fermi_energy=float(fermi_energy))
 
 
 def run_symm_rep(
