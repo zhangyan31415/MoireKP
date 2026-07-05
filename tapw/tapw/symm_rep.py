@@ -46,6 +46,12 @@ def build_parser(prog: str = "tapw symm-rep") -> argparse.ArgumentParser:
         default=0,
         help="Slice index to use when hamk_<point>_valley.npy contains multiple Hamiltonians.",
     )
+    parser.add_argument(
+        "--points",
+        nargs="+",
+        default=None,
+        help="Optional high-symmetry point labels to process, such as Gamma or M1.",
+    )
     parser.add_argument("--overwrite", action="store_true", help="Replace an existing non-empty output directory.")
     return parser
 
@@ -61,6 +67,7 @@ def main(argv=None, *, prog: str = "tapw symm-rep") -> int:
         degeneracy_tol=args.degeneracy_tol,
         fermi_energy=args.fermi_energy,
         hamiltonian_index=args.hamiltonian_index,
+        points=args.points,
         overwrite=args.overwrite,
     )
     print(f"Wrote TAPW symmetry representations to {result.output_dir}")

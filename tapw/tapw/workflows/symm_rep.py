@@ -15,6 +15,7 @@ import scipy.sparse
 
 
 _HAMK_RE = re.compile(r"^hamk_(?P<point>.+)_valley\.npy$")
+_SAVED_BAND_RE = re.compile(r"^band_(?P<edge>VBM|CBM)_(?P<point>.+)_valley\.txt$")
 _RAW_H_SUFFIX = "_rawH.npz"
 _ANTIUNITARY_NAMES = {"T", "TR", "C2T"}
 
@@ -34,6 +35,7 @@ class EnergyBlock:
     sector: str
     indices: tuple[int, ...]
     energies: tuple[float, ...]
+    band_indices: tuple[int, ...]
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,31 @@ def discover_high_symmetry_hamiltonians(band_dir: Path) -> dict[str, Path]:
     if not hamiltonians and (band_dir / "hamiltonian_k.npy").is_file():
         hamiltonians["point"] = band_dir / "hamiltonian_k.npy"
     return hamiltonians
+
+
+def discover_high_symmetry_sources(band_dir: Path) -> dict[str, dict[str, Any]]:
+    band_dir = Path(band_dir)
+    sources: dict[str, dict[str, Any]] = {
+        point: {"kind": "hamiltonian", "hamiltonian": path}
+        for point, path in discover_high_symmetry_hamiltonians(band_dir).items()
+    }
+    saved: dict[str, dict[str, Path]] = {}
+    for energy_path in sorted(band_dir.glob("band_*_*_valley.txt")):
+        match = _SAVED_BAND_RE.match(energy_path.name)
+        if not match:
+            continue
+        edge = match.group("edge")
+        point = match.group("point")
+        vec_path = band_dir / f"vec_{edge}_{point}_valley.npy"
+        if vec_path.is_file():
+            saved.setdefault(point, {})[edge] = energy_path
+            saved[point][f"vec_{edge}"] = vec_path
+    for point, files in saved.items():
+        if point in sources:
+            continue
+        if "VBM" in files or "CBM" in files:
+            sources[point] = {"kind": "saved_wavefunctions", **files}
+    return sources
 
 
 def _load_operations_from_manifest(
@@ -290,6 +317,12 @@ def infer_fermi_energy(band_dir: Path) -> float:
         vbm = np.loadtxt(vbm_path, ndmin=1)
         cbm = np.loadtxt(cbm_path, ndmin=1)
         return float(0.5 * (np.nanmax(vbm) + np.nanmin(cbm)))
+    legacy_vbm = sorted(band_dir.glob("band_VBM_*_valley.txt"))
+    legacy_cbm = sorted(band_dir.glob("band_CBM_*_valley.txt"))
+    if legacy_vbm and legacy_cbm:
+        vbm_max = max(float(np.nanmax(np.loadtxt(path, ndmin=1))) for path in legacy_vbm)
+        cbm_min = min(float(np.nanmin(np.loadtxt(path, ndmin=1))) for path in legacy_cbm)
+        return float(0.5 * (vbm_max + cbm_min))
 
     try:
         import yaml
@@ -332,9 +365,12 @@ def group_degenerate_blocks(
     *,
     sector: str,
     degeneracy_tol: float,
+    band_indices: np.ndarray | None = None,
 ) -> list[EnergyBlock]:
     if len(indices) == 0:
         return []
+    labels = np.asarray(indices if band_indices is None else band_indices, dtype=int)
+    label_by_index = {int(index): int(label) for index, label in zip(indices, labels)}
     blocks: list[EnergyBlock] = []
     current = [int(indices[0])]
     block_id = 0
@@ -343,12 +379,122 @@ def group_degenerate_blocks(
             current.append(idx)
         else:
             blocks.append(
-                EnergyBlock(block_id, sector, tuple(current), tuple(float(energies[i]) for i in current))
+                EnergyBlock(
+                    block_id,
+                    sector,
+                    tuple(current),
+                    tuple(float(energies[i]) for i in current),
+                    tuple(label_by_index[i] for i in current),
+                )
             )
             block_id += 1
             current = [idx]
-    blocks.append(EnergyBlock(block_id, sector, tuple(current), tuple(float(energies[i]) for i in current)))
+    blocks.append(
+        EnergyBlock(
+            block_id,
+            sector,
+            tuple(current),
+            tuple(float(energies[i]) for i in current),
+            tuple(label_by_index[i] for i in current),
+        )
+    )
     return blocks
+
+
+def _resolve_stack_index(count: int, requested: int, path: Path) -> int:
+    index = int(requested)
+    if index < 0:
+        index += count
+    if index < 0 or index >= count:
+        raise IndexError(f"{path} contains {count} entries; index {requested} is out of range.")
+    return index
+
+
+def _load_saved_sector(
+    *,
+    energy_path: Path,
+    vector_path: Path,
+    hamiltonian_index: int,
+    count: int,
+    sector: str,
+) -> dict[str, Any]:
+    all_energies = np.loadtxt(energy_path, ndmin=1)
+    if all_energies.ndim == 1:
+        all_energies = all_energies[None, :]
+    k_index = _resolve_stack_index(all_energies.shape[0], hamiltonian_index, energy_path)
+    edge_energies = np.asarray(all_energies[k_index], dtype=float)
+    vectors = np.load(vector_path, mmap_mode="r")
+    if vectors.ndim == 2:
+        vectors_k = np.asarray(vectors)
+    elif vectors.ndim == 3:
+        vec_index = _resolve_stack_index(vectors.shape[0], hamiltonian_index, vector_path)
+        vectors_k = np.asarray(vectors[vec_index])
+    else:
+        raise ValueError(f"{vector_path} must be a 2D or 3D saved wavefunction array, got {vectors.shape}.")
+    if vectors_k.shape[1] == edge_energies.shape[0]:
+        vectors_by_band = vectors_k
+    elif vectors_k.shape[0] == edge_energies.shape[0]:
+        vectors_by_band = vectors_k.T
+    else:
+        raise ValueError(
+            f"{vector_path} shape {vectors_k.shape} is incompatible with {energy_path} band count "
+            f"{edge_energies.shape[0]}."
+        )
+    n_select = min(max(0, int(count)), edge_energies.shape[0])
+    if sector == "valence":
+        cols = np.arange(edge_energies.shape[0] - n_select, edge_energies.shape[0], dtype=int)
+    else:
+        cols = np.arange(0, n_select, dtype=int)
+    return {
+        "energies": edge_energies[cols],
+        "vectors": np.asarray(vectors_by_band[:, cols], dtype=np.complex128),
+        "band_indices": cols,
+        "source_index": k_index,
+        "source_count": int(all_energies.shape[0]),
+    }
+
+
+def load_saved_wavefunction_point(
+    source: dict[str, Any],
+    *,
+    hamiltonian_index: int,
+    valence_count: int,
+    conduction_count: int,
+) -> dict[str, Any]:
+    sectors: dict[str, dict[str, Any]] = {}
+    if "VBM" in source and "vec_VBM" in source:
+        sectors["valence"] = _load_saved_sector(
+            energy_path=source["VBM"],
+            vector_path=source["vec_VBM"],
+            hamiltonian_index=hamiltonian_index,
+            count=valence_count,
+            sector="valence",
+        )
+    if "CBM" in source and "vec_CBM" in source:
+        sectors["conduction"] = _load_saved_sector(
+            energy_path=source["CBM"],
+            vector_path=source["vec_CBM"],
+            hamiltonian_index=hamiltonian_index,
+            count=conduction_count,
+            sector="conduction",
+        )
+    if not sectors:
+        raise FileNotFoundError("Saved-wavefunction source has no usable VBM/CBM vector and energy pairs.")
+    index = next(iter(sectors.values()))["source_index"]
+    count = next(iter(sectors.values()))["source_count"]
+    energies = np.concatenate([sectors[key]["energies"] for key in ("valence", "conduction") if key in sectors])
+    vectors = np.hstack([sectors[key]["vectors"] for key in ("valence", "conduction") if key in sectors])
+    selected_indices = np.concatenate(
+        [sectors[key]["band_indices"] for key in ("valence", "conduction") if key in sectors]
+    )
+    return {
+        "sectors": sectors,
+        "energies": energies,
+        "vectors": vectors,
+        "selected_indices": selected_indices,
+        "source_index": index,
+        "source_count": count,
+    }
 
 
 def _unitarity_residual(matrix: np.ndarray) -> float:
@@ -391,6 +537,7 @@ def _write_wavefunctions_npz(
         prefix = _safe_npz_key(point)
         payload[f"{prefix}_energies"] = data["energies"]
         payload[f"{prefix}_eigenvectors"] = data["vectors"]
+        payload[f"{prefix}_source_kind"] = np.array(data["source_kind"], dtype=str)
         payload[f"{prefix}_hamiltonian_index"] = np.array(data["hamiltonian_index"], dtype=int)
         payload[f"{prefix}_hamiltonian_count"] = np.array(data["hamiltonian_count"], dtype=int)
         payload[f"{prefix}_selected_indices"] = np.array(data["selected_indices"], dtype=int)
@@ -476,6 +623,8 @@ def _write_summary(
 
     for point, data in point_results.items():
         lines.extend([f"## {point}", ""])
+        if data.get("source_kind") == "saved_wavefunctions":
+            lines.extend(["Source: saved wavefunctions.", ""])
         if int(data["hamiltonian_count"]) > 1:
             lines.extend(
                 [
@@ -536,6 +685,7 @@ def run_symm_rep(
     degeneracy_tol: float = 2.0e-3,
     fermi_energy: float | None = None,
     hamiltonian_index: int = 0,
+    points: list[str] | tuple[str, ...] | None = None,
     overwrite: bool = False,
 ) -> SymmRepResult:
     band_dir = Path(band_dir)
@@ -543,24 +693,69 @@ def run_symm_rep(
     output_dir = Path(output_dir)
     _prepare_output_dir(output_dir, overwrite=overwrite)
 
-    hamiltonians = discover_high_symmetry_hamiltonians(band_dir)
-    if not hamiltonians:
-        raise FileNotFoundError(f"No high-symmetry hamk_<point>_valley.npy files found in {band_dir}.")
+    sources = discover_high_symmetry_sources(band_dir)
+    if points is not None:
+        requested_points = {str(point) for point in points}
+        sources = {point: source for point, source in sources.items() if point in requested_points}
+    if not sources:
+        raise FileNotFoundError(
+            f"No high-symmetry hamk_<point>_valley.npy files or saved vec/band pairs found in {band_dir}."
+        )
     if fermi_energy is None:
         fermi_energy = infer_fermi_energy(band_dir)
     fermi_energy = float(fermi_energy)
 
-    operations_by_point = load_raw_h_symmetry_operations(symmetry_dir, set(hamiltonians))
+    operations_by_point = load_raw_h_symmetry_operations(symmetry_dir, set(sources))
     point_results: dict[str, dict[str, Any]] = {}
     band_rows: list[dict[str, Any]] = []
     character_rows: list[dict[str, Any]] = []
     rep_entries: list[dict[str, Any]] = []
 
-    for point, ham_path in hamiltonians.items():
-        energies, vectors, selected_ham_index, ham_count = diagonalize_hamiltonian(
-            ham_path,
-            hamiltonian_index=hamiltonian_index,
-        )
+    for point, source in sources.items():
+        source_kind = str(source["kind"])
+        sector_payloads: dict[str, dict[str, Any]]
+        if source_kind == "hamiltonian":
+            energies, vectors, selected_ham_index, ham_count = diagonalize_hamiltonian(
+                source["hamiltonian"],
+                hamiltonian_index=hamiltonian_index,
+            )
+            selections = select_band_indices(
+                energies,
+                fermi_energy,
+                valence_count=valence_count,
+                conduction_count=conduction_count,
+            )
+            sector_payloads = {
+                sector: {
+                    "energies": energies,
+                    "vectors": vectors,
+                    "positions": np.asarray(indices, dtype=int),
+                    "band_indices": np.asarray(indices, dtype=int),
+                }
+                for sector, indices in selections.items()
+            }
+            selected_indices = sorted(set(int(idx) for values in selections.values() for idx in values))
+        else:
+            saved = load_saved_wavefunction_point(
+                source,
+                hamiltonian_index=hamiltonian_index,
+                valence_count=valence_count,
+                conduction_count=conduction_count,
+            )
+            energies = saved["energies"]
+            vectors = saved["vectors"]
+            selected_ham_index = int(saved["source_index"])
+            ham_count = int(saved["source_count"])
+            selected_indices = [int(value) for value in saved["selected_indices"]]
+            sector_payloads = {
+                sector: {
+                    "energies": payload["energies"],
+                    "vectors": payload["vectors"],
+                    "positions": np.arange(len(payload["energies"]), dtype=int),
+                    "band_indices": payload["band_indices"],
+                }
+                for sector, payload in saved["sectors"].items()
+            }
         spin_up: list[float] = []
         spin_down: list[float] = []
         spin_label: list[str] = []
@@ -570,17 +765,11 @@ def run_symm_rep(
             spin_down.append(np.nan if down is None else down)
             spin_label.append(label)
 
-        selections = select_band_indices(
-            energies,
-            fermi_energy,
-            valence_count=valence_count,
-            conduction_count=conduction_count,
-        )
-        selected_indices = sorted(set(int(idx) for values in selections.values() for idx in values))
         operations = operations_by_point.get(point, [])
         point_results[point] = {
             "energies": energies,
             "vectors": vectors,
+            "source_kind": source_kind,
             "hamiltonian_index": selected_ham_index,
             "hamiltonian_count": ham_count,
             "selected_indices": selected_indices,
@@ -590,34 +779,44 @@ def run_symm_rep(
             "operations": operations,
         }
 
-        for sector, indices in selections.items():
-            row_indices = indices[::-1] if sector == "valence" else indices
-            for idx in row_indices:
+        for sector, payload in sector_payloads.items():
+            sector_energies = payload["energies"]
+            sector_vectors = payload["vectors"]
+            positions = np.asarray(payload["positions"], dtype=int)
+            band_indices = np.asarray(payload["band_indices"], dtype=int)
+            row_positions = positions[::-1] if sector == "valence" else positions
+            label_by_position = {int(pos): int(label) for pos, label in zip(positions, band_indices)}
+            for idx in row_positions:
+                spin_lookup_index = int(idx) if source_kind == "hamiltonian" else int(
+                    np.where(positions == idx)[0][0]
+                    + (0 if sector == "valence" else len(sector_payloads.get("valence", {}).get("energies", [])))
+                )
                 band_rows.append(
                     {
                         "point": point,
                         "sector": sector,
-                        "band_index": int(idx),
-                        "energy": _format_float(float(energies[idx])),
-                        "spin_up_weight": "" if np.isnan(spin_up[idx]) else _format_float(spin_up[idx], digits=6),
-                        "spin_down_weight": "" if np.isnan(spin_down[idx]) else _format_float(spin_down[idx], digits=6),
-                        "spin_label": spin_label[idx],
+                        "band_index": label_by_position[int(idx)],
+                        "energy": _format_float(float(sector_energies[idx])),
+                        "spin_up_weight": "" if np.isnan(spin_up[spin_lookup_index]) else _format_float(spin_up[spin_lookup_index], digits=6),
+                        "spin_down_weight": "" if np.isnan(spin_down[spin_lookup_index]) else _format_float(spin_down[spin_lookup_index], digits=6),
+                        "spin_label": spin_label[spin_lookup_index],
                     }
                 )
 
             blocks = group_degenerate_blocks(
-                energies,
-                np.asarray(indices, dtype=int),
+                sector_energies,
+                positions,
                 sector=sector,
                 degeneracy_tol=degeneracy_tol,
+                band_indices=band_indices,
             )
             for block in blocks:
-                block_vectors = vectors[:, list(block.indices)]
+                block_vectors = sector_vectors[:, list(block.indices)]
                 for operation in operations:
-                    if operation.matrix.shape != (vectors.shape[0], vectors.shape[0]):
+                    if operation.matrix.shape != (sector_vectors.shape[0], sector_vectors.shape[0]):
                         raise ValueError(
                             f"Raw-H matrix {operation.operation} at {point} has shape {operation.matrix.shape}, "
-                            f"but Hamiltonian eigenvectors have dimension {vectors.shape[0]}."
+                            f"but wavefunctions have dimension {sector_vectors.shape[0]}."
                         )
                     projected = project_operation_to_subspace(
                         operation.matrix,
@@ -631,7 +830,7 @@ def run_symm_rep(
                             "point": point,
                             "sector": sector,
                             "block_id": block.block_id,
-                            "band_indices": _format_indices(block.indices),
+                            "band_indices": _format_indices(block.band_indices),
                             "energies": _format_energies(block.energies),
                             "operation": operation.operation,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
@@ -645,7 +844,7 @@ def run_symm_rep(
                             "point": point,
                             "sector": sector,
                             "block_id": block.block_id,
-                            "band_indices": list(block.indices),
+                            "band_indices": list(block.band_indices),
                             "energies": list(block.energies),
                             "operation": operation.operation,
                             "antiunitary": bool(operation.antiunitary),

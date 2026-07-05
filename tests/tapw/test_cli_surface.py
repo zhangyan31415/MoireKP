@@ -220,6 +220,7 @@ def test_tapw_symm_rep_help_lists_postprocess_inputs(capsys):
     assert "--output-dir" in out
     assert "--fermi-energy" in out
     assert "--hamiltonian-index" in out
+    assert "--points" in out
 
 
 @pytest.mark.parametrize("command", ["plot", "topo"])

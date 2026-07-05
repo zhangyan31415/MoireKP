@@ -140,6 +140,72 @@ def test_symm_rep_loads_packed_canonical_representations(tmp_path):
     assert {row["antiunitary"] for row in rows} == {"false"}
 
 
+def test_symm_rep_falls_back_to_saved_vec_and_band_files_without_hamk(tmp_path):
+    from tapw.workflows.symm_rep import run_symm_rep
+
+    band_dir, symmetry_dir = _write_legacy_inputs(tmp_path)
+    (band_dir / "hamk_Gamma_valley.npy").unlink()
+    vbm_energies = np.array([[-4.0, -3.0, -2.0, -1.0], [-4.5, -3.5, -2.5, -1.5]])
+    cbm_energies = np.array([[1.0, 2.0, 3.0, 4.0], [1.5, 2.5, 3.5, 4.5]])
+    basis = np.eye(6, dtype=np.complex128)
+    vbm_vec = np.stack([basis[:, [0, 1, 2, 3]], basis[:, [1, 2, 3, 4]]])
+    cbm_vec = np.stack([basis[:, [4, 5, 0, 1]], basis[:, [5, 0, 1, 2]]])
+    np.savetxt(band_dir / "band_VBM_Gamma_valley.txt", vbm_energies)
+    np.savetxt(band_dir / "band_CBM_Gamma_valley.txt", cbm_energies)
+    np.save(band_dir / "vec_VBM_Gamma_valley.npy", vbm_vec)
+    np.save(band_dir / "vec_CBM_Gamma_valley.npy", cbm_vec)
+
+    output_dir = tmp_path / "rep-saved"
+    result = run_symm_rep(
+        band_dir=band_dir,
+        symmetry_dir=symmetry_dir,
+        output_dir=output_dir,
+        valence_count=2,
+        conduction_count=2,
+        hamiltonian_index=1,
+    )
+
+    assert result.fermi_energy == pytest.approx(0.0)
+    with np.load(output_dir / "high_symmetry_wavefunctions.npz", allow_pickle=False) as payload:
+        assert payload["Gamma_source_kind"].item() == "saved_wavefunctions"
+        assert payload["Gamma_hamiltonian_index"].item() == 1
+        assert payload["Gamma_selected_indices"].tolist() == [2, 3, 0, 1]
+        assert np.allclose(payload["Gamma_energies"], [-2.5, -1.5, 1.5, 2.5])
+        assert payload["Gamma_eigenvectors"].shape == (6, 4)
+
+    bands = list(csv.DictReader((output_dir / "bands.csv").open(newline="", encoding="utf-8")))
+    assert [(row["sector"], row["band_index"], row["energy"]) for row in bands] == [
+        ("valence", "3", "-1.500000000000"),
+        ("valence", "2", "-2.500000000000"),
+        ("conduction", "0", "1.500000000000"),
+        ("conduction", "1", "2.500000000000"),
+    ]
+    summary = (output_dir / "summary.md").read_text(encoding="utf-8")
+    assert "Source: saved wavefunctions" in summary
+
+
+def test_symm_rep_can_filter_points(tmp_path):
+    from tapw.workflows.symm_rep import run_symm_rep
+
+    band_dir, symmetry_dir = _write_legacy_inputs(tmp_path)
+    np.save(band_dir / "hamk_M1_valley.npy", np.diag([-2.0, -1.0, 1.0, 2.0, 3.0, 4.0]))
+
+    output_dir = tmp_path / "rep-filtered"
+    run_symm_rep(
+        band_dir=band_dir,
+        symmetry_dir=symmetry_dir,
+        output_dir=output_dir,
+        fermi_energy=0.0,
+        valence_count=2,
+        conduction_count=2,
+        points=["Gamma"],
+    )
+
+    with np.load(output_dir / "high_symmetry_wavefunctions.npz", allow_pickle=False) as payload:
+        assert payload["points"].tolist() == ["Gamma"]
+        assert "M1_energies" not in payload.files
+
+
 def test_antiunitary_projection_uses_conjugated_eigenvectors():
     from tapw.workflows.symm_rep import project_operation_to_subspace
 
