@@ -1,13 +1,57 @@
-# moirekp
+# MoireKP
 
-中文说明见 [README.zh.md](README.zh.md).
+<p align="center">
+  <b>TAPW workflows and continuum <i>k·p</i> model construction for twisted bilayer materials</b>
+</p>
 
-`moirekp` provides Python workflows for moire electronic-structure studies:
+<p align="center">
+  <a href="README.zh.md">中文</a>
+  ·
+  <a href="examples/README.md">Examples</a>
+  ·
+  <a href="#kp-workflow">KP workflow</a>
+  ·
+  <a href="examples/data-manifest.yaml">Data manifest</a>
+</p>
 
-- `tapw`: truncated atomic plane-wave calculations and post-processing for twisted bilayer systems.
-- `kp`: continuum-model construction, symmetry projection, and model validation utilities.
+<p align="center">
+  <img alt="Python" src="https://img.shields.io/badge/python-3.11%2B-blue">
+  <img alt="Package" src="https://img.shields.io/badge/package-tapw%20%7C%20kp-4c6ef5">
+  <img alt="Status" src="https://img.shields.io/badge/status-CPC%20release%20candidate-orange">
+  <img alt="Data" src="https://img.shields.io/badge/data-external%20datasets-lightgrey">
+</p>
 
-The repository is packaged as a single editable Python project with command-line entry points for both modules.
+MoireKP is a Python package for moire electronic-structure workflows. It starts from OpenMX-derived real-space Hamiltonian and overlap matrices, builds truncated atomic plane-wave (TAPW) source models, and fits low-energy continuum models with symmetry diagnostics.
+
+| Module | Role | Main outputs |
+| --- | --- | --- |
+| `tapw` | Build TAPW Hamiltonians and compute bands, source-space symmetry representations, and topology data. | `band/`, `symmetry/`, `topology/` |
+| `kp` | Inspect TAPW spectra, project low-energy spaces, project symmetry, and export standalone continuum models. | `inspect/`, `projection/`, `symmetry/`, `model/` |
+
+The release interface uses one config per case, short commands, and canonical output directories. Legacy split configs, old CLI aliases, and old output layouts are not part of the release-facing API.
+
+## Contents
+
+- [What It Does](#what-it-does)
+- [Installation](#installation)
+- [Quick Checks](#quick-checks)
+- [TAPW Workflow](#tapw-workflow)
+- [KP Workflow](#kp-workflow)
+- [Output Layout](#output-layout)
+- [Examples And Data](#examples-and-data)
+- [Release Status](#release-status)
+
+## What It Does
+
+MoireKP is designed for workflows that need both a TAPW source Hamiltonian and a fitted low-energy continuum model:
+
+- Generate TAPW band data from OpenMX `H/S` matrices and structure inputs.
+- Export TAPW raw-H source symmetry representation matrices.
+- Compute Berry curvature, quantum geometry, and Wilson-loop/WCC data.
+- Inspect TAPW band/Q-block spectra before choosing low-energy states.
+- Build projected/downfolded effective Hamiltonians.
+- Project TAPW source symmetry into the KP continuum basis.
+- Fit and export standalone `model/evaluate.py` packages for band, topology, and figure-data generation.
 
 ## Installation
 
@@ -18,104 +62,259 @@ conda env create -f environment.yml
 conda activate moirekp
 ```
 
-The environment file installs the package in editable mode with `python -m pip install -e .`.
+`environment.yml` installs the package in editable mode. After installation, verify that the commands come from the active environment:
+
+```bash
+which python
+which tapw
+which kp
+tapw --help
+kp --help
+```
+
+For manual environment rebuilds, use MKL BLAS/LAPACK. Avoid accidentally running stale `tapw` or `kp` scripts from `~/.local/bin`.
 
 ## Quick Checks
 
-These checks are the clean-clone smoke surface. They do not require external
-OpenMX matrices, TAPW Q-shell arrays, or precomputed KP outputs.
+These checks run from a clean source clone. They do not require external OpenMX matrices, TAPW Q-shell arrays, or precomputed KP outputs.
 
 ```bash
-python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py -q  # clean-clone
-tapw --help  # clean-clone
-tapw init --help  # clean-clone
-kp --help  # clean-clone
+python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py -q
+tapw --help
+tapw init --help
+kp --help
+```
+
+Before a release tag, run the fast baseline:
+
+```bash
+python -m pytest -q -p no:cacheprovider -m "not slow and not external_data"
 ```
 
 ## TAPW Workflow
 
-Generate starter configuration files:
+Generate a starter config:
 
 ```bash
-tapw init -o output_dir
+tapw init -o workdir
 ```
 
-Edit `output_dir/config.yaml` to point to the required OpenMX-derived input
-files, then run the same config through the requested TAPW workflows:
+Edit `workdir/config.yaml`, then run the requested TAPW workflows with the same config:
 
 ```bash
-cd output_dir
-tapw run -c config.yaml
-tapw symm -c config.yaml
-tapw topo -c config.yaml  # when topology settings are present
+tapw run  -c workdir/config.yaml
+tapw symm -c workdir/config.yaml
+tapw topo -c workdir/config.yaml
 ```
 
-New TAPW configs use `case.output_root` plus per-workflow sections
-(`bands`, `symmetry`, `topology`) and write
-`outputs/<valley>/qNN/<workflow>/`. For example, `bands.valley: K1` with
-`bands.q_shell: 6` writes `outputs/K1/q06`.
+A typical release-style TAPW config has this shape:
 
-TAPW symmetry writes three release files:
-`symmetry/representations.npz`, `symmetry/residuals.csv`, and
-`symmetry/summary.md`.
-Canonical topology grid directories include the sampled reciprocal-coordinate
-range, for example `grid21x21_b1_m0p5_0p5_b2_m0p5_0p5`.
+```yaml
+case:
+  output_root: outputs
 
-## Continuum-Model Workflow
+bands:
+  valley: K1
+  q_shell: 6
+  efermi: -4.10
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 40
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
 
-The `kp` command works with YAML source and model configurations under `examples/<material>_<angle>/kp/configs/`.
-The release example commands consume external TAPW arrays or precomputed KP
-outputs; clean-clone checks are limited to package metadata and CLI surfaces.
+symmetry:
+  valley: K1
+  q_shell: 6
 
-New KP configs should use one case file for inspect, projection, symmetry, and
-model fitting:
+topology:
+  valley: Gamma
+  q_shell: 3
+  mesh:
+    n_b1: 21
+    n_b2: 21
+    range_b1: [-0.5, 0.5]
+    range_b2: [-0.5, 0.5]
+  bands:
+    vbm2:
+      sector: valence
+      indices: [-1, -2]
+  berry_curvature:
+    - bands: vbm2
+  quantum_geometry:
+    - bands: vbm2
+  wcc:
+    - bands: vbm2
+      loop: b2
+```
+
+The config does not use workflow `enable` switches. The command selects which section is executed.
+
+## KP Workflow
+
+KP uses one case YAML for inspect, projection, symmetry projection, and model fitting:
+
+```bash
+kp inspect -c kp/configs/K1_q06.yaml
+kp project -c kp/configs/K1_q06.yaml
+kp symm    -c kp/configs/K1_q06.yaml
+kp model   -c kp/configs/K1_q06.yaml
+```
+
+Keep `kp inspect` as the first step. It reports TAPW bands, Q-block spectra, and candidate low-energy states before you choose `project.nlow_state_list`, fitting windows, and reference Q points.
+
+A typical KP config has this shape:
+
+```yaml
+case:
+  profile: K1
+  q_shell: q06
+  output_root: ../outputs
+
+material:
+  name: MoTe2
+  spin: up
+  efermi: -4.10
+  hamk_file: ../../tapw/outputs/K1/q06/band/hamiltonian_k.npy
+  qset1_file: ../../tapw/outputs/K1/q06/band/g_vectors_group1.npy
+  qset2_file: ../../tapw/outputs/K1/q06/band/g_vectors_group2.npy
+  band_file: ../../tapw/outputs/K1/q06/band/energies_vbm.txt
+
+inspect:
+  energy_window: [-1.0, 1.0]
+
+project:
+  nlow_state_list: [[0], [0]]
+  e_ref: -4.10
+
+symm:
+  tapw_symmetry_dir: ../../tapw/outputs/K1/q06/symmetry
+
+model:
+  energy_window: [-1.0, 1.0]
+```
+
+Conventions:
+
+- `case` describes the output identity, such as `profile`, `q_shell`, and `output_root`.
+- `material` describes input data and physical references, such as TAPW files, spin labels, and `efermi`.
+- `inspect.energy_window` controls the displayed `E - material.efermi` range; all available bands are still computed and drawn.
+- `project.e_ref` is the projection/downfolding reference energy. It may equal `material.efermi`, but it has a different role.
+- `kp symm` reads `symm.tapw_symmetry_dir`; users do not list symmetry operations in the KP config.
+- `kp model` directly writes the standalone model. There is no separate release-facing `kp export` step.
+
+Model topology is handled inside the exported standalone model. After `kp model`, edit the user parameters at the top of `model/evaluate.py` and run:
+
+```bash
+python evaluate.py
+```
+
+## Output Layout
+
+TAPW canonical layout:
 
 ```text
-kp/
-  configs/K1_q06.yaml
-  outputs/K1/q06/
-    inspect/
-    projection/
-    symmetry/
-    model/
+outputs/
+  K1/
+    q06/
+      band/
+        energies_vbm.txt
+        energies_cbm.txt
+        wavefunctions_vbm.npy
+        wavefunctions_cbm.npy
+        hamiltonian_k.npy
+        g_vectors_group1.npy
+        g_vectors_group2.npy
+        kpoints.npy
+      symmetry/
+        representations.npz
+        residuals.csv
+        summary.md
+  Gamma/
+    q03/
+      topology/
+        grid21x21_b1_m0p5_0p5_b2_m0p5_0p5/
+          chern_summary.json
+          berry_curvature_vbm2.txt
+          berry_curvature_vbm2.pdf
+          quantum_geometry_vbm2.txt
+          quantum_geometry_vbm2.pdf
+          quantum_geometry_vbm2_trace_condition.txt
+          wcc_vbm2_loop_b2.txt
+          wcc_vbm2_loop_b2.pdf
 ```
 
-Typical operations are:
+KP canonical layout:
 
-```bash
-kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
-kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
-kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
-kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml  # external-data
+```text
+outputs/
+  K1/
+    q06/
+      inspect/
+        spectrum.txt
+        scatter.pdf
+        wavefunctions.npz
+      projection/
+        heff.npy
+        eigvals.txt
+        wavefunctions.npz
+        basis.npz
+        basis.md
+        scatter.pdf
+      symmetry/
+        representations.npz
+        residuals.csv
+        summary.md
+      model/
+        README.md
+        MODEL.md
+        evaluate.py
+        model_data.npz
+        eigvals.npy
+        band_comparison.pdf
+        band_comparison_all.pdf
+        q_lattice_harmonics.pdf
 ```
 
-`kp model` writes the standalone evaluator and data directly into
-`kp/outputs/<profile>/<q_shell>/model/` as part of the release workflow.
-The exported `model/evaluate.py` also contains user-editable topology switches
-for model Berry curvature, quantum geometry, and WCC calculations; there is no
-separate `kp topo` command in the release interface.
+Valley and q-shell are directory levels. Non-default topology ranges are encoded in the grid id, for example:
 
-KP uses `inspect`, not a top-level `plot` section. `inspect.energy_window`
-controls the displayed `E - material.efermi` range while still drawing all
-available bands. `material.efermi` is the shared energy reference; `project.e_ref`
-is the projection/downfolding reference and should be set explicitly for
-reproducible models.
+```text
+grid21x41_b1_0p0_0p5_b2_m0p5_0p5
+grid21x41_b1_m0p5_0p0_b2_m0p5_0p5
+```
 
-For symmetry projection, KP reads the TAPW symmetry output directory from
-`symm.tapw_symmetry_dir`; users do not list operations in the KP config.
+## Examples And Data
 
-For `kp model`, prefer `model.fit.mode: auto_low_energy` when the target is a
-low-energy continuum model. See `docs/project_auto_low_energy.md` for the
-automatic band, subspace, matrix, and parameter-quality reports.
+The repository tracks configs and small template inputs. Large OpenMX matrices, TAPW arrays, symmetry exports, and precomputed KP outputs are external data and are not committed to the source repository.
 
-See `examples/README.md` for the release-facing example layout and `examples/data-manifest.yaml` for the current dataset provenance status.
+Common entry points:
 
-## Release Metadata
+```text
+examples/tapw/mote2_9.43/
+examples/tapw/mgi2_9.43/
+examples/mote2_3.89/
+examples/mgi2_3.89/
+```
 
-Release license, DOI, and public data URL metadata are not finalized in this
-checkout. Track those items in `RELEASE_BLOCKERS.md` before publishing an
-archival release. Do not infer a license, DOI, or public dataset URL from local
-paths or unpublished artifacts.
+Dataset provenance and release status are tracked in:
+
+```text
+examples/data-manifest.yaml
+```
+
+Once the external data are available, run TAPW and KP workflows using the configs in each example directory.
+
+## Release Status
+
+The release license, DOI, and public data URL still need final confirmation. Before an archival release, review:
+
+```text
+RELEASE_BLOCKERS.md
+RELEASE_VALIDATION.md
+examples/data-manifest.yaml
+```
 
 Before tagging a formal CPC archive, run:
 
@@ -123,5 +322,4 @@ Before tagging a formal CPC archive, run:
 scripts/release_gate.sh
 ```
 
-This enables `MOIREKP_RELEASE_FINAL=1` and must fail until the license, DOI,
-public data URL, checksums, and release blockers are resolved.
+This enables final release checks and should fail until license, DOI, public data URL, checksums, and release blockers are resolved.
