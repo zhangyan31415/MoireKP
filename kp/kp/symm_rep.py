@@ -18,6 +18,7 @@ import yaml
 from .config.case import normalize_case_config
 from .io.tapw_loader import load_Q_sets
 from .symmetry.exactify_representation import build_basis_labels
+from .symmetry.geometry import bM_candidates_from_q_distances, canonical_bM_pair_from_candidates
 from .symmetry.projection import _model_q_sets
 
 
@@ -328,10 +329,72 @@ def _reciprocal_basis_from_metadata(metadata: Mapping[str, Any]) -> np.ndarray |
     b2 = exact.get("bM2")
     if b1 is None or b2 is None:
         return None
-    basis = np.column_stack([np.asarray(b1, dtype=float)[:2], np.asarray(b2, dtype=float)[:2]])
+    basis = np.vstack([np.asarray(b1, dtype=float)[:2], np.asarray(b2, dtype=float)[:2]])
     if abs(float(np.linalg.det(basis))) < 1.0e-12:
         return None
     return basis
+
+
+def _source_reciprocal_basis_from_request(request: KpSymmRepRequest) -> np.ndarray | None:
+    with request.config_path.open("r", encoding="utf-8") as handle:
+        cfg = normalize_case_config(yaml.safe_load(handle), config_path=request.config_path)
+    material = cfg.get("material", {}) if isinstance(cfg.get("material"), Mapping) else {}
+    qset1_file = material.get("qset1_file")
+    qset2_file = material.get("qset2_file")
+    if qset1_file in (None, "") or qset2_file in (None, ""):
+        return None
+    q1, q2 = load_Q_sets(
+        str(_as_path(str(qset1_file), base_dir=request.config_path.parent)),
+        str(_as_path(str(qset2_file), base_dir=request.config_path.parent)),
+    )
+    candidates = bM_candidates_from_q_distances(q1, q2)
+    if not candidates:
+        return None
+    b1, b2 = canonical_bM_pair_from_candidates(candidates, angle_deg=60.0)
+    return np.vstack([np.asarray(b1, dtype=float), np.asarray(b2, dtype=float)])
+
+
+def _point_to_model_linear_from_metadata(metadata: Mapping[str, Any]) -> np.ndarray | None:
+    frame = metadata.get("frame")
+    if not isinstance(frame, Mapping):
+        return None
+    transform = frame.get("k_transform")
+    if not isinstance(transform, Mapping):
+        return None
+    matrix = transform.get("linear_matrix")
+    if matrix is not None:
+        arr = np.asarray(matrix, dtype=float)
+        if arr.shape == (2, 2):
+            return arr
+    rotation_deg = transform.get("rotation_deg")
+    if rotation_deg is None:
+        return None
+    angle = np.deg2rad(float(rotation_deg))
+    c = float(np.cos(angle))
+    s = float(np.sin(angle))
+    return np.array([[c, -s], [s, c]], dtype=float)
+
+
+def _coords_to_model_fractional(
+    coords: Sequence[float],
+    *,
+    model_reciprocal_basis: np.ndarray,
+    source_reciprocal_basis: np.ndarray | None,
+    point_to_model_linear: np.ndarray | None,
+) -> np.ndarray:
+    source_basis = (
+        np.asarray(source_reciprocal_basis, dtype=float).reshape(2, 2)
+        if source_reciprocal_basis is not None
+        else np.asarray(model_reciprocal_basis, dtype=float).reshape(2, 2)
+    )
+    linear = (
+        np.asarray(point_to_model_linear, dtype=float).reshape(2, 2)
+        if point_to_model_linear is not None
+        else np.eye(2, dtype=float)
+    )
+    coord2 = np.asarray(coords[:2], dtype=float)
+    model_cart = linear @ (coord2 @ source_basis)
+    return np.linalg.solve(np.asarray(model_reciprocal_basis, dtype=float).reshape(2, 2).T, model_cart)
 
 
 def _linear_matrix_from_k_map(k_map: Mapping[str, Any]) -> np.ndarray | None:
@@ -361,6 +424,8 @@ def _operation_target_shift(
     source_point: str,
     heff_index: int,
     reciprocal_basis: np.ndarray | None,
+    source_reciprocal_basis: np.ndarray | None = None,
+    point_to_model_linear: np.ndarray | None = None,
     tol: float = 5.0e-5,
 ) -> tuple[str, np.ndarray] | None:
     if operation.validated_same_k_indices is not None and int(heff_index) not in operation.validated_same_k_indices:
@@ -370,16 +435,26 @@ def _operation_target_shift(
     linear = _linear_matrix_from_k_map(operation.k_map)
     if linear is None or reciprocal_basis is None:
         return source_point, np.zeros(2, dtype=int)
-    frac = np.asarray(coords[:2], dtype=float)
-    cart = reciprocal_basis @ frac
-    mapped_frac = np.linalg.solve(reciprocal_basis, linear @ cart)
+    source_frac = _coords_to_model_fractional(
+        coords,
+        model_reciprocal_basis=reciprocal_basis,
+        source_reciprocal_basis=source_reciprocal_basis,
+        point_to_model_linear=point_to_model_linear,
+    )
+    mapped_frac = np.linalg.solve(reciprocal_basis.T, linear @ (source_frac @ reciprocal_basis))
     best: tuple[float, str, np.ndarray] | None = None
     for label, target_coords in points.items():
-        target_frac = np.asarray(target_coords[:2], dtype=float)
-        shift = np.rint(mapped_frac - target_frac).astype(int)
-        residual = float(np.linalg.norm(mapped_frac - target_frac - shift))
+        target_frac = _coords_to_model_fractional(
+            target_coords,
+            model_reciprocal_basis=reciprocal_basis,
+            source_reciprocal_basis=source_reciprocal_basis,
+            point_to_model_linear=point_to_model_linear,
+        )
+        lattice_delta = mapped_frac - target_frac
+        shift_to_mapped = np.rint(lattice_delta).astype(int)
+        residual = float(np.linalg.norm(lattice_delta - shift_to_mapped))
         if best is None or residual < best[0]:
-            best = (residual, str(label), shift)
+            best = (residual, str(label), -shift_to_mapped)
     if best is None or best[0] > float(tol):
         return None
     return best[1], best[2]
@@ -791,6 +866,8 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
     heff = np.load(request.heff_path, mmap_mode="r")
     operations, metadata = _load_operations(request.representations_path)
     reciprocal_basis = _reciprocal_basis_from_metadata(metadata)
+    source_reciprocal_basis = _source_reciprocal_basis_from_request(request)
+    point_to_model_linear = _point_to_model_linear_from_metadata(metadata)
     model_basis_labels = _load_model_basis_labels(request, metadata)
     spin_operator_stack = _load_spin_operator(
         request.projection_dir / "spin_operator.npy",
@@ -841,6 +918,8 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
                 source_point=point,
                 heff_index=index,
                 reciprocal_basis=reciprocal_basis,
+                source_reciprocal_basis=source_reciprocal_basis,
+                point_to_model_linear=point_to_model_linear,
             )
             if target is None:
                 continue

@@ -539,6 +539,49 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertEqual(_infer_symmetry_operations_from_manifest(manifest, "K1"), ["C3z"])
         self.assertEqual(_infer_symmetry_operations_from_manifest(manifest, "Gamma"), ["TR", "C3z"])
 
+    def test_symm_loads_packed_tapw_representations(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            symm_dir = tmp / "symmetry"
+            symm_dir.mkdir()
+            metadata = {
+                "matrices": [
+                    {
+                        "operation": "C3z",
+                        "key": "C3z",
+                        "source_valley": "Gamma",
+                        "target_valley": "Gamma",
+                        "supported": True,
+                        "antiunitary": False,
+                        "k_map": {"type": "rotation", "angle_deg": 120.0},
+                        "q_map": {"type": "rotation", "angle_deg": 120.0},
+                        "sector_map": "identity",
+                    }
+                ]
+            }
+            np.savez_compressed(
+                symm_dir / "representations.npz",
+                C3z_data=np.array([1.0 + 0.0j, -1.0 + 0.0j]),
+                C3z_indices=np.array([0, 1], dtype=np.int64),
+                C3z_indptr=np.array([0, 1, 2], dtype=np.int64),
+                C3z_shape=np.array([2, 2], dtype=np.int64),
+                metadata_json=json.dumps(metadata),
+            )
+
+            run_cfg = SimpleNamespace(
+                symm_cfg={"tapw_symmetry_dir": str(symm_dir)},
+                cfg_dir=str(tmp),
+                valley="Gamma",
+            )
+            rep_root, manifest, requests = projection_mod._load_manifest_and_operation_requests(run_cfg)
+            self.assertEqual(rep_root, symm_dir)
+            self.assertEqual([request["source"] for request in requests], ["C3z"])
+
+            entry = _operation_entry(manifest, "Gamma", "C3z")
+            self.assertEqual(entry["raw_h_operator_file"], "representations.npz:C3z")
+            matrix = projection_mod._load_matrix(rep_root / entry["raw_h_operator_file"])
+            np.testing.assert_allclose(matrix.toarray(), np.diag([1.0, -1.0]))
+
     def test_symm_omitted_operations_runs_and_reports_inference(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -624,6 +667,11 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(row["matrix_file"], "representations.npz")
             self.assertEqual(row["matrix_array_key"], "C3z")
             self.assertEqual(row["matrix_source"], "kp_symm_exactified_action")
+            self.assertEqual(row["matrix_scope"], "point_independent_continuum_action")
+            self.assertEqual(row["valid_k_domain"], "all_model_k")
+            self.assertTrue(row["reference_pairs_are_not_domain_restrictions"])
+            self.assertEqual(row["exactification_reference_pairs"], row["pairs"])
+            self.assertEqual(row["projection_diagnostic_pairs"], row["pairs"])
             self.assertNotIn("representation_file", row)
             self.assertFalse((out_dir / "diagnostics" / "C3_low_representation_raw.npy").exists())
 

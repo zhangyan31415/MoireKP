@@ -925,7 +925,7 @@ def sweep_wcc(eig_vec_grid, occ_bands, kappa1_values, kappa2_values, direction="
 
 
 def _load_wcc_g_vectors(output_dir, valley_str):
-    output_dir = Path(output_dir)
+    output_dir = Path(output_dir).expanduser().resolve()
     search_roots = [
         output_dir,
         output_dir.parent,

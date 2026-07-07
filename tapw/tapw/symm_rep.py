@@ -40,7 +40,7 @@ class ConfigSymmRepRequest:
     cache_enabled: bool = True
 
 
-_HIGH_SYMMETRY_CACHE_SCHEMA = "tapw.symm_rep.high_symmetry_wavefunctions.v1"
+_HIGH_SYMMETRY_CACHE_SCHEMA = "tapw.symm_rep.high_symmetry_wavefunctions.v2"
 _HIGH_SYMMETRY_CACHE_FILE = "high_symmetry_wavefunctions.npz"
 
 
@@ -170,6 +170,78 @@ def _build_point_calculator(config: Config) -> BandStructureCalculator:
     )
 
 
+def _integer_lattice_residual(vectors: np.ndarray, basis: np.ndarray) -> float:
+    vectors = np.asarray(vectors, dtype=float)
+    basis = np.asarray(basis, dtype=float).reshape(2, 2)
+    if vectors.size == 0:
+        return 0.0
+    try:
+        coeffs = np.linalg.solve(basis.T, vectors[:, :2].T).T
+    except np.linalg.LinAlgError:
+        return float("inf")
+    rounded = np.rint(coeffs)
+    return float(np.linalg.norm(vectors[:, :2] - rounded @ basis, axis=1).max())
+
+
+def _candidate_reciprocal_vectors(groups: list[np.ndarray], *, max_norm: float) -> np.ndarray:
+    vectors = [np.asarray(group, dtype=float)[:, :2] for group in groups if len(group) > 0]
+    if not vectors:
+        return np.empty((0, 2), dtype=float)
+    points = np.vstack(vectors)
+    candidates: list[np.ndarray] = []
+    for vector in points:
+        if 1.0e-12 < float(np.linalg.norm(vector)) <= max_norm:
+            candidates.append(np.asarray(vector, dtype=float))
+    for source in points:
+        deltas = points - source
+        norms = np.linalg.norm(deltas, axis=1)
+        for delta in deltas[(norms > 1.0e-12) & (norms <= max_norm)]:
+            candidates.append(np.asarray(delta, dtype=float))
+    if not candidates:
+        return np.empty((0, 2), dtype=float)
+    return np.unique(np.round(np.vstack(candidates), decimals=12), axis=0)
+
+
+def _snap_reciprocal_basis_to_g_vectors(
+    reference_basis: np.ndarray,
+    groups: list[np.ndarray],
+    *,
+    relative_tol: float = 5.0e-3,
+    residual_tol: float = 1.0e-7,
+) -> np.ndarray:
+    """Snap the reciprocal basis rows to the actual finite-Q grid while preserving row directions."""
+    reference = np.asarray(reference_basis, dtype=float).reshape(2, 2)
+    group_vectors = [np.asarray(group, dtype=float)[:, :2] for group in groups if len(group) > 0]
+    if not group_vectors:
+        return reference
+    all_vectors = np.vstack(group_vectors)
+    row_norms = np.linalg.norm(reference, axis=1)
+    max_norm = max(float(np.max(row_norms)) * 2.5, 1.0e-12)
+    candidates = _candidate_reciprocal_vectors(group_vectors, max_norm=max_norm)
+    if len(candidates) == 0:
+        return reference
+
+    snapped_rows: list[np.ndarray] = []
+    for row, row_norm in zip(reference, row_norms):
+        if float(row_norm) <= 1.0e-12:
+            return reference
+        distances = np.linalg.norm(candidates - row, axis=1)
+        index = int(np.argmin(distances))
+        if float(distances[index]) > max(residual_tol, relative_tol * float(row_norm)):
+            return reference
+        snapped_rows.append(np.asarray(candidates[index], dtype=float))
+
+    snapped = np.vstack(snapped_rows)
+    if abs(float(np.linalg.det(snapped))) <= 1.0e-14:
+        return reference
+
+    reference_residual = _integer_lattice_residual(all_vectors, reference)
+    snapped_residual = _integer_lattice_residual(all_vectors, snapped)
+    if snapped_residual <= residual_tol and snapped_residual < max(reference_residual, residual_tol):
+        return snapped
+    return reference
+
+
 def _request_cache_path(request: ConfigSymmRepRequest) -> Path | None:
     if not request.cache_enabled:
         return None
@@ -251,6 +323,7 @@ def _sewing_context_from_calculator(calculator: BandStructureCalculator, config:
             np.asarray(getattr(calculator.structure, "reciprocal_Tmat", np.eye(3))[1][:2], dtype=float),
         ]
     )
+    reciprocal = _snap_reciprocal_basis_to_g_vectors(reciprocal, [g1, g2])
     return {
         "g_vectors_by_group": [g1, g2],
         "reciprocal_basis": reciprocal,

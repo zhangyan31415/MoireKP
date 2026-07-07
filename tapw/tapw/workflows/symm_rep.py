@@ -20,6 +20,7 @@ _HAMK_RE = re.compile(r"^hamk_(?P<point>.+)_valley\.npy$")
 _SAVED_BAND_RE = re.compile(r"^band_(?P<edge>VBM|CBM)_(?P<point>.+)_valley\.txt$")
 _RAW_H_SUFFIX = "_rawH.npz"
 _ANTIUNITARY_NAMES = {"T", "TR", "C2T"}
+_SYMM_REP_SEWING_ATOL = 5.0e-4
 
 
 @dataclass(frozen=True)
@@ -278,7 +279,7 @@ def _reciprocal_shift_for_closed_action(
     coords: np.ndarray,
     reciprocal_basis: np.ndarray,
     *,
-    atol: float = 1.0e-6,
+    atol: float = _SYMM_REP_SEWING_ATOL,
 ) -> np.ndarray | None:
     if not operation.source_action:
         return np.zeros(2, dtype=int)
@@ -304,7 +305,7 @@ def _sewing_matrix_from_shift(
     reciprocal_shift_coeffs: np.ndarray,
     dim: int,
     spin_blocks: int,
-    atol: float = 1.0e-6,
+    atol: float = _SYMM_REP_SEWING_ATOL,
 ) -> scipy.sparse.csr_matrix:
     shift_cart = np.asarray(reciprocal_shift_coeffs, dtype=float).reshape(2) @ np.asarray(reciprocal_basis, dtype=float).reshape(2, 2)
     if float(np.linalg.norm(shift_cart)) <= float(atol):

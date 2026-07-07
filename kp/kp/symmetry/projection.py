@@ -527,8 +527,11 @@ def _unitarity_error(matrix: np.ndarray) -> float:
 
 
 def _load_matrix(path: Path) -> np.ndarray:
+    path, matrix_key = _split_packed_matrix_selector(path)
     if not path.exists():
         raise FileNotFoundError(f"Representation file missing: {path}")
+    if matrix_key is not None:
+        return _load_packed_matrix(path, matrix_key)
     if path.suffix == ".npy":
         return np.asarray(np.load(path), dtype=np.complex128)
     if path.suffix == ".npz":
@@ -543,6 +546,34 @@ def _load_matrix(path: Path) -> np.ndarray:
                     return np.asarray(data[key], dtype=np.complex128)
             raise ValueError(f"Cannot find matrix key in {path}; keys={data.files}")
     raise ValueError(f"Unsupported representation file extension: {path}")
+
+
+def _split_packed_matrix_selector(path: Path) -> tuple[Path, str | None]:
+    text = str(path)
+    marker = ".npz:"
+    index = text.rfind(marker)
+    if index < 0:
+        return path, None
+    return Path(text[: index + len(".npz")]), text[index + len(marker) :]
+
+
+def _load_packed_matrix(path: Path, key: str) -> np.ndarray:
+    payload = np.load(path, allow_pickle=False)
+    if key in payload.files:
+        return np.asarray(payload[key], dtype=np.complex128)
+    csr_keys = (f"{key}_data", f"{key}_indices", f"{key}_indptr", f"{key}_shape")
+    if all(name in payload.files for name in csr_keys):
+        if _sparse is None:
+            raise RuntimeError(f"scipy is required to load sparse packed matrix {path}:{key}")
+        return _sparse.csr_matrix(
+            (
+                np.asarray(payload[csr_keys[0]], dtype=np.complex128),
+                np.asarray(payload[csr_keys[1]], dtype=np.int64),
+                np.asarray(payload[csr_keys[2]], dtype=np.int64),
+            ),
+            shape=tuple(int(value) for value in payload[csr_keys[3]]),
+        )
+    raise ValueError(f"Cannot find packed matrix {key!r} in {path}; keys={payload.files}")
 
 
 def _slice_representation_for_spin(matrix: np.ndarray, spin: str, target_dim: int) -> RepresentationData:
@@ -1770,10 +1801,20 @@ def _write_summary_md(path: Path, summary: dict[str, Any]) -> None:
             lines.append(f"- pg_spin_leakage: {op['pg_spin_leakage']:.6e}")
         if op.get("raw_h_spin_leakage") is not None:
             lines.append(f"- raw_h_spin_leakage: {op['raw_h_spin_leakage']:.6e}")
+        if op.get("matrix_scope"):
+            lines.append(f"- matrix_scope: {op['matrix_scope']}")
+        if op.get("valid_k_domain"):
+            lines.append(f"- valid_k_domain: {op['valid_k_domain']}")
+        if op.get("reference_pairs_are_not_domain_restrictions") is not None:
+            lines.append(
+                "- reference_pairs_are_not_domain_restrictions: "
+                f"{op['reference_pairs_are_not_domain_restrictions']}"
+            )
         for pair in op["pairs"]:
             raw = pair["raw"]
             line = (
-                f"- k target/source {pair['target_k_index']}/{pair['source_k_index']}: "
+                f"- reference projection diagnostic target/source "
+                f"{pair['target_k_index']}/{pair['source_k_index']}: "
                 f"full cov={pair.get('full_space_covariance_residual', float('nan')):.6e}, "
                 f"raw cov={raw['heff_covariance_residual']:.6e}, "
                 f"raw leakage={raw['subspace_leakage']:.6e}"
@@ -1882,10 +1923,35 @@ def _load_manifest_and_operation_requests(
     tapw_symmetry_dir = _resolve(run_cfg.symm_cfg.get("tapw_symmetry_dir"), run_cfg.cfg_dir)
     if tapw_symmetry_dir is None:
         raise ValueError("symm.tapw_symmetry_dir is required")
+    packed_path = Path(tapw_symmetry_dir) / "representations.npz"
+    if packed_path.exists():
+        rep_root, manifest = _load_packed_tapw_symmetry_manifest(packed_path)
+        operations_raw = run_cfg.symm_cfg.get("operations")
+        inferred_operations = operations_raw in (None, [])
+        source_operations = (
+            _infer_symmetry_operations_from_manifest(manifest, run_cfg.valley)
+            if inferred_operations
+            else [str(op) for op in operations_raw]
+        )
+        if inferred_operations:
+            print(f"[kp symm] inferred symmetry operations: {', '.join(source_operations)}")
+        operation_requests: list[dict[str, Any]] = []
+        for operation in source_operations:
+            canonical = _validate_operation_label(operation)
+            operation_requests.append(
+                {
+                    "source": _source_manifest_operation_name(canonical),
+                    "output": _output_operation_name(operation, canonical),
+                    "requested": operation,
+                }
+            )
+        return rep_root, manifest, operation_requests
     rep_root = Path(tapw_symmetry_dir) / "representations"
     manifest_path = rep_root / "manifest.json"
     if not manifest_path.exists():
-        raise FileNotFoundError(f"Representation manifest missing: {manifest_path}")
+        raise FileNotFoundError(
+            f"Representation manifest missing: {manifest_path}; packed TAPW file also missing: {packed_path}"
+        )
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 
     operations_raw = run_cfg.symm_cfg.get("operations")
@@ -1909,6 +1975,41 @@ def _load_manifest_and_operation_requests(
             }
         )
     return rep_root, manifest, operation_requests
+
+
+def _load_packed_tapw_symmetry_manifest(packed_path: Path) -> tuple[Path, Mapping[str, Any]]:
+    payload = np.load(packed_path, allow_pickle=False)
+    if "metadata_json" not in payload.files:
+        raise ValueError(f"Packed TAPW symmetry file lacks metadata_json: {packed_path}")
+    metadata = json.loads(str(payload["metadata_json"].item()))
+    matrices_raw = metadata.get("matrices")
+    if not isinstance(matrices_raw, list):
+        raise ValueError(f"Packed TAPW symmetry metadata lacks matrices list: {packed_path}")
+
+    matrices: list[dict[str, Any]] = []
+    for row in matrices_raw:
+        if not isinstance(row, Mapping):
+            continue
+        entry = dict(row)
+        key = str(entry.get("key", entry.get("operation", entry.get("name", ""))))
+        if not key:
+            continue
+        if entry.get("supported") is False:
+            continue
+        entry.setdefault("operation", key)
+        entry.setdefault("name", entry["operation"])
+        entry.setdefault("source_valley", entry.get("source_valley", entry.get("valley", "Gamma")))
+        entry.setdefault("target_valley", entry.get("target_valley", entry["source_valley"]))
+        entry["raw_h_operator_file"] = f"{packed_path.name}:{key}"
+        entry["packed_matrix_file"] = packed_path.name
+        entry["packed_matrix_key"] = key
+        entry.setdefault("k_pairs", [[0, 0]])
+        entry.setdefault("k_pairs_source", "packed_tapw_single_point_default")
+        matrices.append(entry)
+
+    manifest = dict(metadata)
+    manifest["matrices"] = matrices
+    return packed_path.parent, manifest
 
 
 def _load_projection_arrays_and_layout(
@@ -2786,6 +2887,11 @@ def _exactify_and_write_projection_summary(
         operation_summary["matrix_file"] = f"exactified_{name}.npy"
         operation_summary["matrix_kind"] = "continuum_internal_rep_exact"
         operation_summary["matrix_source"] = "kp_symm_exactified_action"
+        operation_summary["matrix_scope"] = "point_independent_continuum_action"
+        operation_summary["valid_k_domain"] = "all_model_k"
+        operation_summary["reference_pairs_are_not_domain_restrictions"] = True
+        operation_summary["exactification_reference_pairs"] = list(operation_summary.get("pairs", []))
+        operation_summary["projection_diagnostic_pairs"] = list(operation_summary.get("pairs", []))
         operation_summary["status"] = "exactified"
         operation_summary["exactification_status"] = status
         operation_summary["exactification_report_file"] = f"{name.lower()}_exactification_report.json"

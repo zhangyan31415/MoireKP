@@ -125,6 +125,8 @@ def _apply_release_section_to_mapping(target: dict[str, Any], section: dict[str,
         target["hamk_save"] = bool(section["save_hamiltonian"])
     if "save_wavefunctions" in section:
         target["eig_vec_cal"] = bool(section["save_wavefunctions"])
+    if "use_sparse_dot_mkl" in section:
+        target["use_sparse_dot_mkl"] = bool(section["use_sparse_dot_mkl"])
     if workflow == "chern":
         mesh = _copy_section(section.get("mesh"))
         if mesh:

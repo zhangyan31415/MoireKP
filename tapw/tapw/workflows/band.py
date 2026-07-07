@@ -127,13 +127,39 @@ def _remove_canonical_manifest_files(workflow_dir: Path) -> None:
         if candidate is not None and candidate.exists():
             candidate.unlink()
 
+def _normalize_mkl_interface_layer_for_sparse_dot_mkl() -> None:
+    value = os.environ.get("MKL_INTERFACE_LAYER")
+    if value in {None, "LP64", "ILP64"}:
+        return
+
+    parts = [part.strip() for part in value.split(",")]
+    for candidate in ("ILP64", "LP64"):
+        if candidate in parts:
+            os.environ["MKL_INTERFACE_LAYER"] = candidate
+            return
+
+
 # Optional MKL-accelerated sparse GEMM (can be a big speedup for g@H@g^H)
+_normalize_mkl_interface_layer_for_sparse_dot_mkl()
 try:
     from sparse_dot_mkl import dot_product_mkl  # type: ignore
     _HAS_SPARSE_DOT_MKL = True
 except Exception:  # pragma: no cover
     dot_product_mkl = None
     _HAS_SPARSE_DOT_MKL = False
+
+
+def _raise_sparse_dot_mkl_unavailable() -> None:
+    raise RuntimeError(
+        "sparse_dot_mkl is required for MKL-accelerated sparse TAPW "
+        "projection but is not installed or cannot be imported. This package "
+        "is needed because the g @ H/S @ g† projection is a bands hotspot, and "
+        "SciPy sparse matmul is much slower for these TAPW matrices. Install "
+        "it in the active environment with `python -m pip install "
+        "sparse-dot-mkl`. To use the SciPy fallback instead, set "
+        "`compute.use_sparse_dot_mkl: false` and call projection code without "
+        "`force_sparse_dot=True`."
+    )
 
 
 _MEMMAP_CACHE: dict[str, np.memmap] = {}
@@ -3722,13 +3748,18 @@ class BandStructureCalculator:
     def Getk_super_gauge_sparse_final_HS(self, Hr, Sr, k):
         """Get final Hamiltonian for orthogonal or non-orthogonal basis (no symmetry)"""
         phase_ctx = self._build_getk_phase_context(k)
+        use_sparse_dot = bool(getattr(self.config, "use_sparse_dot_mkl", False))
         Hk = self._assemble_sparse_realspace_matrix(Hr, phase_ctx, type="H")
-        Hk = self.cal_TAPW_hamiltonian_k(Hk)
+        Hk = self.cal_TAPW_hamiltonian_k_cpu(Hk, force_sparse_dot=use_sparse_dot)
         if self.config.orthogonal_basis:
             return Hk, None
         else:
             Sk = self._assemble_sparse_realspace_matrix(Sr, phase_ctx, type="S")
-            Sk = self.cal_TAPW_hamiltonian_k(Sk)
+            Sk_fast = self._cal_TAPW_spin_degenerate_overlap_k_cpu(
+                Sk,
+                force_sparse_dot=use_sparse_dot,
+            )
+            Sk = Sk_fast if Sk_fast is not None else self.cal_TAPW_hamiltonian_k(Sk)
             if not self.config.ge:
                 Hk = self.gen_H_new(Hk, Sk)
                 return Hk, None
@@ -3755,12 +3786,56 @@ class BandStructureCalculator:
     @timing_decorator_factory(process_id=0)
     def gen_H_new_cpu(self, hamk, samk):
         """CPU version of Hamiltonian transformation"""
+        fast = self._gen_H_new_spin_degenerate_overlap_cpu(hamk, samk)
+        if fast is not None:
+            return fast
+
         # Use the legacy symmetric-orthogonalization path so TAPW eigenvectors
-        # remain consistent with historical `tapw` outputs.
+        # remain consistent with historical `tapw` outputs when the overlap has
+        # no simple spin-degenerate block structure.
         s_eig, s_vec = scipy.linalg.eigh(samk, check_finite=False)
         s_inv_sqrt = np.diag(1.0 / np.sqrt(s_eig))
         uminvud = s_vec @ s_inv_sqrt @ s_vec.conj().T
         return uminvud @ hamk @ uminvud
+
+    def _gen_H_new_spin_degenerate_overlap_cpu(self, hamk, samk):
+        samk = samk.toarray() if scipy.sparse.issparse(samk) else np.asarray(samk)
+        if samk.ndim != 2 or samk.shape[0] != samk.shape[1]:
+            return None
+        dim = int(samk.shape[0])
+        if dim % 2 != 0 or dim == 0:
+            return None
+
+        half = dim // 2
+        s_up = samk[:half, :half]
+        s_down = samk[half:, half:]
+        s_ud = samk[:half, half:]
+        s_du = samk[half:, :half]
+
+        scale = max(1.0, float(np.max(np.abs(samk))))
+        tol = 1.0e-10 * scale
+        if np.max(np.abs(s_ud)) > tol or np.max(np.abs(s_du)) > tol:
+            return None
+        if np.max(np.abs(s_up - s_down)) > tol:
+            return None
+        s0 = np.asarray(s_up)
+        if np.max(np.abs(s0 - s0.conj().T)) > tol:
+            return None
+
+        hamk = hamk.toarray() if scipy.sparse.issparse(hamk) else np.asarray(hamk)
+        if hamk.shape != samk.shape:
+            return None
+
+        s_eig, s_vec = scipy.linalg.eigh(s0, check_finite=False)
+        s_inv_sqrt = np.diag(1.0 / np.sqrt(s_eig))
+        uminvud = s_vec @ s_inv_sqrt @ s_vec.conj().T
+
+        out = np.empty_like(hamk, dtype=np.result_type(hamk, np.complex128))
+        out[:half, :half] = uminvud @ hamk[:half, :half] @ uminvud
+        out[:half, half:] = uminvud @ hamk[:half, half:] @ uminvud
+        out[half:, :half] = uminvud @ hamk[half:, :half] @ uminvud
+        out[half:, half:] = uminvud @ hamk[half:, half:] @ uminvud
+        return out
     
     @timing_decorator_factory(process_id=0)
     def cal_TAPW_hamiltonian_k(self, hamk):
@@ -3773,6 +3848,8 @@ class BandStructureCalculator:
         gH = tapw_parameters.g_matrix_conj
 
         use_sparse_dot = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
+        if use_sparse_dot and not _HAS_SPARSE_DOT_MKL:
+            _raise_sparse_dot_mkl_unavailable()
         if use_sparse_dot and _HAS_SPARSE_DOT_MKL and scipy.sparse.issparse(g) and scipy.sparse.issparse(hamk) and scipy.sparse.issparse(gH):
             # MKL sparse GEMM is multi-threaded and usually much faster than SciPy's sparse matmul.
             tmp = dot_product_mkl(g, hamk, dense=False)
@@ -3781,6 +3858,68 @@ class BandStructureCalculator:
 
         result = g @ hamk @ gH
         return result.toarray() if scipy.sparse.issparse(result) else np.asarray(result)
+
+    def _cal_TAPW_spin_degenerate_overlap_k_cpu(self, overlap, force_sparse_dot: bool = False):
+        g = self.TAPW_parameters.g_matrix
+        if g.shape[0] % 2 != 0 or g.shape[1] % 2 != 0:
+            return None
+        if overlap.shape[0] != overlap.shape[1] or overlap.shape[0] != g.shape[1]:
+            return None
+
+        row_half = g.shape[0] // 2
+        col_half = g.shape[1] // 2
+
+        def _max_abs(matrix) -> float:
+            if scipy.sparse.issparse(matrix):
+                return float(np.max(np.abs(matrix.data))) if matrix.nnz else 0.0
+            matrix = np.asarray(matrix)
+            return float(np.max(np.abs(matrix))) if matrix.size else 0.0
+
+        g_up = g[:row_half, :col_half].tocsr() if scipy.sparse.issparse(g) else np.asarray(g[:row_half, :col_half])
+        g_ud = g[:row_half, col_half:]
+        g_du = g[row_half:, :col_half]
+        g_down = g[row_half:, col_half:]
+
+        g_scale = max(1.0, _max_abs(g))
+        g_tol = 1.0e-12 * g_scale
+        if _max_abs(g_ud) > g_tol or _max_abs(g_du) > g_tol:
+            return None
+        if _max_abs(g_up - g_down) > g_tol:
+            return None
+
+        s_up = overlap[:col_half, :col_half]
+        s_ud = overlap[:col_half, col_half:]
+        s_du = overlap[col_half:, :col_half]
+        s_down = overlap[col_half:, col_half:]
+
+        s_scale = max(1.0, _max_abs(overlap))
+        s_tol = 1.0e-10 * s_scale
+        if _max_abs(s_ud) > s_tol or _max_abs(s_du) > s_tol:
+            return None
+        if _max_abs(s_up - s_down) > s_tol:
+            return None
+
+        g_up_h = g_up.conj().T.tocsr() if scipy.sparse.issparse(g_up) else g_up.conj().T
+        use_sparse_dot = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
+        if use_sparse_dot and not _HAS_SPARSE_DOT_MKL:
+            _raise_sparse_dot_mkl_unavailable()
+        if (
+            use_sparse_dot
+            and _HAS_SPARSE_DOT_MKL
+            and scipy.sparse.issparse(g_up)
+            and scipy.sparse.issparse(s_up)
+            and scipy.sparse.issparse(g_up_h)
+        ):
+            tmp = dot_product_mkl(g_up, s_up, dense=False)
+            projected_up = np.asarray(dot_product_mkl(tmp, g_up_h, dense=True))
+        else:
+            projected_up = g_up @ s_up @ g_up_h
+            projected_up = projected_up.toarray() if scipy.sparse.issparse(projected_up) else np.asarray(projected_up)
+
+        projected = np.zeros((2 * row_half, 2 * row_half), dtype=projected_up.dtype)
+        projected[:row_half, :row_half] = projected_up
+        projected[row_half:, row_half:] = projected_up
+        return projected
 
     def _get_raw_tapw_projected_hs_for_parameters(
         self,
@@ -3816,6 +3955,8 @@ class BandStructureCalculator:
             projector = projector.tocsr()
             projector_h = projector.conj().T.tocsr() if projector_h is None else projector_h.tocsr()
             use_sparse_dot = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
+            if use_sparse_dot and not _HAS_SPARSE_DOT_MKL:
+                _raise_sparse_dot_mkl_unavailable()
             if (
                 use_sparse_dot
                 and _HAS_SPARSE_DOT_MKL

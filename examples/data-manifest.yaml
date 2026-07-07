@@ -121,8 +121,8 @@ datasets:
         sha256: 0c835de77cc732117b8f86f8df35ab98c20996df8a88f2940ce9d629b3c9840c
       - path: examples/tapw/mgi2_9.43/configs/Gamma_q03.yaml
         kind: file
-        size_bytes: 1223
-        sha256: 3fbbbb3e18d8e4275c65710b0f2ebe77bea3bb137fb69048c334df66a93b28a9
+        size_bytes: 1224
+        sha256: 295994faa157d3ac1292f6da0ca643e2be120ab96b2b76d1728a282bfae00090
       - path: examples/tapw/mgi2_9.43/openmx/soc/band_info.json
         kind: file
         size_bytes: 102

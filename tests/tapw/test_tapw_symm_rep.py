@@ -1,6 +1,7 @@
 import csv
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -339,6 +340,68 @@ def test_partial_reciprocal_sewing_allows_finite_g_truncation():
     assert matrix.shape == (2, 2)
     assert matrix[1, 0] == pytest.approx(1.0)
     assert matrix[0, 1] == pytest.approx(0.0)
+
+
+def test_symm_rep_sewing_default_tolerance_allows_large_moire_roundoff():
+    from tapw.workflows.symm_rep import _sewing_matrix_from_shift
+
+    matrix = _sewing_matrix_from_shift(
+        g_vectors_by_group=[np.array([[0.0, 0.0], [1.0, 0.0]])],
+        reciprocal_basis=np.array([[1.0004, 0.0], [0.0, 1.0]]),
+        reciprocal_shift_coeffs=np.array([1, 0]),
+        dim=2,
+        spin_blocks=1,
+    )
+    too_loose_matrix = _sewing_matrix_from_shift(
+        g_vectors_by_group=[np.array([[0.0, 0.0], [1.0, 0.0]])],
+        reciprocal_basis=np.array([[1.0006, 0.0], [0.0, 1.0]]),
+        reciprocal_shift_coeffs=np.array([1, 0]),
+        dim=2,
+        spin_blocks=1,
+    )
+
+    assert matrix[1, 0] == pytest.approx(1.0)
+    assert too_loose_matrix[1, 0] == pytest.approx(0.0)
+
+
+def test_config_sewing_context_snaps_reciprocal_basis_to_actual_g_vectors():
+    from tapw import symm_rep
+    from tapw.chern_post import build_boundary_sewing
+
+    g_vectors = np.array(
+        [
+            [0.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [1.0, 1.0],
+        ],
+        dtype=float,
+    )
+    calculator = SimpleNamespace(
+        TAPW_parameters=SimpleNamespace(g_vec_list_K1=g_vectors, g_vec_list_K2=g_vectors.copy()),
+        structure=SimpleNamespace(
+            reciprocal_Tmat=np.array(
+                [
+                    [1.0001, 0.0, 0.0],
+                    [0.0, 0.9999, 0.0],
+                    [0.0, 0.0, 1.0],
+                ],
+                dtype=float,
+            )
+        ),
+    )
+    config = SimpleNamespace(twist=SimpleNamespace(spin=True))
+
+    context = symm_rep._sewing_context_from_calculator(calculator, config)
+
+    np.testing.assert_allclose(context["reciprocal_basis"], np.eye(2), atol=1.0e-12)
+    sewing = build_boundary_sewing(
+        context["g_vectors_by_group"],
+        np.array([1.0, 0.0]) @ context["reciprocal_basis"],
+        dim_h=16,
+        spin_blocks=context["spin_blocks"],
+    )
+    assert sewing.matched_blocks == 8
 
 
 def test_symm_rep_falls_back_to_saved_vec_and_band_files_without_hamk(tmp_path):

@@ -92,6 +92,97 @@ def test_kp_symm_rep_phase_label_uses_spinful_c3_omega():
     assert _phase_label(-1.0 + 0.0j) == "-1"
 
 
+def test_kp_symm_rep_c3_little_group_shift_uses_fractional_row_basis():
+    from kp.symm_rep import KpSymmetryOperation, _operation_target_shift
+
+    operation = KpSymmetryOperation(
+        name="C3z",
+        matrix=np.eye(1, dtype=np.complex128),
+        antiunitary=False,
+        source="test",
+        k_map={"type": "rotation", "angle_deg": 120.0},
+    )
+    reciprocal_basis = np.array(
+        [
+            [1.0, 0.0],
+            [0.5, np.sqrt(3.0) / 2.0],
+        ],
+        dtype=float,
+    )
+
+    target = _operation_target_shift(
+        operation,
+        (1.0 / 3.0, 1.0 / 3.0, 0.0),
+        {"K": (1.0 / 3.0, 1.0 / 3.0, 0.0)},
+        source_point="K",
+        heff_index=0,
+        reciprocal_basis=reciprocal_basis,
+    )
+    assert target is not None
+    assert target[0] == "K"
+    np.testing.assert_array_equal(target[1], np.array([1, 0]))
+
+    assert (
+        _operation_target_shift(
+            operation,
+            (0.5, 0.0, 0.0),
+            {"M": (0.5, 0.0, 0.0)},
+            source_point="M",
+            heff_index=0,
+            reciprocal_basis=reciprocal_basis,
+        )
+        is None
+    )
+
+
+def test_kp_symm_rep_c3_little_group_shift_uses_model_frame_transform():
+    from kp.symm_rep import KpSymmetryOperation, _operation_target_shift
+
+    operation = KpSymmetryOperation(
+        name="C3z",
+        matrix=np.eye(1, dtype=np.complex128),
+        antiunitary=False,
+        source="test",
+        k_map={"type": "rotation", "angle_deg": 120.0},
+    )
+    source_basis = np.array(
+        [
+            [np.sqrt(3.0) / 2.0, 0.5],
+            [0.0, 1.0],
+        ],
+        dtype=float,
+    )
+    model_basis = np.array(
+        [
+            [1.0, 0.0],
+            [0.5, np.sqrt(3.0) / 2.0],
+        ],
+        dtype=float,
+    )
+    point_to_model_linear = np.array(
+        [
+            [-np.sqrt(3.0) / 2.0, 0.5],
+            [-0.5, -np.sqrt(3.0) / 2.0],
+        ],
+        dtype=float,
+    )
+
+    target = _operation_target_shift(
+        operation,
+        (1.0 / 3.0, 1.0 / 3.0, 0.0),
+        {"K": (1.0 / 3.0, 1.0 / 3.0, 0.0)},
+        source_point="K",
+        heff_index=0,
+        reciprocal_basis=model_basis,
+        source_reciprocal_basis=source_basis,
+        point_to_model_linear=point_to_model_linear,
+    )
+
+    assert target is not None
+    assert target[0] == "K"
+    np.testing.assert_array_equal(target[1], np.array([0, -1]))
+
+
 def test_kp_symm_rep_uses_polar_unitary_for_band_block(tmp_path):
     from kp.symm_rep import run_configured_symm_rep
 
@@ -253,6 +344,77 @@ def test_kp_symm_rep_uses_reciprocal_shift_sewing_for_little_group(tmp_path):
         projected = payload["K__valence__block0__C3z"]
         raw_projected = payload["K__valence__block0__C3z__raw_projected"]
     assert np.allclose(projected.conj().T @ projected, np.eye(2))
+    assert np.allclose(raw_projected, np.array([[0.0, 0.0], [1.0, 0.0]], dtype=np.complex128))
+
+
+def test_kp_symm_rep_run_uses_model_frame_for_c3_sewing(tmp_path):
+    from kp.symmetry.projection import _model_q_sets
+    from kp.symm_rep import run_configured_symm_rep
+
+    cfg_path = _write_config(tmp_path)
+    sqrt3 = np.sqrt(3.0)
+    source_b1 = np.array([sqrt3 / 2.0, 0.5], dtype=float)
+    source_b2 = np.array([0.0, 1.0], dtype=float)
+    q_source = np.array([[0.0, 0.0], source_b1, source_b2], dtype=float)
+    qset1_path = tmp_path / "qset1.npy"
+    qset2_path = tmp_path / "qset2.npy"
+    np.save(qset1_path, q_source)
+    np.save(qset2_path, q_source)
+
+    payload = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    payload["material"]["qset1_file"] = str(qset1_path)
+    payload["material"]["qset2_file"] = str(qset2_path)
+    payload["symm_rep"]["points"] = {"K": {"coords": [1.0 / 3.0, 1.0 / 3.0], "index": 0}}
+    cfg_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    root = _write_inputs(tmp_path)
+    np.save(root / "projection" / "heff.npy", np.diag([-1.0, -1.0, 1.0, 2.0, 3.0, 4.0])[None, :, :])
+
+    rotation_deg = -150.0
+    q_model, _ = _model_q_sets(q_source, q_source, rotation_deg=rotation_deg)
+    q_offset = q_model[0].tolist()
+    model_basis = [[1.0, 0.0], [0.5, sqrt3 / 2.0]]
+    point_to_model_linear = [
+        [-sqrt3 / 2.0, 0.5],
+        [-0.5, -sqrt3 / 2.0],
+    ]
+    metadata = {
+        "frame": {
+            "k_transform": {
+                "rotation_deg": rotation_deg,
+                "linear_matrix": point_to_model_linear,
+            }
+        },
+        "kp_symm_exactification": {
+            "bM1": model_basis[0],
+            "bM2": model_basis[1],
+            "n_orb": [1, 1],
+            "sectors": [
+                {"name": "L1", "qset": "qset1", "n_orb": 1, "q_offset": q_offset},
+                {"name": "L2", "qset": "qset2", "n_orb": 1, "q_offset": q_offset},
+            ],
+        },
+        "operations": [
+            {
+                "name": "C3z",
+                "matrix_array_key": "C3z",
+                "antiunitary": False,
+                "matrix_kind": "continuum_internal_rep_exact",
+                "matrix_source": "kp_symm_exactified_action",
+                "model_action": {"k_map": {"type": "rotation", "angle_deg": 120.0}},
+            },
+        ],
+    }
+    np.savez_compressed(
+        root / "symmetry" / "representations.npz",
+        C3z=np.eye(6, dtype=np.complex128),
+        __metadata_json__=np.asarray(json.dumps(metadata)),
+    )
+
+    output_dir = run_configured_symm_rep(cfg_path)
+
+    with np.load(output_dir / "band_representations.npz", allow_pickle=False) as payload:
+        raw_projected = payload["K__valence__block0__C3z__raw_projected"]
     assert np.allclose(raw_projected, np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128))
 
 

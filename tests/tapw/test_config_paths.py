@@ -228,6 +228,7 @@ def test_release_sections_normalize_to_runtime_config(tmp_path):
                     "num_bands": 100,
                     "save_hamiltonian": True,
                     "save_wavefunctions": False,
+                    "use_sparse_dot_mkl": True,
                     "kpath": {
                         "labels": ["G", "M", "K", "G"],
                         "points_per_segment": 40,
@@ -289,6 +290,7 @@ def test_release_sections_normalize_to_runtime_config(tmp_path):
     assert config.compute.num_bands_cal == 100
     assert config.compute.hamk_save is True
     assert config.compute.eig_vec_cal is False
+    assert config.compute.use_sparse_dot_mkl is True
     assert config.compute.orthogonal_basis is False
     assert config.compute.zero_potential_layers == [1]
     assert config.compute.Electric_field_in_eVpA == 0.1

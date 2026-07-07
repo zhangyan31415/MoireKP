@@ -146,6 +146,26 @@ def test_wcc_loop_uses_canonical_ij_storage_mapping_with_manifest():
     assert chern_post._wcc_direction_from_loop("b2", grid_order="ij") == "ky"
 
 
+def test_wcc_g_vector_lookup_resolves_relative_topology_dir(tmp_path, monkeypatch):
+    qshell_dir = tmp_path / "Q_shell_8"
+    topo_dir = qshell_dir / "topo"
+    topo_dir.mkdir(parents=True)
+    group1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    group2 = np.array([[0.0, 0.0], [0.0, 1.0]], dtype=float)
+    np.save(qshell_dir / "g_vec_list_8_Gamma_1layer.npy", group1)
+    np.save(qshell_dir / "g_vec_list_8_Gamma_2layer.npy", group2)
+
+    monkeypatch.chdir(topo_dir)
+    groups, files = chern_post._load_wcc_g_vectors(".", "Gamma")
+
+    assert files == [
+        str(qshell_dir / "g_vec_list_8_Gamma_1layer.npy"),
+        str(qshell_dir / "g_vec_list_8_Gamma_2layer.npy"),
+    ]
+    assert np.allclose(groups[0], group1)
+    assert np.allclose(groups[1], group2)
+
+
 def test_topology_grid_output_dir_separates_nondefault_ranges(tmp_path):
     config = {
         "compute": {"num_chern": 31},
