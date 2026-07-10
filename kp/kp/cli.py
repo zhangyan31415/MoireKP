@@ -1560,7 +1560,13 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     gauge_report: GaugeAnchorReport | None = None
     resolved_norb_fix_list: list[Any] | None = None
     symm_cfg = cfg.get("symm", {})
-    if _project_requests_auto_gauge(project_cfg) and _symm_can_validate_auto_gauge(symm_cfg):
+    auto_gauge = _project_requests_auto_gauge(project_cfg)
+    if auto_gauge and not _symm_can_validate_auto_gauge(symm_cfg):
+        raise ValueError(
+            "project auto gauge requires enabled symm.tapw_symmetry_dir so anchors are "
+            "validated before production projection"
+        )
+    if auto_gauge:
         print("[kp]   resolving auto gauge against TAPW source symmetry")
         gauge_report = resolve_symmetry_validated_project_gauge(
             cfg_path,

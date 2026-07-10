@@ -166,6 +166,69 @@ def test_symmetry_resolves_identity_from_projection_artifacts(tmp_path) -> None:
     assert resolved == artifact_identity
 
 
+def test_symmetry_identity_rejects_project_k_indices_config_drift(tmp_path) -> None:
+    project_dir = tmp_path / "projection"
+    project_dir.mkdir()
+    hamk_path = tmp_path / "hamk.npy"
+    q1 = np.array([[0.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+    hamk = np.stack([np.eye(4), 2.0 * np.eye(4)]).astype(np.complex128)
+    heff = np.eye(2, dtype=np.complex128)[None, :, :]
+    np.save(hamk_path, hamk)
+    np.save(project_dir / "heff.npy", heff)
+    identity = projection_mod.build_projection_basis_identity(
+        hamk_file=hamk_path,
+        hamk_fallback=hamk[0],
+        qset1=q1,
+        qset2=q2,
+        spin="up",
+        mode="k1",
+        energy_scale=1.0,
+        nlow_state_list=[[0], [0]],
+        resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+        gauge_mode="manual",
+        num_layer_list=[1, 1],
+        num_orb_per_layer_list=[1, 1],
+        orbital_block_dim=1,
+        model_dim=2,
+        k_indices=[0],
+    )
+    artifact_identity = {**identity, "heff_hash": hash_array(heff)}
+    scalar_identity = {key: np.asarray(value) for key, value in artifact_identity.items()}
+    np.savez(project_dir / "basis.npz", **scalar_identity)
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        wavefunctions=np.eye(2, dtype=np.complex128)[None, :, :],
+        k_indices=np.asarray([0]),
+        **scalar_identity,
+    )
+    ctx = SimpleNamespace(
+        config=SimpleNamespace(
+            cfg_dir=str(tmp_path),
+            project_cfg={"out_dir": str(project_dir), "k_indices": [1]},
+            material={"hamk_file": str(hamk_path), "energy_unit": "eV"},
+            spin="up",
+        ),
+        q1=q1,
+        q2=q2,
+        mode="k1",
+        nlow_state_list=[[0], [0]],
+        num_layer_list=[1, 1],
+        num_orb_per_layer_list=[1, 1],
+        orb0=1,
+        hamk_source_by_k={0: hamk[0]},
+    )
+    gauge_report = SimpleNamespace(gauge_mode="manual")
+
+    with pytest.raises(ValueError, match="kp symm.*k_indices_hash"):
+        _resolve_symmetry_project_identity(
+            ctx,
+            gauge_report=gauge_report,
+            resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+            low_dim=2,
+        )
+
+
 def _load_canonical_symmetry_payload(out_dir: Path) -> tuple[dict[str, np.ndarray], dict]:
     with np.load(out_dir / "representations.npz", allow_pickle=False) as payload:
         arrays = {name: np.asarray(payload[name]) for name in payload.files if name != "__metadata_json__"}

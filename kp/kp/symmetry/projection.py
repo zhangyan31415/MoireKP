@@ -31,7 +31,6 @@ from ..identity import (
     PROJECTION_ARTIFACT_IDENTITY_FIELDS,
     build_projection_basis_identity,
     load_projection_artifact_identity,
-    load_projection_k_indices,
     require_identity_fields,
     require_matching_identity,
 )
@@ -2614,6 +2613,26 @@ def _resolve_symmetry_project_identity(
     hamk_file = _resolve(run_cfg.material.get("hamk_file"), run_cfg.cfg_dir)
     if hamk_file is None:
         raise ValueError("material.hamk_file is required for kp symm projection identity")
+    hamk_source = load_hamk(hamk_file, mmap_mode="r")
+    source_k_count = int(hamk_source.shape[0]) if hamk_source.ndim == 3 else 1
+    configured_k_indices_raw = run_cfg.project_cfg.get("k_indices")
+    if configured_k_indices_raw is None:
+        configured_k_indices = list(range(source_k_count))
+    elif isinstance(configured_k_indices_raw, str):
+        configured_k_indices = [
+            int(part.strip())
+            for part in configured_k_indices_raw.split(",")
+            if part.strip()
+        ]
+    elif isinstance(configured_k_indices_raw, Sequence):
+        configured_k_indices = [int(value) for value in configured_k_indices_raw]
+    else:
+        raise ValueError("project.k_indices must be a list or comma-separated string")
+    for index in configured_k_indices:
+        if index < 0 or index >= source_k_count:
+            raise IndexError(
+                f"project.k_indices contains {index}, but available k indices are 0..{source_k_count - 1}"
+            )
     reference_k = sorted(ctx.hamk_source_by_k)[0]
     expected = build_projection_basis_identity(
         hamk_file=hamk_file,
@@ -2630,7 +2649,7 @@ def _resolve_symmetry_project_identity(
         num_orb_per_layer_list=ctx.num_orb_per_layer_list,
         orbital_block_dim=ctx.orb0,
         model_dim=int(low_dim),
-        k_indices=load_projection_k_indices(Path(project_dir) / "heff.npy"),
+        k_indices=configured_k_indices,
     )
     return _validate_symmetry_project_identity(expected, actual)
 

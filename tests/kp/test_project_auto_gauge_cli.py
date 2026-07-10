@@ -86,13 +86,7 @@ def _write_tiny_tapw_c3_source(symm_dir: Path) -> None:
     )
 
 
-def test_project_gauge_auto_writes_basis_selection_reports(monkeypatch, tmp_path: Path) -> None:
-    monkeypatch.setattr(
-        cli,
-        "plot_eigs_scatter",
-        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
-    )
-
+def test_project_auto_requires_source_symmetry(tmp_path: Path) -> None:
     cfg_path = _write_tiny_project_config(
         tmp_path,
         {
@@ -105,19 +99,10 @@ def test_project_gauge_auto_writes_basis_selection_reports(monkeypatch, tmp_path
         },
     )
 
-    cli.cmd_project_from_config(str(cfg_path))
+    with pytest.raises(ValueError, match="auto gauge.*symm.tapw_symmetry_dir"):
+        cli.cmd_project_from_config(str(cfg_path))
 
-    out_dir = tmp_path / "project"
-    assert (out_dir / "heff.npy").exists()
-    assert (out_dir / "basis.npz").exists()
-    assert (out_dir / "basis.md").exists()
-
-    with np.load(out_dir / "basis.npz", allow_pickle=True) as payload:
-        assert payload["norb_fix_list"].tolist() == [[[[0, 1.0]]], [[[0, 1.0]]]]
-    report_text = (out_dir / "basis.md").read_text(encoding="utf-8")
-    assert "gauge_mode: `auto_scdm`" in report_text
-    assert "symmetry_closure_quality: `not_available`" in report_text
-    assert "condition_number" in report_text
+    assert not (tmp_path / "project" / "heff.npy").exists()
 
 
 def test_symmetry_gauge_resolver_needs_no_project_artifacts_and_writes_nothing(tmp_path: Path) -> None:
