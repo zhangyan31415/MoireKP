@@ -49,7 +49,10 @@ from .plot_style import (
 #     write_sweep_json,
 #     SweepRow,
 # )
-from .symmetry.projection import run_symmetry_projection_from_config
+from .symmetry.projection import (
+    resolve_symmetry_validated_project_gauge,
+    run_symmetry_projection_from_config,
+)
 from .config.case import normalize_case_config
 
 HARTREE_TO_EV = 27.2113845
@@ -781,88 +784,6 @@ def _symm_can_validate_auto_gauge(symm_cfg: Any) -> bool:
     if not _as_bool(symm_cfg.get("enable", True)):
         return False
     return bool(symm_cfg.get("tapw_symmetry_dir"))
-
-
-def _project_requests_inline_symmetry_gauge_validation(project_cfg: dict[str, Any]) -> bool:
-    value = project_cfg.get("validate_auto_gauge_with_symmetry")
-    if value is not None:
-        return _as_bool(value)
-    gauge = project_cfg.get("gauge")
-    if isinstance(gauge, dict):
-        value = gauge.get("validate_with_symmetry", gauge.get("symmetry_validation"))
-        if isinstance(value, str):
-            return value.strip().lower() in {"inline", "required", "require", "true", "yes", "1"}
-        if value is not None:
-            return _as_bool(value)
-    return False
-
-
-def _cached_symmetry_basis_payload(symm_cfg: Any, resolve) -> dict[str, Any] | None:
-    if not isinstance(symm_cfg, dict):
-        return None
-    output_dir = symm_cfg.get("output_dir")
-    if output_dir is None:
-        return None
-    resolved = resolve(output_dir)
-    if resolved is None:
-        return None
-    representations_path = Path(resolved) / "representations.npz"
-    if not representations_path.exists():
-        return None
-    with np.load(representations_path, allow_pickle=False) as payload_file:
-        if "__metadata_json__" not in payload_file.files:
-            return None
-        metadata = json.loads(str(np.asarray(payload_file["__metadata_json__"]).item()))
-    payload = metadata.get("project_basis")
-    if not isinstance(payload, dict):
-        return None
-    if not isinstance(payload.get("resolved_norb_fix_list"), list):
-        raise ValueError(f"Cached symmetry metadata lacks project_basis.resolved_norb_fix_list: {representations_path}")
-    return payload
-
-
-def _with_deferred_symmetry_validation(report: GaugeAnchorReport) -> GaugeAnchorReport:
-    warnings = list(report.warnings)
-    message = "symmetry validation deferred to kp symm"
-    if message not in warnings:
-        warnings.append(message)
-    return GaugeAnchorReport(
-        gauge_mode=report.gauge_mode,
-        resolved_norb_fix_list=report.resolved_norb_fix_list,
-        selections=report.selections,
-        metric=report.metric,
-        state_selection_quality=report.state_selection_quality,
-        gauge_anchor_quality=report.gauge_anchor_quality,
-        symmetry_closure_quality={
-            "status": "deferred",
-            "source": "kp_symm",
-            "subspace_leakage": None,
-            "reason": "Run `kp symm` to validate auto gauge anchors against TAPW source symmetry.",
-        },
-        warnings=warnings,
-    )
-
-
-def _gauge_report_from_basis_payload(payload: dict[str, Any]) -> GaugeAnchorReport:
-    return GaugeAnchorReport(
-        gauge_mode=str(payload.get("gauge_mode", "auto_scdm")),
-        resolved_norb_fix_list=list(payload.get("resolved_norb_fix_list", [])),
-        selections=list(payload.get("selections", [])),
-        metric=dict(payload.get("metric", {"type": "orthonormal", "basis_is_orthonormal": True})),
-        state_selection_quality=dict(payload.get("state_selection_quality", {"status": "not_evaluated"})),
-        gauge_anchor_quality=dict(payload.get("gauge_anchor_quality", {"status": "unknown"})),
-        symmetry_closure_quality=dict(
-            payload.get(
-                "symmetry_closure_quality",
-                {
-                    "status": "validated",
-                    "source": "kp_symm",
-                    "subspace_leakage": None,
-                },
-            )
-        ),
-        warnings=list(payload.get("warnings", [])),
-    )
 
 
 def parse_int_list(value: str | Sequence[int] | None) -> list[int]:
@@ -1640,52 +1561,12 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     resolved_norb_fix_list: list[Any] | None = None
     symm_cfg = cfg.get("symm", {})
     if _project_requests_auto_gauge(project_cfg) and _symm_can_validate_auto_gauge(symm_cfg):
-        basis_payload = _cached_symmetry_basis_payload(symm_cfg, resolve)
-        if basis_payload is not None:
-            print("[kp]   resolving auto gauge from cached kp symm basis selection")
-            resolved_norb_fix_list = list(basis_payload["resolved_norb_fix_list"])
-            gauge_report = _gauge_report_from_basis_payload(basis_payload)
-        elif _project_requests_inline_symmetry_gauge_validation(project_cfg):
-            print("[kp]   resolving auto gauge with kp symm validation")
-            symm_summary = run_symmetry_projection_from_config(cfg_path)
-            project_basis = symm_summary.get("project_basis", {}) if isinstance(symm_summary, dict) else {}
-            resolved_from_symm = project_basis.get("resolved_norb_fix_list") if isinstance(project_basis, dict) else None
-            if not isinstance(resolved_from_symm, list):
-                raise ValueError("kp symm did not return project_basis.resolved_norb_fix_list for auto gauge")
-            basis_payload = _cached_symmetry_basis_payload(symm_cfg, resolve)
-            if basis_payload is None:
-                basis_payload = {
-                    "gauge_mode": project_basis.get("gauge_mode", "auto_scdm") if isinstance(project_basis, dict) else "auto_scdm",
-                    "resolved_norb_fix_list": resolved_from_symm,
-                    "selections": [],
-                    "metric": {"type": "orthonormal", "basis_is_orthonormal": True},
-                    "state_selection_quality": {"status": "not_evaluated"},
-                    "gauge_anchor_quality": {"status": "unknown"},
-                    "symmetry_closure_quality": {
-                        "status": "validated",
-                        "source": "kp_symm",
-                        "subspace_leakage": None,
-                    },
-                    "warnings": [],
-                }
-            resolved_norb_fix_list = resolved_from_symm
-            gauge_report = _gauge_report_from_basis_payload(basis_payload)
-        else:
-            print("[kp]   resolving auto gauge locally; symmetry validation deferred to kp symm")
-            resolved_norb_fix_list, local_report = resolve_project_gauge_anchors(
-                _selected_spin_project_input(np.asarray(hamk2d), spin),
-                q_count,
-                orb0,
-                num_layer_list,
-                spin=projection_spin,
-                Qlayer_list=[[q1], [q2_for_projection]],
-                num_orb_per_layer_list=num_orb_per_layer_list,
-                nlow_state_list=nlow_state_list,
-                norb_fix_list=norb_fix_list,
-                gauge_config=project_cfg.get("gauge"),
-                mode=mode,
-            )
-            gauge_report = _with_deferred_symmetry_validation(local_report)
+        print("[kp]   resolving auto gauge against TAPW source symmetry")
+        gauge_report = resolve_symmetry_validated_project_gauge(
+            cfg_path,
+            project_config=project_cfg,
+        )
+        resolved_norb_fix_list = list(gauge_report.resolved_norb_fix_list)
     else:
         resolved_norb_fix_list, gauge_report = resolve_project_gauge_anchors(
             _selected_spin_project_input(np.asarray(hamk2d), spin),

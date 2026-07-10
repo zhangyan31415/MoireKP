@@ -20,6 +20,7 @@ from ..blocks.blocks import (
 )
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..basis.selection import (
+    GaugeAnchorReport,
     GaugeCandidateSymmetryMetrics,
     select_gauge_candidate_by_symmetry,
     write_basis_selection_report,
@@ -2199,7 +2200,11 @@ def _build_operation_payloads(
     return operation_payloads
 
 
-def _build_projection_run_context(run_cfg: _ProjectionRunConfig) -> _ProjectionRunContext:
+def _build_projection_run_context(
+    run_cfg: _ProjectionRunConfig,
+    *,
+    create_output_dir: bool = True,
+) -> _ProjectionRunContext:
     rep_root, manifest, operation_requests = _load_manifest_and_operation_requests(run_cfg)
     (
         hamk3d,
@@ -2242,7 +2247,8 @@ def _build_projection_run_context(run_cfg: _ProjectionRunConfig) -> _ProjectionR
     )
     full_dim = int(hamk_source_by_k[required_k[0]].shape[0])
     output_dir = Path(_resolve(run_cfg.symm_cfg.get("output_dir", "symm_project"), run_cfg.cfg_dir) or "symm_project")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    if create_output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
     operation_payloads = _build_operation_payloads(
         run_cfg=run_cfg,
         rep_root=rep_root,
@@ -2560,6 +2566,36 @@ def _select_projection_gauge(
         },
     )
     return selected_gauge_candidate, gauge_report
+
+
+def _resolve_validated_projection_gauge(
+    ctx: _ProjectionRunContext,
+) -> tuple[ProjectGaugeAnchorCandidate, GaugeAnchorReport]:
+    gauge_candidates = _resolve_projection_gauge_candidates(ctx)
+    selected_gauge_candidate, gauge_report = _select_projection_gauge(ctx, gauge_candidates)
+    _validate_project_layer_lists(
+        ctx.nlow_state_list,
+        selected_gauge_candidate.resolved_norb_fix_list,
+        num_layer_list=ctx.num_layer_list,
+        context="project",
+    )
+    return selected_gauge_candidate, gauge_report
+
+
+def resolve_symmetry_validated_project_gauge(
+    cfg_path: str,
+    *,
+    project_config: Mapping[str, Any] | None = None,
+    developer_outputs: bool | None = None,
+) -> GaugeAnchorReport:
+    """Resolve auto-gauge anchors against source symmetry without writing KP artifacts."""
+
+    run_cfg = _load_projection_run_config(cfg_path, developer_outputs=developer_outputs)
+    if project_config is not None:
+        run_cfg = replace(run_cfg, project_cfg=dict(project_config))
+    ctx = _build_projection_run_context(run_cfg, create_output_dir=False)
+    _selected_gauge_candidate, gauge_report = _resolve_validated_projection_gauge(ctx)
+    return gauge_report
 
 
 def _resolve_symmetry_project_identity(
@@ -3001,15 +3037,8 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
     run_cfg = _load_projection_run_config(cfg_path, developer_outputs=developer_outputs)
     ctx = _build_projection_run_context(run_cfg)
 
-    gauge_candidates = _resolve_projection_gauge_candidates(ctx)
-    selected_gauge_candidate, gauge_report = _select_projection_gauge(ctx, gauge_candidates)
+    selected_gauge_candidate, gauge_report = _resolve_validated_projection_gauge(ctx)
     norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
-    _validate_project_layer_lists(
-        ctx.nlow_state_list,
-        norb_fix_list,
-        num_layer_list=ctx.num_layer_list,
-        context="project",
-    )
     _states, source_states, target_states, first_state = _states_for_resolved_anchors(ctx, norb_fix_list)
     low_dim = int(first_state.u_low.shape[1])
     artifact_identity = _resolve_symmetry_project_identity(

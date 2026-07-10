@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import io
+import shutil
 import sys
 import tempfile
 import unittest
@@ -853,6 +854,32 @@ class SymmetryProjectionCliTests(unittest.TestCase):
 
             self.assertTrue(observed_thresholds)
             self.assertTrue(all(value == 5.0e-3 for value in observed_thresholds))
+
+    def test_symmetry_gauge_resolver_does_not_require_or_write_project_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            self._run_minimal_two_layer_projection(
+                tmp,
+                valley="K1",
+                operation="C3",
+                d_up=np.eye(4, dtype=np.complex128),
+                manifest_entry={
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                },
+                auto_gauge=True,
+            )
+            case_root = tmp / "outputs" / "K1" / "q06"
+            shutil.rmtree(case_root)
+
+            report = projection_mod.resolve_symmetry_validated_project_gauge(
+                str(tmp / "C3_symm.yaml")
+            )
+
+            self.assertEqual(report.gauge_mode, "auto_scdm")
+            self.assertEqual(report.symmetry_closure_quality["status"], "validated")
+            self.assertFalse(case_root.exists())
 
     def test_symm_accepts_release_manifest_with_rawh_only(self) -> None:
         with tempfile.TemporaryDirectory() as td:
