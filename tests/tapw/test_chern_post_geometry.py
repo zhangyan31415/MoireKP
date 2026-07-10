@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import scipy.sparse
 from types import SimpleNamespace
 
 from tapw.workflows.band import BandStructureCalculator
@@ -183,6 +184,26 @@ def test_topology_grid_output_dir_separates_nondefault_ranges(tmp_path):
     grid_dir = chern_post._topology_grid_output_dir(output_dir, config)
 
     assert grid_dir == output_dir / "grid21x41_b1_0p0_0p5_b2_m0p5_0p5"
+
+
+def test_topology_task_output_dir_places_grid_under_case_topology_dir(tmp_path):
+    config = {
+        "topology": {
+            "mesh": {
+                "n_b1": 31,
+                "n_b2": 31,
+                "range_b1": [-0.5, 0.5],
+                "range_b2": [-0.5, 0.5],
+            }
+        },
+    }
+    case_dir = tmp_path / "Gamma" / "q04"
+
+    assert chern_post._topology_task_output_dir(case_dir, config) == case_dir / "topology"
+    assert chern_post._topology_grid_output_dir(
+        chern_post._topology_task_output_dir(case_dir, config),
+        config,
+    ) == case_dir / "topology" / "grid31x31_b1_m0p5_0p5_b2_m0p5_0p5"
 
 
 def test_topology_tasks_resolve_named_band_sets():
@@ -390,7 +411,36 @@ def test_chern_post_config_tasks_write_canonical_topology_artifact_names(tmp_pat
     vec_grid = np.zeros((4, 4, 2, 2), dtype=np.complex128)
     vec_grid[:, :, 0, 0] = 1.0
     vec_grid[:, :, 1, 1] = 1.0
-    np.save(grid_dir / "wavefunctions_vbm.npy", vec_grid.reshape(16, 2, 2))
+    wavefunction_path = grid_dir / "wavefunctions_vbm.npy"
+    np.save(wavefunction_path, vec_grid.reshape(16, 2, 2))
+    from tapw import __version__ as tapw_version
+    from tapw.identity import IDENTITY_SCHEMA, hash_file, hash_mapping
+    from tapw.symmetry.periodic_gauge import (
+        BOUNDARY_SEWING_SCHEMA,
+        BOUNDARY_SEWING_SCHEMA_VERSION,
+        save_boundary_operators,
+    )
+
+    wavefunction_hashes = {wavefunction_path.name: hash_file(wavefunction_path)}
+    save_boundary_operators(
+        grid_dir / "boundary_sewing.npz",
+        {
+            "b1": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+            "b2": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+        },
+        {
+            "schema": BOUNDARY_SEWING_SCHEMA,
+            "identity_schema": IDENTITY_SCHEMA,
+            "input_hash": hash_mapping({"wavefunction_hashes": wavefunction_hashes}),
+            "config_hash": "config-a",
+            "basis_hash": "basis-a",
+            "package_version": tapw_version,
+            "schema_version": BOUNDARY_SEWING_SCHEMA_VERSION,
+            "matrix_dimension": 2,
+            "reciprocal_basis": [[2.0 * np.pi, 0.0], [0.0, 2.0 * np.pi]],
+            "wavefunction_hashes": wavefunction_hashes,
+        },
+    )
 
     config_path = config_dir / "config.yaml"
     config_path.write_text(
@@ -620,6 +670,73 @@ def test_boundary_sewing_respects_spin_block_row_order():
     assert np.count_nonzero(sewn) == 1
     assert sewing.matched_blocks == 2
     assert sewing.missing_blocks == 2
+
+
+def test_canonical_boundary_operator_is_bound_to_wavefunction_file(tmp_path):
+    from tapw import __version__ as tapw_version
+    from tapw.identity import IDENTITY_SCHEMA, hash_file, hash_mapping
+    from tapw.symmetry.periodic_gauge import (
+        BOUNDARY_SEWING_SCHEMA,
+        BOUNDARY_SEWING_SCHEMA_VERSION,
+        save_boundary_operators,
+    )
+
+    wavefunction_path = tmp_path / "wavefunctions_vbm.npy"
+    np.save(wavefunction_path, np.eye(2, dtype=np.complex128)[None, :, :])
+    wavefunction_hashes = {wavefunction_path.name: hash_file(wavefunction_path)}
+    operators = {
+        "b1": scipy.sparse.diags([1.0, -1.0], dtype=np.complex128, format="csr"),
+        "b2": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+    }
+    reciprocal_basis = np.array([[1.0, 0.0], [0.2, 0.8]])
+    save_boundary_operators(
+        tmp_path / "boundary_sewing.npz",
+        operators,
+        {
+            "schema": BOUNDARY_SEWING_SCHEMA,
+            "identity_schema": IDENTITY_SCHEMA,
+            "input_hash": hash_mapping({"wavefunction_hashes": wavefunction_hashes}),
+            "config_hash": "config-a",
+            "basis_hash": "basis-a",
+            "package_version": tapw_version,
+            "schema_version": BOUNDARY_SEWING_SCHEMA_VERSION,
+            "matrix_dimension": 2,
+            "reciprocal_basis": reciprocal_basis.tolist(),
+            "wavefunction_hashes": wavefunction_hashes,
+        },
+    )
+
+    loaded = chern_post._load_required_boundary_operator(
+        tmp_path,
+        loop="b1",
+        wavefunction_path=wavefunction_path,
+        reciprocal_basis=reciprocal_basis,
+        expected_dim=2,
+    )
+
+    np.testing.assert_allclose(loaded.toarray(), operators["b1"].toarray())
+    np.save(wavefunction_path, np.ones((1, 2, 2), dtype=np.complex128))
+    with pytest.raises(ValueError, match="wavefunction hash"):
+        chern_post._load_required_boundary_operator(
+            tmp_path,
+            loop="b1",
+            wavefunction_path=wavefunction_path,
+            reciprocal_basis=reciprocal_basis,
+            expected_dim=2,
+        )
+
+
+def test_wilson_loop_rejects_rank_deficient_boundary_link():
+    vectors = np.zeros((2, 2, 1), dtype=np.complex128)
+    vectors[:, 0, 0] = 1.0
+    boundary = scipy.sparse.diags([0.0, 1.0], dtype=np.complex128, format="csr")
+
+    with pytest.raises(ValueError, match="boundary link is rank deficient"):
+        chern_post.wilson_loop(
+            vectors,
+            boundary_sewing=boundary,
+            boundary_singular_value_tol=1.0e-8,
+        )
 
 
 def test_field_labels_expose_normalization_and_units():

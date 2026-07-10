@@ -7,8 +7,10 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import scipy.sparse
 import yaml
 
+from . import __version__ as TAPW_VERSION
 from .artifacts import (
     array_output_filename,
     berry_flux_output_filename,
@@ -18,6 +20,12 @@ from .artifacts import (
     chern_summary_output_filename,
 )
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
+from .identity import IDENTITY_SCHEMA, hash_file, hash_mapping
+from .symmetry.periodic_gauge import (
+    BOUNDARY_SEWING_SCHEMA,
+    BOUNDARY_SEWING_SCHEMA_VERSION,
+    load_boundary_operators,
+)
 
 
 plt.rc("font", family="Times New Roman")
@@ -860,6 +868,12 @@ def build_boundary_sewing(g_vectors_by_group, reciprocal_shift, dim_h, atol=1e-6
 
 def apply_boundary_sewing(vecs, sewing):
     vecs = np.asarray(vecs)
+    if scipy.sparse.issparse(sewing):
+        if sewing.shape[0] != sewing.shape[1] or vecs.shape[0] != sewing.shape[1]:
+            raise ValueError(
+                f"Boundary sewing dimension mismatch: vecs dim={vecs.shape[0]}, operator shape={sewing.shape}."
+            )
+        return np.asarray(sewing @ vecs)
     if vecs.shape[0] != sewing.dim:
         raise ValueError(f"Boundary sewing dimension mismatch: vecs dim={vecs.shape[0]}, sewing dim={sewing.dim}.")
     sewn = np.zeros_like(vecs)
@@ -867,7 +881,12 @@ def apply_boundary_sewing(vecs, sewing):
     return sewn
 
 
-def wilson_loop(vecs_occ_path, boundary_sewing=None):
+def wilson_loop(
+    vecs_occ_path,
+    boundary_sewing=None,
+    *,
+    boundary_singular_value_tol=1.0e-8,
+):
     n_path, _, n_occ = vecs_occ_path.shape
     wilson = np.eye(n_occ, dtype=np.complex128)
     for i in range(n_path):
@@ -875,6 +894,15 @@ def wilson_loop(vecs_occ_path, boundary_sewing=None):
         if i == n_path - 1 and boundary_sewing is not None:
             current = apply_boundary_sewing(current, boundary_sewing)
         overlap = np.conj(vecs_occ_path[(i + 1) % n_path].T) @ current
+        if i == n_path - 1 and boundary_sewing is not None:
+            singular_values = np.linalg.svd(overlap, compute_uv=False)
+            minimum = float(np.min(singular_values)) if singular_values.size else 0.0
+            if not np.isfinite(minimum) or minimum < float(boundary_singular_value_tol):
+                raise ValueError(
+                    "WCC boundary link is rank deficient: "
+                    f"minimum singular value={minimum:.6e}, "
+                    f"required>={float(boundary_singular_value_tol):.6e}"
+                )
         wilson = overlap @ wilson
     phases = np.angle(np.linalg.eigvals(wilson)) / (2.0 * np.pi)
     return np.sort(phases) % 1.0
@@ -894,7 +922,15 @@ def wcc_sweep_axis_label(direction):
     raise ValueError("direction must be 'kx' or 'ky'")
 
 
-def sweep_wcc(eig_vec_grid, occ_bands, kappa1_values, kappa2_values, direction="ky", boundary_sewing=None):
+def sweep_wcc(
+    eig_vec_grid,
+    occ_bands,
+    kappa1_values,
+    kappa2_values,
+    direction="ky",
+    boundary_sewing=None,
+    boundary_singular_value_tol=1.0e-8,
+):
     """Sweep Wilson loops along one fractional axis while fixing the other."""
     if direction == "ky":
         sweep_values = np.asarray(kappa1_values)
@@ -920,8 +956,70 @@ def sweep_wcc(eig_vec_grid, occ_bands, kappa1_values, kappa2_values, direction="
         if boundary_sewing is None:
             all_wcc.append(wilson_loop(vecs_path))
         else:
-            all_wcc.append(wilson_loop(vecs_path, boundary_sewing=boundary_sewing))
+            all_wcc.append(
+                wilson_loop(
+                    vecs_path,
+                    boundary_sewing=boundary_sewing,
+                    boundary_singular_value_tol=boundary_singular_value_tol,
+                )
+            )
     return sweep_values, np.stack(all_wcc, axis=0)
+
+
+def _load_required_boundary_operator(
+    output_dir,
+    *,
+    loop,
+    wavefunction_path,
+    reciprocal_basis,
+    expected_dim,
+):
+    loop = str(loop).strip().lower()
+    if loop not in {"b1", "b2"}:
+        raise ValueError(f"Boundary sewing loop must be b1 or b2, got {loop!r}")
+    pack_path = Path(output_dir) / "boundary_sewing.npz"
+    if not pack_path.is_file():
+        raise FileNotFoundError(
+            f"Canonical WCC requires {pack_path}; rerun tapw topo with the current release"
+        )
+    operators, metadata = load_boundary_operators(pack_path)
+    if metadata.get("schema") != BOUNDARY_SEWING_SCHEMA:
+        raise ValueError(f"Unsupported boundary sewing schema: {metadata.get('schema')!r}")
+    if metadata.get("identity_schema") != IDENTITY_SCHEMA:
+        raise ValueError(f"Unsupported boundary sewing identity schema: {metadata.get('identity_schema')!r}")
+    if int(metadata.get("schema_version", -1)) != BOUNDARY_SEWING_SCHEMA_VERSION:
+        raise ValueError(f"Unsupported boundary sewing schema version: {metadata.get('schema_version')!r}")
+    if str(metadata.get("package_version", "")) != TAPW_VERSION:
+        raise ValueError(
+            f"Boundary sewing package version {metadata.get('package_version')!r} does not match TAPW {TAPW_VERSION!r}"
+        )
+    saved_basis = np.asarray(metadata.get("reciprocal_basis"), dtype=float)
+    current_basis = np.asarray(reciprocal_basis, dtype=float)
+    if saved_basis.shape != (2, 2) or not np.allclose(saved_basis, current_basis, rtol=0.0, atol=1.0e-10):
+        raise ValueError("Boundary sewing reciprocal basis does not match the topology wavefunction grid")
+    operator = operators[loop]
+    if operator.shape != (int(expected_dim), int(expected_dim)):
+        raise ValueError(
+            f"Boundary sewing operator {loop} has shape {operator.shape}; expected {(int(expected_dim), int(expected_dim))}"
+        )
+
+    wavefunction_path = Path(wavefunction_path)
+    wavefunction_hashes = dict(metadata.get("wavefunction_hashes", {}) or {})
+    expected_hash = wavefunction_hashes.get(wavefunction_path.name)
+    if not expected_hash:
+        raise ValueError(
+            f"Boundary sewing metadata does not identify wavefunction file {wavefunction_path.name}"
+        )
+    actual_hash = hash_file(wavefunction_path)
+    if actual_hash != expected_hash:
+        raise ValueError(
+            f"Boundary sewing wavefunction hash mismatch for {wavefunction_path.name}: "
+            f"{expected_hash} != {actual_hash}"
+        )
+    expected_input_hash = hash_mapping({"wavefunction_hashes": wavefunction_hashes})
+    if metadata.get("input_hash") != expected_input_hash:
+        raise ValueError("Boundary sewing input_hash does not match its wavefunction hash table")
+    return operator
 
 
 def _load_wcc_g_vectors(output_dir, valley_str):
@@ -1152,6 +1250,18 @@ def _topology_grid_output_dir(output_dir, config):
     return output_dir / grid_id
 
 
+def _topology_task_output_dir(output_dir, config):
+    output_dir = Path(output_dir)
+    if not _topology_uses_grid_layout(config):
+        return output_dir
+    grid_id = _topology_grid_id(config)
+    if output_dir.name == "topology" or output_dir.name == grid_id:
+        return output_dir
+    if output_dir.name.startswith("q") and output_dir.name[1:].isdigit():
+        return output_dir / "topology"
+    return output_dir
+
+
 def _topology_collection_dir(grid_output_dir, config):
     grid_output_dir = Path(grid_output_dir)
     return grid_output_dir.parent if grid_output_dir.name == _topology_grid_id(config) else grid_output_dir
@@ -1357,6 +1467,7 @@ def _dispatch_topology_tasks(config_path, args, config):
     band_tasks, wcc_tasks = _resolve_topology_tasks(config)
     _, _, range_k1, range_k2 = _resolve_topology_mesh(config)
     valley = _resolve_cli_valley(args.valley, config)
+    task_output_dir = _topology_task_output_dir(args.output_dir, config)
     for task in band_tasks:
         if not (task["bc"] or task["qgt"]):
             continue
@@ -1364,7 +1475,7 @@ def _dispatch_topology_tasks(config_path, args, config):
             "--config",
             str(config_path),
             "--output-dir",
-            str(args.output_dir),
+            str(task_output_dir),
             "--valley",
             str(valley),
             "--band-type",
@@ -1382,7 +1493,7 @@ def _dispatch_topology_tasks(config_path, args, config):
             "--config",
             str(config_path),
             "--output-dir",
-            str(args.output_dir),
+            str(task_output_dir),
             "--valley",
             str(valley),
             "--band-type",
@@ -2068,7 +2179,23 @@ def main(argv=None, *, prog=None):
             raise SystemExit(1)
 
         boundary_sewing = None
-        if args.wcc_sewing != "off":
+        if canonical_grid_layout:
+            if args.wcc_loop is None:
+                raise ValueError("Canonical topology WCC requires topology.wcc.loop=b1 or b2")
+            boundary_sewing = _load_required_boundary_operator(
+                output_dir,
+                loop=args.wcc_loop,
+                wavefunction_path=vec_file,
+                reciprocal_basis=b_phys_2d,
+                expected_dim=band_vec_grid.shape[-2],
+            )
+            print(
+                "[INFO] WCC projected atomic Bloch sewing enabled: loop={0}, file={1}".format(
+                    args.wcc_loop,
+                    Path(output_dir) / "boundary_sewing.npz",
+                )
+            )
+        elif args.wcc_sewing != "off":
             g_vectors_by_group, g_vector_files = _load_wcc_g_vectors(output_dir, valley_str)
             if g_vectors_by_group is None:
                 message = (
@@ -2110,6 +2237,7 @@ def main(argv=None, *, prog=None):
             kappa2_values,
             direction=wcc_direction,
             boundary_sewing=boundary_sewing,
+            boundary_singular_value_tol=1.0e-8,
         )
         wcc_bands_str = "_".join(str(i) for i in args.wcc_bands)
         if canonical_grid_layout:

@@ -24,6 +24,15 @@ from types import SimpleNamespace
 from numpy.lib.format import open_memmap
 from joblib import Parallel, delayed
 import joblib.parallel as joblib_parallel
+from .. import __version__ as TAPW_VERSION
+from ..identity import IDENTITY_SCHEMA, hash_file, hash_mapping
+from ..symmetry.periodic_gauge import (
+    BOUNDARY_SEWING_SCHEMA,
+    BOUNDARY_SEWING_SCHEMA_VERSION,
+    build_projected_boundary_operator,
+    projected_basis_hash,
+    save_boundary_operators,
+)
 from ..symmetry.representations import (
     C3_MoTe2_all,
     C3_G_matrix,
@@ -3476,6 +3485,86 @@ class BandStructureCalculator:
         if canonical_layout and mode != "chern":
             _remove_canonical_manifest_files(Path(out_path))
 
+    def _write_boundary_sewing_artifact(self, topology_dir: Path) -> Path:
+        tapw_parameters = getattr(self, "TAPW_parameters", None)
+        g_matrix = None if tapw_parameters is None else getattr(tapw_parameters, "g_matrix", None)
+        if g_matrix is None:
+            raise ValueError("Canonical TAPW topology requires TAPW_parameters.g_matrix for boundary sewing")
+        structure = getattr(self, "structure", None)
+        if structure is None or getattr(structure, "df", None) is None:
+            raise ValueError("Canonical TAPW topology requires structure metadata for boundary sewing")
+        reciprocal_basis = np.asarray(structure.reciprocal_Tmat, dtype=float)[:2, :2]
+        if reciprocal_basis.shape != (2, 2) or abs(float(np.linalg.det(reciprocal_basis))) < 1.0e-14:
+            raise ValueError("Canonical TAPW topology requires a nonsingular 2D reciprocal basis")
+
+        operators = {}
+        operator_diagnostics = {}
+        for index, name in enumerate(("b1", "b2")):
+            operator, diagnostics = build_projected_boundary_operator(
+                structure_df=structure.df,
+                g_matrix=g_matrix,
+                reciprocal_shift=reciprocal_basis[index],
+                spinful=bool(getattr(structure, "spin", False)),
+            )
+            operators[name] = operator
+            operator_diagnostics[name] = diagnostics
+
+        wavefunction_paths = [
+            topology_dir / canonical_band_filename("wavefunctions", edge)
+            for edge in ("vbm", "cbm")
+        ]
+        wavefunction_paths = [path for path in wavefunction_paths if path.is_file()]
+        if not wavefunction_paths:
+            raise FileNotFoundError(
+                f"Canonical TAPW topology did not write wavefunctions under {topology_dir}"
+            )
+        projected_dim = int(operators["b1"].shape[0])
+        wavefunction_hashes = {}
+        for wavefunction_path in wavefunction_paths:
+            wavefunctions = np.load(wavefunction_path, mmap_mode="r", allow_pickle=False)
+            if wavefunctions.ndim != 3 or int(wavefunctions.shape[1]) != projected_dim:
+                raise ValueError(
+                    f"Wavefunction basis in {wavefunction_path} has shape {wavefunctions.shape}; "
+                    f"expected (*, {projected_dim}, *)"
+                )
+            wavefunction_hashes[wavefunction_path.name] = hash_file(wavefunction_path)
+
+        basis_hash = projected_basis_hash(
+            structure_df=structure.df,
+            g_matrix=g_matrix,
+            valley=self.valley_flag,
+            q_shell=int(getattr(self.config, "n_g")),
+            spinful=bool(getattr(structure, "spin", False)),
+        )
+        mesh = dict((getattr(self.config, "topology", {}) or {}).get("mesh", {}) or {})
+        metadata = {
+            "schema": BOUNDARY_SEWING_SCHEMA,
+            "identity_schema": IDENTITY_SCHEMA,
+            "input_hash": hash_mapping({"wavefunction_hashes": wavefunction_hashes}),
+            "config_hash": hash_mapping(
+                {
+                    "valley": str(self.valley_flag),
+                    "q_shell": int(getattr(self.config, "n_g")),
+                    "spinful": bool(getattr(structure, "spin", False)),
+                    "mesh": mesh,
+                    "reciprocal_basis": reciprocal_basis.tolist(),
+                }
+            ),
+            "basis_hash": basis_hash,
+            "package_version": TAPW_VERSION,
+            "schema_version": BOUNDARY_SEWING_SCHEMA_VERSION,
+            "matrix_dimension": projected_dim,
+            "reciprocal_basis": reciprocal_basis.tolist(),
+            "wavefunction_hashes": wavefunction_hashes,
+            "operators": operator_diagnostics,
+            "operator_convention": "endpoint_to_start=(G diag(exp(-i b.r)) G^dagger)^dagger",
+        }
+        return save_boundary_operators(
+            topology_dir / "boundary_sewing.npz",
+            operators,
+            metadata,
+        )
+
     def calculate_chern(self, path):
         """Calculate Chern number using uniform k-point mesh
         
@@ -3541,6 +3630,9 @@ class BandStructureCalculator:
         else:
             topo_path = os.path.join(os.fspath(path), "topo")
         os.makedirs(topo_path, exist_ok=True)
+        boundary_sewing_path = None
+        if canonical_layout:
+            boundary_sewing_path = self._write_boundary_sewing_artifact(Path(topo_path))
         band_type = str(getattr(self.config, "band_type", "BOTH")).upper()
         suffix = self.config.get_chern_grid_suffix()
         entries = []
@@ -3604,6 +3696,8 @@ class BandStructureCalculator:
             "berry_flux_file": primary["berry_flux_file"],
             "entries": entries,
         }
+        if boundary_sewing_path is not None:
+            summary["boundary_sewing_file"] = boundary_sewing_path.name
         summary_filename = (
             "chern_summary.json"
             if canonical_layout

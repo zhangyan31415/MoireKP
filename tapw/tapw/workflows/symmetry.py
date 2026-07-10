@@ -20,6 +20,7 @@ from scipy.spatial import cKDTree
 from .. import __version__ as TAPW_VERSION
 from ..artifacts import canonical_profile_name, canonical_qshell_name
 from ..identity import IDENTITY_SCHEMA, hash_file, hash_mapping
+from ..symmetry.periodic_gauge import atomic_bloch_phase, project_atomic_bloch_gauge
 from ..symmetry.representations import (
     direct_sum,
     generate_direct_sum_params,
@@ -2433,21 +2434,10 @@ def build_source_pin_matrix_for_candidate(structure, valley_ctx: ValleyContext, 
 def _atomic_periodic_gauge_phase(structure, shift_by_group_cart: dict[int, np.ndarray]) -> np.ndarray:
     if not hasattr(structure, "df") or structure.df is None:
         raise SymmetrySupportError("atom_mapping_missing", "Structure dataframe is required to build P_G.")
-    df = structure.df.copy().sort_values(["atom_type"], kind="stable").reset_index(drop=True)
-    if {"x", "y"}.issubset(df.columns):
-        coord_cols = ["x", "y"]
-    elif {"shifted_x", "shifted_y"}.issubset(df.columns):
-        coord_cols = ["shifted_x", "shifted_y"]
-    else:
-        raise SymmetrySupportError("atom_mapping_missing", "Structure dataframe lacks x/y coordinates for P_G.")
-    coords = np.repeat(df[coord_cols].to_numpy(dtype=float), df["orb_num"].to_numpy(dtype=int), axis=0)
-    groups = np.repeat(df["twist_group"].astype(int).to_numpy(), df["orb_num"].to_numpy(dtype=int), axis=0)
-    phases = np.empty(coords.shape[0], dtype=np.complex128)
-    for group in sorted(np.unique(groups).tolist()):
-        shift = np.asarray(shift_by_group_cart.get(int(group), np.zeros(2)), dtype=float).reshape(2)
-        mask = groups == int(group)
-        phases[mask] = np.exp(-1.0j * (coords[mask] @ shift))
-    return phases
+    try:
+        return atomic_bloch_phase(structure.df, shift_by_group_cart)
+    except ValueError as exc:
+        raise SymmetrySupportError("atom_mapping_missing", str(exc)) from exc
 
 
 def _projected_periodic_gauge_dim(structure, valley_ctx: ValleyContext) -> int:
@@ -2501,20 +2491,14 @@ def build_periodic_gauge_matrix_for_candidate(structure, valley_ctx: ValleyConte
 
     if g_matrix is None:
         raise SymmetrySupportError("q_mapping_missing", "TAPW g_matrix is required to build nontrivial P_G.")
-    g_matrix = g_matrix.tocsr() if scipy.sparse.issparse(g_matrix) else scipy.sparse.csr_matrix(g_matrix)
     spinless_phase = _atomic_periodic_gauge_phase(structure, shift_by_group_cart)
-    if g_matrix.shape[1] == spinless_phase.shape[0]:
-        phase = spinless_phase
-    elif g_matrix.shape[1] == 2 * spinless_phase.shape[0]:
-        phase = np.concatenate([spinless_phase, spinless_phase])
-    else:
+    try:
+        pg_matrix = project_atomic_bloch_gauge(g_matrix, spinless_phase)
+    except ValueError as exc:
         raise SymmetrySupportError(
             "q_mapping_missing",
-            f"P_G phase length {spinless_phase.shape[0]} is incompatible with g_matrix columns {g_matrix.shape[1]}.",
-        )
-    phase_diag = scipy.sparse.diags(phase, offsets=0, dtype=np.complex128, format="csr")
-    pg_matrix = (g_matrix @ phase_diag @ g_matrix.conj().T).tocsr()
-    pg_matrix.sort_indices()
+            str(exc),
+        ) from exc
     return pg_matrix, {
         "pg_shift_by_group_coeffs": shift_by_group_coeffs,
         "pg_phase_convention": PG_PHASE_CONVENTION,

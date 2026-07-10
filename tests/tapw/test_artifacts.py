@@ -1,6 +1,10 @@
+import json
+from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
+import scipy.sparse
 
 from tapw.artifacts import (
     array_output_filename,
@@ -183,18 +187,44 @@ def test_chern_calculation_writes_canonical_topology_files(tmp_path):
         ge=False,
         kpoint_chunk_count=1,
         chern_band_indices=[-1, -2],
+        n_g=6,
         output_layout=SimpleNamespace(style="canonical_v1"),
     )
     calc.valley_flag = "K1"
     calc.reporter = None
     calc.generate_kmesh = lambda *_args: np.zeros((9, 3), dtype=float)
+    calc.structure = SimpleNamespace(
+        spin=False,
+        reciprocal_Tmat=np.eye(3),
+        df=pd.DataFrame(
+            {
+                "twist_group": [0, 1],
+                "atom_type": [0, 1],
+                "species": ["A", "B"],
+                "orb_name": ["s1", "s1"],
+                "orb_num": [1, 1],
+                "x": [0.0, 0.25],
+                "y": [0.0, 0.5],
+            }
+        ),
+    )
+    calc.TAPW_parameters = SimpleNamespace(
+        g_matrix=scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+    )
 
     vec_grid = np.zeros((3, 3, 2, 2), dtype=np.complex128)
     vec_grid[:, :, 0, 0] = 1.0
     vec_grid[:, :, 1, 1] = 1.0
 
-    def fake_calculate_band_structure(_path, _kpoints):
+    def fake_calculate_band_structure(path, _kpoints):
         calc.result = {"vec": vec_grid.reshape(9, 2, 2)}
+        topology_dir = (
+            Path(path)
+            / "topology"
+            / "grid3x3_b1_m0p5_0p5_b2_m0p5_0p5"
+        )
+        topology_dir.mkdir(parents=True, exist_ok=True)
+        np.save(topology_dir / "wavefunctions_vbm.npy", calc.result["vec"])
 
     calc.calculate_band_structure = fake_calculate_band_structure
 
@@ -202,5 +232,11 @@ def test_chern_calculation_writes_canonical_topology_files(tmp_path):
 
     topology_dir = target_dir / "topology" / "grid3x3_b1_m0p5_0p5_b2_m0p5_0p5"
     assert (topology_dir / "chern_summary.json").is_file()
+    assert (topology_dir / "boundary_sewing.npz").is_file()
+    with np.load(topology_dir / "boundary_sewing.npz", allow_pickle=False) as payload:
+        metadata = json.loads(str(payload["metadata_json"].item()))
+    assert metadata["basis_hash"]
+    assert metadata["wavefunction_hashes"]["wavefunctions_vbm.npy"]
+    assert metadata["operators"]["b1"]["operator_direction"] == "endpoint_to_start"
     assert not list(topology_dir.glob("berry_flux_*.npy"))
     assert not (topology_dir / "manifest.json").exists()
