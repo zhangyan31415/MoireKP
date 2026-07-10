@@ -7,12 +7,46 @@ import pytest
 
 from kp.identity import (
     build_projection_basis_identity,
+    exactified_operation_provenance_is_complete,
     hash_array,
     hash_file,
     hash_mapping,
     require_identity_fields,
     require_matching_identity,
 )
+
+
+def _exactified_operation_record() -> dict:
+    return {
+        "matrix_kind": "continuum_internal_rep_exact",
+        "matrix_source": "kp_symm_exactified_action",
+        "status": "exactified",
+        "exactification_status": "exactified",
+        "exactification_owner": "kp_symm",
+        "basis_hash": "basis-a",
+        "source_matrix_projection_report": {"report": {"status": "exactified"}},
+    }
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "matrix_kind",
+        "matrix_source",
+        "status",
+        "exactification_status",
+        "exactification_owner",
+        "basis_hash",
+        "source_matrix_projection_report",
+    ],
+)
+def test_exactified_operation_provenance_requires_every_contract_field(field: str) -> None:
+    complete = _exactified_operation_record()
+    assert exactified_operation_provenance_is_complete(complete)
+
+    incomplete = dict(complete)
+    incomplete.pop(field)
+    assert not exactified_operation_provenance_is_complete(incomplete)
 
 
 def test_kp_identity_hashes_are_deterministic_and_content_sensitive(tmp_path: Path) -> None:

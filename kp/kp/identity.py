@@ -112,6 +112,25 @@ def require_matching_identity(
         raise ValueError(f"{context} identity mismatch ({details})")
 
 
+def exactified_operation_provenance_is_complete(record: Mapping[str, Any]) -> bool:
+    report = record.get("source_matrix_projection_report")
+    report_status = None
+    if isinstance(report, Mapping) and isinstance(report.get("report"), Mapping):
+        report_status = str(report["report"].get("status", ""))
+    return all(
+        (
+            str(record.get("matrix_kind", "")) == "continuum_internal_rep_exact",
+            str(record.get("matrix_source", record.get("matrix_file_role", "")))
+            == "kp_symm_exactified_action",
+            str(record.get("status", "")) == "exactified",
+            str(record.get("exactification_status", "")) == "exactified",
+            str(record.get("exactification_owner", "")) == "kp_symm",
+            bool(str(record.get("basis_hash", "")).strip()),
+            report_status == "exactified",
+        )
+    )
+
+
 def build_projection_basis_identity(
     *,
     hamk_file: str | Path,

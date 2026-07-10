@@ -29,6 +29,7 @@ from .symmetry import load_symmetry_source
 from ..config.case import normalize_case_config
 from ..identity import (
     PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+    exactified_operation_provenance_is_complete,
     load_projection_artifact_identity,
     load_projection_k_indices,
     require_identity_fields,
@@ -3445,23 +3446,7 @@ def _load_model_q_sets(config: ConfiguredModel) -> tuple[np.ndarray, np.ndarray]
 
 
 def _operation_matrix_is_exactified(record: Mapping[str, Any]) -> bool:
-    matrix_kind = str(record.get("matrix_kind", ""))
-    matrix_source = str(record.get("matrix_source", record.get("matrix_file_role", "")))
-    report = record.get("source_matrix_projection_report")
-    report_status = None
-    if isinstance(report, Mapping) and isinstance(report.get("report"), Mapping):
-        report_status = str(report["report"].get("status", ""))
-    return all(
-        (
-            matrix_kind == "continuum_internal_rep_exact",
-            matrix_source == "kp_symm_exactified_action",
-            str(record.get("status", "")) == "exactified",
-            str(record.get("exactification_status", "")) == "exactified",
-            str(record.get("exactification_owner", "")) == "kp_symm",
-            bool(str(record.get("basis_hash", "")).strip()),
-            report_status == "exactified",
-        )
-    )
+    return exactified_operation_provenance_is_complete(record)
 
 
 def _requires_model_side_exactification(metadata: Mapping[str, Any]) -> bool:

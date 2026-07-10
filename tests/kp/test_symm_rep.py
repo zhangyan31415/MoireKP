@@ -8,6 +8,30 @@ import numpy as np
 import yaml
 
 
+def _exactified_operation(name: str, **overrides) -> dict:
+    record = {
+        "name": name,
+        "matrix_array_key": name,
+        "antiunitary": name in {"TR", "C2T"},
+        "matrix_kind": "continuum_internal_rep_exact",
+        "matrix_source": "kp_symm_exactified_action",
+        "status": "exactified",
+        "exactification_status": "exactified",
+        "exactification_owner": "kp_symm",
+        "basis_hash": "basis-test",
+        "source_matrix_projection_report": {"report": {"status": "exactified"}},
+    }
+    record.update(overrides)
+    return record
+
+
+def _write_exactified_pack(symmetry_dir: Path, **matrices: np.ndarray) -> None:
+    metadata = {"operations": [_exactified_operation(name) for name in matrices]}
+    payload = {name: np.asarray(matrix, dtype=np.complex128) for name, matrix in matrices.items()}
+    payload["__metadata_json__"] = np.asarray(json.dumps(metadata))
+    np.savez_compressed(symmetry_dir / "representations.npz", **payload)
+
+
 def _write_config(tmp_path: Path) -> Path:
     cfg_path = tmp_path / "configs" / "case.yaml"
     cfg_path.parent.mkdir(parents=True)
@@ -42,8 +66,33 @@ def _write_inputs(tmp_path: Path) -> Path:
     np.save(projection_dir / "heff.npy", heff)
     c2 = np.diag([1.0, -1.0, 1.0, -1.0]).astype(np.complex128)
     tr = np.eye(4, dtype=np.complex128)
-    np.savez_compressed(symmetry_dir / "representations.npz", C2=c2, TR=tr)
+    _write_exactified_pack(symmetry_dir, C2=c2, TR=tr)
     return root
+
+
+def test_incomplete_exactification_provenance_is_not_point_independent(tmp_path: Path) -> None:
+    from kp.symm_rep import _load_operations
+
+    path = tmp_path / "representations.npz"
+    metadata = {
+        "operations": [
+            {
+                "name": "C3z",
+                "matrix_array_key": "C3z",
+                "matrix_kind": "continuum_internal_rep_exact",
+                "matrix_source": "kp_symm_exactified_action",
+            }
+        ]
+    }
+    np.savez_compressed(
+        path,
+        C3z=np.eye(2, dtype=np.complex128),
+        __metadata_json__=np.asarray(json.dumps(metadata)),
+    )
+
+    operations, _metadata = _load_operations(path)
+
+    assert operations[0].validated_same_k_indices == frozenset()
 
 
 def test_kp_symm_rep_projects_exactified_matrices_into_heff_blocks(tmp_path):
@@ -80,6 +129,7 @@ def test_kp_symm_rep_projects_exactified_matrices_into_heff_blocks(tmp_path):
     assert "# KP Symmetry Representation Summary" in summary
     assert "heff row: `0`" in summary
     assert "### Symmetry Representations" in summary
+    assert "| sector | block | bands | energies (eV) | operation | spin-resolved rep | trace | residual | raw residual | polar distance | status |" in summary
 
 
 def test_kp_symm_rep_phase_label_uses_spinful_c3_omega():
@@ -190,7 +240,7 @@ def test_kp_symm_rep_uses_polar_unitary_for_band_block(tmp_path):
     root = _write_inputs(tmp_path)
     symmetry_dir = root / "symmetry"
     raw = np.diag([0.8, 1.2, 1.0, 1.0]).astype(np.complex128)
-    np.savez_compressed(symmetry_dir / "representations.npz", C2=raw)
+    _write_exactified_pack(symmetry_dir, C2=raw)
 
     output_dir = run_configured_symm_rep(cfg_path)
 
@@ -208,6 +258,9 @@ def test_kp_symm_rep_uses_polar_unitary_for_band_block(tmp_path):
     assert float(row["raw_unitarity_residual"]) > 0.0
     assert float(row["polar_distance"]) > 0.0
     assert row["d_block"] == "[[1.0000, 0.0000]; [0.0000, 1.0000]]"
+    summary = (output_dir / "summary.md").read_text(encoding="utf-8")
+    assert "| valence | 0 | 0 1 | -1.000000, -1.000000 | C2 | `basis=[effective, effective]; D=[[1.0000, 0.0000]; [0.0000, 1.0000]]` | 2.000000+0.000000i | 0.000e+00 | " in summary
+    assert " | bad |" in summary
 
 
 def test_kp_symm_rep_spin_diagonalizes_degenerate_block_from_spin_operator(tmp_path):
@@ -226,6 +279,33 @@ def test_kp_symm_rep_spin_diagonalizes_degenerate_block_from_spin_operator(tmp_p
         ("up", 1.0, 0.0),
         ("down", 0.0, 1.0),
     ]
+
+
+def test_kp_symm_rep_summary_reports_spin_resolved_matrix_not_eigenbasis(tmp_path):
+    from kp.symm_rep import run_configured_symm_rep
+
+    cfg_path = _write_config(tmp_path)
+    root = _write_inputs(tmp_path)
+    symmetry_dir = root / "symmetry"
+    c2_spin_flip = np.array(
+        [
+            [0.0, 1.0j, 0.0, 0.0],
+            [1.0j, 0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.complex128,
+    )
+    _write_exactified_pack(symmetry_dir, C2=c2_spin_flip)
+    spin_operator = np.diag([1.0, -1.0, 1.0, -1.0]).astype(np.complex128)[None, :, :]
+    np.save(root / "projection" / "spin_operator.npy", spin_operator)
+
+    output_dir = run_configured_symm_rep(cfg_path)
+
+    summary = (output_dir / "summary.md").read_text(encoding="utf-8")
+    assert "basis=[↑1.000, ↓1.000]" in summary
+    assert "D=[[0.0000, 1.0000j]; [1.0000j, 0.0000]]" in summary
+    assert "(i, -i)" not in summary
 
 
 def test_kp_symm_rep_keeps_only_little_group_operations(tmp_path):
@@ -257,18 +337,14 @@ def test_kp_symm_rep_keeps_only_little_group_operations(tmp_path):
             ],
         },
         "operations": [
-            {
-                "name": "C3z",
-                "matrix_array_key": "C3z",
-                "antiunitary": False,
-                "model_action": {"k_map": {"type": "rotation", "angle_deg": 120.0}},
-            },
-            {
-                "name": "C2",
-                "matrix_array_key": "C2",
-                "antiunitary": False,
-                "model_action": {"k_map": {"type": "reflection", "axis_deg": 0.0}},
-            },
+            _exactified_operation(
+                "C3z",
+                model_action={"k_map": {"type": "rotation", "angle_deg": 120.0}},
+            ),
+            _exactified_operation(
+                "C2",
+                model_action={"k_map": {"type": "reflection", "axis_deg": 0.0}},
+            ),
         ],
     }
     np.savez_compressed(
@@ -317,15 +393,11 @@ def test_kp_symm_rep_uses_reciprocal_shift_sewing_for_little_group(tmp_path):
             ],
         },
         "operations": [
-            {
-                "name": "C3z",
-                "matrix_array_key": "C3z",
-                "antiunitary": False,
-                "matrix_kind": "continuum_internal_rep_exact",
-                "matrix_source": "kp_symm_exactified_action",
-                "model_action": {"k_map": {"type": "rotation", "angle_deg": 120.0}},
-                "pairs": [{"source_k_index": 99, "target_k_index": 99}],
-            },
+            _exactified_operation(
+                "C3z",
+                model_action={"k_map": {"type": "rotation", "angle_deg": 120.0}},
+                pairs=[{"source_k_index": 99, "target_k_index": 99}],
+            ),
         ],
     }
     np.savez_compressed(
@@ -395,14 +467,10 @@ def test_kp_symm_rep_run_uses_model_frame_for_c3_sewing(tmp_path):
             ],
         },
         "operations": [
-            {
-                "name": "C3z",
-                "matrix_array_key": "C3z",
-                "antiunitary": False,
-                "matrix_kind": "continuum_internal_rep_exact",
-                "matrix_source": "kp_symm_exactified_action",
-                "model_action": {"k_map": {"type": "rotation", "angle_deg": 120.0}},
-            },
+            _exactified_operation(
+                "C3z",
+                model_action={"k_map": {"type": "rotation", "angle_deg": 120.0}},
+            ),
         ],
     }
     np.savez_compressed(

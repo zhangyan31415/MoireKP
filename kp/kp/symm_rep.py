@@ -16,6 +16,7 @@ import numpy as np
 import yaml
 
 from .config.case import normalize_case_config
+from .identity import exactified_operation_provenance_is_complete
 from .io.tapw_loader import load_Q_sets
 from .symmetry.exactify_representation import build_basis_labels
 from .symmetry.geometry import bM_candidates_from_q_distances, canonical_bM_pair_from_candidates
@@ -284,21 +285,18 @@ def _load_operations(path: Path) -> tuple[list[KpSymmetryOperation], dict[str, A
             record = records_by_key.get(key, {})
             name = str(record.get("name") or record.get("operation") or key).strip()
             antiunitary = bool(record.get("antiunitary", _infer_antiunitary(name)))
-            matrix_kind = str(record.get("matrix_kind", ""))
-            matrix_source = str(record.get("matrix_source", ""))
             action = record.get("model_action") or record.get("internal_resolved_action") or record.get("declared_model_action") or {}
             k_map = dict(action.get("k_map", {}) or {}) if isinstance(action, Mapping) else None
-            validated_same_k_indices: set[int] | None = None
-            pairs = record.get("pairs")
-            is_point_independent_model_action = (
-                matrix_kind == "continuum_internal_rep_exact" or matrix_source == "kp_symm_exactified_action"
+            is_point_independent_model_action = exactified_operation_provenance_is_complete(record)
+            validated_same_k_indices: set[int] | None = (
+                None if is_point_independent_model_action else set()
             )
+            pairs = record.get("pairs")
             if (
                 not is_point_independent_model_action
                 and isinstance(pairs, Sequence)
                 and not isinstance(pairs, (str, bytes))
             ):
-                validated_same_k_indices = set()
                 for pair in pairs:
                     if not isinstance(pair, Mapping):
                         continue
@@ -647,6 +645,15 @@ def _unitarity_residual(matrix: np.ndarray) -> float:
     return float(np.linalg.norm(arr.conj().T @ arr - eye) / max(1, arr.shape[0]))
 
 
+def _representation_quality_status(raw_residual: Any, polar_distance: Any) -> str:
+    score = max(float(raw_residual), float(polar_distance))
+    if score >= 1.0e-3:
+        return "bad"
+    if score >= 1.0e-6:
+        return "check"
+    return "ok"
+
+
 def _format_complex(value: complex, *, digits: int = 4) -> str:
     value = complex(value)
     real = 0.0 if abs(value.real) < 10 ** (-digits) else value.real
@@ -692,9 +699,36 @@ def _symm_rep_label(matrix: np.ndarray, *, antiunitary: bool) -> str:
     arr = np.asarray(matrix, dtype=np.complex128)
     if arr.shape == (1, 1):
         return f"({_phase_label(arr[0, 0])})"
-    values = np.linalg.eigvals(arr)
-    order = np.argsort(np.angle(values))
-    return "(" + ", ".join(_phase_label(value) for value in values[order]) + ")"
+    return f"D={_format_d_block(arr)}"
+
+
+def _spin_basis_entry_from_weights(spin_up: float, spin_down: float, spin_label: str, *, threshold: float = 0.8) -> str:
+    if np.isnan(spin_up) or np.isnan(spin_down):
+        return str(spin_label)
+    if spin_up >= threshold:
+        return f"↑{spin_up:.3f}"
+    if spin_down >= threshold:
+        return f"↓{spin_down:.3f}"
+    return f"mix[↑{spin_up:.3f},↓{spin_down:.3f}]"
+
+
+def _spin_basis_label_from_weights(spin_weights: Sequence[tuple[float, float, str]]) -> str:
+    return "[" + ", ".join(_spin_basis_entry_from_weights(up, down, label) for up, down, label in spin_weights) + "]"
+
+
+def _spin_resolved_rep_label(
+    matrix: np.ndarray,
+    spin_weights: Sequence[tuple[float, float, str]],
+    *,
+    antiunitary: bool,
+) -> str:
+    if antiunitary:
+        return ""
+    arr = np.asarray(matrix, dtype=np.complex128)
+    basis = _spin_basis_label_from_weights(spin_weights)
+    if arr.shape == (1, 1):
+        return f"({_phase_label(arr[0, 0])}; basis={basis})"
+    return f"basis={basis}; D={_format_d_block(arr)}"
 
 
 def _energy_text(energies: Sequence[float], *, digits: int = 12) -> str:
@@ -801,10 +835,7 @@ def _write_summary(
     operations: Sequence[KpSymmetryOperation],
     point_operations: Mapping[str, Sequence[str]],
 ) -> None:
-    rows_by_point: dict[str, list[Mapping[str, Any]]] = {}
     chars_by_point: dict[str, list[Mapping[str, Any]]] = {}
-    for row in band_rows:
-        rows_by_point.setdefault(str(row["point"]), []).append(row)
     for row in character_rows:
         chars_by_point.setdefault(str(row["point"]), []).append(row)
 
@@ -829,32 +860,26 @@ def _write_summary(
                 "",
             ]
         )
-        for sector, title in (("valence", "Valence"), ("conduction", "Conduction")):
-            sector_rows = [row for row in rows_by_point.get(point, []) if row["sector"] == sector]
-            lines.extend([f"### {title}", "", "| band | energy (eV) | spin |", "|---:|---:|---|"])
-            for row in sector_rows:
-                lines.append(f"| {row['band_index']} | {float(row['energy']):.6f} | {row.get('spin_label', '')} |")
-            if not sector_rows:
-                lines.append("| - | - | - |")
-            lines.append("")
         lines.extend(
             [
                 "### Symmetry Representations",
                 "",
-                "| sector | block | bands | energies (eV) | operation | rep | trace | residual | D_block |",
-                "|---|---:|---|---|---|---|---|---:|---|",
+                "| sector | block | bands | energies (eV) | operation | spin-resolved rep | trace | residual | raw residual | polar distance | status |",
+                "|---|---:|---|---|---|---|---|---:|---:|---:|---|",
             ]
         )
         for row in chars_by_point.get(point, []):
             trace = f"{float(row['trace_real']):.6f}{float(row['trace_imag']):+.6f}i"
             energies = ", ".join(f"{float(item.strip()):.6f}" for item in str(row["energies"]).split(",") if item.strip())
+            status = _representation_quality_status(row["raw_unitarity_residual"], row["polar_distance"])
             lines.append(
                 f"| {row['sector']} | {row['block_id']} | {row['band_indices']} | {energies} | "
-                f"{row['operation']} | {row.get('symm_rep', '')} | {trace} | "
-                f"{float(row['unitarity_residual']):.3e} | `{row.get('d_block', '')}` |"
+                f"{row['operation']} | `{row.get('symm_rep', '')}` | {trace} | "
+                f"{float(row['unitarity_residual']):.3e} | {float(row['raw_unitarity_residual']):.3e} | "
+                f"{float(row['polar_distance']):.3e} | {status} |"
             )
         if not chars_by_point.get(point):
-            lines.append("| - | - | - | - | - | - | - | - | - |")
+            lines.append("| - | - | - | - | - | - | - | - | - | - | - |")
         lines.append("")
     path.write_text("\n".join(lines), encoding="utf-8")
 
@@ -995,7 +1020,11 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
                             "energies": _energy_text(block_energies),
                             "operation": operation.name,
                             "antiunitary": str(bool(operation.antiunitary)).lower(),
-                            "symm_rep": _symm_rep_label(projected, antiunitary=operation.antiunitary),
+                            "symm_rep": _spin_resolved_rep_label(
+                                projected,
+                                block_spin,
+                                antiunitary=operation.antiunitary,
+                            ),
                             "trace_real": f"{float(trace.real):.12f}",
                             "trace_imag": f"{float(trace.imag):.12f}",
                             "unitarity_residual": f"{_unitarity_residual(projected):.12e}",
