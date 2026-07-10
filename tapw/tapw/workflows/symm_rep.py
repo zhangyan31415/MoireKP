@@ -49,6 +49,19 @@ class SymmRepResult:
     fermi_energy: float
 
 
+@dataclass(frozen=True)
+class ProjectedPairC3Audit:
+    point: str
+    pair: str
+    labels: tuple[str, ...]
+    phases: tuple[float, ...]
+    leakage_residual: float
+    unitarity_residual: float
+    energy_order_label_match: bool
+    multiset_label_match: bool
+    matrix: np.ndarray
+
+
 def spin_weights_and_label(vector: np.ndarray, *, threshold: float = 0.8) -> tuple[float | None, float | None, str]:
     """Return spin-up/down half weights and a coarse state label."""
     vector = np.asarray(vector)
@@ -76,15 +89,20 @@ def _spin_weight_label(vector: np.ndarray) -> str:
     return f"[↑{up:.3f},↓{down:.3f}]"
 
 
-def _spin_weight_text(up: Any, down: Any) -> str:
-    try:
-        up_value = float(up)
-        down_value = float(down)
-    except (TypeError, ValueError):
+def _spin_basis_entry_label(vector: np.ndarray, *, threshold: float = 0.8) -> str:
+    up, down, _label = spin_weights_and_label(vector, threshold=threshold)
+    if up is None or down is None:
         return "spinless"
-    if np.isnan(up_value) or np.isnan(down_value):
-        return "spinless"
-    return f"↑{up_value:.3f}, ↓{down_value:.3f}"
+    if up >= threshold:
+        return f"↑{up:.3f}"
+    if down >= threshold:
+        return f"↓{down:.3f}"
+    return f"mix[↑{up:.3f},↓{down:.3f}]"
+
+
+def _spin_basis_label(vectors: np.ndarray) -> str:
+    basis = orthonormalize_block_vectors(vectors)
+    return "[" + ", ".join(_spin_basis_entry_label(vector) for vector in basis.T) + "]"
 
 
 def _phase_label(value: complex, *, tol: float = 0.15) -> str:
@@ -119,38 +137,158 @@ def symmetry_rep_label(projected: np.ndarray, block_vectors: np.ndarray, *, anti
     if matrix.size == 0:
         return "()"
     if matrix.shape == (1, 1):
-        symm_vectors = vectors
-        values = np.array([matrix[0, 0]], dtype=np.complex128)
+        return f"{_phase_label(matrix[0, 0])}({_spin_polarization_label(vectors[:, 0])})"
+    return _format_representation_eigenstates(matrix, vectors)
+
+
+def _spin_polarization_label(vector: np.ndarray) -> str:
+    up, down, _label = spin_weights_and_label(vector)
+    if up is None or down is None:
+        return "spinless"
+    return f"Sz={up - down:+.3f}"
+
+
+def _format_representation_eigenstates(matrix: np.ndarray, block_vectors: np.ndarray) -> str:
+    matrix = np.asarray(matrix, dtype=np.complex128)
+    vectors = orthonormalize_block_vectors(block_vectors)
+    values, coeffs = np.linalg.eig(matrix)
+
+    groups: dict[str, list[int]] = {}
+    for index, value in enumerate(values):
+        groups.setdefault(_phase_label(value), []).append(index)
+
+    entries: list[tuple[tuple[int, float, float, float], str]] = []
+    for index, value in enumerate(values):
+        phase = _phase_label(value)
+        group = groups[phase]
+        if group[0] != index:
+            continue
+        if len(group) == 1:
+            state_vectors = vectors @ coeffs[:, [index]]
+        else:
+            state_vectors = spin_diagonalize_block_vectors(vectors @ coeffs[:, group])
+        for vector in state_vectors.T:
+            entries.append(
+                (
+                    _symmetry_eigenstate_sort_key(vectors, vector, value),
+                    f"{phase}({_spin_polarization_label(vector)})",
+                )
+            )
+    entries.sort(key=lambda item: item[0])
+    return ", ".join(label for _key, label in entries)
+
+
+def selected_pair_labels_match(labels: tuple[str, ...] | list[str], target_labels: tuple[str, ...] | list[str]) -> bool:
+    """Return representation-equivalence matching for a two-band pair label multiset."""
+    return sorted(str(label) for label in labels) == sorted(str(label) for label in target_labels)
+
+
+def _metric_matrix(overlap_matrix: Any | None, dim: int) -> np.ndarray:
+    if overlap_matrix is None:
+        return np.eye(dim, dtype=np.complex128)
+    return (
+        overlap_matrix.toarray()
+        if scipy.sparse.issparse(overlap_matrix)
+        else np.asarray(overlap_matrix, dtype=np.complex128)
+    )
+
+
+def _metric_inner(left: np.ndarray, metric: np.ndarray, right: np.ndarray) -> np.ndarray:
+    return left.conj().T @ (metric @ right)
+
+
+def _metric_norm(vectors: np.ndarray, metric: np.ndarray) -> float:
+    gram = _metric_inner(vectors, metric, vectors)
+    return float(np.sqrt(max(float(np.trace(gram).real), 0.0)))
+
+
+def _metric_orthonormalize(vectors: np.ndarray, metric: np.ndarray, *, tol: float = 1.0e-10) -> np.ndarray:
+    basis = np.asarray(vectors, dtype=np.complex128)
+    gram = _metric_inner(basis, metric, basis)
+    eye = np.eye(gram.shape[0], dtype=np.complex128)
+    if np.linalg.norm(gram - eye) <= tol * max(1, gram.shape[0]):
+        return basis
+    gram = 0.5 * (gram + gram.conj().T)
+    values, rotation = np.linalg.eigh(gram)
+    floor = max(tol, tol * float(np.max(np.abs(values))) if values.size else tol)
+    if np.any(values <= floor):
+        raise ValueError(
+            "Selected pair contains linearly dependent wavefunctions in the overlap metric; "
+            f"minimum Gram eigenvalue is {float(np.min(values)):.3e}."
+        )
+    return basis @ (rotation @ np.diag(values**-0.5) @ rotation.conj().T)
+
+
+def _eigen_labels_in_band_order(matrix: np.ndarray, band_basis: np.ndarray) -> tuple[str, ...]:
+    values, coeffs = np.linalg.eig(np.asarray(matrix, dtype=np.complex128))
+    entries: list[tuple[tuple[int, float, float, float], str]] = []
+    for index, value in enumerate(values):
+        state_vector = band_basis @ coeffs[:, index]
+        entries.append((_symmetry_eigenstate_sort_key(band_basis, state_vector, value), _phase_label(value)))
+    entries.sort(key=lambda item: item[0])
+    return tuple(label for _key, label in entries)
+
+
+def projected_pair_c3_audit(
+    *,
+    point: str,
+    pair: str,
+    vectors: np.ndarray,
+    action_matrix: Any,
+    full_vectors: np.ndarray | None = None,
+    overlap_matrix: Any | None = None,
+    target_labels: tuple[str, str] | None = None,
+) -> ProjectedPairC3Audit:
+    """Project a unitary C3 little-group action into one selected two-band subspace."""
+    del full_vectors  # Kept for API clarity and future diagnostics; raw-basis residual is used below.
+    action = action_matrix.toarray() if scipy.sparse.issparse(action_matrix) else np.asarray(action_matrix)
+    action = np.asarray(action, dtype=np.complex128)
+    metric = _metric_matrix(overlap_matrix, action.shape[0])
+    basis = _metric_orthonormalize(np.asarray(vectors, dtype=np.complex128), metric)
+    transformed = action @ basis
+    projected_raw = _metric_inner(basis, metric, transformed)
+    projected, _polar_distance = polar_unitary_part(projected_raw)
+    phases = tuple(float(np.angle(value) / np.pi) for value in np.linalg.eigvals(projected))
+    labels = _eigen_labels_in_band_order(projected, basis)
+
+    residual_vectors = transformed - basis @ projected_raw
+    denom = max(_metric_norm(transformed, metric), 1.0e-30)
+    leakage = _metric_norm(residual_vectors, metric) / denom
+    unitarity = _unitarity_residual(projected_raw)
+    if target_labels is None:
+        energy_order_match = False
+        multiset_match = False
     else:
-        values, coeffs = np.linalg.eig(matrix)
-        order = np.argsort(np.angle(values))
-        values = values[order]
-        coeffs = coeffs[:, order]
-        value_groups: dict[str, list[int]] = {}
-        for index, value in enumerate(values):
-            value_groups.setdefault(_phase_label(value), []).append(index)
-        grouped_values: list[complex] = []
-        grouped_vectors: list[np.ndarray] = []
-        for index, value in enumerate(values):
-            group = value_groups[_phase_label(value)]
-            if group[0] != index:
-                continue
-            if len(group) == 1:
-                grouped_values.append(value)
-                grouped_vectors.append(vectors @ coeffs[:, index])
-                continue
-            group_values = values[group]
-            group_vectors = spin_diagonalize_block_vectors(vectors @ coeffs[:, group])
-            for group_value, group_vector in zip(group_values, group_vectors.T):
-                grouped_values.append(group_value)
-                grouped_vectors.append(group_vector)
-        values = np.asarray(grouped_values, dtype=np.complex128)
-        symm_vectors = np.column_stack(grouped_vectors) if grouped_vectors else vectors[:, :0]
-    labels = []
-    for value, vector in zip(values, symm_vectors.T):
-        suffix = _spin_weight_label(vector)
-        labels.append(f"{_phase_label(value)}{suffix}")
-    return "(" + ", ".join(labels) + ")"
+        energy_order_match = tuple(labels) == tuple(target_labels)
+        multiset_match = selected_pair_labels_match(labels, target_labels)
+    return ProjectedPairC3Audit(
+        point=str(point),
+        pair=str(pair),
+        labels=tuple(labels),
+        phases=tuple(phases),
+        leakage_residual=float(leakage),
+        unitarity_residual=float(unitarity),
+        energy_order_label_match=bool(energy_order_match),
+        multiset_label_match=bool(multiset_match),
+        matrix=np.asarray(projected_raw, dtype=np.complex128),
+    )
+
+
+def _symmetry_eigenstate_sort_key(
+    band_basis: np.ndarray,
+    state_vector: np.ndarray,
+    eigenvalue: complex,
+) -> tuple[int, float, float, float]:
+    coords = band_basis.conj().T @ state_vector
+    weights = np.abs(coords) ** 2
+    total = float(np.sum(weights))
+    if total > 0.0:
+        weights = weights / total
+    band_anchor = int(np.argmax(weights)) if weights.size else 0
+    max_overlap = float(weights[band_anchor]) if weights.size else 0.0
+    up, down, _label = spin_weights_and_label(state_vector)
+    sz = 0.0 if up is None or down is None else float(up - down)
+    return (band_anchor, -max_overlap, float(np.angle(eigenvalue)), -sz)
 
 
 def _format_complex_entry(value: complex, *, digits: int = 4) -> str:
@@ -188,6 +326,54 @@ def _format_summary_energies(text: str) -> str:
     if not energies:
         return str(text)
     return ", ".join(f"{energy:.6f}" for energy in energies)
+
+
+def _format_summary_residual(value: Any) -> str:
+    return f"{float(value):.6f}"
+
+
+def _representation_quality_status(raw_residual: Any, polar_distance: Any) -> str:
+    score = max(float(raw_residual), float(polar_distance))
+    if score >= 1.0e-3:
+        return "bad"
+    if score >= 1.0e-6:
+        return "check"
+    return "ok"
+
+
+def _summary_band_sort_key(row: dict[str, Any]) -> tuple[float, int]:
+    energy = float(row["energy"])
+    raw_index = int(row["band_index"])
+    if row.get("sector") == "valence":
+        return (-energy, -raw_index)
+    return (energy, raw_index)
+
+
+def _summary_band_label_maps(band_rows: list[dict[str, Any]]) -> dict[tuple[str, str], dict[int, str]]:
+    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in band_rows:
+        grouped.setdefault((str(row["point"]), str(row["sector"])), []).append(row)
+    label_maps: dict[tuple[str, str], dict[int, str]] = {}
+    for key, rows in grouped.items():
+        ordered = sorted(rows, key=_summary_band_sort_key)
+        label_maps[key] = {int(row["band_index"]): str(index + 1) for index, row in enumerate(ordered)}
+    return label_maps
+
+
+def _format_summary_band_indices(text: Any, label_map: dict[int, str]) -> str:
+    display_labels: list[str] = []
+    for token in str(text).split():
+        try:
+            label = label_map[int(token)]
+        except (KeyError, ValueError):
+            display_labels.append(token)
+        else:
+            display_labels.append(label)
+    if not display_labels:
+        return str(text)
+    if all(label.lstrip("+-").isdigit() for label in display_labels):
+        display_labels = [str(value) for value in sorted(int(label) for label in display_labels)]
+    return " ".join(display_labels)
 
 
 def _symm_row_sort_key(row: dict[str, Any]) -> tuple[int, float, int, str]:
@@ -343,6 +529,109 @@ def _sewn_raw_action(
     )
     raw = operation.matrix.tocsr() if scipy.sparse.issparse(operation.matrix) else scipy.sparse.csr_matrix(operation.matrix)
     return (sewing @ raw).tocsr(), f"{int(shift[0])} {int(shift[1])}"
+
+
+def _sparse_power(matrix: Any, exponent: int) -> scipy.sparse.csr_matrix:
+    base = matrix.tocsr() if scipy.sparse.issparse(matrix) else scipy.sparse.csr_matrix(matrix)
+    if exponent <= 0:
+        return scipy.sparse.identity(base.shape[0], dtype=base.dtype, format="csr")
+    result = scipy.sparse.identity(base.shape[0], dtype=base.dtype, format="csr")
+    for _ in range(int(exponent)):
+        result = (result @ base).tocsr()
+    return result
+
+
+def _c3_rotation_angle(operation: RawHSymmetryOperation) -> float | None:
+    action = dict(operation.source_action or {})
+    k_map = dict(action.get("k_map", {}) or {})
+    if str(k_map.get("type", "")).lower() != "rotation":
+        return None
+    try:
+        return float(k_map.get("angle_deg", 0.0))
+    except (TypeError, ValueError):
+        return None
+
+
+def _c2_reflection_axis(operation: RawHSymmetryOperation) -> float | None:
+    action = dict(operation.source_action or {})
+    k_map = dict(action.get("k_map", {}) or {})
+    if str(k_map.get("type", "")).lower() != "reflection":
+        return None
+    try:
+        return float(k_map["axis_deg"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _c2_source_action_with_axis(source_action: dict[str, Any], axis_deg: float) -> dict[str, Any]:
+    derived = dict(source_action)
+    reflection = {
+        "type": "reflection",
+        "axis_deg": float(axis_deg) % 180.0,
+        "reflection_axis_convention": "mirror_axis_deg",
+    }
+    derived["k_map"] = dict(reflection)
+    derived["q_map"] = dict(reflection)
+    return derived
+
+
+def _derive_c2_c3_conjugates(operations: list[RawHSymmetryOperation]) -> list[RawHSymmetryOperation]:
+    c2_ops = [
+        op for op in operations
+        if op.operation == "C2" and not op.antiunitary and _c2_reflection_axis(op) is not None
+    ]
+    c3_ops = [
+        op for op in operations
+        if op.operation == "C3z" and not op.antiunitary and _c3_rotation_angle(op) is not None
+    ]
+    if not c2_ops or not c3_ops:
+        return []
+    c2 = c2_ops[0]
+    c3 = c3_ops[0]
+    axis = float(_c2_reflection_axis(c2))
+    angle = float(_c3_rotation_angle(c3))
+    candidates: list[RawHSymmetryOperation] = []
+    for power in (1, 2):
+        c3_power = _sparse_power(c3.matrix, power)
+        matrix = (c3_power @ c2.matrix @ c3_power.getH()).tocsr()
+        source_action = _c2_source_action_with_axis(
+            dict(c2.source_action or {}),
+            axis + power * angle,
+        )
+        candidates.append(
+            RawHSymmetryOperation(
+                point=c2.point,
+                operation="C2",
+                matrix=matrix,
+                antiunitary=False,
+                source=f"{c2.source}; derived by C3z^{power} conjugation",
+                source_action=source_action,
+            )
+        )
+    return candidates
+
+
+def _operation_closes_point(operation: RawHSymmetryOperation, point_source: dict[str, Any]) -> bool:
+    sewing_context = dict(point_source.get("sewing_context", {}) or {})
+    if not sewing_context:
+        return True
+    coords = np.asarray(point_source.get("coords", (0.0, 0.0, 0.0)), dtype=float)
+    reciprocal_basis = np.asarray(sewing_context["reciprocal_basis"], dtype=float)
+    return _reciprocal_shift_for_closed_action(operation, coords, reciprocal_basis) is not None
+
+
+def _augment_point_little_group_operations(
+    operations: list[RawHSymmetryOperation],
+    point_source: dict[str, Any],
+) -> list[RawHSymmetryOperation]:
+    if any(op.operation == "C2" and _operation_closes_point(op, point_source) for op in operations):
+        return operations
+    augmented = list(operations)
+    for candidate in _derive_c2_c3_conjugates(operations):
+        if _operation_closes_point(candidate, point_source):
+            augmented.append(candidate)
+            break
+    return augmented
 
 
 def _safe_npz_key(text: str) -> str:
@@ -982,12 +1271,65 @@ def _prepare_output_dir(output_dir: Path, *, overwrite: bool) -> None:
 def _write_wavefunctions_npz(
     output_dir: Path,
     point_results: dict[str, dict[str, Any]],
+    *,
+    fermi_energy: float | None = None,
+    cache_schema: str | None = None,
+    artifact_identity: dict[str, Any] | None = None,
 ) -> None:
     payload: dict[str, np.ndarray] = {"points": np.array(list(point_results), dtype=str)}
+    cache_ready = (
+        cache_schema is not None
+        and fermi_energy is not None
+        and all(
+            data.get("cache_energies") is not None
+            and data.get("cache_eigenvectors") is not None
+            and data.get("coords") is not None
+            for data in point_results.values()
+        )
+    )
+    if cache_ready:
+        payload["schema"] = np.array(str(cache_schema), dtype=str)
+        payload["fermi_energy"] = np.array(float(fermi_energy), dtype=float)
+        payload["num_bands"] = np.array(
+            min(int(np.asarray(data["cache_energies"]).shape[0]) for data in point_results.values()),
+            dtype=int,
+        )
+        payload["point_coords"] = np.asarray(
+            [point_results[point]["coords"] for point in point_results],
+            dtype=float,
+        )
+        if artifact_identity is not None:
+            payload.update(
+                {
+                    str(field): np.asarray(value)
+                    for field, value in artifact_identity.items()
+                }
+            )
+        sewing_context = next(
+            (
+                data.get("sewing_context")
+                for data in point_results.values()
+                if data.get("sewing_context") is not None
+            ),
+            None,
+        )
+        if sewing_context is not None:
+            groups = [np.asarray(group, dtype=float) for group in sewing_context.get("g_vectors_by_group", [])]
+            payload["sewing_group_count"] = np.array(len(groups), dtype=int)
+            for index, group in enumerate(groups):
+                payload[f"sewing_g_vectors_group{index}"] = group
+            payload["sewing_reciprocal_basis"] = np.asarray(sewing_context["reciprocal_basis"], dtype=float)
+            payload["sewing_spin_blocks"] = np.array(int(sewing_context["spin_blocks"]), dtype=int)
     for point, data in point_results.items():
         prefix = _safe_npz_key(point)
-        payload[f"{prefix}_energies"] = data["energies"]
-        payload[f"{prefix}_eigenvectors"] = data["vectors"]
+        if cache_ready:
+            payload[f"{prefix}_energies"] = np.asarray(data["cache_energies"], dtype=float)
+            payload[f"{prefix}_eigenvectors"] = np.asarray(data["cache_eigenvectors"], dtype=np.complex128)
+            payload[f"{prefix}_selected_energies"] = np.asarray(data["energies"], dtype=float)
+            payload[f"{prefix}_selected_eigenvectors"] = np.asarray(data["vectors"], dtype=np.complex128)
+        else:
+            payload[f"{prefix}_energies"] = data["energies"]
+            payload[f"{prefix}_eigenvectors"] = data["vectors"]
         payload[f"{prefix}_source_kind"] = np.array(data["source_kind"], dtype=str)
         payload[f"{prefix}_hamiltonian_index"] = np.array(data["hamiltonian_index"], dtype=int)
         payload[f"{prefix}_hamiltonian_count"] = np.array(data["hamiltonian_count"], dtype=int)
@@ -998,7 +1340,12 @@ def _write_wavefunctions_npz(
     np.savez_compressed(output_dir / "high_symmetry_wavefunctions.npz", **payload)
 
 
-def _write_representation_npz(output_dir: Path, rep_entries: list[dict[str, Any]]) -> None:
+def _write_representation_npz(
+    output_dir: Path,
+    rep_entries: list[dict[str, Any]],
+    *,
+    artifact_identity: dict[str, Any] | None = None,
+) -> None:
     payload: dict[str, np.ndarray] = {}
     metadata: list[dict[str, Any]] = []
     for entry in rep_entries:
@@ -1015,6 +1362,13 @@ def _write_representation_npz(output_dir: Path, rep_entries: list[dict[str, Any]
             payload[f"{key}__raw_projected"] = entry["raw_matrix"]
         metadata.append({k: v for k, v in entry.items() if k not in {"matrix", "raw_matrix"}})
     payload["metadata_json"] = np.array(json.dumps(metadata, indent=2, sort_keys=True), dtype=str)
+    if artifact_identity is not None:
+        payload.update(
+            {
+                str(field): np.asarray(value)
+                for field, value in artifact_identity.items()
+            }
+        )
     np.savez_compressed(output_dir / "band_representations.npz", **payload)
 
 
@@ -1051,6 +1405,122 @@ def _write_characters_csv(output_dir: Path, character_rows: list[dict[str, Any]]
             writer.writerow({field: row.get(field, "") for field in fields})
 
 
+def _canonical_c3_point_prefix(point: str) -> str:
+    text = str(point).strip()
+    normalized = text.lower().replace("'", "p").replace("’", "p")
+    if normalized in {"gamma", "g", "Γ".lower()}:
+        return "Gamma"
+    if normalized in {"kp", "kprime", "k2", "k_2"}:
+        return "Kp"
+    if normalized in {"k", "k1", "k_1"}:
+        return "K"
+    return re.sub(r"[^A-Za-z0-9_]+", "_", text) or "point"
+
+
+def _target_c3_labels_for_point(point: str) -> tuple[str, str] | None:
+    prefix = _canonical_c3_point_prefix(point)
+    if prefix == "Gamma":
+        return ("ω⁵", "ω")
+    if prefix in {"K", "Kp"}:
+        return ("-1", "-1")
+    return None
+
+
+def _selected_valence_pair_specs(count: int) -> list[tuple[str, list[int]]]:
+    specs: list[tuple[str, list[int]]] = []
+    for upper in range(3, 8):
+        lower = upper + 1
+        if count >= lower:
+            specs.append((f"top{upper}-{lower}", [count - upper, count - lower]))
+    return specs
+
+
+def _format_phase_tuple(phases: tuple[float, ...]) -> str:
+    return " ".join(f"{float(phase):+.6f}π" for phase in phases)
+
+
+def _selected_pair_audit_rows_for_sector(
+    *,
+    point: str,
+    sector: str,
+    energies: np.ndarray,
+    vectors: np.ndarray,
+    band_indices: np.ndarray,
+    operations: list[RawHSymmetryOperation],
+    source: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if sector != "valence":
+        return []
+    target = _target_c3_labels_for_point(point)
+    rows: list[dict[str, Any]] = []
+    prefix = _canonical_c3_point_prefix(point)
+    for operation in operations:
+        if operation.operation != "C3z" or operation.antiunitary:
+            continue
+        sewn_action = _sewn_raw_action(operation, source, vectors.shape[0])
+        if sewn_action is None:
+            continue
+        action_matrix, sewing_shift = sewn_action
+        for pair, positions in _selected_valence_pair_specs(len(energies)):
+            pair_vectors = vectors[:, positions]
+            audit = projected_pair_c3_audit(
+                point=point,
+                pair=pair,
+                vectors=pair_vectors,
+                action_matrix=action_matrix,
+                full_vectors=vectors,
+                overlap_matrix=source.get("overlap_matrix"),
+                target_labels=target,
+            )
+            row = {
+                "point": point,
+                "sector": sector,
+                "pair": pair,
+                "operation": operation.operation,
+                "sewing_shift": sewing_shift,
+                "pair_band_indices": _format_indices([int(band_indices[pos]) for pos in positions]),
+                "pair_energies": _format_energies([float(energies[pos]) for pos in positions]),
+            }
+            row[f"{prefix}_pair_c3_labels"] = " ".join(audit.labels)
+            row[f"{prefix}_pair_c3_phases"] = _format_phase_tuple(audit.phases)
+            row[f"{prefix}_pair_c3_leakage"] = f"{audit.leakage_residual:.12g}"
+            row[f"{prefix}_pair_c3_unitarity_resid"] = f"{audit.unitarity_residual:.12g}"
+            row[f"{prefix}_energy_order_label_match"] = str(audit.energy_order_label_match).lower()
+            row[f"{prefix}_pair_c3_multiset_match"] = str(audit.multiset_label_match).lower()
+            rows.append(row)
+    return rows
+
+
+def _write_selected_pair_c3_audit_csv(output_dir: Path, rows: list[dict[str, Any]]) -> None:
+    prefixes = ["Gamma", "K", "Kp"]
+    fields = [
+        "point",
+        "sector",
+        "pair",
+        "operation",
+        "sewing_shift",
+        "pair_band_indices",
+        "pair_energies",
+    ]
+    for prefix in prefixes:
+        fields.extend(
+            [
+                f"{prefix}_pair_c3_labels",
+                f"{prefix}_pair_c3_phases",
+                f"{prefix}_pair_c3_leakage",
+                f"{prefix}_pair_c3_unitarity_resid",
+                f"{prefix}_energy_order_label_match",
+                f"{prefix}_pair_c3_multiset_match",
+            ]
+        )
+    extra_fields = sorted({key for row in rows for key in row} - set(fields))
+    with (output_dir / "selected_pair_c3_audit.csv").open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fields + extra_fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow({field: row.get(field, "") for field in fields + extra_fields})
+
+
 def _write_summary(
     output_dir: Path,
     *,
@@ -1071,9 +1541,7 @@ def _write_summary(
         f"- degeneracy_tol: `{degeneracy_tol:.6g}`",
         "",
     ]
-    rows_by_point_sector: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in band_rows:
-        rows_by_point_sector.setdefault((row["point"], row["sector"]), []).append(row)
+    band_label_maps = _summary_band_label_maps(band_rows)
     chars_by_point: dict[str, list[dict[str, Any]]] = {}
     for row in character_rows:
         chars_by_point.setdefault(row["point"], []).append(row)
@@ -1093,29 +1561,6 @@ def _write_summary(
             )
         if not data["operations"]:
             lines.extend(["No raw-H symmetry matrices were available for this point.", ""])
-        for sector in ("valence", "conduction"):
-            lines.extend([f"### {sector.capitalize()}", ""])
-            lines.append("| band | energy | spin weights |")
-            lines.append("| ---: | ---: | --- |")
-            sector_rows = list(rows_by_point_sector.get((point, sector), []))
-            if sector == "valence":
-                sector_rows.sort(key=lambda row: float(row["energy"]), reverse=True)
-            else:
-                sector_rows.sort(key=lambda row: float(row["energy"]))
-            for row in sector_rows:
-                display_row = {
-                    **row,
-                    "energy": _format_summary_energy(row["energy"]),
-                    "spin_text": _spin_weight_text(row.get("spin_up_weight"), row.get("spin_down_weight")),
-                }
-                lines.append(
-                    "| {band_index} | {energy} | {spin_text} |".format(
-                        **display_row
-                    )
-                )
-            if not sector_rows:
-                lines.append("|  |  | unavailable |")
-            lines.append("")
 
         point_chars = chars_by_point.get(point, [])
         rep_rows = [
@@ -1125,41 +1570,31 @@ def _write_summary(
         ]
         rep_rows.sort(key=_symm_row_sort_key)
         lines.extend(["### Symmetry Representations", ""])
-        lines.append("| sector | block | bands | energies | operation | sewing G | rep | D_block |")
-        lines.append("| --- | ---: | --- | --- | --- | --- | --- | --- |")
+        lines.append("| sector | bands | energies | operation | sewing G | symmetry eigenstates | trace | residual | raw residual | polar distance | status |")
+        lines.append("| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | --- |")
         for row in rep_rows:
-            display_row = {
-                **row,
-                "energies": _format_summary_energies(row["energies"]),
-                "d_block": row.get("d_block", ""),
-            }
-            lines.append(
-                "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {sewing_shift} | {symm_rep} | `{d_block}` |".format(
-                    **display_row,
-                )
-            )
-        if not rep_rows:
-            lines.append("|  |  |  |  | unavailable |  |  |  |")
-        lines.append("")
-
-        lines.extend(["### Characters", ""])
-        lines.append("| sector | block | bands | energies | operation | antiunitary | trace | residual |")
-        lines.append("| --- | ---: | --- | --- | --- | --- | ---: | ---: |")
-        point_chars = sorted(point_chars, key=_symm_row_sort_key)
-        for row in point_chars:
             trace = f"{float(row['trace_real']):.6f}"
             imag = float(row["trace_imag"])
             if abs(imag) > 1.0e-12:
                 trace += f"{imag:+.6f}i"
-            display_row = {**row, "energies": _format_summary_energies(row["energies"])}
+            label_map = band_label_maps.get((point, str(row.get("sector", ""))), {})
+            display_row = {
+                **row,
+                "band_indices": _format_summary_band_indices(row["band_indices"], label_map),
+                "energies": _format_summary_energies(row["energies"]),
+                "unitarity_residual": _format_summary_residual(row["unitarity_residual"]),
+                "raw_unitarity_residual": _format_summary_residual(row["raw_unitarity_residual"]),
+                "polar_distance": _format_summary_residual(row["polar_distance"]),
+                "status": _representation_quality_status(row["raw_unitarity_residual"], row["polar_distance"]),
+            }
             lines.append(
-                "| {sector} | {block_id} | {band_indices} | {energies} | {operation} | {antiunitary} | {trace} | {unitarity_residual} |".format(
+                "| {sector} | {band_indices} | {energies} | {operation} | {sewing_shift} | `{symm_rep}` | {trace} | {unitarity_residual} | {raw_unitarity_residual} | {polar_distance} | {status} |".format(
                     trace=trace,
                     **display_row,
                 )
             )
-        if not point_chars:
-            lines.append("|  |  |  |  | unavailable |  |  |  |")
+        if not rep_rows:
+            lines.append("|  |  |  | unavailable |  |  |  |  |  |  |  |")
         lines.append("")
 
     (output_dir / "summary.md").write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
@@ -1174,6 +1609,8 @@ def run_symm_rep_from_point_sources(
     degeneracy_tol: float = 2.0e-3,
     overwrite: bool = False,
     source_label: str = "configured TAPW points",
+    wavefunction_cache_schema: str | None = None,
+    artifact_identity: dict[str, Any] | None = None,
 ) -> SymmRepResult:
     symmetry_dir = Path(symmetry_dir)
     output_dir = Path(output_dir)
@@ -1185,6 +1622,7 @@ def run_symm_rep_from_point_sources(
     point_results: dict[str, dict[str, Any]] = {}
     band_rows: list[dict[str, Any]] = []
     character_rows: list[dict[str, Any]] = []
+    selected_pair_rows: list[dict[str, Any]] = []
     rep_entries: list[dict[str, Any]] = []
 
     for point, source in point_sources.items():
@@ -1239,7 +1677,10 @@ def run_symm_rep_from_point_sources(
             spin_down.append(np.nan if down is None else down)
             spin_label.append(label)
 
-        operations = operations_by_point.get(point, [])
+        operations = _augment_point_little_group_operations(
+            operations_by_point.get(point, []),
+            source,
+        )
         point_results[point] = {
             "energies": energies_all,
             "vectors": vectors_all,
@@ -1251,6 +1692,10 @@ def run_symm_rep_from_point_sources(
             "spin_down": spin_down,
             "spin_label": spin_label,
             "operations": operations,
+            "coords": tuple(float(x) for x in source.get("coords", ())),
+            "cache_energies": source.get("cache_energies"),
+            "cache_eigenvectors": source.get("cache_eigenvectors"),
+            "sewing_context": source.get("sewing_context"),
         }
 
         spin_offset = 0
@@ -1274,6 +1719,18 @@ def run_symm_rep_from_point_sources(
                         "spin_label": spin_label[spin_lookup_index],
                     }
                 )
+
+            selected_pair_rows.extend(
+                _selected_pair_audit_rows_for_sector(
+                    point=point,
+                    sector=sector,
+                    energies=sector_energies,
+                    vectors=sector_vectors,
+                    band_indices=band_indices,
+                    operations=operations,
+                    source=source,
+                )
+            )
 
             blocks = group_degenerate_blocks(
                 sector_energies,
@@ -1346,10 +1803,17 @@ def run_symm_rep_from_point_sources(
                     )
             spin_offset += len(sector_energies)
 
-    _write_wavefunctions_npz(output_dir, point_results)
-    _write_representation_npz(output_dir, rep_entries)
+    _write_wavefunctions_npz(
+        output_dir,
+        point_results,
+        fermi_energy=float(fermi_energy),
+        cache_schema=wavefunction_cache_schema,
+        artifact_identity=artifact_identity,
+    )
+    _write_representation_npz(output_dir, rep_entries, artifact_identity=artifact_identity)
     _write_bands_csv(output_dir, band_rows)
     _write_characters_csv(output_dir, character_rows)
+    _write_selected_pair_c3_audit_csv(output_dir, selected_pair_rows)
     _write_summary(
         output_dir,
         band_dir=Path(source_label),
@@ -1397,6 +1861,7 @@ def run_symm_rep(
     point_results: dict[str, dict[str, Any]] = {}
     band_rows: list[dict[str, Any]] = []
     character_rows: list[dict[str, Any]] = []
+    selected_pair_rows: list[dict[str, Any]] = []
     rep_entries: list[dict[str, Any]] = []
 
     for point, source in sources.items():
@@ -1511,6 +1976,18 @@ def run_symm_rep(
                     }
                 )
 
+            selected_pair_rows.extend(
+                _selected_pair_audit_rows_for_sector(
+                    point=point,
+                    sector=sector,
+                    energies=sector_energies,
+                    vectors=sector_vectors,
+                    band_indices=band_indices,
+                    operations=operations,
+                    source=source,
+                )
+            )
+
             blocks = group_degenerate_blocks(
                 sector_energies,
                 positions,
@@ -1585,6 +2062,7 @@ def run_symm_rep(
     _write_representation_npz(output_dir, rep_entries)
     _write_bands_csv(output_dir, band_rows)
     _write_characters_csv(output_dir, character_rows)
+    _write_selected_pair_c3_audit_csv(output_dir, selected_pair_rows)
     _write_summary(
         output_dir,
         band_dir=band_dir,

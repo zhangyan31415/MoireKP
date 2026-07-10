@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from collections.abc import Callable
 from dataclasses import dataclass, replace
+import json
 import logging
 from pathlib import Path
 import time
@@ -13,13 +14,21 @@ from typing import Any
 from joblib import Parallel, delayed
 import numpy as np
 
+from . import __version__ as TAPW_VERSION
 from .artifacts import canonical_profile_name, canonical_qshell_name
 from .config import Config
+from .identity import IDENTITY_SCHEMA, require_identity_fields, require_matching_identity
 from .io.hr import HrSparseHandler
 from .io.structure import OpenMXFile, StructureProcessorSpglib
 from .reporting import TapwReporter
 from .workflows.band import BandStructureCalculator, _maybe_pin_current_worker, _set_thread_limits
-from .workflows.symm_rep import _prepare_output_dir, run_symm_rep, run_symm_rep_from_point_sources, select_band_indices
+from .workflows.symmetry import RAW_H_ARTIFACT_SCHEMA_VERSION, _physics_config_hash, _source_input_hash
+from .workflows.symm_rep import (
+    _prepare_output_dir,
+    _safe_npz_key,
+    run_symm_rep,
+    run_symm_rep_from_point_sources,
+)
 
 ProgressCallback = Callable[[str], None]
 TimingBreakdown = dict[str, Any]
@@ -32,16 +41,58 @@ class ConfigSymmRepRequest:
     output_dir: Path
     fermi_energy: float
     num_bands: int
-    valence_count: int
-    conduction_count: int
     degeneracy_tol: float
     points: dict[str, tuple[float, float, float]]
-    cache_dir: Path | None = None
+    identity_schema: str
+    input_hash: str
+    config_hash: str
+    basis_hash: str
+    package_version: str
+    schema_version: int
     cache_enabled: bool = True
 
 
-_HIGH_SYMMETRY_CACHE_SCHEMA = "tapw.symm_rep.high_symmetry_wavefunctions.v2"
+CONFIG_SYMM_REP_NUM_BANDS = 50
+_HIGH_SYMMETRY_CACHE_SCHEMA = "tapw.symm_rep.high_symmetry_wavefunctions.v3"
 _HIGH_SYMMETRY_CACHE_FILE = "high_symmetry_wavefunctions.npz"
+_REMOVED_REPRESENTATION_FIELDS = {"num_bands", "valence_count", "conduction_count", "output_dir", "cache"}
+_IDENTITY_FIELDS = (
+    "identity_schema",
+    "input_hash",
+    "config_hash",
+    "basis_hash",
+    "package_version",
+    "schema_version",
+)
+
+
+def _request_identity(request: ConfigSymmRepRequest) -> dict[str, Any]:
+    return {field: getattr(request, field) for field in _IDENTITY_FIELDS}
+
+
+def _load_raw_h_identity(path: Path) -> dict[str, Any]:
+    with np.load(path, allow_pickle=False) as payload:
+        if "metadata_json" not in payload.files:
+            raise ValueError(f"raw-H representations are missing metadata_json: {path}")
+        metadata = json.loads(str(np.asarray(payload["metadata_json"]).item()))
+    identity = require_identity_fields(metadata, _IDENTITY_FIELDS, f"raw-H representations {path}")
+    if str(metadata.get("schema", "")) != "tapw.raw_h_representations.v1":
+        raise ValueError(f"Unsupported raw-H representation schema in {path}: {metadata.get('schema')!r}")
+    if identity["identity_schema"] != IDENTITY_SCHEMA:
+        raise ValueError(
+            f"Unsupported raw-H identity schema in {path}: {identity['identity_schema']!r}"
+        )
+    matrices = list(metadata.get("matrices", []) or [])
+    if not matrices:
+        raise ValueError(f"raw-H representations contain no matrix metadata: {path}")
+    for record in matrices:
+        require_matching_identity(
+            {"basis_hash": identity["basis_hash"]},
+            record,
+            ("basis_hash",),
+            f"raw-H matrix {record.get('key', '<unknown>')}",
+        )
+    return identity
 
 
 def _point_tuple(value: Any, *, label: str) -> tuple[float, float, float]:
@@ -59,13 +110,30 @@ def _parse_representation_points(raw_points: Any) -> dict[str, tuple[float, floa
     return {str(label): _point_tuple(value, label=str(label)) for label, value in raw_points.items()}
 
 
+def _resolve_config_num_bands(config: Config, symmetry: dict[str, Any]) -> int:
+    raw = symmetry.get("num_bands", dict(getattr(config, "bands", {}) or {}).get("num_bands", CONFIG_SYMM_REP_NUM_BANDS))
+    num_bands = int(raw)
+    if num_bands < 1:
+        raise ValueError("symmetry.num_bands must be a positive integer for tapw symm-rep config mode.")
+    return num_bands
+
+
 def resolve_config_request(config_path: Path) -> ConfigSymmRepRequest:
     config_path = Path(config_path).expanduser().resolve()
     config = Config.from_yaml(str(config_path))
+    config.apply_workflow_section("symmetry")
     symmetry = dict(getattr(config, "symmetry", {}) or {})
     representation = dict(symmetry.get("representation", {}) or {})
     if not representation:
         raise ValueError("Config is missing symmetry.representation.")
+    removed = sorted(_REMOVED_REPRESENTATION_FIELDS & set(representation))
+    if removed:
+        raise ValueError(
+            "symmetry.representation contains removed parameter(s): "
+            f"{removed}. Set symmetry.num_bands for the high-symmetry band window; "
+            "tapw symm-rep writes to symm_rep, caches high-symmetry wavefunctions, "
+            "and classifies all solved states by efermi."
+        )
     if "efermi" not in symmetry:
         raise ValueError("symmetry.efermi is required for tapw symm-rep config mode.")
 
@@ -82,26 +150,32 @@ def resolve_config_request(config_path: Path) -> ConfigSymmRepRequest:
             f"Missing raw-H symmetry representations: {packed_rawh}\n"
             f"Run `tapw symm -c {config_path}` first."
         )
+    raw_h_identity = _load_raw_h_identity(packed_rawh)
+    current_identity = {
+        "identity_schema": IDENTITY_SCHEMA,
+        "input_hash": _source_input_hash(config),
+        "config_hash": _physics_config_hash(config),
+        "package_version": TAPW_VERSION,
+        "schema_version": RAW_H_ARTIFACT_SCHEMA_VERSION,
+    }
+    require_matching_identity(
+        current_identity,
+        raw_h_identity,
+        ("identity_schema", "input_hash", "config_hash", "package_version", "schema_version"),
+        f"raw-H representations {packed_rawh}",
+    )
 
-    output_dir = Path(representation.get("output_dir", "symm_rep"))
-    if not output_dir.is_absolute():
-        output_dir = run_root / output_dir
-    cache_dir = Path(representation.get("cache_dir", "symm_rep_cache"))
-    if not cache_dir.is_absolute():
-        cache_dir = run_root / cache_dir
+    output_dir = run_root / "symm_rep"
 
     return ConfigSymmRepRequest(
         config_path=config_path,
         symmetry_dir=symmetry_dir,
         output_dir=output_dir,
         fermi_energy=float(symmetry["efermi"]),
-        num_bands=int(representation.get("num_bands", 50)),
-        valence_count=int(representation.get("valence_count", 20)),
-        conduction_count=int(representation.get("conduction_count", 20)),
+        num_bands=_resolve_config_num_bands(config, symmetry),
         degeneracy_tol=float(representation.get("degeneracy_tol", 2.0e-3)),
         points=_parse_representation_points(representation.get("points")),
-        cache_dir=cache_dir,
-        cache_enabled=bool(representation.get("cache", True)),
+        **raw_h_identity,
     )
 
 
@@ -245,8 +319,7 @@ def _snap_reciprocal_basis_to_g_vectors(
 def _request_cache_path(request: ConfigSymmRepRequest) -> Path | None:
     if not request.cache_enabled:
         return None
-    cache_dir = request.cache_dir if request.cache_dir is not None else request.output_dir.parent / "symm_rep_cache"
-    return Path(cache_dir) / _HIGH_SYMMETRY_CACHE_FILE
+    return Path(request.output_dir) / _HIGH_SYMMETRY_CACHE_FILE
 
 
 def _request_point_labels(request: ConfigSymmRepRequest) -> list[str]:
@@ -255,6 +328,14 @@ def _request_point_labels(request: ConfigSymmRepRequest) -> list[str]:
 
 def _request_point_coords(request: ConfigSymmRepRequest) -> np.ndarray:
     return np.asarray([request.points[label] for label in _request_point_labels(request)], dtype=float)
+
+
+def _select_all_band_indices_by_fermi(energies: np.ndarray, fermi_energy: float) -> dict[str, np.ndarray]:
+    energies = np.asarray(energies, dtype=float)
+    return {
+        "valence": np.where(energies < float(fermi_energy))[0],
+        "conduction": np.where(energies >= float(fermi_energy))[0],
+    }
 
 
 def _select_sectors_for_point(
@@ -266,28 +347,11 @@ def _select_sectors_for_point(
     request: ConfigSymmRepRequest,
     sewing_context: dict[str, Any] | None,
     source_kind: str,
+    overlap_matrix: Any | None = None,
 ) -> dict[str, Any]:
     eig = np.asarray(eig, dtype=float)
     vec = np.asarray(vec, dtype=np.complex128)
-    selections = select_band_indices(
-        eig,
-        request.fermi_energy,
-        valence_count=request.valence_count,
-        conduction_count=request.conduction_count,
-    )
-    have_valence = len(selections["valence"])
-    have_conduction = len(selections["conduction"])
-    if have_valence < request.valence_count or have_conduction < request.conduction_count:
-        missing = []
-        if have_valence < request.valence_count:
-            missing.append(f"valence {have_valence}/{request.valence_count}")
-        if have_conduction < request.conduction_count:
-            missing.append(f"conduction {have_conduction}/{request.conduction_count}")
-        raise RuntimeError(
-            f"Point {label} did not provide enough states around efermi={request.fermi_energy:.12g} "
-            f"after solving symmetry.representation.num_bands={request.num_bands}: {', '.join(missing)}. "
-            f"Increase symmetry.representation.num_bands to a value larger than {request.num_bands}."
-        )
+    selections = _select_all_band_indices_by_fermi(eig, request.fermi_energy)
 
     sectors: dict[str, dict[str, Any]] = {}
     for sector, indices in selections.items():
@@ -305,7 +369,11 @@ def _select_sectors_for_point(
         "source_count": 1,
         "coords": tuple(float(x) for x in coords),
         "sectors": sectors,
+        "cache_energies": eig,
+        "cache_eigenvectors": vec,
     }
+    if overlap_matrix is not None:
+        point_source["overlap_matrix"] = overlap_matrix
     if sewing_context is not None:
         point_source["sewing_context"] = sewing_context
     return point_source
@@ -366,11 +434,22 @@ def _load_high_symmetry_point_cache(
             schema = str(np.asarray(payload["schema"]).item())
             if schema != _HIGH_SYMMETRY_CACHE_SCHEMA:
                 return None
+            cached_identity = require_identity_fields(
+                payload,
+                _IDENTITY_FIELDS,
+                f"high-symmetry cache {cache_path}",
+            )
+            require_matching_identity(
+                _request_identity(request),
+                cached_identity,
+                _IDENTITY_FIELDS,
+                f"high-symmetry cache {cache_path}",
+            )
             cached_fermi = float(np.asarray(payload["fermi_energy"]).item())
             if not np.isclose(cached_fermi, request.fermi_energy, rtol=0.0, atol=1.0e-10):
                 return None
             cached_num_bands = int(np.asarray(payload["num_bands"]).item())
-            if cached_num_bands < int(request.num_bands):
+            if cached_num_bands != int(request.num_bands):
                 return None
             labels = [str(item) for item in np.asarray(payload["points"]).tolist()]
             if labels != _request_point_labels(request):
@@ -380,8 +459,9 @@ def _load_high_symmetry_point_cache(
             sewing_context = _cache_sewing_context(payload)
             point_sources: dict[str, dict[str, Any]] = {}
             for label, coords in request.points.items():
-                eig_key = f"{label}_energies"
-                vec_key = f"{label}_eigenvectors"
+                prefix = _safe_npz_key(label)
+                eig_key = f"{prefix}_energies"
+                vec_key = f"{prefix}_eigenvectors"
                 if eig_key not in payload.files or vec_key not in payload.files:
                     return None
                 point_sources[label] = _select_sectors_for_point(
@@ -393,7 +473,7 @@ def _load_high_symmetry_point_cache(
                     sewing_context=sewing_context,
                     source_kind="computed_config_points",
                 )
-    except (OSError, KeyError, ValueError):
+    except (OSError, KeyError, TypeError, ValueError):
         return None
     finally:
         if timings is not None:
@@ -421,10 +501,15 @@ def _write_high_symmetry_point_cache(
         "num_bands": np.array(int(request.num_bands), dtype=int),
         "points": np.array(_request_point_labels(request), dtype=str),
         "point_coords": _request_point_coords(request),
+        **{
+            field: np.asarray(value)
+            for field, value in _request_identity(request).items()
+        },
     }
     for label, (eig, vec) in solved_points.items():
-        payload[f"{label}_energies"] = np.asarray(eig, dtype=float)
-        payload[f"{label}_eigenvectors"] = np.asarray(vec, dtype=np.complex128)
+        prefix = _safe_npz_key(label)
+        payload[f"{prefix}_energies"] = np.asarray(eig, dtype=float)
+        payload[f"{prefix}_eigenvectors"] = np.asarray(vec, dtype=np.complex128)
     if sewing_context is not None:
         groups = [np.asarray(group, dtype=float) for group in sewing_context.get("g_vectors_by_group", [])]
         payload["sewing_group_count"] = np.array(len(groups), dtype=int)
@@ -454,7 +539,7 @@ def _solve_config_point_loky_worker(
     config.compute.mode = "band"
     config.compute.efermi = float(fermi_energy)
     config.compute.eig_vec_cal = True
-    config.compute.hamk_save = False
+    config.compute.hamk_save = True
     config.compute.num_bands_cal = max(1, int(num_bands))
     config.compute.num_processes = 1
 
@@ -464,7 +549,7 @@ def _solve_config_point_loky_worker(
     sewing_context = _sewing_context_from_calculator(calculator, config)
 
     solve_started = time.perf_counter()
-    eig, vec, _hamk, _samk = calculator.calculate_band_01(np.asarray(coords, dtype=float), int(point_index))
+    eig, vec, _hamk, samk = calculator.calculate_band_01(np.asarray(coords, dtype=float), int(point_index))
     solve_elapsed = time.perf_counter() - solve_started
     if vec is None:
         raise RuntimeError(f"TAPW point solve for {label} did not return eigenvectors; eig_vec_cal must be true.")
@@ -473,6 +558,7 @@ def _solve_config_point_loky_worker(
         "coords": tuple(float(x) for x in coords),
         "eig": np.asarray(eig, dtype=float),
         "vec": np.asarray(vec, dtype=np.complex128),
+        "overlap_matrix": samk,
         "sewing_context": sewing_context,
         "setup_seconds": setup_elapsed,
         "solve_seconds": solve_elapsed,
@@ -507,8 +593,9 @@ def calculate_config_point_sources(
     *,
     progress: ProgressCallback | None = None,
     timings: TimingBreakdown | None = None,
+    write_cache: bool = True,
 ) -> dict[str, dict[str, Any]]:
-    cached = _load_high_symmetry_point_cache(request, progress=progress, timings=timings)
+    cached = _load_high_symmetry_point_cache(request, progress=progress, timings=timings) if write_cache else None
     if cached is not None:
         return cached
 
@@ -516,7 +603,7 @@ def calculate_config_point_sources(
     config.compute.mode = "band"
     config.compute.efermi = request.fermi_energy
     config.compute.eig_vec_cal = True
-    config.compute.hamk_save = False
+    config.compute.hamk_save = True
     initial_num_bands = max(1, int(request.num_bands))
     config.compute.num_bands_cal = initial_num_bands
     total_points = len(request.points)
@@ -573,6 +660,7 @@ def calculate_config_point_sources(
                 request=request,
                 sewing_context=sewing_context,
                 source_kind="computed_config_points",
+                overlap_matrix=item.get("overlap_matrix"),
             )
             if progress is not None:
                 sectors = point_sources[label]["sectors"]
@@ -583,7 +671,8 @@ def calculate_config_point_sources(
                         conduction=len(sectors.get("conduction", {}).get("band_indices", [])),
                     )
                 )
-        _write_high_symmetry_point_cache(request, solved_points, sewing_context=sewing_context, timings=timings)
+        if write_cache:
+            _write_high_symmetry_point_cache(request, solved_points, sewing_context=sewing_context, timings=timings)
         return point_sources
 
     if progress is not None:
@@ -614,7 +703,7 @@ def calculate_config_point_sources(
             coords_array,
             kpoint_indices=list(range(total_points)),
             nk_total=total_points,
-            out_dir=str(request.cache_dir or request.output_dir),
+            out_dir=str(request.output_dir),
             suffix="symm_rep",
         )
         elapsed = time.perf_counter() - started
@@ -623,6 +712,7 @@ def calculate_config_point_sources(
         if vec_result is None:
             raise RuntimeError("TAPW point solve did not return eigenvectors; eig_vec_cal must be true.")
         vec_all = np.asarray(vec_result, dtype=np.complex128)
+        samk_result = calculator.result.get("samk")
         if timings is not None:
             timings["diagonalize_parallel"] = {
                 "seconds": elapsed,
@@ -635,6 +725,7 @@ def calculate_config_point_sources(
         for point_index, label in enumerate(labels):
             eig = np.asarray(eig_all[point_index], dtype=float)
             vec = np.asarray(vec_all[point_index], dtype=np.complex128)
+            samk = None if samk_result is None else samk_result[point_index]
             coords = request.points[label]
             solved_points[label] = (eig, vec)
             point_sources[label] = _select_sectors_for_point(
@@ -645,6 +736,7 @@ def calculate_config_point_sources(
                 request=request,
                 sewing_context=sewing_context,
                 source_kind="computed_config_points",
+                overlap_matrix=samk,
             )
             if progress is not None:
                 sectors = point_sources[label]["sectors"]
@@ -655,7 +747,8 @@ def calculate_config_point_sources(
                         conduction=len(sectors.get("conduction", {}).get("band_indices", [])),
                     )
                 )
-        _write_high_symmetry_point_cache(request, solved_points, sewing_context=sewing_context, timings=timings)
+        if write_cache:
+            _write_high_symmetry_point_cache(request, solved_points, sewing_context=sewing_context, timings=timings)
         return point_sources
 
     for point_index, (label, coords) in enumerate(request.points.items()):
@@ -671,7 +764,7 @@ def calculate_config_point_sources(
                     kz=coords[2],
                 )
             )
-        eig, vec, selections = _solve_config_point_with_requested_window(
+        eig, vec, samk, selections = _solve_config_point_with_fixed_window(
             calculator,
             config.compute,
             np.asarray(coords, dtype=float),
@@ -679,8 +772,6 @@ def calculate_config_point_sources(
             label=label,
             initial_num_bands=initial_num_bands,
             fermi_energy=request.fermi_energy,
-            valence_count=request.valence_count,
-            conduction_count=request.conduction_count,
             progress=progress,
             timings=timings,
         )
@@ -693,6 +784,7 @@ def calculate_config_point_sources(
             request=request,
             sewing_context=sewing_context,
             source_kind="computed_config_points",
+            overlap_matrix=samk,
         )
         if progress is not None:
             point_elapsed = time.perf_counter() - point_started
@@ -713,11 +805,12 @@ def calculate_config_point_sources(
                     "conduction": int(len(selections["conduction"])),
                 }
             )
-    _write_high_symmetry_point_cache(request, solved_points, sewing_context=sewing_context, timings=timings)
+    if write_cache:
+        _write_high_symmetry_point_cache(request, solved_points, sewing_context=sewing_context, timings=timings)
     return point_sources
 
 
-def _solve_config_point_with_requested_window(
+def _solve_config_point_with_fixed_window(
     calculator: BandStructureCalculator,
     compute_config: Any,
     coords: np.ndarray,
@@ -726,20 +819,16 @@ def _solve_config_point_with_requested_window(
     label: str,
     initial_num_bands: int,
     fermi_energy: float,
-    valence_count: int,
-    conduction_count: int,
     progress: ProgressCallback | None = None,
     timings: TimingBreakdown | None = None,
-) -> tuple[np.ndarray, np.ndarray, dict[str, np.ndarray]]:
-    requested_valence = max(0, int(valence_count))
-    requested_conduction = max(0, int(conduction_count))
+) -> tuple[np.ndarray, np.ndarray, Any | None, dict[str, np.ndarray]]:
     num_bands = max(1, int(initial_num_bands))
 
     compute_config.num_bands_cal = num_bands
     if progress is not None:
         progress(f"Diagonalizing {label} with num_bands={num_bands}.")
     started = time.perf_counter()
-    eig, vec, _hamk, _samk = calculator.calculate_band_01(coords, point_index)
+    eig, vec, _hamk, samk = calculator.calculate_band_01(coords, point_index)
     elapsed = time.perf_counter() - started
     if vec is None:
         raise RuntimeError("TAPW point solve did not return eigenvectors; eig_vec_cal must be true.")
@@ -751,34 +840,12 @@ def _solve_config_point_with_requested_window(
         timings.setdefault("diagonalize_points", []).append(
             {"point": label, "seconds": elapsed, "bands": int(len(eig))}
         )
-    selections = select_band_indices(
-        eig,
-        fermi_energy,
-        valence_count=requested_valence,
-        conduction_count=requested_conduction,
-    )
-    have_valence = len(selections["valence"])
-    have_conduction = len(selections["conduction"])
-    if have_valence >= requested_valence and have_conduction >= requested_conduction:
-        return eig, vec, selections
-
-    missing = []
-    if have_valence < requested_valence:
-        missing.append(f"valence {have_valence}/{requested_valence}")
-    if have_conduction < requested_conduction:
-        missing.append(f"conduction {have_conduction}/{requested_conduction}")
-    raise RuntimeError(
-        f"Point {label} did not provide enough states around efermi={fermi_energy:.12g} "
-        f"after solving symmetry.representation.num_bands={num_bands}: {', '.join(missing)}. "
-        f"Increase symmetry.representation.num_bands to a value larger than {num_bands}."
-    )
+    return eig, vec, samk, _select_all_band_indices_by_fermi(eig, fermi_energy)
 
 
 def run_configured_symm_rep(
     config_path: Path,
     *,
-    valence_count: int | None = None,
-    conduction_count: int | None = None,
     degeneracy_tol: float | None = None,
     overwrite: bool = True,
     progress: ProgressCallback | None = None,
@@ -788,15 +855,14 @@ def run_configured_symm_rep(
     request = resolve_config_request(config_path)
     if timings is not None:
         timings["resolve_config"] = time.perf_counter() - resolve_started
-    if valence_count is not None or conduction_count is not None or degeneracy_tol is not None:
+    if degeneracy_tol is not None:
         request = replace(
             request,
-            valence_count=request.valence_count if valence_count is None else int(valence_count),
-            conduction_count=request.conduction_count if conduction_count is None else int(conduction_count),
-            degeneracy_tol=request.degeneracy_tol if degeneracy_tol is None else float(degeneracy_tol),
+            degeneracy_tol=float(degeneracy_tol),
         )
     prepare_started = time.perf_counter()
-    _prepare_output_dir(request.output_dir, overwrite=overwrite)
+    if not overwrite:
+        _prepare_output_dir(request.output_dir, overwrite=False)
     if timings is not None:
         timings["prepare_output"] = time.perf_counter() - prepare_started
     if progress is not None:
@@ -804,12 +870,13 @@ def run_configured_symm_rep(
         progress(f"Using raw-H representations: {request.symmetry_dir / 'representations.npz'}")
         progress(f"Writing symmetry representations to: {request.output_dir}")
         progress(
-            f"Band window: num_bands={request.num_bands}, valence_count={request.valence_count}, "
-            f"conduction_count={request.conduction_count}, degeneracy_tol={request.degeneracy_tol:g}"
+            f"Band window: num_bands={request.num_bands} around efermi; "
+            "selecting all valence/conduction states in that window; "
+            f"degeneracy_tol={request.degeneracy_tol:g}"
         )
         progress(f"Computing high-symmetry point wavefunctions for: {', '.join(request.points)}")
     points_started = time.perf_counter()
-    point_sources = calculate_config_point_sources(request, progress=progress, timings=timings)
+    point_sources = calculate_config_point_sources(request, progress=progress, timings=timings, write_cache=True)
     if timings is not None:
         timings["point_source_total"] = time.perf_counter() - points_started
     if progress is not None:
@@ -823,6 +890,8 @@ def run_configured_symm_rep(
         degeneracy_tol=request.degeneracy_tol,
         overwrite=overwrite,
         source_label=f"config:{request.config_path}",
+        wavefunction_cache_schema=_HIGH_SYMMETRY_CACHE_SCHEMA,
+        artifact_identity=_request_identity(request),
     )
     if timings is not None:
         timings["projection_write"] = time.perf_counter() - projection_started
@@ -965,12 +1034,12 @@ def build_parser(prog: str = "tapw symm-rep") -> argparse.ArgumentParser:
         help=argparse.SUPPRESS,
     )
     parser.add_argument("--output-dir", type=Path, help=argparse.SUPPRESS)
-    parser.add_argument("--valence-count", type=int, default=None, help="Number of valence states to report per point.")
+    parser.add_argument("--valence-count", type=int, default=None, help=argparse.SUPPRESS)
     parser.add_argument(
         "--conduction-count",
         type=int,
         default=None,
-        help="Number of conduction states to report per point.",
+        help=argparse.SUPPRESS,
     )
     parser.add_argument(
         "--degeneracy-tol",
@@ -1015,13 +1084,13 @@ def build_parser(prog: str = "tapw symm-rep") -> argparse.ArgumentParser:
 def main(argv=None, *, prog: str = "tapw symm-rep") -> int:
     args = build_parser(prog=prog).parse_args(argv)
     if args.config is not None:
+        if args.valence_count is not None or args.conduction_count is not None:
+            raise SystemExit("tapw symm-rep -c does not accept --valence-count or --conduction-count.")
         started = time.perf_counter()
         timings: TimingBreakdown = {}
         _print_section("Start")
         output_dir = run_configured_symm_rep(
             args.config,
-            valence_count=args.valence_count,
-            conduction_count=args.conduction_count,
             degeneracy_tol=args.degeneracy_tol,
             overwrite=args.overwrite,
             progress=_print_progress,

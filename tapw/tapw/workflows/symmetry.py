@@ -6,7 +6,7 @@ import hashlib
 import json
 import shutil
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from functools import lru_cache
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +17,9 @@ import scipy.linalg
 import scipy.sparse
 from scipy.spatial import cKDTree
 
+from .. import __version__ as TAPW_VERSION
 from ..artifacts import canonical_profile_name, canonical_qshell_name
+from ..identity import IDENTITY_SCHEMA, hash_file, hash_mapping
 from ..symmetry.representations import (
     direct_sum,
     generate_direct_sum_params,
@@ -54,6 +56,75 @@ DETAIL_COLUMNS = [
     "nonzero_reciprocal_shift_count",
     "square_residual",
 ]
+
+RAW_H_ARTIFACT_SCHEMA_VERSION = 1
+_CONFIG_IDENTITY_EXCLUDED_FIELDS = {
+    "blas_threads",
+    "debug",
+    "developer_outputs",
+    "eig_vec_cal",
+    "hamk_save",
+    "kpoint_chunk_count",
+    "kpoint_chunk_id",
+    "log_level",
+    "memmap_dir",
+    "mode",
+    "num_processes",
+    "output_dir",
+    "parallel_backend",
+    "parallel_impl",
+    "tapw_auto_fork",
+    "vec_store",
+}
+
+
+def _identity_config_value(value: Any) -> Any:
+    if is_dataclass(value):
+        items = ((field.name, getattr(value, field.name)) for field in fields(value))
+        return {
+            key: _identity_config_value(item)
+            for key, item in items
+            if key not in _CONFIG_IDENTITY_EXCLUDED_FIELDS
+        }
+    if isinstance(value, dict):
+        return {
+            str(key): _identity_config_value(item)
+            for key, item in value.items()
+            if str(key) not in _CONFIG_IDENTITY_EXCLUDED_FIELDS
+        }
+    if isinstance(value, SimpleNamespace) or hasattr(value, "__dict__"):
+        return {
+            str(key): _identity_config_value(item)
+            for key, item in vars(value).items()
+            if not str(key).startswith("_") and str(key) not in _CONFIG_IDENTITY_EXCLUDED_FIELDS
+        }
+    if isinstance(value, tuple):
+        return [_identity_config_value(item) for item in value]
+    if isinstance(value, list):
+        return [_identity_config_value(item) for item in value]
+    return value
+
+
+def _source_input_hash(config: Any) -> str:
+    paths = getattr(config, "paths", None)
+    if paths is None:
+        raise ValueError("TAPW source identity requires config.paths")
+    file_hashes: dict[str, str | None] = {}
+    for field in ("H_file", "S_file", "input_file"):
+        raw_path = getattr(paths, field, None)
+        if field != "S_file" and not raw_path:
+            raise ValueError(f"TAPW source identity requires paths.{field}")
+        file_hashes[field] = None if not raw_path else hash_file(Path(raw_path))
+    return hash_mapping(file_hashes)
+
+
+def _physics_config_hash(config: Any) -> str:
+    payload = {
+        section: _identity_config_value(getattr(config, section))
+        for section in ("twist", "cluster", "compute", "symmetry_analysis", "symmetry")
+        if hasattr(config, section)
+    }
+    return hash_mapping(payload)
 
 
 def _is_canonical_output_layout(config) -> bool:
@@ -351,6 +422,18 @@ def _inter_valley_operations(operations: dict[str, list[dict[str, Any]]]) -> dic
                 continue
             result.setdefault(source, []).append((_operation_markdown_label(entry), target))
     return result
+
+
+def _show_operation_in_summary_table(
+    entry: dict[str, Any],
+    *,
+    exported: bool,
+    minimal_generators: set[str] | None = None,
+) -> bool:
+    operation = str(entry.get("operation", ""))
+    if representation_operation_name(operation) == "C3z^2" and not bool(exported):
+        return False
+    return True
 
 
 def _raw_h_file_from_record(record: dict[str, Any]) -> str:
@@ -1772,6 +1855,21 @@ def _default_validation_q_points():
     ]
 
 
+def _symmetry_validation_mode(symmetry_config) -> str:
+    mode = str(getattr(symmetry_config, "validation", "full")).strip().lower().replace("-", "_")
+    aliases = {
+        "gamma_only": "gamma",
+        "export": "export_only",
+        "raw_h_only": "export_only",
+        "none": "export_only",
+    }
+    mode = aliases.get(mode, mode)
+    allowed = {"full", "gamma", "export_only"}
+    if mode not in allowed:
+        raise ValueError(f"Invalid symmetry.validation={mode!r}. Must be one of {sorted(allowed)}")
+    return mode
+
+
 def _format_k_frac(q) -> str:
     q = np.asarray(q, dtype=float)
     return "[" + ", ".join(f"{value:.6f}" for value in q.tolist()) + "]"
@@ -2506,6 +2604,21 @@ class SymmetryAnalysisRunner:
         self._valley_context_cache: dict[int, ValleyContext] = {}
         self.timing_breakdown: dict[str, float] = {}
         self.analysis_timing_breakdown: dict[str, Any] = {}
+        self._source_identity_cache: dict[str, Any] | None = None
+
+    def _artifact_identity_for_basis(self, basis_hash: str) -> dict[str, Any]:
+        basis_hash = str(basis_hash).strip()
+        if not basis_hash:
+            raise ValueError("raw-H artifact identity requires a non-empty basis_hash")
+        if self._source_identity_cache is None:
+            self._source_identity_cache = {
+                "identity_schema": IDENTITY_SCHEMA,
+                "input_hash": _source_input_hash(self.config),
+                "config_hash": _physics_config_hash(self.config),
+                "package_version": TAPW_VERSION,
+                "schema_version": RAW_H_ARTIFACT_SCHEMA_VERSION,
+            }
+        return {**self._source_identity_cache, "basis_hash": basis_hash}
 
     def _calculator_for_valley(self, valley: int) -> BandStructureCalculator:
         calculator = self._calculator_cache.get(int(valley))
@@ -3907,6 +4020,48 @@ class SymmetryAnalysisRunner:
             "debug": debug or {},
         }
 
+    def _candidate_export_only_detail_row(
+        self,
+        candidate,
+        valley_label: str,
+        q_label: str,
+        q_target,
+        tolerance: float,
+    ):
+        q_target = np.asarray(q_target, dtype=float)
+        rotation_cart = np.asarray(candidate.get("rotation_cart", np.eye(3, dtype=float)), dtype=float)
+        operation_name = displayed_operation_name(candidate.get("name"))
+        supported = bool(candidate.get("closed", False))
+        if operation_name == "E" and not candidate.get("antiunitary", False):
+            supported = True
+        return self._make_detail_row(
+            valley_label=valley_label,
+            operation_name=candidate["name"],
+            operation_type="antiunitary" if candidate.get("antiunitary", False) else "unitary",
+            spglib_index=_candidate_spglib_index(candidate),
+            r_2d=_format_matrix_json(rotation_cart[:2, :2]),
+            k_label=q_label,
+            q_local=q_target,
+            supported=supported,
+            not_supported_reason="" if supported else candidate.get("closure_reason", "valley_not_closed"),
+            residual_h_raw=None,
+            residual_s_raw=None,
+            residual_h_sym=None,
+            residual_s_sym=None,
+            residual_lowdin_order=None,
+            diagnostic_g_perm_max_delta=None,
+            diagnostic_nonzero_reciprocal_shift_count=None,
+            diagnostic_transport_unitarity_residual=None,
+            diagnostic_t_square_residual=None,
+            debug={
+                "validation_mode": "export_only",
+                "validation_note": "raw-H covariance residuals were skipped by symmetry.validation=export_only",
+            },
+            tolerance=tolerance,
+            status_override="derived" if supported else "not_supported",
+            covariance_status_override="not_computed" if supported else "not_supported",
+        )
+
     def _derived_c3_square_detail_row(self, candidate, valley_label: str, q_label: str, q_target, tolerance: float):
         rotation_cart = np.asarray(candidate.get("rotation_cart", np.eye(3, dtype=float)), dtype=float)
         return self._make_detail_row(
@@ -4269,6 +4424,7 @@ class SymmetryAnalysisRunner:
         valleys = getattr(self.config.symmetry_analysis, "valleys", None) or getattr(self.config.compute, "valleys", [])
         tolerance = float(getattr(self.config.symmetry_analysis, "tolerance", 1.0e-2))
         spglib_symprec = _spglib_symprec_from_config(self.config.symmetry_analysis, tolerance)
+        validation_mode = _symmetry_validation_mode(self.config.symmetry_analysis)
         if not getattr(self.config.compute, "TAPW", False):
             raise ValueError("Symmetry-analysis mode currently supports TAPW only.")
 
@@ -4276,6 +4432,8 @@ class SymmetryAnalysisRunner:
         operations_summary: dict[str, list[dict[str, Any]]] = {}
         representations: list[dict[str, Any]] = []
         validation_q_points = _default_validation_q_points()
+        if validation_mode in {"gamma", "export_only"}:
+            validation_q_points = validation_q_points[:1]
 
         started = time.perf_counter()
         spatial_operations = collect_spglib_spatial_operations(self.structure, symprec=spglib_symprec)
@@ -4383,7 +4541,18 @@ class SymmetryAnalysisRunner:
                     and operation_display_name in {"C3z", "C3z^2"}
                 ):
                     candidate_validation_q_points = validation_q_points[:1]
-                if (
+                if validation_mode == "export_only":
+                    candidate_rows = [
+                        self._candidate_export_only_detail_row(
+                            candidate,
+                            valley_label,
+                            q_label,
+                            q_value,
+                            tolerance,
+                        )
+                        for q_label, q_value in candidate_validation_q_points
+                    ]
+                elif (
                     operation_display_name == "C3z^2"
                     and c3_generator_validated
                     and bool(candidate.get("closed", False))
@@ -4523,6 +4692,7 @@ class SymmetryAnalysisRunner:
                 "valleys": list(valleys),
                 "tolerance": tolerance,
                 "spglib_symprec": spglib_symprec,
+                "validation": validation_mode,
                 "m_valley_convention": (
                     "M1, M2, and M3 are related by C3z. "
                     "A single-M valley output exports only operations closed within the selected valley block."
@@ -4545,6 +4715,7 @@ class SymmetryAnalysisRunner:
         valleys = summary.get("valleys", [])
         tolerance = summary.get("tolerance")
         spglib_symprec = summary.get("spglib_symprec")
+        validation = summary.get("validation", "full")
         operations = summary.get("operations", {})
         minimal_generators = summary.get("minimal_generators", {})
         output_schema = summary.get("output_schema", "tapw_source_symmetry/v2")
@@ -4571,6 +4742,7 @@ class SymmetryAnalysisRunner:
             "- Valleys analyzed: " + (", ".join(str(v) for v in valleys) if valleys else active_valley_text),
             f"- Tolerance: {tolerance}",
             f"- spglib symprec: {spglib_symprec}",
+            f"- Validation: {validation}",
             f"- Output schema: {output_schema}",
             "- Production matrix source: raw-H action only",
             "",
@@ -4583,6 +4755,10 @@ class SymmetryAnalysisRunner:
         ]
         if operations:
             for valley, entries in operations.items():
+                valley_minimal_generators = {
+                    representation_operation_name(name)
+                    for name in minimal_generators.get(valley, [])
+                }
                 for entry in entries:
                     source = _display_valley_name(entry.get("source_valley", valley))
                     target = _display_valley_name(entry.get("target_valley", source))
@@ -4595,6 +4771,12 @@ class SymmetryAnalysisRunner:
                         if explicit_export is not None
                         else (source, target, representation_name) in exported_raw_h_keys
                     )
+                    if not _show_operation_in_summary_table(
+                        entry,
+                        exported=exported,
+                        minimal_generators=valley_minimal_generators,
+                    ):
+                        continue
                     lines.append(
                         "| {operation} | {candidate_source} | {antiunitary} | {source} | {target} | {closed} | {supported} | {status} | {exported} | {role} | {reason} |".format(
                             operation=operation,
@@ -4720,8 +4902,29 @@ class SymmetryAnalysisRunner:
             )
             for valley, entries in operations.items():
                 lines.append(f"- {valley}:")
+                valley_minimal_generators = {
+                    representation_operation_name(name)
+                    for name in minimal_generators.get(valley, [])
+                }
                 if entries:
+                    visible_entries = []
                     for entry in entries:
+                        source = _display_valley_name(entry.get("source_valley", valley))
+                        target = _display_valley_name(entry.get("target_valley", source))
+                        representation_name = representation_operation_name(entry.get("operation", "unknown"))
+                        explicit_export = entry.get("export_raw_h_matrix")
+                        exported = (
+                            bool(explicit_export)
+                            if explicit_export is not None
+                            else (source, target, representation_name) in exported_raw_h_keys
+                        )
+                        if _show_operation_in_summary_table(
+                            entry,
+                            exported=exported,
+                            minimal_generators=valley_minimal_generators,
+                        ):
+                            visible_entries.append(entry)
+                    for entry in visible_entries:
                         lines.append(
                             "  - {operation}: supported={supported}, status={status}".format(
                                 operation=_operation_markdown_label(entry),
@@ -4729,7 +4932,7 @@ class SymmetryAnalysisRunner:
                                 status=entry.get("status", "unknown"),
                             )
                         )
-                else:
+                if not entries or not visible_entries:
                     lines.append("  - None")
         lines.extend(
             [
@@ -4997,8 +5200,20 @@ class SymmetryAnalysisRunner:
                 metadata_matrices.append(self._packed_raw_h_metadata_record(record, operation, packed_key, raw_h_matrix))
             packed_path = output_dir / "representations.npz"
             if packed_payload:
+                basis_hashes = {
+                    str(record.get("basis_hash", "")).strip()
+                    for record in metadata_matrices
+                    if str(record.get("basis_hash", "")).strip()
+                }
+                if len(basis_hashes) != 1:
+                    raise ValueError(
+                        "representations.npz requires exactly one non-empty basis_hash; "
+                        f"found {{sorted(basis_hashes)}}"
+                    )
+                artifact_identity = self._artifact_identity_for_basis(next(iter(basis_hashes)))
                 metadata = {
                     "schema": "tapw.raw_h_representations.v1",
+                    **artifact_identity,
                     "output_schema": "tapw_source_symmetry/v2",
                     "storage": "scipy_csr_components_v1",
                     "basis": "tapw_projected",

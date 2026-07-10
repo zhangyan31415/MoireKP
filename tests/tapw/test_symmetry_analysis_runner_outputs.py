@@ -16,8 +16,19 @@ class _FakeLogger:
 
 
 def _make_runner(tmp_path: Path):
+    h_path = tmp_path / "H_symm.npz"
+    s_path = tmp_path / "S_symm.npz"
+    structure_path = tmp_path / "openmx.dat"
+    h_path.write_bytes(b"H-source-a")
+    s_path.write_bytes(b"S-source-a")
+    structure_path.write_bytes(b"structure-source-a")
     config = SimpleNamespace(
-        paths=SimpleNamespace(output_dir=str(tmp_path / "run")),
+        paths=SimpleNamespace(
+            output_dir=str(tmp_path / "run"),
+            H_file=str(h_path),
+            S_file=str(s_path),
+            input_file=str(structure_path),
+        ),
         output_layout=None,
         twist=SimpleNamespace(spin=True),
         compute=SimpleNamespace(n_g=6, valleys=[1]),
@@ -415,6 +426,12 @@ def test_runner_writes_canonical_symmetry_two_file_layout_with_packed_metadata(t
         assert "C2T_indptr" in payload.files
         metadata = json.loads(str(payload["metadata_json"].item()))
     assert metadata["schema"] == "tapw.raw_h_representations.v1"
+    assert metadata["identity_schema"] == "moirekp.artifact-identity.v1"
+    assert len(metadata["input_hash"]) == 64
+    assert len(metadata["config_hash"]) == 64
+    assert metadata["basis_hash"] == "basis-test-hash"
+    assert metadata["package_version"] == "0.1.0"
+    assert metadata["schema_version"] == 1
     assert metadata["storage"] == "scipy_csr_components_v1"
     assert metadata["basis_order"] == "spin_outermost; group -> g_index -> atom_type -> orbital"
     assert metadata["matrices"][0]["key"] == "C2T"
@@ -424,6 +441,36 @@ def test_runner_writes_canonical_symmetry_two_file_layout_with_packed_metadata(t
     assert "Use `representations.npz` for release machine inputs; it contains CSR matrices and `metadata_json`." in summary_text
     assert "| K1 -> K1 | C2T | representations.npz:C2T | raw_h_action |" in summary_text
     assert "representations/K1/C2T_rawH.npz" not in summary_text
+
+
+@pytest.mark.parametrize("source_name", ["H_file", "S_file", "input_file"])
+def test_runner_source_identity_changes_with_each_input_file(tmp_path, source_name):
+    runner = _make_runner(tmp_path)
+    before = symmetry_analysis._source_input_hash(runner.config)
+    source_path = Path(getattr(runner.config.paths, source_name))
+    source_path.write_bytes(source_path.read_bytes() + b"-changed")
+
+    after = symmetry_analysis._source_input_hash(runner.config)
+
+    assert after != before
+
+
+@pytest.mark.parametrize(
+    ("section", "field", "value"),
+    [
+        ("compute", "n_g", 7),
+        ("twist", "spin", False),
+        ("compute", "Electric_field_in_eVpA", 0.02),
+    ],
+)
+def test_runner_config_identity_changes_with_physics_config(tmp_path, section, field, value):
+    runner = _make_runner(tmp_path)
+    before = symmetry_analysis._physics_config_hash(runner.config)
+    setattr(getattr(runner.config, section), field, value)
+
+    after = symmetry_analysis._physics_config_hash(runner.config)
+
+    assert after != before
 
 
 def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_path):
@@ -725,6 +772,71 @@ def test_analyze_derives_c3_square_from_supported_c3_without_raw_validation(tmp_
     }
     assert summary_by_operation["C3z^2"]["supported"] is True
     assert summary_by_operation["C3z^2"]["export_raw_h_matrix"] is False
+
+
+def test_export_only_validation_skips_raw_covariance_but_exports_generators(tmp_path, monkeypatch):
+    runner = _make_runner(tmp_path)
+    runner.config.compute = SimpleNamespace(TAPW=True, valleys=[5])
+    runner.config.twist = SimpleNamespace(bravais="hex")
+    runner.config.symmetry_analysis.validation = "export_only"
+    runner.structure = SimpleNamespace(spin=False, reciprocal_Tmat=np.eye(3))
+    valley_ctx = symmetry_analysis.ValleyContext(
+        valley=5,
+        valley_label="Gamma",
+        valley_center_cart=np.zeros(2),
+        partner_center_cart=np.zeros(2),
+        group_k_centers={0: np.zeros(2)},
+        group_m_k_centers={0: np.zeros(2)},
+        group_g_vectors={0: np.zeros((1, 2))},
+        moire_reciprocal_basis=np.eye(2),
+        calculator=SimpleNamespace(TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr"))),
+    )
+    runner._calculator_for_valley = MethodType(
+        lambda self, valley: SimpleNamespace(
+            valley_flag="Gamma",
+            TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr")),
+        ),
+        runner,
+    )
+    runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
+    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure, **_kwargs: [])
+    monkeypatch.setattr(symmetry_analysis, "_default_validation_q_points", lambda: [("Gamma", np.zeros(3)), ("q1", np.ones(3))])
+    monkeypatch.setattr(
+        symmetry_analysis,
+        "_minimal_symmetry_candidates_for_valley",
+        lambda valley_ctx, bravais, spatial_operations=None, structure=None, **_kwargs: [
+            {"index": 0, "name": "E", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
+            {"index": 2, "name": "C3z", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
+            {"index": 3, "name": "C3z^2", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
+        ],
+    )
+    runner._candidate_rows_for_q = MethodType(
+        lambda self, candidate, valley, valley_label, q_label, q_target, tolerance: (_ for _ in ()).throw(
+            AssertionError("export_only must not run raw covariance validation")
+        ),
+        runner,
+    )
+    runner._representation_record_for_candidate = MethodType(
+        lambda self, candidate, valley, valley_label, valley_ctx, candidate_rows: {
+            "valley": valley,
+            "valley_label": valley_label,
+            "operation": symmetry_analysis.representation_operation_name(candidate["name"]),
+            "antiunitary": bool(candidate.get("antiunitary", False)),
+            "matrix": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
+        },
+        runner,
+    )
+
+    payload = runner._analyze()
+
+    assert payload["summary"]["validation"] == "export_only"
+    assert [record["operation"] for record in payload["representations"]] == ["C3z"]
+    details_by_operation = {row["operation"]: row for row in payload["details"]}
+    assert details_by_operation["C3z"]["status"] == "derived"
+    assert details_by_operation["C3z"]["covariance_status"] == "not_computed"
+    assert details_by_operation["C3z"]["residual_H_raw"] is None
+    assert details_by_operation["C3z"]["k_label"] == "Gamma"
+    assert "q1" not in {row["k_label"] for row in payload["details"]}
 
 
 def test_c3_covariance_validation_uses_raw_h_action_with_periodic_gauge(tmp_path, monkeypatch):
@@ -1140,6 +1252,59 @@ def test_summary_markdown_separates_valley_closed_from_supported_candidates(tmp_
     assert "closed in active set" not in text
     assert "## Exported Internal Generators For KP" in text
     assert "- Gamma: TR (E implicit)" in text
+
+
+def test_summary_markdown_hides_nonexported_redundant_candidates_but_keeps_identity(tmp_path):
+    runner = _make_runner(tmp_path)
+    text = "\n".join(
+        runner._summary_markdown_lines(
+            {
+                "valleys": [5],
+                "tolerance": 1.0e-2,
+                "operations": {
+                    "Gamma": [
+                        {
+                            "operation": "E",
+                            "candidate_source": "built-in",
+                            "supported": True,
+                            "status": "derived",
+                            "export_raw_h_matrix": False,
+                            "source_valley": "Gamma",
+                            "target_valley": "Gamma",
+                            "closed": True,
+                        },
+                        {
+                            "operation": "C3z",
+                            "candidate_source": "spglib:1",
+                            "supported": True,
+                            "status": "derived",
+                            "export_raw_h_matrix": True,
+                            "source_valley": "Gamma",
+                            "target_valley": "Gamma",
+                            "closed": True,
+                        },
+                        {
+                            "operation": "C3z^2",
+                            "candidate_source": "spglib:2",
+                            "supported": True,
+                            "status": "derived",
+                            "export_raw_h_matrix": False,
+                            "source_valley": "Gamma",
+                            "target_valley": "Gamma",
+                            "closed": True,
+                        },
+                    ]
+                },
+                "minimal_generators": {"Gamma": ["C3z"]},
+            },
+            representations=[],
+            developer_outputs=False,
+        )
+    )
+
+    assert "| E | built-in | no | Gamma | Gamma | yes | yes | derived | no | internal |  |" in text
+    assert "| C3z | template | no | Gamma | Gamma | yes | yes | derived | yes | internal |  |" in text
+    assert "C3z^2" not in text
 
 
 def test_summary_markdown_infers_antiunitary_for_legacy_t_and_c2t_entries(tmp_path):
