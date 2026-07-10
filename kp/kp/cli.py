@@ -12,6 +12,7 @@ from typing import Any, Dict, List, Sequence
 import yaml
 import numpy as np
 
+from .identity import build_projection_basis_identity, hash_array
 from .io.tapw_loader import load_hamk, load_Q_sets
 from .orbitals import (
     expand_orbital_order_by_sector,
@@ -1713,11 +1714,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     )
     basis_payload = gauge_report.to_dict()
     _write_text(Path(out_dir) / "basis.md", _format_basis_report_markdown(basis_payload))
-    np.savez(
-        Path(out_dir) / "basis.npz",
-        nlow_state_list=np.asarray(nlow_state_list, dtype=object),
-        norb_fix_list=np.asarray(norb_fix_list, dtype=object),
-    )
     basis_report_path = os.path.join(out_dir, "basis.md")
     print(f"[kp]   gauge={gauge_report.gauge_mode}")
     print(f"[kp]   basis selection report={basis_report_path}")
@@ -1860,10 +1856,41 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         except Exception:
             spin_operator_arr = np.array(spin_operator_rows, dtype=object)
         np.save(out_spin_operator, spin_operator_arr)
+    if not isinstance(heff_arr, np.ndarray) or heff_arr.dtype == object:
+        raise ValueError("Projection produced ragged/object Heff rows; release outputs require one numeric basis dimension")
+    basis_identity = build_projection_basis_identity(
+        hamk_file=hamk_file,
+        hamk_fallback=np.asarray(hamk2d),
+        qset1=q1,
+        qset2=q2_for_projection,
+        spin=str(spin),
+        mode=mode,
+        energy_scale=_energy_scale_from_material(material),
+        nlow_state_list=nlow_state_list,
+        resolved_norb_fix_list=norb_fix_list,
+        gauge_mode=gauge_report.gauge_mode,
+        num_layer_list=num_layer_list,
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        orbital_block_dim=orb0,
+        model_dim=int(heff_arr.shape[-1]),
+        k_indices=project_indices,
+    )
+    heff_hash = hash_array(heff_arr)
+    identity_payload = {
+        **{field: np.asarray(value) for field, value in basis_identity.items()},
+        "heff_hash": np.asarray(heff_hash),
+    }
+    np.savez(
+        Path(out_dir) / "basis.npz",
+        nlow_state_list=np.asarray(nlow_state_list, dtype=object),
+        norb_fix_list=np.asarray(norb_fix_list, dtype=object),
+        **identity_payload,
+    )
     np.savez_compressed(
         out_vec,
         wavefunctions=hvec_arr,
         k_indices=np.asarray(project_indices, dtype=int),
+        **identity_payload,
     )
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
         print(f"[kp] Heff shape: {heff_arr.shape}")

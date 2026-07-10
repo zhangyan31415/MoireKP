@@ -26,6 +26,14 @@ from ..basis.selection import (
 )
 from ..config.case import normalize_case_config
 from ..io.tapw_loader import load_Q_sets, load_hamk
+from ..identity import (
+    PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+    build_projection_basis_identity,
+    load_projection_artifact_identity,
+    load_projection_k_indices,
+    require_identity_fields,
+    require_matching_identity,
+)
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
 from .exactify_representation import exactify_loaded_symmetry_source
 from .geometry import (
@@ -103,6 +111,33 @@ def _as_bool(value: Any) -> bool:
 
 _SUPPORTED_OPERATION_LABELS = frozenset({"C3", "C3z", "C2", "C2T", "T", "TR"})
 HARTREE_TO_EV = 27.211386245988
+_PROJECT_ARTIFACT_IDENTITY_FIELDS = PROJECTION_ARTIFACT_IDENTITY_FIELDS
+_PROJECT_BASIS_IDENTITY_FIELDS = _PROJECT_ARTIFACT_IDENTITY_FIELDS[:-1]
+
+
+def _load_project_artifact_identity(
+    project_dir: str | Path,
+    *,
+    verify_heff: bool = True,
+) -> dict[str, Any]:
+    return load_projection_artifact_identity(project_dir, verify_heff=verify_heff)
+
+
+def _validate_symmetry_project_identity(
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+) -> dict[str, Any]:
+    require_matching_identity(
+        expected,
+        actual,
+        _PROJECT_BASIS_IDENTITY_FIELDS,
+        "kp symm projection basis",
+    )
+    return require_identity_fields(
+        actual,
+        _PROJECT_ARTIFACT_IDENTITY_FIELDS,
+        "kp symm projection artifacts",
+    )
 
 
 def _energy_scale_from_material(material: Mapping[str, Any]) -> float:
@@ -2527,12 +2562,50 @@ def _select_projection_gauge(
     return selected_gauge_candidate, gauge_report
 
 
+def _resolve_symmetry_project_identity(
+    ctx: _ProjectionRunContext,
+    *,
+    gauge_report: Any,
+    resolved_norb_fix_list: Any,
+    low_dim: int,
+) -> dict[str, Any]:
+    run_cfg = ctx.config
+    project_dir_raw = run_cfg.project_cfg.get("out_dir")
+    project_dir = _resolve(project_dir_raw, run_cfg.cfg_dir)
+    if project_dir is None:
+        raise ValueError("project.out_dir is required before kp symm can validate the projection basis")
+    actual = _load_project_artifact_identity(project_dir)
+    hamk_file = _resolve(run_cfg.material.get("hamk_file"), run_cfg.cfg_dir)
+    if hamk_file is None:
+        raise ValueError("material.hamk_file is required for kp symm projection identity")
+    reference_k = sorted(ctx.hamk_source_by_k)[0]
+    expected = build_projection_basis_identity(
+        hamk_file=hamk_file,
+        hamk_fallback=np.asarray(ctx.hamk_source_by_k[reference_k]),
+        qset1=ctx.q1,
+        qset2=ctx.q2,
+        spin=run_cfg.spin,
+        mode=ctx.mode,
+        energy_scale=_energy_scale_from_material(run_cfg.material),
+        nlow_state_list=ctx.nlow_state_list,
+        resolved_norb_fix_list=resolved_norb_fix_list,
+        gauge_mode=gauge_report.gauge_mode,
+        num_layer_list=ctx.num_layer_list,
+        num_orb_per_layer_list=ctx.num_orb_per_layer_list,
+        orbital_block_dim=ctx.orb0,
+        model_dim=int(low_dim),
+        k_indices=load_projection_k_indices(Path(project_dir) / "heff.npy"),
+    )
+    return _validate_symmetry_project_identity(expected, actual)
+
+
 def _initial_projection_summary(
     ctx: _ProjectionRunContext,
     *,
     gauge_report: Any,
     low_dim: int,
     n_orb_for_exactification: tuple[int, int],
+    artifact_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     run_cfg = ctx.config
     return {
@@ -2545,6 +2618,7 @@ def _initial_projection_summary(
         "orbital_block_dim": ctx.orb0,
         "full_dim": ctx.full_dim,
         "low_dim": low_dim,
+        "artifact_identity": dict(artifact_identity),
         "frame": _frame_metadata(rotation_deg=ctx.q_rotation_deg, inference=ctx.frame_inference),
         "q_model": {
             "files": {"layer1": "q_model_layer1.npy", "layer2": "q_model_layer2.npy"},
@@ -2770,6 +2844,9 @@ def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, An
 
     matrices: dict[str, np.ndarray] = {}
     packed_operations: list[dict[str, Any]] = []
+    artifact_identity = summary.get("artifact_identity", {})
+    if not isinstance(artifact_identity, Mapping):
+        artifact_identity = {}
     residual_rows = ["operation,status,unitarity,exactification_distance"]
     for operation in operations:
         if not isinstance(operation, Mapping):
@@ -2787,7 +2864,11 @@ def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, An
                 packed_operation = dict(operation)
                 packed_operation["matrix_file"] = "representations.npz"
                 packed_operation["matrix_array_key"] = name
+                packed_operation["exactification_owner"] = "kp_symm"
                 packed_operation.pop("developer_outputs", None)
+                for field in _PROJECT_ARTIFACT_IDENTITY_FIELDS:
+                    if field in artifact_identity:
+                        packed_operation[field] = artifact_identity[field]
                 packed_operations.append(packed_operation)
         residuals = operation.get("residuals", {})
         unitarity = ""
@@ -2929,10 +3010,15 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         num_layer_list=ctx.num_layer_list,
         context="project",
     )
-    write_basis_selection_report(ctx.output_dir, gauge_report)
-
     _states, source_states, target_states, first_state = _states_for_resolved_anchors(ctx, norb_fix_list)
     low_dim = int(first_state.u_low.shape[1])
+    artifact_identity = _resolve_symmetry_project_identity(
+        ctx,
+        gauge_report=gauge_report,
+        resolved_norb_fix_list=norb_fix_list,
+        low_dim=low_dim,
+    )
+    write_basis_selection_report(ctx.output_dir, gauge_report)
     np.save(ctx.output_dir / "q_model_layer1.npy", ctx.q_model1)
     np.save(ctx.output_dir / "q_model_layer2.npy", ctx.q_model2)
 
@@ -2948,6 +3034,7 @@ def run_symmetry_projection_from_config(cfg_path: str, *, developer_outputs: boo
         gauge_report=gauge_report,
         low_dim=low_dim,
         n_orb_for_exactification=n_orb_for_exactification,
+        artifact_identity=artifact_identity,
     )
     raw_low_matrices = _append_projected_operation_summaries(
         ctx,

@@ -12,6 +12,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 import yaml
 
+from ..identity import PROJECTION_ARTIFACT_IDENTITY_FIELDS
 from .core import (
     ContinuumModelBuilder,
     ContinuumTerm,
@@ -216,6 +217,9 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
         "basis_block_n_orb": basis_metadata["basis_block_n_orb"],
         "model_reciprocal_basis": reciprocal_basis,
     }
+    for key in PROJECTION_ARTIFACT_IDENTITY_FIELDS:
+        if key in model_config.artifact_identity:
+            model_data[key] = np.asarray(model_config.artifact_identity[key])
     for name, matrix in exactified.items():
         model_data[f"exactified_{name}"] = matrix
     if reference_heff_eig is not None:

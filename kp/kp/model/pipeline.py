@@ -27,6 +27,13 @@ from .schema import (
 )
 from .symmetry import load_symmetry_source
 from ..config.case import normalize_case_config
+from ..identity import (
+    PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+    load_projection_artifact_identity,
+    load_projection_k_indices,
+    require_identity_fields,
+    require_matching_identity,
+)
 from ..plot_style import (
     KP_BAND_BOX_ASPECT,
     KP_BAND_FIGSIZE,
@@ -163,6 +170,8 @@ class ConfiguredModel:
     band_refinement_config: dict[str, Any] = field(default_factory=dict)
     null_channel_abs_tol: float = 0.0
     null_channel_rel_tol: float = 0.0
+    artifact_identity: dict[str, Any] = field(default_factory=dict)
+    project_k_indices: list[int] = field(default_factory=list)
 
 
 def _resolve_path(value: str | Path | None, base: Path) -> Path | None:
@@ -1044,6 +1053,94 @@ def _load_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> dict[str, 
     return {}
 
 
+def _load_model_artifact_identity(
+    heff_file: str | Path,
+    symmetry_source: Mapping[str, Any],
+    *,
+    base: str | Path | None = None,
+) -> dict[str, Any]:
+    if str(symmetry_source.get("type", "")) != "kp_symm_output":
+        return {}
+    source_path = symmetry_source.get("path")
+    if source_path in (None, ""):
+        raise ValueError("kp model requires symmetry_source.path for kp_symm_output")
+    symmetry_dir = Path(str(source_path)).expanduser()
+    if not symmetry_dir.is_absolute():
+        if base is None:
+            raise ValueError("Relative symmetry_source.path requires a config base directory")
+        symmetry_dir = Path(base) / symmetry_dir
+    symmetry_dir = symmetry_dir.resolve()
+    representations = symmetry_dir / "representations.npz"
+    if not representations.is_file():
+        raise FileNotFoundError(
+            f"kp model requires canonical kp symm output: {representations}"
+        )
+    with np.load(representations, allow_pickle=False) as payload:
+        if "__metadata_json__" not in payload.files:
+            raise ValueError(f"kp model symmetry pack lacks __metadata_json__: {representations}")
+        metadata = json.loads(str(payload["__metadata_json__"].item()))
+        matrix_keys = {str(name) for name in payload.files if not str(name).startswith("__")}
+    if not isinstance(metadata, Mapping):
+        raise ValueError(f"kp model symmetry metadata must be a mapping: {representations}")
+    symmetry_identity_raw = metadata.get("artifact_identity")
+    if not isinstance(symmetry_identity_raw, Mapping):
+        raise ValueError(
+            f"kp model symmetry pack lacks artifact_identity; rerun kp symm: {representations}"
+        )
+    symmetry_identity = require_identity_fields(
+        symmetry_identity_raw,
+        PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+        "kp model symmetry pack",
+    )
+    heff_path = Path(heff_file).resolve()
+    project_dir = heff_path.parent
+    canonical_heff = (project_dir / "heff.npy").resolve()
+    if heff_path != canonical_heff:
+        raise ValueError(f"kp model requires canonical projection/heff.npy, got {heff_path}")
+    project_identity = load_projection_artifact_identity(project_dir)
+    require_matching_identity(
+        project_identity,
+        symmetry_identity,
+        PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+        "kp model projection/symmetry",
+    )
+    operations = metadata.get("operations", [])
+    if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
+        raise ValueError(f"kp model symmetry pack operations must be a list: {representations}")
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            raise ValueError(f"kp model symmetry pack operation metadata must be a mapping: {operation!r}")
+        name = str(operation.get("name", operation.get("operation", "")))
+        require_matching_identity(
+            project_identity,
+            operation,
+            ("basis_hash", "k_indices_hash", "heff_hash"),
+            f"kp model symmetry operation {name!r}",
+        )
+        if not _operation_matrix_is_exactified(operation):
+            raise ValueError(
+                f"kp model symmetry operation {name!r} lacks complete exactification provenance"
+            )
+        matrix_key = str(operation.get("matrix_array_key", name))
+        if matrix_key not in matrix_keys:
+            raise ValueError(
+                f"kp model symmetry operation {name!r} references missing matrix array {matrix_key!r}"
+            )
+    return project_identity
+
+
+def _apply_project_k_indices(kpoints: np.ndarray, indices: Sequence[int]) -> np.ndarray:
+    points = _validate_kpoints(kpoints)
+    if not indices:
+        return points[:0]
+    max_index = max(int(index) for index in indices)
+    if max_index >= len(points):
+        raise IndexError(
+            f"projection k_indices contains {max_index}, but the source k-point path has {len(points)} rows"
+        )
+    return np.asarray(points[[int(index) for index in indices]], dtype=float)
+
+
 def _symmetry_operations_for_default_templates(raw: Mapping[str, Any], *, base: Path) -> list[Mapping[str, Any]]:
     operations: list[Mapping[str, Any]] = []
     symmetry_source = raw.get("symmetry_source", {})
@@ -1135,6 +1232,11 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     heff_eig_file = _resolve_path(_get_path_value(raw, "heff_eig_file"), base)
     if heff_eig_file is not None:
         raise ValueError("heff_eig_file is not supported in release-only KP configs; use projection/heff.npy.")
+    try:
+        project_k_indices = load_projection_k_indices(heff_file)
+    except FileNotFoundError:
+        heff_rows = int(np.load(heff_file, mmap_mode="r", allow_pickle=False).shape[0])
+        project_k_indices = list(range(heff_rows))
 
     kpoints_file = _resolve_path(_get_path_value(raw, "kpoints_file"), base)
 
@@ -1273,20 +1375,20 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             "selected_indices": [int(index) for index in fit_indices],
         }
     elif fit.get("mode") is not None and str(fit.get("mode")).strip().lower() in {"auto", "auto_compact"}:
-        fit_kpoints_all = _load_kpoints_from_inputs(
+        fit_kpoints_all = _apply_project_k_indices(_load_kpoints_from_inputs(
             kpoints_file=kpoints_file,
             kpath_config=kpath_config,
             base=base,
             rotation_deg=rotation_deg,
-        )
+        ), project_k_indices)
         fit_indices, fit_selection_metadata = _select_auto_fit_indices(fit_kpoints_all, fit)
     elif fit.get("mode") is not None and str(fit.get("mode")).strip().lower() == "auto_low_energy":
-        fit_kpoints_all = _load_kpoints_from_inputs(
+        fit_kpoints_all = _apply_project_k_indices(_load_kpoints_from_inputs(
             kpoints_file=kpoints_file,
             kpath_config=kpath_config,
             base=base,
             rotation_deg=rotation_deg,
-        )
+        ), project_k_indices)
         max_points = int(fit.get("max_points", 2))
         initial_points = int(fit.get("initial_points", 2))
         initial_fit_indices = (
@@ -1649,6 +1751,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         kpoints_file=kpoints_file,
         heff_file=heff_file,
         heff_eig_file=heff_eig_file,
+        project_k_indices=project_k_indices,
         output_dir=output_dir,
         rotation_deg=rotation_deg,
         fit_indices=fit_indices,
@@ -3176,7 +3279,7 @@ def _resolve_harmonics_maps(
 def _load_kpoints(config: ConfiguredModel) -> np.ndarray:
     if config.kpoints_file is not None:
         kpoints = np.load(config.kpoints_file)
-        return _validate_kpoints(kpoints)
+        return _apply_project_k_indices(kpoints, config.project_k_indices)
 
     if not config.kpath_config:
         raise ValueError("Configured model requires kpoints_file or kpath section")
@@ -3195,7 +3298,7 @@ def _load_kpoints(config: ConfiguredModel) -> np.ndarray:
         segment_points=None if segment_points is None else int(segment_points),
         output_file_path=output_file,
     )
-    return _validate_kpoints(generated.kpoints_2d)
+    return _apply_project_k_indices(generated.kpoints_2d, config.project_k_indices)
 
 
 def _load_kpoints_from_inputs(
@@ -3344,10 +3447,21 @@ def _load_model_q_sets(config: ConfiguredModel) -> tuple[np.ndarray, np.ndarray]
 def _operation_matrix_is_exactified(record: Mapping[str, Any]) -> bool:
     matrix_kind = str(record.get("matrix_kind", ""))
     matrix_source = str(record.get("matrix_source", record.get("matrix_file_role", "")))
-    return matrix_kind == "continuum_internal_rep_exact" or matrix_source in {
-        "kp_symm_exactified_action",
-        "exactified_raw_h_action_projection",
-    }
+    report = record.get("source_matrix_projection_report")
+    report_status = None
+    if isinstance(report, Mapping) and isinstance(report.get("report"), Mapping):
+        report_status = str(report["report"].get("status", ""))
+    return all(
+        (
+            matrix_kind == "continuum_internal_rep_exact",
+            matrix_source == "kp_symm_exactified_action",
+            str(record.get("status", "")) == "exactified",
+            str(record.get("exactification_status", "")) == "exactified",
+            str(record.get("exactification_owner", "")) == "kp_symm",
+            bool(str(record.get("basis_hash", "")).strip()),
+            report_status == "exactified",
+        )
+    )
 
 
 def _requires_model_side_exactification(metadata: Mapping[str, Any]) -> bool:
@@ -3361,6 +3475,11 @@ def _requires_model_side_exactification(metadata: Mapping[str, Any]) -> bool:
 
 def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, ConfiguredModel]:
     config = load_model_config(path)
+    config.artifact_identity = _load_model_artifact_identity(
+        config.heff_file,
+        config.symmetry_source_config,
+        base=config.path.parent,
+    )
     heff_list = np.load(config.heff_file, mmap_mode="r")
     Q_set1, Q_set2 = _load_model_q_sets(config)
 

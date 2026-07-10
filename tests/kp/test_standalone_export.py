@@ -24,6 +24,7 @@ from kp.model.export import (  # noqa: E402
     export_standalone_model,
 )
 from kp.model.pipeline import build_moire_config_from_file, run_configured_model  # noqa: E402
+from kp.identity import hash_array  # noqa: E402
 
 
 def _write_symm_frame_manifest(
@@ -34,6 +35,7 @@ def _write_symm_frame_manifest(
     dim: int = 2,
     rotation_deg: float = 0.0,
     operations: tuple[str, ...] = ("C3z", "C2T"),
+    artifact_identity: dict[str, object] | None = None,
 ) -> Path:
     symm_dir = base / "outputs" / case_id / q_shell / "symmetry"
     symm_dir.mkdir(parents=True, exist_ok=True)
@@ -63,6 +65,22 @@ def _write_symm_frame_manifest(
             for operation in operations
         ],
     }
+    if artifact_identity is not None:
+        manifest["artifact_identity"] = dict(artifact_identity)
+        for operation in manifest["operations"]:
+            operation.update(
+                {
+                    "basis_hash": artifact_identity["basis_hash"],
+                    "k_indices_hash": artifact_identity["k_indices_hash"],
+                    "heff_hash": artifact_identity["heff_hash"],
+                    "status": "exactified",
+                    "exactification_status": "exactified",
+                    "exactification_owner": "kp_symm",
+                    "source_matrix_projection_report": {
+                        "report": {"status": "exactified"}
+                    },
+                }
+            )
     payload = {operation: np.eye(dim, dtype=np.complex128) for operation in operations}
     payload["__metadata_json__"] = np.asarray(json.dumps(manifest, sort_keys=True))
     np.savez_compressed(symm_dir / "representations.npz", **payload)
@@ -105,7 +123,32 @@ def _write_export_fixture(
     project_dir = root / "outputs" / case_id / q_shell / "projection"
     project_dir.mkdir(parents=True)
     np.save(project_dir / "heff.npy", heff)
-    _write_symm_frame_manifest(root, case_id=case_id, q_shell=q_shell, dim=dim, operations=operations)
+    artifact_identity = {
+        "identity_schema": "moirekp.artifact-identity.v1",
+        "input_hash": "input-fixture",
+        "config_hash": "config-fixture",
+        "basis_hash": "basis-fixture",
+        "package_version": "0.1.0",
+        "schema_version": 1,
+        "k_indices_hash": hash_array(np.arange(len(kpoints), dtype=np.int64)),
+        "heff_hash": hash_array(heff),
+    }
+    scalar_identity = {key: np.asarray(value) for key, value in artifact_identity.items()}
+    np.savez(project_dir / "basis.npz", **scalar_identity)
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        wavefunctions=np.stack([np.eye(dim, dtype=np.complex128)] * len(kpoints)),
+        k_indices=np.arange(len(kpoints), dtype=int),
+        **scalar_identity,
+    )
+    _write_symm_frame_manifest(
+        root,
+        case_id=case_id,
+        q_shell=q_shell,
+        dim=dim,
+        operations=operations,
+        artifact_identity=artifact_identity,
+    )
 
     if term_templates is None:
         term_templates = [
@@ -341,6 +384,14 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
         "basis_block_q_count",
         "basis_block_n_orb",
         "model_reciprocal_basis",
+        "identity_schema",
+        "input_hash",
+        "config_hash",
+        "basis_hash",
+        "package_version",
+        "schema_version",
+        "k_indices_hash",
+        "heff_hash",
     }
     assert expected_keys.issubset(set(data.files))
     assert not (out_dir / "model.json").exists()
@@ -355,6 +406,7 @@ def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
     np.testing.assert_array_equal(data["basis_block_q_count"], np.array([1, 1]))
     np.testing.assert_array_equal(data["basis_block_n_orb"], np.array([1, 1]))
     np.testing.assert_allclose(data["model_reciprocal_basis"], np.eye(2))
+    assert str(np.asarray(data["basis_hash"]).item()) == "basis-fixture"
 
 
 def test_standalone_evaluate_can_run_model_topology_from_user_settings(tmp_path: Path) -> None:

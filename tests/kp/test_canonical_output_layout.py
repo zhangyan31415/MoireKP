@@ -366,6 +366,16 @@ def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_pa
         "tolerance": 1.0e-8,
         "full_dim": 2,
         "low_dim": 2,
+        "artifact_identity": {
+            "identity_schema": "moirekp.artifact-identity.v1",
+            "input_hash": "input-a",
+            "config_hash": "config-a",
+            "basis_hash": "basis-a",
+            "package_version": "0.1.0",
+            "schema_version": 1,
+            "k_indices_hash": "k-indices-a",
+            "heff_hash": "heff-a",
+        },
         "frame": {
             "q_transform": {"rotation_deg": 210.0},
             "k_transform": {"rotation_deg": 210.0},
@@ -392,6 +402,10 @@ def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_pa
                     "residuals": {"unitarity": 1.0e-12},
                     "pairs": [],
                     "status": "exactified",
+                    "exactification_status": "exactified",
+                    "source_matrix_projection_report": {
+                        "report": {"status": "exactified"}
+                    },
                 },
                 {
                     "name": "C2T",
@@ -413,7 +427,11 @@ def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_pa
                     "target_block_dims": [2],
                     "pairs": [],
                     "status": "exactified",
+                    "exactification_status": "exactified",
                     "exactification_distance": 2.0e-12,
+                    "source_matrix_projection_report": {
+                        "report": {"status": "exactified"}
+                    },
                 },
             ]
         }
@@ -426,6 +444,9 @@ def test_symmetry_canonical_writer_combines_representations_and_residuals(tmp_pa
         metadata = json.loads(str(payload["__metadata_json__"].item()))
     c2t = next(op for op in metadata["operations"] if op["name"] == "C2T")
     assert c2t["k_map"] == {"type": "reflection", "axis_deg": 60.0}
+    assert metadata["artifact_identity"]["basis_hash"] == "basis-a"
+    assert all(op["basis_hash"] == "basis-a" for op in metadata["operations"])
+    assert all(op["heff_hash"] == "heff-a" for op in metadata["operations"])
     rotation_deg = _rotation_deg_from_symmetry_manifest(
         {"symmetry_source": {"type": "kp_symm_output", "path": str(out_dir)}},
         base=tmp_path,

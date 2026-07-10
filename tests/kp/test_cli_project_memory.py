@@ -98,6 +98,20 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
     assert len(projected_blocks) == 1
     wavefunctions = np.load(tmp_path / "project" / "wavefunctions.npz")
     np.testing.assert_array_equal(wavefunctions["k_indices"], np.array([1], dtype=int))
+    with np.load(tmp_path / "project" / "basis.npz", allow_pickle=True) as basis:
+        for field in (
+            "identity_schema",
+            "input_hash",
+            "config_hash",
+            "basis_hash",
+            "package_version",
+            "schema_version",
+            "k_indices_hash",
+            "heff_hash",
+        ):
+            assert field in basis.files
+            assert field in wavefunctions.files
+            assert np.asarray(basis[field]).item() == np.asarray(wavefunctions[field]).item()
 
 
 def test_project_saves_spin_operator_from_projection(monkeypatch, tmp_path: Path) -> None:

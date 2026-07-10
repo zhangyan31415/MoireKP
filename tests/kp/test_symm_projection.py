@@ -11,6 +11,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 
 import numpy as np
+import pytest
 import yaml
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -18,6 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import kp.cli as cli
 import kp.symmetry.projection as projection_mod
 from kp.basis.selection import GaugeCandidateSymmetryMetrics
+from kp.identity import hash_array
 from kp.model.symmetry import load_symmetry_source
 from kp.orbitals import expand_orbital_order_by_sector
 from kp.symmetry.projection import (
@@ -30,12 +32,137 @@ from kp.symmetry.projection import (
     _pairs_from_entry,
     _projectors_for_k,
     _resolve_projected_model_action,
+    _resolve_symmetry_project_identity,
     _select_operation_matrix_kind,
     _sector_orbital_counts,
     _infer_symmetry_operations_from_manifest,
+    _load_project_artifact_identity,
+    _validate_symmetry_project_identity,
     _source_manifest_operation_name,
     _validate_operation_label,
 )
+
+
+def test_project_artifact_identity_rejects_basis_wavefunction_mismatch(tmp_path) -> None:
+    project_dir = tmp_path / "projection"
+    project_dir.mkdir()
+    identity = {
+        "identity_schema": "moirekp.artifact-identity.v1",
+        "input_hash": "input-a",
+        "config_hash": "config-a",
+        "basis_hash": "basis-a",
+        "package_version": "0.1.0",
+        "schema_version": 1,
+        "k_indices_hash": "k-indices-a",
+        "heff_hash": "heff-a",
+    }
+    np.savez(project_dir / "basis.npz", **{key: np.asarray(value) for key, value in identity.items()})
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        **{
+            **{key: np.asarray(value) for key, value in identity.items()},
+            "basis_hash": np.asarray("basis-b"),
+            "wavefunctions": np.eye(2, dtype=np.complex128)[None, :, :],
+            "k_indices": np.asarray([0]),
+        },
+    )
+    np.save(project_dir / "heff.npy", np.eye(2, dtype=np.complex128)[None, :, :])
+
+    with pytest.raises(ValueError, match="KP projection artifacts.*basis_hash"):
+        _load_project_artifact_identity(project_dir, verify_heff=False)
+
+
+def test_symmetry_project_identity_rejects_recomputed_basis_mismatch(tmp_path) -> None:
+    hamk_path = tmp_path / "hamk.npy"
+    q1 = np.array([[0.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+    hamk = np.eye(4, dtype=np.complex128)[None, :, :]
+    np.save(hamk_path, hamk)
+    expected = projection_mod.build_projection_basis_identity(
+        hamk_file=hamk_path,
+        hamk_fallback=hamk[0],
+        qset1=q1,
+        qset2=q2,
+        spin="up",
+        mode="k1",
+        energy_scale=1.0,
+        nlow_state_list=[[0], [0]],
+        resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+        gauge_mode="manual",
+        num_layer_list=[1, 1],
+        num_orb_per_layer_list=[1, 1],
+        orbital_block_dim=1,
+        model_dim=2,
+        k_indices=[0],
+    )
+    actual = {**expected, "basis_hash": "stale-basis", "heff_hash": "heff-a"}
+
+    with pytest.raises(ValueError, match="kp symm.*basis_hash"):
+        _validate_symmetry_project_identity(expected, actual)
+
+
+def test_symmetry_resolves_identity_from_projection_artifacts(tmp_path) -> None:
+    project_dir = tmp_path / "projection"
+    project_dir.mkdir()
+    hamk_path = tmp_path / "hamk.npy"
+    q1 = np.array([[0.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+    hamk = np.eye(4, dtype=np.complex128)[None, :, :]
+    heff = np.eye(2, dtype=np.complex128)[None, :, :]
+    np.save(hamk_path, hamk)
+    np.save(project_dir / "heff.npy", heff)
+    identity = projection_mod.build_projection_basis_identity(
+        hamk_file=hamk_path,
+        hamk_fallback=hamk[0],
+        qset1=q1,
+        qset2=q2,
+        spin="up",
+        mode="k1",
+        energy_scale=1.0,
+        nlow_state_list=[[0], [0]],
+        resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+        gauge_mode="manual",
+        num_layer_list=[1, 1],
+        num_orb_per_layer_list=[1, 1],
+        orbital_block_dim=1,
+        model_dim=2,
+        k_indices=[0],
+    )
+    artifact_identity = {**identity, "heff_hash": hash_array(heff)}
+    scalar_identity = {key: np.asarray(value) for key, value in artifact_identity.items()}
+    np.savez(project_dir / "basis.npz", **scalar_identity)
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        wavefunctions=np.eye(2, dtype=np.complex128)[None, :, :],
+        k_indices=np.asarray([0]),
+        **scalar_identity,
+    )
+    ctx = SimpleNamespace(
+        config=SimpleNamespace(
+            cfg_dir=str(tmp_path),
+            project_cfg={"out_dir": str(project_dir)},
+            material={"hamk_file": str(hamk_path), "energy_unit": "eV"},
+            spin="up",
+        ),
+        q1=q1,
+        q2=q2,
+        mode="k1",
+        nlow_state_list=[[0], [0]],
+        num_layer_list=[1, 1],
+        num_orb_per_layer_list=[1, 1],
+        orb0=1,
+        hamk_source_by_k={0: hamk[0]},
+    )
+    gauge_report = SimpleNamespace(gauge_mode="manual")
+
+    resolved = _resolve_symmetry_project_identity(
+        ctx,
+        gauge_report=gauge_report,
+        resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+        low_dim=2,
+    )
+
+    assert resolved == artifact_identity
 
 
 def _load_canonical_symmetry_payload(out_dir: Path) -> tuple[dict[str, np.ndarray], dict]:
@@ -43,6 +170,54 @@ def _load_canonical_symmetry_payload(out_dir: Path) -> tuple[dict[str, np.ndarra
         arrays = {name: np.asarray(payload[name]) for name in payload.files if name != "__metadata_json__"}
         metadata = json.loads(str(payload["__metadata_json__"].item()))
     return arrays, metadata
+
+
+def _write_projection_identity_artifacts(
+    project_dir: Path,
+    *,
+    hamk_file: Path,
+    hamk: np.ndarray,
+    q1: np.ndarray,
+    q2: np.ndarray,
+    mode: str,
+    nlow_state_list: list,
+    resolved_norb_fix_list: list,
+    gauge_mode: str = "manual_norb_fix_list",
+    spin: str = "up",
+    num_layer_list: list[int] | None = None,
+    num_orb_per_layer_list: list | None = None,
+    orbital_block_dim: int = 2,
+    model_dim: int = 2,
+) -> None:
+    project_dir.mkdir(parents=True, exist_ok=True)
+    heff = np.zeros((1, model_dim, model_dim), dtype=np.complex128)
+    np.save(project_dir / "heff.npy", heff)
+    identity = projection_mod.build_projection_basis_identity(
+        hamk_file=hamk_file,
+        hamk_fallback=np.asarray(hamk[0] if hamk.ndim == 3 else hamk),
+        qset1=q1,
+        qset2=q2,
+        spin=spin,
+        mode=mode.lower(),
+        energy_scale=1.0,
+        nlow_state_list=nlow_state_list,
+        resolved_norb_fix_list=resolved_norb_fix_list,
+        gauge_mode=gauge_mode,
+        num_layer_list=num_layer_list or [1, 1],
+        num_orb_per_layer_list=num_orb_per_layer_list or [[2], [2]],
+        orbital_block_dim=orbital_block_dim,
+        model_dim=model_dim,
+        k_indices=[0],
+    )
+    artifact_identity = {**identity, "heff_hash": hash_array(heff)}
+    scalar_identity = {key: np.asarray(value) for key, value in artifact_identity.items()}
+    np.savez(project_dir / "basis.npz", **scalar_identity)
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        wavefunctions=np.eye(model_dim, dtype=np.complex128)[None, :, :],
+        k_indices=np.asarray([0]),
+        **scalar_identity,
+    )
 
 
 def test_orbital_order_accepts_per_layer_patterns() -> None:
@@ -500,6 +675,40 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             cfg["material"].pop("energy_unit", None)
         cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
+        project_dir = tmp / "outputs" / valley / "q06" / "projection"
+        project_dir.mkdir(parents=True, exist_ok=True)
+        heff = np.zeros((1, 2, 2), dtype=np.complex128)
+        np.save(project_dir / "heff.npy", heff)
+        project_identity = projection_mod.build_projection_basis_identity(
+            hamk_file=hamk_file,
+            hamk_fallback=hamk[0],
+            qset1=np.load(q1_file),
+            qset2=np.load(q2_file),
+            spin="up",
+            mode=valley.lower(),
+            energy_scale=1.0,
+            nlow_state_list=nlow_state_list,
+            resolved_norb_fix_list=norb_fix_list,
+            gauge_mode="auto_scdm" if auto_gauge else "manual_norb_fix_list",
+            num_layer_list=[1, 1],
+            num_orb_per_layer_list=[[2], [2]],
+            orbital_block_dim=2,
+            model_dim=2,
+            k_indices=[0],
+        )
+        artifact_identity = {
+            **project_identity,
+            "heff_hash": hash_array(heff),
+        }
+        scalar_identity = {key: np.asarray(value) for key, value in artifact_identity.items()}
+        np.savez(project_dir / "basis.npz", **scalar_identity)
+        np.savez(
+            project_dir / "wavefunctions.npz",
+            wavefunctions=np.eye(2, dtype=np.complex128)[None, :, :],
+            k_indices=np.asarray([0]),
+            **scalar_identity,
+        )
+
         cli.main(["symm", "--config", str(cfg_path)])
         return out_dir
 
@@ -950,6 +1159,17 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             }
             cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
+            _write_projection_identity_artifacts(
+                tmp / "outputs" / "K1" / "q06" / "projection",
+                hamk_file=hamk_file,
+                hamk=hamk,
+                q1=np.load(q1_file),
+                q2=np.load(q2_file),
+                mode="K1",
+                nlow_state_list=[[0], [0]],
+                resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+            )
+
             cli.main(["symm", "--config", str(cfg_path)])
 
             arrays, summary = _load_canonical_symmetry_payload(out_dir)
@@ -1075,6 +1295,17 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 },
             }
             cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+            _write_projection_identity_artifacts(
+                tmp / "outputs" / "K1" / "q06" / "projection",
+                hamk_file=hamk_file,
+                hamk=hamk,
+                q1=np.load(q1_file),
+                q2=np.load(q2_file),
+                mode="K1",
+                nlow_state_list=[[0], [0]],
+                resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+            )
 
             cli.main(["symm", "--config", str(cfg_path)])
 
@@ -1287,6 +1518,17 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 },
             }
             cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+            _write_projection_identity_artifacts(
+                tmp / "outputs" / "M1" / "q06" / "projection",
+                hamk_file=hamk_file,
+                hamk=hamk,
+                q1=np.load(q1_file),
+                q2=np.load(q2_file),
+                mode="M1",
+                nlow_state_list=[[0], [0]],
+                resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+            )
 
             cli.main(["symm", "--config", str(cfg_path)])
 
@@ -1554,6 +1796,17 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 },
             }
             cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+
+            _write_projection_identity_artifacts(
+                tmp / "outputs" / "K1" / "q06" / "projection",
+                hamk_file=hamk_file,
+                hamk=hamk,
+                q1=np.load(q1_file),
+                q2=np.load(q2_file),
+                mode="K1",
+                nlow_state_list=[[0], [0]],
+                resolved_norb_fix_list=[[[[0, 1.0]]], [[[0, 1.0]]]],
+            )
 
             cli.main(["symm", "--config", str(cfg_path)])
 

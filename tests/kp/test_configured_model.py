@@ -39,6 +39,9 @@ from kp.model.pipeline import (  # noqa: E402
     _low_subspace_matrix_residual,
     _matrix_loss_block_masks,
     _matrix_loss_residual,
+    _load_model_artifact_identity,
+    _load_kpoints,
+    _operation_matrix_is_exactified,
     _max_derivative_order_values,
     _principal_angle_subspace_residual,
     _q_shell_row_indices,
@@ -67,6 +70,7 @@ from kp.model.pipeline import (  # noqa: E402
 )
 import kp.model.core as model_core  # noqa: E402
 import kp.model.pipeline as pipeline_module  # noqa: E402
+from kp.identity import hash_array  # noqa: E402
 from kp.model.core import (  # noqa: E402
     ContinuumModel,
     ContinuumModelBuilder,
@@ -97,6 +101,111 @@ def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> 
                 "spin_map": "from_kp_symm_output",
         "valley_map": "identity",
     }
+
+
+def _exactified_test_meta() -> dict[str, object]:
+    return {
+        "status": "exactified",
+        "exactification_status": "exactified",
+        "exactification_owner": "kp_symm",
+        "basis_hash": "basis-fixture",
+        "source_matrix_projection_report": {"report": {"status": "exactified"}},
+    }
+
+
+def test_model_artifact_identity_rejects_projection_symmetry_mismatch(tmp_path: Path) -> None:
+    project_dir = tmp_path / "projection"
+    symmetry_dir = tmp_path / "symmetry"
+    project_dir.mkdir()
+    symmetry_dir.mkdir()
+    heff = np.eye(2, dtype=np.complex128)[None, :, :]
+    np.save(project_dir / "heff.npy", heff)
+    identity = {
+        "identity_schema": "moirekp.artifact-identity.v1",
+        "input_hash": "input-a",
+        "config_hash": "config-a",
+        "basis_hash": "basis-a",
+        "package_version": "0.1.0",
+        "schema_version": 1,
+        "k_indices_hash": hash_array(np.asarray([0], dtype=np.int64)),
+        "heff_hash": hash_array(heff),
+    }
+    scalar_identity = {key: np.asarray(value) for key, value in identity.items()}
+    np.savez(project_dir / "basis.npz", **scalar_identity)
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        wavefunctions=np.eye(2, dtype=np.complex128)[None, :, :],
+        k_indices=np.asarray([0]),
+        **scalar_identity,
+    )
+    symmetry_identity = dict(identity)
+    operation = {
+        "name": "C3z",
+        "matrix_kind": "continuum_internal_rep_exact",
+        "matrix_source": "kp_symm_exactified_action",
+        "status": "exactified",
+        "exactification_status": "exactified",
+        "exactification_owner": "kp_symm",
+        "basis_hash": "basis-b",
+        "k_indices_hash": identity["k_indices_hash"],
+        "heff_hash": identity["heff_hash"],
+        "source_matrix_projection_report": {"report": {"status": "exactified"}},
+    }
+    np.savez(
+        symmetry_dir / "representations.npz",
+        C3z=np.eye(2, dtype=np.complex128),
+        __metadata_json__=np.asarray(
+            json.dumps(
+                {"artifact_identity": symmetry_identity, "operations": [operation]},
+                sort_keys=True,
+            )
+        ),
+    )
+
+    with pytest.raises(ValueError, match="kp model.*basis_hash"):
+        _load_model_artifact_identity(
+            project_dir / "heff.npy",
+            {"type": "kp_symm_output", "path": str(symmetry_dir)},
+        )
+
+
+def test_model_kpoints_follow_projection_source_indices(tmp_path: Path) -> None:
+    kpoints = np.array(
+        [[0.0, 0.0], [0.1, 0.0], [0.2, 0.0], [0.3, 0.0]],
+        dtype=float,
+    )
+    kpoints_file = tmp_path / "kpoints.npy"
+    np.save(kpoints_file, kpoints)
+    config = SimpleNamespace(
+        kpoints_file=kpoints_file,
+        project_k_indices=[1, 3],
+        kpath_config={},
+        path=tmp_path / "case.yaml",
+        rotation_deg=0.0,
+    )
+
+    np.testing.assert_allclose(_load_kpoints(config), kpoints[[1, 3]])
+
+
+def test_exactified_operation_requires_complete_production_provenance() -> None:
+    complete = {
+        "matrix_kind": "continuum_internal_rep_exact",
+        "matrix_source": "kp_symm_exactified_action",
+        "status": "exactified",
+        "exactification_status": "exactified",
+        "exactification_owner": "kp_symm",
+        "basis_hash": "basis-a",
+        "source_matrix_projection_report": {"report": {"status": "exactified"}},
+    }
+
+    assert _operation_matrix_is_exactified(complete)
+    assert not _operation_matrix_is_exactified({**complete, "matrix_kind": "action"})
+    assert not _operation_matrix_is_exactified({**complete, "matrix_source": "raw_h_action_projection"})
+    assert not _operation_matrix_is_exactified({**complete, "status": "projected"})
+    assert not _operation_matrix_is_exactified({**complete, "basis_hash": ""})
+    assert not _operation_matrix_is_exactified(
+        {**complete, "source_matrix_projection_report": {"report": {"status": "failed"}}}
+    )
 
 
 def _support_grouping_builder() -> ContinuumModelBuilder:
@@ -806,6 +915,7 @@ def _write_symm_frame_manifest(
     rotation_deg: float,
     path_name: str = "symm",
     q_model_files: dict[str, str] | None = None,
+    project_k_indices: list[int] | None = None,
 ) -> Path:
     symm_dir = tmp_path / path_name
     symm_dir.mkdir(exist_ok=True)
@@ -816,6 +926,41 @@ def _write_symm_frame_manifest(
         json.dumps(manifest),
         encoding="utf-8",
     )
+    project_dir = tmp_path / "project"
+    heff_path = project_dir / "heff.npy"
+    if heff_path.exists():
+        heff = np.load(heff_path, allow_pickle=False)
+        if project_k_indices is None:
+            project_k_indices = list(range(int(heff.shape[0])))
+        if len(project_k_indices) != int(heff.shape[0]):
+            raise ValueError("test fixture project_k_indices must match Heff rows")
+        identity = {
+            "identity_schema": "moirekp.artifact-identity.v1",
+            "input_hash": "input-fixture",
+            "config_hash": "config-fixture",
+            "basis_hash": "basis-fixture",
+            "package_version": "0.1.0",
+            "schema_version": 1,
+            "k_indices_hash": hash_array(
+                np.asarray(project_k_indices, dtype=np.int64)
+            ),
+            "heff_hash": hash_array(heff),
+        }
+        scalar_identity = {key: np.asarray(value) for key, value in identity.items()}
+        dim = int(heff.shape[-1])
+        np.savez(project_dir / "basis.npz", **scalar_identity)
+        np.savez(
+            project_dir / "wavefunctions.npz",
+            wavefunctions=np.stack([np.eye(dim, dtype=np.complex128)] * int(heff.shape[0])),
+            k_indices=np.asarray(project_k_indices, dtype=int),
+            **scalar_identity,
+        )
+        np.savez_compressed(
+            symm_dir / "representations.npz",
+            __metadata_json__=np.asarray(
+                json.dumps({**manifest, "artifact_identity": identity}, sort_keys=True)
+            ),
+        )
     return symm_dir
 
 
@@ -1180,6 +1325,29 @@ def _write_fixture(tmp_path: Path) -> Path:
 
 def _expected_project_eigvals(tmp_path: Path) -> np.ndarray:
     return np.linalg.eigvalsh(np.load(tmp_path / "project" / "heff.npy"))
+
+
+def test_build_moire_config_remaps_projected_heff_rows_to_source_kpoints(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    source_kpoints = np.load(tmp_path / "kpoints.npy")
+    full_heff = np.load(tmp_path / "project" / "heff.npy")
+    selected_source_rows = [0, 2]
+    np.save(tmp_path / "project" / "heff.npy", full_heff[selected_source_rows])
+    _write_symm_frame_manifest(
+        tmp_path,
+        rotation_deg=0.0,
+        project_k_indices=selected_source_rows,
+    )
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["indices"] = [0, 1]
+    raw["bands"]["indices"] = [0, 1]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+
+    assert model_config.project_k_indices == selected_source_rows
+    np.testing.assert_allclose(moire_config.kpoints, source_kpoints[selected_source_rows])
+    np.testing.assert_allclose(moire_config.kpoints_fit, source_kpoints[selected_source_rows])
 
 
 def test_load_model_config_resolves_paths_relative_to_yaml(tmp_path: Path) -> None:
@@ -4058,6 +4226,7 @@ def test_model_rotation_fails_without_manifest_frame(tmp_path: Path) -> None:
     symm_dir = tmp_path / "symm"
     symm_dir.mkdir(exist_ok=True)
     (symm_dir / "manifest.json").write_text(json.dumps({"operations": []}), encoding="utf-8")
+    (symm_dir / "representations.npz").unlink()
 
     with pytest.raises(ValueError, match="symmetry manifest frame rotation"):
         load_model_config(cfg_path)
@@ -5547,6 +5716,7 @@ def test_build_moire_config_enriches_symmetry_map_with_rotated_k_map(tmp_path: P
                 "operations": [
                         {
                             **_source_meta(),
+                            **_exactified_test_meta(),
                             "name": "C2",
                             "matrix_file": "exactified_C2.npy",
                             "matrix_kind": "continuum_internal_rep_exact",
@@ -5596,6 +5766,7 @@ def test_build_moire_config_prefers_model_frame_action_from_symm_artifact(tmp_pa
                 "operations": [
                     {
                         **_source_meta(),
+                        **_exactified_test_meta(),
                         "name": "C2",
                         "matrix_file": "exactified_C2.npy",
                         "matrix_kind": "continuum_internal_rep_exact",
@@ -5659,6 +5830,7 @@ def test_build_moire_config_loads_strict_symm_artifact_without_model_exactificat
                 "operations": [
                     {
                         **_source_meta(),
+                        **_exactified_test_meta(),
                         "name": "C2",
                         "matrix_file": "exactified_C2.npy",
                         "matrix_kind": "continuum_internal_rep_exact",
@@ -5679,7 +5851,7 @@ def test_build_moire_config_loads_strict_symm_artifact_without_model_exactificat
 
     operation = model_cfg.symmetry_source_metadata["operations"][0]
     assert "source_matrix_projection_reports" not in model_cfg.symmetry_source_metadata
-    assert "source_matrix_projection_report" not in operation
+    assert operation["source_matrix_projection_report"]["report"]["status"] == "exactified"
     assert operation["matrix_kind"] == "continuum_internal_rep_exact"
     assert model_cfg.symmetry_map["Kinect"][0]["k_map"]["axis_deg"] == pytest.approx(180.0)
     assert moire_cfg.symmetry_map["Kinect"][0]["k_map"]["axis_deg"] == pytest.approx(180.0)
@@ -5715,6 +5887,7 @@ def test_build_moire_config_reads_kp_symm_projection_report_without_action_misma
                 "operations": [
                     {
                         **_source_meta(antiunitary=True),
+                        **_exactified_test_meta(),
                         "name": "C2T",
                         "matrix_file": "exactified_C2T.npy",
                         "matrix_kind": "continuum_internal_rep_exact",
@@ -5796,6 +5969,7 @@ def test_action_mismatch_default_does_not_write_internal_resolved_action(tmp_pat
                 "operations": [
                     {
                         **_source_meta(),
+                        **_exactified_test_meta(),
                         "name": "C2",
                         "matrix_file": "exactified_C2.npy",
                         "matrix_kind": "continuum_internal_rep_exact",
@@ -5879,6 +6053,7 @@ def test_action_mismatch_explicit_accept_writes_internal_resolved_action_with_pr
                 "operations": [
                     {
                         **_source_meta(),
+                        **_exactified_test_meta(),
                         "name": "C2",
                         "matrix_file": "exactified_C2.npy",
                         "matrix_kind": "continuum_internal_rep_exact",
