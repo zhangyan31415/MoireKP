@@ -201,15 +201,6 @@ def _selected_spin_project_input(hamk2d: np.ndarray, spin: str) -> np.ndarray:
     return np.asarray(block, dtype=np.complex128)
 
 
-def _spin_operator_sign_for_projection(spin: str) -> int | None:
-    spin_norm = str(spin).lower()
-    if spin_norm == "up":
-        return 1
-    if spin_norm == "down":
-        return -1
-    return None
-
-
 def load_efermi_from_vbm_txt(path: str) -> float:
     """Load VBM text file and return max energy as efermi (in eV)."""
     vals: List[float] = []
@@ -885,10 +876,8 @@ def _project_one_from_context(k_index: int, context: dict[str, Any]) -> tuple[An
         kwargs["compute_condition_number"] = context["compute_condition_number"]
     if context["supports_compute_pole_diagnostics"]:
         kwargs["compute_pole_diagnostics"] = context["compute_pole_diagnostics"]
-    if context.get("supports_return_spin_operator"):
+    if context.get("return_spin_operator"):
         kwargs["return_spin_operator"] = True
-    if context.get("supports_spin_operator_sign") and context.get("spin_operator_sign") is not None:
-        kwargs["spin_operator_sign"] = int(context["spin_operator_sign"])
     return project_heff_full(
         ham_for_projection,
         context["q_count"],
@@ -1596,6 +1585,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             "basis_selection.md",
             "eigvals.npy",
             "scatter.png",
+            "spin_operator.npy",
             "vectors.npy",
         ),
     )
@@ -1654,9 +1644,10 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         "compute_pole_diagnostics": compute_pole_diagnostics,
         "supports_compute_condition_number": _project_heff_full_kwargs_supports("compute_condition_number"),
         "supports_compute_pole_diagnostics": _project_heff_full_kwargs_supports("compute_pole_diagnostics"),
-        "supports_return_spin_operator": _project_heff_full_kwargs_supports("return_spin_operator"),
-        "supports_spin_operator_sign": _project_heff_full_kwargs_supports("spin_operator_sign"),
-        "spin_operator_sign": _spin_operator_sign_for_projection(spin),
+        "return_spin_operator": (
+            str(spin).lower() == "all"
+            and _project_heff_full_kwargs_supports("return_spin_operator")
+        ),
         "mode": mode,
     }
 
@@ -1736,13 +1727,12 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     np.save(out_heff, heff_arr)
     if out_eig is not None:
         np.save(out_eig, heig_arr)
-    out_spin_operator = os.path.join(out_dir, "spin_operator.npy")
+    spin_operator_arr: np.ndarray | None = None
     if len(spin_operator_rows) == len(results):
         try:
             spin_operator_arr = np.stack(spin_operator_rows, axis=0)
         except Exception:
             spin_operator_arr = np.array(spin_operator_rows, dtype=object)
-        np.save(out_spin_operator, spin_operator_arr)
     if not isinstance(heff_arr, np.ndarray) or heff_arr.dtype == object:
         raise ValueError("Projection produced ragged/object Heff rows; release outputs require one numeric basis dimension")
     basis_identity = build_projection_basis_identity(
@@ -1773,20 +1763,23 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         norb_fix_list=np.asarray(norb_fix_list, dtype=object),
         **identity_payload,
     )
-    np.savez_compressed(
-        out_vec,
-        wavefunctions=hvec_arr,
-        k_indices=np.asarray(project_indices, dtype=int),
+    wavefunction_payload = {
+        "wavefunctions": hvec_arr,
+        "k_indices": np.asarray(project_indices, dtype=int),
+        "spin_convention": np.asarray(str(spin).lower()),
         **identity_payload,
-    )
+    }
+    if str(spin).lower() == "all" and spin_operator_arr is not None:
+        if spin_operator_arr.dtype == object:
+            raise ValueError("Projection produced ragged/object spin-operator rows")
+        wavefunction_payload["spin_operator"] = spin_operator_arr
+    np.savez_compressed(out_vec, **wavefunction_payload)
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
         print(f"[kp] Heff shape: {heff_arr.shape}")
     print("[kp] Saved arrays:")
     print(f"[kp]   {out_heff}")
     if out_eig is not None:
         print(f"[kp]   {out_eig}")
-    if len(spin_operator_rows) == len(results):
-        print(f"[kp]   {out_spin_operator}")
     print(f"[kp]   {out_vec}")
     _print_project_diagnostics(
         diag_list,

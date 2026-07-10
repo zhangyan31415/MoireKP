@@ -114,7 +114,7 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
             assert np.asarray(basis[field]).item() == np.asarray(wavefunctions[field]).item()
 
 
-def test_project_saves_spin_operator_from_projection(monkeypatch, tmp_path: Path) -> None:
+def test_project_records_fixed_spin_without_saving_operator(monkeypatch, tmp_path: Path) -> None:
     class FullPathHamk:
         ndim = 3
         shape = (1, 4, 4)
@@ -130,20 +130,13 @@ def test_project_saves_spin_operator_from_projection(monkeypatch, tmp_path: Path
     monkeypatch.setattr(cli, "_load_hamk_with_energy_unit", lambda *_args, **_kwargs: FullPathHamk())
     monkeypatch.setattr(cli, "load_Q_sets", lambda *_args, **_kwargs: (q, q.copy()))
 
-    def fake_project_heff_full(
-        *_args,
-        return_spin_operator: bool,
-        spin_operator_sign: int,
-        **_kwargs,
-    ):
-        seen["return_spin_operator"] = return_spin_operator
-        seen["spin_operator_sign"] = spin_operator_sign
+    def fake_project_heff_full(*_args, **_kwargs):
+        seen.update(_kwargs)
         return (
             np.eye(2, dtype=np.complex128),
             np.array([0.0, 1.0], dtype=float),
             np.eye(2, dtype=np.complex128),
             SimpleNamespace(hermiticity_residual=0.0),
-            np.eye(2, dtype=np.complex128) * spin_operator_sign,
         )
 
     monkeypatch.setattr(cli, "project_heff_full", fake_project_heff_full)
@@ -174,8 +167,75 @@ def test_project_saves_spin_operator_from_projection(monkeypatch, tmp_path: Path
 
     cli.cmd_project_from_config(str(cfg_path))
 
-    assert seen == {"return_spin_operator": True, "spin_operator_sign": -1}
-    np.testing.assert_allclose(np.load(tmp_path / "project" / "spin_operator.npy"), -np.eye(2)[None, :, :])
+    assert "return_spin_operator" not in seen
+    assert "spin_operator_sign" not in seen
+    assert not (tmp_path / "project" / "spin_operator.npy").exists()
+    with np.load(tmp_path / "project" / "wavefunctions.npz", allow_pickle=False) as payload:
+        assert np.asarray(payload["spin_convention"]).item() == "down"
+        assert "spin_operator" not in payload.files
+
+
+def test_project_embeds_mixed_spin_operator_in_wavefunctions_archive(monkeypatch, tmp_path: Path) -> None:
+    class FullPathHamk:
+        ndim = 3
+        shape = (1, 4, 4)
+
+        def __getitem__(self, key):
+            if not isinstance(key, int):
+                raise TypeError(f"unexpected hamk key {key!r}")
+            return np.eye(4, dtype=np.complex128)
+
+    q = np.zeros((1, 2), dtype=float)
+    projected_spin = np.diag([0.75, -0.75]).astype(np.complex128)
+    seen: dict[str, object] = {}
+
+    monkeypatch.setattr(cli, "_load_hamk_with_energy_unit", lambda *_args, **_kwargs: FullPathHamk())
+    monkeypatch.setattr(cli, "load_Q_sets", lambda *_args, **_kwargs: (q, q.copy()))
+
+    def fake_project_heff_full(*_args, **kwargs):
+        seen.update(kwargs)
+        return (
+            np.eye(2, dtype=np.complex128),
+            np.array([0.0, 1.0], dtype=float),
+            np.eye(2, dtype=np.complex128),
+            SimpleNamespace(hermiticity_residual=0.0),
+            projected_spin,
+        )
+
+    monkeypatch.setattr(cli, "project_heff_full", fake_project_heff_full)
+    monkeypatch.setattr(cli, "plot_eigs_scatter", lambda *_args, out, **_kwargs: Path(out).write_text("plot"))
+
+    cfg = {
+        "material": {
+            "hamk_file": "unused.npy",
+            "qset1_file": "unused_q1.npy",
+            "qset2_file": "unused_q2.npy",
+            "spin": "all",
+            "energy_unit": "eV",
+            "num_layers": 2,
+            "num_orb_per_layer": [1],
+        },
+        "plot": {"hamk_index": 0},
+        "project": {
+            "mode": "K1",
+            "workers": 1,
+            "downfold_method": "first_order",
+            "out_dir": "project",
+            "nlow_state_list": [[0], [0]],
+            "norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+        },
+    }
+    cfg_path = tmp_path / "source.yaml"
+    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+
+    cli.cmd_project_from_config(str(cfg_path))
+
+    assert seen["return_spin_operator"] is True
+    assert "spin_operator_sign" not in seen
+    assert not (tmp_path / "project" / "spin_operator.npy").exists()
+    with np.load(tmp_path / "project" / "wavefunctions.npz", allow_pickle=False) as payload:
+        assert np.asarray(payload["spin_convention"]).item() == "all"
+        np.testing.assert_allclose(payload["spin_operator"], projected_spin[None, :, :])
 
 
 def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path) -> None:

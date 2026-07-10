@@ -742,13 +742,34 @@ def _safe_key(text: str) -> str:
 def _load_spin_operator(path: Path, n_k: int, dim: int) -> np.ndarray | None:
     if not path.is_file():
         return None
-    arr = np.asarray(np.load(path), dtype=np.complex128)
+    with np.load(path, allow_pickle=False) as payload:
+        if "spin_convention" not in payload.files:
+            raise KeyError(
+                f"{path} is missing spin_convention; rerun `kp project` to create current projection artifacts."
+            )
+        convention = str(np.asarray(payload["spin_convention"]).item()).strip().lower()
+        if convention in {"up", "down"}:
+            sign = 1.0 if convention == "up" else -1.0
+            return (sign * np.eye(dim, dtype=np.complex128))[np.newaxis, :, :]
+        if convention != "all":
+            raise ValueError(f"{path} has unsupported spin_convention={convention!r}")
+        if "spin_operator" not in payload.files:
+            raise KeyError(
+                f"{path} is missing spin_operator for spin_convention='all'; rerun `kp project`."
+            )
+        arr = np.asarray(payload["spin_operator"], dtype=np.complex128)
     if arr.shape == (dim, dim):
         arr = arr[np.newaxis, :, :]
     if arr.ndim != 3 or arr.shape[1:] != (dim, dim):
-        raise ValueError(f"spin_operator.npy has shape {arr.shape}, expected ({n_k}, {dim}, {dim}) or ({dim}, {dim}).")
+        raise ValueError(
+            f"spin_operator in {path} has shape {arr.shape}, "
+            f"expected ({n_k}, {dim}, {dim}) or ({dim}, {dim})."
+        )
     if arr.shape[0] not in {1, n_k}:
-        raise ValueError(f"spin_operator.npy has {arr.shape[0]} k rows, expected 1 or {n_k}.")
+        raise ValueError(f"spin_operator in {path} has {arr.shape[0]} k rows, expected 1 or {n_k}.")
+    hermiticity = np.max(np.abs(arr - arr.conj().transpose(0, 2, 1))) if arr.size else 0.0
+    if float(hermiticity) > 1.0e-10:
+        raise ValueError(f"spin_operator in {path} is not Hermitian (max residual={hermiticity:.3e}).")
     return arr
 
 
@@ -895,7 +916,7 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
     point_to_model_linear = _point_to_model_linear_from_metadata(metadata)
     model_basis_labels = _load_model_basis_labels(request, metadata)
     spin_operator_stack = _load_spin_operator(
-        request.projection_dir / "spin_operator.npy",
+        request.projection_dir / "wavefunctions.npz",
         int(heff.shape[0]),
         int(heff.shape[1]),
     )

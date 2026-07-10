@@ -269,7 +269,11 @@ def test_kp_symm_rep_spin_diagonalizes_degenerate_block_from_spin_operator(tmp_p
     cfg_path = _write_config(tmp_path)
     root = _write_inputs(tmp_path)
     spin_operator = np.diag([-1.0, 1.0, 1.0, -1.0]).astype(np.complex128)[None, :, :]
-    np.save(root / "projection" / "spin_operator.npy", spin_operator)
+    np.savez_compressed(
+        root / "projection" / "wavefunctions.npz",
+        spin_convention=np.asarray("all"),
+        spin_operator=spin_operator,
+    )
 
     output_dir = run_configured_symm_rep(cfg_path)
 
@@ -298,7 +302,11 @@ def test_kp_symm_rep_summary_reports_spin_resolved_matrix_not_eigenbasis(tmp_pat
     )
     _write_exactified_pack(symmetry_dir, C2=c2_spin_flip)
     spin_operator = np.diag([1.0, -1.0, 1.0, -1.0]).astype(np.complex128)[None, :, :]
-    np.save(root / "projection" / "spin_operator.npy", spin_operator)
+    np.savez_compressed(
+        root / "projection" / "wavefunctions.npz",
+        spin_convention=np.asarray("all"),
+        spin_operator=spin_operator,
+    )
 
     output_dir = run_configured_symm_rep(cfg_path)
 
@@ -306,6 +314,43 @@ def test_kp_symm_rep_summary_reports_spin_resolved_matrix_not_eigenbasis(tmp_pat
     assert "basis=[↑1.000, ↓1.000]" in summary
     assert "D=[[0.0000, 1.0000j]; [1.0000j, 0.0000]]" in summary
     assert "(i, -i)" not in summary
+
+
+def test_kp_symm_rep_constructs_fixed_spin_operator_from_archive_convention(tmp_path):
+    from kp.symm_rep import run_configured_symm_rep
+
+    cfg_path = _write_config(tmp_path)
+    root = _write_inputs(tmp_path)
+    np.savez_compressed(
+        root / "projection" / "wavefunctions.npz",
+        spin_convention=np.asarray("down"),
+    )
+
+    output_dir = run_configured_symm_rep(cfg_path)
+
+    bands = list(csv.DictReader((output_dir / "bands.csv").open(newline="", encoding="utf-8")))
+    valence = [row for row in bands if row["point"] == "Gamma" and row["sector"] == "valence"]
+    assert [(row["spin_label"], float(row["spin_up"]), float(row["spin_down"])) for row in valence[:2]] == [
+        ("down", 0.0, 1.0),
+        ("down", 0.0, 1.0),
+    ]
+
+
+def test_kp_symm_rep_ignores_removed_loose_spin_operator(tmp_path):
+    from kp.symm_rep import run_configured_symm_rep
+
+    cfg_path = _write_config(tmp_path)
+    root = _write_inputs(tmp_path)
+    np.save(
+        root / "projection" / "spin_operator.npy",
+        np.diag([-1.0, 1.0, 1.0, -1.0]).astype(np.complex128)[None, :, :],
+    )
+
+    output_dir = run_configured_symm_rep(cfg_path)
+
+    bands = list(csv.DictReader((output_dir / "bands.csv").open(newline="", encoding="utf-8")))
+    valence = [row for row in bands if row["point"] == "Gamma" and row["sector"] == "valence"]
+    assert [row["spin_label"] for row in valence[:2]] == ["effective", "effective"]
 
 
 def test_kp_symm_rep_keeps_only_little_group_operations(tmp_path):
