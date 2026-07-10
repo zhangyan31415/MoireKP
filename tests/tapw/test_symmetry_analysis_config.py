@@ -73,12 +73,28 @@ def test_release_band_config_loads_default_symmetry_section(tmp_path):
     assert config.symmetry_analysis.enable is False
     assert config.symmetry_analysis.valleys == [1]
     assert config.symmetry_analysis.tolerance == 1.0e-2
+    assert config.symmetry_analysis.validation == "full"
+    assert config.symmetry_analysis.debug is False
+    assert config.symmetry_analysis.developer_outputs is False
+    assert config.compute.use_sparse_dot_mkl is True
     assert config.output_layout.style == "canonical_v1"
+
+
+def test_release_symmetry_config_defaults_to_strict_validation(tmp_path):
+    config_path = _write_payload(tmp_path, _release_payload(tmp_path, workflow="symmetry"))
+
+    config = Config.from_yaml(str(config_path))
+
+    assert config.compute.mode == "symmetry"
+    assert config.compute.use_sparse_dot_mkl is True
+    assert config.symmetry_analysis.validation == "full"
+    assert config.symmetry_analysis.debug is False
+    assert config.symmetry_analysis.developer_outputs is False
 
 
 def test_release_symmetry_config_loads_symmetry_section(tmp_path):
     payload = _release_payload(tmp_path, workflow="symmetry")
-    payload["symmetry"].update({"tolerance": 5.0e-3, "debug": True})
+    payload["symmetry"].update({"tolerance": 5.0e-3, "validation": "full", "debug": True})
     config_path = _write_payload(tmp_path, payload)
 
     config = Config.from_yaml(str(config_path))
@@ -89,7 +105,27 @@ def test_release_symmetry_config_loads_symmetry_section(tmp_path):
     assert config.symmetry_analysis.enable is True
     assert config.symmetry_analysis.valleys == [1]
     assert config.symmetry_analysis.tolerance == 5.0e-3
+    assert config.symmetry_analysis.validation == "full"
     assert config.symmetry_analysis.debug is True
+
+
+@pytest.mark.parametrize("validation", ["gamma", "export_only", "raw-h-only", "none"])
+def test_release_symmetry_validation_rejects_non_strict_modes(tmp_path, validation):
+    payload = _release_payload(tmp_path, workflow="symmetry")
+    payload["symmetry"]["validation"] = validation
+    config_path = _write_payload(tmp_path, payload)
+
+    with pytest.raises(ValueError, match="symmetry.validation"):
+        Config.from_yaml(str(config_path))
+
+
+def test_release_symmetry_validation_rejects_unknown_mode(tmp_path):
+    payload = _release_payload(tmp_path, workflow="symmetry")
+    payload["symmetry"]["validation"] = "quickish"
+    config_path = _write_payload(tmp_path, payload)
+
+    with pytest.raises(ValueError, match="symmetry.validation"):
+        Config.from_yaml(str(config_path))
 
 
 def test_symmetry_section_valley_is_independent_from_band_valley(tmp_path):

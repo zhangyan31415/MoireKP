@@ -342,9 +342,18 @@ class SymmetryAnalysisConfig:
     valleys: Optional[List[int]] = None
     tolerance: float = 1.0e-2
     spglib_symprec: Optional[float] = None
+    validation: str = "full"
     output_dir: str = "symmetry_analysis"
     debug: bool = False
     developer_outputs: bool = False
+
+    def __post_init__(self):
+        mode = str(self.validation).strip().lower().replace("-", "_")
+        if mode != "full":
+            raise ValueError(
+                f"Invalid symmetry.validation={self.validation!r}. Release symmetry requires 'full' covariance validation."
+            )
+        self.validation = mode
 
 
 @dataclass
@@ -392,7 +401,7 @@ class ComputeConfig:
     kpoint_chunk_id: int = 0  # For job-array sharding: 0-based chunk index
     kpoint_chunk_count: int = 1  # For job-array sharding: total number of chunks
     fast_getk: bool = True  # Faster CSR build in Getk_super_gauge_sparse (recommended)
-    use_sparse_dot_mkl: bool = False  # Use sparse_dot_mkl for g@H@g^H (can help or hurt depending on sizes/threads)
+    use_sparse_dot_mkl: bool = True  # Use sparse_dot_mkl for TAPW sparse projection.
     eigensolver: str = "scipy"  # non-TAPW generalized solver: "scipy" or "slepc" (SLEPc tuning is internal)
     slepc_eps_type: str = "krylovschur"  # e.g. "krylovschur", "jd", "lapack" (small problems)
     slepc_st_type: str = "sinvert"  # spectral transform: "sinvert" is typical for interior eigenvalues
@@ -716,7 +725,7 @@ class Config:
                 symmetry_analysis_raw["enable"] = bool(symmetry_raw["enable"])
             if "valley" in symmetry_raw:
                 symmetry_analysis_raw["valleys"] = [_parse_valley(symmetry_raw["valley"])]
-            for key in ("tolerance", "spglib_symprec", "debug", "developer_outputs"):
+            for key in ("tolerance", "spglib_symprec", "validation", "debug", "developer_outputs"):
                 if key in symmetry_raw:
                     symmetry_analysis_raw[key] = symmetry_raw[key]
         symmetry_analysis_config = SymmetryAnalysisConfig(**symmetry_analysis_raw)

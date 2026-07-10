@@ -77,7 +77,11 @@ def _minimal_rawh_payload(operation: str = "C2T"):
                 "axis_angle_deg": 3.7,
                 "basis_hash": "basis-test-hash",
                 "residual_H_raw": 1.0e-5,
-                "status": "approximate/provisional",
+                "residual_S_raw": None,
+                "production_validated": True,
+                "status": "passed",
+                "supported": True,
+                "role": "internal",
                 "g_perm_max_delta": 2.0e-12,
                 "nonzero_reciprocal_shift_count": 0,
                 "square_residual": 4.0e-9,
@@ -774,69 +778,80 @@ def test_analyze_derives_c3_square_from_supported_c3_without_raw_validation(tmp_
     assert summary_by_operation["C3z^2"]["export_raw_h_matrix"] is False
 
 
-def test_export_only_validation_skips_raw_covariance_but_exports_generators(tmp_path, monkeypatch):
+@pytest.mark.parametrize("validation", ["gamma", "export_only", "raw_h_only", "none"])
+def test_runner_rejects_non_strict_validation_modes(tmp_path, validation):
     runner = _make_runner(tmp_path)
-    runner.config.compute = SimpleNamespace(TAPW=True, valleys=[5])
-    runner.config.twist = SimpleNamespace(bravais="hex")
-    runner.config.symmetry_analysis.validation = "export_only"
-    runner.structure = SimpleNamespace(spin=False, reciprocal_Tmat=np.eye(3))
-    valley_ctx = symmetry_analysis.ValleyContext(
-        valley=5,
-        valley_label="Gamma",
-        valley_center_cart=np.zeros(2),
-        partner_center_cart=np.zeros(2),
-        group_k_centers={0: np.zeros(2)},
-        group_m_k_centers={0: np.zeros(2)},
-        group_g_vectors={0: np.zeros((1, 2))},
-        moire_reciprocal_basis=np.eye(2),
-        calculator=SimpleNamespace(TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr"))),
-    )
-    runner._calculator_for_valley = MethodType(
-        lambda self, valley: SimpleNamespace(
-            valley_flag="Gamma",
-            TAPW_parameters=SimpleNamespace(g_matrix=scipy.sparse.identity(2, format="csr")),
-        ),
-        runner,
-    )
-    runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
-    monkeypatch.setattr(symmetry_analysis, "collect_spglib_spatial_operations", lambda structure, **_kwargs: [])
-    monkeypatch.setattr(symmetry_analysis, "_default_validation_q_points", lambda: [("Gamma", np.zeros(3)), ("q1", np.ones(3))])
-    monkeypatch.setattr(
-        symmetry_analysis,
-        "_minimal_symmetry_candidates_for_valley",
-        lambda valley_ctx, bravais, spatial_operations=None, structure=None, **_kwargs: [
-            {"index": 0, "name": "E", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
-            {"index": 2, "name": "C3z", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
-            {"index": 3, "name": "C3z^2", "antiunitary": False, "closed": True, "rotation_cart": np.eye(3)},
-        ],
-    )
-    runner._candidate_rows_for_q = MethodType(
-        lambda self, candidate, valley, valley_label, q_label, q_target, tolerance: (_ for _ in ()).throw(
-            AssertionError("export_only must not run raw covariance validation")
-        ),
-        runner,
-    )
-    runner._representation_record_for_candidate = MethodType(
-        lambda self, candidate, valley, valley_label, valley_ctx, candidate_rows: {
-            "valley": valley,
-            "valley_label": valley_label,
-            "operation": symmetry_analysis.representation_operation_name(candidate["name"]),
-            "antiunitary": bool(candidate.get("antiunitary", False)),
-            "matrix": scipy.sparse.identity(2, dtype=np.complex128, format="csr"),
-        },
-        runner,
-    )
+    runner.config.symmetry_analysis.validation = validation
 
-    payload = runner._analyze()
+    with pytest.raises(ValueError, match="symmetry.validation"):
+        symmetry_analysis._symmetry_validation_mode(runner.config.symmetry_analysis)
 
-    assert payload["summary"]["validation"] == "export_only"
-    assert [record["operation"] for record in payload["representations"]] == ["C3z"]
-    details_by_operation = {row["operation"]: row for row in payload["details"]}
-    assert details_by_operation["C3z"]["status"] == "derived"
-    assert details_by_operation["C3z"]["covariance_status"] == "not_computed"
-    assert details_by_operation["C3z"]["residual_H_raw"] is None
-    assert details_by_operation["C3z"]["k_label"] == "Gamma"
-    assert "q1" not in {row["k_label"] for row in payload["details"]}
+
+@pytest.mark.parametrize(
+    ("rows", "require_overlap", "expected"),
+    [
+        ([{"supported": True, "residual_H_raw": 1.0e-5, "residual_S_raw": None}], False, True),
+        ([{"supported": True, "residual_H_raw": None, "residual_S_raw": None}], False, False),
+        ([{"supported": True, "residual_H_raw": 2.0e-2, "residual_S_raw": None}], False, False),
+        ([{"supported": True, "residual_H_raw": 1.0e-5, "residual_S_raw": None}], True, False),
+        ([{"supported": True, "residual_H_raw": 1.0e-5, "residual_S_raw": 2.0e-2}], True, False),
+        ([{"supported": True, "residual_H_raw": 1.0e-5, "residual_S_raw": 2.0e-5}], True, True),
+        ([{"supported": False, "residual_H_raw": 0.0, "residual_S_raw": 0.0}], True, False),
+    ],
+)
+def test_production_covariance_gate_requires_complete_h_and_s_validation(rows, require_overlap, expected):
+    assert symmetry_analysis._candidate_rows_pass_production_validation(
+        rows,
+        tolerance=1.0e-2,
+        require_overlap=require_overlap,
+    ) is expected
+
+
+def test_raw_projected_hs_projects_overlap_when_source_is_nonorthogonal(tmp_path):
+    runner = _make_runner(tmp_path)
+
+    class FakeCalculator:
+        hr_supercell = "H"
+        sr_supercell = "S"
+        TAPW_parameters = object()
+
+        @staticmethod
+        def _build_getk_phase_context(_q):
+            return object()
+
+        @staticmethod
+        def _assemble_sparse_realspace_matrix(_source, _phase, *, type):
+            scale = 2.0 if type == "S" else 1.0
+            return scipy.sparse.identity(2, dtype=np.complex128, format="csr") * scale
+
+        @staticmethod
+        def cal_TAPW_hamiltonian_k_cpu(matrix, **_kwargs):
+            return matrix.toarray()
+
+    runner._calculator_cache[5] = FakeCalculator()
+
+    hamk, samk = runner._raw_projected_hs(5, np.zeros(3))
+
+    assert hamk == pytest.approx(np.eye(2))
+    assert samk == pytest.approx(2.0 * np.eye(2))
+
+
+def test_canonical_writer_drops_unvalidated_raw_h_record(tmp_path):
+    runner = _make_runner(tmp_path)
+    runner.config.output_layout = SimpleNamespace(
+        style="canonical_v1",
+        root=str(tmp_path / "outputs"),
+        profile=None,
+        q_shell="q06",
+    )
+    output_dir = tmp_path / "symmetry"
+    output_dir.mkdir()
+    record = _minimal_rawh_payload("C2T")["representations"][0]
+    record["production_validated"] = False
+
+    runner._write_representations([record], output_dir)
+
+    assert not (output_dir / "representations.npz").exists()
 
 
 def test_c3_covariance_validation_uses_raw_h_action_with_periodic_gauge(tmp_path, monkeypatch):

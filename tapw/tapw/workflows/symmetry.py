@@ -1057,6 +1057,35 @@ def combine_statuses(statuses: Iterable[str]) -> str:
     return max(statuses, key=_status_rank)
 
 
+def _candidate_rows_pass_production_validation(
+    rows: Iterable[dict[str, Any]],
+    *,
+    tolerance: float,
+    require_overlap: bool,
+) -> bool:
+    rows = list(rows)
+    if not rows:
+        return False
+    for row in rows:
+        if not bool(row.get("supported", False)):
+            return False
+        residual_h = row.get("residual_H_raw")
+        if residual_h is None or not np.isfinite(residual_h) or float(residual_h) > float(tolerance):
+            return False
+        if require_overlap:
+            residual_s = row.get("residual_S_raw")
+            if residual_s is None or not np.isfinite(residual_s) or float(residual_s) > float(tolerance):
+                return False
+    return True
+
+
+def _maximum_validated_residual(rows: Iterable[dict[str, Any]], field: str) -> float | None:
+    values = [row.get(field) for row in rows]
+    if not values or any(value is None or not np.isfinite(value) for value in values):
+        return None
+    return max(float(value) for value in values)
+
+
 class SymmetrySupportError(RuntimeError):
     def __init__(self, reason: str, message: str):
         super().__init__(message)
@@ -1857,16 +1886,10 @@ def _default_validation_q_points():
 
 def _symmetry_validation_mode(symmetry_config) -> str:
     mode = str(getattr(symmetry_config, "validation", "full")).strip().lower().replace("-", "_")
-    aliases = {
-        "gamma_only": "gamma",
-        "export": "export_only",
-        "raw_h_only": "export_only",
-        "none": "export_only",
-    }
-    mode = aliases.get(mode, mode)
-    allowed = {"full", "gamma", "export_only"}
-    if mode not in allowed:
-        raise ValueError(f"Invalid symmetry.validation={mode!r}. Must be one of {sorted(allowed)}")
+    if mode != "full":
+        raise ValueError(
+            f"Invalid symmetry.validation={mode!r}. Release symmetry requires 'full' covariance validation."
+        )
     return mode
 
 
@@ -2663,7 +2686,22 @@ class SymmetryAnalysisRunner:
             tapw_parameters=calculator.TAPW_parameters,
             force_sparse_dot=True,
         )
-        self._raw_hs_cache[cache_key] = (np.asarray(hamk, dtype=np.complex128), None)
+        samk = None
+        if calculator.sr_supercell is not None:
+            s_full = calculator._assemble_sparse_realspace_matrix(
+                calculator.sr_supercell,
+                phase_ctx,
+                type="S",
+            )
+            samk = calculator.cal_TAPW_hamiltonian_k_cpu(
+                s_full,
+                tapw_parameters=calculator.TAPW_parameters,
+                force_sparse_dot=True,
+            )
+        self._raw_hs_cache[cache_key] = (
+            np.asarray(hamk, dtype=np.complex128),
+            None if samk is None else np.asarray(samk, dtype=np.complex128),
+        )
         return self._raw_hs_cache[cache_key]
 
     def _raw_c3_h_orbit(self, valley: int, q_local):
@@ -4131,6 +4169,47 @@ class SymmetryAnalysisRunner:
             )
 
         if displayed_operation_name(candidate.get("name")) == "E" and not candidate.get("antiunitary", False):
+            residual_s_raw = None
+            if self.sr_supercell is not None:
+                try:
+                    _h_target, s_target = self._raw_projected_hs(valley, q_target)
+                except (SymmetrySupportError, np.linalg.LinAlgError) as exc:
+                    return self._make_detail_row(
+                        valley_label=valley_label,
+                        operation_name=candidate["name"],
+                        operation_type="unitary",
+                        spglib_index=spglib_index,
+                        r_2d=r_2d,
+                        k_label=q_label,
+                        q_local=q_target,
+                        supported=False,
+                        not_supported_reason=getattr(exc, "reason", "q_mapping_missing"),
+                        residual_h_raw=None,
+                        residual_s_raw=None,
+                        residual_h_sym=None,
+                        residual_s_sym=None,
+                        residual_lowdin_order=None,
+                        tolerance=tolerance,
+                    )
+                if s_target is None or not is_positive_definite(s_target):
+                    return self._make_detail_row(
+                        valley_label=valley_label,
+                        operation_name=candidate["name"],
+                        operation_type="unitary",
+                        spglib_index=spglib_index,
+                        r_2d=r_2d,
+                        k_label=q_label,
+                        q_local=q_target,
+                        supported=False,
+                        not_supported_reason="S_not_positive_definite",
+                        residual_h_raw=0.0,
+                        residual_s_raw=None,
+                        residual_h_sym=None,
+                        residual_s_sym=None,
+                        residual_lowdin_order=None,
+                        tolerance=tolerance,
+                    )
+                residual_s_raw = 0.0
             return self._make_detail_row(
                 valley_label=valley_label,
                 operation_name=candidate["name"],
@@ -4142,7 +4221,7 @@ class SymmetryAnalysisRunner:
                 supported=True,
                 not_supported_reason="",
                 residual_h_raw=0.0,
-                residual_s_raw=None,
+                residual_s_raw=residual_s_raw,
                 residual_h_sym=None,
                 residual_s_sym=None,
                 residual_lowdin_order=None,
@@ -4172,7 +4251,7 @@ class SymmetryAnalysisRunner:
                         **dict(pg_diagnostics or {}),
                     }
                 )
-                h_target, _ = self._raw_projected_hs(valley, q_target)
+                h_target, s_target = self._raw_projected_hs(valley, q_target)
             except (SymmetrySupportError, np.linalg.LinAlgError) as exc:
                 reason = getattr(exc, "reason", "q_mapping_missing")
                 return self._make_detail_row(
@@ -4206,6 +4285,41 @@ class SymmetryAnalysisRunner:
             if residual_h_raw is None:
                 h_cov = raw_transport @ h_target @ raw_transport.conj().T
                 residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
+            residual_s_raw = None
+            if self.sr_supercell is not None:
+                if s_target is None or not is_positive_definite(s_target):
+                    return self._make_detail_row(
+                        valley_label=valley_label,
+                        operation_name=candidate["name"],
+                        operation_type="unitary",
+                        spglib_index=spglib_index,
+                        r_2d=r_2d,
+                        k_label=q_label,
+                        q_local=q_target,
+                        supported=False,
+                        not_supported_reason="S_not_positive_definite",
+                        residual_h_raw=residual_h_raw,
+                        residual_s_raw=None,
+                        residual_h_sym=None,
+                        residual_s_sym=None,
+                        residual_lowdin_order=None,
+                        diagnostic_g_perm_max_delta=diagnostics.get("g_perm_max_delta"),
+                        diagnostic_nonzero_reciprocal_shift_count=diagnostics.get("nonzero_reciprocal_shift_count"),
+                        diagnostic_transport_unitarity_residual=diagnostics.get("transport_unitarity_residual"),
+                        diagnostic_t_square_residual=diagnostics.get("t_square_residual"),
+                        debug=_build_detail_debug_payload(base_debug, diagnostics),
+                        tolerance=tolerance,
+                    )
+                residual_s_raw = monomial_covariance_relative_residual(
+                    s_target,
+                    s_target,
+                    raw_transport,
+                )
+                if residual_s_raw is None:
+                    s_cov = raw_transport @ s_target @ raw_transport.conj().T
+                    residual_s_raw = float(
+                        frobenius_relative_residual(s_target, s_cov, denominator=s_target)
+                    )
             return self._make_detail_row(
                 valley_label=valley_label,
                 operation_name=candidate["name"],
@@ -4217,7 +4331,7 @@ class SymmetryAnalysisRunner:
                 supported=True,
                 not_supported_reason="",
                 residual_h_raw=residual_h_raw,
-                residual_s_raw=None,
+                residual_s_raw=residual_s_raw,
                 residual_h_sym=None,
                 residual_s_sym=None,
                 residual_lowdin_order=None,
@@ -4257,8 +4371,8 @@ class SymmetryAnalysisRunner:
                 tolerance=tolerance,
             )
 
-        h_target, _ = self._raw_projected_hs(valley, q_target)
-        h_source, _ = self._raw_projected_hs(valley, q_source)
+        h_target, s_target = self._raw_projected_hs(valley, q_target)
+        h_source, s_source = self._raw_projected_hs(valley, q_source)
         antiunitary = bool(candidate.get("antiunitary", False))
         residual_h_raw = monomial_covariance_relative_residual(
             h_target,
@@ -4273,6 +4387,49 @@ class SymmetryAnalysisRunner:
                 h_cov = transport @ h_source @ transport.conj().T
             residual_h_raw = float(frobenius_relative_residual(h_target, h_cov, denominator=h_target))
         residual_s_raw = None
+        if self.sr_supercell is not None:
+            if (
+                s_target is None
+                or s_source is None
+                or not is_positive_definite(s_target)
+                or not is_positive_definite(s_source)
+            ):
+                return self._make_detail_row(
+                    valley_label=valley_label,
+                    operation_name=candidate["name"],
+                    operation_type="antiunitary" if antiunitary else "unitary",
+                    spglib_index=spglib_index,
+                    r_2d=r_2d,
+                    k_label=q_label,
+                    q_local=q_target,
+                    supported=False,
+                    not_supported_reason="S_not_positive_definite",
+                    residual_h_raw=residual_h_raw,
+                    residual_s_raw=None,
+                    residual_h_sym=None,
+                    residual_s_sym=None,
+                    residual_lowdin_order=None,
+                    diagnostic_g_perm_max_delta=diagnostics.get("g_perm_max_delta"),
+                    diagnostic_nonzero_reciprocal_shift_count=diagnostics.get("nonzero_reciprocal_shift_count"),
+                    diagnostic_transport_unitarity_residual=diagnostics.get("transport_unitarity_residual"),
+                    diagnostic_t_square_residual=diagnostics.get("t_square_residual"),
+                    debug=_build_detail_debug_payload(base_debug, diagnostics),
+                    tolerance=tolerance,
+                )
+            residual_s_raw = monomial_covariance_relative_residual(
+                s_target,
+                s_source,
+                transport,
+                antiunitary=antiunitary,
+            )
+            if residual_s_raw is None:
+                if antiunitary:
+                    s_cov = transport @ s_source.conj() @ transport.conj().T
+                else:
+                    s_cov = transport @ s_source @ transport.conj().T
+                residual_s_raw = float(
+                    frobenius_relative_residual(s_target, s_cov, denominator=s_target)
+                )
 
         residual_h_sym = None
         residual_s_sym = None
@@ -4384,8 +4541,13 @@ class SymmetryAnalysisRunner:
         if pg_matrix is not None:
             pg_for_raw = pg_matrix.conj() if bool(candidate.get("antiunitary", False)) else pg_matrix
             raw_h_matrix = (matrix @ pg_for_raw).tocsr()
-        gamma_row = next((row for row in candidate_rows if row.get("k_label") == "Gamma"), None)
-        reference_row = gamma_row or (candidate_rows[0] if candidate_rows else {})
+        tolerance = float(getattr(self.config.symmetry_analysis, "tolerance", 1.0e-2))
+        require_overlap = self.sr_supercell is not None
+        production_validated = _candidate_rows_pass_production_validation(
+            candidate_rows,
+            tolerance=tolerance,
+            require_overlap=require_overlap,
+        )
         projected_dim = int(matrix.shape[0])
         axis_angle_deg = None
         if "C2" in operation:
@@ -4398,11 +4560,19 @@ class SymmetryAnalysisRunner:
             "spglib_index": _candidate_spglib_index(candidate),
             "axis_angle_deg": axis_angle_deg,
             "basis_hash": _basis_hash_for_valley_context(self.structure, valley_ctx, projected_dim),
-            "residual_H_raw": reference_row.get("residual_H_raw"),
-            "status": reference_row.get("status", ""),
-            "g_perm_max_delta": reference_row.get("g_perm_max_delta"),
-            "nonzero_reciprocal_shift_count": reference_row.get("nonzero_reciprocal_shift_count"),
-            "square_residual": reference_row.get("square_residual"),
+            "residual_H_raw": _maximum_validated_residual(candidate_rows, "residual_H_raw"),
+            "residual_S_raw": _maximum_validated_residual(candidate_rows, "residual_S_raw"),
+            "production_validated": production_validated,
+            "validation_point_count": len(candidate_rows),
+            "status": "passed" if production_validated else "failed",
+            "supported": production_validated,
+            "role": str(candidate.get("source_symmetry_role", "internal")),
+            "g_perm_max_delta": _maximum_validated_residual(candidate_rows, "g_perm_max_delta"),
+            "nonzero_reciprocal_shift_count": max(
+                (int(row.get("nonzero_reciprocal_shift_count", 0) or 0) for row in candidate_rows),
+                default=0,
+            ),
+            "square_residual": _maximum_validated_residual(candidate_rows, "square_residual"),
             "matrix": matrix,
             "matrix_role": "D_g^(0)",
             "pin_supported": bool(pin_diagnostics.get("pin_supported", False)),
@@ -4432,8 +4602,6 @@ class SymmetryAnalysisRunner:
         operations_summary: dict[str, list[dict[str, Any]]] = {}
         representations: list[dict[str, Any]] = []
         validation_q_points = _default_validation_q_points()
-        if validation_mode in {"gamma", "export_only"}:
-            validation_q_points = validation_q_points[:1]
 
         started = time.perf_counter()
         spatial_operations = collect_spglib_spatial_operations(self.structure, symprec=spglib_symprec)
@@ -4537,22 +4705,6 @@ class SymmetryAnalysisRunner:
                 operation_display_name = displayed_operation_name(candidate["name"])
                 candidate_validation_q_points = validation_q_points
                 if (
-                    not candidate.get("antiunitary", False)
-                    and operation_display_name in {"C3z", "C3z^2"}
-                ):
-                    candidate_validation_q_points = validation_q_points[:1]
-                if validation_mode == "export_only":
-                    candidate_rows = [
-                        self._candidate_export_only_detail_row(
-                            candidate,
-                            valley_label,
-                            q_label,
-                            q_value,
-                            tolerance,
-                        )
-                        for q_label, q_value in candidate_validation_q_points
-                    ]
-                elif (
                     operation_display_name == "C3z^2"
                     and c3_generator_validated
                     and bool(candidate.get("closed", False))
@@ -4586,6 +4738,11 @@ class SymmetryAnalysisRunner:
 
                 candidate_status = combine_statuses(row["status"] for row in candidate_rows)
                 candidate_supported = all(row["supported"] for row in candidate_rows)
+                candidate_production_validated = _candidate_rows_pass_production_validation(
+                    candidate_rows,
+                    tolerance=tolerance,
+                    require_overlap=self.sr_supercell is not None,
+                )
                 candidate_reason = ""
                 for row in candidate_rows:
                     if row["not_supported_reason"]:
@@ -4598,6 +4755,7 @@ class SymmetryAnalysisRunner:
                 export_raw_h_matrix = (
                     bool(candidate.get("export_raw_h_matrix", True))
                     and candidate_supported
+                    and candidate_production_validated
                     and _is_saved_minimal_generator(representation_name, saved_representation_operations)
                 )
                 if export_raw_h_matrix:
@@ -4628,6 +4786,7 @@ class SymmetryAnalysisRunner:
                         "raw_h_export": export_elapsed,
                         "total": candidate_elapsed + export_elapsed,
                         "supported": bool(candidate_supported),
+                        "production_validated": bool(candidate_production_validated),
                         "exported": bool(export_raw_h_matrix),
                     }
                 )
@@ -4636,6 +4795,7 @@ class SymmetryAnalysisRunner:
                         "operation": operation_display_name,
                         "antiunitary": bool(candidate.get("antiunitary", False)),
                         "supported": candidate_supported,
+                        "production_validated": bool(candidate_production_validated),
                         "status": candidate_status,
                         "not_supported_reason": candidate_reason,
                         "axis_angle_deg": axis_angle_deg,
@@ -5156,6 +5316,9 @@ class SymmetryAnalysisRunner:
             "ld_source_rule": str(record.get("ld_source_rule", "")),
             "basis_hash": str(record.get("basis_hash", "")),
             "residual_H_raw": _json_optional_float(record.get("residual_H_raw")),
+            "residual_S_raw": _json_optional_float(record.get("residual_S_raw")),
+            "production_validated": bool(record.get("production_validated", False)),
+            "validation_point_count": _json_optional_int(record.get("validation_point_count", "")),
             "status": record.get("status", ""),
             "g_perm_max_delta": _json_optional_float(record.get("g_perm_max_delta")),
             "nonzero_reciprocal_shift_count": _json_optional_int(record.get("nonzero_reciprocal_shift_count", "")),
@@ -5184,10 +5347,34 @@ class SymmetryAnalysisRunner:
     ) -> None:
         canonical_layout = _is_canonical_output_layout(self.config)
         if canonical_layout:
+            tolerance = float(getattr(self.config.symmetry_analysis, "tolerance", 1.0e-2))
+            require_overlap = self.sr_supercell is not None
+            production_representations = []
+            for record in representations:
+                residual_h = record.get("residual_H_raw")
+                residual_s = record.get("residual_S_raw")
+                ready = (
+                    bool(record.get("production_validated", False))
+                    and str(record.get("status", "")) == "passed"
+                    and str(record.get("role", "internal")) == "internal"
+                    and bool(record.get("supported", True))
+                    and residual_h is not None
+                    and np.isfinite(residual_h)
+                    and float(residual_h) <= tolerance
+                )
+                if require_overlap:
+                    ready = (
+                        ready
+                        and residual_s is not None
+                        and np.isfinite(residual_s)
+                        and float(residual_s) <= tolerance
+                    )
+                if ready:
+                    production_representations.append(record)
             packed_payload: dict[str, np.ndarray] = {}
             packed_keys_seen: set[str] = set()
             metadata_matrices: list[dict[str, Any]] = []
-            for record in representations:
+            for record in production_representations:
                 raw_h_matrix = record.get("raw_h_matrix")
                 if raw_h_matrix is None:
                     continue

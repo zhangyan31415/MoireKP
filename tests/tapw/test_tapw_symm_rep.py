@@ -46,7 +46,16 @@ def _write_identity_rawh_pack(path: Path, config_path: Path | None = None) -> di
     metadata = {
         "schema": "tapw.raw_h_representations.v1",
         **identity,
-        "matrices": [{"key": "C3z", "operation": "C3z", "basis_hash": identity["basis_hash"]}],
+        "matrices": [
+            {
+                "key": "C3z",
+                "operation": "C3z",
+                "basis_hash": identity["basis_hash"],
+                "status": "passed",
+                "production_validated": True,
+                "residual_H_raw": 0.0,
+            }
+        ],
     }
     np.savez_compressed(
         path,
@@ -837,6 +846,40 @@ def test_symm_rep_config_rejects_matrix_basis_identity_mismatch(tmp_path):
     )
 
     with pytest.raises(ValueError, match=r"raw-H matrix C3z.*basis_hash"):
+        resolve_config_request(config_path)
+
+
+def test_symm_rep_config_rejects_nonpassed_rawh_matrix(tmp_path):
+    from tapw.symm_rep import resolve_config_request
+
+    config_path = _write_release_symm_rep_config(tmp_path)
+    rawh_path = tmp_path / "outputs" / "Gamma" / "q04" / "symmetry" / "representations.npz"
+    rawh_path.parent.mkdir(parents=True)
+    identity = _write_identity_rawh_pack(rawh_path, config_path)
+    metadata = {
+        "schema": "tapw.raw_h_representations.v1",
+        **identity,
+        "matrices": [
+            {
+                "key": "C3z",
+                "operation": "C3z",
+                "basis_hash": identity["basis_hash"],
+                "status": "failed",
+                "production_validated": False,
+                "residual_H_raw": 0.2,
+            }
+        ],
+    }
+    np.savez_compressed(
+        rawh_path,
+        C3z_data=np.array([1.0]),
+        C3z_indices=np.array([0]),
+        C3z_indptr=np.array([0, 1]),
+        C3z_shape=np.array([1, 1]),
+        metadata_json=np.asarray(json.dumps(metadata, sort_keys=True), dtype=str),
+    )
+
+    with pytest.raises(ValueError, match=r"raw-H matrix C3z.*production-validated"):
         resolve_config_request(config_path)
 
 

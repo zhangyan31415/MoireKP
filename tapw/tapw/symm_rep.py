@@ -92,6 +92,14 @@ def _load_raw_h_identity(path: Path) -> dict[str, Any]:
             ("basis_hash",),
             f"raw-H matrix {record.get('key', '<unknown>')}",
         )
+        if str(record.get("status", "")) != "passed" or not bool(
+            record.get("production_validated", False)
+        ):
+            raise ValueError(
+                f"raw-H matrix {record.get('key', '<unknown>')} is not production-validated "
+                f"(status={record.get('status')!r}, production_validated="
+                f"{record.get('production_validated')!r})"
+            )
     return identity
 
 
