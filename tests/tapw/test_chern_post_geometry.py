@@ -726,7 +726,7 @@ def test_canonical_boundary_operator_is_bound_to_wavefunction_file(tmp_path):
         )
 
 
-def test_canonical_boundary_operator_rejects_full_rank_nonunitary_sewing(tmp_path):
+def test_wilson_loop_rejects_full_rank_nonisometric_boundary_link(tmp_path):
     from tapw import __version__ as tapw_version
     from tapw.identity import IDENTITY_SCHEMA, hash_file, hash_mapping
     from tapw.symmetry.periodic_gauge import (
@@ -756,13 +756,20 @@ def test_canonical_boundary_operator_rejects_full_rank_nonunitary_sewing(tmp_pat
         },
     )
 
-    with pytest.raises(ValueError, match="not unitary.*increase topology.q_shell"):
-        chern_post._load_required_boundary_operator(
-            tmp_path,
-            loop="b1",
-            wavefunction_path=wavefunction_path,
-            reciprocal_basis=np.eye(2),
-            expected_dim=2,
+    boundary = chern_post._load_required_boundary_operator(
+        tmp_path,
+        loop="b1",
+        wavefunction_path=wavefunction_path,
+        reciprocal_basis=np.eye(2),
+        expected_dim=2,
+    )
+    vectors = np.stack([np.eye(2, dtype=np.complex128)] * 2)
+
+    with pytest.raises(ValueError, match="boundary link is not isometric"):
+        chern_post.wilson_loop(
+            vectors,
+            boundary_sewing=boundary,
+            boundary_isometry_tol=1.0e-3,
         )
 
 
@@ -777,6 +784,22 @@ def test_wilson_loop_rejects_rank_deficient_boundary_link():
             boundary_sewing=boundary,
             boundary_singular_value_tol=1.0e-8,
         )
+
+
+def test_wilson_loop_uses_polar_unitary_part_of_boundary_link():
+    vectors = np.stack([np.eye(2, dtype=np.complex128)] * 2)
+    unitary = np.array([[0.0, 1.0], [-1.0, 0.0]], dtype=np.complex128)
+    positive = np.diag([0.9995, 1.0005]).astype(np.complex128)
+    boundary = scipy.sparse.csr_matrix(positive @ unitary)
+
+    phases = chern_post.wilson_loop(
+        vectors,
+        boundary_sewing=boundary,
+        boundary_isometry_tol=1.0e-3,
+    )
+    expected = np.sort(np.angle(np.linalg.eigvals(unitary)) / (2.0 * np.pi)) % 1.0
+
+    np.testing.assert_allclose(phases, expected, atol=1.0e-12)
 
 
 def test_field_labels_expose_normalization_and_units():

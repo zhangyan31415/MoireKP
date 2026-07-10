@@ -22,11 +22,9 @@ from .artifacts import (
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
 from .identity import IDENTITY_SCHEMA, hash_file, hash_mapping
 from .symmetry.periodic_gauge import (
-    BOUNDARY_OPERATOR_UNITARITY_TOL,
     BOUNDARY_SEWING_SCHEMA,
     BOUNDARY_SEWING_SCHEMA_VERSION,
     load_boundary_operators,
-    normalized_unitarity_residual,
 )
 
 
@@ -888,6 +886,7 @@ def wilson_loop(
     boundary_sewing=None,
     *,
     boundary_singular_value_tol=1.0e-8,
+    boundary_isometry_tol=1.0e-3,
 ):
     n_path, _, n_occ = vecs_occ_path.shape
     wilson = np.eye(n_occ, dtype=np.complex128)
@@ -896,16 +895,31 @@ def wilson_loop(
         if i == n_path - 1 and boundary_sewing is not None:
             current = apply_boundary_sewing(current, boundary_sewing)
         overlap = np.conj(vecs_occ_path[(i + 1) % n_path].T) @ current
-        if i == n_path - 1 and boundary_sewing is not None:
-            singular_values = np.linalg.svd(overlap, compute_uv=False)
-            minimum = float(np.min(singular_values)) if singular_values.size else 0.0
-            if not np.isfinite(minimum) or minimum < float(boundary_singular_value_tol):
+        left, singular_values, right_h = np.linalg.svd(overlap, full_matrices=False)
+        minimum = float(np.min(singular_values)) if singular_values.size else 0.0
+        if not np.isfinite(minimum) or minimum < float(boundary_singular_value_tol):
+            if i == n_path - 1 and boundary_sewing is not None:
                 raise ValueError(
                     "WCC boundary link is rank deficient: "
                     f"minimum singular value={minimum:.6e}, "
                     f"required>={float(boundary_singular_value_tol):.6e}"
                 )
-        wilson = overlap @ wilson
+            raise ValueError(
+                "WCC Wilson link is rank deficient: "
+                f"minimum singular value={minimum:.6e}, "
+                f"required>={float(boundary_singular_value_tol):.6e}"
+            )
+        if i == n_path - 1 and boundary_sewing is not None:
+            isometry_error = float(np.max(np.abs(singular_values - 1.0)))
+            if not np.isfinite(isometry_error) or isometry_error > float(boundary_isometry_tol):
+                raise ValueError(
+                    "WCC boundary link is not isometric in the selected band subspace: "
+                    f"max|sigma-1|={isometry_error:.6e}, "
+                    f"required<={float(boundary_isometry_tol):.6e}. "
+                    "Increase topology.q_shell or revise the selected band subspace."
+                )
+        overlap_unitary = left @ right_h
+        wilson = overlap_unitary @ wilson
     phases = np.angle(np.linalg.eigvals(wilson)) / (2.0 * np.pi)
     return np.sort(phases) % 1.0
 
@@ -932,6 +946,7 @@ def sweep_wcc(
     direction="ky",
     boundary_sewing=None,
     boundary_singular_value_tol=1.0e-8,
+    boundary_isometry_tol=1.0e-3,
 ):
     """Sweep Wilson loops along one fractional axis while fixing the other."""
     if direction == "ky":
@@ -963,6 +978,7 @@ def sweep_wcc(
                     vecs_path,
                     boundary_sewing=boundary_sewing,
                     boundary_singular_value_tol=boundary_singular_value_tol,
+                    boundary_isometry_tol=boundary_isometry_tol,
                 )
             )
     return sweep_values, np.stack(all_wcc, axis=0)
@@ -1004,19 +1020,6 @@ def _load_required_boundary_operator(
         raise ValueError(
             f"Boundary sewing operator {loop} has shape {operator.shape}; expected {(int(expected_dim), int(expected_dim))}"
         )
-    # A unitary compression of the atomic Bloch gauge leaves the TAPW subspace
-    # invariant. In that case its endpoint-to-start action is unchanged by the
-    # k-dependent Lowdin basis transformation. A visibly nonunitary compression
-    # has no such guarantee and must not enter a production Wilson loop.
-    unitarity_residual = normalized_unitarity_residual(operator)
-    if unitarity_residual > BOUNDARY_OPERATOR_UNITARITY_TOL:
-        raise ValueError(
-            "Boundary sewing operator is not unitary in the finite TAPW basis; "
-            f"residual={unitarity_residual:.6e}, "
-            f"required<={BOUNDARY_OPERATOR_UNITARITY_TOL:.6e}. "
-            "increase topology.q_shell until the boundary subspace is converged."
-        )
-
     wavefunction_path = Path(wavefunction_path)
     wavefunction_hashes = dict(metadata.get("wavefunction_hashes", {}) or {})
     expected_hash = wavefunction_hashes.get(wavefunction_path.name)

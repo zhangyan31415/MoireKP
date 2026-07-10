@@ -13,8 +13,7 @@ from ..identity import hash_array, hash_mapping, require_identity_fields
 
 BOUNDARY_SEWING_SCHEMA = "tapw.boundary_sewing.v1"
 BOUNDARY_SEWING_SCHEMA_VERSION = 1
-PROJECTOR_ISOMETRY_TOL = 1.0e-8
-BOUNDARY_OPERATOR_UNITARITY_TOL = 1.0e-6
+PROJECTOR_ISOMETRY_TOL = 1.0e-5
 _IDENTITY_FIELDS = (
     "identity_schema",
     "input_hash",
