@@ -83,6 +83,10 @@ def _write_export_fixture(
     sectors: list[dict] | None = None,
     term_templates: list[dict] | None = None,
     standalone_override: bool = True,
+    reciprocal_basis: tuple[tuple[float, float], tuple[float, float]] = (
+        (1.0, 0.0),
+        (0.0, 1.0),
+    ),
 ) -> tuple[Path, Path]:
     root = tmp_path / "example" / "kp"
     root.mkdir(parents=True)
@@ -150,7 +154,10 @@ def _write_export_fixture(
         "model": {
             "n_orb": list(n_orb),
             "nlow_state": list(n_orb),
-            "bM": {"bM1": [1.0, 0.0], "bM2": [0.0, 1.0]},
+            "bM": {
+                "bM1": list(reciprocal_basis[0]),
+                "bM2": list(reciprocal_basis[1]),
+            },
             "harmonics": {"intra": {1: "zero"}, "inter": {1: "zero"}},
             "max_order": {"Kinect": 1, "intra": 0, "inter": 0},
             "symmetry_map": {"Kinect": [], "Onsite": [], "intra": [], "inter": []},
@@ -396,6 +403,97 @@ def test_standalone_evaluate_can_run_model_topology_from_user_settings(tmp_path:
     assert "phase angle" in model_doc
     assert "\\pi:\\quad" not in model_doc
     assert "0\\mapsto" not in model_doc
+
+
+def test_standalone_topology_projector_preserves_full_basis_dimension(tmp_path: Path) -> None:
+    model_output, _cfg_path = _write_export_fixture(tmp_path)
+    out_dir = tmp_path / "standalone"
+    export_standalone_model(model_output, out_dir)
+    module = _load_exported_evaluator(out_dir)
+
+    eigvecs = np.broadcast_to(np.eye(54, dtype=np.complex128), (2, 2, 54, 54)).copy()
+    projectors = module._projectors_for_bandset(eigvecs, [52, 53])
+
+    assert projectors.shape == (2, 2, 54, 54)
+    np.testing.assert_allclose(np.diag(projectors[0, 0]), [0.0] * 52 + [1.0, 1.0])
+
+
+def test_standalone_topology_mesh_uses_saved_reciprocal_basis(tmp_path: Path) -> None:
+    reciprocal_basis = ((2.0, 0.0), (0.5, 3.0))
+    model_output, _cfg_path = _write_export_fixture(
+        tmp_path,
+        reciprocal_basis=reciprocal_basis,
+    )
+    out_dir = tmp_path / "standalone"
+    export_standalone_model(model_output, out_dir)
+    module = _load_exported_evaluator(out_dir)
+    model = module.load_model(out_dir)
+    module.TOPO_N_B1 = 2
+    module.TOPO_N_B2 = 2
+    module.TOPO_RANGE_B1 = (0.0, 1.0)
+    module.TOPO_RANGE_B2 = (0.0, 1.0)
+
+    b1_values, b2_values, points = module._topology_mesh(model)
+
+    np.testing.assert_allclose(b1_values, [0.0, 1.0])
+    np.testing.assert_allclose(b2_values, [0.0, 1.0])
+    np.testing.assert_allclose(
+        points,
+        [[0.0, 0.0], [0.5, 3.0], [2.0, 0.0], [2.5, 3.0]],
+    )
+
+
+def test_standalone_wcc_uses_saved_reciprocal_vector_for_boundary_shift(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    reciprocal_basis = ((2.0, 0.0), (0.5, 3.0))
+    model_output, _cfg_path = _write_export_fixture(
+        tmp_path,
+        reciprocal_basis=reciprocal_basis,
+    )
+    out_dir = tmp_path / "standalone"
+    export_standalone_model(model_output, out_dir)
+    module = _load_exported_evaluator(out_dir)
+    model = module.load_model(out_dir)
+    captured = []
+
+    def fake_sewing(_model, shift):
+        captured.append(np.asarray(shift, dtype=float))
+        return np.arange(_model.dim, dtype=np.int64)
+
+    monkeypatch.setattr(module, "_sewing_permutation", fake_sewing)
+    eigvecs = np.broadcast_to(np.eye(model.dim, dtype=np.complex128), (2, 2, model.dim, model.dim)).copy()
+
+    module._wilson_wcc(model, eigvecs, [0], "b2")
+
+    assert len(captured) == 1
+    np.testing.assert_allclose(captured[0], reciprocal_basis[1])
+
+
+def test_standalone_topology_transforms_fractional_geometry_to_cartesian(tmp_path: Path) -> None:
+    model_output, _cfg_path = _write_export_fixture(tmp_path)
+    out_dir = tmp_path / "standalone"
+    export_standalone_model(model_output, out_dir)
+    module = _load_exported_evaluator(out_dir)
+    berry_fractional = np.full((2, 2), 6.0)
+    qgt_fractional = np.zeros((2, 2, 4), dtype=float)
+    qgt_fractional[..., 0] = 13.0
+    qgt_fractional[..., 1] = 4.0
+    qgt_fractional[..., 2] = 9.0
+    reciprocal_basis = np.array([[2.0, 0.0], [0.0, 3.0]])
+
+    berry_cartesian, qgt_cartesian = module._geometry_to_cartesian(
+        berry_fractional,
+        qgt_fractional,
+        reciprocal_basis,
+    )
+
+    np.testing.assert_allclose(berry_cartesian, 1.0)
+    np.testing.assert_allclose(qgt_cartesian[..., 0], 2.0)
+    np.testing.assert_allclose(qgt_cartesian[..., 1], 1.0)
+    np.testing.assert_allclose(qgt_cartesian[..., 2], 1.0)
+    np.testing.assert_allclose(qgt_cartesian[..., 3], 0.0)
 
 
 def test_standalone_export_supports_spinful_two_orbital_models(tmp_path: Path) -> None:

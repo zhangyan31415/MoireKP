@@ -2362,14 +2362,32 @@ def _topology_grid_id():
     )
 
 
-def _topology_mesh():
+def _model_reciprocal_basis(model):
+    if "model_reciprocal_basis" not in model.data.files:
+        raise KeyError(
+            "Topology requires model_reciprocal_basis in model_data.npz; "
+            "regenerate this standalone package with kp model"
+        )
+    reciprocal_basis = np.asarray(model.data["model_reciprocal_basis"], dtype=float)
+    if reciprocal_basis.shape != (2, 2):
+        raise ValueError(
+            f"model_reciprocal_basis must have shape (2, 2), got {{reciprocal_basis.shape}}"
+        )
+    determinant = float(np.linalg.det(reciprocal_basis))
+    if not np.all(np.isfinite(reciprocal_basis)) or abs(determinant) < 1.0e-12:
+        raise ValueError("model_reciprocal_basis must be finite and nonsingular")
+    return reciprocal_basis
+
+
+def _topology_mesh(model):
     n1 = int(TOPO_N_B1)
     n2 = int(TOPO_N_B2)
     if n1 < 2 or n2 < 2:
         raise ValueError("TOPO_N_B1 and TOPO_N_B2 must be at least 2")
     b1_values = np.linspace(float(TOPO_RANGE_B1[0]), float(TOPO_RANGE_B1[1]), n1)
     b2_values = np.linspace(float(TOPO_RANGE_B2[0]), float(TOPO_RANGE_B2[1]), n2)
-    points = np.asarray([[x, y] for x in b1_values for y in b2_values], dtype=float)
+    fractional_points = np.asarray([[x, y] for x in b1_values for y in b2_values], dtype=float)
+    points = fractional_points @ _model_reciprocal_basis(model)
     return b1_values, b2_values, points
 
 
@@ -2412,7 +2430,7 @@ def _projectors_for_bandset(eigvecs, band_indices):
     projectors = np.empty((n1, n2, dim, dim), dtype=np.complex128)
     for i in range(n1):
         for j in range(n2):
-            u = eigvecs[i, j, :, band_indices]
+            u = eigvecs[i, j][:, band_indices]
             projectors[i, j] = u @ u.conj().T
     return projectors
 
@@ -2447,6 +2465,39 @@ def _berry_and_qgt_from_projectors(projectors, b1_values, b2_values):
             g12 = float(np.real(np.trace(dp1 @ dp2)))
             qgt[i, j] = [g11 + g22, g11, g22, g12]
     return berry, qgt
+
+
+def _geometry_to_cartesian(berry_fractional, qgt_fractional, reciprocal_basis):
+    reciprocal_basis = np.asarray(reciprocal_basis, dtype=float)
+    if reciprocal_basis.shape != (2, 2):
+        raise ValueError(
+            f"reciprocal_basis must have shape (2, 2), got {{reciprocal_basis.shape}}"
+        )
+    determinant = float(np.linalg.det(reciprocal_basis))
+    if not np.all(np.isfinite(reciprocal_basis)) or abs(determinant) < 1.0e-12:
+        raise ValueError("reciprocal_basis must be finite and nonsingular")
+
+    berry_cartesian = np.asarray(berry_fractional, dtype=float) / determinant
+    qgt_fractional = np.asarray(qgt_fractional, dtype=float)
+    inverse_basis = np.linalg.inv(reciprocal_basis)
+    metric_fractional = np.empty(qgt_fractional.shape[:-1] + (2, 2), dtype=float)
+    metric_fractional[..., 0, 0] = qgt_fractional[..., 1]
+    metric_fractional[..., 1, 1] = qgt_fractional[..., 2]
+    metric_fractional[..., 0, 1] = qgt_fractional[..., 3]
+    metric_fractional[..., 1, 0] = qgt_fractional[..., 3]
+    metric_cartesian = np.einsum(
+        "ab,...bc,dc->...ad",
+        inverse_basis,
+        metric_fractional,
+        inverse_basis,
+        optimize=True,
+    )
+    qgt_cartesian = np.empty_like(qgt_fractional)
+    qgt_cartesian[..., 0] = np.trace(metric_cartesian, axis1=-2, axis2=-1)
+    qgt_cartesian[..., 1] = metric_cartesian[..., 0, 0]
+    qgt_cartesian[..., 2] = metric_cartesian[..., 1, 1]
+    qgt_cartesian[..., 3] = metric_cartesian[..., 0, 1]
+    return berry_cartesian, qgt_cartesian
 
 
 def _save_grid_table(path, b1_values, b2_values, values, columns):
@@ -2528,35 +2579,36 @@ def _apply_sewing(matrix, target_by_source):
 
 def _wilson_wcc(model, eigvecs, band_indices, loop):
     loop = str(loop).strip().lower()
+    reciprocal_basis = _model_reciprocal_basis(model)
     if loop == "b1":
-        shift = np.array([1.0, 0.0], dtype=float)
+        shift = reciprocal_basis[0]
         target_by_source = _sewing_permutation(model, shift)
         sweep_count = eigvecs.shape[1]
         branches = []
         for j in range(sweep_count):
             product = np.eye(len(band_indices), dtype=np.complex128)
             for i in range(eigvecs.shape[0] - 1):
-                u0 = eigvecs[i, j, :, band_indices]
-                u1 = eigvecs[i + 1, j, :, band_indices]
+                u0 = eigvecs[i, j][:, band_indices]
+                u1 = eigvecs[i + 1, j][:, band_indices]
                 product = (u1.conj().T @ u0) @ product
-            u_start = eigvecs[0, j, :, band_indices]
+            u_start = eigvecs[0, j][:, band_indices]
             u_end = _apply_sewing(eigvecs[-1, j, :, :], target_by_source)[:, band_indices]
             product = (u_start.conj().T @ u_end) @ product
             phases = np.sort((np.angle(np.linalg.eigvals(product)) / (2.0 * np.pi)) % 1.0)
             branches.append(phases)
         return np.asarray(branches, dtype=float)
     if loop == "b2":
-        shift = np.array([0.0, 1.0], dtype=float)
+        shift = reciprocal_basis[1]
         target_by_source = _sewing_permutation(model, shift)
         sweep_count = eigvecs.shape[0]
         branches = []
         for i in range(sweep_count):
             product = np.eye(len(band_indices), dtype=np.complex128)
             for j in range(eigvecs.shape[1] - 1):
-                u0 = eigvecs[i, j, :, band_indices]
-                u1 = eigvecs[i, j + 1, :, band_indices]
+                u0 = eigvecs[i, j][:, band_indices]
+                u1 = eigvecs[i, j + 1][:, band_indices]
                 product = (u1.conj().T @ u0) @ product
-            u_start = eigvecs[i, 0, :, band_indices]
+            u_start = eigvecs[i, 0][:, band_indices]
             u_end = _apply_sewing(eigvecs[i, -1, :, :], target_by_source)[:, band_indices]
             product = (u_start.conj().T @ u_end) @ product
             phases = np.sort((np.angle(np.linalg.eigvals(product)) / (2.0 * np.pi)) % 1.0)
@@ -2587,7 +2639,8 @@ def _plot_wcc(path, sweep_values, branches):
 
 
 def _run_topology(root, model):
-    b1_values, b2_values, points = _topology_mesh()
+    reciprocal_basis = _model_reciprocal_basis(model)
+    b1_values, b2_values, points = _topology_mesh(model)
     grid_dir = _resolve_path(root, Path(TOPOLOGY_OUTPUT_DIR) / _topology_grid_id())
     grid_dir.mkdir(parents=True, exist_ok=True)
     eigvals, eigvecs = _eigensystem_on_grid(model, points, int(TOPO_N_B1), int(TOPO_N_B2))
@@ -2595,7 +2648,16 @@ def _run_topology(root, model):
     for name, spec in TOPO_BAND_SETS.items():
         band_indices = _resolve_topology_band_indices(model.dim, spec)
         projectors = _projectors_for_bandset(eigvecs, band_indices)
-        berry, qgt = _berry_and_qgt_from_projectors(projectors, b1_values, b2_values)
+        berry_fractional, qgt_fractional = _berry_and_qgt_from_projectors(
+            projectors,
+            b1_values,
+            b2_values,
+        )
+        berry, qgt = _geometry_to_cartesian(
+            berry_fractional,
+            qgt_fractional,
+            reciprocal_basis,
+        )
         if CALC_BERRY_CURVATURE:
             txt = grid_dir / f"berry_curvature_{{name}}.txt"
             _save_grid_table(txt, b1_values, b2_values, berry[:, :, None], ["omega"])
