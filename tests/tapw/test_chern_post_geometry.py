@@ -726,6 +726,46 @@ def test_canonical_boundary_operator_is_bound_to_wavefunction_file(tmp_path):
         )
 
 
+def test_canonical_boundary_operator_rejects_full_rank_nonunitary_sewing(tmp_path):
+    from tapw import __version__ as tapw_version
+    from tapw.identity import IDENTITY_SCHEMA, hash_file, hash_mapping
+    from tapw.symmetry.periodic_gauge import (
+        BOUNDARY_SEWING_SCHEMA,
+        BOUNDARY_SEWING_SCHEMA_VERSION,
+        save_boundary_operators,
+    )
+
+    wavefunction_path = tmp_path / "wavefunctions_vbm.npy"
+    np.save(wavefunction_path, np.eye(2, dtype=np.complex128)[None, :, :])
+    wavefunction_hashes = {wavefunction_path.name: hash_file(wavefunction_path)}
+    bad = scipy.sparse.diags([1.0, 0.5], dtype=np.complex128, format="csr")
+    save_boundary_operators(
+        tmp_path / "boundary_sewing.npz",
+        {"b1": bad, "b2": scipy.sparse.identity(2, dtype=np.complex128, format="csr")},
+        {
+            "schema": BOUNDARY_SEWING_SCHEMA,
+            "identity_schema": IDENTITY_SCHEMA,
+            "input_hash": hash_mapping({"wavefunction_hashes": wavefunction_hashes}),
+            "config_hash": "config-a",
+            "basis_hash": "basis-a",
+            "package_version": tapw_version,
+            "schema_version": BOUNDARY_SEWING_SCHEMA_VERSION,
+            "matrix_dimension": 2,
+            "reciprocal_basis": [[1.0, 0.0], [0.0, 1.0]],
+            "wavefunction_hashes": wavefunction_hashes,
+        },
+    )
+
+    with pytest.raises(ValueError, match="not unitary.*increase topology.q_shell"):
+        chern_post._load_required_boundary_operator(
+            tmp_path,
+            loop="b1",
+            wavefunction_path=wavefunction_path,
+            reciprocal_basis=np.eye(2),
+            expected_dim=2,
+        )
+
+
 def test_wilson_loop_rejects_rank_deficient_boundary_link():
     vectors = np.zeros((2, 2, 1), dtype=np.complex128)
     vectors[:, 0, 0] = 1.0

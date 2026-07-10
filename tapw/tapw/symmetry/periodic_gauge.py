@@ -13,6 +13,8 @@ from ..identity import hash_array, hash_mapping, require_identity_fields
 
 BOUNDARY_SEWING_SCHEMA = "tapw.boundary_sewing.v1"
 BOUNDARY_SEWING_SCHEMA_VERSION = 1
+PROJECTOR_ISOMETRY_TOL = 1.0e-8
+BOUNDARY_OPERATOR_UNITARITY_TOL = 1.0e-6
 _IDENTITY_FIELDS = (
     "identity_schema",
     "input_hash",
@@ -21,6 +23,36 @@ _IDENTITY_FIELDS = (
     "package_version",
     "schema_version",
 )
+
+
+def normalized_unitarity_residual(matrix: Any) -> float:
+    value = (
+        matrix.tocsr()
+        if scipy.sparse.issparse(matrix)
+        else scipy.sparse.csr_matrix(np.asarray(matrix, dtype=np.complex128))
+    )
+    if value.shape[0] != value.shape[1]:
+        raise ValueError(f"Unitarity residual requires a square matrix, got {value.shape}")
+    identity = scipy.sparse.identity(value.shape[0], dtype=np.complex128, format="csr")
+    delta = (value.conj().T @ value - identity).tocsr()
+    return float(np.sqrt(np.sum(np.abs(delta.data) ** 2))) / max(
+        1.0,
+        float(np.sqrt(value.shape[0])),
+    )
+
+
+def normalized_row_isometry_residual(matrix: Any) -> float:
+    value = (
+        matrix.tocsr()
+        if scipy.sparse.issparse(matrix)
+        else scipy.sparse.csr_matrix(np.asarray(matrix, dtype=np.complex128))
+    )
+    identity = scipy.sparse.identity(value.shape[0], dtype=np.complex128, format="csr")
+    delta = (value @ value.conj().T - identity).tocsr()
+    return float(np.sqrt(np.sum(np.abs(delta.data) ** 2))) / max(
+        1.0,
+        float(np.sqrt(value.shape[0])),
+    )
 
 
 def atomic_bloch_phase(
@@ -105,6 +137,24 @@ def build_projected_boundary_operator(
         frame,
         {int(group): shift for group in groups},
     )
+    projector = (
+        g_matrix.tocsr()
+        if scipy.sparse.issparse(g_matrix)
+        else scipy.sparse.csr_matrix(np.asarray(g_matrix, dtype=np.complex128))
+    )
+    expected_columns = int(phase.size) * (2 if spinful else 1)
+    if int(projector.shape[1]) != expected_columns:
+        raise ValueError(
+            "Atomic Bloch phase spin contract mismatch: "
+            f"spinful={spinful}, projector_columns={projector.shape[1]}, expected={expected_columns}"
+        )
+    projector_isometry_residual = normalized_row_isometry_residual(projector)
+    if projector_isometry_residual > PROJECTOR_ISOMETRY_TOL:
+        raise ValueError(
+            "TAPW projector is not row-isometric: "
+            f"residual={projector_isometry_residual:.6e}, "
+            f"required<={PROJECTOR_ISOMETRY_TOL:.6e}"
+        )
     projected_plus = project_atomic_bloch_gauge(g_matrix, phase)
     boundary = projected_plus.conj().T.tocsr()
     boundary.sort_indices()
@@ -116,18 +166,14 @@ def build_projected_boundary_operator(
         raise ValueError(
             f"Projected dimension {projected_dim} is incompatible with spinful={spinful}"
         )
-    identity = scipy.sparse.identity(projected_dim, dtype=np.complex128, format="csr")
-    unitarity_delta = (boundary.conj().T @ boundary - identity).tocsr()
-    unitarity_residual = float(np.sqrt(np.sum(np.abs(unitarity_delta.data) ** 2))) / max(
-        1.0,
-        float(np.sqrt(projected_dim)),
-    )
+    unitarity_residual = normalized_unitarity_residual(boundary)
     return boundary, {
         "atomic_spinless_dim": int(phase.size),
         "projected_dim": projected_dim,
         "spinful": bool(spinful),
         "reciprocal_shift": shift.tolist(),
         "operator_direction": "endpoint_to_start",
+        "projector_isometry_residual": projector_isometry_residual,
         "projected_unitarity_residual": unitarity_residual,
     }
 

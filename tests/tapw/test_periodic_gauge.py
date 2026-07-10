@@ -88,6 +88,34 @@ def test_projected_boundary_operator_uses_full_projector_not_g_block_relabel():
     np.testing.assert_allclose(boundary.toarray(), expected.toarray())
 
 
+def test_spinful_boundary_operator_rejects_spinless_projector_columns():
+    frame = _structure_frame((1, 1))
+    projector = scipy.sparse.identity(2, dtype=np.complex128, format="csr")
+
+    with pytest.raises(ValueError, match="spinful=True.*projector_columns=2.*expected=4"):
+        build_projected_boundary_operator(
+            structure_df=frame,
+            g_matrix=projector,
+            reciprocal_shift=np.array([1.0, 0.0]),
+            spinful=True,
+        )
+
+
+def test_boundary_operator_rejects_nonisometric_tapw_projector():
+    frame = _structure_frame((1, 1))
+    projector = scipy.sparse.csr_matrix(
+        np.array([[1.0, 0.0], [1.0, 0.0]], dtype=np.complex128)
+    )
+
+    with pytest.raises(ValueError, match="TAPW projector is not row-isometric"):
+        build_projected_boundary_operator(
+            structure_df=frame,
+            g_matrix=projector,
+            reciprocal_shift=np.array([1.0, 0.0]),
+            spinful=False,
+        )
+
+
 def test_boundary_operator_maps_k_plus_b_eigenvectors_back_to_k_basis():
     frame = _structure_frame((1, 2))
     projector = scipy.sparse.identity(3, dtype=np.complex128, format="csr")
@@ -110,6 +138,27 @@ def test_boundary_operator_maps_k_plus_b_eigenvectors_back_to_k_basis():
     sewing_overlap = u0.conj().T @ boundary @ u_plus
 
     np.testing.assert_allclose(np.abs(sewing_overlap), np.eye(3), atol=1.0e-12)
+
+
+def test_unitary_boundary_action_is_unchanged_in_lowdin_basis():
+    boundary = np.array(
+        [[0.0, 1.0j], [np.exp(0.37j), 0.0]],
+        dtype=np.complex128,
+    )
+    s_zero = np.array([[2.0, 0.25j], [-0.25j, 1.3]], dtype=np.complex128)
+    s_plus = boundary.conj().T @ s_zero @ boundary
+
+    def matrix_power(matrix: np.ndarray, exponent: float) -> np.ndarray:
+        values, vectors = np.linalg.eigh(matrix)
+        return (vectors * (values**exponent)) @ vectors.conj().T
+
+    lowdin_boundary = (
+        matrix_power(s_zero, 0.5)
+        @ boundary
+        @ matrix_power(s_plus, -0.5)
+    )
+
+    np.testing.assert_allclose(lowdin_boundary, boundary, atol=1.0e-12)
 
 
 def test_boundary_operator_pack_round_trips_sparse_matrices_and_identity(tmp_path: Path):

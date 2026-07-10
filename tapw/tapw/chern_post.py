@@ -22,9 +22,11 @@ from .artifacts import (
 from .config import format_chern_grid_suffix, resolve_chern_grid_shape
 from .identity import IDENTITY_SCHEMA, hash_file, hash_mapping
 from .symmetry.periodic_gauge import (
+    BOUNDARY_OPERATOR_UNITARITY_TOL,
     BOUNDARY_SEWING_SCHEMA,
     BOUNDARY_SEWING_SCHEMA_VERSION,
     load_boundary_operators,
+    normalized_unitarity_residual,
 )
 
 
@@ -1001,6 +1003,18 @@ def _load_required_boundary_operator(
     if operator.shape != (int(expected_dim), int(expected_dim)):
         raise ValueError(
             f"Boundary sewing operator {loop} has shape {operator.shape}; expected {(int(expected_dim), int(expected_dim))}"
+        )
+    # A unitary compression of the atomic Bloch gauge leaves the TAPW subspace
+    # invariant. In that case its endpoint-to-start action is unchanged by the
+    # k-dependent Lowdin basis transformation. A visibly nonunitary compression
+    # has no such guarantee and must not enter a production Wilson loop.
+    unitarity_residual = normalized_unitarity_residual(operator)
+    if unitarity_residual > BOUNDARY_OPERATOR_UNITARITY_TOL:
+        raise ValueError(
+            "Boundary sewing operator is not unitary in the finite TAPW basis; "
+            f"residual={unitarity_residual:.6e}, "
+            f"required<={BOUNDARY_OPERATOR_UNITARITY_TOL:.6e}. "
+            "increase topology.q_shell until the boundary subspace is converged."
         )
 
     wavefunction_path = Path(wavefunction_path)
