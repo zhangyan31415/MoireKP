@@ -8,6 +8,7 @@ import pytest
 import yaml
 
 from kp.model.pipeline import build_moire_config_from_file
+from kp.identity import hash_array
 from kp.symmetry.exactify_representation import (
     BasisLabel,
     OperationAction,
@@ -1834,9 +1835,64 @@ def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path
     out_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
     out_dir.mkdir(parents=True)
     np.save(out_dir / "heff.npy", heff)
+    identity = {
+        "identity_schema": "moirekp.artifact-identity.v1",
+        "input_hash": "input-fixture",
+        "config_hash": "config-fixture",
+        "basis_hash": "basis-fixture",
+        "package_version": "0.1.0",
+        "schema_version": 1,
+        "k_indices_hash": hash_array(np.asarray([0], dtype=np.int64)),
+        "heff_hash": hash_array(heff),
+    }
+    scalar_identity = {key: np.asarray(value) for key, value in identity.items()}
+    np.savez(out_dir / "basis.npz", **scalar_identity)
+    np.savez(
+        out_dir / "wavefunctions.npz",
+        wavefunctions=np.eye(2, dtype=np.complex128)[None, :, :],
+        k_indices=np.asarray([0], dtype=int),
+        **scalar_identity,
+    )
     symm_dir = tmp_path / "symm"
     symm_dir.mkdir()
     np.save(symm_dir / "C3_low_raw.npy", np.eye(2, dtype=complex))
+    raw_operation = {
+        **_source_meta(),
+        "name": "C3z",
+        "operation": "C3",
+        "matrix_file": "representations.npz",
+        "matrix_array_key": "C3z",
+        "matrix_kind": "action",
+        "matrix_source": "raw_h_action_projection",
+        "status": "projected",
+        "exactification_owner": "kp_symm",
+        "basis_hash": identity["basis_hash"],
+        "k_indices_hash": identity["k_indices_hash"],
+        "heff_hash": identity["heff_hash"],
+        "antiunitary": False,
+        "k_map": {"type": "rotation", "angle_deg": 120},
+        "q_map": {"type": "rotation", "angle_deg": 120},
+        "sector_map": "identity",
+        "spin_map": "identity",
+        "valley_map": "identity",
+        "residual": 0.0,
+        "leakage": 0.0,
+    }
+    np.savez_compressed(
+        symm_dir / "representations.npz",
+        C3z=np.eye(2, dtype=np.complex128),
+        __metadata_json__=np.asarray(
+            json.dumps(
+                {
+                    "artifact_identity": identity,
+                    "exactification_owner": "kp_symm",
+                    "frame": {"q_transform": {"rotation_deg": 0.0}},
+                    "operations": [raw_operation],
+                },
+                sort_keys=True,
+            )
+        ),
+    )
     (symm_dir / "manifest.json").write_text(
         json.dumps(
             {
@@ -1916,7 +1972,7 @@ def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path
         encoding="utf-8",
     )
 
-    with pytest.raises(ValueError, match="kp_symm_output must provide exactified continuum matrices"):
+    with pytest.raises(ValueError, match="lacks complete exactification provenance"):
         build_moire_config_from_file(cfg_path)
 
     assert not (tmp_path / "model_out" / "symmetry_source_matrix_projection").exists()
