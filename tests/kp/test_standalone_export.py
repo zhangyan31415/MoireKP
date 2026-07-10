@@ -20,6 +20,7 @@ from kp.model.export import (  # noqa: E402
     _dense_composed_symmetry_action,
     _expand_operator_recipe,
     _iter_transformed_sparse_entries,
+    _load_exactified_matrices,
     export_all_standalone_models,
     export_standalone_model,
 )
@@ -263,6 +264,28 @@ def test_standalone_export_removes_stale_model_json_in_place(tmp_path: Path) -> 
 
     assert not (model_output / "model.json").exists()
     assert (model_output / "model_data.npz").exists()
+
+
+def test_exactified_matrix_export_ignores_loose_file_overrides(tmp_path: Path) -> None:
+    symmetry_dir = tmp_path / "symmetry"
+    symmetry_dir.mkdir()
+    packed_matrix = np.diag([1.0, -1.0]).astype(np.complex128)
+    np.savez_compressed(
+        symmetry_dir / "representations.npz",
+        C3z=packed_matrix,
+        __metadata_json__=np.asarray(json.dumps({"operations": []})),
+    )
+    np.save(symmetry_dir / "exactified_C3z.npy", np.zeros((2, 2), dtype=np.complex128))
+    model_config = SimpleNamespace(
+        path=tmp_path / "case.yaml",
+        output_dir=None,
+        symmetry_source_config={"path": str(symmetry_dir), "operations": ["C3z"]},
+        symmetry_source_metadata={"operations": [{"name": "C3z"}]},
+    )
+
+    matrices = _load_exactified_matrices(model_config, dim=2)
+
+    np.testing.assert_allclose(matrices["C3z"], packed_matrix)
 
 
 def test_expand_operator_recipe_caches_duplicate_monomial_transforms(monkeypatch) -> None:

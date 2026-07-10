@@ -709,38 +709,32 @@ def _load_exactified_matrices(model_config: Any, dim: int) -> dict[str, np.ndarr
         raise FileNotFoundError(f"symmetry_source.path does not exist: {symm_dir}")
 
     requested = _production_operation_names(model_config, symm_dir)
-    available: dict[str, Path] = {}
-    for path in symm_dir.glob("exactified_*.npy"):
-        raw_name = path.stem.removeprefix("exactified_")
-        available.setdefault(_operation_family_name(raw_name), path)
     packed_path = symm_dir / "representations.npz"
+    if not packed_path.is_file():
+        raise FileNotFoundError(
+            f"canonical exactified symmetry pack is required for standalone export: {packed_path}"
+        )
     packed_keys: dict[str, str] = {}
-    if packed_path.exists():
-        with np.load(packed_path, allow_pickle=False) as packed:
-            for key in packed.files:
-                if str(key).startswith("__"):
-                    continue
-                packed_keys.setdefault(_operation_family_name(str(key)), str(key))
-    names = requested or sorted(available)
-    if not names and packed_keys:
-        names = sorted(packed_keys)
-    for name in names:
-        if name in FORBIDDEN_PRODUCTION_OPERATION_NAMES:
-            raise ValueError(f"forbidden production operation name in standalone export: {name}")
-        path = available.get(name, symm_dir / f"exactified_{name}.npy")
-        if path.exists():
-            matrix = np.load(path, allow_pickle=False)
+    with np.load(packed_path, allow_pickle=False) as packed:
+        for key in packed.files:
+            if str(key).startswith("__"):
+                continue
+            packed_keys.setdefault(_operation_family_name(str(key)), str(key))
+        names = requested or sorted(packed_keys)
+        for name in names:
+            if name in FORBIDDEN_PRODUCTION_OPERATION_NAMES:
+                raise ValueError(f"forbidden production operation name in standalone export: {name}")
+            if name not in packed_keys:
+                raise FileNotFoundError(
+                    f"exactified production symmetry matrix is missing from {packed_path}: {name}"
+                )
+            matrix = np.asarray(packed[packed_keys[name]], dtype=np.complex128)
             if matrix.shape != (dim, dim):
-                raise ValueError(f"{path.name} shape {matrix.shape} does not match model dim {dim}")
-            out[name] = np.asarray(matrix, dtype=np.complex128)
-        elif name in packed_keys:
-            with np.load(packed_path, allow_pickle=False) as packed:
-                matrix = np.asarray(packed[packed_keys[name]], dtype=np.complex128)
-            if matrix.shape != (dim, dim):
-                raise ValueError(f"{packed_path.name}:{packed_keys[name]} shape {matrix.shape} does not match model dim {dim}")
+                raise ValueError(
+                    f"{packed_path.name}:{packed_keys[name]} shape {matrix.shape} "
+                    f"does not match model dim {dim}"
+                )
             out[name] = matrix
-        else:
-            raise FileNotFoundError(f"exactified production symmetry matrix is required: {path}")
     return out
 
 
