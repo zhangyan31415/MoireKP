@@ -33,8 +33,10 @@ from kp.model.pipeline import (  # noqa: E402
     _harmonic_ablation_candidate_is_accepted,
     _harmonic_ablation_mask_from_shell_maps,
     _harmonic_ablation_shell_maps,
+    _hamiltonian_element_comparison_arrays,
     _harmonic_recommendation_plot_candidates,
     _harmonic_selection_threshold_values,
+    _selected_harmonic_support_mask,
     _run_harmonic_ablation_selection,
     _select_harmonic_ablation_candidate,
     _auto_low_energy_fit_candidate_sets,
@@ -72,6 +74,7 @@ from kp.model.pipeline import (  # noqa: E402
     load_model_config,
     matrix_residual,
     run_configured_model,
+    save_hamiltonian_element_comparison_plot,
     save_band_comparison_plot,
     save_q_lattice_harmonics_plot,
 )
@@ -1260,12 +1263,18 @@ def test_canonical_model_cleanup_preserves_harmonic_recommendation_plot(tmp_path
     output.mkdir()
     keep = output / "harmonic_recommendation_bands.png"
     keep.write_bytes(b"plot")
+    heatmap = output / "hamiltonian_element_comparison.png"
+    heatmap.write_bytes(b"heatmap")
+    heatmap_pdf = output / "hamiltonian_element_comparison.pdf"
+    heatmap_pdf.write_bytes(b"%PDF-1.4\n")
     stale = output / "temporary.txt"
     stale.write_text("remove", encoding="utf-8")
 
     cli._cleanup_canonical_model_output(output)
 
     assert keep.exists()
+    assert heatmap.exists()
+    assert heatmap_pdf.exists()
     assert not stale.exists()
 
 
@@ -1307,6 +1316,76 @@ def test_standalone_export_dense_symmetry_action_expands_sparse_entries() -> Non
     assert observed[(0, 1)] == pytest.approx(-0.5 + 0.0j)
     assert observed[(1, 0)] == pytest.approx(0.5 + 0.0j)
     assert observed[(1, 1)] == pytest.approx(-0.5 + 0.0j)
+
+
+def test_compiled_operator_recipe_keeps_onsite_terms_within_same_layer_q_block() -> None:
+    q1 = np.array([[0.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+
+    key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
+    y_basis = ContinuumModelBuilder.make_Y_basis_function(key, q1, q2, 1, 1)
+    term = ContinuumTerm(
+        key=key,
+        Y_basis=y_basis,
+        r_value_real=1.0,
+        r_value_imag=0.0,
+        active=True,
+        tag="Onsite",
+        symmetry_ops=[{"name": "C2", "k_map": {"type": "identity"}}],
+    )
+
+    class DenseLayerExchange:
+        def get_operator(self, name: str, params=None):
+            assert name == "C2"
+            return np.array([[1.0, 1.0], [1.0, -1.0]], dtype=np.complex128) / np.sqrt(2.0)
+
+    recipe = operator_runtime_module.compile_operator_recipe(
+        [term],
+        SimpleNamespace(symmetry_gen=DenseLayerExchange()),
+        dim=2,
+    )
+
+    rows = np.asarray(recipe["row"], dtype=int)
+    cols = np.asarray(recipe["col"], dtype=int)
+    assert set(zip(rows.tolist(), cols.tolist())) <= {(0, 0), (1, 1)}
+    assert (0, 1) not in set(zip(rows.tolist(), cols.tolist()))
+    assert (1, 0) not in set(zip(rows.tolist(), cols.tolist()))
+
+
+def test_hamiltonian_element_panels_reorder_q_blocks_and_subtract_layer_diagonal_means() -> None:
+    # Native basis order is layer/orbital/Q.  Plot order should be layer/Q/orbital,
+    # so a same-Q orbital block becomes adjacent in the heatmap.
+    q1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+    heff = np.zeros((1, 5, 5), dtype=np.complex128)
+    model = np.zeros_like(heff)
+    heff[0, np.arange(5), np.arange(5)] = [10.0, 14.0, 20.0, 24.0, 100.0]
+    model[0, np.arange(5), np.arange(5)] = [11.0, 15.0, 21.0, 25.0, 102.0]
+    heff[0, 0, 2] = 3.0
+    heff[0, 2, 0] = 3.0
+    model[0, 0, 2] = 4.0
+    model[0, 2, 0] = 4.0
+
+    panels = _hamiltonian_element_comparison_arrays(
+        model,
+        heff,
+        np.ones((5, 5), dtype=bool),
+        positions=[0],
+        qset1=q1,
+        qset2=q2,
+        n_orb=(2, 1),
+        subtract_layer_diagonal_mean=True,
+    )
+
+    assert panels["display_order"] == [0, 2, 1, 3, 4]
+    assert panels["q_block_boundaries"] == [2, 4]
+    assert panels["layer_boundaries"] == [4]
+    assert panels["diag_offsets"]["heff"][0] == pytest.approx([17.0, 100.0])
+    assert panels["diag_offsets"]["model"][0] == pytest.approx([18.0, 102.0])
+    assert panels["heff"][0, 0, 0] == pytest.approx(7.0)
+    assert panels["heff"][0, 0, 1] == pytest.approx(3.0)
+    assert panels["model"][0, 0, 0] == pytest.approx(7.0)
+    assert panels["diff"][0, 0, 1] == pytest.approx(1.0)
 
 
 def test_cli_project_rejects_unimplemented_qdpt2() -> None:
@@ -2177,7 +2256,7 @@ def test_harmonic_ablation_selects_smallest_acceptable_support() -> None:
     )
 
     selected = report["selected"]
-    assert selected["intra_shells"] == 1
+    assert selected["intra_shells"] == 2
     assert selected["inter_shells"] == 0
     assert selected["accepted"] is True
     assert selected["plot_rms_mev"] < 1.0
@@ -2271,12 +2350,12 @@ def test_harmonic_ablation_can_scan_explicit_candidate_pairs_only() -> None:
         primary_bands=2,
         plot_bands=2,
         max_shell=5,
-        candidate_pairs=[(0, 0), (1, 0)],
+        candidate_pairs=[(0, 0), (1, 0), (2, 0)],
         thresholds={"plot_rms_mev": 1.0, "plot_max_mev": 2.0, "min_overlap": 0.99},
     )
 
-    assert [(row["intra_shells"], row["inter_shells"]) for row in report["candidates"]] == [(0, 0), (1, 0)]
-    assert report["selected"]["intra_shells"] == 1
+    assert [(row["intra_shells"], row["inter_shells"]) for row in report["candidates"]] == [(0, 0), (1, 0), (2, 0)]
+    assert report["selected"]["intra_shells"] == 2
     assert report["selected"]["inter_shells"] == 0
 
 
@@ -2488,12 +2567,12 @@ def test_load_model_config_auto_low_energy_can_select_harmonics_from_heff(tmp_pa
 
     config = load_model_config(cfg_path)
 
-    assert config.harmonics_config["intra"]["count"] == 1
+    assert config.harmonics_config["intra"]["count"] == 2
     assert config.harmonics_config["inter"]["count"] == 0
     report = config.raw["model"]["auto_low_energy_harmonic_selection"]
     assert report["selection_status"] == "accepted_quality_plateau_candidate"
     assert report["selected"]["accepted"] is True
-    assert config.band_refinement_config["auto_harmonic_selection"]["selected"]["intra_shells"] == 1
+    assert config.band_refinement_config["auto_harmonic_selection"]["selected"]["intra_shells"] == 2
 
 
 def test_load_model_config_auto_low_energy_preserves_explicit_harmonics(tmp_path: Path) -> None:
@@ -3969,6 +4048,73 @@ def test_default_term_templates_are_profile_driven_and_preserve_k_gamma_m_behavi
     assert gamma_by_name["gamma_intra_zero_kdependent"]["monomial_constraints"]["exclude_m_sum_zero"] is True
     assert gamma_templates[-2]["max_order"] == 3
     assert gamma_templates[-1]["max_order"] == 3
+
+
+def test_default_gamma_templates_use_generic_onsite_fallback_for_arbitrary_orbital_count() -> None:
+    max_order = _max_derivative_order_values(
+        {"max_order": {"Kinect": 4, "intra": 0, "inter": 0}}
+    )
+
+    templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(4, 4),
+        max_order=max_order,
+        harmonic_counts={"intra": 0, "inter": 0},
+    )
+
+    assert [row["name"] for row in templates] == [
+        "gamma_generic_kinetic",
+        "gamma_generic_onsite",
+        "gamma_generic_intra",
+        "gamma_generic_inter",
+    ]
+    by_name = {row["name"]: row for row in templates}
+    assert by_name["gamma_generic_kinetic"] == {
+        "name": "gamma_generic_kinetic",
+        "source": "diagonal_kp",
+        "sector_pairs": [[1, 1], [2, 2]],
+        "orbital_pairs": "diagonal",
+        "max_order": 4,
+    }
+    assert by_name["gamma_generic_onsite"] == {
+        "name": "gamma_generic_onsite",
+        "source": "onsite",
+        "sector_pairs": [[1, 1], [2, 2]],
+        "orbital_pairs": "diagonal",
+        "max_order": 0,
+    }
+    assert by_name["gamma_generic_intra"]["harmonics"] == "intra"
+    assert by_name["gamma_generic_inter"]["harmonics"] == "inter"
+
+    metadata = _default_term_template_profile_metadata(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(4, 4),
+        symmetry_operations=[],
+    )
+    assert metadata["profiles"] == ["gamma_default"]
+
+
+def test_exact_gamma_profiles_do_not_also_include_generic_fallback() -> None:
+    templates = _default_term_templates_for_model(
+        valley_model={"valley_type": "Gamma"},
+        n_orb=(2, 2),
+        max_order={"Kinect": 4, "intra": 0, "inter": 0},
+    )
+
+    names = {row["name"] for row in templates}
+    assert "gamma_kinetic" in names
+    assert not any(name.startswith("gamma_generic_") for name in names)
+
+
+def test_core_default_templates_include_onsite_safety_fallback() -> None:
+    templates = _support_grouping_builder()._default_term_templates()
+
+    assert [row["source"] for row in templates] == [
+        "diagonal_kp",
+        "onsite",
+        "moire_potential",
+        "tunneling",
+    ]
 
 
 def test_gamma_2x2_term_templates_collapse_only_with_sector_exchange_symmetry() -> None:
@@ -5859,6 +6005,83 @@ def test_harmonic_recommendation_plot_candidates_include_current_low_and_high() 
     assert (selected[0][1]["intra_shells"], selected[0][1]["inter_shells"]) == (1, 1)
     assert (selected[1][1]["intra_shells"], selected[1][1]["inter_shells"]) == (2, 1)
     assert (selected[2][1]["intra_shells"], selected[2][1]["inter_shells"]) == (4, 3)
+
+
+def test_hamiltonian_element_comparison_arrays_apply_harmonic_mask() -> None:
+    heff = np.array(
+        [
+            [[1.0, 2.0j, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
+            [[10.0, 11.0, 12.0], [13.0, 14.0, 15.0], [16.0, 17.0, 18.0]],
+        ],
+        dtype=np.complex128,
+    )
+    model = heff + 1.0
+    mask = np.array(
+        [
+            [True, False, True],
+            [False, True, False],
+            [True, False, True],
+        ],
+        dtype=bool,
+    )
+
+    panels = _hamiltonian_element_comparison_arrays(
+        model,
+        heff,
+        mask,
+        positions=[1],
+    )
+
+    assert panels["positions"] == [1]
+    assert panels["heff"].shape == (1, 3, 3)
+    assert panels["model"].shape == (1, 3, 3)
+    assert panels["diff"].shape == (1, 3, 3)
+    assert panels["heff"][0, 0, 0] == pytest.approx(10.0)
+    assert panels["model"][0, 0, 0] == pytest.approx(11.0)
+    assert panels["diff"][0, 0, 0] == pytest.approx(1.0)
+    assert np.isnan(panels["heff"][0, 0, 1])
+    assert np.isnan(panels["model"][0, 1, 2])
+    assert np.isnan(panels["diff"][0, 1, 0])
+
+
+def test_selected_harmonic_support_mask_shape_and_zero_support() -> None:
+    q1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+
+    mask = _selected_harmonic_support_mask(
+        q1,
+        q2,
+        n_orb=(1, 1),
+        current_counts={"intra": 0, "inter": 0},
+    )
+
+    assert mask.shape == (3, 3)
+    assert mask[0, 0]
+    assert mask[1, 1]
+    assert mask[2, 2]
+    assert not mask[0, 2]  # interlayer zero-q support is not part of inter=0 model support
+    assert not mask[0, 1]
+
+
+def test_save_hamiltonian_element_comparison_plot_writes_n_by_three_panel(tmp_path: Path) -> None:
+    heff = np.stack([np.eye(3), 2.0 * np.eye(3)]).astype(np.complex128)
+    model = heff + 0.1 * np.ones_like(heff)
+    mask = np.eye(3, dtype=bool)
+
+    path = save_hamiltonian_element_comparison_plot(
+        model,
+        heff,
+        tmp_path / "hamiltonian_element_comparison.png",
+        harmonic_mask=mask,
+        positions=[0, 1],
+        k_indices=[3, 7],
+    )
+
+    assert path.exists()
+    assert path.stat().st_size > 0
+    pdf_path = path.with_suffix(".pdf")
+    assert pdf_path.exists()
+    assert pdf_path.stat().st_size > 0
 
 
 def test_matrix_residual_not_only_band() -> None:

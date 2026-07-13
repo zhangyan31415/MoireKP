@@ -16,15 +16,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from kp.model.core import ContinuumModelBuilder, ContinuumTerm, ContinuumTermKey  # noqa: E402
 from kp.model import export as export_module  # noqa: E402
+from kp.model import operator_runtime as operator_runtime_module  # noqa: E402
 from kp.model.export import (  # noqa: E402
     _dense_composed_symmetry_action,
     _expand_operator_recipe,
     _iter_transformed_sparse_entries,
     _load_exactified_matrices,
+    _runtime_terms_from_active_terms,
+    _standalone_payload_from_kpath_config,
     export_all_standalone_models,
     export_standalone_model,
 )
-from kp.model.pipeline import build_moire_config_from_file, run_configured_model  # noqa: E402
+from kp.model.pipeline import _term_to_release_dict, build_moire_config_from_file, run_configured_model  # noqa: E402
 from kp.identity import hash_array  # noqa: E402
 
 
@@ -307,18 +310,59 @@ def test_expand_operator_recipe_caches_duplicate_monomial_transforms(monkeypatch
         symmetry_ops=[],
     )
     calls = []
-    original = export_module._transform_monomial
+    original = operator_runtime_module.transform_monomial
 
     def spy(transform, q_base, mz, mz_star):
         calls.append((tuple(np.asarray(q_base, dtype=float)), int(mz), int(mz_star)))
         return original(transform, q_base, mz, mz_star)
 
-    monkeypatch.setattr(export_module, "_transform_monomial", spy)
+    monkeypatch.setattr(operator_runtime_module, "transform_monomial", spy)
 
     data = _expand_operator_recipe([term], SimpleNamespace(symmetry_gen=None), dim=2)
 
     assert data["row"].size >= 2
     assert len(calls) == 1
+
+
+def test_standalone_export_reuses_supplied_operator_recipe(monkeypatch, tmp_path: Path) -> None:
+    model_output, _cfg_path = _write_export_fixture(tmp_path)
+    baseline_dir = tmp_path / "standalone_baseline"
+    export_standalone_model(model_output, baseline_dir)
+    with np.load(baseline_dir / "model_data.npz", allow_pickle=False) as data:
+        operator_data = {
+            "term_index": np.asarray(data["operator_term_index"]),
+            "row": np.asarray(data["operator_row"]),
+            "col": np.asarray(data["operator_col"]),
+            "mz": np.asarray(data["operator_mz"]),
+            "mz_star": np.asarray(data["operator_mz_star"]),
+            "q_center": np.asarray(data["operator_q_center"]),
+            "prefactor_real": np.asarray(data["operator_prefactor_real"]),
+            "prefactor_imag": np.asarray(data["operator_prefactor_imag"]),
+            "dynamic_hermitization_term_index": np.asarray(
+                data["dynamic_hermitization_term_index"]
+            ),
+        }
+
+    def fail_recompile(*_args, **_kwargs):
+        raise AssertionError("standalone export must reuse the supplied operator recipe")
+
+    monkeypatch.setattr(export_module, "_expand_operator_recipe", fail_recompile)
+    reused_dir = tmp_path / "standalone_reused"
+
+    export_standalone_model(
+        model_output,
+        reused_dir,
+        operator_data=operator_data,
+    )
+
+    with np.load(reused_dir / "model_data.npz", allow_pickle=False) as reused:
+        for name, expected in operator_data.items():
+            key = (
+                "dynamic_hermitization_term_index"
+                if name == "dynamic_hermitization_term_index"
+                else f"operator_{name}"
+            )
+            np.testing.assert_array_equal(reused[key], expected)
 
 
 def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
@@ -475,9 +519,48 @@ def test_standalone_evaluate_can_run_model_topology_from_user_settings(tmp_path:
     assert "`intra`" in model_doc
     assert "`inter`" in model_doc
     assert "[\\rho_{\\mathrm{C3z}}]" in model_doc
+    assert "A^g_{\\alpha a,\\beta b}e^{i\\theta^g_{\\alpha a,\\beta b}}" in model_doc
+    assert "compact nonzero block rules" in model_doc
+    assert "compact phase-permutation rules" not in model_doc
     assert "phase angle" in model_doc
     assert "\\pi:\\quad" not in model_doc
     assert "0\\mapsto" not in model_doc
+
+
+def test_symmetry_reconstruction_omits_numerical_zero_phases_and_renders_algebraic_c3() -> None:
+    sqrt3 = np.sqrt(3.0)
+    c3 = np.array(
+        [
+            [-0.25 - 0.25j * sqrt3, -0.25 * sqrt3 - 0.75j, 0.0, 0.0],
+            [0.25 * sqrt3 + 0.75j, -0.25 - 0.25j * sqrt3, 0.0, 0.0],
+            [0.0, 0.0, -0.25 + 0.25j * sqrt3, -0.25 * sqrt3 + 0.75j],
+            [0.0, 0.0, 0.25 * sqrt3 - 0.75j, -0.25 + 0.25j * sqrt3],
+        ],
+        dtype=np.complex128,
+    )
+    c3[0, 2] = 3.09715951317e-8 * np.exp(0.00619926836119j)
+    c3[2, 0] = -np.conjugate(c3[0, 2])
+    model = {
+        "dimension": {
+            "basis_blocks": [
+                {"qset": "qset1", "offset": 0, "q_count": 1, "n_orb": 4, "dim": 4}
+            ]
+        },
+        "operations": [{"name": "C3z", "matrix_array_key": "exactified_C3z"}],
+    }
+
+    rendered = export_module._render_symmetry_reconstruction(
+        model,
+        {"exactified_C3z": c3},
+        include_q_permutation=False,
+    )
+
+    assert "nonzero entries `8`" in rendered
+    assert "matrix-element magnitude `sqrt(3)/2`; phase angle `-2*pi/3`" in rendered
+    assert "matrix-element magnitude `1/2`" in rendered
+    assert r"\frac{\sqrt{3}}{2}" in rendered
+    assert "non-unit |phase|" not in rendered
+    assert "0.00619926836119" not in rendered
 
 
 def test_standalone_topology_projector_preserves_full_basis_dimension(tmp_path: Path) -> None:
@@ -644,6 +727,117 @@ def test_standalone_export_dense_symmetry_action_expands_sparse_entries() -> Non
     assert observed[(1, 1)] == pytest.approx(-0.5 + 0.0j)
 
 
+def test_operator_recipe_honors_recorded_false_hermitization_flags() -> None:
+    def y_basis(_k):
+        matrix = np.zeros((2, 2), dtype=complex)
+        matrix[0, 1] = 1.0
+        return matrix
+
+    def eval_sparse(_k):
+        return np.array([0]), np.array([1]), np.array([1.0 + 0.0j])
+
+    y_basis.eval_sparse = eval_sparse
+    y_basis._moire_sparse_rows = np.array([0], dtype=int)
+    y_basis._moire_sparse_cols = np.array([1], dtype=int)
+    y_basis._moire_sparse_row_q_idx = np.array([0], dtype=int)
+    y_basis._moire_sparse_Q_rows = np.array([[0.0, 0.0]], dtype=float)
+    y_basis._moire_sparse_hermitize_in_basis = False
+    key = ContinuumTermKey(0, 0, 1, 1, 1, 2, (0.0, 0.0))
+    term = ContinuumTerm(
+        key=key,
+        Y_basis=y_basis,
+        r_value_real=1.0,
+        r_value_imag=0.0,
+        active=True,
+        tag="intra",
+        symmetry_ops=[],
+    )
+    term._moire_needs_hermitize_real = False
+    term._moire_needs_hermitize_imag = False
+    term._moire_hermitize_flags_inconsistent = False
+
+    recipe = _expand_operator_recipe([term], SimpleNamespace(symmetry_gen=None), dim=2)
+    matrix = np.zeros((2, 2), dtype=complex)
+    np.add.at(
+        matrix,
+        (recipe["row"], recipe["col"]),
+        recipe["prefactor_real"],
+    )
+    matrix = 0.5 * (matrix + matrix.conj().T)
+
+    np.testing.assert_allclose(matrix, [[0.0, 0.5], [0.5, 0.0]])
+
+
+def test_operator_recipe_legacy_payload_uses_first_fit_kpoint_for_hermitization() -> None:
+    def y_basis(k):
+        matrix = np.zeros((2, 2), dtype=complex)
+        matrix[0, 1] = complex(k[0], k[1])
+        return matrix
+
+    def eval_sparse(k):
+        return np.array([0]), np.array([1]), np.array([complex(k[0], k[1])])
+
+    y_basis.eval_sparse = eval_sparse
+    y_basis._moire_sparse_rows = np.array([0], dtype=int)
+    y_basis._moire_sparse_cols = np.array([1], dtype=int)
+    y_basis._moire_sparse_row_q_idx = np.array([0], dtype=int)
+    y_basis._moire_sparse_Q_rows = np.array([[0.0, 0.0]], dtype=float)
+    y_basis._moire_sparse_hermitize_in_basis = False
+    key = ContinuumTermKey(1, 0, 1, 1, 1, 2, (0.0, 0.0))
+    term = ContinuumTerm(
+        key=key,
+        Y_basis=y_basis,
+        r_value_real=1.0,
+        r_value_imag=0.0,
+        active=True,
+        tag="intra",
+        symmetry_ops=[],
+    )
+    moire_config = SimpleNamespace(
+        symmetry_gen=None,
+        kpoints_fit=np.array([[0.0, 0.0], [0.2, 0.0]], dtype=float),
+    )
+
+    recipe = _expand_operator_recipe([term], moire_config, dim=2)
+    z = (1.0 - recipe["q_center"][:, 0]) + 1j * (0.0 - recipe["q_center"][:, 1])
+    values = recipe["prefactor_real"] * z ** recipe["mz"] * np.conjugate(z) ** recipe["mz_star"]
+    matrix = np.zeros((2, 2), dtype=complex)
+    np.add.at(matrix, (recipe["row"], recipe["col"]), values)
+    matrix = 0.5 * (matrix + matrix.conj().T)
+
+    np.testing.assert_allclose(matrix, [[0.0, 0.5], [0.5, 0.0]])
+
+
+def test_release_term_payload_roundtrips_hermitization_flags() -> None:
+    key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
+    term = ContinuumTerm(
+        key=key,
+        Y_basis=lambda _k: np.ones((1, 1), dtype=complex),
+        r_value_real=1.0,
+        r_value_imag=0.0,
+        active=True,
+        tag="Onsite",
+        symmetry_ops=[],
+    )
+    term._moire_needs_hermitize_real = False
+    term._moire_needs_hermitize_imag = True
+    term._moire_hermitize_flags_inconsistent = False
+    payload = _term_to_release_dict(term)
+    moire_config = SimpleNamespace(
+        Q_set1=np.zeros((1, 2), dtype=float),
+        Q_set2=np.zeros((0, 2), dtype=float),
+        n_orb1=1,
+        n_orb2=0,
+    )
+
+    _semantic, runtime_terms = _runtime_terms_from_active_terms([payload], moire_config)
+
+    assert payload["hermitization"] == {"real": False, "imag": True, "inconsistent": False}
+    assert runtime_terms[0]._moire_needs_hermitize_real is False
+    assert runtime_terms[0]._moire_needs_hermitize_imag is True
+    assert runtime_terms[0]._moire_hermitize_flags_inconsistent is False
+
+
 def test_standalone_export_supports_single_active_qset_models(tmp_path: Path) -> None:
     model_output, _cfg_path = _write_export_fixture(
         tmp_path,
@@ -750,6 +944,39 @@ def test_standalone_export_requires_explicit_kpath_metadata(tmp_path: Path) -> N
         export_standalone_model(model_output, tmp_path / "standalone")
 
 
+def test_standalone_export_converts_inline_kpath_to_fractional_model_basis(tmp_path: Path) -> None:
+    model_config = SimpleNamespace(
+        path=tmp_path / "case.yaml",
+        rotation_deg=90.0,
+        band_slice=[2, 6],
+        kpath_config={
+            "labels": ["G", "M", "K", "G"],
+            "coordinates": {
+                "G": [0.0, 0.0],
+                "M": [0.5, 0.0],
+                "K": [0.5, 0.5],
+            },
+            "tmat": (2.0 * np.pi * np.eye(3)).tolist(),
+            "points_per_segment": 20,
+        },
+    )
+    moire_config = SimpleNamespace(
+        bM1=np.array([0.0, 2.0]),
+        bM2=np.array([-4.0, 0.0]),
+    )
+
+    payload = _standalone_payload_from_kpath_config(model_config, moire_config)
+
+    assert payload is not None
+    assert payload["default_kpath"] == ["G", "M", "K", "G"]
+    assert payload["points_per_segment"] == 20
+    assert payload["default_band_slice"] == [2, 6]
+    np.testing.assert_allclose(payload["high_symmetry_points"]["G"], [0.0, 0.0], atol=1.0e-12)
+    np.testing.assert_allclose(payload["high_symmetry_points"]["M"], [0.25, 0.0], atol=1.0e-12)
+    np.testing.assert_allclose(payload["high_symmetry_points"]["K"], [0.25, 0.125], atol=1.0e-12)
+    assert payload["coordinate_convention"]["source"] == "inline kpath coordinates"
+
+
 def test_standalone_export_is_deterministic(tmp_path: Path) -> None:
     model_output, _cfg_path = _write_export_fixture(tmp_path)
     out_a = tmp_path / "standalone_a"
@@ -852,7 +1079,14 @@ def test_cli_model_config_exports_standalone_inside_output_dir_by_default(monkey
             "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
         }
 
-    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+    def fake_export(
+        model_output_dir,
+        output_dir,
+        *,
+        force=False,
+        debug_files=False,
+        operator_data=None,
+    ):
         calls["export"] = (Path(model_output_dir), Path(output_dir), force, debug_files)
         return Path(output_dir)
 

@@ -178,6 +178,8 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "band_comparison_all.pdf",
         "q_lattice_harmonics.pdf",
         "harmonic_recommendation_bands.png",
+        "hamiltonian_element_comparison.png",
+        "hamiltonian_element_comparison.pdf",
     }
     root = Path(model_output_dir)
     if not root.exists():
@@ -2206,6 +2208,10 @@ def main(argv: Sequence[str] | None = None) -> None:
             _kp_model_print(f"  q lattice plot: {results['q_lattice_plot']}", style="path")
         if results.get("all_band_plot"):
             _kp_model_print(f"  all-band plot: {results['all_band_plot']}", style="path")
+        if results.get("hamiltonian_element_plot"):
+            _kp_model_print(f"  Hamiltonian element plot: {results['hamiltonian_element_plot']}", style="path")
+        if results.get("hamiltonian_element_plot_pdf"):
+            _kp_model_print(f"  Hamiltonian element plot PDF: {results['hamiltonian_element_plot_pdf']}", style="path")
         if comparison:
             rms = float(comparison["rms_error"])
             max_abs = float(comparison["max_abs_error"])

@@ -2082,6 +2082,41 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
         ),
     ),
     _TermTemplateProfile(
+        valley_type="Gamma",
+        templates=(
+            _term_template_row(
+                "gamma_generic_kinetic",
+                "diagonal_kp",
+                [[1, 1], [2, 2]],
+                "diagonal",
+                max_order_from="Kinect",
+            ),
+            _term_template_row(
+                "gamma_generic_onsite",
+                "onsite",
+                [[1, 1], [2, 2]],
+                "diagonal",
+                max_order=0,
+            ),
+            _term_template_row(
+                "gamma_generic_intra",
+                "moire_potential",
+                [[1, 1], [2, 2]],
+                "all",
+                harmonics="intra",
+                max_order_from="intra",
+            ),
+            _term_template_row(
+                "gamma_generic_inter",
+                "tunneling",
+                [[2, 1], [1, 2]],
+                "all",
+                harmonics="inter",
+                max_order_from="inter",
+            ),
+        ),
+    ),
+    _TermTemplateProfile(
         valley_type="M",
         templates=(
             _term_template_row("m1_kinetic_bottom", "diagonal_kp", [[1, 1]], "diagonal", max_order_from="Kinect"),
@@ -2145,14 +2180,16 @@ def _expand_term_template_profile(
 
 
 def _term_template_profile_for(valley_type: str, n_orb: tuple[int, int]) -> tuple[_TermTemplateProfile, ...]:
-    matches: list[_TermTemplateProfile] = []
+    exact_matches: list[_TermTemplateProfile] = []
+    generic_matches: list[_TermTemplateProfile] = []
     for profile in _TERM_TEMPLATE_PROFILES:
         if profile.valley_type != str(valley_type):
             continue
-        if profile.n_orb is not None and profile.n_orb != tuple(n_orb):
-            continue
-        matches.append(profile)
-    return tuple(matches)
+        if profile.n_orb == tuple(n_orb):
+            exact_matches.append(profile)
+        elif profile.n_orb is None:
+            generic_matches.append(profile)
+    return tuple(exact_matches or generic_matches)
 
 
 def _term_name_fragment(value: Any) -> str:
@@ -3815,6 +3852,356 @@ def matrix_residual(model_hamiltonians: np.ndarray, heff_hamiltonians: np.ndarra
         "max_residual": float(np.max(arr)) if arr.size else 0.0,
         "residuals": arr.tolist(),
     }
+
+
+def _selected_harmonic_support_mask(
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    *,
+    n_orb: tuple[int, int],
+    current_counts: Mapping[str, int],
+    tol: float = 1.0e-6,
+) -> np.ndarray:
+    rows = _model_row_metadata_for_harmonic_scan(qset1, qset2, n_orb)
+    shell_norms = _harmonic_shell_norms_from_qsets(qset1, qset2, tol=tol)
+    q = np.asarray([np.asarray(row["q"], dtype=float) for row in rows], dtype=float)
+    layers = np.asarray([int(row["layer"]) for row in rows], dtype=np.int16)
+    norms = np.linalg.norm(q[:, None, :] - q[None, :, :], axis=-1)
+    zero = norms <= float(tol)
+    same_layer = layers[:, None] == layers[None, :]
+    intra_count = int(current_counts.get("intra", 0))
+    inter_count = int(current_counts.get("inter", 0))
+    intra_positive_shells = max(0, intra_count - 1)
+    inter_positive_shells = max(0, inter_count - 1)
+    intra_shell = _shell_index_matrix(norms, shell_norms.get("intra", []))
+    inter_shell = _shell_index_matrix(norms, shell_norms.get("inter", []))
+    onsite_or_local = np.logical_and(same_layer, zero)
+    intra = (
+        np.logical_and.reduce((same_layer, ~zero, intra_shell <= intra_positive_shells))
+        if intra_positive_shells > 0
+        else np.zeros(norms.shape, dtype=bool)
+    )
+    inter = (
+        np.logical_and.reduce((~same_layer, ~zero, inter_shell <= inter_positive_shells))
+        if inter_positive_shells > 0
+        else np.zeros(norms.shape, dtype=bool)
+    )
+    inter_zero = np.logical_and.reduce((~same_layer, zero)) if inter_count > 0 else np.zeros(norms.shape, dtype=bool)
+    return np.logical_or.reduce((onsite_or_local, intra, inter_zero, inter))
+
+
+def _hamiltonian_element_comparison_arrays(
+    model_hamiltonians: np.ndarray,
+    heff_hamiltonians: np.ndarray,
+    harmonic_mask: np.ndarray,
+    *,
+    positions: Sequence[int] | None = None,
+    qset1: np.ndarray | None = None,
+    qset2: np.ndarray | None = None,
+    n_orb: tuple[int, int] | None = None,
+    subtract_layer_diagonal_mean: bool = False,
+) -> dict[str, Any]:
+    model = np.asarray(model_hamiltonians, dtype=np.complex128)
+    heff = np.asarray(heff_hamiltonians, dtype=np.complex128)
+    mask = np.asarray(harmonic_mask, dtype=bool)
+    if model.ndim == 2:
+        model = model[None, :, :]
+    if heff.ndim == 2:
+        heff = heff[None, :, :]
+    if model.shape != heff.shape:
+        raise ValueError(f"model/heff Hamiltonian arrays must have same shape, got {model.shape} and {heff.shape}")
+    if model.ndim != 3 or model.shape[-1] != model.shape[-2]:
+        raise ValueError(f"Hamiltonian arrays must have shape (Nk, dim, dim), got {model.shape}")
+    if mask.shape != model.shape[-2:]:
+        raise ValueError(f"harmonic mask shape {mask.shape} does not match Hamiltonian dimension {model.shape[-2:]}")
+    if positions is None:
+        selected = list(range(model.shape[0]))
+    else:
+        selected = [int(item) for item in positions]
+    if not selected:
+        raise ValueError("Hamiltonian element comparison requires at least one k-point position")
+    for pos in selected:
+        if pos < 0 or pos >= model.shape[0]:
+            raise IndexError(f"k-point position {pos} is outside 0..{model.shape[0] - 1}")
+    model_selected = model[np.asarray(selected, dtype=int)]
+    heff_selected = heff[np.asarray(selected, dtype=int)]
+
+    display_order = list(range(model.shape[-1]))
+    q_block_boundaries: list[int] = []
+    layer_boundaries: list[int] = []
+    display_layers: np.ndarray | None = None
+    if qset1 is not None and qset2 is not None and n_orb is not None:
+        display = _q_block_display_metadata(qset1, qset2, n_orb, dim=model.shape[-1])
+        display_order = display["order"]
+        q_block_boundaries = display["q_block_boundaries"]
+        layer_boundaries = display["layer_boundaries"]
+        display_layers = display["layers"]
+    else:
+        display_layers = np.ones(model.shape[-1], dtype=np.int16)
+
+    heff_offsets: list[list[float]] = []
+    model_offsets: list[list[float]] = []
+    if subtract_layer_diagonal_mean:
+        heff_selected, heff_offsets = _subtract_layer_diagonal_means(heff_selected, display_layers)
+        model_selected, model_offsets = _subtract_layer_diagonal_means(model_selected, display_layers)
+
+    order = np.asarray(display_order, dtype=int)
+    model_selected = model_selected[:, order][:, :, order]
+    heff_selected = heff_selected[:, order][:, :, order]
+    mask = mask[np.ix_(order, order)]
+    diff_selected = model_selected - heff_selected
+    mask3 = mask[None, :, :]
+    return {
+        "positions": selected,
+        "heff": np.where(mask3, np.abs(heff_selected), np.nan),
+        "model": np.where(mask3, np.abs(model_selected), np.nan),
+        "diff": np.where(mask3, np.abs(diff_selected), np.nan),
+        "mask": mask,
+        "display_order": display_order,
+        "q_block_boundaries": q_block_boundaries,
+        "layer_boundaries": layer_boundaries,
+        "diag_offsets": {
+            "heff": heff_offsets,
+            "model": model_offsets,
+        },
+    }
+
+
+def _q_block_display_metadata(
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    n_orb: tuple[int, int],
+    *,
+    dim: int,
+) -> dict[str, Any]:
+    rows = _model_row_metadata_for_harmonic_scan(qset1, qset2, n_orb)
+    if len(rows) != int(dim):
+        raise ValueError(f"basis metadata dimension {len(rows)} does not match Hamiltonian dimension {dim}")
+    order = sorted(
+        range(len(rows)),
+        key=lambda idx: (
+            int(rows[idx]["layer"]),
+            int(rows[idx]["q_index"]),
+            int(rows[idx]["orbital"]),
+        ),
+    )
+    ordered_rows = [rows[idx] for idx in order]
+    layers = np.asarray([int(row["layer"]) for row in ordered_rows], dtype=np.int16)
+    q_block_boundaries: list[int] = []
+    layer_boundaries: list[int] = []
+    for idx in range(1, len(ordered_rows)):
+        prev = ordered_rows[idx - 1]
+        curr = ordered_rows[idx]
+        if int(prev["layer"]) != int(curr["layer"]):
+            layer_boundaries.append(idx)
+            q_block_boundaries.append(idx)
+        elif int(prev["q_index"]) != int(curr["q_index"]):
+            q_block_boundaries.append(idx)
+    return {
+        "order": [int(idx) for idx in order],
+        "layers": layers,
+        "q_block_boundaries": q_block_boundaries,
+        "layer_boundaries": layer_boundaries,
+    }
+
+
+def _subtract_layer_diagonal_means(
+    hamiltonians: np.ndarray,
+    layers: np.ndarray,
+) -> tuple[np.ndarray, list[list[float]]]:
+    adjusted = np.asarray(hamiltonians, dtype=np.complex128).copy()
+    layer_arr = np.asarray(layers, dtype=int)
+    unique_layers = [int(item) for item in np.unique(layer_arr)]
+    offsets: list[list[float]] = []
+    for ik in range(adjusted.shape[0]):
+        row_offsets: list[float] = []
+        diag = np.diagonal(adjusted[ik]).copy()
+        for layer in unique_layers:
+            indices = np.flatnonzero(layer_arr == layer)
+            if indices.size == 0:
+                row_offsets.append(0.0)
+                continue
+            offset = complex(np.mean(diag[indices]))
+            adjusted[ik, indices, indices] -= offset
+            row_offsets.append(float(np.real_if_close(offset).real))
+        offsets.append(row_offsets)
+    return adjusted, offsets
+
+
+def _finite_heatmap_vmax(*arrays: np.ndarray) -> float:
+    values = []
+    for arr in arrays:
+        data = np.asarray(arr, dtype=float)
+        finite = data[np.isfinite(data)]
+        if finite.size:
+            values.append(float(np.max(finite)))
+    vmax = max(values) if values else 0.0
+    return vmax if vmax > 0.0 else 1.0
+
+
+def _matrix_index_ticks(dim: int, *, max_ticks: int = 8) -> list[int]:
+    size = int(dim)
+    if size <= 0:
+        return []
+    if size <= max_ticks:
+        return list(range(size))
+    step = max(1, int(math.ceil((size - 1) / float(max_ticks - 1))))
+    ticks = list(range(0, size, step))
+    if ticks[-1] != size - 1:
+        ticks.append(size - 1)
+    return ticks
+
+
+def save_hamiltonian_element_comparison_plot(
+    model_hamiltonians: np.ndarray,
+    heff_hamiltonians: np.ndarray,
+    path: str | Path,
+    *,
+    harmonic_mask: np.ndarray,
+    positions: Sequence[int] | None = None,
+    k_indices: Sequence[int] | None = None,
+    title: str | None = None,
+    qset1: np.ndarray | None = None,
+    qset2: np.ndarray | None = None,
+    n_orb: tuple[int, int] | None = None,
+    subtract_layer_diagonal_mean: bool = True,
+) -> Path:
+    panels = _hamiltonian_element_comparison_arrays(
+        model_hamiltonians,
+        heff_hamiltonians,
+        harmonic_mask,
+        positions=positions,
+        qset1=qset1,
+        qset2=qset2,
+        n_orb=n_orb,
+        subtract_layer_diagonal_mean=subtract_layer_diagonal_mean,
+    )
+    heff = np.asarray(panels["heff"], dtype=float)
+    model = np.asarray(panels["model"], dtype=float)
+    diff = np.asarray(panels["diff"], dtype=float)
+    nrows = int(heff.shape[0])
+    if k_indices is None:
+        labels = [f"k position {idx}" for idx in panels["positions"]]
+    else:
+        labels = [f"k index {int(idx)}" for idx in k_indices]
+        if len(labels) != nrows:
+            raise ValueError(f"k_indices length {len(labels)} does not match plotted row count {nrows}")
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.cm import ScalarMappable
+    from matplotlib.colors import Normalize
+
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    pdf_out = out.with_suffix(".pdf")
+    raster_dpi = max(int(KP_DPI), 360)
+    main_vmax = _finite_heatmap_vmax(heff, model)
+    diff_vmax = _finite_heatmap_vmax(diff)
+    dim = int(heff.shape[-1])
+    index_ticks = _matrix_index_ticks(dim)
+    q_boundaries = [int(item) for item in panels.get("q_block_boundaries", [])]
+    layer_boundaries = [int(item) for item in panels.get("layer_boundaries", [])]
+    diag_offsets = panels.get("diag_offsets", {})
+
+    def format_offsets(kind: str, row_index: int) -> str:
+        rows = diag_offsets.get(kind, []) if isinstance(diag_offsets, Mapping) else []
+        if not rows or row_index >= len(rows):
+            return ""
+        values = rows[row_index]
+        if not values:
+            return ""
+        parts = [f"L{idx + 1}={float(value):+.4g}" for idx, value in enumerate(values)]
+        return "diag mean subtracted\n" + ", ".join(parts) + " eV"
+
+    def draw_boundaries(ax: Any) -> None:
+        for boundary in q_boundaries:
+            pos = float(boundary) - 0.5
+            ax.axhline(pos, color="0.65", linewidth=0.3, alpha=0.85)
+            ax.axvline(pos, color="0.65", linewidth=0.3, alpha=0.85)
+        for boundary in layer_boundaries:
+            pos = float(boundary) - 0.5
+            ax.axhline(pos, color="black", linewidth=1.0, alpha=0.9)
+            ax.axvline(pos, color="black", linewidth=1.0, alpha=0.9)
+
+    with kp_plot_rc_context():
+        fig, axes = plt.subplots(
+            nrows=nrows,
+            ncols=3,
+            figsize=(8.4, max(2.6, 2.35 * nrows)),
+            dpi=KP_DPI,
+            squeeze=False,
+            constrained_layout=True,
+        )
+        main_cmap = plt.get_cmap("viridis").copy()
+        diff_cmap = plt.get_cmap("magma").copy()
+        main_cmap.set_bad(color="white")
+        diff_cmap.set_bad(color="white")
+        main_norm = Normalize(vmin=0.0, vmax=main_vmax)
+        diff_norm = Normalize(vmin=0.0, vmax=diff_vmax)
+        columns = [
+            ("Heff |H|", heff, main_cmap, main_norm),
+            ("Model |H|", model, main_cmap, main_norm),
+            ("|Model - Heff|", diff, diff_cmap, diff_norm),
+        ]
+        for irow in range(nrows):
+            for icol, (col_title, data, cmap, norm) in enumerate(columns):
+                ax = axes[irow, icol]
+                ax.imshow(np.ma.masked_invalid(data[irow]), origin="lower", interpolation="nearest", cmap=cmap, norm=norm)
+                draw_boundaries(ax)
+                ax.set_xticks(index_ticks)
+                ax.set_yticks(index_ticks)
+                ax.tick_params(axis="both", labelsize=6, length=2)
+                if irow != nrows - 1:
+                    ax.set_xticklabels([])
+                if icol != 0:
+                    ax.set_yticklabels([])
+                ax.set_box_aspect(1.0)
+                if irow == 0:
+                    ax.set_title(col_title)
+                if icol == 0:
+                    ax.set_ylabel(labels[irow], rotation=90, labelpad=14)
+                    text = format_offsets("heff", irow)
+                    if text:
+                        ax.text(
+                            0.02,
+                            0.98,
+                            text,
+                            transform=ax.transAxes,
+                            va="top",
+                            ha="left",
+                            fontsize=5.5,
+                            color="white",
+                            bbox={"facecolor": "black", "alpha": 0.35, "pad": 1.5, "edgecolor": "none"},
+                        )
+                elif icol == 1:
+                    text = format_offsets("model", irow)
+                    if text:
+                        ax.text(
+                            0.02,
+                            0.98,
+                            text,
+                            transform=ax.transAxes,
+                            va="top",
+                            ha="left",
+                            fontsize=5.5,
+                            color="white",
+                            bbox={"facecolor": "black", "alpha": 0.35, "pad": 1.5, "edgecolor": "none"},
+                        )
+                if irow == nrows - 1:
+                    ax.set_xlabel("column: layer/Q/orbital")
+        if title:
+            fig.suptitle(title)
+        main_sm = ScalarMappable(norm=main_norm, cmap=main_cmap)
+        diff_sm = ScalarMappable(norm=diff_norm, cmap=diff_cmap)
+        fig.colorbar(main_sm, ax=axes[:, :2].ravel().tolist(), fraction=0.025, pad=0.02, label="|H| (eV)")
+        fig.colorbar(diff_sm, ax=axes[:, 2].ravel().tolist(), fraction=0.025, pad=0.02, label="|ΔH| (eV)")
+        fig.savefig(out, dpi=raster_dpi, bbox_inches="tight")
+        fig.savefig(pdf_out, bbox_inches="tight")
+        plt.close(fig)
+    return out
 
 
 def _normalise_kpath_label(label: Any) -> str:
@@ -5924,6 +6311,11 @@ def _term_response_pair_hamiltonians_for_kpoints(
                 else:
                     rr, cc, vv = rows, cols, vals0
                     is_anti_total = bool(is_anti)
+                support = ContinuumModelBuilder.term_output_support_mask(term, rr, cc, dim_full)
+                if not np.all(support):
+                    rr = rr[support]
+                    cc = cc[support]
+                    vv = vv[support]
                 sign = -1.0 if is_anti_total else 1.0
                 if use_add_at:
                     np.add.at(h_real, (rr, cc), vv)
@@ -7028,7 +7420,6 @@ def _run_harmonic_ablation_selection(
     if len(rows) != int(target.shape[-1]):
         raise ValueError(f"harmonic ablation row count {len(rows)} does not match heff dimension {target.shape[-1]}")
     shell_norms = _harmonic_shell_norms_from_qsets(qset1, qset2, tol=tol)
-    shell_maps = _harmonic_ablation_shell_maps(rows, shell_norms, tol=tol)
     threshold_values = dict(thresholds or {})
     records: list[dict[str, Any]] = []
     full_norm = float(np.linalg.norm(target))
@@ -7043,10 +7434,12 @@ def _run_harmonic_ablation_selection(
         ]
     )
     for intra_shells, inter_shells in pair_list:
-        mask, stats = _harmonic_ablation_mask_from_shell_maps(
-            shell_maps,
-            intra_shells=int(intra_shells),
-            inter_shells=int(inter_shells),
+        mask = _selected_harmonic_support_mask(
+            qset1,
+            qset2,
+            n_orb=n_orb,
+            current_counts={"intra": int(intra_shells), "inter": int(inter_shells)},
+            tol=tol,
         )
         metrics = _evaluate_harmonic_ablation_candidate(
             target,
@@ -7064,7 +7457,8 @@ def _run_harmonic_ablation_selection(
             "complexity": int(intra_shells) + int(inter_shells),
             "kept_matrix_fraction": float(np.count_nonzero(mask) / mask.size),
             "kept_frobenius_fraction": float(kept_norm / full_norm) if full_norm > 0 else None,
-            **stats,
+            "support_entries": int(np.count_nonzero(mask)),
+            "total_entries": int(mask.size),
             **metrics,
         }
         candidate["accepted"] = _harmonic_ablation_candidate_is_accepted(candidate, threshold_values)
@@ -7381,9 +7775,6 @@ def _save_harmonic_recommendation_band_plot(
     target = np.asarray(heff, dtype=np.complex128)
     if target.ndim != 3 or target.shape[-1] != target.shape[-2]:
         raise ValueError(f"harmonic recommendation band plot expects Heff shape (Nk,dim,dim), got {target.shape}")
-    rows = _model_row_metadata_for_harmonic_scan(qset1, qset2, n_orb)
-    shell_norms = _harmonic_shell_norms_from_qsets(qset1, qset2, tol=tol)
-    shell_maps = _harmonic_ablation_shell_maps(rows, shell_norms, tol=tol)
     dim = int(target.shape[-1])
     band_slice = tuple(_auto_low_energy_band_slice(dim, int(plot_bands), target_bands))
     target_slice = _eigvalsh_harmonic_plot_window(target, band_slice)
@@ -7398,10 +7789,15 @@ def _save_harmonic_recommendation_band_plot(
         ylabel = "Energy (eV)"
 
     def candidate_plot(candidate: Mapping[str, Any]) -> np.ndarray:
-        mask, _stats = _harmonic_ablation_mask_from_shell_maps(
-            shell_maps,
-            intra_shells=int(candidate["intra_shells"]),
-            inter_shells=int(candidate["inter_shells"]),
+        mask = _selected_harmonic_support_mask(
+            qset1,
+            qset2,
+            n_orb=n_orb,
+            current_counts={
+                "intra": int(candidate["intra_shells"]),
+                "inter": int(candidate["inter_shells"]),
+            },
+            tol=tol,
         )
         masked = target * mask[None, :, :]
         masked = 0.5 * (masked + np.swapaxes(masked.conj(), -1, -2))
@@ -7420,7 +7816,7 @@ def _save_harmonic_recommendation_band_plot(
     out.parent.mkdir(parents=True, exist_ok=True)
     x = np.arange(target_plot.shape[0], dtype=float)
     styles = {
-        "current": {"color": "#0072B2", "linestyle": "-", "linewidth": 1.15, "label": "current model.harmonics"},
+        "current": {"color": "#0072B2", "linestyle": "-", "linewidth": 1.15, "label": "current Heff support mask"},
         "low": {"color": "#E69F00", "linestyle": "--", "linewidth": 1.05, "label": "low-cost recommendation"},
         "high": {"color": "#009E73", "linestyle": "-.", "linewidth": 1.05, "label": "high-accuracy recommendation"},
     }
@@ -10160,6 +10556,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     all_band_plot_comparison = None
     band_plot_path = None
     all_band_plot_path = None
+    hamiltonian_element_plot_path = None
     q_lattice_plot_path = save_q_lattice_harmonics_plot(
         Q_set1=np.asarray(moire_config.Q_set1, dtype=float),
         Q_set2=np.asarray(moire_config.Q_set2, dtype=float),
@@ -10179,13 +10576,15 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     )
     if model_config.compare_to_heff:
         heff_eigvecs = None
+        heff_matrix_all = np.load(model_config.heff_file, mmap_mode="r")
         if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
             heff_eig = np.load(model_config.heff_eig_file)
         else:
-            heff_eig = np.linalg.eigvalsh(np.load(model_config.heff_file, mmap_mode="r"))
+            heff_eig = np.linalg.eigvalsh(heff_matrix_all)
         if model_eigvecs is not None and model_config.heff_file is not None and model_config.heff_file.exists():
-            _, heff_eigvecs = np.linalg.eigh(np.load(model_config.heff_file, mmap_mode="r"))
+            _, heff_eigvecs = np.linalg.eigh(heff_matrix_all)
         heff_selected = _select_rows(heff_eig, model_config.band_indices)
+        heff_matrix_selected = _select_rows(heff_matrix_all, model_config.band_indices)
         overlap_weights = None
         if model_eigvecs is not None and heff_eigvecs is not None:
             model_eigvecs_selected = _select_rows(np.asarray(model_eigvecs), model_config.band_indices)
@@ -10255,6 +10654,32 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             x_ticklabels=x_ticklabels,
             title=f"{_band_plot_title(model_config)} (all bands)",
         )
+        try:
+            model_hamiltonians = np.asarray(results.get("band_hamiltonians"), dtype=np.complex128)
+            fit_positions, _holdout_positions = _selected_index_positions(model_config, int(heff_matrix_selected.shape[0]))
+            selected_indices = list(model_config.band_indices or list(range(int(heff_matrix_selected.shape[0]))))
+            fit_k_indices = [int(selected_indices[pos]) for pos in fit_positions]
+            harmonic_mask = _selected_harmonic_support_mask(
+                np.asarray(moire_config.Q_set1, dtype=float),
+                np.asarray(moire_config.Q_set2, dtype=float),
+                n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
+                current_counts=_resolved_harmonic_count_limits(model_config.harmonics_config),
+            )
+            hamiltonian_element_plot_path = save_hamiltonian_element_comparison_plot(
+                model_hamiltonians,
+                heff_matrix_selected,
+                output_dir / "hamiltonian_element_comparison.png",
+                harmonic_mask=harmonic_mask,
+                positions=fit_positions,
+                k_indices=fit_k_indices,
+                title=f"{_band_plot_title(model_config)} Hamiltonian elements",
+                qset1=np.asarray(moire_config.Q_set1, dtype=float),
+                qset2=np.asarray(moire_config.Q_set2, dtype=float),
+                n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
+                subtract_layer_diagonal_mean=True,
+            )
+        except Exception as exc:
+            _progress_line(f"Hamiltonian element comparison skipped: {exc}", enabled=progress, style="warning")
     results["configured_model"] = model_config
     results["moire_config"] = moire_config
     results["comparison"] = comparison
@@ -10265,6 +10690,9 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         results["band_plot"] = str(band_plot_path.resolve())
     if all_band_plot_path is not None:
         results["all_band_plot"] = str(all_band_plot_path.resolve())
+    if hamiltonian_element_plot_path is not None:
+        results["hamiltonian_element_plot"] = str(hamiltonian_element_plot_path.resolve())
+        results["hamiltonian_element_plot_pdf"] = str(hamiltonian_element_plot_path.with_suffix(".pdf").resolve())
     _progress_line("validating fitted model ...", enabled=progress)
     validation_started = time.perf_counter()
     validations, validation_summary = _compute_validation_outputs(

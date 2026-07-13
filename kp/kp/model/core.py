@@ -1316,6 +1316,15 @@ class ContinuumModelBuilder:
             Y_func._moire_sparse_orders = (Mz, Mz_star)  # type: ignore[attr-defined]
         else:
             Y_func._moire_sparse_dim = dim  # type: ignore[attr-defined]
+        basis_layer, basis_q_index, basis_orbital = ContinuumModelBuilder.basis_index_metadata_arrays(
+            Q_set1.shape[0],
+            Q_set2.shape[0],
+            n_orb1,
+            n_orb2,
+        )
+        Y_func._moire_basis_layer = basis_layer  # type: ignore[attr-defined]
+        Y_func._moire_basis_q_index = basis_q_index  # type: ignore[attr-defined]
+        Y_func._moire_basis_orbital = basis_orbital  # type: ignore[attr-defined]
         return Y_func
     
     @staticmethod
@@ -1331,6 +1340,93 @@ class ContinuumModelBuilder:
             return Q_set1.shape[0] * n_orb1 + Q_set2.shape[0] * orb + q_index
         else:
             raise ValueError("Layer must be 1 or 2.")
+
+    @staticmethod
+    def basis_index_metadata_arrays(
+        qset1_len: int,
+        qset2_len: int,
+        n_orb1: int,
+        n_orb2: int,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Return layer/Q/orbital metadata in the model's native basis order."""
+        layers: list[int] = []
+        q_indices: list[int] = []
+        orbitals: list[int] = []
+        for layer, q_count, n_orb in (
+            (1, int(qset1_len), int(n_orb1)),
+            (2, int(qset2_len), int(n_orb2)),
+        ):
+            for orbital in range(n_orb):
+                for q_index in range(q_count):
+                    layers.append(layer)
+                    q_indices.append(q_index)
+                    orbitals.append(orbital)
+        return (
+            np.asarray(layers, dtype=np.int16),
+            np.asarray(q_indices, dtype=np.int32),
+            np.asarray(orbitals, dtype=np.int16),
+        )
+
+    @staticmethod
+    def term_output_support_mask(
+        term: Any,
+        rows: np.ndarray,
+        cols: np.ndarray,
+        dim: int,
+    ) -> np.ndarray:
+        """Mask transformed matrix entries back to the physical support of a term tag."""
+        row_arr = np.asarray(rows, dtype=int)
+        col_arr = np.asarray(cols, dtype=int)
+        if row_arr.shape != col_arr.shape:
+            raise ValueError("row/col arrays must have the same shape for support filtering")
+        if row_arr.size == 0:
+            return np.zeros(row_arr.shape, dtype=bool)
+        if not isinstance(term, ContinuumTerm):
+            return np.ones(row_arr.shape, dtype=bool)
+        tag = str(getattr(term, "tag", "")).strip().lower()
+        if tag not in {"kinect", "kinetic", "onsite", "intra", "intralayer", "inter", "interlayer"}:
+            return np.ones(row_arr.shape, dtype=bool)
+        y_basis = getattr(term, "Y_basis", None)
+        layers = getattr(y_basis, "_moire_basis_layer", None)
+        q_indices = getattr(y_basis, "_moire_basis_q_index", None)
+        if layers is None or q_indices is None:
+            return np.ones(row_arr.shape, dtype=bool)
+        layers_arr = np.asarray(layers)
+        q_arr = np.asarray(q_indices)
+        if layers_arr.shape[0] != int(dim) or q_arr.shape[0] != int(dim):
+            return np.ones(row_arr.shape, dtype=bool)
+        same_layer = layers_arr[row_arr] == layers_arr[col_arr]
+        if tag in {"kinect", "kinetic", "onsite"}:
+            return np.logical_and(same_layer, q_arr[row_arr] == q_arr[col_arr])
+        if tag in {"intra", "intralayer"}:
+            return same_layer
+        return ~same_layer
+
+    @staticmethod
+    def apply_term_output_support_to_matrix(term: Any, matrix: np.ndarray) -> np.ndarray:
+        if not isinstance(matrix, np.ndarray) or matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+            return matrix
+        dim = int(matrix.shape[0])
+        rows, cols = np.indices((dim, dim), dtype=int)
+        mask = ContinuumModelBuilder.term_output_support_mask(term, rows, cols, dim)
+        if np.all(mask):
+            return matrix
+        return np.where(mask, matrix, 0.0)
+
+    @staticmethod
+    def filter_operator_contributions_for_term_support(
+        term: Any,
+        contributions: Sequence[tuple[int, int, int, int, np.ndarray, complex, complex]],
+        dim: int,
+    ) -> list[tuple[int, int, int, int, np.ndarray, complex, complex]]:
+        if not contributions:
+            return []
+        rows = np.asarray([item[0] for item in contributions], dtype=int)
+        cols = np.asarray([item[1] for item in contributions], dtype=int)
+        mask = ContinuumModelBuilder.term_output_support_mask(term, rows, cols, int(dim))
+        if np.all(mask):
+            return list(contributions)
+        return [item for item, keep in zip(contributions, mask) if bool(keep)]
 
     @staticmethod
     def _extract_monomial_matrix(op_matrix: np.ndarray, tol: float | None = None) -> tuple[np.ndarray, np.ndarray] | None:
@@ -1829,6 +1925,11 @@ class ContinuumModelBuilder:
                         cc = inv_perm[cols]
                         vv = np.conjugate(vals0) if is_anti_total else vals0
                         vv = vv * vals[rr] * inv_vals[cc]
+                        support = ContinuumModelBuilder.term_output_support_mask(term, rr, cc, int(Y_symm_local.shape[0]))
+                        if not np.all(support):
+                            rr = rr[support]
+                            cc = cc[support]
+                            vv = vv[support]
                         if use_add_at:
                             np.add.at(Y_symm_local, (rr, cc), vv)
                         else:
@@ -1839,10 +1940,14 @@ class ContinuumModelBuilder:
                             else:
                                 Y_anti_local[rr, cc] += vv
                     else:
+                        support = ContinuumModelBuilder.term_output_support_mask(term, rows, cols, int(Y_symm_local.shape[0]))
+                        rows_out = rows[support] if not np.all(support) else rows
+                        cols_out = cols[support] if not np.all(support) else cols
+                        vals_out = vals0[support] if not np.all(support) else vals0
                         if use_add_at:
-                            np.add.at(Y_symm_local, (rows, cols), vals0)
+                            np.add.at(Y_symm_local, (rows_out, cols_out), vals_out)
                         else:
-                            Y_symm_local[rows, cols] += vals0
+                            Y_symm_local[rows_out, cols_out] += vals_out
                     continue
 
                 Y_part = Y_basis(kk)
@@ -1857,6 +1962,7 @@ class ContinuumModelBuilder:
                 elif op_seq_applied:
                     for op_name, param in op_seq_applied:
                         Y_part = ContinuumModelBuilder._apply_symmetry_op_to_matrix(Y_part, op_name, param, symmetry_gen)
+                Y_part = ContinuumModelBuilder.apply_term_output_support_to_matrix(term, Y_part)
 
                 if Y_symm_local is None:
                     Y_symm_local = np.zeros_like(Y_part)
@@ -2000,6 +2106,11 @@ class ContinuumModelBuilder:
                 else:
                     rr, cc, vv = rows, cols, vals0
                     is_anti_total = False
+                support = ContinuumModelBuilder.term_output_support_mask(term, rr, cc, int(H_out.shape[0]))
+                if not np.all(support):
+                    rr = rr[support]
+                    cc = cc[support]
+                    vv = vv[support]
 
                 # base: r_real * S[Y] + r_imag * S[iY] 的逐 orbit 累加
                 s = -1.0 if is_anti_total else 1.0
@@ -2033,6 +2144,7 @@ class ContinuumModelBuilder:
             elif op_seq_applied:
                 for op_name, param in op_seq_applied:
                     Y_part = ContinuumModelBuilder._apply_symmetry_op_to_matrix(Y_part, op_name, param, symmetry_gen)
+            Y_part = ContinuumModelBuilder.apply_term_output_support_to_matrix(term, Y_part)
 
             s = -1.0 if is_anti_total else 1.0
             weight = r_value_real + (1j * s) * r_value_imag
@@ -3321,6 +3433,7 @@ class ContinuumModelBuilder:
     def _default_term_templates(self) -> List[Dict[str, Any]]:
         return [
             {"name": "kinetic", "source": "diagonal_kp", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Kinect", 0)},
+            {"name": "onsite", "source": "onsite", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Onsite", 0)},
             {"name": "intra", "source": "moire_potential", "sector_pairs": "same", "orbital_pairs": "all", "harmonics": "intra", "max_order": self.max_order.get("intra", 0)},
             {"name": "inter", "source": "tunneling", "sector_pairs": [[2, 1], [1, 2]], "orbital_pairs": "all", "harmonics": "inter", "max_order": self.max_order.get("inter", 0)},
         ]

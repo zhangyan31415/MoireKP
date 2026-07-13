@@ -20,8 +20,15 @@ from .core import (
     _compute_one_k,
     _prepare_band_state,
     clear_symmetry_caches,
+    reciprocal_Tmat_from_Tmat,
+    rot,
 )
 from .pipeline import build_moire_config_from_file
+from .operator_runtime import (
+    clear_operator_recipe_cache,
+    compile_operator_recipe,
+    validate_operator_recipe,
+)
 
 SCHEMA_VERSION = "standalone-kp-model-v1"
 EXPORTER_VERSION = "0.1"
@@ -48,6 +55,7 @@ def export_standalone_model(
     *,
     force: bool = False,
     debug_files: bool = False,
+    operator_data: Mapping[str, Any] | None = None,
 ) -> Path:
     """Export a fitted configured model as a minimal NumPy-only standalone package."""
     model_output = Path(model_output_dir).resolve()
@@ -64,7 +72,11 @@ def export_standalone_model(
     if stale_model_json.exists() and stale_model_json.is_file():
         stale_model_json.unlink()
 
-    package = _build_standalone_export(model_output, include_debug=debug_files)
+    package = _build_standalone_export(
+        model_output,
+        include_debug=debug_files,
+        operator_data=operator_data,
+    )
     _assert_clean_text("README.md", package.readme)
     _assert_clean_text("MODEL.md", package.model_doc)
 
@@ -129,9 +141,15 @@ def export_all_standalone_models(
     return report
 
 
-def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _StandaloneExport:
+def _build_standalone_export(
+    model_output: Path,
+    *,
+    include_debug: bool,
+    operator_data: Mapping[str, Any] | None = None,
+) -> _StandaloneExport:
     clear_symmetry_caches()
     _ORBIT_RECORD_CACHE.clear()
+    clear_operator_recipe_cache()
     case_id = model_output.name
     config_path = _infer_model_config_path(model_output)
 
@@ -154,7 +172,14 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
     dim = sum(int(block["dim"]) for block in basis_blocks)
     exactified = _load_exactified_matrices(model_config, dim)
     semantic_terms, runtime_terms = _runtime_terms_from_active_terms(active_terms, moire_config)
-    operator_data = _expand_operator_recipe(runtime_terms, moire_config, dim)
+    if operator_data is None:
+        resolved_operator_data = _expand_operator_recipe(runtime_terms, moire_config, dim)
+    else:
+        resolved_operator_data = validate_operator_recipe(
+            operator_data,
+            dim=dim,
+            term_count=len(runtime_terms),
+        )
 
     reference_eigvals = _load_required_array(model_output / "eigvals.npy", "model reference eigenvalues")
     reference_kpoints = np.asarray(moire_config.kpoints, dtype=float)
@@ -194,14 +219,15 @@ def _build_standalone_export(model_output: Path, *, include_debug: bool) -> _Sta
         "qset2": qsets["qset2"],
         "qset_layer1": qsets["qset1"],
         "qset_layer2": qsets["qset2"],
-        "operator_term_index": operator_data["term_index"],
-        "operator_row": operator_data["row"],
-        "operator_col": operator_data["col"],
-        "operator_mz": operator_data["mz"],
-        "operator_mz_star": operator_data["mz_star"],
-        "operator_q_center": operator_data["q_center"],
-        "operator_prefactor_real": operator_data["prefactor_real"],
-        "operator_prefactor_imag": operator_data["prefactor_imag"],
+        "operator_term_index": resolved_operator_data["term_index"],
+        "operator_row": resolved_operator_data["row"],
+        "operator_col": resolved_operator_data["col"],
+        "operator_mz": resolved_operator_data["mz"],
+        "operator_mz_star": resolved_operator_data["mz_star"],
+        "operator_q_center": resolved_operator_data["q_center"],
+        "operator_prefactor_real": resolved_operator_data["prefactor_real"],
+        "operator_prefactor_imag": resolved_operator_data["prefactor_imag"],
+        "dynamic_hermitization_term_index": resolved_operator_data["dynamic_hermitization_term_index"],
         "term_r_value_real": np.asarray([float(term["r_value_real"]) for term in semantic_terms], dtype=float),
         "term_r_value_imag": np.asarray([float(term["r_value_imag"]) for term in semantic_terms], dtype=float),
         "dimension_dim": np.asarray(dim, dtype=np.int64),
@@ -486,6 +512,50 @@ def _standalone_payload_from_kpath_config(model_config: Any, moire_config: Any) 
     kpath = getattr(model_config, "kpath_config", {})
     if not isinstance(kpath, Mapping) or not kpath:
         return None
+    if "coordinates" in kpath or "labels" in kpath:
+        coordinates = kpath.get("coordinates")
+        labels = kpath.get("labels")
+        if not isinstance(coordinates, Mapping) or not coordinates:
+            raise ValueError("inline kpath is missing coordinates mapping")
+        if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)) or len(labels) < 2:
+            raise ValueError("inline kpath is missing labels list with at least two entries")
+        if kpath.get("tmat") is None:
+            raise ValueError("inline kpath is missing tmat for fractional-coordinate conversion")
+        reciprocal = reciprocal_Tmat_from_Tmat(np.asarray(kpath["tmat"], dtype=float))
+        reciprocal_2d = np.array([reciprocal[0, :2], reciprocal[1, :2]], dtype=float).T
+        bM1 = np.asarray(getattr(moire_config, "bM1", None), dtype=float).ravel()
+        bM2 = np.asarray(getattr(moire_config, "bM2", None), dtype=float).ravel()
+        if bM1.shape[0] < 2 or bM2.shape[0] < 2:
+            raise ValueError("inline kpath requires bM1/bM2 to resolve model-basis coordinates")
+        model_basis = np.column_stack([bM1[:2], bM2[:2]])
+        hsp: dict[str, list[float]] = {}
+        for raw_label, raw_point in coordinates.items():
+            point = np.asarray(raw_point, dtype=float).ravel()
+            if point.shape[0] < 2:
+                raise ValueError(f"inline kpath coordinates.{raw_label} must have at least two entries")
+            source_cartesian = reciprocal_2d @ point[:2]
+            model_cartesian = rot(source_cartesian, float(getattr(model_config, "rotation_deg", 0.0)))
+            try:
+                model_fractional = np.linalg.solve(model_basis, model_cartesian)
+            except np.linalg.LinAlgError as exc:
+                raise ValueError("inline kpath requires linearly independent model bM1/bM2 vectors") from exc
+            hsp[str(raw_label)] = [float(model_fractional[0]), float(model_fractional[1])]
+        points_per_segment = kpath.get("points_per_segment", kpath.get("segment_points", 80))
+        coord = {
+            "type": "fractional_model_basis",
+            "k_units": "fractional coordinates in bM1/bM2 basis",
+            "q_units": "same as k",
+            "hsp_coordinates_are": "fractional_model_basis",
+        }
+        return _normalise_standalone_kpath_payload(
+            coord,
+            hsp,
+            labels,
+            points_per_segment,
+            getattr(model_config, "band_slice", None),
+            moire_config,
+            source="inline kpath coordinates",
+        )
     file_raw = kpath.get("file")
     if file_raw is None:
         return None
@@ -831,6 +901,15 @@ def _runtime_terms_from_active_terms(active_terms: list[Mapping[str, Any]], moir
             symmetry_ops=[dict(op) for op in sym_ops if isinstance(op, Mapping)],
             registry_metadata=metadata,
         )
+        hermitization = row.get("hermitization")
+        if hermitization is not None:
+            if not isinstance(hermitization, Mapping):
+                raise ValueError(f"active term {index} has invalid hermitization metadata")
+            if "real" not in hermitization or "imag" not in hermitization:
+                raise ValueError(f"active term {index} has incomplete hermitization metadata")
+            term._moire_needs_hermitize_real = bool(hermitization["real"])
+            term._moire_needs_hermitize_imag = bool(hermitization["imag"])
+            term._moire_hermitize_flags_inconsistent = bool(hermitization.get("inconsistent", False))
         runtime.append(term)
         semantic.append(
             {
@@ -841,6 +920,13 @@ def _runtime_terms_from_active_terms(active_terms: list[Mapping[str, Any]], moir
                 "r_value_imag": term.r_value_imag,
                 "operation_names": operation_names,
                 "metadata": metadata,
+                "hermitization": None
+                if hermitization is None
+                else {
+                    "real": bool(hermitization["real"]),
+                    "imag": bool(hermitization["imag"]),
+                    "inconsistent": bool(hermitization.get("inconsistent", False)),
+                },
             }
         )
     return semantic, runtime
@@ -902,6 +988,7 @@ def _expand_operator_recipe(runtime_terms: Sequence[ContinuumTerm], moire_config
     q_center: list[tuple[float, float]] = []
     prefactor_real: list[complex] = []
     prefactor_imag: list[complex] = []
+    dynamic_hermitization_terms: list[int] = []
     monomial_transform_cache: dict[
         tuple[tuple[float, ...], tuple[float, float], int, int],
         tuple[int, int, tuple[float, float], complex],
@@ -984,10 +1071,28 @@ def _expand_operator_recipe(runtime_terms: Sequence[ContinuumTerm], moire_config
                             complex(imag_pref),
                         )
                     )
-        needs_herm_real, needs_herm_imag = _hermitize_flags_from_operator_contributions(
-            term_contributions,
-            dim,
+        has_recorded_flags = hasattr(term, "_moire_needs_hermitize_real") and hasattr(
+            term,
+            "_moire_needs_hermitize_imag",
         )
+        dynamic_hermitization = has_recorded_flags and bool(
+            getattr(term,
+            "_moire_hermitize_flags_inconsistent",
+            False),
+        )
+        if dynamic_hermitization:
+            dynamic_hermitization_terms.append(idx)
+            needs_herm_real = False
+            needs_herm_imag = False
+        elif has_recorded_flags:
+            needs_herm_real = bool(getattr(term, "_moire_needs_hermitize_real"))
+            needs_herm_imag = bool(getattr(term, "_moire_needs_hermitize_imag"))
+        else:
+            needs_herm_real, needs_herm_imag = _hermitize_flags_from_operator_contributions(
+                term_contributions,
+                dim,
+                probe_k=_standalone_hermitization_probe(moire_config),
+            )
         for r_out, c_out, mz_new, mz_star_new, q_new, real_pref, imag_pref in term_contributions:
             _append_operator_contribution(
                 idx,
@@ -1040,16 +1145,24 @@ def _expand_operator_recipe(runtime_terms: Sequence[ContinuumTerm], moire_config
         "q_center": np.asarray(q_center, dtype=float),
         "prefactor_real": np.asarray(prefactor_real, dtype=np.complex128),
         "prefactor_imag": np.asarray(prefactor_imag, dtype=np.complex128),
+        "dynamic_hermitization_term_index": np.asarray(dynamic_hermitization_terms, dtype=np.int64),
     }
 
 
 def _hermitize_flags_from_operator_contributions(
     contributions: Sequence[tuple[int, int, int, int, np.ndarray, complex, complex]],
     dim: int,
+    *,
+    probe_k: np.ndarray | None = None,
 ) -> tuple[bool, bool]:
     if not contributions:
         return False, False
-    probe_k = np.array([0.137, -0.219], dtype=float)
+    if probe_k is None:
+        probe_k = np.array([0.137, -0.219], dtype=float)
+    else:
+        probe_k = np.asarray(probe_k, dtype=float)
+        if probe_k.shape != (2,):
+            raise ValueError(f"hermitianization probe must have shape (2,), got {probe_k.shape}")
     real_matrix = np.zeros((int(dim), int(dim)), dtype=np.complex128)
     imag_matrix = np.zeros_like(real_matrix)
     for row_idx, col_idx, mz, mz_star, q, real_pref, imag_pref in contributions:
@@ -1058,6 +1171,18 @@ def _hermitize_flags_from_operator_contributions(
         real_matrix[int(row_idx), int(col_idx)] += complex(real_pref) * monomial
         imag_matrix[int(row_idx), int(col_idx)] += complex(imag_pref) * monomial
     return (not np.allclose(real_matrix, real_matrix.conj().T), not np.allclose(imag_matrix, imag_matrix.conj().T))
+
+
+def _standalone_hermitization_probe(moire_config: Any) -> np.ndarray:
+    """Use a production k-point when exporting legacy active-term payloads."""
+    for attribute in ("kpoints_fit", "kpoints"):
+        values = getattr(moire_config, attribute, None)
+        if values is None:
+            continue
+        points = np.asarray(values, dtype=float)
+        if points.ndim == 2 and points.shape[0] > 0 and points.shape[1] == 2:
+            return points[0]
+    return np.array([0.137, -0.219], dtype=float)
 
 
 def _append_operator_contribution(
@@ -1268,6 +1393,11 @@ def _transform_monomial(transform: np.ndarray, q_base: np.ndarray, mz: int, mz_s
     return int(mz_star), int(mz), q_center, complex(prefactor)
 
 
+# Keep the historical private exporter name while sharing the production compiler
+# with the in-package band runtime.
+_expand_operator_recipe = compile_operator_recipe
+
+
 def _portable_operations(model_config: Any, exactified: Mapping[str, np.ndarray]) -> list[dict[str, Any]]:
     rows = []
     registry = _load_json_if_exists(model_config.output_dir / "operation_registry.json") if model_config.output_dir else None
@@ -1465,11 +1595,16 @@ Runtime evaluation reads the pre-expanded arrays in `model_data.npz`:
 - `operator_q_center`
 - `operator_prefactor_real`
 - `operator_prefactor_imag`
+- `dynamic_hermitization_term_index`
 
 For contribution `c`, `operator_term_index[c]` selects the fitted coefficient
 from `term_r_value_real` and `term_r_value_imag`; row/col select the matrix
 element; `mz/mz_star` and `q_center` define the monomial; prefactors multiply
 the real and imaginary coefficient channels.
+
+Terms listed by `dynamic_hermitization_term_index` retain separate real and
+imaginary response matrices at runtime and apply the production conditional
+Hermitian completion at each k-point.
 """
 
 
@@ -1687,15 +1822,24 @@ def _format_pi_angle(angle: float) -> str:
     return f"{_format_float(angle)} rad"
 
 
-def _format_phase(value: complex) -> str:
-    magnitude = abs(value)
-    angle = float(np.angle(value))
-    angle_text = _format_pi_angle(angle)
-    if abs(magnitude - 1.0) < 1.0e-10:
-        if angle_text == "0":
-            return "0"
-        return angle_text
-    return f"{angle_text}; non-unit |phase|={_format_float(magnitude)}"
+def _format_algebraic_magnitude(magnitude: float) -> str:
+    value = float(magnitude)
+    if abs(value - 1.0) < 1.0e-10:
+        return "1"
+    if abs(value - 0.5) < 1.0e-10:
+        return "1/2"
+    if abs(value - np.sqrt(3.0) / 2.0) < 1.0e-10:
+        return "sqrt(3)/2"
+    return _format_float(value)
+
+
+def _format_algebraic_magnitude_latex(magnitude: float) -> str:
+    text = _format_algebraic_magnitude(magnitude)
+    if text == "1/2":
+        return r"\frac{1}{2}"
+    if text == "sqrt(3)/2":
+        return r"\frac{\sqrt{3}}{2}"
+    return text
 
 
 def _format_angle_latex(angle_text: str) -> str:
@@ -1708,11 +1852,14 @@ def _format_phase_latex(value: complex) -> str:
     magnitude = abs(value)
     angle_text = _format_pi_angle(float(np.angle(value)))
     angle_latex = _format_angle_latex(angle_text)
-    if abs(magnitude - 1.0) < 1.0e-10:
+    magnitude_latex = _format_algebraic_magnitude_latex(magnitude)
+    if magnitude_latex == "1":
         if angle_text == "0":
             return "1"
         return f"e^{{i({angle_latex})}}"
-    return f"{_format_float(magnitude)} e^{{i({angle_latex})}}"
+    if angle_text == "0":
+        return magnitude_latex
+    return f"{magnitude_latex} e^{{i({angle_latex})}}"
 
 
 def _math_label(value: str) -> str:
@@ -1783,7 +1930,7 @@ def _render_symmetry_reconstruction(
         "",
         "$$",
         "[\\rho_g]_{(\\alpha,a,q),(\\beta,b,q')} =",
-        "e^{i\\theta^g_{\\alpha a,\\beta b}}\\,",
+        "A^g_{\\alpha a,\\beta b}e^{i\\theta^g_{\\alpha a,\\beta b}}\\,",
         "\\delta_{q,\\pi^g_{\\alpha a\\leftarrow\\beta b}(q')}.",
         "$$",
         "",
@@ -1802,11 +1949,15 @@ def _render_symmetry_reconstruction(
             sections.extend(["", f"### `{name}`", f"Matrix key `{matrix_key}` is missing from `model_data.npz`."])
             continue
         array = np.asarray(matrix)
-        rows, cols = np.nonzero(np.abs(array) > 1.0e-10)
-        row_counts = np.sum(np.abs(array) > 1.0e-10, axis=1)
-        col_counts = np.sum(np.abs(array) > 1.0e-10, axis=0)
+        magnitudes = np.abs(array)
+        row_scale = np.max(magnitudes, axis=1, keepdims=True)
+        significant = magnitudes > np.maximum(1.0e-10, 1.0e-7 * row_scale)
+        rows, cols = np.nonzero(significant)
+        row_counts = np.sum(significant, axis=1)
+        col_counts = np.sum(significant, axis=0)
         phase_permutation = bool(np.all(row_counts == 1) and np.all(col_counts == 1))
         groups: dict[tuple[str, int, str, int, complex], list[tuple[int, int]]] = {}
+        group_values: dict[tuple[str, int, str, int, complex], complex] = {}
         for row, col in zip(rows, cols):
             row_qset, row_orb, row_q = _basis_block_for_index(int(row), blocks)
             col_qset, col_orb, col_q = _basis_block_for_index(int(col), blocks)
@@ -1814,6 +1965,7 @@ def _render_symmetry_reconstruction(
             rounded = complex(round(float(np.real(value)), 12), round(float(np.imag(value)), 12))
             key = (row_qset, row_orb, col_qset, col_orb, rounded)
             groups.setdefault(key, []).append((row_q, col_q))
+            group_values.setdefault(key, complex(value))
         sections.extend(
             [
                 "",
@@ -1824,16 +1976,18 @@ def _render_symmetry_reconstruction(
             ]
         )
         for key in sorted(groups, key=lambda item: (item[0], item[1], item[2], item[3], item[4].real, item[4].imag)):
-            row_qset, row_orb, col_qset, col_orb, phase = key
+            row_qset, row_orb, col_qset, col_orb, _rounded = key
+            matrix_element = group_values[key]
             pairs = sorted(groups[key])
             op_label = _math_label(name)
             row_label = _math_label(row_qset)
             col_label = _math_label(col_qset)
-            phase_latex = _format_phase_latex(phase)
-            phase_angle = _format_phase(phase)
+            phase_latex = _format_phase_latex(matrix_element)
+            phase_angle = _format_pi_angle(float(np.angle(matrix_element)))
+            magnitude_text = _format_algebraic_magnitude(abs(matrix_element))
             block_lines = [
                 f"- Nonzero block: `({col_qset}, orbital {col_orb}) -> ({row_qset}, orbital {row_orb})`; "
-                f"phase angle `{phase_angle}`; count `{len(pairs)}`.",
+                f"matrix-element magnitude `{magnitude_text}`; phase angle `{phase_angle}`; count `{len(pairs)}`.",
                 "",
                 "  $$",
                 f"  [\\rho_{{{op_label}}}]_{{({row_label},{row_orb},q),({col_label},{col_orb},q')}} =",
@@ -2009,7 +2163,7 @@ Compact matrix-element form:
 
 $$
 [\\rho_g]_{{(\\alpha,a,q),(\\beta,b,q')}} =
-e^{{i\\theta^g_{{\\alpha a,\\beta b}}}}
+A^g_{{\\alpha a,\\beta b}}e^{{i\\theta^g_{{\\alpha a,\\beta b}}}}
 \\delta_{{q,\\pi^g_{{\\alpha a\\leftarrow\\beta b}}(q')}}.
 $$
 
@@ -2036,7 +2190,7 @@ invented during export.
 This package uses the current two-qset KP core. Custom k-points must use the
 recorded coordinate convention. Exactified matrices are included for diagnostics;
 runtime evaluation uses the pre-expanded `operator_*` arrays. The default
-`MODEL.md` includes the compact phase-permutation rules needed to reconstruct
+`MODEL.md` includes compact nonzero block rules needed to reconstruct
 the exported symmetry matrices. Use `debug_files=True` only for separated
 developer-facing metadata files.
 """
@@ -2167,13 +2321,37 @@ class StandaloneModel:
         q_center = np.asarray(self.data["operator_q_center"], dtype=float)
         prefactor_real = np.asarray(self.data["operator_prefactor_real"], dtype=np.complex128)
         prefactor_imag = np.asarray(self.data["operator_prefactor_imag"], dtype=np.complex128)
+        dynamic_terms = np.asarray(
+            self.data["dynamic_hermitization_term_index"]
+            if "dynamic_hermitization_term_index" in self.data.files
+            else np.array([], dtype=np.int64),
+            dtype=np.int64,
+        )
         if q_center.ndim != 2 or q_center.shape[1] != 2:
             raise ValueError(f"operator_q_center must have shape (N, 2), got {{q_center.shape}}")
         z = (k[0] - q_center[:, 0]) + 1j * (k[1] - q_center[:, 1])
         monomial = (z ** mz) * (np.conjugate(z) ** mz_star)
-        coeff = self.r_real[term_index] * prefactor_real + self.r_imag[term_index] * prefactor_imag
         h = np.zeros((self.dim, self.dim), dtype=np.complex128)
-        np.add.at(h, (rows, cols), coeff * monomial)
+        dynamic_mask = np.isin(term_index, dynamic_terms) if dynamic_terms.size else np.zeros(term_index.shape, dtype=bool)
+        static_mask = ~dynamic_mask
+        if np.any(static_mask):
+            static_terms = term_index[static_mask]
+            coeff = (
+                self.r_real[static_terms] * prefactor_real[static_mask]
+                + self.r_imag[static_terms] * prefactor_imag[static_mask]
+            )
+            np.add.at(h, (rows[static_mask], cols[static_mask]), coeff * monomial[static_mask])
+        for term in dynamic_terms:
+            mask = term_index == term
+            h_real = np.zeros_like(h)
+            h_imag = np.zeros_like(h)
+            np.add.at(h_real, (rows[mask], cols[mask]), prefactor_real[mask] * monomial[mask])
+            np.add.at(h_imag, (rows[mask], cols[mask]), prefactor_imag[mask] * monomial[mask])
+            if not np.allclose(h_real, h_real.conj().T):
+                h_real += h_real.conj().T
+            if not np.allclose(h_imag, h_imag.conj().T):
+                h_imag += h_imag.conj().T
+            h += self.r_real[term] * h_real + self.r_imag[term] * h_imag
         return h
 
     def _hamiltonian_for_eigvalsh(self, k):
