@@ -1,4 +1,4 @@
-# ZrS2 Gamma q04 Top-Eight Nine-Point Refine Design
+# ZrS2 Gamma q04 Top-Eight At-Most-Ten-Point Refine Design
 
 ## Objective
 
@@ -25,16 +25,17 @@ responses can be used as symmetry-preserving refine directions.
 
 ## Refine and holdout points
 
-Use nine path indices:
+An explicit top-eight audit of the starting candidate finds its worst top-eight
+projector overlap at index 12.  Use the full allowed budget of ten path indices:
 
 ```text
-0, 10, 20, 21, 30, 40, 46, 47, 50
+0, 10, 12, 20, 21, 30, 40, 46, 47, 50
 ```
 
 They contain the independent high-symmetry endpoints, segment midpoints, the
-current worst top-two and top-four overlap points, and the current worst
-top-four energy-error point.  Index 60 duplicates Gamma and is left in the
-holdout set.  The remaining 52 rows are never used to solve for coefficients.
+current worst top-two, top-four, and top-eight overlap points, and the current
+worst top-four energy-error point.  Index 60 duplicates Gamma and is left in
+the holdout set.  The remaining 51 rows are never used to solve for coefficients.
 
 ## Refine objective
 
@@ -54,7 +55,7 @@ Sweep only a small fixed grid of PQ and trust weights, solve each candidate by
 rank-revealing linear least squares, and rank candidates using held-out metrics.
 
 If the best linear candidate is close to but does not satisfy the gates, apply
-at most a few damped nonlinear/Gauss-Newton steps on the same nine points.  The
+at most a few damped nonlinear/Gauss-Newton steps on the same ten points.  The
 polynomial term-response basis remains fixed, and a line search rejects any
 step that worsens the combined held-out score.
 

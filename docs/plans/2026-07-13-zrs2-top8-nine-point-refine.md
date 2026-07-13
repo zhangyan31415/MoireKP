@@ -1,10 +1,10 @@
-# ZrS2 Top-Eight Nine-Point Refine Implementation Plan
+# ZrS2 Top-Eight At-Most-Ten-Point Refine Implementation Plan
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Produce and validate on bigmem002 a symmetry-preserving top-eight refinement that uses exactly nine path points and passes the agreed full-path energy and projector-overlap gates.
+**Goal:** Produce and validate on bigmem002 a symmetry-preserving top-eight refinement that uses at most ten path points and passes the agreed full-path energy and projector-overlap gates.
 
-**Architecture:** Keep the existing symmetry-exactified RBF correction fixed and refine only exact polynomial term coefficients.  Assemble fixed-reference top-eight `PP` and neighboring-eight `PQ` response rows at nine k points, solve a small grid of normalized regularized linear systems, and select only on the 52 held-out path rows.  All implementation and outputs remain under `validation_runs/`.
+**Architecture:** Keep the existing symmetry-exactified RBF correction fixed and refine only exact polynomial term coefficients.  Assemble fixed-reference top-eight `PP` and neighboring-eight `PQ` response rows at ten k points, solve a small grid of normalized regularized linear systems, and select only on the 51 held-out path rows.  All implementation and outputs remain under `validation_runs/`.
 
 **Tech Stack:** Python 3.11, NumPy/SciPy linear algebra, Matplotlib, existing MoireKP direct term-response helpers, pytest.
 
@@ -67,7 +67,7 @@ precision before constructing any response.
 
 **Step 2: Construct direct symmetry-exact term responses**
 
-Use refine indices `[0, 10, 20, 21, 30, 40, 46, 47, 50]`.  Select active real
+Use refine indices `[0, 10, 12, 20, 21, 30, 40, 46, 47, 50]`.  Select active real
 and imaginary responses from `Kinect`, `Onsite`, `intra`, and `inter` terms.
 Drop only numerically zero columns and record term/component metadata.
 
@@ -116,7 +116,7 @@ Skip nonlinear work if the best linear candidate already passes every gate.
 
 Restrict optimization to well-conditioned singular directions of the linear
 PP+PQ design.  Perform at most six damped Gauss-Newton iterations using the
-same nine refine points.  Include top-eight energy residuals and top-eight
+same ten refine points.  Include top-eight energy residuals and top-eight
 principal-angle residuals, and reject line-search steps that worsen the
 held-out ranking score.
 
@@ -136,7 +136,7 @@ and no acceptance gate regresses.
 
 Compare fixed-Schur Heff, the unrefined exactified candidate, and the selected
 refined candidate.  Show the top eight bands, all top-eight energy errors, and
-top-two/top-four/top-eight projector overlaps.  Mark the nine refine indices.
+top-two/top-four/top-eight projector overlaps.  Mark the ten refine indices.
 
 **Step 2: Inspect the rendered PNG**
 
