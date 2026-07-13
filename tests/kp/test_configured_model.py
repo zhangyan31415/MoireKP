@@ -13,6 +13,7 @@ import yaml
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.model.export as export_module  # noqa: E402
+import kp.model.operator_runtime as operator_runtime_module  # noqa: E402
 from kp.model.pipeline import (  # noqa: E402
     _auto_harmonics_from_q_sets,
     _auto_harmonics_from_support,
@@ -30,6 +31,9 @@ from kp.model.pipeline import (  # noqa: E402
     _default_auto_low_energy_order_config,
     _edge_weighted_band_weights,
     _harmonic_ablation_candidate_is_accepted,
+    _harmonic_ablation_mask_from_shell_maps,
+    _harmonic_ablation_shell_maps,
+    _harmonic_recommendation_plot_candidates,
     _harmonic_selection_threshold_values,
     _run_harmonic_ablation_selection,
     _select_harmonic_ablation_candidate,
@@ -41,6 +45,7 @@ from kp.model.pipeline import (  # noqa: E402
     _matrix_loss_residual,
     _load_model_artifact_identity,
     _load_kpoints,
+    _load_kpoints_from_inputs,
     _operation_matrix_is_exactified,
     _max_derivative_order_values,
     _principal_angle_subspace_residual,
@@ -55,6 +60,8 @@ from kp.model.pipeline import (  # noqa: E402
     _symmetry_operation_index,
     _term_component_hamiltonians_for_kpoints,
     _term_response_pair_hamiltonians_for_kpoints,
+    _progress_line,
+    _run_model_pipeline,
     _write_auto_model_selection_outputs,
     _window_band_plot_config,
     ConfiguredModel,
@@ -187,6 +194,51 @@ def test_model_kpoints_follow_projection_source_indices(tmp_path: Path) -> None:
     np.testing.assert_allclose(_load_kpoints(config), kpoints[[1, 3]])
 
 
+def test_model_kpoints_from_projection_are_aligned_and_rotated(tmp_path: Path) -> None:
+    source_cartesian = np.array([[1.0, 0.0], [0.0, 2.0]], dtype=float)
+    kpoints_file = tmp_path / "project" / "kpoints.npy"
+    kpoints_file.parent.mkdir()
+    np.save(kpoints_file, source_cartesian)
+    heff_file = kpoints_file.with_name("heff.npy")
+    np.save(heff_file, np.zeros((2, 1, 1), dtype=np.complex128))
+    config = SimpleNamespace(
+        kpoints_file=kpoints_file,
+        kpoints_from_projection=True,
+        project_k_indices=[4, 7],
+        kpath_config={},
+        path=tmp_path / "case.yaml",
+        rotation_deg=90.0,
+        heff_file=heff_file,
+        artifact_identity={"kpoints_hash": hash_array(source_cartesian)},
+    )
+
+    np.testing.assert_allclose(
+        _load_kpoints(config),
+        np.array([[0.0, 1.0], [-2.0, 0.0]]),
+        atol=1.0e-14,
+    )
+
+
+def test_auto_fit_kpoints_from_projection_are_not_source_reindexed(tmp_path: Path) -> None:
+    source_cartesian = np.array([[1.0, 0.0], [0.0, 2.0]], dtype=float)
+    kpoints_file = tmp_path / "project" / "kpoints.npy"
+    kpoints_file.parent.mkdir()
+    np.save(kpoints_file, source_cartesian)
+
+    loaded = _load_kpoints_from_inputs(
+        kpoints_file=kpoints_file,
+        kpath_config={},
+        base=tmp_path,
+        rotation_deg=90.0,
+        kpoints_from_projection=True,
+    )
+
+    np.testing.assert_allclose(
+        loaded,
+        np.array([[0.0, 1.0], [-2.0, 0.0]]),
+        atol=1.0e-14,
+    )
+
 def test_exactified_operation_requires_complete_production_provenance() -> None:
     complete = {
         "matrix_kind": "continuum_internal_rep_exact",
@@ -256,13 +308,13 @@ def test_expand_operator_recipe_caches_duplicate_monomial_transforms(monkeypatch
         symmetry_ops=[],
     )
     calls = []
-    original = export_module._transform_monomial
+    original = operator_runtime_module.transform_monomial
 
     def spy(transform, q_base, mz, mz_star):
         calls.append((tuple(np.asarray(q_base, dtype=float)), int(mz), int(mz_star)))
         return original(transform, q_base, mz, mz_star)
 
-    monkeypatch.setattr(export_module, "_transform_monomial", spy)
+    monkeypatch.setattr(operator_runtime_module, "transform_monomial", spy)
 
     data = _expand_operator_recipe([term], SimpleNamespace(symmetry_gen=None), dim=2)
 
@@ -654,6 +706,87 @@ def test_compute_bands_hermitizes_assembled_hamiltonian(monkeypatch):
     eigvals = compute_bands(cfg, model, cfg.kpoints)
 
     np.testing.assert_allclose(eigvals[0], [-0.5, 0.5])
+
+
+def test_compute_bands_can_collect_assembled_hamiltonians(monkeypatch):
+    def add_nonhermitian(matrix, *_args, **_kwargs):
+        matrix[0, 1] += 1.0
+
+    monkeypatch.setattr(
+        model_core.ContinuumModelBuilder,
+        "add_symmetrized_term_to_matrix_static",
+        staticmethod(add_nonhermitian),
+    )
+    cfg = MoireConfig(
+        Q_set1=np.zeros((1, 2), dtype=float),
+        Q_set2=np.zeros((0, 2), dtype=float),
+        n_orb1=2,
+        n_orb2=0,
+        kpoints=np.array([[0.0, 0.0]], dtype=float),
+        save_eigvecs=False,
+    )
+    key = ContinuumTermKey(Mz=0, Mz_star=0, layer_from=1, layer_to=1, orbital_from=1, orbital_to=1, p=(0.0, 0.0))
+    term = ContinuumTerm(
+        key=key,
+        Y_basis=lambda _k: np.zeros((2, 2), dtype=complex),
+        r_value_real=1.0,
+        r_value_imag=0.0,
+        active=True,
+        tag="Kinect",
+    )
+    model = ContinuumModel()
+    model.terms[key] = term
+    hamiltonians: list[np.ndarray] = []
+
+    eigvals = compute_bands(cfg, model, cfg.kpoints, hamiltonians_out=hamiltonians)
+
+    np.testing.assert_allclose(eigvals[0], [-0.5, 0.5])
+    assert len(hamiltonians) == 1
+    np.testing.assert_allclose(hamiltonians[0], [[0.0, 0.5], [0.5, 0.0]])
+
+
+def test_validation_reuses_band_stage_hamiltonians(monkeypatch):
+    q1 = np.zeros((1, 2), dtype=float)
+    q2 = np.zeros((0, 2), dtype=float)
+    moire_config = MoireConfig(
+        Q_set1=q1,
+        Q_set2=q2,
+        n_orb1=1,
+        n_orb2=0,
+        nlow_state=[1, 0],
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.0, 1.0]),
+        kpoints=np.array([[0.0, 0.0], [0.25, 0.0]], dtype=float),
+        symmetry_gen=SymmetryGenerator(q1, q2, [1, 0]),
+    )
+    model_config = SimpleNamespace(
+        validation_config={},
+        compare_to_heff=False,
+        symmetry_source_config={"operations": []},
+        symmetry_map={},
+        term_templates=[],
+        valley_model={"valley_type": "Gamma", "mode": "single_valley", "spin_convention": "spinful"},
+        band_indices=None,
+        fit_indices=[],
+    )
+    model = SimpleNamespace(terms={})
+    band_hamiltonians = np.array([[[1.0]], [[2.0]]], dtype=complex)
+    assembly_calls = 0
+
+    def fail_reassembly(*_args, **_kwargs):
+        nonlocal assembly_calls
+        assembly_calls += 1
+        raise AssertionError("validation must reuse band-stage Hamiltonians")
+
+    monkeypatch.setattr(pipeline_module, "_compute_one_k", fail_reassembly)
+
+    pipeline_module._compute_validation_outputs(
+        results={"model": model, "band_hamiltonians": band_hamiltonians},
+        model_config=model_config,
+        moire_config=moire_config,
+    )
+
+    assert assembly_calls == 0
 
 
 def test_monomial_extraction_tolerates_roundoff_leakage():
@@ -1050,7 +1183,14 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
         seen["path"] = path
         return {"configured_model": FakeModelConfig(), "comparison": {"rms_error": 0.0, "max_abs_error": 0.0}}
 
-    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+    def fake_export(
+        model_output_dir,
+        output_dir,
+        *,
+        force=False,
+        debug_files=False,
+        operator_data=None,
+    ):
         seen["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
         return Path(output_dir)
 
@@ -1092,7 +1232,14 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
             },
         }
 
-    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+    def fake_export(
+        model_output_dir,
+        output_dir,
+        *,
+        force=False,
+        debug_files=False,
+        operator_data=None,
+    ):
         return Path(output_dir)
 
     monkeypatch.setattr(configured, "run_configured_model", fake_run)
@@ -1104,6 +1251,22 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
     assert f"[kp model]   band plot: {plot_path.resolve()}" in out
     assert f"[kp model]   all-band plot: {all_plot_path.resolve()}" in out
     assert "[kp model]   all-band RMS: 2.000 meV, Max: 3.000 meV (bands=124, align=top)" in out
+
+
+def test_canonical_model_cleanup_preserves_harmonic_recommendation_plot(tmp_path: Path) -> None:
+    import kp.cli as cli
+
+    output = tmp_path / "model_out"
+    output.mkdir()
+    keep = output / "harmonic_recommendation_bands.png"
+    keep.write_bytes(b"plot")
+    stale = output / "temporary.txt"
+    stale.write_text("remove", encoding="utf-8")
+
+    cli._cleanup_canonical_model_output(output)
+
+    assert keep.exists()
+    assert not stale.exists()
 
 
 def test_cli_model_subcommand_rejects_explicit_standalone_export_path(tmp_path: Path) -> None:
@@ -2117,6 +2280,35 @@ def test_harmonic_ablation_can_scan_explicit_candidate_pairs_only() -> None:
     assert report["selected"]["inter_shells"] == 0
 
 
+def test_harmonic_ablation_precomputed_shell_maps_match_mask_stats() -> None:
+    q1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0], [0.0, 2.0]], dtype=float)
+    rows = [
+        {"q": q1[0], "layer": 1},
+        {"q": q1[1], "layer": 1},
+        {"q": q2[0], "layer": 2},
+        {"q": q2[1], "layer": 2},
+    ]
+    shell_norms = {"intra": [1.0, 2.0], "inter": [1.0, 2.0, np.sqrt(5.0)]}
+
+    direct_mask, direct_stats = pipeline_module._harmonic_ablation_mask(
+        rows,
+        shell_norms,
+        intra_shells=1,
+        inter_shells=2,
+        tol=1.0e-8,
+    )
+    shell_maps = _harmonic_ablation_shell_maps(rows, shell_norms, tol=1.0e-8)
+    fast_mask, fast_stats = _harmonic_ablation_mask_from_shell_maps(
+        shell_maps,
+        intra_shells=1,
+        inter_shells=2,
+    )
+
+    np.testing.assert_array_equal(fast_mask, direct_mask)
+    assert fast_stats == direct_stats
+
+
 def test_auto_low_energy_windows_reports_small_boundary_gap() -> None:
     eig = np.array(
         [
@@ -2321,6 +2513,59 @@ def test_load_model_config_auto_low_energy_preserves_explicit_harmonics(tmp_path
     assert config.harmonics_config == {"intra": 3, "inter": 2}
     assert "auto_low_energy_harmonic_selection" not in config.raw["model"]
     assert config.band_refinement_config["auto_harmonic_selection"]["enabled"] is False
+
+
+def test_load_model_config_does_not_print_harmonic_recommendation(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg_path = _write_auto_fixture(tmp_path)
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    data["model"]["harmonics"] = {"intralayer": 3, "interlayer": 2}
+    data["model"]["target_bands"] = "bottom"
+    data["fit"] = {"mode": "auto_low_energy", "max_points": 2}
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    config = load_model_config(cfg_path)
+    stdout = capsys.readouterr().out
+
+    assert config.harmonics_config == {"intra": 3, "inter": 2}
+    assert stdout == ""
+    assert not (tmp_path / "model_out" / "harmonic_recommendation_bands.png").exists()
+
+
+def test_run_configured_model_prints_single_compact_harmonic_recommendation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg_path = _write_auto_fixture(tmp_path)
+    expected_eigvals = _expected_project_eigvals(tmp_path)
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    data["model"]["harmonics"] = {"intralayer": 3, "interlayer": 2}
+    data["model"]["target_bands"] = "bottom"
+    data["fit"] = {"mode": "auto_low_energy", "max_points": 2}
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {"eigvals": expected_eigvals, "diagnostics": {}}
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+
+    result = run_configured_model(cfg_path)
+    stdout = capsys.readouterr().out
+
+    assert result["configured_model"].harmonics_config == {"intra": 3, "inter": 2}
+    assert "auto_low_energy_harmonic_selection" not in result["configured_model"].raw["model"]
+    assert stdout.count("Harmonic recommendation") == 1
+    assert "--- Harmonic recommendation (diagnostic only) ---" in stdout
+    assert "actual model.harmonics: intra=3 inter=2 (unchanged)" in stdout
+    assert "low-cost" in stdout
+    assert "high-acc" in stdout
+    assert "faithful recommended" not in stdout
+    assert "plot " in stdout
+    assert "band plot" in stdout
+    assert (tmp_path / "model_out" / "harmonic_recommendation_bands.png").exists()
 
 
 def test_band_refinement_invokes_subspace_and_low_matrix_losses(monkeypatch, tmp_path: Path) -> None:
@@ -4137,11 +4382,13 @@ def test_kp_symm_exactification_allows_explicit_projection_noise_override() -> N
     assert _kp_symm_exactification_config()["reject_if_off_support_rel_gt"] == pytest.approx(1.0e-5)
 
 
-def test_kp_symm_gamma_exactification_default_uses_symmetry_tolerance() -> None:
+def test_kp_symm_gamma_exactification_default_uses_auto_c3_support() -> None:
     exact_cfg = _merged_exactification_overrides("Gamma", None, symmetry_tolerance=2.0e-2)
 
     assert exact_cfg["reject_if_off_support_rel_gt"] == pytest.approx(2.0e-2)
-    assert exact_cfg["operations"] == {"C3z": {"support_mode": "monomial"}}
+    assert exact_cfg["operations"] == {
+        "C3z": {"support_mode": "auto", "algebraic_template": "auto"}
+    }
 
 
 def test_kp_symm_explicit_exactification_override_wins_over_symmetry_tolerance() -> None:
@@ -5004,6 +5251,169 @@ def test_physical_tr_closed_fit_group_merges_orbital_partners() -> None:
     assert len(diagnostics["Onsite"]) == 1
 
 
+def test_coefficient_fit_uses_full_dense_symmetry_responses() -> None:
+    q = np.array([[0.0, 0.0]], dtype=float)
+    angle = 2.0 * np.pi / 3.0
+    c3_block = np.array(
+        [
+            [np.cos(angle), -np.sin(angle)],
+            [np.sin(angle), np.cos(angle)],
+        ],
+        dtype=np.complex128,
+    )
+    c3_matrix = np.block(
+        [
+            [c3_block, np.zeros((2, 2), dtype=np.complex128)],
+            [np.zeros((2, 2), dtype=np.complex128), c3_block],
+        ]
+    )
+
+    class DenseC3Generator:
+        def get_operator(self, name, params=None):
+            assert name == "C3z"
+            power = 1 if params is None else int(params)
+            return np.linalg.matrix_power(c3_matrix, power)
+
+    c3_op = {
+        "name": "C3z",
+        "antiunitary": False,
+        "k_map": {"type": "rotation", "angle_deg": 120.0},
+        "q_map": {"type": "rotation", "angle_deg": 120.0},
+        "sector_map": "identity",
+    }
+    builder = ContinuumModelBuilder(
+        q,
+        np.zeros((0, 2), dtype=float),
+        4,
+        0,
+        np.array([1.0, 0.0]),
+        np.array([0.5, np.sqrt(3.0) / 2.0]),
+        {},
+        {},
+        {"Onsite": 0},
+        DenseC3Generator(),
+        {"Onsite": [c3_op]},
+        term_templates=[
+            {
+                "name": "onsite",
+                "source": "onsite",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "diagonal",
+                "max_order": 0,
+            }
+        ],
+    )
+    builder.build_terms()
+    builder.null_channel_rel_tol = 1.0e-12
+    kpoint = np.array([0.13, -0.07], dtype=float)
+    known_coefficients = [0.7, -0.2, 1.1, -0.4]
+    for term, coefficient in zip(builder.model.terms.values(), known_coefficients):
+        term.active = True
+        term.r_value_real = coefficient
+        term.r_value_imag = 0.0
+    target = builder.model.assemble_hamiltonian(kpoint, builder.symmetry_gen)
+
+    for term in builder.model.terms.values():
+        term.active = True
+        term.r_value_real = None
+        term.r_value_imag = None
+    builder.compute_coefficients_by_tag(
+        target,
+        np.asarray([kpoint]),
+        tol=1.0e-12,
+    )
+    reconstructed = builder.model.assemble_hamiltonian(kpoint, builder.symmetry_gen)
+
+    np.testing.assert_allclose(reconstructed, target, atol=1.0e-11, rtol=0.0)
+    np.testing.assert_allclose(
+        np.diag(reconstructed),
+        np.diag(target),
+        atol=1.0e-11,
+        rtol=0.0,
+    )
+    assert np.trace(reconstructed) == pytest.approx(np.trace(target), abs=1.0e-11)
+
+
+def test_coefficient_fit_custom_terms_fall_back_to_full_dense_responses() -> None:
+    q = np.array([[0.0, 0.0]], dtype=float)
+    angle = 2.0 * np.pi / 3.0
+    c3_matrix = np.array(
+        [
+            [np.cos(angle), -np.sin(angle)],
+            [np.sin(angle), np.cos(angle)],
+        ],
+        dtype=np.complex128,
+    )
+
+    class DenseC3Generator:
+        def get_operator(self, name, params=None):
+            assert name == "C3z"
+            power = 1 if params is None else int(params)
+            return np.linalg.matrix_power(c3_matrix, power)
+
+    c3_op = {
+        "name": "C3z",
+        "antiunitary": False,
+        "k_map": {"type": "rotation", "angle_deg": 120.0},
+        "q_map": {"type": "rotation", "angle_deg": 120.0},
+        "sector_map": "identity",
+    }
+    builder = ContinuumModelBuilder(
+        q,
+        np.zeros((0, 2), dtype=float),
+        2,
+        0,
+        np.array([1.0, 0.0]),
+        np.array([0.5, np.sqrt(3.0) / 2.0]),
+        {},
+        {},
+        {"Onsite": 0},
+        DenseC3Generator(),
+        {"Onsite": [c3_op]},
+    )
+    for orbital in (1, 2):
+        key = ContinuumTermKey(0, 0, 1, 1, orbital, orbital, (0.0, 0.0))
+        projector = np.zeros((2, 2), dtype=np.complex128)
+        projector[orbital - 1, orbital - 1] = 1.0
+        builder.model.add_term(
+            key,
+            lambda _k, matrix=projector: matrix.copy(),
+            tag="Onsite",
+            symmetry_ops=[c3_op],
+        )
+    kpoint = np.array([0.09, 0.04], dtype=float)
+    for term, coefficient in zip(builder.model.terms.values(), [0.7, -0.2]):
+        term.active = True
+        term.r_value_real = coefficient
+        term.r_value_imag = 0.0
+    target = builder.model.assemble_hamiltonian(kpoint, builder.symmetry_gen)
+
+    for term in builder.model.terms.values():
+        term.r_value_real = None
+        term.r_value_imag = None
+    builder.compute_coefficients_by_tag(target, np.asarray([kpoint]), tol=1.0e-12)
+    reconstructed = builder.model.assemble_hamiltonian(kpoint, builder.symmetry_gen)
+
+    np.testing.assert_allclose(reconstructed, target, atol=1.0e-11, rtol=0.0)
+
+
+def test_production_response_components_follow_actual_sparse_support() -> None:
+    response = model_core.sparse.csc_matrix(
+        np.asarray(
+            [
+                [1.0, 0.0, 0.0, 0.0],
+                [0.0, 2.0, 0.0, 0.0],
+                [0.0, 0.0, 3.0, 4.0],
+            ],
+            dtype=np.complex128,
+        )
+    )
+
+    components = ContinuumModelBuilder._response_column_components(response)
+
+    assert [component.tolist() for component in components] == [[0], [1], [2, 3]]
+
+
 def test_fit_uses_symmetry_closed_block_not_raw_subgroup(monkeypatch) -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     cfg = MoireConfig(
@@ -5321,17 +5731,29 @@ def test_run_configured_model_quiet_writes_detailed_log(monkeypatch, capsys, tmp
     cfg_path = _write_fixture(tmp_path)
     expected_eigvals = _expected_project_eigvals(tmp_path)
     fake_model = type("Model", (), {"terms": {}})()
+    compiled_runtime = object()
 
     def fake_build_model(moire_config):
         print("very noisy coefficient dump")
         return fake_model
 
-    def fake_compute_coefficients(moire_config, model):
+    def fake_compute_coefficients(moire_config, model, *, progress_callback=None):
         print("very noisy fit dump")
         return model, {}
 
-    def fake_compute_bands(moire_config, model, kpoints, return_eigvecs=False):
+    def fake_compute_bands(
+        moire_config,
+        model,
+        kpoints,
+        return_eigvecs=False,
+        hamiltonians_out=None,
+        compiled_runtime_out=None,
+    ):
         print("very noisy coefficient dump")
+        if hamiltonians_out is not None:
+            hamiltonians_out.extend(np.diag(row).astype(complex) for row in expected_eigvals)
+        assert compiled_runtime_out is not None
+        compiled_runtime_out.append(compiled_runtime)
         return expected_eigvals
 
     monkeypatch.setattr("kp.model.pipeline.build_model", fake_build_model)
@@ -5347,6 +5769,96 @@ def test_run_configured_model_quiet_writes_detailed_log(monkeypatch, capsys, tmp
     assert log_path.exists()
     assert "very noisy coefficient dump" in log_path.read_text(encoding="utf-8")
     assert "very noisy fit dump" in log_path.read_text(encoding="utf-8")
+    assert results["compiled_operator_runtime"] is compiled_runtime
+
+
+def test_run_model_pipeline_prints_term_summary_and_fit_progress(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    key_onsite = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
+    key_inter = ContinuumTermKey(1, 0, 2, 1, 1, 1, (0.0, 0.0))
+    terms = {
+        key_onsite: SimpleNamespace(tag="Onsite", active=True, r_value_real=0.0, r_value_imag=0.0),
+        key_inter: SimpleNamespace(tag="inter", active=True, r_value_real=0.0, r_value_imag=0.0),
+    }
+    fake_model = SimpleNamespace(terms=terms)
+    expected_eigvals = np.array([[0.0, 1.0]], dtype=float)
+    moire_cfg = MoireConfig(
+        Q_set1=np.zeros((1, 2), dtype=float),
+        Q_set2=np.zeros((1, 2), dtype=float),
+        n_orb1=1,
+        n_orb2=1,
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.0, 1.0]),
+        kpoints=np.array([[0.0, 0.0]], dtype=float),
+        kpoints_fit=np.array([[0.0, 0.0]], dtype=float),
+        heff=np.diag([0.0, 1.0])[None, :, :].astype(np.complex128),
+    )
+    model_cfg = SimpleNamespace(
+        null_channel_abs_tol=0.0,
+        null_channel_rel_tol=0.0,
+        coeff_prune_threshold=0.0,
+        band_refinement_config={},
+        compare_to_heff=False,
+    )
+
+    def fake_compute_coefficients(moire_config, model, *, progress_callback=None):
+        assert progress_callback is not None
+        progress_callback("fit block 1/1 tag=Onsite terms=1 start", state="start")
+        progress_callback("fit block 1/1 done in 0.01 s | variables=2 support_components=1 skipped_empty=0", state="done")
+        return model, {}
+
+    def fake_compute_bands(moire_config, model, kpoints, return_eigvecs=False, hamiltonians_out=None, compiled_runtime_out=None):
+        if hamiltonians_out is not None:
+            hamiltonians_out.append(np.diag(expected_eigvals[0]).astype(complex))
+        if compiled_runtime_out is not None:
+            compiled_runtime_out.append(None)
+        return expected_eigvals
+
+    monkeypatch.setattr("kp.model.pipeline.build_model", lambda _moire_config: fake_model)
+    monkeypatch.setattr("kp.model.pipeline.compute_coefficients", fake_compute_coefficients)
+    monkeypatch.setattr("kp.model.pipeline.compute_bands", fake_compute_bands)
+
+    _run_model_pipeline(moire_cfg, model_cfg, tmp_path / "model.log", verbose=False, progress=True)
+    stdout = capsys.readouterr().out
+
+    assert "term summary before fitting" in stdout
+    assert "Onsite: terms=1, fit_components=2" in stdout
+    assert "inter: terms=1, fit_components=2" in stdout
+    assert "fit block 1/1 tag=Onsite terms=1 start" in stdout
+    assert "fit block 1/1 done in 0.01 s | variables=2 support_components=1 skipped_empty=0" in stdout
+    assert "variables=0 support=0" not in stdout
+
+
+def test_progress_line_can_emit_ansi_color(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    _progress_line("fitting coefficients done in 1.23 s", enabled=True, style="done")
+    stdout = capsys.readouterr().out
+
+    assert "\033[" in stdout
+    assert "fitting coefficients done in 1.23 s" in stdout
+
+
+def test_harmonic_recommendation_plot_candidates_include_current_low_and_high() -> None:
+    report = {
+        "selected": {"intra_shells": 4, "inter_shells": 3, "plot_rms_mev": 0.01, "plot_max_mev": 0.02, "low_matrix_rms_mev": 0.0, "primary_rms_mev": 0.0, "primary_max_mev": 0.0, "subspace_mean_overlap": 1.0, "accepted": True},
+        "candidates": [
+            {"intra_shells": 1, "inter_shells": 1, "plot_rms_mev": 1.8, "plot_max_mev": 4.0, "low_matrix_rms_mev": 0.0, "primary_rms_mev": 0.1, "primary_max_mev": 0.2, "subspace_mean_overlap": 0.95, "accepted": False},
+            {"intra_shells": 2, "inter_shells": 1, "plot_rms_mev": 0.5, "plot_max_mev": 1.0, "low_matrix_rms_mev": 0.0, "primary_rms_mev": 0.05, "primary_max_mev": 0.1, "subspace_mean_overlap": 0.995, "accepted": True},
+            {"intra_shells": 4, "inter_shells": 3, "plot_rms_mev": 0.01, "plot_max_mev": 0.02, "low_matrix_rms_mev": 0.0, "primary_rms_mev": 0.0, "primary_max_mev": 0.0, "subspace_mean_overlap": 1.0, "accepted": True},
+        ],
+    }
+
+    selected = _harmonic_recommendation_plot_candidates(report, current_counts={"intra": 1, "inter": 1})
+
+    assert [item[0] for item in selected] == ["current", "low", "high"]
+    assert (selected[0][1]["intra_shells"], selected[0][1]["inter_shells"]) == (1, 1)
+    assert (selected[1][1]["intra_shells"], selected[1][1]["inter_shells"]) == (2, 1)
+    assert (selected[2][1]["intra_shells"], selected[2][1]["inter_shells"]) == (4, 3)
 
 
 def test_matrix_residual_not_only_band() -> None:
@@ -6242,6 +6754,22 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
     assert summary["all_band_plot"] == "band_comparison_all.pdf"
     assert summary["q_lattice_plot"] == "q_lattice_harmonics.pdf"
     assert summary["all_band_plot_comparison"]["num_bands"] == expected_eigvals.shape[1]
+
+
+def test_json_safe_recurses_into_complex_numpy_arrays() -> None:
+    payload = {
+        "coefficients": np.asarray([1.25 - 0.5j, -2.0 + 3.0j], dtype=np.complex128),
+    }
+
+    converted = pipeline_module._json_safe(payload)
+
+    assert converted == {
+        "coefficients": [
+            {"real": 1.25, "imag": -0.5},
+            {"real": -2.0, "imag": 3.0},
+        ]
+    }
+    json.dumps(converted)
 
 
 def test_compare_bands_reports_rms_and_max_error() -> None:

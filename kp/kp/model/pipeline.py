@@ -6,7 +6,9 @@ import contextlib
 import hashlib
 import json
 import math
+import os
 import shutil
+import sys
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -30,6 +32,7 @@ from ..config.case import normalize_case_config
 from ..identity import (
     PROJECTION_ARTIFACT_IDENTITY_FIELDS,
     exactified_operation_provenance_is_complete,
+    hash_array,
     load_projection_artifact_identity,
     load_projection_k_indices,
     require_identity_fields,
@@ -173,6 +176,7 @@ class ConfiguredModel:
     null_channel_rel_tol: float = 0.0
     artifact_identity: dict[str, Any] = field(default_factory=dict)
     project_k_indices: list[int] = field(default_factory=list)
+    kpoints_from_projection: bool = False
 
 
 def _resolve_path(value: str | Path | None, base: Path) -> Path | None:
@@ -1240,6 +1244,12 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         project_k_indices = list(range(heff_rows))
 
     kpoints_file = _resolve_path(_get_path_value(raw, "kpoints_file"), base)
+    kpoints_from_projection = False
+    if kpoints_file is None:
+        projection_kpoints = heff_file.parent / "kpoints.npy"
+        if projection_kpoints.is_file():
+            kpoints_file = projection_kpoints
+            kpoints_from_projection = True
 
     output_section = raw.get("output", {})
     if output_section is None:
@@ -1376,20 +1386,26 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             "selected_indices": [int(index) for index in fit_indices],
         }
     elif fit.get("mode") is not None and str(fit.get("mode")).strip().lower() in {"auto", "auto_compact"}:
-        fit_kpoints_all = _apply_project_k_indices(_load_kpoints_from_inputs(
+        fit_kpoints_all = _load_kpoints_from_inputs(
             kpoints_file=kpoints_file,
             kpath_config=kpath_config,
             base=base,
             rotation_deg=rotation_deg,
-        ), project_k_indices)
+            kpoints_from_projection=kpoints_from_projection,
+        )
+        if not kpoints_from_projection:
+            fit_kpoints_all = _apply_project_k_indices(fit_kpoints_all, project_k_indices)
         fit_indices, fit_selection_metadata = _select_auto_fit_indices(fit_kpoints_all, fit)
     elif fit.get("mode") is not None and str(fit.get("mode")).strip().lower() == "auto_low_energy":
-        fit_kpoints_all = _apply_project_k_indices(_load_kpoints_from_inputs(
+        fit_kpoints_all = _load_kpoints_from_inputs(
             kpoints_file=kpoints_file,
             kpath_config=kpath_config,
             base=base,
             rotation_deg=rotation_deg,
-        ), project_k_indices)
+            kpoints_from_projection=kpoints_from_projection,
+        )
+        if not kpoints_from_projection:
+            fit_kpoints_all = _apply_project_k_indices(fit_kpoints_all, project_k_indices)
         max_points = int(fit.get("max_points", 2))
         initial_points = int(fit.get("initial_points", 2))
         initial_fit_indices = (
@@ -1750,6 +1766,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         qset1_file=qset1_file,
         qset2_file=qset2_file,
         kpoints_file=kpoints_file,
+        kpoints_from_projection=kpoints_from_projection,
         heff_file=heff_file,
         heff_eig_file=heff_eig_file,
         project_k_indices=project_k_indices,
@@ -3279,7 +3296,27 @@ def _resolve_harmonics_maps(
 
 def _load_kpoints(config: ConfiguredModel) -> np.ndarray:
     if config.kpoints_file is not None:
-        kpoints = np.load(config.kpoints_file)
+        kpoints = _validate_kpoints(np.load(config.kpoints_file, allow_pickle=False))
+        if bool(getattr(config, "kpoints_from_projection", False)):
+            heff_rows = int(np.load(config.heff_file, mmap_mode="r", allow_pickle=False).shape[0])
+            if len(kpoints) != heff_rows:
+                raise ValueError(
+                    "projection kpoints/Heff row mismatch: "
+                    f"{len(kpoints)} != {heff_rows} ({config.kpoints_file})"
+                )
+            identity = getattr(config, "artifact_identity", {})
+            stored_hash = require_identity_fields(
+                identity,
+                ("kpoints_hash",),
+                f"KP projection k-points {config.kpoints_file}",
+            )["kpoints_hash"]
+            actual_hash = hash_array(kpoints)
+            if actual_hash != stored_hash:
+                raise ValueError(
+                    f"KP projection k-points {config.kpoints_file} kpoints_hash mismatch: "
+                    f"{stored_hash} != {actual_hash}"
+                )
+            return np.asarray([rot(point, float(config.rotation_deg)) for point in kpoints], dtype=float)
         return _apply_project_k_indices(kpoints, config.project_k_indices)
 
     if not config.kpath_config:
@@ -3308,9 +3345,13 @@ def _load_kpoints_from_inputs(
     kpath_config: Mapping[str, Any],
     base: Path,
     rotation_deg: float,
+    kpoints_from_projection: bool = False,
 ) -> np.ndarray:
     if kpoints_file is not None:
-        return _validate_kpoints(np.load(kpoints_file))
+        points = _validate_kpoints(np.load(kpoints_file, allow_pickle=False))
+        if kpoints_from_projection:
+            return np.asarray([rot(point, float(rotation_deg)) for point in points], dtype=float)
+        return points
     if not kpath_config:
         raise ValueError("fit.mode=auto_compact requires kpoints_file or kpath section")
     file_path = _resolve_path(kpath_config.get("file"), base)
@@ -4873,7 +4914,7 @@ def _compact_symmetry_op_for_release(operation: Any) -> dict[str, Any]:
 
 
 def _term_to_release_dict(term: Any) -> dict[str, Any]:
-    return {
+    payload = {
         "key": _term_key_to_dict(getattr(term, "key", None)),
         "tag": getattr(term, "tag", None),
         "active": bool(getattr(term, "active", False)),
@@ -4886,6 +4927,13 @@ def _term_to_release_dict(term: Any) -> dict[str, Any]:
         ],
         "registry_metadata": _json_safe(getattr(term, "registry_metadata", {})),
     }
+    if hasattr(term, "_moire_needs_hermitize_real") and hasattr(term, "_moire_needs_hermitize_imag"):
+        payload["hermitization"] = {
+            "real": bool(getattr(term, "_moire_needs_hermitize_real")),
+            "imag": bool(getattr(term, "_moire_needs_hermitize_imag")),
+            "inconsistent": bool(getattr(term, "_moire_hermitize_flags_inconsistent", False)),
+        }
+    return payload
 
 
 def _operation_physics_level(model_config: ConfiguredModel, operation: Mapping[str, Any]) -> str:
@@ -5073,12 +5121,29 @@ def _compute_validation_outputs(
                     )
         return validations, summary
 
+    cached_band_hamiltonians = results.get("band_hamiltonians")
     validation_hamiltonians: np.ndarray | None = None
     hermiticity_residuals: list[float] = []
 
     def get_validation_hamiltonians() -> np.ndarray:
         nonlocal validation_hamiltonians, hermiticity_residuals
         if validation_hamiltonians is not None:
+            return validation_hamiltonians
+        if cached_band_hamiltonians is not None:
+            cached = np.asarray(cached_band_hamiltonians, dtype=complex)
+            expected_kpoints = len(np.asarray(moire_config.kpoints, dtype=float))
+            if cached.ndim != 3 or cached.shape[0] != expected_kpoints or cached.shape[1] != cached.shape[2]:
+                raise ValueError(
+                    "band-stage Hamiltonians must have shape (Nk, dim, dim), "
+                    f"got {cached.shape} for Nk={expected_kpoints}"
+                )
+            validation_hamiltonians = cached
+            hermiticity_residuals = []
+            for hamiltonian in validation_hamiltonians:
+                denom = float(np.linalg.norm(hamiltonian)) or 1.0
+                hermiticity_residuals.append(
+                    float(np.linalg.norm(hamiltonian - hamiltonian.conj().T) / denom)
+                )
             return validation_hamiltonians
         state = _prepare_band_state(moire_config, model)
         h_model_list = []
@@ -5615,14 +5680,14 @@ def _write_auto_model_selection_outputs(
 
 def _json_safe(value: Any) -> Any:
     if isinstance(value, np.ndarray):
-        return value.tolist()
+        return _json_safe(value.tolist())
     if isinstance(value, Mapping):
         return {str(key): _json_safe(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [_json_safe(item) for item in value]
     if isinstance(value, (np.integer, np.floating)):
         return value.item()
-    if isinstance(value, complex):
+    if isinstance(value, (complex, np.complexfloating)):
         return {"real": float(np.real(value)), "imag": float(np.imag(value))}
     return value
 
@@ -5638,9 +5703,59 @@ def _redirect_model_output(log_path: Path, *, verbose: bool, mode: str):
             yield
 
 
-def _progress_line(message: str, *, enabled: bool) -> None:
+def _progress_line(
+    message: str,
+    *,
+    enabled: bool,
+    style: str | None = None,
+    stream: Any | None = None,
+) -> None:
     if enabled:
-        print(f"[kp model] {message}", flush=True)
+        out = stream if stream is not None else sys.stdout
+        use_color = _terminal_color_enabled(out)
+        style_code = {
+            "start": "36",
+            "done": "1;32",
+            "section": "1;35",
+            "fit_start": "1;33",
+            "fit_done": "1;32",
+            "path": "1;35",
+            "warning": "1;33",
+            "error": "1;31",
+        }.get(str(style or ""))
+        prefix = _terminal_color("[kp model]", "2;36", enabled=use_color)
+        body = _terminal_color(str(message), style_code, enabled=use_color) if style_code else str(message)
+        print(f"{prefix} {body}", file=out, flush=True)
+
+
+def _term_progress_summary_rows(model: Any) -> list[tuple[str, int, int, int]]:
+    rows: dict[str, dict[str, int]] = {}
+    for term in getattr(model, "terms", {}).values():
+        tag = str(getattr(term, "tag", "unknown") or "unknown")
+        row = rows.setdefault(tag, {"terms": 0, "active_terms": 0, "variables": 0})
+        row["terms"] += 1
+        if bool(getattr(term, "active", True)):
+            row["active_terms"] += 1
+        row["variables"] += 2
+    return [
+        (tag, int(values["terms"]), int(values["active_terms"]), int(values["variables"]))
+        for tag, values in sorted(rows.items(), key=lambda item: item[0].lower())
+    ]
+
+
+def _print_term_progress_summary(model: Any, *, enabled: bool, stream: Any | None = None) -> None:
+    rows = _term_progress_summary_rows(model)
+    if not rows:
+        _progress_line("term summary before fitting: no terms", enabled=enabled, style="section", stream=stream)
+        return
+    _progress_line("term summary before fitting:", enabled=enabled, style="section", stream=stream)
+    for tag, terms, active_terms, variables in rows:
+        _progress_line(
+            f"  {tag}: terms={terms}, fit_components={variables}",
+            enabled=enabled,
+            style="fit_start",
+            stream=stream,
+        )
 
 
 def _prune_small_coefficients(model: Any, threshold: float) -> dict[str, Any]:
@@ -6626,6 +6741,67 @@ def _harmonic_shell_index(norm: float, shell_norms: Sequence[float], *, tol: flo
     return int(np.argmin([abs(value - shell) for shell in shells])) + 1
 
 
+def _shell_index_matrix(norms: np.ndarray, shells: Sequence[float]) -> np.ndarray:
+    values = np.asarray(norms, dtype=float)
+    shell_values = np.asarray([float(item) for item in shells], dtype=float)
+    if shell_values.size == 0:
+        return np.full(values.shape, 10**9, dtype=np.int32)
+    return (np.argmin(np.abs(values[..., None] - shell_values[None, None, :]), axis=-1) + 1).astype(np.int32)
+
+
+def _harmonic_ablation_shell_maps(
+    rows: Sequence[Mapping[str, Any]],
+    shell_norms: Mapping[str, Sequence[float]],
+    *,
+    tol: float = 1.0e-6,
+) -> dict[str, np.ndarray]:
+    q = np.asarray([np.asarray(row["q"], dtype=float) for row in rows], dtype=float)
+    layers = np.asarray([int(row["layer"]) for row in rows], dtype=np.int16)
+    delta = q[:, None, :] - q[None, :, :]
+    norms = np.linalg.norm(delta, axis=-1)
+    zero = norms <= float(tol)
+    same_layer = layers[:, None] == layers[None, :]
+    intra = np.logical_and(~zero, same_layer)
+    inter = np.logical_and(~zero, ~same_layer)
+    intra_shell = _shell_index_matrix(norms, shell_norms.get("intra", []))
+    inter_shell = _shell_index_matrix(norms, shell_norms.get("inter", []))
+    return {
+        "zero": zero,
+        "intra": intra,
+        "inter": inter,
+        "intra_shell": intra_shell,
+        "inter_shell": inter_shell,
+    }
+
+
+def _harmonic_ablation_mask_from_shell_maps(
+    shell_maps: Mapping[str, np.ndarray],
+    *,
+    intra_shells: int,
+    inter_shells: int,
+) -> tuple[np.ndarray, dict[str, int]]:
+    zero = np.asarray(shell_maps["zero"], dtype=bool)
+    intra = np.asarray(shell_maps["intra"], dtype=bool)
+    inter = np.asarray(shell_maps["inter"], dtype=bool)
+    intra_shell = np.asarray(shell_maps["intra_shell"], dtype=np.int32)
+    inter_shell = np.asarray(shell_maps["inter_shell"], dtype=np.int32)
+    intra_keep = np.logical_and(intra, intra_shell <= int(intra_shells))
+    inter_keep = np.logical_and(inter, inter_shell <= int(inter_shells))
+    mask = np.logical_or(zero, np.logical_or(intra_keep, inter_keep))
+    intra_shell_values = intra_shell[intra]
+    inter_shell_values = inter_shell[inter]
+    stats = {
+        "onsite_or_zero": int(np.count_nonzero(zero)),
+        "intra_kept": int(np.count_nonzero(intra_keep)),
+        "intra_dropped": int(np.count_nonzero(intra) - np.count_nonzero(intra_keep)),
+        "inter_kept": int(np.count_nonzero(inter_keep)),
+        "inter_dropped": int(np.count_nonzero(inter) - np.count_nonzero(inter_keep)),
+        "max_intra_shell_seen": int(np.max(intra_shell_values)) if intra_shell_values.size else 0,
+        "max_inter_shell_seen": int(np.max(inter_shell_values)) if inter_shell_values.size else 0,
+    }
+    return mask, stats
+
+
 def _harmonic_ablation_mask(
     rows: Sequence[Mapping[str, Any]],
     shell_norms: Mapping[str, Sequence[float]],
@@ -6634,38 +6810,11 @@ def _harmonic_ablation_mask(
     inter_shells: int,
     tol: float = 1.0e-6,
 ) -> tuple[np.ndarray, dict[str, int]]:
-    dim = len(rows)
-    mask = np.zeros((dim, dim), dtype=bool)
-    stats = {
-        "onsite_or_zero": 0,
-        "intra_kept": 0,
-        "intra_dropped": 0,
-        "inter_kept": 0,
-        "inter_dropped": 0,
-        "max_intra_shell_seen": 0,
-        "max_inter_shell_seen": 0,
-    }
-    for i, row_i in enumerate(rows):
-        qi = np.asarray(row_i["q"], dtype=float)
-        for j, row_j in enumerate(rows):
-            qj = np.asarray(row_j["q"], dtype=float)
-            norm = float(np.linalg.norm(qi - qj))
-            if norm <= tol:
-                mask[i, j] = True
-                stats["onsite_or_zero"] += 1
-                continue
-            if int(row_i["layer"]) == int(row_j["layer"]):
-                shell = _harmonic_shell_index(norm, shell_norms.get("intra", []), tol=tol)
-                stats["max_intra_shell_seen"] = max(stats["max_intra_shell_seen"], int(shell))
-                keep = int(shell) <= int(intra_shells)
-                stats["intra_kept" if keep else "intra_dropped"] += 1
-            else:
-                shell = _harmonic_shell_index(norm, shell_norms.get("inter", []), tol=tol)
-                stats["max_inter_shell_seen"] = max(stats["max_inter_shell_seen"], int(shell))
-                keep = int(shell) <= int(inter_shells)
-                stats["inter_kept" if keep else "inter_dropped"] += 1
-            mask[i, j] = bool(keep)
-    return mask, stats
+    return _harmonic_ablation_mask_from_shell_maps(
+        _harmonic_ablation_shell_maps(rows, shell_norms, tol=tol),
+        intra_shells=intra_shells,
+        inter_shells=inter_shells,
+    )
 
 
 def _evaluate_harmonic_ablation_candidate(
@@ -6879,6 +7028,7 @@ def _run_harmonic_ablation_selection(
     if len(rows) != int(target.shape[-1]):
         raise ValueError(f"harmonic ablation row count {len(rows)} does not match heff dimension {target.shape[-1]}")
     shell_norms = _harmonic_shell_norms_from_qsets(qset1, qset2, tol=tol)
+    shell_maps = _harmonic_ablation_shell_maps(rows, shell_norms, tol=tol)
     threshold_values = dict(thresholds or {})
     records: list[dict[str, Any]] = []
     full_norm = float(np.linalg.norm(target))
@@ -6893,12 +7043,10 @@ def _run_harmonic_ablation_selection(
         ]
     )
     for intra_shells, inter_shells in pair_list:
-        mask, stats = _harmonic_ablation_mask(
-            rows,
-            shell_norms,
+        mask, stats = _harmonic_ablation_mask_from_shell_maps(
+            shell_maps,
             intra_shells=int(intra_shells),
             inter_shells=int(inter_shells),
-            tol=tol,
         )
         metrics = _evaluate_harmonic_ablation_candidate(
             target,
@@ -6967,6 +7115,484 @@ def _harmonic_selection_options(fit: Mapping[str, Any]) -> tuple[bool, dict[str,
         raise ValueError("fit.harmonic_selection must be a mapping or boolean when provided")
     options = dict(raw)
     return bool(options.get("enabled", False)), options
+
+
+def _harmonic_recommendation_options(
+    fit: Mapping[str, Any],
+    *,
+    inherit_from: Mapping[str, Any] | None = None,
+) -> tuple[bool, dict[str, Any]]:
+    raw = fit.get("harmonic_recommendation", True)
+    if raw is False:
+        return False, {}
+    if raw in (True, None):
+        options: dict[str, Any] = {}
+    elif isinstance(raw, Mapping):
+        options = dict(raw)
+    else:
+        raise ValueError("fit.harmonic_recommendation must be a mapping or boolean when provided")
+    for key, value in dict(inherit_from or {}).items():
+        options.setdefault(key, value)
+    return bool(options.get("enabled", True)), options
+
+
+def _format_harmonic_recommendation_candidate(candidate: Mapping[str, Any]) -> str:
+    return (
+        f"intra={int(candidate['intra_shells'])} inter={int(candidate['inter_shells'])} | "
+        f"plot RMS={float(candidate['plot_rms_mev']):.3f} meV "
+        f"Max={float(candidate['plot_max_mev']):.3f} meV | "
+        f"primary RMS={float(candidate['primary_rms_mev']):.3f} meV "
+        f"Max={float(candidate['primary_max_mev']):.3f} meV | "
+        f"overlap={float(candidate['subspace_mean_overlap']):.6f}"
+    )
+
+
+def _format_harmonic_recommendation_metrics(candidate: Mapping[str, Any]) -> str:
+    return (
+        f"plot {float(candidate['plot_rms_mev']):.3f}/{float(candidate['plot_max_mev']):.3f} meV | "
+        f"primary {float(candidate['primary_rms_mev']):.3f}/{float(candidate['primary_max_mev']):.3f} meV | "
+        f"overlap {float(candidate['subspace_mean_overlap']):.6f}"
+    )
+
+
+def _format_harmonic_recommendation_support(candidate: Mapping[str, Any]) -> str:
+    return f"intra={int(candidate['intra_shells'])} inter={int(candidate['inter_shells'])}"
+
+
+def _harmonic_recommendation_quality_key(candidate: Mapping[str, Any]) -> tuple[float, float, float, int, int]:
+    return (
+        float(candidate["plot_rms_mev"]),
+        float(candidate["low_matrix_rms_mev"]),
+        float(candidate["plot_max_mev"]),
+        int(candidate["intra_shells"]),
+        int(candidate["inter_shells"]),
+    )
+
+
+def _harmonic_recommendation_support_key(candidate: Mapping[str, Any]) -> tuple[int, int, int, float, float]:
+    intra = int(candidate["intra_shells"])
+    inter = int(candidate["inter_shells"])
+    return (
+        intra + inter,
+        max(intra, inter),
+        abs(intra - inter),
+        float(candidate["plot_rms_mev"]),
+        float(candidate["plot_max_mev"]),
+    )
+
+
+def _low_cost_harmonic_recommendation_candidate(report: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    candidates = [item for item in report.get("candidates", []) if isinstance(item, Mapping)]
+    if not candidates:
+        return None
+    relaxed_thresholds = {
+        "plot_rms_mev": 1.0,
+        "plot_max_mev": 3.0,
+        "min_overlap": 0.98,
+    }
+    relaxed = [
+        item
+        for item in candidates
+        if _harmonic_ablation_candidate_is_accepted(item, relaxed_thresholds)
+    ]
+    rows = relaxed or candidates
+    return min(rows, key=_harmonic_recommendation_support_key)
+
+
+def _harmonic_recommendation_named_candidates(report: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    selected = report.get("selected", {})
+    out: dict[str, Mapping[str, Any]] = {}
+    if isinstance(selected, Mapping):
+        out["high"] = selected
+    low_cost = _low_cost_harmonic_recommendation_candidate(report)
+    if low_cost is not None:
+        out["low"] = low_cost
+    return out
+
+
+def _harmonic_candidate_for_counts(report: Mapping[str, Any], counts: Mapping[str, int]) -> Mapping[str, Any] | None:
+    pair = (int(counts.get("intra", 0)), int(counts.get("inter", 0)))
+    for candidate in report.get("candidates", []):
+        if not isinstance(candidate, Mapping):
+            continue
+        candidate_pair = (int(candidate.get("intra_shells", -1)), int(candidate.get("inter_shells", -1)))
+        if candidate_pair == pair:
+            return candidate
+    return None
+
+
+def _harmonic_recommendation_plot_candidates(
+    report: Mapping[str, Any],
+    *,
+    current_counts: Mapping[str, int],
+) -> list[tuple[str, Mapping[str, Any]]]:
+    named = _harmonic_recommendation_named_candidates(report)
+    rows: list[tuple[str, Mapping[str, Any]]] = []
+    current = _harmonic_candidate_for_counts(report, current_counts)
+    if current is not None:
+        rows.append(("current", current))
+    low = named.get("low")
+    if low is not None:
+        rows.append(("low", low))
+    high = named.get("high")
+    if high is not None:
+        rows.append(("high", high))
+    return rows
+
+
+def _terminal_color_enabled(stream: Any | None = None) -> bool:
+    out = stream if stream is not None else sys.stdout
+    return bool(getattr(out, "isatty", lambda: False)()) and os.environ.get("NO_COLOR") is None
+
+
+def _terminal_color(text: str, code: str, *, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _resolved_harmonic_count_limits(harmonics: Mapping[str, Any]) -> dict[str, int]:
+    limits = _harmonic_count_limits(harmonics)
+    for kind in ("intra", "inter"):
+        if kind in limits:
+            continue
+        raw = harmonics.get(kind)
+        if isinstance(raw, (int, np.integer)):
+            limits[kind] = int(raw)
+        elif isinstance(raw, Mapping) and "count" in raw:
+            limits[kind] = int(raw["count"])
+    return limits
+
+
+def _print_harmonic_recommendation_report(
+    report: Mapping[str, Any],
+    *,
+    current_counts: Mapping[str, int],
+    plot_path: Path | None = None,
+    color: bool | None = None,
+) -> None:
+    named = _harmonic_recommendation_named_candidates(report)
+    selected = named.get("high")
+    if selected is None:
+        return
+    use_color = _terminal_color_enabled() if color is None else bool(color)
+    prefix = _terminal_color("[kp model]", "36", enabled=use_color)
+    current_pair = (int(current_counts.get("intra", 0)), int(current_counts.get("inter", 0)))
+    current = None
+    for candidate in report.get("candidates", []):
+        if not isinstance(candidate, Mapping):
+            continue
+        pair = (int(candidate.get("intra_shells", -1)), int(candidate.get("inter_shells", -1)))
+        if pair == current_pair:
+            current = candidate
+            break
+    low_cost = named.get("low")
+    print(
+        f"{prefix} "
+        + _terminal_color("--- Harmonic recommendation (diagnostic only) ---", "1;36", enabled=use_color),
+        flush=True,
+    )
+    current_label = _terminal_color("actual model.harmonics", "2", enabled=use_color)
+    if current is not None:
+        line = (
+            f"  {current_label}: "
+            + _format_harmonic_recommendation_support(current)
+            + " (unchanged) | "
+            + _format_harmonic_recommendation_metrics(current)
+        )
+        print(f"{prefix} " + _terminal_color(line, "2", enabled=use_color), flush=True)
+    else:
+        line = (
+            f"  {current_label}: "
+            f"intra={current_pair[0]} inter={current_pair[1]} | not scanned",
+            " (unchanged)",
+        )
+        print(f"{prefix} " + _terminal_color("".join(line), "2", enabled=use_color), flush=True)
+    if low_cost is not None:
+        label = _terminal_color("low-cost", "1;33", enabled=use_color)
+        line = (
+            f"  {label}: "
+            + _format_harmonic_recommendation_support(low_cost)
+            + " | "
+            + _format_harmonic_recommendation_metrics(low_cost)
+            + " | relaxed accuracy"
+        )
+        print(f"{prefix} " + _terminal_color(line, "33", enabled=use_color), flush=True)
+    label = _terminal_color("high-acc", "1;32", enabled=use_color)
+    line = (
+        f"  {label}: "
+        + _format_harmonic_recommendation_support(selected)
+        + " | "
+        + _format_harmonic_recommendation_metrics(selected)
+        + f" | {report.get('selection_status', 'unknown')}"
+    )
+    print(f"{prefix} " + _terminal_color(line, "32", enabled=use_color), flush=True)
+    if plot_path is not None:
+        print(
+            f"{prefix} "
+            + _terminal_color(f"  band plot: {plot_path.resolve()}", "35", enabled=use_color),
+            flush=True,
+        )
+
+
+def _aligned_harmonic_plot_bands(eig: np.ndarray, target_slice: np.ndarray, *, band_slice: tuple[int, int], target_bands: str) -> np.ndarray:
+    selected = np.asarray(eig, dtype=float)
+    if target_bands == "top":
+        selected = selected + (float(target_slice[0, -1]) - float(selected[0, -1]))
+        return selected - float(target_slice[0, -1])
+    if target_bands == "bottom":
+        selected = selected + (float(target_slice[0, 0]) - float(selected[0, 0]))
+        return selected - float(target_slice[0, 0])
+    return selected
+
+
+def _eigvalsh_harmonic_plot_window(hamiltonians: np.ndarray, band_slice: tuple[int, int]) -> np.ndarray:
+    start, stop = int(band_slice[0]), int(band_slice[1])
+    return np.asarray(
+        [
+            scipy.linalg.eigh(
+                np.asarray(matrix, dtype=np.complex128),
+                eigvals_only=True,
+                subset_by_index=[start, stop - 1],
+                driver="evr",
+            )
+            for matrix in np.asarray(hamiltonians)
+        ],
+        dtype=float,
+    )
+
+
+def _save_harmonic_recommendation_band_plot(
+    *,
+    heff: np.ndarray,
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    n_orb: tuple[int, int],
+    target_bands: str,
+    plot_bands: int,
+    report: Mapping[str, Any],
+    current_counts: Mapping[str, int],
+    path: Path,
+    tol: float,
+) -> Path | None:
+    plot_candidates = _harmonic_recommendation_plot_candidates(report, current_counts=current_counts)
+    if len(plot_candidates) < 1:
+        return None
+    target = np.asarray(heff, dtype=np.complex128)
+    if target.ndim != 3 or target.shape[-1] != target.shape[-2]:
+        raise ValueError(f"harmonic recommendation band plot expects Heff shape (Nk,dim,dim), got {target.shape}")
+    rows = _model_row_metadata_for_harmonic_scan(qset1, qset2, n_orb)
+    shell_norms = _harmonic_shell_norms_from_qsets(qset1, qset2, tol=tol)
+    shell_maps = _harmonic_ablation_shell_maps(rows, shell_norms, tol=tol)
+    dim = int(target.shape[-1])
+    band_slice = tuple(_auto_low_energy_band_slice(dim, int(plot_bands), target_bands))
+    target_slice = _eigvalsh_harmonic_plot_window(target, band_slice)
+    if target_bands == "top":
+        target_plot = target_slice - float(target_slice[0, -1])
+        ylabel = relative_energy_ylabel("top")
+    elif target_bands == "bottom":
+        target_plot = target_slice - float(target_slice[0, 0])
+        ylabel = relative_energy_ylabel("bottom")
+    else:
+        target_plot = target_slice
+        ylabel = "Energy (eV)"
+
+    def candidate_plot(candidate: Mapping[str, Any]) -> np.ndarray:
+        mask, _stats = _harmonic_ablation_mask_from_shell_maps(
+            shell_maps,
+            intra_shells=int(candidate["intra_shells"]),
+            inter_shells=int(candidate["inter_shells"]),
+        )
+        masked = target * mask[None, :, :]
+        masked = 0.5 * (masked + np.swapaxes(masked.conj(), -1, -2))
+        eig = _eigvalsh_harmonic_plot_window(masked, band_slice)
+        return _aligned_harmonic_plot_bands(eig, target_slice, band_slice=band_slice, target_bands=target_bands)
+
+    candidate_bands = [(name, candidate, candidate_plot(candidate)) for name, candidate in plot_candidates]
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+    from matplotlib.lines import Line2D
+
+    out = Path(path)
+    out.parent.mkdir(parents=True, exist_ok=True)
+    x = np.arange(target_plot.shape[0], dtype=float)
+    styles = {
+        "current": {"color": "#0072B2", "linestyle": "-", "linewidth": 1.15, "label": "current model.harmonics"},
+        "low": {"color": "#E69F00", "linestyle": "--", "linewidth": 1.05, "label": "low-cost recommendation"},
+        "high": {"color": "#009E73", "linestyle": "-.", "linewidth": 1.05, "label": "high-accuracy recommendation"},
+    }
+    legend_kwargs = dict(KP_LEGEND_KWARGS)
+    legend_kwargs.update(
+        {
+            "loc": "upper center",
+            "bbox_to_anchor": (0.5, -0.18),
+            "ncol": 2,
+            "frameon": False,
+        }
+    )
+    with kp_plot_rc_context():
+        fig, ax = plt.subplots(figsize=(5.6, 4.8), dpi=KP_DPI)
+        for ib in range(target_plot.shape[1]):
+            ax.plot(x, target_plot[:, ib], color="black", linewidth=1.2, alpha=0.85)
+            for name, _candidate, bands in candidate_bands:
+                style = styles.get(name, {"color": "0.4", "linestyle": ":", "linewidth": 1.0, "label": name})
+                ax.plot(
+                    x,
+                    bands[:, ib],
+                    color=str(style["color"]),
+                    linewidth=float(style["linewidth"]),
+                    linestyle=str(style["linestyle"]),
+                    alpha=0.86,
+                )
+        ax.set_xlabel("k-point index")
+        ax.set_ylabel(ylabel)
+        ax.set_title("Harmonic support comparison")
+        ax.grid(True, axis="y", color="0.88", linewidth=0.65)
+        ax.axhline(0.0, color="0.88", linewidth=0.7, zorder=0)
+        ax.legend(
+            handles=[
+                Line2D([0], [0], color="black", linewidth=1.2, label="original Heff"),
+                *[
+                    Line2D(
+                        [0],
+                        [0],
+                        color=str(styles.get(name, {}).get("color", "0.4")),
+                        linewidth=float(styles.get(name, {}).get("linewidth", 1.0)),
+                        linestyle=str(styles.get(name, {}).get("linestyle", ":")),
+                        label=str(styles.get(name, {}).get("label", name)),
+                    )
+                    for name, _candidate, _bands in candidate_bands
+                ],
+            ],
+            **legend_kwargs,
+        )
+        apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT, font_family=kp_font_family())
+        fig.tight_layout(rect=(0.0, 0.12, 1.0, 1.0))
+        fig.savefig(out, dpi=KP_DPI, bbox_inches="tight")
+        plt.close(fig)
+    return out
+
+
+def _run_and_print_harmonic_recommendation(
+    *,
+    heff_file: Path,
+    qset1_file: Path,
+    qset2_file: Path,
+    output_dir: Path,
+    rotation_deg: float,
+    band_indices: Sequence[int] | None,
+    n_orb_values: Sequence[int],
+    target_bands: str,
+    fit: Mapping[str, Any],
+    current_counts: Mapping[str, int],
+    options: Mapping[str, Any],
+) -> None:
+    thresholds_raw = options.get("thresholds", {})
+    if thresholds_raw is None:
+        thresholds_raw = {}
+    if not isinstance(thresholds_raw, Mapping):
+        raise ValueError("fit.harmonic_recommendation.thresholds must be a mapping when provided")
+    threshold_values = _harmonic_selection_threshold_values(thresholds_raw)
+    Q_set1_for_selection, Q_set2_for_selection = load_Q_sets_from_gvec_files(
+        qset1_file,
+        qset2_file,
+        rotation_deg=rotation_deg,
+    )
+    heff_for_selection = _select_rows(np.load(heff_file, mmap_mode="r"), band_indices)
+    sample_indices = _evenly_spaced_sample_indices(
+        int(heff_for_selection.shape[0]),
+        int(options.get("sample_kpoints", 7)),
+    )
+    if sample_indices is None:
+        heff_scan = np.asarray(heff_for_selection)
+    else:
+        heff_scan = np.asarray(heff_for_selection)[np.asarray(sample_indices, dtype=int)]
+    n_primary_for_selection = int(sum(int(value) for value in n_orb_values))
+    dim_for_selection = int(heff_for_selection.shape[-1])
+    plot_bands_for_selection = int(
+        options.get(
+            "plot_bands",
+            fit.get("weighted_fit_bands", min(dim_for_selection, max(n_primary_for_selection, 10))),
+        )
+    )
+    max_shell_for_selection = max(
+        int(options.get("max_shell", 5)),
+        int(current_counts.get("intra", 0)),
+        int(current_counts.get("inter", 0)),
+    )
+    candidate_pairs_for_selection = _harmonic_candidate_pairs_from_config(
+        options.get("candidate_pairs"),
+        max_shell=max_shell_for_selection,
+        search=str(options.get("search", "ladder")),
+    )
+    current_pair = (int(current_counts.get("intra", 0)), int(current_counts.get("inter", 0)))
+    if candidate_pairs_for_selection is not None and current_pair not in candidate_pairs_for_selection:
+        candidate_pairs_for_selection = [*candidate_pairs_for_selection, current_pair]
+    report = _run_harmonic_ablation_selection(
+        heff_scan,
+        Q_set1_for_selection,
+        Q_set2_for_selection,
+        n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
+        target_bands=target_bands,
+        primary_bands=n_primary_for_selection,
+        plot_bands=plot_bands_for_selection,
+        max_shell=max_shell_for_selection,
+        thresholds=threshold_values,
+        candidate_pairs=candidate_pairs_for_selection,
+        tol=float(options.get("tol", 1.0e-6)),
+    )
+    report["sample_indices"] = sample_indices
+    plot_path = _save_harmonic_recommendation_band_plot(
+        heff=np.asarray(heff_for_selection),
+        qset1=Q_set1_for_selection,
+        qset2=Q_set2_for_selection,
+        n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
+        target_bands=target_bands,
+        plot_bands=plot_bands_for_selection,
+        report=report,
+        current_counts=current_counts,
+        path=Path(output_dir) / "harmonic_recommendation_bands.png",
+        tol=float(options.get("tol", 1.0e-6)),
+    )
+    _print_harmonic_recommendation_report(report, current_counts=current_counts, plot_path=plot_path)
+
+
+def _run_model_harmonic_recommendation_once(
+    *,
+    model_config: ConfiguredModel,
+    output_dir: Path,
+) -> None:
+    fit = model_config.raw.get("fit", {})
+    if not isinstance(fit, Mapping):
+        return
+    harmonic_selection_enabled, harmonic_selection_cfg = _harmonic_selection_options(fit)
+    if harmonic_selection_enabled and isinstance(model_config.raw.get("model", {}).get("auto_low_energy_harmonic_selection"), Mapping):
+        return
+    recommendation_enabled, recommendation_cfg = _harmonic_recommendation_options(
+        fit,
+        inherit_from=harmonic_selection_cfg,
+    )
+    if not recommendation_enabled:
+        return
+    try:
+        _run_and_print_harmonic_recommendation(
+            heff_file=model_config.heff_file,
+            qset1_file=model_config.qset1_file,
+            qset2_file=model_config.qset2_file,
+            output_dir=output_dir,
+            rotation_deg=model_config.rotation_deg,
+            band_indices=model_config.band_indices,
+            n_orb_values=model_config.n_orb,
+            target_bands=str(model_config.raw.get("model", {}).get("target_bands", "top")).strip().lower(),
+            fit=fit,
+            current_counts=_resolved_harmonic_count_limits(model_config.harmonics_config),
+            options=recommendation_cfg,
+        )
+    except Exception as exc:
+        _progress_line(f"harmonic recommendation skipped: {exc}", enabled=True, style="warning")
 
 
 def _auto_low_energy_band_slice(dim: int, n_bands: int, target_bands: str) -> list[int]:
@@ -9109,16 +9735,17 @@ def _run_model_pipeline(
 ) -> dict[str, Any]:
     setup_logging(moire_config.log_level)
     first_log_write = True
+    progress_stream = sys.stdout
 
     def run_stage(label: str, func):
         nonlocal first_log_write
-        _progress_line(f"{label} ...", enabled=progress)
+        _progress_line(f"{label} ...", enabled=progress, style="start", stream=progress_stream)
         t0 = time.perf_counter()
         mode = "w" if first_log_write else "a"
         first_log_write = False
         with _redirect_model_output(log_path, verbose=verbose, mode=mode):
             result = func()
-        _progress_line(f"{label} done in {time.perf_counter() - t0:.2f} s", enabled=progress)
+        _progress_line(f"{label} done in {time.perf_counter() - t0:.2f} s", enabled=progress, style="done", stream=progress_stream)
         return result
 
     model = run_stage("building continuum terms", lambda: build_model(moire_config))
@@ -9131,7 +9758,16 @@ def _run_model_pipeline(
     pruning = {"enabled": False, "threshold": 0.0, "dropped": 0, "kept": None}
     refinement = {"enabled": False}
     if moire_config.heff is not None and moire_config.kpoints_fit is not None:
-        model, diagnostics = run_stage("fitting coefficients", lambda: compute_coefficients(moire_config, model))
+        _print_term_progress_summary(model, enabled=progress, stream=progress_stream)
+
+        def fit_progress(message: str, *, state: str | None = None) -> None:
+            style = "fit_done" if state == "done" else "fit_start" if state == "start" else None
+            _progress_line(str(message), enabled=progress, style=style, stream=progress_stream)
+
+        model, diagnostics = run_stage(
+            "fitting coefficients",
+            lambda: compute_coefficients(moire_config, model, progress_callback=fit_progress),
+        )
         null_filter = _null_channel_filter_summary(
             model,
             model_config.null_channel_abs_tol,
@@ -9171,6 +9807,8 @@ def _run_model_pipeline(
     if moire_config.kpoints is None:
         raise ValueError("config.kpoints must be provided for band computation.")
     want_band_overlap_vectors = bool(model_config.compare_to_heff)
+    band_hamiltonians: list[np.ndarray] = []
+    compiled_operator_runtime: list[Any | None] = []
     eigvals = run_stage(
         f"computing bands on {len(moire_config.kpoints)} k-points",
         lambda: compute_bands(
@@ -9178,11 +9816,19 @@ def _run_model_pipeline(
             model,
             moire_config.kpoints,
             return_eigvecs=bool(moire_config.save_eigvecs or want_band_overlap_vectors),
+            hamiltonians_out=band_hamiltonians,
+            compiled_runtime_out=compiled_operator_runtime,
         ),
     )
     return {
         "model": model,
         "eigvals": eigvals,
+        "band_hamiltonians": np.asarray(band_hamiltonians, dtype=complex),
+        "compiled_operator_runtime": (
+            compiled_operator_runtime[0]
+            if compiled_operator_runtime
+            else None
+        ),
         "diagnostics": diagnostics,
         "null_channel_filter": null_filter,
         "coefficient_pruning": pruning,
@@ -9463,16 +10109,17 @@ def _run_auto_low_energy_fit_candidate_scan(
 
 def run_configured_model(path: str | Path) -> dict[str, Any]:
     started = time.perf_counter()
-    print("[kp model] loading configuration ...", flush=True)
+    _progress_line("loading configuration ...", enabled=True, style="start")
     moire_config, model_config = build_moire_config_from_file(path)
     output_dir = model_config.output_dir
     output_profile = _model_output_profile(model_config)
     canonical_output = isinstance(model_config.raw.get("case"), Mapping) and bool(model_config.raw["case"].get("profile")) and bool(model_config.raw["case"].get("q_shell"))
     diagnostics_dir = _model_diagnostics_dir(output_dir) if output_profile == "debug" else None
     output_dir.mkdir(parents=True, exist_ok=True)
-    print(f"[kp model] output directory: {output_dir}", flush=True)
+    _progress_line(f"output directory: {output_dir}", enabled=True, style="path")
     _cleanup_stale_band_outputs(output_dir)
     _cleanup_stale_model_debug_outputs(output_dir)
+    _run_model_harmonic_recommendation_once(model_config=model_config, output_dir=output_dir)
     if diagnostics_dir is not None:
         save_bM_diagnostics(model_config=model_config, output_dir=diagnostics_dir)
         save_harmonics_diagnostics(moire_config=moire_config, model_config=model_config, output_dir=diagnostics_dir)
@@ -9618,10 +10265,16 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         results["band_plot"] = str(band_plot_path.resolve())
     if all_band_plot_path is not None:
         results["all_band_plot"] = str(all_band_plot_path.resolve())
+    _progress_line("validating fitted model ...", enabled=progress)
+    validation_started = time.perf_counter()
     validations, validation_summary = _compute_validation_outputs(
         results=results,
         model_config=model_config,
         moire_config=moire_config,
+    )
+    _progress_line(
+        f"validating fitted model done in {time.perf_counter() - validation_started:.2f} s",
+        enabled=progress,
     )
     results["validations"] = validations
     results["validation_summary"] = validation_summary

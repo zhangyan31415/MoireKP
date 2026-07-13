@@ -58,6 +58,30 @@ from .config.case import normalize_case_config
 HARTREE_TO_EV = 27.2113845
 
 
+def _kp_cli_color_enabled() -> bool:
+    return bool(getattr(sys.stdout, "isatty", lambda: False)()) and os.environ.get("NO_COLOR") is None
+
+
+def _kp_cli_color(text: str, code: str, *, enabled: bool) -> str:
+    if not enabled:
+        return text
+    return f"\033[{code}m{text}\033[0m"
+
+
+def _kp_model_print(message: str, *, style: str | None = None) -> None:
+    use_color = _kp_cli_color_enabled()
+    style_code = {
+        "header": "1;36",
+        "path": "1;35",
+        "metric": "1;33",
+        "ok": "1;32",
+        "info": "36",
+    }.get(str(style or ""))
+    prefix = _kp_cli_color("[kp model]", "36", enabled=use_color)
+    body = _kp_cli_color(str(message), style_code, enabled=use_color) if style_code else str(message)
+    print(f"{prefix} {body}")
+
+
 def _is_canonical_case_config(cfg: dict[str, Any]) -> bool:
     case = cfg.get("case")
     if not isinstance(case, dict):
@@ -153,6 +177,7 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "band_comparison.pdf",
         "band_comparison_all.pdf",
         "q_lattice_harmonics.pdf",
+        "harmonic_recommendation_bands.png",
     }
     root = Path(model_output_dir)
     if not root.exists():
@@ -688,6 +713,57 @@ def _load_bands_from_text(path: str) -> list[np.ndarray]:
     return rows
 
 
+def _load_project_source_kpoints(
+    cfg: dict[str, Any],
+    material: dict[str, Any],
+    *,
+    cfg_dir: str,
+    hamk_file: str,
+    nk: int,
+    project_indices: Sequence[int],
+) -> np.ndarray:
+    """Load TAPW path rows and convert fractional coordinates to source Cartesian k."""
+
+    source_raw = material.get("kpoints_file")
+    if source_raw in (None, ""):
+        source_path = Path(hamk_file).with_name("kpoints.npy")
+    else:
+        source_path = Path(str(source_raw))
+        if not source_path.is_absolute():
+            source_path = Path(cfg_dir) / source_path
+    source_path = source_path.resolve()
+    if not source_path.is_file():
+        raise FileNotFoundError(
+            "kp project requires the canonical TAPW k-point artifact beside hamiltonian_k.npy "
+            f"or material.kpoints_file: {source_path}"
+        )
+
+    source = np.asarray(np.load(source_path, allow_pickle=False), dtype=float)
+    if source.ndim != 2 or source.shape[1] < 3:
+        raise ValueError(
+            "TAPW kpoints must have shape (Nk, >=3) with fractional reciprocal coordinates, "
+            f"got {source.shape} ({source_path})"
+        )
+    if source.shape[0] != int(nk):
+        raise ValueError(
+            "TAPW k-point rows must match hamiltonian_k rows for kp project: "
+            f"{source.shape[0]} != {nk} ({source_path})"
+        )
+
+    kpath = cfg.get("kpath", {})
+    if not isinstance(kpath, dict) or kpath.get("tmat") is None:
+        raise ValueError(
+            "kp project requires kpath.tmat to convert TAPW fractional kpoints into Cartesian coordinates"
+        )
+    tmat = np.asarray(kpath["tmat"], dtype=float)
+    if tmat.shape != (3, 3):
+        raise ValueError(f"kpath.tmat must have shape (3,3), got {tmat.shape}")
+    reciprocal = np.linalg.inv(tmat).T * (2.0 * np.pi)
+    reciprocal_2d = np.array([reciprocal[0, :2], reciprocal[1, :2]], dtype=float).T
+    source_cartesian = (reciprocal_2d @ source[:, :2].T).T
+    return np.asarray(source_cartesian[np.asarray(project_indices, dtype=int)], dtype=float)
+
+
 def _normalize_kpath_tick_label(label: Any) -> str:
     text = str(label).strip()
     if text.lower() in {"gamma", "gam", "g"}:
@@ -1207,7 +1283,9 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         print(f"[kp] Diagonalized {len(eigs_list)} Q blocks.")
         print(f"[kp] {np.array(eigs_list).shape}")
 
-    out_path = resolve(plot_cfg.get("out", f"plot_{mode}_scatter.pdf"))
+    out_path = resolve(plot_cfg.get("out", "bands_and_qblocks.pdf"))
+    if out_path is not None and os.path.basename(out_path) == "bands_and_qblocks.pdf":
+        _remove_known_stale_files(os.path.dirname(out_path), ("scatter.pdf",))
     data_out = resolve(plot_cfg.get("data_out", os.path.splitext(out_path)[0] + ".txt"))
     ref_q_index = int(plot_cfg.get("ref_q_index", 0))
     title = plot_cfg.get("title", None)
@@ -1532,6 +1610,22 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     for idx in project_indices:
         if idx < 0 or idx >= nk:
             raise IndexError(f"project.k_indices contains {idx}, but available k indices are 0..{nk - 1}")
+
+    band_file = resolve(material.get("band_file"))
+    if not band_file:
+        raise ValueError(
+            "material.band_file is required for the TAPW reference comparison produced by kp project"
+        )
+    try:
+        original_eigs_all = _load_bands_from_text(band_file)
+    except Exception as ex:
+        raise ValueError(f"Failed to load TAPW reference bands from material.band_file={band_file}: {ex}") from ex
+    if len(original_eigs_all) != nk:
+        raise ValueError(
+            "TAPW reference band rows must match hamiltonian_k rows for kp project: "
+            f"{len(original_eigs_all)} != {nk} ({band_file})"
+        )
+    original_eigs_list = [original_eigs_all[i] for i in project_indices]
     active_indices = _active_indices_from_project_cfg(project_cfg)
     model_dim = q_count * sum(len(layer_bands) for layer_bands in nlow_state_list)
     print("[kp] Project setup:")
@@ -1577,6 +1671,14 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             mode=mode,
         )
     norb_fix_list = resolved_norb_fix_list
+    projected_kpoints = _load_project_source_kpoints(
+        cfg,
+        material,
+        cfg_dir=cfg_dir,
+        hamk_file=str(hamk_file),
+        nk=nk,
+        project_indices=project_indices,
+    )
     _remove_known_stale_files(
         out_dir,
         (
@@ -1584,6 +1686,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             "basis_selection.json",
             "basis_selection.md",
             "eigvals.npy",
+            "scatter.pdf",
             "scatter.png",
             "spin_operator.npy",
             "vectors.npy",
@@ -1604,19 +1707,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp]   norb_fix_list={norb_fix_list}")
     # Unified output directory for all artifacts
     out_heff = os.path.join(out_dir, "heff.npy")
+    out_kpoints = os.path.join(out_dir, "kpoints.npy")
     out_eig = None
     out_vec = os.path.join(out_dir, "wavefunctions.npz")
-    plot_out = os.path.join(out_dir, "scatter.pdf")
+    plot_out = os.path.join(out_dir, "band_comparison.pdf")
     data_out = os.path.join(out_dir, "eigvals.txt")
-    original_eigs_list = None
-    band_file = resolve(material.get("band_file"))
-    if band_file:
-        try:
-            original_eigs_list = _load_bands_from_text(band_file)
-            if len(project_indices) != nk:
-                original_eigs_list = [original_eigs_list[i] for i in project_indices]
-        except Exception as ex:
-            print(f"[kp] Overlay warning: failed to load original bands from {band_file}: {ex}")
 
     project_context_id = uuid.uuid4().hex
     project_context = {
@@ -1725,6 +1820,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     # Save
     os.makedirs(os.path.dirname(out_heff) or ".", exist_ok=True)
     np.save(out_heff, heff_arr)
+    np.save(out_kpoints, projected_kpoints)
     if out_eig is not None:
         np.save(out_eig, heig_arr)
     spin_operator_arr: np.ndarray | None = None
@@ -1753,9 +1849,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         k_indices=project_indices,
     )
     heff_hash = hash_array(heff_arr)
+    kpoints_hash = hash_array(projected_kpoints)
     identity_payload = {
         **{field: np.asarray(value) for field, value in basis_identity.items()},
         "heff_hash": np.asarray(heff_hash),
+        "kpoints_hash": np.asarray(kpoints_hash),
     }
     np.savez(
         Path(out_dir) / "basis.npz",
@@ -1778,6 +1876,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         print(f"[kp] Heff shape: {heff_arr.shape}")
     print("[kp] Saved arrays:")
     print(f"[kp]   {out_heff}")
+    print(f"[kp]   {out_kpoints}")
     if out_eig is not None:
         print(f"[kp]   {out_eig}")
     print(f"[kp]   {out_vec}")
@@ -1812,12 +1911,11 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         project_indices=project_indices,
         row_count=len(heig_list),
     )
-    if original_eigs_list is not None and len(original_eigs_list) != len(heig_list):
-        print(
-            f"[kp] Overlay warning: original band rows ({len(original_eigs_list)}) "
-            f"do not match Heff rows ({len(heig_list)}); skip overlay."
+    if len(original_eigs_list) != len(heig_list):
+        raise ValueError(
+            f"TAPW reference band rows ({len(original_eigs_list)}) do not match "
+            f"projected Heff rows ({len(heig_list)})"
         )
-        original_eigs_list = None
     # Top-N comparison is reporting-only, so keep it disabled while downfold.py
     # is limited to the core downfolding math.
     # if original_eigs_list is not None:
@@ -1826,7 +1924,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     #         print_top_n_metrics(metrics)
     #     except ValueError as ex:
     #         print(f"[kp] Top-N comparison warning: {ex}")
-    print(f"[kp] Saving Heff plot: {plot_out}")
+    print(f"[kp] Saving TAPW/projected band comparison: {plot_out}")
     plot_eigs_scatter(
         heig_list,
         efermi,
@@ -2087,40 +2185,40 @@ def main(argv: Sequence[str] | None = None) -> None:
             q2 = len(moire_cfg.Q_set2) if moire_cfg.Q_set2 is not None else 0
             dim = q1 * int(moire_cfg.n_orb1) + q2 * int(moire_cfg.n_orb2)
             sym_ops = [op.get("name") for op in model_cfg.symmetry_source_metadata.get("operations", [])]
-            print("[kp model] Completed configured continuum model")
-            print(f"[kp model]   config: {model_cfg.path}")
-            print(f"[kp model]   output: {model_cfg.output_dir}")
-            print(f"[kp model]   basis: dim={dim}, Q=({q1}, {q2}), n_orb={model_cfg.n_orb}")
-            print(f"[kp model]   fit k-points: {len(model_cfg.fit_indices)}, band k-points: {len(moire_cfg.kpoints)}")
-            print(f"[kp model]   bM source: {model_cfg.bM_diagnostics.get('source', 'unknown')}")
+            _kp_model_print("Completed configured continuum model", style="header")
+            _kp_model_print(f"  config: {model_cfg.path}", style="path")
+            _kp_model_print(f"  output: {model_cfg.output_dir}", style="path")
+            _kp_model_print(f"  basis: dim={dim}, Q=({q1}, {q2}), n_orb={model_cfg.n_orb}", style="info")
+            _kp_model_print(f"  fit k-points: {len(model_cfg.fit_indices)}, band k-points: {len(moire_cfg.kpoints)}", style="info")
+            _kp_model_print(f"  bM source: {model_cfg.bM_diagnostics.get('source', 'unknown')}", style="info")
             intra_count = len(getattr(moire_cfg, "intra_harmonics_map", {}) or {})
             inter_count = len(getattr(moire_cfg, "inter_harmonics_map", {}) or {})
-            print(f"[kp model]   harmonics: intra={intra_count}, inter={inter_count}")
+            _kp_model_print(f"  harmonics: intra={intra_count}, inter={inter_count}", style="info")
             if sym_ops:
-                print(f"[kp model]   symmetry: {', '.join(str(op) for op in sym_ops)}")
+                _kp_model_print(f"  symmetry: {', '.join(str(op) for op in sym_ops)}", style="info")
             if results.get("model_log") and not _config_path_uses_canonical_case(args.config):
-                print(f"[kp model]   detailed log: {results['model_log']}")
+                _kp_model_print(f"  detailed log: {results['model_log']}", style="path")
             if results.get("runtime_s") is not None:
-                print(f"[kp model]   runtime: {float(results['runtime_s']):.2f} s")
+                _kp_model_print(f"  runtime: {float(results['runtime_s']):.2f} s", style="ok")
         if results.get("band_plot"):
-            print(f"[kp model]   band plot: {results['band_plot']}")
+            _kp_model_print(f"  band plot: {results['band_plot']}", style="path")
         if results.get("q_lattice_plot"):
-            print(f"[kp model]   q lattice plot: {results['q_lattice_plot']}")
+            _kp_model_print(f"  q lattice plot: {results['q_lattice_plot']}", style="path")
         if results.get("all_band_plot"):
-            print(f"[kp model]   all-band plot: {results['all_band_plot']}")
+            _kp_model_print(f"  all-band plot: {results['all_band_plot']}", style="path")
         if comparison:
             rms = float(comparison["rms_error"])
             max_abs = float(comparison["max_abs_error"])
-            print(f"[kp model]   RMS error: {rms:.6e} eV ({1000.0 * rms:.3f} meV)")
-            print(f"[kp model]   Max error: {max_abs:.6e} eV ({1000.0 * max_abs:.3f} meV)")
+            _kp_model_print(f"  RMS error: {rms:.6e} eV ({1000.0 * rms:.3f} meV)", style="metric")
+            _kp_model_print(f"  Max error: {max_abs:.6e} eV ({1000.0 * max_abs:.3f} meV)", style="metric")
         if plot_comparison:
             rms_mev = float(plot_comparison.get("rms_error_mev", 1000.0 * float(plot_comparison["rms_error"])))
             max_mev = float(plot_comparison.get("max_abs_error_mev", 1000.0 * float(plot_comparison["max_abs_error"])))
             bands = int(plot_comparison.get("num_bands", 0))
             align = str(plot_comparison.get("align", "none"))
-            print(f"[kp model]   plot bands RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})")
+            _kp_model_print(f"  plot bands RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})", style="metric")
             if plot_comparison.get("model_alignment_shift_meV") is not None:
-                print(f"[kp model]   plot alignment shift: {float(plot_comparison['model_alignment_shift_meV']):.3f} meV")
+                _kp_model_print(f"  plot alignment shift: {float(plot_comparison['model_alignment_shift_meV']):.3f} meV", style="metric")
         all_band_comparison = results.get("all_band_plot_comparison")
         if all_band_comparison:
             rms_mev = float(
@@ -2137,21 +2235,28 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             bands = int(all_band_comparison.get("num_bands", 0))
             align = str(all_band_comparison.get("align", "none"))
-            print(f"[kp model]   all-band RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})")
+            _kp_model_print(f"  all-band RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})", style="metric")
         if model_cfg is None:
             raise RuntimeError("standalone export requires configured model results")
         from .model.export import export_standalone_model
 
         standalone_dir = Path(model_cfg.output_dir)
+        compiled_runtime = results.get("compiled_operator_runtime")
+        operator_data = (
+            compiled_runtime.export_arrays()
+            if compiled_runtime is not None
+            else None
+        )
         export_path = export_standalone_model(
             model_cfg.output_dir,
             standalone_dir,
             force=True,
             debug_files=False,
+            operator_data=operator_data,
         )
         if _config_path_uses_canonical_case(args.config):
             _cleanup_canonical_model_output(model_cfg.output_dir)
-        print(f"[kp model]   standalone export: {export_path}")
+        _kp_model_print(f"  standalone export: {export_path}", style="path")
     else:
         raise SystemExit(2)
 

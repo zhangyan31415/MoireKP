@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from functools import wraps
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 # --- third-party ---
@@ -2875,10 +2876,256 @@ class ContinuumModelBuilder:
             mat_blocks.append(scipy.linalg.block_diag(*block_list))
 
         return mat_blocks
-        
-            
+
+    def _requires_production_response_fit(self) -> bool:
+        for term in self.model.terms.values():
+            for operation in term.symmetry_ops:
+                if not self._uses_physical_time_reversal_fit_block(operation):
+                    return True
+        return False
+
+    def _dense_production_response_matrix(
+        self,
+        terms: Sequence[ContinuumTerm],
+        k_points: np.ndarray,
+    ) -> sparse.csc_matrix:
+        dim = len(self.Q_set1) * self.n_orb1 + len(self.Q_set2) * self.n_orb2
+        nk = int(k_points.shape[0])
+        block_dim = nk * dim
+        response_rows: List[np.ndarray] = []
+        response_cols: List[np.ndarray] = []
+        response_values: List[np.ndarray] = []
+        for term_index, term in enumerate(terms):
+            for k_index, kpoint in enumerate(k_points):
+                mat_real, mat_imag = ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static(
+                    term.Y_basis,
+                    kpoint,
+                    term.symmetry_ops,
+                    symmetry_gen=self.symmetry_gen,
+                    term=term,
+                )
+                for channel, matrix in enumerate((mat_real, mat_imag)):
+                    local_rows, local_cols = np.nonzero(matrix)
+                    if local_rows.size == 0:
+                        continue
+                    global_rows = k_index * dim + local_rows
+                    global_cols = k_index * dim + local_cols
+                    response_rows.append(global_rows * block_dim + global_cols)
+                    response_cols.append(
+                        np.full(
+                            local_rows.shape,
+                            2 * term_index + channel,
+                            dtype=np.int64,
+                        )
+                    )
+                    response_values.append(matrix[local_rows, local_cols])
+        shape = (block_dim * block_dim, 2 * len(terms))
+        if not response_values:
+            return sparse.csc_matrix(shape, dtype=np.complex128)
+        response = sparse.coo_matrix(
+            (
+                np.concatenate(response_values),
+                (np.concatenate(response_rows), np.concatenate(response_cols)),
+            ),
+            shape=shape,
+            dtype=np.complex128,
+        ).tocsc()
+        response.sum_duplicates()
+        response.eliminate_zeros()
+        return response
+
+    def _production_response_matrix(
+        self,
+        terms: Sequence[ContinuumTerm],
+        k_points: np.ndarray,
+    ) -> tuple[sparse.csc_matrix, str]:
+        dim = len(self.Q_set1) * self.n_orb1 + len(self.Q_set2) * self.n_orb2
+        try:
+            from .operator_runtime import (
+                CompiledOperatorUnsupported,
+                compile_operator_recipe,
+                compiled_operator_response_matrix,
+            )
+
+            recipe = compile_operator_recipe(
+                terms,
+                SimpleNamespace(
+                    symmetry_gen=self.symmetry_gen,
+                    kpoints_fit=np.asarray(k_points, dtype=float),
+                ),
+                dim,
+            )
+            return (
+                compiled_operator_response_matrix(
+                    recipe,
+                    k_points,
+                    dim=dim,
+                    term_count=len(terms),
+                ),
+                "compiled",
+            )
+        except CompiledOperatorUnsupported:
+            return self._dense_production_response_matrix(terms, k_points), "dense"
+
+    @staticmethod
+    def _response_column_components(response: sparse.csc_matrix) -> List[np.ndarray]:
+        matrix = response.tocsc()
+        n_columns = int(matrix.shape[1])
+        parent = list(range(n_columns))
+        rank = [0] * n_columns
+
+        def find(index: int) -> int:
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left: int, right: int) -> None:
+            root_left = find(left)
+            root_right = find(right)
+            if root_left == root_right:
+                return
+            if rank[root_left] < rank[root_right]:
+                parent[root_left] = root_right
+            elif rank[root_left] > rank[root_right]:
+                parent[root_right] = root_left
+            else:
+                parent[root_right] = root_left
+                rank[root_left] += 1
+
+        first_owner: Dict[int, int] = {}
+        live_columns: List[int] = []
+        for column in range(n_columns):
+            start = int(matrix.indptr[column])
+            stop = int(matrix.indptr[column + 1])
+            support = matrix.indices[start:stop]
+            if support.size == 0:
+                continue
+            live_columns.append(column)
+            for position in support.tolist():
+                owner = first_owner.get(int(position))
+                if owner is None:
+                    first_owner[int(position)] = column
+                else:
+                    union(column, owner)
+
+        grouped: Dict[int, List[int]] = {}
+        for column in live_columns:
+            grouped.setdefault(find(column), []).append(column)
+        return [
+            np.asarray(columns, dtype=int)
+            for columns in sorted(grouped.values(), key=lambda values: values[0])
+        ]
+
+    def _compute_coefficients_from_production_responses(
+        self,
+        heff: np.ndarray,
+        k_points: np.ndarray,
+        *,
+        tol: float,
+        progress_callback: Callable[..., None] | None,
+    ) -> Dict[str, Dict[Any, np.ndarray]]:
+        terms = list(self.model.terms.values())
+        coeffs_by_tag: Dict[str, Dict[Any, np.ndarray]] = {
+            tag: {}
+            for tag in dict.fromkeys(term.tag for term in terms)
+        }
+        response, response_source = self._production_response_matrix(terms, k_points)
+        target_matrix = np.asarray(heff, dtype=np.complex128)
+        if target_matrix.ndim == 3:
+            target_matrix = scipy.linalg.block_diag(*target_matrix)
+        if target_matrix.ndim != 2 or target_matrix.shape[0] != target_matrix.shape[1]:
+            raise ValueError(f"heff must be square or have shape (Nk, dim, dim), got {target_matrix.shape}")
+        target = target_matrix.reshape(-1)
+        if response.shape[0] != target.size:
+            raise ValueError(
+                "production response/heff size mismatch: "
+                f"{response.shape[0]} != {target.size}"
+            )
+
+        components = self._response_column_components(response)
+        coefficients = np.zeros(2 * len(terms), dtype=float)
+        retained_channels: set[int] = set()
+        raw_channel_norms = None
+        if float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0) > 0.0:
+            raw_channel_norms = self._raw_initialterm_norms_for_fit_keys(
+                [term.key for term in terms],
+                k_points,
+            )
+
+        for term in terms:
+            term.active = False
+            term.r_value_real = 0.0
+            term.r_value_imag = 0.0
+
+        total_components = len(components)
+        for component_index, columns in enumerate(components, start=1):
+            started = time.perf_counter()
+            support_parts = []
+            for column in columns:
+                start = int(response.indptr[int(column)])
+                stop = int(response.indptr[int(column) + 1])
+                support_parts.append(response.indices[start:stop])
+            support = np.unique(np.concatenate(support_parts)).astype(int, copy=False)
+            design = response[support, :][:, columns].toarray().T
+            component_raw_norms = (
+                None
+                if raw_channel_norms is None
+                else np.asarray(raw_channel_norms, dtype=float)[columns]
+            )
+            solved, included = self._solve_coefficients_from_support_matrix(
+                design,
+                target[support],
+                tol=tol,
+                null_channel_abs_tol=float(getattr(self, "null_channel_abs_tol", 0.0) or 0.0),
+                raw_channel_norms=component_raw_norms,
+                null_channel_rel_tol=float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0),
+            )
+            for value, local_column in zip(solved, included):
+                global_column = int(columns[int(local_column)])
+                coefficients[global_column] = float(value)
+                retained_channels.add(global_column)
+            if progress_callback is not None:
+                progress_callback(
+                    f"fit response component {component_index}/{total_components} "
+                    f"source={response_source} channels={len(columns)} variables={len(included)} "
+                    f"support_entries={len(support)} done in {time.perf_counter() - started:.2f} s",
+                    state="done",
+                )
+
+        for term_index, term in enumerate(terms):
+            real_channel = 2 * term_index
+            imag_channel = real_channel + 1
+            term.r_value_real = float(coefficients[real_channel])
+            term.r_value_imag = float(coefficients[imag_channel])
+            term.active = real_channel in retained_channels or imag_channel in retained_channels
+
+        for component_index, columns in enumerate(components):
+            term_indices = list(dict.fromkeys(int(column) // 2 for column in columns))
+            for tag in coeffs_by_tag:
+                tag_values = [
+                    complex(
+                        coefficients[2 * term_index],
+                        coefficients[2 * term_index + 1],
+                    )
+                    for term_index in term_indices
+                    if terms[term_index].tag == tag
+                ]
+                if tag_values:
+                    coeffs_by_tag[tag][("production_response_component", component_index)] = np.asarray(
+                        tag_values,
+                        dtype=np.complex128,
+                    )
+        return coeffs_by_tag
+
     @timing_decorator_factory(0)
-    def compute_coefficients_by_tag(self, heff: np.ndarray, k_points: List[np.ndarray], tol: float = 1e-8) -> Dict[str, Dict[Any, np.ndarray]]:
+    def compute_coefficients_by_tag(
+        self,
+        heff: np.ndarray,
+        k_points: List[np.ndarray],
+        tol: float = 1e-8,
+        progress_callback: Callable[..., None] | None = None,
+    ) -> Dict[str, Dict[Any, np.ndarray]]:
         """
         Fit all terms that share the same fit block together, then report the
         fitted coefficients grouped by tag for diagnostics.
@@ -2898,6 +3145,15 @@ class ContinuumModelBuilder:
         term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] = {}
         self._null_channel_filter_reports = []
 
+        k_points_array = np.asarray(k_points, dtype=float)
+        if self._requires_production_response_fit():
+            return self._compute_coefficients_from_production_responses(
+                heff,
+                k_points_array,
+                tol=tol,
+                progress_callback=progress_callback,
+            )
+
         print("\n" + "="*100)
         print(f"Processing joint fit blocks. Time: {time.strftime('%H:%M:%S', time.localtime())}")
         for tag, keys in tag_groups.items():
@@ -2916,12 +3172,24 @@ class ContinuumModelBuilder:
             subgroup = self._fit_block_signature_for_key(key)
             subgroup_dict.setdefault(subgroup, []).append(key)
 
-        for subgroup, base_sub_keys in subgroup_dict.items():
+        total_blocks = len(subgroup_dict)
+        for block_index, (subgroup, base_sub_keys) in enumerate(subgroup_dict.items(), start=1):
+            block_started = time.perf_counter()
             base_tag_counts: Dict[str, int] = {}
             for key in base_sub_keys:
                 tag = self.model.terms[key].tag
                 base_tag_counts[tag] = base_tag_counts.get(tag, 0) + 1
             base_tag_summary = ", ".join(f"{tag}:{count}" for tag, count in sorted(base_tag_counts.items()))
+            if progress_callback is not None:
+                if len(base_tag_counts) == 1:
+                    tag_part = f"tag={next(iter(base_tag_counts))}"
+                else:
+                    tag_part = f"tags={base_tag_summary}"
+                progress_callback(
+                    f"fit block {block_index}/{total_blocks} {tag_part} "
+                    f"terms={len(base_sub_keys)} start",
+                    state="start",
+                )
             print(
                 f"  Processing joint fit block with {len(base_sub_keys)} terms "
                 f"({base_tag_summary}). Time: {time.strftime('%H:%M:%S', time.localtime())}"
@@ -2936,6 +3204,10 @@ class ContinuumModelBuilder:
             if len(support_components) > 1:
                 print(f"    split into {len(support_components)} support components before orthogonalization.")
 
+            block_variables = 0
+            block_support_entries = 0
+            block_solved_components = 0
+            block_skipped_components = 0
             for component_index, (sub_keys, component_support_idx) in enumerate(support_components):
                 tag_counts: Dict[str, int] = {}
                 for key in sub_keys:
@@ -2964,6 +3236,7 @@ class ContinuumModelBuilder:
                             diagnostics_key = (diagnostics_key, ("support_component", component_index))
                         coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
                     print(f"  No support for subgroup {subgroup}; coefficients set to zero.")
+                    block_skipped_components += 1
                     continue
 
                 support_vectors = self._initialterm_support_vectors_for_fit_keys(
@@ -3004,6 +3277,7 @@ class ContinuumModelBuilder:
                             diagnostics_key = (diagnostics_key, ("support_component", component_index))
                         coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
                     print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
+                    block_skipped_components += 1
                     continue
 
                 included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
@@ -3030,6 +3304,16 @@ class ContinuumModelBuilder:
                         coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs)
                     else:
                         coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs_print_by_tag.get(tag, []))
+                block_variables += int(len(includinglist))
+                block_support_entries += int(len(fit_support_idx))
+                block_solved_components += 1
+            if progress_callback is not None:
+                progress_callback(
+                    f"fit block {block_index}/{total_blocks} done in {time.perf_counter() - block_started:.2f} s | "
+                    f"variables={block_variables} support_components={block_solved_components} "
+                    f"skipped_empty={block_skipped_components} support_entries={block_support_entries}",
+                    state="done",
+                )
         print("="*100)
         return coeffs_by_tag
 
@@ -3810,7 +4094,12 @@ def build_model(config: MoireConfig) -> ContinuumModel:
     setattr(model, "_moire_builder", builder)
     return model
 
-def compute_coefficients(config: MoireConfig, model: ContinuumModel) -> Tuple[ContinuumModel, Any]:
+def compute_coefficients(
+    config: MoireConfig,
+    model: ContinuumModel,
+    *,
+    progress_callback: Callable[..., None] | None = None,
+) -> Tuple[ContinuumModel, Any]:
     """
     Fit term coefficients using `heff` and update `model` in-place.
 
@@ -3855,7 +4144,12 @@ def compute_coefficients(config: MoireConfig, model: ContinuumModel) -> Tuple[Co
     builder.null_channel_rel_tol = float(getattr(config, "null_channel_rel_tol", 0.0) or 0.0)
     heff = np.asarray(config.heff)
     kpts = np.asarray(config.kpoints_fit, dtype=float)
-    diagnostics = builder.compute_coefficients_by_tag(heff, kpts, tol=float(config.coeff_tol))
+    diagnostics = builder.compute_coefficients_by_tag(
+        heff,
+        kpts,
+        tol=float(config.coeff_tol),
+        progress_callback=progress_callback,
+    )
     setattr(model, "_null_channel_filter_reports", list(getattr(builder, "_null_channel_filter_reports", [])))
     setattr(model, "_null_channel_abs_tol", float(getattr(builder, "null_channel_abs_tol", 0.0) or 0.0))
     setattr(model, "_null_channel_rel_tol", float(getattr(builder, "null_channel_rel_tol", 0.0) or 0.0))
@@ -4010,6 +4304,8 @@ def compute_bands(
     kpoints: np.ndarray,
     *,
     return_eigvecs: bool | None = None,
+    hamiltonians_out: list[np.ndarray] | None = None,
+    compiled_runtime_out: list[Any | None] | None = None,
 ) -> np.ndarray | Tuple[np.ndarray, np.ndarray]:
     """
     Compute eigenvalues along a k-path / k-mesh.
@@ -4024,6 +4320,12 @@ def compute_bands(
         Shape (Nk, 2).
     return_eigvecs: bool | None
         If True, also returns eigenvectors per k. If None, uses config.save_eigvecs.
+    hamiltonians_out: list[np.ndarray] | None
+        Optional sink populated with each assembled Hermitian Hamiltonian. This does not
+        change the function return type.
+    compiled_runtime_out: list[Any | None] | None
+        Optional sink receiving the compiled operator runtime, or None when the model
+        requires the legacy term-by-term assembly path.
 
     Returns
     -------
@@ -4045,9 +4347,46 @@ def compute_bands(
     eigvals_out = np.empty((nk, dim_kept), dtype=float)
     eigvecs_out = np.empty((nk, dim_kept, dim_kept), dtype=complex) if want_vecs else None
 
+    from .operator_runtime import CompiledOperatorRuntime, CompiledOperatorUnsupported
+
+    runtime_terms = [
+        term
+        for term in model.terms.values()
+        if bool(getattr(term, "active", True))
+    ]
+    compiled_runtime: CompiledOperatorRuntime | None
+    try:
+        compiled_runtime = CompiledOperatorRuntime.from_terms(
+            runtime_terms,
+            config,
+            state.dim_full,
+        )
+    except CompiledOperatorUnsupported:
+        compiled_runtime = None
+    if compiled_runtime_out is not None:
+        compiled_runtime_out.append(compiled_runtime)
+
     eigvals_only = not want_vecs
     for i in range(nk):
-        _H_kept, w, v, _counts, _prof = _compute_one_k(i, kpts[i], state, eigvals_only=eigvals_only)
+        if compiled_runtime is None:
+            _H_kept, w, v, _counts, _prof = _compute_one_k(
+                i,
+                kpts[i],
+                state,
+                eigvals_only=eigvals_only,
+            )
+        else:
+            _H_kept = _reduce_and_hermitize_hamiltonian(
+                compiled_runtime.hamiltonian(kpts[i]),
+                state,
+            )
+            if eigvals_only:
+                w = scipy.linalg.eigvalsh(_H_kept, check_finite=False)
+                v = None
+            else:
+                w, v = scipy.linalg.eigh(_H_kept, check_finite=False)
+        if hamiltonians_out is not None:
+            hamiltonians_out.append(np.asarray(_H_kept, dtype=complex).copy())
         eigvals_out[i] = w
         if want_vecs and eigvecs_out is not None:
             if v is None:
@@ -4114,20 +4453,7 @@ def _compute_one_k(
     t_loop = time.perf_counter() - t_loop_start
 
     t_schur_start = time.perf_counter()
-    keep = state.keep
-    remove = state.remove
-    H00 = H_cont[np.ix_(keep, keep)]
-    if remove.size == 0:
-        H = H00
-    else:
-        H01 = H_cont[np.ix_(keep, remove)]
-        H10 = H_cont[np.ix_(remove, keep)]
-        H11 = H_cont[np.ix_(remove, remove)]
-        energy = np.max(np.linalg.eigvalsh(H00))
-        H = H00 + H01 @ np.linalg.inv(energy * np.eye(len(H11)) - H11) @ H10
-    # Sparse symmetry assembly can leave tiny non-Hermitian roundoff.  Use the
-    # same Hermitian matrix for diagnostics, saved bands, and eigensolves.
-    H = 0.5 * (H + H.conj().T)
+    H = _reduce_and_hermitize_hamiltonian(H_cont, state)
     t_schur = time.perf_counter() - t_schur_start
 
     t_eig_start = time.perf_counter()
@@ -4154,6 +4480,27 @@ def _compute_one_k(
             "t_eig": t_eig,
         }
     return H, w, v, counts, profile
+
+
+def _reduce_and_hermitize_hamiltonian(
+    H_cont: np.ndarray,
+    state: _BandState,
+) -> np.ndarray:
+    keep = state.keep
+    remove = state.remove
+    H00 = H_cont[np.ix_(keep, keep)]
+    if remove.size == 0:
+        H = H00
+    else:
+        H01 = H_cont[np.ix_(keep, remove)]
+        H10 = H_cont[np.ix_(remove, keep)]
+        H11 = H_cont[np.ix_(remove, remove)]
+        energy = np.max(np.linalg.eigvalsh(H00))
+        H = H00 + H01 @ np.linalg.inv(energy * np.eye(len(H11)) - H11) @ H10
+    # Sparse symmetry assembly can leave tiny non-Hermitian roundoff.  Use the
+    # same Hermitian matrix for diagnostics, saved bands, and eigensolves.
+    H = 0.5 * (H + H.conj().T)
+    return H
 
 def run_end_to_end(config: MoireConfig) -> Dict[str, Any]:
     """
