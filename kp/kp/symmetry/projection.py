@@ -46,6 +46,7 @@ from .geometry import (
     canonical_bM_pair_from_candidates,
     sectors_with_q_offsets,
 )
+from .q_canonicalization import CanonicalQResult, canonicalize_q_geometry
 
 try:
     import scipy.sparse as _sparse
@@ -2930,7 +2931,12 @@ def _append_projected_operation_summaries(
     return raw_low_matrices
 
 
-def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, Any]) -> None:
+def _write_canonical_symmetry_outputs(
+    output_dir: Path,
+    summary: Mapping[str, Any],
+    *,
+    q_geometry: CanonicalQResult | None = None,
+) -> None:
     operations = summary.get("operations", [])
     if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
         return
@@ -2992,6 +2998,25 @@ def _write_canonical_symmetry_outputs(output_dir: Path, summary: Mapping[str, An
             {"status": "exactified", "matrix_source": "kp_symm_exactified_action"},
         )
         payload = dict(matrices)
+        if q_geometry is not None:
+            sector_order = tuple(q_geometry.artifact.get("sector_order", ()))
+            if len(sector_order) != 2:
+                raise ValueError(
+                    "canonical symmetry output currently requires exactly two ordered Q sectors"
+                )
+            layer1, layer2 = sector_order
+            payload.update(
+                {
+                    "__q_model_raw_layer1__": np.asarray(q_geometry.raw_q[layer1], dtype=np.float64),
+                    "__q_model_raw_layer2__": np.asarray(q_geometry.raw_q[layer2], dtype=np.float64),
+                    "__q_model_canonical_layer1__": np.asarray(
+                        q_geometry.canonical_q[layer1], dtype=np.float64
+                    ),
+                    "__q_model_canonical_layer2__": np.asarray(
+                        q_geometry.canonical_q[layer2], dtype=np.float64
+                    ),
+                }
+            )
         payload["__metadata_json__"] = np.asarray(json.dumps(metadata, sort_keys=True))
         np.savez_compressed(output_dir / "representations.npz", **payload)
     (output_dir / "residuals.csv").write_text("\n".join(residual_rows) + "\n", encoding="utf-8")
@@ -3112,12 +3137,35 @@ def _exactify_and_write_projection_summary(
         "post_exactification_gauge": frame_artifact,
     }
 
+    q_geometry = canonicalize_q_geometry(
+        {"L1": ctx.q_model1, "L2": ctx.q_model2},
+        summary["operations"],
+    )
+    q_model_metadata = summary.setdefault("q_model", {})
+    q_model_metadata.update(
+        {
+            "role": "raw_model_q",
+            "production_role": "symmetry_canonical_q",
+            "canonicalization": dict(q_geometry.artifact),
+            "package_arrays": {
+                "raw_layer1": "__q_model_raw_layer1__",
+                "raw_layer2": "__q_model_raw_layer2__",
+                "canonical_layer1": "__q_model_canonical_layer1__",
+                "canonical_layer2": "__q_model_canonical_layer2__",
+            },
+        }
+    )
+
     payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
     (ctx.output_dir / "manifest.json").write_text(payload, encoding="utf-8")
     (ctx.output_dir / "summary.json").write_text(payload, encoding="utf-8")
     _write_summary_md(ctx.output_dir / "summary.md", summary)
     if ctx.config.canonical_layout:
-        _write_canonical_symmetry_outputs(ctx.output_dir, summary)
+        _write_canonical_symmetry_outputs(
+            ctx.output_dir,
+            summary,
+            q_geometry=q_geometry,
+        )
     return summary
 
 

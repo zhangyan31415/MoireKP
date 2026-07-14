@@ -3490,6 +3490,72 @@ def _load_q_sets_from_symmetry_artifact(config: ConfiguredModel) -> tuple[np.nda
     artifact_path = _symmetry_artifact_path(config)
     if artifact_path is None:
         return None
+    representations = artifact_path / "representations.npz"
+    canonical_keys = (
+        "__q_model_canonical_layer1__",
+        "__q_model_canonical_layer2__",
+    )
+    raw_keys = (
+        "__q_model_raw_layer1__",
+        "__q_model_raw_layer2__",
+    )
+    if representations.is_file():
+        with np.load(representations, allow_pickle=False) as payload:
+            present_canonical = tuple(key in payload.files for key in canonical_keys)
+            present_raw = tuple(key in payload.files for key in raw_keys)
+            if any(present_canonical) and not all(present_canonical):
+                raise ValueError(
+                    f"kp symm package contains an incomplete canonical Q pair: {representations}"
+                )
+            if any(present_raw) and not all(present_raw):
+                raise ValueError(f"kp symm package contains an incomplete raw Q pair: {representations}")
+            if all(present_canonical):
+                if not all(present_raw) or "__metadata_json__" not in payload.files:
+                    raise ValueError(
+                        f"kp symm canonical Q package lacks raw Q or metadata: {representations}"
+                    )
+                q1 = np.asarray(payload[canonical_keys[0]], dtype=np.float64)
+                q2 = np.asarray(payload[canonical_keys[1]], dtype=np.float64)
+                raw_q1 = np.asarray(payload[raw_keys[0]], dtype=np.float64)
+                raw_q2 = np.asarray(payload[raw_keys[1]], dtype=np.float64)
+                metadata = json.loads(str(payload["__metadata_json__"].item()))
+                q_model = metadata.get("q_model", {}) if isinstance(metadata, Mapping) else {}
+                canonicalization = (
+                    q_model.get("canonicalization", {}) if isinstance(q_model, Mapping) else {}
+                )
+                if not isinstance(canonicalization, Mapping) or canonicalization.get("status") not in {
+                    "certified",
+                    "not_needed",
+                }:
+                    raise ValueError(
+                        f"kp symm canonical Q package is not certified: {representations}"
+                    )
+                sector_order = tuple(canonicalization.get("sector_order", ()))
+                if sector_order != ("L1", "L2"):
+                    raise ValueError(
+                        "kp symm canonical Q package has unsupported sector ordering: "
+                        f"{sector_order!r}"
+                    )
+                from ..symmetry.q_canonicalization import q_geometry_hash
+
+                expected_raw_hash = str(canonicalization.get("raw_q_hash", ""))
+                expected_canonical_hash = str(canonicalization.get("canonical_q_hash", ""))
+                actual_raw_hash = q_geometry_hash(
+                    {"L1": raw_q1, "L2": raw_q2}, sector_order
+                )
+                actual_canonical_hash = q_geometry_hash(
+                    {"L1": q1, "L2": q2}, sector_order
+                )
+                if actual_raw_hash != expected_raw_hash:
+                    raise ValueError("kp symm raw Q hash does not match the packed arrays")
+                if actual_canonical_hash != expected_canonical_hash:
+                    raise ValueError("kp symm canonical Q hash does not match the packed arrays")
+                for name, array in (("layer1", q1), ("layer2", q2)):
+                    if array.ndim != 2 or array.shape[1] != 2 or not np.all(np.isfinite(array)):
+                        raise ValueError(
+                            f"kp symm canonical Q {name} must be a finite (N, 2) array"
+                        )
+                return q1, q2
     manifest = _load_symmetry_artifact_manifest(artifact_path)
     q_model = manifest.get("q_model", {})
     if not isinstance(q_model, Mapping):
@@ -3516,6 +3582,14 @@ def _load_model_q_sets(config: ConfiguredModel) -> tuple[np.ndarray, np.ndarray]
     artifact_q_sets = _load_q_sets_from_symmetry_artifact(config)
     if artifact_q_sets is not None:
         return artifact_q_sets
+    if (
+        str(config.symmetry_source_config.get("type", "")) == "kp_symm_output"
+        and str(getattr(config, "response_semantics", "legacy_frozen_v1")) == "complete_linear_v2"
+    ):
+        raise ValueError(
+            "complete_linear_v2 requires canonical Q arrays from the exactified symmetry package; "
+            "rerun `kp symm` with the current code"
+        )
     return load_Q_sets_from_gvec_files(
         config.qset1_file,
         config.qset2_file,
