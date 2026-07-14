@@ -148,6 +148,7 @@ def build_projection_basis_identity(
     orbital_block_dim: int,
     model_dim: int,
     k_indices: Any,
+    gauge_frame_hash: str | None = None,
 ) -> dict[str, Any]:
     hamk_path = Path(hamk_file)
     hamk_hash = hash_file(hamk_path) if hamk_path.is_file() else hash_array(hamk_fallback)
@@ -176,6 +177,7 @@ def build_projection_basis_identity(
         "orbital_block_dim": int(orbital_block_dim),
         "model_dim": int(model_dim),
         "k_indices": k_indices_array.tolist(),
+        "gauge_frame_hash": None if gauge_frame_hash is None else str(gauge_frame_hash),
     }
     config_hash = hash_mapping(config_payload)
     basis_hash = hash_mapping(
@@ -260,11 +262,29 @@ def load_projection_artifact_identity(
             PROJECTION_ARTIFACT_IDENTITY_FIELDS,
             f"KP projection artifacts {project_dir}",
         )
+        basis_kpoints_hash = (
+            require_identity_fields(
+                basis_payload,
+                ("kpoints_hash",),
+                f"KP projection artifacts {project_dir}",
+            )["kpoints_hash"]
+            if "kpoints_hash" in basis_payload.files
+            else None
+        )
     with np.load(wavefunctions_path, allow_pickle=False) as wavefunction_payload:
         wavefunction_identity = require_identity_fields(
             wavefunction_payload,
             PROJECTION_ARTIFACT_IDENTITY_FIELDS,
             f"KP projection artifacts {project_dir}",
+        )
+        wavefunction_kpoints_hash = (
+            require_identity_fields(
+                wavefunction_payload,
+                ("kpoints_hash",),
+                f"KP projection artifacts {project_dir}",
+            )["kpoints_hash"]
+            if "kpoints_hash" in wavefunction_payload.files
+            else None
         )
     require_matching_identity(
         basis_identity,
@@ -282,6 +302,35 @@ def load_projection_artifact_identity(
         raise ValueError(
             f"Unsupported KP projection basis schema version: {basis_identity['schema_version']!r}"
         )
+    kpoints_path = project_dir / "kpoints.npy"
+    has_kpoints_identity = basis_kpoints_hash is not None or wavefunction_kpoints_hash is not None
+    if kpoints_path.is_file() or has_kpoints_identity:
+        if not kpoints_path.is_file():
+            raise FileNotFoundError(f"KP projection artifact is missing: {kpoints_path}")
+        if basis_kpoints_hash is None or wavefunction_kpoints_hash is None:
+            raise KeyError(
+                f"KP projection artifacts {project_dir} are missing matching kpoints_hash metadata"
+            )
+        if basis_kpoints_hash != wavefunction_kpoints_hash:
+            raise ValueError(
+                f"KP projection artifacts {project_dir} identity mismatch "
+                f"(kpoints_hash: {basis_kpoints_hash!r} != {wavefunction_kpoints_hash!r})"
+            )
+        kpoints = np.load(kpoints_path, mmap_mode="r", allow_pickle=False)
+        if kpoints.ndim != 2 or kpoints.shape[1] != 2:
+            raise ValueError(f"projection/kpoints.npy must have shape (Nk,2), got {kpoints.shape}")
+        heff_rows = int(np.load(heff_path, mmap_mode="r", allow_pickle=False).shape[0])
+        if int(kpoints.shape[0]) != heff_rows:
+            raise ValueError(
+                f"projection kpoints/Heff row mismatch: {int(kpoints.shape[0])} != {heff_rows}"
+            )
+        actual_kpoints_hash = hash_array(kpoints)
+        if actual_kpoints_hash != basis_kpoints_hash:
+            raise ValueError(
+                f"KP projection artifacts {project_dir} kpoints_hash mismatch: "
+                f"{basis_kpoints_hash} != {actual_kpoints_hash}"
+            )
+        basis_identity["kpoints_hash"] = basis_kpoints_hash
     if verify_heff:
         actual_heff_hash = hash_array(np.load(heff_path, mmap_mode="r", allow_pickle=False))
         if actual_heff_hash != basis_identity["heff_hash"]:

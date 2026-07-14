@@ -7,7 +7,7 @@ import os
 import sys
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Sequence
+from typing import Any, Dict, List, Mapping, Sequence
 
 import yaml
 import numpy as np
@@ -26,6 +26,11 @@ from .blocks import (
 )
 from .basis.selection import GaugeAnchorReport
 from .basis.selection import _format_report_markdown as _format_basis_report_markdown
+from .basis.symmetry_gauge import (
+    SymmetryAdaptedBasisFrame,
+    transform_basis_hamiltonian,
+    transform_basis_vectors,
+)
 from .plot_style import (
     KP_BAND_BOX_ASPECT,
     KP_BAND_FIGSIZE,
@@ -178,8 +183,6 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "band_comparison_all.pdf",
         "q_lattice_harmonics.pdf",
         "harmonic_recommendation_bands.png",
-        "hamiltonian_element_comparison.png",
-        "hamiltonian_element_comparison.pdf",
     }
     root = Path(model_output_dir)
     if not root.exists():
@@ -1695,6 +1698,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         ),
     )
     basis_payload = gauge_report.to_dict()
+    frame_artifact_raw = gauge_report.symmetry_closure_quality.get("symmetry_adapted_frame")
+    frame_artifact = frame_artifact_raw if isinstance(frame_artifact_raw, Mapping) else None
     _write_text(Path(out_dir) / "basis.md", _format_basis_report_markdown(basis_payload))
     basis_report_path = os.path.join(out_dir, "basis.md")
     print(f"[kp]   gauge={gauge_report.gauge_mode}")
@@ -1819,12 +1824,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         heig_arr = np.array(heig_list, dtype=object)
         hvec_arr = np.array(hvec_list, dtype=object)
 
-    # Save
-    os.makedirs(os.path.dirname(out_heff) or ".", exist_ok=True)
-    np.save(out_heff, heff_arr)
-    np.save(out_kpoints, projected_kpoints)
-    if out_eig is not None:
-        np.save(out_eig, heig_arr)
     spin_operator_arr: np.ndarray | None = None
     if len(spin_operator_rows) == len(results):
         try:
@@ -1833,6 +1832,34 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             spin_operator_arr = np.array(spin_operator_rows, dtype=object)
     if not isinstance(heff_arr, np.ndarray) or heff_arr.dtype == object:
         raise ValueError("Projection produced ragged/object Heff rows; release outputs require one numeric basis dimension")
+    if not isinstance(hvec_arr, np.ndarray) or hvec_arr.dtype == object:
+        raise ValueError("Projection produced ragged/object eigenvector rows; release outputs require one numeric basis dimension")
+    gauge_frame_hash: str | None = None
+    if frame_artifact is not None:
+        adapted_frame = SymmetryAdaptedBasisFrame.from_artifact(frame_artifact)
+        if adapted_frame.status == "applied":
+            gauge_frame_hash = str(frame_artifact.get("frame_hash", "")) or None
+        if adapted_frame.full_unitary.shape != heff_arr.shape[-2:]:
+            raise ValueError(
+                "symmetry-adapted frame/model dimension mismatch: "
+                f"{adapted_frame.full_unitary.shape} != {heff_arr.shape[-2:]}"
+            )
+        if adapted_frame.status == "applied":
+            heff_arr = transform_basis_hamiltonian(heff_arr, adapted_frame.full_unitary)
+            hvec_arr = transform_basis_vectors(hvec_arr, adapted_frame.full_unitary)
+            if spin_operator_arr is not None:
+                if spin_operator_arr.dtype == object:
+                    raise ValueError("Projection produced ragged/object spin-operator rows")
+                spin_operator_arr = transform_basis_hamiltonian(
+                    spin_operator_arr,
+                    adapted_frame.full_unitary,
+                )
+    # Save only after all basis-dependent arrays have been rotated together.
+    os.makedirs(os.path.dirname(out_heff) or ".", exist_ok=True)
+    np.save(out_heff, heff_arr)
+    np.save(out_kpoints, projected_kpoints)
+    if out_eig is not None:
+        np.save(out_eig, heig_arr)
     basis_identity = build_projection_basis_identity(
         hamk_file=hamk_file,
         hamk_fallback=np.asarray(hamk2d),
@@ -1849,6 +1876,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         orbital_block_dim=orb0,
         model_dim=int(heff_arr.shape[-1]),
         k_indices=project_indices,
+        gauge_frame_hash=gauge_frame_hash,
     )
     heff_hash = hash_array(heff_arr)
     kpoints_hash = hash_array(projected_kpoints)
@@ -1861,12 +1889,18 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         Path(out_dir) / "basis.npz",
         nlow_state_list=np.asarray(nlow_state_list, dtype=object),
         norb_fix_list=np.asarray(norb_fix_list, dtype=object),
+        symmetry_adapted_frame_json=np.asarray(
+            "" if frame_artifact is None else json.dumps(frame_artifact, sort_keys=True)
+        ),
         **identity_payload,
     )
     wavefunction_payload = {
         "wavefunctions": hvec_arr,
         "k_indices": np.asarray(project_indices, dtype=int),
         "spin_convention": np.asarray(str(spin).lower()),
+        "symmetry_adapted_frame_json": np.asarray(
+            "" if frame_artifact is None else json.dumps(frame_artifact, sort_keys=True)
+        ),
         **identity_payload,
     }
     if str(spin).lower() == "all" and spin_operator_arr is not None:

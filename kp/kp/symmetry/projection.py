@@ -25,6 +25,11 @@ from ..basis.selection import (
     select_gauge_candidate_by_symmetry,
     write_basis_selection_report,
 )
+from ..basis.symmetry_gauge import (
+    SymmetryAdaptedBasisFrame,
+    derive_symmetry_adapted_basis_frame,
+    transform_basis_operation,
+)
 from ..config.case import normalize_case_config
 from ..io.tapw_loader import load_Q_sets, load_hamk
 from ..identity import (
@@ -422,7 +427,7 @@ def _default_exactification_overrides_for_valley(
         defaults = {
             "reject_if_off_support_rel_gt": 1.0e-3,
             "operations": {
-                "C3z": {"support_mode": "monomial"},
+                "C3z": {"support_mode": "auto", "algebraic_template": "auto"},
             },
         }
     else:
@@ -2476,7 +2481,7 @@ def _candidate_symmetry_metrics(
                 symmetry_tolerance=run_cfg.tolerance,
             )
         )
-        _exact_matrices, exact_reports_candidate = exactify_loaded_symmetry_source(
+        exact_matrices_candidate, exact_reports_candidate = exactify_loaded_symmetry_source(
             loaded_metadata={"operations": operation_records},
             matrices=raw_candidate_matrices,
             Q_set1=ctx.q_model1,
@@ -2488,6 +2493,19 @@ def _candidate_symmetry_metrics(
             raw_config={"exactification": exact_config_candidate},
             rotation_deg=0.0,
             output_dir=None,
+        )
+        adapted_frame_candidate = derive_symmetry_adapted_basis_frame(
+            exact_matrices_candidate,
+            operations=operation_records,
+            sectors=[
+                {"name": "L1", "n_orb": int(n_orb_candidate[0]), "n_q": int(len(ctx.q_model1))},
+                {"name": "L2", "n_orb": int(n_orb_candidate[1]), "n_q": int(len(ctx.q_model2))},
+            ],
+            # The input matrices have already been exactified.  The frame
+            # solver therefore needs an algebraic floating-point threshold,
+            # not the (possibly percent-level) source-symmetry acceptance
+            # tolerance from the user configuration.
+            tolerance=min(max(float(run_cfg.tolerance), 1.0e-12), 1.0e-8),
         )
         distances: dict[str, float] = {}
         support_off: dict[str, float] = {}
@@ -2512,6 +2530,7 @@ def _candidate_symmetry_metrics(
                 "sigma_min": candidate.report.gauge_anchor_quality.get("sigma_min"),
                 "condition_number": candidate.report.gauge_anchor_quality.get("condition_number"),
                 "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
+                "symmetry_adapted_frame": adapted_frame_candidate.artifact(),
             },
         )
     except Exception as exc:
@@ -2545,12 +2564,16 @@ def _select_projection_gauge(
         candidate_metrics,
         max_exactification_distance=float(validation_cfg.get("max_exactification_distance", ctx.config.tolerance)),
     )
+    selected_metric = next(
+        metric for metric in candidate_metrics if metric.candidate_id == selected_gauge_candidate.candidate_id
+    )
     gauge_report = replace(
         selected_gauge_candidate.report,
         symmetry_closure_quality={
             "status": "validated",
             "selection_policy": "symmetry_exactification_residual",
             "selected_candidate_id": selected_gauge_candidate.candidate_id,
+            "symmetry_adapted_frame": selected_metric.metadata.get("symmetry_adapted_frame"),
             "candidate_rankings": validation_decision.rankings,
             "metrics": [
                 {
@@ -2634,6 +2657,17 @@ def _resolve_symmetry_project_identity(
                 f"project.k_indices contains {index}, but available k indices are 0..{source_k_count - 1}"
             )
     reference_k = sorted(ctx.hamk_source_by_k)[0]
+    closure_quality = getattr(gauge_report, "symmetry_closure_quality", {})
+    frame_artifact_raw = (
+        closure_quality.get("symmetry_adapted_frame") if isinstance(closure_quality, Mapping) else None
+    )
+    frame_artifact = frame_artifact_raw if isinstance(frame_artifact_raw, Mapping) else None
+    adapted_frame = None if frame_artifact is None else SymmetryAdaptedBasisFrame.from_artifact(frame_artifact)
+    gauge_frame_hash = (
+        str(frame_artifact.get("frame_hash", "")) or None
+        if adapted_frame is not None and adapted_frame.status == "applied"
+        else None
+    )
     expected = build_projection_basis_identity(
         hamk_file=hamk_file,
         hamk_fallback=np.asarray(ctx.hamk_source_by_k[reference_k]),
@@ -2650,6 +2684,7 @@ def _resolve_symmetry_project_identity(
         orbital_block_dim=ctx.orb0,
         model_dim=int(low_dim),
         k_indices=configured_k_indices,
+        gauge_frame_hash=gauge_frame_hash,
     )
     return _validate_symmetry_project_identity(expected, actual)
 
@@ -2663,6 +2698,8 @@ def _initial_projection_summary(
     artifact_identity: Mapping[str, Any],
 ) -> dict[str, Any]:
     run_cfg = ctx.config
+    frame_artifact_raw = gauge_report.symmetry_closure_quality.get("symmetry_adapted_frame")
+    frame_artifact = frame_artifact_raw if isinstance(frame_artifact_raw, Mapping) else None
     return {
         "config": run_cfg.cfg_path,
         "valley": run_cfg.valley,
@@ -2691,6 +2728,7 @@ def _initial_projection_summary(
             "nlow_state_list_layout": "physical_layer",
             "num_layer_list": [int(n) for n in ctx.num_layer_list],
             "gauge_mode": gauge_report.gauge_mode,
+            "symmetry_adapted_frame": frame_artifact,
             "resolved_norb_fix_list": gauge_report.resolved_norb_fix_list,
             "basis_selection_report": "basis_selection.json",
             "resolved_sector_orbital_counts": {
@@ -3009,6 +3047,18 @@ def _exactify_and_write_projection_summary(
         rotation_deg=0.0,
         output_dir=ctx.output_dir,
     )
+    project_basis = summary.get("project_basis", {})
+    frame_artifact_raw = (
+        project_basis.get("symmetry_adapted_frame") if isinstance(project_basis, Mapping) else None
+    )
+    frame_artifact = frame_artifact_raw if isinstance(frame_artifact_raw, Mapping) else None
+    adapted_frame = None if frame_artifact is None else SymmetryAdaptedBasisFrame.from_artifact(frame_artifact)
+    exact_dimension = next(iter(exact_matrices.values())).shape[0] if exact_matrices else 0
+    if adapted_frame is not None and adapted_frame.full_unitary.shape != (exact_dimension, exact_dimension):
+        raise ValueError(
+            "symmetry-adapted frame is inconsistent with the exactified model basis: "
+            f"{adapted_frame.full_unitary.shape} != {(exact_dimension, exact_dimension)}"
+        )
     for operation_summary in summary["operations"]:
         name = str(operation_summary["name"])
         report = exact_reports.get(name)
@@ -3019,6 +3069,18 @@ def _exactify_and_write_projection_summary(
             raise ValueError(f"{name} kp_symm exactification did not finish: status={status!r}")
         if name not in exact_matrices:
             raise ValueError(f"{name} kp_symm exactification did not produce a matrix")
+        if adapted_frame is not None and adapted_frame.status == "applied":
+            exact_matrices[name] = transform_basis_operation(
+                exact_matrices[name],
+                adapted_frame.full_unitary,
+                antiunitary=bool(operation_summary.get("antiunitary", False)),
+            )
+            np.save(ctx.output_dir / f"exactified_{name}.npy", exact_matrices[name])
+            operation_summary["gauge_correction"] = {
+                "kind": "post_exactification_symmetry_adapted_internal_frame",
+                "frame_hash": frame_artifact.get("frame_hash"),
+                "version": frame_artifact.get("version"),
+            }
         operation_summary["raw_matrix_file"] = operation_summary["matrix_file"]
         operation_summary["matrix_file"] = f"exactified_{name}.npy"
         operation_summary["matrix_kind"] = "continuum_internal_rep_exact"
@@ -3041,6 +3103,13 @@ def _exactify_and_write_projection_summary(
         "bM2": bM2.tolist(),
         "n_orb": [int(n_orb[0]), int(n_orb[1])],
         "sectors": sectors,
+        "polynomial_coordinate": {
+            "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
+            "origin": [0.0, 0.0],
+            "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
+            "valley": str(ctx.config.valley),
+        },
+        "post_exactification_gauge": frame_artifact,
     }
 
     payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
