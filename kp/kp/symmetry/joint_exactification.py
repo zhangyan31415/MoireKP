@@ -7,6 +7,8 @@ They never infer numerical zeros from entry magnitudes.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import hashlib
+import json
 import operator
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
@@ -2494,12 +2496,534 @@ def synchronize_free_orbit(
     return route_blocks, report
 
 
+JOINT_BLOCK_REPRESENTATION_V1 = "joint_block_representation_v1"
+
+
+@dataclass(frozen=True)
+class JointExactificationResult:
+    """Certified output of one complete joint generator exactification."""
+
+    actions: Mapping[str, BlockRouteAction]
+    presentation: MagneticPresentation
+    report: Mapping[str, Any]
+    artifact_metadata: Mapping[str, Any]
+    artifact_arrays: Mapping[str, np.ndarray]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "actions", MappingProxyType(dict(self.actions)))
+        object.__setattr__(self, "report", MappingProxyType(dict(self.report)))
+        object.__setattr__(
+            self,
+            "artifact_metadata",
+            MappingProxyType(dict(self.artifact_metadata)),
+        )
+        object.__setattr__(
+            self,
+            "artifact_arrays",
+            MappingProxyType(
+                {
+                    str(key): _readonly_complex(value)
+                    for key, value in self.artifact_arrays.items()
+                }
+            ),
+        )
+
+
+def _relation_residual_summary(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> tuple[dict[str, dict[str, float]], float]:
+    reference = actions[presentation.generators[0].name]
+    fiber_count = len(reference.fiber_dimensions)
+    table: dict[str, dict[str, float]] = {}
+    global_maximum = 0.0
+    for relation in presentation.relations:
+        values: list[float] = []
+        maximum_entry = 0.0
+        for source in range(fiber_count):
+            lhs, lhs_target, lhs_antiunitary = _evaluate_route_word(
+                actions,
+                relation.lhs,
+                source,
+            )
+            rhs, rhs_target, rhs_antiunitary = _evaluate_route_word(
+                actions,
+                relation.rhs,
+                source,
+            )
+            if (lhs_target, lhs_antiunitary) != (
+                rhs_target,
+                rhs_antiunitary,
+            ):
+                raise JointExactificationError(
+                    f"relation {relation.name!r} has inconsistent discrete targets"
+                )
+            difference = lhs - relation.central_phase * rhs
+            normalized = float(
+                np.linalg.norm(difference, ord="fro") / np.sqrt(lhs.shape[0])
+            )
+            values.append(normalized)
+            maximum_entry = max(
+                maximum_entry,
+                float(np.max(np.abs(difference))),
+            )
+        array = np.asarray(values, dtype=np.float64)
+        maximum = float(np.max(array))
+        table[relation.name] = {
+            "rms": float(np.sqrt(np.mean(np.square(array)))),
+            "max": maximum,
+            "maximum_entry": maximum_entry,
+        }
+        global_maximum = max(global_maximum, maximum)
+    return table, global_maximum
+
+
+def _joint_relation_certification_bound(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbits: Sequence[ActionOrbit],
+) -> float:
+    maximum_dimension = max(
+        dimension
+        for action in actions.values()
+        for dimension in action.fiber_dimensions
+    )
+    maximum_word_length = max(
+        len(relation.lhs) + len(relation.rhs)
+        for relation in presentation.relations
+    )
+    maximum_orbit_coordinate_count = max(
+        len(presentation.generators)
+        * len(orbit.fibers)
+        * maximum_dimension
+        * maximum_dimension
+        for orbit in orbits
+    )
+    return float(
+        128.0
+        * np.finfo(np.float64).eps
+        * max(
+            1,
+            maximum_dimension,
+            maximum_word_length,
+            maximum_orbit_coordinate_count,
+        )
+    )
+
+
+def _operation_correction_metrics(
+    before: Mapping[str, BlockRouteAction],
+    after: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> tuple[dict[str, float], dict[str, float], float, float]:
+    rms_by_operation: dict[str, float] = {}
+    max_by_operation: dict[str, float] = {}
+    all_values: list[float] = []
+    for generator in presentation.generators:
+        values = np.asarray(
+            [
+                float(
+                    np.linalg.norm(target - source, ord="fro")
+                    / np.sqrt(source.shape[0])
+                )
+                for source, target in zip(
+                    before[generator.name].route_blocks,
+                    after[generator.name].route_blocks,
+                )
+            ],
+            dtype=np.float64,
+        )
+        rms_by_operation[generator.name] = float(
+            np.sqrt(np.mean(np.square(values)))
+        )
+        max_by_operation[generator.name] = float(np.max(values))
+        all_values.extend(float(value) for value in values)
+    combined = np.asarray(all_values, dtype=np.float64)
+    return (
+        rms_by_operation,
+        max_by_operation,
+        float(np.sqrt(np.mean(np.square(combined)))),
+        float(np.max(combined)),
+    )
+
+
+def _matrix_sha256(matrix: np.ndarray) -> str:
+    value = np.asarray(matrix, dtype=np.dtype("<c16"), order="C")
+    digest = hashlib.sha256()
+    digest.update(np.asarray(value.shape, dtype="<i8").tobytes(order="C"))
+    digest.update(value.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _presentation_metadata(presentation: MagneticPresentation) -> dict[str, Any]:
+    return {
+        "source": presentation.source,
+        "generators": [
+            {
+                "name": generator.name,
+                "antiunitary": generator.antiunitary,
+            }
+            for generator in presentation.generators
+        ],
+        "relations": [
+            {
+                "name": relation.name,
+                "lhs": list(relation.lhs),
+                "rhs": list(relation.rhs),
+                "central_phase": [
+                    float(relation.central_phase.real),
+                    float(relation.central_phase.imag),
+                ],
+            }
+            for relation in presentation.relations
+        ],
+        "central_phases": [
+            [float(phase.real), float(phase.imag)]
+            for phase in presentation.central_phases
+        ],
+    }
+
+
+def _presentation_from_metadata(metadata: Mapping[str, Any]) -> MagneticPresentation:
+    return MagneticPresentation(
+        generators=tuple(
+            MagneticGenerator(
+                str(record["name"]),
+                bool(record["antiunitary"]),
+            )
+            for record in metadata["generators"]
+        ),
+        relations=tuple(
+            MagneticRelation(
+                str(record["name"]),
+                tuple(str(value) for value in record["lhs"]),
+                tuple(str(value) for value in record["rhs"]),
+                complex(*record["central_phase"]),
+            )
+            for record in metadata["relations"]
+        ),
+        central_phases=tuple(
+            complex(*value) for value in metadata["central_phases"]
+        ),
+        source=str(metadata["source"]),
+    )
+
+
+def _free_orbit_report_metadata(report: FreeOrbitReport) -> dict[str, Any]:
+    return {
+        "kind": "free",
+        "root": report.root,
+        "fibers": list(report.fibers),
+        "block_dimension": report.block_dimension,
+        "solver": report.solver,
+        "iterations": report.iterations,
+        "converged": report.converged,
+        "objective_initial": report.objective_initial,
+        "objective_final": report.objective_final,
+        "route_correction_rms": report.route_correction_rms,
+        "route_correction_max": report.route_correction_max,
+        "minimum_central_separation": report.minimum_central_separation,
+        "central_transition_counts": dict(report.central_transition_counts),
+        "condition_number": report.condition_number,
+        "relation_residual_max": report.relation_residual_max,
+    }
+
+
+def _stabilized_orbit_report_metadata(
+    report: StabilizedOrbitReport,
+) -> dict[str, Any]:
+    return {
+        "kind": "stabilized",
+        "root": report.root,
+        "fibers": list(report.fibers),
+        "block_dimension": report.block_dimension,
+        "solver": report.solver,
+        "iterations": report.iterations,
+        "converged": report.converged,
+        "rank": report.rank,
+        "nullity": report.nullity,
+        "condition_number": report.condition_number,
+        "relation_objective_initial": report.relation_objective_initial,
+        "relation_objective_final": report.relation_objective_final,
+        "route_correction_rms": report.route_correction_rms,
+        "route_correction_max": report.route_correction_max,
+        "minimum_relation_log_branch_margin": (
+            report.minimum_relation_log_branch_margin
+        ),
+        "relation_residual_max": report.relation_residual_max,
+    }
+
+
+def _joint_artifact_hash(
+    metadata_without_hash: Mapping[str, Any],
+    arrays: Mapping[str, np.ndarray],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(
+        json.dumps(
+            metadata_without_hash,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+    )
+    for key in sorted(arrays):
+        digest.update(str(key).encode("utf-8"))
+        value = np.asarray(arrays[key], dtype=np.dtype("<c16"), order="C")
+        digest.update(np.asarray(value.shape, dtype="<i8").tobytes(order="C"))
+        digest.update(value.tobytes(order="C"))
+    return digest.hexdigest()
+
+
+def _build_joint_artifact(
+    before: Mapping[str, BlockRouteAction],
+    after: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    report: Mapping[str, Any],
+    config: JointExactificationConfig,
+    certification_bound: float,
+) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    arrays: dict[str, np.ndarray] = {}
+    action_records: list[dict[str, Any]] = []
+    for generator_index, generator in enumerate(presentation.generators):
+        action = after[generator.name]
+        keys: list[str] = []
+        for source, block in enumerate(action.route_blocks):
+            key = (
+                f"__joint_block_representation_{generator_index}_route_{source}__"
+            )
+            keys.append(key)
+            arrays[key] = np.array(block, dtype=np.complex128, order="C", copy=True)
+        action_records.append(
+            {
+                "name": action.name,
+                "antiunitary": action.antiunitary,
+                "fiber_permutation": list(action.fiber_permutation),
+                "fiber_dimensions": list(action.fiber_dimensions),
+                "fiber_indices": [list(group) for group in action.fiber_indices],
+                "route_array_keys": keys,
+                "unitarity_certification_bound": float(
+                    action.unitarity_certification_bound
+                ),
+            }
+        )
+    metadata: dict[str, Any] = {
+        "version": JOINT_BLOCK_REPRESENTATION_V1,
+        "status": "certified",
+        "presentation": _presentation_metadata(presentation),
+        "actions": action_records,
+        "config": {
+            "enabled": config.enabled,
+            "max_rms_correction": config.max_rms_correction,
+            "max_route_correction": config.max_route_correction,
+            "central_branch_margin": config.central_branch_margin,
+            "max_iterations": config.max_iterations,
+            "condition_limit": config.condition_limit,
+        },
+        "relation_certification_bound": certification_bound,
+        "stage1_action_hashes": {
+            generator.name: _matrix_sha256(
+                materialize_block_route_action(before[generator.name])
+            )
+            for generator in presentation.generators
+        },
+        "joint_action_hashes": {
+            generator.name: _matrix_sha256(
+                materialize_block_route_action(after[generator.name])
+            )
+            for generator in presentation.generators
+        },
+        "report": dict(report),
+    }
+    metadata["artifact_hash"] = _joint_artifact_hash(metadata, arrays)
+    return metadata, arrays
+
+
+def joint_exactify_block_actions(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    config: JointExactificationConfig,
+) -> JointExactificationResult:
+    """Jointly exactify and certify one complete continuum generator set."""
+
+    if not config.enabled:
+        raise JointExactificationError("joint exactification is disabled by configuration")
+    validate_presentation_action_relations(actions, presentation)
+    before = dict(actions)
+    orbits = compile_action_orbits(before, presentation)
+    pre_table, pre_maximum = _relation_residual_summary(before, presentation)
+    orbit_reports: list[dict[str, Any]] = []
+    dimensions = {
+        dimension
+        for action in before.values()
+        for dimension in action.fiber_dimensions
+    }
+    if dimensions == {1}:
+        working, u1_report = project_u1_relations(before, presentation)
+        orbit_reports.append(
+            {
+                "kind": "u1_global",
+                "roots": [orbit.root for orbit in orbits],
+                "solver": "u1_relation_projection",
+                "report": dict(u1_report),
+            }
+        )
+    else:
+        working = dict(before)
+        for orbit in orbits:
+            if orbit.stabilizer_words == ((),):
+                route_blocks, orbit_report = synchronize_free_orbit(
+                    working,
+                    presentation,
+                    orbit,
+                    config=config,
+                )
+                orbit_reports.append(_free_orbit_report_metadata(orbit_report))
+            else:
+                route_blocks, orbit_report = exactify_stabilized_orbit(
+                    working,
+                    presentation,
+                    orbit,
+                    config=config,
+                )
+                orbit_reports.append(
+                    _stabilized_orbit_report_metadata(orbit_report)
+                )
+            working = _actions_with_route_blocks(working, route_blocks)
+    post_table, post_maximum = _relation_residual_summary(working, presentation)
+    certification_bound = _joint_relation_certification_bound(
+        working,
+        presentation,
+        orbits,
+    )
+    if post_maximum > certification_bound:
+        raise JointExactificationError(
+            "joint relation certification failed: "
+            f"residual={post_maximum:.6e}, bound={certification_bound:.6e}"
+        )
+    (
+        rms_by_operation,
+        max_by_operation,
+        correction_rms,
+        correction_max,
+    ) = _operation_correction_metrics(before, working, presentation)
+    if correction_rms > config.max_rms_correction:
+        raise JointExactificationError(
+            "joint RMS correction exceeds configured limit: "
+            f"correction={correction_rms:.6e}, limit={config.max_rms_correction:.6e}"
+        )
+    if correction_max > config.max_route_correction:
+        raise JointExactificationError(
+            "joint route correction exceeds configured limit: "
+            f"correction={correction_max:.6e}, limit={config.max_route_correction:.6e}"
+        )
+    report: dict[str, Any] = {
+        "status": "certified",
+        "pre_relation_residuals": pre_table,
+        "pre_relation_residual_max": pre_maximum,
+        "post_relation_residuals": post_table,
+        "post_relation_residual_max": post_maximum,
+        "relation_certification_bound": certification_bound,
+        "route_correction_rms_by_operation": rms_by_operation,
+        "route_correction_max_by_operation": max_by_operation,
+        "route_correction_rms": correction_rms,
+        "route_correction_max": correction_max,
+        "orbit_reports": orbit_reports,
+    }
+    metadata, arrays = _build_joint_artifact(
+        before,
+        working,
+        presentation,
+        report,
+        config,
+        certification_bound,
+    )
+    return JointExactificationResult(
+        actions=working,
+        presentation=presentation,
+        report=report,
+        artifact_metadata=metadata,
+        artifact_arrays=arrays,
+    )
+
+
+def load_joint_exactification_artifact(
+    metadata: Mapping[str, Any],
+    arrays: Mapping[str, np.ndarray],
+) -> JointExactificationResult:
+    """Load, hash-check, and re-certify an in-memory joint artifact."""
+
+    root = dict(metadata)
+    if root.get("version") != JOINT_BLOCK_REPRESENTATION_V1:
+        raise JointExactificationError(
+            f"unsupported joint artifact version {root.get('version')!r}"
+        )
+    expected_hash = str(root.pop("artifact_hash", ""))
+    actual_hash = _joint_artifact_hash(root, arrays)
+    if not expected_hash or actual_hash != expected_hash:
+        raise JointExactificationError(
+            "joint artifact hash mismatch: "
+            f"expected={expected_hash!r}, actual={actual_hash!r}"
+        )
+    presentation = _presentation_from_metadata(root["presentation"])
+    actions: dict[str, BlockRouteAction] = {}
+    expected_keys: set[str] = set()
+    for record in root["actions"]:
+        keys = tuple(str(key) for key in record["route_array_keys"])
+        expected_keys.update(keys)
+        try:
+            route_blocks = tuple(np.asarray(arrays[key]) for key in keys)
+        except KeyError as error:
+            raise JointExactificationError(
+                f"joint artifact route array is missing: {error.args[0]}"
+            ) from error
+        action = BlockRouteAction(
+            name=str(record["name"]),
+            antiunitary=bool(record["antiunitary"]),
+            fiber_permutation=tuple(int(value) for value in record["fiber_permutation"]),
+            fiber_dimensions=tuple(int(value) for value in record["fiber_dimensions"]),
+            route_blocks=route_blocks,
+            fiber_indices=tuple(
+                tuple(int(value) for value in group)
+                for group in record["fiber_indices"]
+            ),
+            unitarity_certification_bound=float(
+                record["unitarity_certification_bound"]
+            ),
+        )
+        actions[action.name] = action
+    if set(arrays) != expected_keys:
+        raise JointExactificationError(
+            "joint artifact arrays do not exactly match declared route keys"
+        )
+    validate_presentation_action_relations(actions, presentation)
+    _, maximum = _relation_residual_summary(actions, presentation)
+    bound = float(root["relation_certification_bound"])
+    if maximum > bound:
+        raise JointExactificationError(
+            "loaded joint artifact relation certification failed: "
+            f"residual={maximum:.6e}, bound={bound:.6e}"
+        )
+    restored_metadata = dict(root)
+    restored_metadata["artifact_hash"] = expected_hash
+    return JointExactificationResult(
+        actions=actions,
+        presentation=presentation,
+        report=dict(root["report"]),
+        artifact_metadata=restored_metadata,
+        artifact_arrays=arrays,
+    )
+
+
 __all__ = [
     "ActionOrbit",
     "BlockRouteAction",
     "FreeOrbitReport",
+    "JOINT_BLOCK_REPRESENTATION_V1",
     "JointExactificationError",
     "JointExactificationConfig",
+    "JointExactificationResult",
     "MagneticGenerator",
     "MagneticPresentation",
     "MagneticRelation",
@@ -2513,6 +3037,8 @@ __all__ = [
     "exactify_stabilized_orbit",
     "extract_block_route_action",
     "inverse_semilinear",
+    "joint_exactify_block_actions",
+    "load_joint_exactification_artifact",
     "materialize_block_route_action",
     "pack_skew_hermitian",
     "project_u1_relations",

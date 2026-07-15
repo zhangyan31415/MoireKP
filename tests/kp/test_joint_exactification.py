@@ -17,6 +17,7 @@ from kp.symmetry.joint_exactification import (
     QuotientGroupElement,
     SemilinearBlock,
     StabilizedOrbitReport,
+    JointExactificationResult,
     compile_action_orbits,
     compile_continuum_magnetic_presentation,
     compile_quotient_group_elements,
@@ -24,6 +25,8 @@ from kp.symmetry.joint_exactification import (
     exactify_stabilized_orbit,
     extract_block_route_action,
     inverse_semilinear,
+    joint_exactify_block_actions,
+    load_joint_exactification_artifact,
     materialize_block_route_action,
     pack_skew_hermitian,
     project_u1_relations,
@@ -1346,4 +1349,107 @@ def test_stabilized_orbit_rejects_relation_log_at_pi_branch() -> None:
             presentation,
             orbit,
             config=JointExactificationConfig(),
+        )
+
+
+def test_joint_orchestrator_exactifies_mgi2_and_builds_deterministic_artifact() -> None:
+    actions = _mgi2_measured_u1_defect_actions()
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+
+    first = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    second = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+
+    assert isinstance(first, JointExactificationResult)
+    assert _maximum_matrix_relation_residual(
+        dict(first.actions), presentation
+    ) < 5.0e-15
+    assert first.report["pre_relation_residual_max"] == pytest.approx(
+        1.7807762611e-5,
+        rel=2.0e-10,
+    )
+    assert first.report["route_correction_rms_by_operation"]["TR"] == pytest.approx(
+        4.3625209915e-6,
+        rel=2.0e-10,
+    )
+    assert first.report["route_correction_rms_by_operation"]["C2"] == pytest.approx(
+        4.3625209915e-6,
+        rel=2.0e-10,
+    )
+    assert first.artifact_metadata["status"] == "certified"
+    assert first.artifact_metadata["artifact_hash"] == second.artifact_metadata[
+        "artifact_hash"
+    ]
+    assert set(first.artifact_arrays) == set(second.artifact_arrays)
+    for key in first.artifact_arrays:
+        np.testing.assert_array_equal(
+            first.artifact_arrays[key], second.artifact_arrays[key]
+        )
+
+
+def test_joint_orchestrator_dispatches_nontrivial_stabilizer() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c3z(), _c2(phase=-1)]
+    )
+    actions = _gamma_fixed_fiber_actions(
+        4,
+        perturbation=6.0e-7,
+        seed=9904,
+    )
+
+    result = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(max_iterations=30),
+    )
+
+    assert result.report["orbit_reports"][0]["kind"] == "stabilized"
+    assert result.report["post_relation_residual_max"] < 5.0e-12
+    assert _maximum_matrix_relation_residual(
+        dict(result.actions), presentation
+    ) < 5.0e-12
+
+
+def test_joint_artifact_loader_recertifies_and_rejects_changed_route_byte() -> None:
+    actions = _mgi2_measured_u1_defect_actions()
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+    result = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+
+    loaded = load_joint_exactification_artifact(
+        result.artifact_metadata,
+        result.artifact_arrays,
+    )
+
+    assert loaded.artifact_metadata["artifact_hash"] == result.artifact_metadata[
+        "artifact_hash"
+    ]
+    assert _maximum_matrix_relation_residual(
+        dict(loaded.actions), presentation
+    ) < 5.0e-15
+
+    corrupted = {
+        key: np.array(value, copy=True)
+        for key, value in result.artifact_arrays.items()
+    }
+    key = sorted(corrupted)[0]
+    corrupted[key].view(np.uint8).flat[0] ^= 1
+    with pytest.raises(JointExactificationError, match="hash"):
+        load_joint_exactification_artifact(
+            result.artifact_metadata,
+            corrupted,
         )
