@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import io
 import logging
 import os
 import numpy as np
@@ -15,6 +16,74 @@ class _ListLogger:
         self.messages.append(str(message))
 
 
+class _TtyBuffer(io.StringIO):
+    def isatty(self) -> bool:
+        return True
+
+
+def test_tapw_reporter_renders_plain_command_summary():
+    from tapw.reporting import TapwReporter
+
+    stream = io.StringIO()
+    reporter = TapwReporter(command="tapw run", stream=stream)
+
+    reporter.title("Calculate source bands")
+    reporter.fields([("config", "case.yaml"), ("mode", "band")])
+    reporter.stage("Build Hamiltonian", current=2, total=3)
+    reporter.check("Hermiticity", passed=True, detail="1.0e-13")
+    reporter.section("Results")
+    reporter.path("bands", "outputs/bands.npy")
+    reporter.warning("small spectral gap")
+    reporter.complete(elapsed=2.5)
+
+    assert stream.getvalue() == (
+        "[tapw run] Calculate source bands\n"
+        "  config  case.yaml\n"
+        "  mode    band\n"
+        "\n"
+        "[tapw run] [2/3] Build Hamiltonian\n"
+        "  Hermiticity  OK  1.0e-13\n"
+        "\n"
+        "[tapw run] Results\n"
+        "  bands  outputs/bands.npy\n"
+        "  WARN  small spectral gap\n"
+        "\n"
+        "[tapw run] OK  Completed in 2.50 s\n"
+    )
+    assert "\033[" not in stream.getvalue()
+
+
+def test_tapw_reporter_tty_color_and_no_color(monkeypatch):
+    from tapw.reporting import TapwReporter
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    color_stream = _TtyBuffer()
+    reporter = TapwReporter(command="tapw symm", stream=color_stream)
+    reporter.title("Analyze source symmetry")
+    reporter.complete()
+    assert "\033[" in color_stream.getvalue()
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    plain_stream = _TtyBuffer()
+    reporter = TapwReporter(command="tapw symm", stream=plain_stream)
+    reporter.title("Analyze source symmetry")
+    reporter.complete()
+    assert "\033[" not in plain_stream.getvalue()
+
+
+def test_tapw_reporter_logger_output_is_always_plain(monkeypatch):
+    from tapw.reporting import TapwReporter
+
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    logger = _ListLogger()
+    reporter = TapwReporter(logger, command="tapw run", color=True)
+
+    reporter.title("Calculate source bands")
+    reporter.complete()
+
+    assert "\033[" not in "\n".join(logger.messages)
+
+
 def test_reporter_default_hides_details_but_verbose_shows_them():
     from tapw.reporting import TapwReporter
 
@@ -27,7 +96,7 @@ def test_reporter_default_hides_details_but_verbose_shows_them():
     default_output = "\n".join(default_logger.messages)
     assert "atom_type_list" not in default_output
     assert "Projected TAPW basis dimension: 1278" in default_output
-    assert "Projection normalization check: PASS" in default_output
+    assert "Projection normalization check  OK" in default_output
     assert "max deviation 0.000e+00" in default_output
 
     verbose_logger = _ListLogger()
@@ -49,9 +118,7 @@ def test_reporter_stage_and_step_make_run_flow_clear():
     reporter.step("Layer clustering", "3 physical layers, 2 source orientation groups")
 
     assert logger.messages == [
-        "=" * 72,
-        "[TAPW] Preprocessing",
-        "-" * 72,
+        "[tapw] Preprocessing",
         "  Prepare structure and TAPW basis inputs.",
         "  - Layer clustering: 3 physical layers, 2 source orientation groups",
     ]
@@ -67,12 +134,10 @@ def test_reporter_formats_sections_key_values_and_arrays():
     reporter.kv("Twist index", 6)
     reporter.array("Moire lattice vectors (Angstrom)", np.array([[1.0, 0.0], [0.5, 0.866025]]))
 
-    assert logger.messages[0] == "=" * 72
-    assert logger.messages[1] == "[TAPW] Structure"
-    assert logger.messages[2] == "-" * 72
-    assert logger.messages[3] == "  Twist index: 6"
-    assert logger.messages[4] == "  Moire lattice vectors (Angstrom):"
-    assert logger.messages[5].startswith("    [[1.")
+    assert logger.messages[0] == "[tapw] Structure"
+    assert logger.messages[1] == "  Twist index: 6"
+    assert logger.messages[2] == "  Moire lattice vectors (Angstrom):"
+    assert logger.messages[3].startswith("    [[1.")
 
 
 def test_reporter_indents_multiline_key_values():
@@ -136,12 +201,12 @@ def test_openmx_display_properties_uses_english_reporter_output():
     structure.display_properties(reporter=reporter)
     output = "\n".join(logger.messages)
 
-    assert "[TAPW] Structure" in output
+    assert "[tapw] Structure" in output
     assert "Twist angle from twist_index_m (deg): 5.085848" in output
     assert "Moire lattice vectors (Angstrom):" in output
     assert "扭转角度" not in output
-    assert "=" * 72 in output
-    assert "-" * 72 in output
+    assert "=" * 72 not in output
+    assert "-" * 72 not in output
 
 
 def test_structure_processor_summary_uses_reporter_lines():
@@ -164,7 +229,7 @@ def test_structure_processor_summary_uses_reporter_lines():
     processor.print_summary()
     output = "\n".join(logger.messages)
 
-    assert "[TAPW] Layer and atom-type summary" in output
+    assert "[tapw] Layer and atom-type summary" in output
     assert "Final atom-type grouping used by the TAPW projector." in output
     assert "  Total layers: 2" in output
     assert "  Layer 0: 2 sublayers" in output
@@ -233,8 +298,8 @@ def test_generate_g_vec_list_reports_summary_by_default_and_arrays_in_verbose():
     assert "G-vector count: K1 set=" in output
     assert "m_g_unitvec_1:" not in output
     assert "K1 G-vectors:" not in output
-    assert "=" * 72 in output
-    assert "-" * 72 in output
+    assert "=" * 72 not in output
+    assert "-" * 72 not in output
 
     verbose_logger = _ListLogger()
     verbose = TapwReporter(verbose_logger, verbose=True)
@@ -277,7 +342,7 @@ def test_generate_gr_matrix_reports_user_summary_by_default_and_details_in_verbo
 
     assert "Projected TAPW basis dimension: 2" in output
     assert "Source orbital basis dimension: 2" in output
-    assert "Projection normalization check: PASS" in output
+    assert "Projection normalization check  OK" in output
     assert "atom_type_list" not in output
     assert "factor_list" not in output
     assert "dim_gr_1" not in output
