@@ -8,7 +8,9 @@ from kp.symmetry.joint_exactification import (
     JointExactificationError,
     SemilinearBlock,
     compose_semilinear,
+    extract_block_route_action,
     inverse_semilinear,
+    materialize_block_route_action,
 )
 
 
@@ -128,4 +130,111 @@ def test_block_route_action_rejects_invalid_structure(
             fiber_permutation=permutation,
             fiber_dimensions=dimensions,
             route_blocks=blocks,
+        )
+
+
+def test_route_round_trip_preserves_small_internal_entries() -> None:
+    eps = 5.0e-5
+    block = np.array(
+        [[np.sqrt(1.0 - eps**2), eps], [-eps, np.sqrt(1.0 - eps**2)]],
+        dtype=np.complex128,
+    )
+    action = BlockRouteAction(
+        name="g",
+        antiunitary=False,
+        fiber_permutation=(1, 0),
+        fiber_dimensions=(2, 2),
+        route_blocks=(block, block.conj().T),
+    )
+
+    dense = materialize_block_route_action(action)
+    restored = extract_block_route_action(
+        dense,
+        name="g",
+        antiunitary=False,
+        fiber_indices=((0, 1), (2, 3)),
+        fiber_permutation=(1, 0),
+        off_route_bound=0.0,
+    )
+
+    assert restored.route_blocks[0][0, 1] == eps
+    np.testing.assert_array_equal(materialize_block_route_action(restored), dense)
+    route_support = dense != 0.0
+    assert np.count_nonzero(route_support) == 8
+    assert np.count_nonzero(dense[~route_support]) == 0
+
+
+def test_route_round_trip_preserves_noncontiguous_fiber_layout() -> None:
+    action = BlockRouteAction(
+        name="g",
+        antiunitary=True,
+        fiber_permutation=(1, 0),
+        fiber_dimensions=(2, 2),
+        route_blocks=(
+            np.array([[0.0, 1.0j], [1.0, 0.0]], dtype=np.complex128),
+            np.array([[0.0, 1.0], [1.0j, 0.0]], dtype=np.complex128),
+        ),
+        fiber_indices=((0, 2), (1, 3)),
+    )
+
+    dense = materialize_block_route_action(action)
+    restored = extract_block_route_action(
+        dense,
+        name="g",
+        antiunitary=True,
+        fiber_indices=((0, 2), (1, 3)),
+        fiber_permutation=(1, 0),
+        off_route_bound=0.0,
+    )
+
+    assert restored.fiber_indices == ((0, 2), (1, 3))
+    np.testing.assert_array_equal(materialize_block_route_action(restored), dense)
+
+
+def test_route_extraction_rejects_off_route_pollution_above_bound() -> None:
+    dense = np.eye(2, dtype=np.complex128)
+    dense[1, 0] = 2.0e-8
+
+    with pytest.raises(JointExactificationError, match="off-route"):
+        extract_block_route_action(
+            dense,
+            name="g",
+            antiunitary=False,
+            fiber_indices=((0,), (1,)),
+            fiber_permutation=(0, 1),
+            off_route_bound=1.0e-9,
+        )
+
+
+def test_route_extraction_rejects_incompatible_fiber_dimensions() -> None:
+    with pytest.raises(JointExactificationError, match="dimension"):
+        extract_block_route_action(
+            np.eye(3, dtype=np.complex128),
+            name="g",
+            antiunitary=False,
+            fiber_indices=((0,), (1, 2)),
+            fiber_permutation=(1, 0),
+            off_route_bound=0.0,
+        )
+
+
+@pytest.mark.parametrize(
+    "fiber_indices",
+    [
+        ((0,), (0,)),
+        ((0,), (2,)),
+        ((0,), (1, 2)),
+    ],
+)
+def test_route_extraction_requires_a_complete_disjoint_fiber_partition(
+    fiber_indices: tuple[tuple[int, ...], ...],
+) -> None:
+    with pytest.raises(JointExactificationError, match="fiber indices"):
+        extract_block_route_action(
+            np.eye(2, dtype=np.complex128),
+            name="g",
+            antiunitary=False,
+            fiber_indices=fiber_indices,
+            fiber_permutation=tuple(range(len(fiber_indices))),
+            off_route_bound=0.0,
         )
