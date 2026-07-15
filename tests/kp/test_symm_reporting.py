@@ -62,3 +62,26 @@ def test_kp_symm_reports_production_and_developer_outputs_separately(
     assert "[kp symm] OK  Completed in" in out
     for forbidden in ("C2x", "C2y", "C2yT", "mirror_x", "mirror_y"):
         assert forbidden not in out
+
+
+def test_kp_symm_result_path_uses_canonical_case_default(tmp_path: Path) -> None:
+    from kp import cli
+
+    cfg_path = tmp_path / "case.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "case": {
+                    "profile": "K1",
+                    "q_shell": "q06",
+                    "output_root": "outputs",
+                },
+                "symm": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cli._kp_symm_output_dir(cfg_path) == (
+        tmp_path / "outputs" / "K1" / "q06" / "symmetry"
+    ).resolve()

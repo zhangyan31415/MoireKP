@@ -2266,6 +2266,8 @@ def _kp_symm_output_dir(config_path: str | Path) -> Path:
     path = Path(config_path).expanduser().resolve()
     with path.open("r", encoding="utf-8") as handle:
         payload = yaml.safe_load(handle) or {}
+    if isinstance(payload, Mapping) and payload.get("case") is not None:
+        payload = normalize_case_config(payload, config_path=path)
     symm_cfg = payload.get("symm", {}) if isinstance(payload, Mapping) else {}
     raw = symm_cfg.get("output_dir", "symm_project") if isinstance(symm_cfg, Mapping) else "symm_project"
     output = Path(str(raw)).expanduser()
