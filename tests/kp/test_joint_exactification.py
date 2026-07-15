@@ -16,15 +16,19 @@ from kp.symmetry.joint_exactification import (
     MagneticRelation,
     QuotientGroupElement,
     SemilinearBlock,
+    StabilizedOrbitReport,
     compile_action_orbits,
     compile_continuum_magnetic_presentation,
     compile_quotient_group_elements,
     compose_semilinear,
+    exactify_stabilized_orbit,
     extract_block_route_action,
     inverse_semilinear,
     materialize_block_route_action,
+    pack_skew_hermitian,
     project_u1_relations,
     synchronize_free_orbit,
+    unpack_skew_hermitian,
     validate_presentation_action_relations,
 )
 
@@ -1200,3 +1204,146 @@ def test_free_orbit_analytic_solver_matches_independent_numerical_oracle() -> No
 
     comparison_bound = 1.0e-18 + 1.0e-7 * reference_objective
     assert report.objective_final <= reference_objective + comparison_bound
+
+
+@pytest.mark.parametrize("dimension", [2, 4])
+def test_skew_hermitian_coordinates_are_exact_inverses(dimension: int) -> None:
+    rng = np.random.default_rng(9500 + dimension)
+    matrix = _normalized_random_skew(rng, dimension, amplitude=0.4)
+
+    coordinates = pack_skew_hermitian(matrix)
+    restored = unpack_skew_hermitian(coordinates, dimension)
+
+    assert coordinates.shape == (dimension * dimension,)
+    np.testing.assert_allclose(restored, matrix, atol=2.0e-16, rtol=0.0)
+
+
+def _gamma_fixed_fiber_actions(
+    dimension: int,
+    *,
+    perturbation: float,
+    seed: int,
+) -> dict[str, BlockRouteAction]:
+    if dimension % 2:
+        raise ValueError("fixture dimension must be even")
+    rng = np.random.default_rng(seed)
+    pair_count = dimension // 2
+    j_pair = np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=np.complex128)
+    tr = np.kron(np.eye(pair_count), j_pair)
+    c3_pair = np.diag(
+        np.exp(1.0j * np.asarray([-np.pi / 3.0, np.pi / 3.0]))
+    ).astype(np.complex128)
+    c3 = np.kron(np.eye(pair_count), c3_pair)
+    c2 = np.kron(
+        np.eye(pair_count),
+        np.asarray([[0.0, 1.0j], [1.0j, 0.0]], dtype=np.complex128),
+    )
+    exact = {"TR": tr, "C3z": c3, "C2": c2}
+    parity = {"TR": True, "C3z": False, "C2": False}
+    actions: dict[str, BlockRouteAction] = {}
+    for name, block in exact.items():
+        value = np.asarray(block, dtype=np.complex128)
+        if perturbation:
+            value = expm(
+                _normalized_random_skew(rng, dimension, perturbation)
+            ) @ value
+        actions[name] = BlockRouteAction(
+            name,
+            parity[name],
+            (0,),
+            (dimension,),
+            (value,),
+        )
+    return actions
+
+
+def test_stabilized_orbit_projection_restores_spinful_gamma_relations() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c3z(), _c2(phase=-1)]
+    )
+    actions = _gamma_fixed_fiber_actions(
+        4,
+        perturbation=7.0e-7,
+        seed=9604,
+    )
+    orbit = compile_action_orbits(actions, presentation)[0]
+
+    blocks, report = exactify_stabilized_orbit(
+        actions,
+        presentation,
+        orbit,
+        config=JointExactificationConfig(max_iterations=30),
+    )
+    exactified = _replace_route_blocks(actions, blocks)
+
+    assert isinstance(report, StabilizedOrbitReport)
+    assert report.converged is True
+    assert report.route_correction_rms < 5.0e-6
+    assert report.route_correction_max < 5.0e-6
+    assert report.relation_residual_max < 5.0e-12
+    assert report.minimum_relation_log_branch_margin > 1.0
+    assert _maximum_matrix_relation_residual(exactified, presentation) < 5.0e-12
+
+
+def test_stabilized_orbit_projection_is_idempotent_for_exact_gamma_input() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c3z(), _c2(phase=-1)]
+    )
+    actions = _gamma_fixed_fiber_actions(4, perturbation=0.0, seed=9704)
+    orbit = compile_action_orbits(actions, presentation)[0]
+
+    blocks, report = exactify_stabilized_orbit(
+        actions,
+        presentation,
+        orbit,
+        config=JointExactificationConfig(),
+    )
+
+    assert report.route_correction_rms < 5.0e-13
+    assert report.relation_residual_max < 5.0e-12
+    for name, action in actions.items():
+        np.testing.assert_allclose(
+            blocks[name][0], action.route_blocks[0], atol=5.0e-13, rtol=0.0
+        )
+
+
+def test_stabilized_orbit_rejects_odd_fixed_kramers_fiber() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c3z()]
+    )
+    actions = {
+        "TR": BlockRouteAction("TR", True, (0,), (1,), (np.eye(1),)),
+        "C3z": BlockRouteAction("C3z", False, (0,), (1,), (np.eye(1),)),
+    }
+    orbit = compile_action_orbits(actions, presentation)[0]
+
+    with pytest.raises(JointExactificationError, match="even dimension|Kramers"):
+        exactify_stabilized_orbit(
+            actions,
+            presentation,
+            orbit,
+            config=JointExactificationConfig(),
+        )
+
+
+def test_stabilized_orbit_rejects_relation_log_at_pi_branch() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c3z(), _c2(phase=-1)]
+    )
+    actions = _gamma_fixed_fiber_actions(2, perturbation=0.0, seed=9802)
+    actions["C3z"] = BlockRouteAction(
+        "C3z",
+        False,
+        (0,),
+        (2,),
+        (np.eye(2, dtype=np.complex128),),
+    )
+    orbit = compile_action_orbits(actions, presentation)[0]
+
+    with pytest.raises(JointExactificationError, match="branch"):
+        exactify_stabilized_orbit(
+            actions,
+            presentation,
+            orbit,
+            config=JointExactificationConfig(),
+        )

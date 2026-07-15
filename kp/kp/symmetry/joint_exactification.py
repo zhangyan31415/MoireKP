@@ -1435,6 +1435,95 @@ class FreeOrbitReport:
         )
 
 
+def pack_skew_hermitian(matrix: np.ndarray) -> np.ndarray:
+    """Pack a skew-Hermitian matrix into deterministic real ``u(d)`` coordinates."""
+
+    value = np.asarray(matrix, dtype=np.complex128)
+    if value.ndim != 2 or value.shape[0] != value.shape[1]:
+        raise JointExactificationError(
+            f"skew-Hermitian matrix must be square, got shape {value.shape}"
+        )
+    if not np.all(np.isfinite(value)):
+        raise JointExactificationError("skew-Hermitian matrix must be finite")
+    dimension = int(value.shape[0])
+    defect = float(np.linalg.norm(value + value.conj().T, ord="fro"))
+    scale = max(1.0, float(np.linalg.norm(value, ord="fro")))
+    bound = float(64.0 * np.finfo(np.float64).eps * max(1, dimension) * scale)
+    if defect > bound:
+        raise JointExactificationError(
+            f"matrix is not skew-Hermitian: residual={defect:.6e}, "
+            f"bound={bound:.6e}"
+        )
+    coordinates: list[float] = [float(value[index, index].imag) for index in range(dimension)]
+    root_two = float(np.sqrt(2.0))
+    for row in range(dimension):
+        for column in range(row + 1, dimension):
+            coordinates.append(root_two * float(value[row, column].real))
+            coordinates.append(root_two * float(value[row, column].imag))
+    return np.asarray(coordinates, dtype=np.float64)
+
+
+def unpack_skew_hermitian(
+    coordinates: Sequence[float],
+    dimension: int,
+) -> np.ndarray:
+    """Restore a skew-Hermitian matrix from ``pack_skew_hermitian`` coordinates."""
+
+    size = _positive_limit(dimension, label="skew-Hermitian dimension")
+    values = np.asarray(tuple(coordinates), dtype=np.float64)
+    if values.shape != (size * size,) or not np.all(np.isfinite(values)):
+        raise JointExactificationError(
+            "skew-Hermitian coordinates must be a finite vector of length "
+            f"{size * size}, got shape {values.shape}"
+        )
+    matrix = np.zeros((size, size), dtype=np.complex128)
+    cursor = 0
+    for index in range(size):
+        matrix[index, index] = 1.0j * values[cursor]
+        cursor += 1
+    inverse_root_two = float(1.0 / np.sqrt(2.0))
+    for row in range(size):
+        for column in range(row + 1, size):
+            upper = inverse_root_two * complex(
+                values[cursor], values[cursor + 1]
+            )
+            cursor += 2
+            matrix[row, column] = upper
+            matrix[column, row] = -upper.conjugate()
+    return matrix
+
+
+@dataclass(frozen=True)
+class StabilizedOrbitReport:
+    """Diagnostics for the constrained projection on a non-free fiber orbit."""
+
+    root: int
+    fibers: tuple[int, ...]
+    block_dimension: int
+    solver: str
+    iterations: int
+    converged: bool
+    rank: int
+    nullity: int
+    condition_number: float
+    relation_objective_initial: float
+    relation_objective_final: float
+    route_correction_rms: float
+    route_correction_max: float
+    minimum_relation_log_branch_margin: float
+    relation_residual_max: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root", int(self.root))
+        object.__setattr__(self, "fibers", tuple(int(value) for value in self.fibers))
+        object.__setattr__(self, "block_dimension", int(self.block_dimension))
+        object.__setattr__(self, "solver", str(self.solver))
+        object.__setattr__(self, "iterations", int(self.iterations))
+        object.__setattr__(self, "converged", bool(self.converged))
+        object.__setattr__(self, "rank", int(self.rank))
+        object.__setattr__(self, "nullity", int(self.nullity))
+
+
 def _evaluate_route_word(
     actions: Mapping[str, BlockRouteAction],
     word: Sequence[str],
@@ -1453,6 +1542,378 @@ def _evaluate_route_word(
         current = action.fiber_permutation[current]
         antiunitary ^= action.antiunitary
     return block, current, antiunitary
+
+
+def _route_word_left_variation(
+    actions: Mapping[str, BlockRouteAction],
+    word: Sequence[str],
+    source: int,
+    *,
+    variable: tuple[str, int],
+    generator: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Evaluate a route word and its left-trivialized edge variation."""
+
+    names = tuple(word)
+    route_sources = [0] * len(names)
+    current = int(source)
+    for position in range(len(names) - 1, -1, -1):
+        name = names[position]
+        route_sources[position] = current
+        current = actions[name].fiber_permutation[current]
+    dimension = actions[next(iter(actions))].fiber_dimensions[source]
+    prefix = np.eye(dimension, dtype=np.complex128)
+    left_variation = np.zeros((dimension, dimension), dtype=np.complex128)
+    prefix_antiunitary = False
+    for position, name in enumerate(names):
+        action = actions[name]
+        edge_source = route_sources[position]
+        if variable == (name, edge_source):
+            transformed_generator = semilinear_kappa(
+                generator,
+                prefix_antiunitary,
+            )
+            left_variation += (
+                prefix @ transformed_generator @ prefix.conj().T
+            )
+        factor = semilinear_kappa(
+            action.route_blocks[edge_source],
+            prefix_antiunitary,
+        )
+        prefix = prefix @ factor
+        prefix_antiunitary ^= action.antiunitary
+    return prefix, left_variation
+
+
+def _skew_part(matrix: np.ndarray) -> np.ndarray:
+    return np.asarray(0.5 * (matrix - matrix.conj().T), dtype=np.complex128)
+
+
+def _relation_mismatch(
+    actions: Mapping[str, BlockRouteAction],
+    relation: MagneticRelation,
+    source: int,
+) -> np.ndarray:
+    lhs, lhs_target, lhs_antiunitary = _evaluate_route_word(
+        actions,
+        relation.lhs,
+        source,
+    )
+    rhs, rhs_target, rhs_antiunitary = _evaluate_route_word(
+        actions,
+        relation.rhs,
+        source,
+    )
+    if (lhs_target, lhs_antiunitary) != (rhs_target, rhs_antiunitary):
+        raise JointExactificationError(
+            f"relation {relation.name!r} has inconsistent discrete targets"
+        )
+    target = relation.central_phase * rhs
+    return np.asarray(lhs @ target.conj().T, dtype=np.complex128)
+
+
+def _minimum_principal_branch_margin(matrix: np.ndarray) -> float:
+    eigenvalues = np.linalg.eigvals(matrix)
+    angles = np.angle(eigenvalues)
+    return float(np.min(np.pi - np.abs(angles)))
+
+
+def _stabilized_relation_system(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    variables: Sequence[tuple[str, int]],
+    basis: Sequence[np.ndarray],
+    *,
+    with_jacobian: bool,
+) -> tuple[np.ndarray, np.ndarray | None, float]:
+    dimension = actions[next(iter(actions))].fiber_dimensions[orbit.root]
+    row_count = len(presentation.relations) * len(orbit.fibers) * dimension * dimension
+    column_count = len(variables) * len(basis)
+    residual = np.empty(row_count, dtype=np.float64)
+    jacobian = (
+        np.empty((row_count, column_count), dtype=np.float64)
+        if with_jacobian
+        else None
+    )
+    minimum_margin = float("inf")
+    row_start = 0
+    for relation in presentation.relations:
+        for source in orbit.fibers:
+            mismatch = _relation_mismatch(actions, relation, source)
+            minimum_margin = min(
+                minimum_margin,
+                _minimum_principal_branch_margin(mismatch),
+            )
+            row_stop = row_start + dimension * dimension
+            residual[row_start:row_stop] = pack_skew_hermitian(
+                _skew_part(mismatch)
+            )
+            if jacobian is not None:
+                lhs, _, _ = _evaluate_route_word(actions, relation.lhs, source)
+                rhs, _, _ = _evaluate_route_word(actions, relation.rhs, source)
+                target = relation.central_phase * rhs
+                relation_mismatch = lhs @ target.conj().T
+                for variable_index, variable in enumerate(variables):
+                    for basis_index, generator in enumerate(basis):
+                        _, lhs_variation = _route_word_left_variation(
+                            actions,
+                            relation.lhs,
+                            source,
+                            variable=variable,
+                            generator=generator,
+                        )
+                        _, rhs_variation = _route_word_left_variation(
+                            actions,
+                            relation.rhs,
+                            source,
+                            variable=variable,
+                            generator=generator,
+                        )
+                        mismatch_variation = (
+                            lhs_variation
+                            - relation_mismatch
+                            @ rhs_variation
+                            @ relation_mismatch.conj().T
+                        )
+                        delta = mismatch_variation @ relation_mismatch
+                        column = variable_index * len(basis) + basis_index
+                        jacobian[row_start:row_stop, column] = (
+                            pack_skew_hermitian(_skew_part(delta))
+                        )
+            row_start = row_stop
+    return residual, jacobian, minimum_margin
+
+
+def _antiunitary_fixed_fiber_compatibility(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+) -> None:
+    for relation in presentation.relations:
+        if (
+            len(relation.lhs) != 2
+            or relation.lhs[0] != relation.lhs[1]
+            or relation.rhs
+            or relation.central_phase != complex(-1.0, 0.0)
+        ):
+            continue
+        name = relation.lhs[0]
+        action = actions[name]
+        if not action.antiunitary:
+            continue
+        for source in orbit.fibers:
+            if (
+                action.fiber_permutation[source] == source
+                and action.fiber_dimensions[source] % 2
+            ):
+                raise JointExactificationError(
+                    "fixed-fiber Kramers antiunitary with square -I requires "
+                    f"even dimension, got {action.fiber_dimensions[source]}"
+                )
+
+
+def _updated_stabilized_actions(
+    actions: Mapping[str, BlockRouteAction],
+    variables: Sequence[tuple[str, int]],
+    basis: Sequence[np.ndarray],
+    step: np.ndarray,
+    scale: float,
+) -> dict[str, BlockRouteAction]:
+    blocks = {
+        name: [np.asarray(block) for block in action.route_blocks]
+        for name, action in actions.items()
+    }
+    for variable_index, (name, source) in enumerate(variables):
+        offset = variable_index * len(basis)
+        generator = np.zeros_like(blocks[name][source])
+        for basis_index, value in enumerate(basis):
+            generator += scale * step[offset + basis_index] * value
+        blocks[name][source] = expm(generator) @ blocks[name][source]
+    return _actions_with_route_blocks(
+        actions,
+        {name: tuple(values) for name, values in blocks.items()},
+    )
+
+
+def exactify_stabilized_orbit(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    *,
+    config: JointExactificationConfig,
+) -> tuple[dict[str, tuple[np.ndarray, ...]], StabilizedOrbitReport]:
+    """Project one non-free orbit onto all declared semilinear relations."""
+
+    if not config.enabled:
+        raise JointExactificationError("joint exactification is disabled by configuration")
+    validate_presentation_action_relations(actions, presentation)
+    canonical_orbits = compile_action_orbits(actions, presentation)
+    if orbit not in canonical_orbits:
+        raise JointExactificationError("stabilized-orbit input is not canonical")
+    if len(orbit.stabilizer_words) == 1:
+        raise JointExactificationError("stabilized-orbit solver requires a nontrivial stabilizer")
+    dimensions = {
+        actions[generator.name].fiber_dimensions[source]
+        for generator in presentation.generators
+        for source in orbit.fibers
+    }
+    if len(dimensions) != 1:
+        raise JointExactificationError(
+            "stabilized-orbit exactification requires one constant block dimension"
+        )
+    dimension = dimensions.pop()
+    _antiunitary_fixed_fiber_compatibility(actions, presentation, orbit)
+    variables = tuple(
+        (generator.name, source)
+        for generator in presentation.generators
+        for source in orbit.fibers
+    )
+    basis = _skew_hermitian_basis(dimension)
+    working = dict(actions)
+    residual, jacobian, minimum_margin = _stabilized_relation_system(
+        working,
+        presentation,
+        orbit,
+        variables,
+        basis,
+        with_jacobian=True,
+    )
+    if minimum_margin <= config.central_branch_margin:
+        raise JointExactificationError(
+            "stabilized relation-log branch is not safely separated from pi: "
+            f"margin={minimum_margin:.6e}, required="
+            f"{config.central_branch_margin:.6e}"
+        )
+    objective_initial = float(np.dot(residual, residual))
+    epsilon = float(np.finfo(np.float64).eps)
+    residual_bound = float(
+        128.0
+        * epsilon
+        * max(
+            1,
+            dimension,
+            len(variables) * len(basis),
+            len(presentation.relations),
+            max(
+                len(relation.lhs) + len(relation.rhs)
+                for relation in presentation.relations
+            ),
+        )
+    )
+    condition_number = 1.0
+    rank = 0
+    iterations = 0
+    converged = False
+    for _ in range(config.max_iterations + 1):
+        maximum = float(np.linalg.norm(residual, ord=np.inf))
+        if maximum <= residual_bound:
+            converged = True
+            break
+        if jacobian is None:
+            raise JointExactificationError("missing stabilized-orbit Jacobian")
+        left, singular_values, right_h = np.linalg.svd(jacobian, full_matrices=False)
+        if singular_values.size == 0 or singular_values[0] == 0.0:
+            raise JointExactificationError("stabilized-orbit Jacobian has zero rank")
+        rank_tolerance = float(
+            singular_values[0] * max(jacobian.shape) * epsilon
+        )
+        rank = int(np.count_nonzero(singular_values > rank_tolerance))
+        if rank == 0:
+            raise JointExactificationError("stabilized-orbit Jacobian has zero rank")
+        condition_number = float(singular_values[0] / singular_values[rank - 1])
+        if condition_number > config.condition_limit:
+            raise JointExactificationError(
+                "stabilized-orbit Jacobian exceeds condition limit: "
+                f"condition={condition_number:.6e}, limit={config.condition_limit:.6e}"
+            )
+        step = right_h[:rank, :].T @ (
+            (left[:, :rank].T @ (-residual)) / singular_values[:rank]
+        )
+        objective = float(np.dot(residual, residual))
+        accepted = False
+        for line_search_step in range(16):
+            scale = float(0.5**line_search_step)
+            trial = _updated_stabilized_actions(
+                working,
+                variables,
+                basis,
+                step,
+                scale,
+            )
+            trial_residual, trial_jacobian, trial_margin = (
+                _stabilized_relation_system(
+                    trial,
+                    presentation,
+                    orbit,
+                    variables,
+                    basis,
+                    with_jacobian=True,
+                )
+            )
+            trial_objective = float(np.dot(trial_residual, trial_residual))
+            if (
+                trial_margin > config.central_branch_margin
+                and trial_objective < objective
+            ):
+                working = trial
+                residual = trial_residual
+                jacobian = trial_jacobian
+                minimum_margin = min(minimum_margin, trial_margin)
+                iterations += 1
+                accepted = True
+                break
+        if not accepted:
+            raise JointExactificationError(
+                "stabilized-orbit line search failed to reduce relation residual"
+            )
+    if not converged:
+        raise JointExactificationError(
+            "stabilized-orbit exactification did not converge within "
+            f"{config.max_iterations} iterations"
+        )
+    route_blocks = {
+        name: tuple(action.route_blocks) for name, action in working.items()
+    }
+    correction_rms, correction_max = _route_correction_metrics(
+        actions,
+        presentation,
+        orbit,
+        route_blocks,
+    )
+    if correction_rms > config.max_rms_correction:
+        raise JointExactificationError(
+            "stabilized-orbit RMS correction exceeds configured limit: "
+            f"correction={correction_rms:.6e}, limit={config.max_rms_correction:.6e}"
+        )
+    if correction_max > config.max_route_correction:
+        raise JointExactificationError(
+            "stabilized-orbit route correction exceeds configured limit: "
+            f"correction={correction_max:.6e}, limit={config.max_route_correction:.6e}"
+        )
+    relation_residual = _relation_residual_for_sources(
+        working,
+        presentation,
+        orbit.fibers,
+    )
+    report = StabilizedOrbitReport(
+        root=orbit.root,
+        fibers=orbit.fibers,
+        block_dimension=dimension,
+        solver="minimum_norm_route_newton",
+        iterations=iterations,
+        converged=True,
+        rank=rank,
+        nullity=len(variables) * len(basis) - rank,
+        condition_number=condition_number,
+        relation_objective_initial=objective_initial,
+        relation_objective_final=float(np.dot(residual, residual)),
+        route_correction_rms=correction_rms,
+        route_correction_max=correction_max,
+        minimum_relation_log_branch_margin=minimum_margin,
+        relation_residual_max=relation_residual,
+    )
+    return route_blocks, report
 
 
 def _canonical_transporter_frames(
@@ -2044,15 +2505,19 @@ __all__ = [
     "MagneticRelation",
     "QuotientGroupElement",
     "SemilinearBlock",
+    "StabilizedOrbitReport",
     "compile_action_orbits",
     "compile_continuum_magnetic_presentation",
     "compile_quotient_group_elements",
     "compose_semilinear",
+    "exactify_stabilized_orbit",
     "extract_block_route_action",
     "inverse_semilinear",
     "materialize_block_route_action",
+    "pack_skew_hermitian",
     "project_u1_relations",
     "semilinear_kappa",
     "synchronize_free_orbit",
+    "unpack_skew_hermitian",
     "validate_presentation_action_relations",
 ]
