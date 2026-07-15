@@ -875,14 +875,227 @@ def validate_presentation_action_relations(
             )
 
 
+@dataclass(frozen=True)
+class QuotientGroupElement:
+    """One canonical element of the permutation/parity quotient group."""
+
+    canonical_word: tuple[str, ...]
+    antiunitary: bool
+    fiber_permutation: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        word = tuple(str(value).strip() for value in self.canonical_word)
+        if any(not value for value in word):
+            raise JointExactificationError("quotient-group words must name generators")
+        permutation = _integer_tuple(
+            self.fiber_permutation,
+            label="quotient-group fiber permutation",
+        )
+        if sorted(permutation) != list(range(len(permutation))):
+            raise JointExactificationError(
+                "quotient-group fiber permutation must be bijective"
+            )
+        object.__setattr__(self, "canonical_word", word)
+        object.__setattr__(self, "antiunitary", bool(self.antiunitary))
+        object.__setattr__(self, "fiber_permutation", permutation)
+
+
+@dataclass(frozen=True)
+class ActionOrbit:
+    """Canonical orbit, root transporters, and its full discrete stabilizer."""
+
+    root: int
+    fibers: tuple[int, ...]
+    transporter_words: tuple[tuple[str, ...], ...]
+    stabilizer_words: tuple[tuple[str, ...], ...]
+
+    def __post_init__(self) -> None:
+        try:
+            root = int(operator.index(self.root))
+        except TypeError as exc:
+            raise JointExactificationError("action-orbit root must be an integer") from exc
+        fibers = _integer_tuple(self.fibers, label="action-orbit fibers")
+        if not fibers or tuple(sorted(set(fibers))) != fibers or root != fibers[0]:
+            raise JointExactificationError(
+                "action-orbit fibers must be sorted, unique, and start with the root"
+            )
+        transporters = tuple(
+            tuple(str(value).strip() for value in word)
+            for word in self.transporter_words
+        )
+        stabilizers = tuple(
+            tuple(str(value).strip() for value in word)
+            for word in self.stabilizer_words
+        )
+        if len(transporters) != len(fibers) or transporters[0] != ():
+            raise JointExactificationError(
+                "action-orbit transporters must label every fiber and start with identity"
+            )
+        if not stabilizers or stabilizers[0] != ():
+            raise JointExactificationError(
+                "action-orbit stabilizer words must start with identity"
+            )
+        if any(
+            not value
+            for word in (*transporters, *stabilizers)
+            for value in word
+        ):
+            raise JointExactificationError(
+                "action-orbit words must contain nonempty generator names"
+            )
+        object.__setattr__(self, "root", root)
+        object.__setattr__(self, "fibers", fibers)
+        object.__setattr__(self, "transporter_words", transporters)
+        object.__setattr__(self, "stabilizer_words", stabilizers)
+
+
+def _positive_limit(value: int, *, label: str) -> int:
+    try:
+        limit = int(operator.index(value))
+    except TypeError as exc:
+        raise JointExactificationError(f"{label} must be a positive integer") from exc
+    if limit <= 0:
+        raise JointExactificationError(f"{label} must be a positive integer")
+    return limit
+
+
+def _compose_discrete_actions(
+    outer_permutation: Sequence[int],
+    outer_antiunitary: bool,
+    inner_permutation: Sequence[int],
+    inner_antiunitary: bool,
+) -> tuple[tuple[int, ...], bool]:
+    if len(outer_permutation) != len(inner_permutation):
+        raise JointExactificationError(
+            "cannot compose discrete actions with different fiber counts"
+        )
+    return (
+        tuple(
+            int(outer_permutation[int(inner_permutation[source])])
+            for source in range(len(outer_permutation))
+        ),
+        bool(outer_antiunitary) ^ bool(inner_antiunitary),
+    )
+
+
+def compile_quotient_group_elements(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    max_group_size: int = 4096,
+    max_word_length: int = 128,
+) -> tuple[QuotientGroupElement, ...]:
+    """Enumerate shortest canonical words in the finite discrete quotient."""
+
+    group_size_limit = _positive_limit(max_group_size, label="group-size limit")
+    word_length_limit = _positive_limit(
+        max_word_length,
+        label="word-length limit",
+    )
+    validate_presentation_action_relations(actions, presentation)
+    generator_names = tuple(
+        generator.name for generator in presentation.generators
+    )
+    fiber_count = len(actions[generator_names[0]].fiber_permutation)
+    identity = tuple(range(fiber_count))
+    elements: list[QuotientGroupElement] = [
+        QuotientGroupElement((), False, identity)
+    ]
+    known: dict[tuple[tuple[int, ...], bool], int] = {
+        (identity, False): 0,
+    }
+    cursor = 0
+    while cursor < len(elements):
+        current = elements[cursor]
+        cursor += 1
+        for generator_name in generator_names:
+            generator = actions[generator_name]
+            permutation, antiunitary = _compose_discrete_actions(
+                current.fiber_permutation,
+                current.antiunitary,
+                generator.fiber_permutation,
+                generator.antiunitary,
+            )
+            key = (permutation, antiunitary)
+            if key in known:
+                continue
+            word = (*current.canonical_word, generator_name)
+            if len(word) > word_length_limit:
+                raise JointExactificationError(
+                    "quotient-group word-length limit exceeded while proving closure: "
+                    f"limit={word_length_limit}, candidate={word}"
+                )
+            if len(elements) >= group_size_limit:
+                raise JointExactificationError(
+                    "quotient-group group-size limit exceeded while proving closure: "
+                    f"limit={group_size_limit}"
+                )
+            known[key] = len(elements)
+            elements.append(
+                QuotientGroupElement(word, antiunitary, permutation)
+            )
+    return tuple(elements)
+
+
+def compile_action_orbits(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    max_group_size: int = 4096,
+    max_word_length: int = 128,
+) -> tuple[ActionOrbit, ...]:
+    """Decompose the exact fiber action into canonical orbit/stabilizer data."""
+
+    elements = compile_quotient_group_elements(
+        actions,
+        presentation,
+        max_group_size=max_group_size,
+        max_word_length=max_word_length,
+    )
+    fiber_count = len(elements[0].fiber_permutation)
+    unassigned = set(range(fiber_count))
+    orbits: list[ActionOrbit] = []
+    while unassigned:
+        root = min(unassigned)
+        transporter_by_fiber: dict[int, tuple[str, ...]] = {}
+        stabilizer_words: list[tuple[str, ...]] = []
+        for element in elements:
+            target = int(element.fiber_permutation[root])
+            transporter_by_fiber.setdefault(target, element.canonical_word)
+            if target == root:
+                stabilizer_words.append(element.canonical_word)
+        fibers = tuple(sorted(transporter_by_fiber))
+        if len(fibers) * len(stabilizer_words) != len(elements):
+            raise JointExactificationError(
+                "orbit-stabilizer identity failed for compiled discrete action: "
+                f"root={root}, orbit={len(fibers)}, stabilizer="
+                f"{len(stabilizer_words)}, group={len(elements)}"
+            )
+        orbit = ActionOrbit(
+            root=root,
+            fibers=fibers,
+            transporter_words=tuple(
+                transporter_by_fiber[fiber] for fiber in fibers
+            ),
+            stabilizer_words=tuple(stabilizer_words),
+        )
+        orbits.append(orbit)
+        unassigned.difference_update(fibers)
+    return tuple(orbits)
+
+
 __all__ = [
+    "ActionOrbit",
     "BlockRouteAction",
     "JointExactificationError",
     "MagneticGenerator",
     "MagneticPresentation",
     "MagneticRelation",
+    "QuotientGroupElement",
     "SemilinearBlock",
+    "compile_action_orbits",
     "compile_continuum_magnetic_presentation",
+    "compile_quotient_group_elements",
     "compose_semilinear",
     "extract_block_route_action",
     "inverse_semilinear",

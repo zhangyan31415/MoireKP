@@ -4,13 +4,17 @@ import numpy as np
 import pytest
 
 from kp.symmetry.joint_exactification import (
+    ActionOrbit,
     BlockRouteAction,
     JointExactificationError,
     MagneticGenerator,
     MagneticPresentation,
     MagneticRelation,
+    QuotientGroupElement,
     SemilinearBlock,
+    compile_action_orbits,
     compile_continuum_magnetic_presentation,
+    compile_quotient_group_elements,
     compose_semilinear,
     extract_block_route_action,
     inverse_semilinear,
@@ -496,4 +500,188 @@ def test_discrete_relation_validation_rejects_nonclosing_permutations() -> None:
         validate_presentation_action_relations(
             actions,
             compile_continuum_magnetic_presentation([_tr(phase=1), _c2(phase=1)]),
+        )
+
+
+def _repeated_permutation(
+    local_permutation: tuple[int, ...],
+    repeats: int,
+) -> tuple[int, ...]:
+    size = len(local_permutation)
+    return tuple(
+        repeat * size + local_permutation[index]
+        for repeat in range(repeats)
+        for index in range(size)
+    )
+
+
+def _unit_route_action(
+    name: str,
+    antiunitary: bool,
+    permutation: tuple[int, ...],
+) -> BlockRouteAction:
+    return BlockRouteAction(
+        name,
+        antiunitary,
+        permutation,
+        tuple(1 for _ in permutation),
+        tuple(np.eye(1, dtype=np.complex128) for _ in permutation),
+    )
+
+
+def _mgi2_v4_actions(repeats: int = 11) -> dict[str, BlockRouteAction]:
+    return {
+        "TR": _unit_route_action(
+            "TR",
+            True,
+            _repeated_permutation((1, 0, 3, 2), repeats),
+        ),
+        "C2": _unit_route_action(
+            "C2",
+            False,
+            _repeated_permutation((2, 3, 0, 1), repeats),
+        ),
+    }
+
+
+def _mote2_regular_d3_actions(repeats: int = 9) -> dict[str, BlockRouteAction]:
+    return {
+        "C3z": _unit_route_action(
+            "C3z",
+            False,
+            _repeated_permutation((1, 2, 0, 4, 5, 3), repeats),
+        ),
+        "C2T": _unit_route_action(
+            "C2T",
+            True,
+            _repeated_permutation((3, 5, 4, 0, 2, 1), repeats),
+        ),
+    }
+
+
+def test_v4_quotient_group_has_deterministic_canonical_words() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+
+    elements = compile_quotient_group_elements(
+        _mgi2_v4_actions(repeats=1),
+        presentation,
+    )
+
+    assert all(isinstance(element, QuotientGroupElement) for element in elements)
+    assert tuple(element.canonical_word for element in elements) == (
+        (),
+        ("TR",),
+        ("C2",),
+        ("TR", "C2"),
+    )
+    assert tuple(element.antiunitary for element in elements) == (
+        False,
+        True,
+        False,
+        True,
+    )
+
+
+def test_mgi2_v4_compiles_eleven_free_four_fiber_orbits() -> None:
+    orbits = compile_action_orbits(
+        _mgi2_v4_actions(),
+        compile_continuum_magnetic_presentation([_tr(phase=1), _c2(phase=1)]),
+    )
+
+    assert len(orbits) == 11
+    assert all(isinstance(orbit, ActionOrbit) for orbit in orbits)
+    assert tuple(orbit.root for orbit in orbits) == tuple(range(0, 44, 4))
+    assert all(len(orbit.fibers) == 4 for orbit in orbits)
+    assert all(orbit.stabilizer_words == ((),) for orbit in orbits)
+    assert orbits[0].fibers == (0, 1, 2, 3)
+    assert orbits[0].transporter_words == (
+        (),
+        ("TR",),
+        ("C2",),
+        ("TR", "C2"),
+    )
+
+
+def test_mote2_d3_compiles_nine_free_six_fiber_orbits() -> None:
+    orbits = compile_action_orbits(
+        _mote2_regular_d3_actions(),
+        compile_continuum_magnetic_presentation([_c3z(), _c2t()]),
+    )
+
+    assert len(orbits) == 9
+    assert tuple(orbit.root for orbit in orbits) == tuple(range(0, 54, 6))
+    assert all(len(orbit.fibers) == 6 for orbit in orbits)
+    assert all(orbit.stabilizer_words == ((),) for orbit in orbits)
+    assert orbits[0].transporter_words == (
+        (),
+        ("C3z",),
+        ("C3z", "C3z"),
+        ("C2T",),
+        ("C3z", "C2T"),
+        ("C2T", "C3z"),
+    )
+
+
+def _gamma_d3_times_tr_actions() -> dict[str, BlockRouteAction]:
+    tr_local = tuple((index + 6) % 12 for index in range(12))
+    c3_local: list[int] = []
+    c2_local: list[int] = []
+    for time_sector in range(2):
+        for reflection_sector in range(2):
+            for rotation_sector in range(3):
+                c3_local.append(
+                    time_sector * 6
+                    + reflection_sector * 3
+                    + (rotation_sector + 1) % 3
+                )
+                c2_local.append(
+                    time_sector * 6
+                    + (1 - reflection_sector) * 3
+                    + (-rotation_sector) % 3
+                )
+    tr = (*_repeated_permutation(tr_local, 3), 37, 36)
+    c3 = (*_repeated_permutation(tuple(c3_local), 3), 36, 37)
+    c2 = (*_repeated_permutation(tuple(c2_local), 3), 36, 37)
+    return {
+        "TR": _unit_route_action("TR", True, tr),
+        "C3z": _unit_route_action("C3z", False, c3),
+        "C2": _unit_route_action("C2", False, c2),
+    }
+
+
+def test_gamma_d3_times_tr_has_three_free_orbits_and_one_stabilized_orbit() -> None:
+    orbits = compile_action_orbits(
+        _gamma_d3_times_tr_actions(),
+        compile_continuum_magnetic_presentation(
+            [_tr(phase=-1), _c3z(), _c2(phase=-1)]
+        ),
+    )
+
+    assert tuple(orbit.root for orbit in orbits) == (0, 12, 24, 36)
+    assert tuple(len(orbit.fibers) for orbit in orbits) == (12, 12, 12, 2)
+    assert tuple(len(orbit.stabilizer_words) for orbit in orbits) == (1, 1, 1, 6)
+    assert orbits[-1].fibers == (36, 37)
+    assert orbits[-1].transporter_words == ((), ("TR",))
+    assert all("TR" not in word for word in orbits[-1].stabilizer_words)
+
+
+def test_quotient_group_compiler_enforces_explicit_limits() -> None:
+    actions = _mgi2_v4_actions(repeats=1)
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+
+    with pytest.raises(JointExactificationError, match="group-size limit"):
+        compile_quotient_group_elements(
+            actions,
+            presentation,
+            max_group_size=3,
+        )
+    with pytest.raises(JointExactificationError, match="word-length limit"):
+        compile_quotient_group_elements(
+            actions,
+            presentation,
+            max_word_length=1,
         )
