@@ -908,18 +908,8 @@ def run_configured_symm_rep(
     return result.output_dir
 
 
-_CLI_RULE = "=" * 72
-_CLI_SUBRULE = "-" * 72
-
-
-def _print_section(title: str) -> None:
-    print(_CLI_RULE, flush=True)
-    print(f"[tapw symm-rep] {title}", flush=True)
-    print(_CLI_SUBRULE, flush=True)
-
-
-def _print_progress(message: str) -> None:
-    print(f"  {message}", flush=True)
+def _print_progress(reporter: TapwReporter, message: str) -> None:
+    reporter.line(f"  {message}")
 
 
 def _timing_value(timings: TimingBreakdown | None, key: str) -> float:
@@ -931,9 +921,14 @@ def _timing_value(timings: TimingBreakdown | None, key: str) -> float:
         return 0.0
 
 
-def _print_timing_breakdown(*, elapsed: float, timings: TimingBreakdown | None) -> None:
+def _print_timing_breakdown(
+    reporter: TapwReporter,
+    *,
+    elapsed: float,
+    timings: TimingBreakdown | None,
+) -> None:
     min_timing_seconds = 0.05
-    print("  time breakdown   :", flush=True)
+    reporter.line("  time breakdown:")
     if timings:
         setup = (
             _timing_value(timings, "resolve_config")
@@ -954,77 +949,86 @@ def _print_timing_breakdown(*, elapsed: float, timings: TimingBreakdown | None) 
         cache_write = _timing_value(timings, "cache_write")
         hidden_time = 0.0
         if setup >= min_timing_seconds:
-            print(f"    setup          : {setup:.1f}s", flush=True)
+            reporter.line(f"    setup          : {setup:.1f}s")
         else:
             hidden_time += setup
         if cache_read >= min_timing_seconds:
-            print(f"    cache read     : {cache_read:.1f}s", flush=True)
+            reporter.line(f"    cache read     : {cache_read:.1f}s")
         else:
             hidden_time += cache_read
         if diagonalize >= min_timing_seconds:
-            print(f"    diagonalize    : {diagonalize:.1f}s", flush=True)
+            reporter.line(f"    diagonalize    : {diagonalize:.1f}s")
             if parallel_diag_seconds >= min_timing_seconds:
                 points = ", ".join(str(point) for point in parallel_diag.get("points", []))
-                print(
+                reporter.line(
                     "      parallel     {seconds:>8.1f}s  workers={workers}  bands={bands}  points={points}".format(
                         seconds=parallel_diag_seconds,
                         workers=int(parallel_diag.get("workers", 0)),
                         bands=int(parallel_diag.get("bands", 0)),
                         points=points,
                     ),
-                    flush=True,
                 )
                 worker_setup_sum = float(parallel_diag.get("worker_setup_sum", 0.0) or 0.0)
                 worker_solve_sum = float(parallel_diag.get("worker_solve_sum", 0.0) or 0.0)
                 if worker_setup_sum >= min_timing_seconds:
-                    print(f"      worker setup sum: {worker_setup_sum:.1f}s", flush=True)
+                    reporter.line(f"      worker setup sum: {worker_setup_sum:.1f}s")
                 if worker_solve_sum >= min_timing_seconds:
-                    print(f"      worker solve sum : {worker_solve_sum:.1f}s", flush=True)
+                    reporter.line(f"      worker solve sum : {worker_solve_sum:.1f}s")
             for item in timings.get("diagonalize_points", []):
                 seconds = float(item.get("seconds", 0.0))
                 if seconds >= min_timing_seconds:
-                    print(
+                    reporter.line(
                         "      {point:<12} {seconds:>8.1f}s  bands={bands}".format(
                             point=str(item.get("point", "")),
                             seconds=seconds,
                             bands=int(item.get("bands", 0)),
                         ),
-                        flush=True,
                     )
         else:
             hidden_time += diagonalize
         point_prep = max(0.0, point_total - point_solver_setup - diagonalize - cache_read - cache_write)
         if point_prep >= min_timing_seconds:
-            print(f"    point prep      : {point_prep:.1f}s", flush=True)
+            reporter.line(f"    point prep      : {point_prep:.1f}s")
         else:
             hidden_time += point_prep
         if projection >= min_timing_seconds:
-            print(f"    project/write   : {projection:.1f}s", flush=True)
+            reporter.line(f"    project/write   : {projection:.1f}s")
         else:
             hidden_time += projection
         if cache_write >= min_timing_seconds:
-            print(f"    cache write    : {cache_write:.1f}s", flush=True)
+            reporter.line(f"    cache write    : {cache_write:.1f}s")
         else:
             hidden_time += cache_write
         if postprocess >= min_timing_seconds:
-            print(f"    postprocess     : {postprocess:.1f}s", flush=True)
+            reporter.line(f"    postprocess     : {postprocess:.1f}s")
         else:
             hidden_time += postprocess
         accounted = setup_outside_point_solve + point_total + projection + postprocess
         unaccounted = max(0.0, float(elapsed) - accounted)
         hidden_time += unaccounted
         if hidden_time >= min_timing_seconds:
-            print(f"    other           : {hidden_time:.1f}s", flush=True)
-    print(f"    total           : {elapsed:.1f}s", flush=True)
+            reporter.line(f"    other           : {hidden_time:.1f}s")
+    reporter.line(f"    total           : {elapsed:.1f}s")
 
 
-def _print_output_summary(output_dir: Path, *, elapsed: float, timings: TimingBreakdown | None = None) -> None:
-    _print_section("Complete")
-    print(f"  output directory : {output_dir}", flush=True)
-    print(f"  summary          : {output_dir / 'summary.md'}", flush=True)
-    print(f"  band reps        : {output_dir / 'band_representations.npz'}", flush=True)
-    print(f"  characters       : {output_dir / 'characters.csv'}", flush=True)
-    _print_timing_breakdown(elapsed=elapsed, timings=timings)
+def _print_output_summary(
+    reporter: TapwReporter,
+    output_dir: Path,
+    *,
+    elapsed: float,
+    timings: TimingBreakdown | None = None,
+) -> None:
+    reporter.section("Results")
+    reporter.fields(
+        [
+            ("output directory", output_dir),
+            ("summary", output_dir / "summary.md"),
+            ("band reps", output_dir / "band_representations.npz"),
+            ("characters", output_dir / "characters.csv"),
+        ]
+    )
+    _print_timing_breakdown(reporter, elapsed=elapsed, timings=timings)
+    reporter.complete(elapsed=elapsed)
 
 
 
@@ -1091,29 +1095,34 @@ def build_parser(prog: str = "tapw symm-rep") -> argparse.ArgumentParser:
 
 def main(argv=None, *, prog: str = "tapw symm-rep") -> int:
     args = build_parser(prog=prog).parse_args(argv)
+    reporter = TapwReporter(command="tapw symm-rep")
+    reporter.title("Project symmetry representations")
     if args.config is not None:
         if args.valence_count is not None or args.conduction_count is not None:
             raise SystemExit("tapw symm-rep -c does not accept --valence-count or --conduction-count.")
         started = time.perf_counter()
         timings: TimingBreakdown = {}
-        _print_section("Start")
         output_dir = run_configured_symm_rep(
             args.config,
             degeneracy_tol=args.degeneracy_tol,
             overwrite=args.overwrite,
-            progress=_print_progress,
+            progress=lambda message: _print_progress(reporter, message),
             timings=timings,
         )
-        _print_output_summary(output_dir, elapsed=time.perf_counter() - started, timings=timings)
+        _print_output_summary(
+            reporter,
+            output_dir,
+            elapsed=time.perf_counter() - started,
+            timings=timings,
+        )
         return 0
     if args.band_dir is None or args.symmetry_dir is None or args.output_dir is None:
         raise SystemExit("tapw symm-rep requires either -c/--config or --band-dir, --symmetry-dir, and --output-dir.")
     started = time.perf_counter()
     timings = {}
-    _print_section("Start")
-    _print_progress(f"Reading band data from: {args.band_dir}")
-    _print_progress(f"Reading raw-H representations from: {args.symmetry_dir}")
-    _print_progress(f"Writing symmetry representations to: {args.output_dir}")
+    _print_progress(reporter, f"Reading band data from: {args.band_dir}")
+    _print_progress(reporter, f"Reading raw-H representations from: {args.symmetry_dir}")
+    _print_progress(reporter, f"Writing symmetry representations to: {args.output_dir}")
     postprocess_started = time.perf_counter()
     result = run_symm_rep(
         band_dir=args.band_dir,
@@ -1128,7 +1137,12 @@ def main(argv=None, *, prog: str = "tapw symm-rep") -> int:
         overwrite=args.overwrite,
     )
     timings["postprocess"] = time.perf_counter() - postprocess_started
-    _print_output_summary(result.output_dir, elapsed=time.perf_counter() - started, timings=timings)
+    _print_output_summary(
+        reporter,
+        result.output_dir,
+        elapsed=time.perf_counter() - started,
+        timings=timings,
+    )
     return 0
 
 

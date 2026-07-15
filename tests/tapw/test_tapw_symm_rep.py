@@ -1324,8 +1324,13 @@ def test_symm_rep_cli_smoke_writes_files(tmp_path, capsys):
     assert (output_dir / "summary.md").is_file()
     assert (output_dir / "characters.csv").is_file()
     stdout = capsys.readouterr().out
-    assert "[tapw symm-rep] Start" in stdout
-    assert "[tapw symm-rep] Complete" in stdout
-    assert "summary          :" in stdout
-    assert "time breakdown   :" in stdout
-    assert "total           :" in stdout
+    assert "[tapw symm-rep] Project symmetry representations" in stdout
+    assert "[tapw symm-rep] Results" in stdout
+    assert "  output directory  " in stdout
+    assert "  summary           " in stdout
+    assert "  band reps         " in stdout
+    assert "  characters        " in stdout
+    assert "  time breakdown:" in stdout
+    assert "    total" in stdout
+    assert "[tapw symm-rep] OK  Completed in" in stdout
+    assert "=" * 72 not in stdout
