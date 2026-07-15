@@ -118,7 +118,11 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path,
     assert int(wavefunctions["ref_q_index"]) == 0
     assert not (inspect_dir / "candidates.md").exists()
     assert not (inspect_dir / "blocks.csv").exists()
-    assert "[kp] Selected bands at ref_Q=0: below EF [0], above EF [1]" in stdout
+    assert "[kp inspect] Inspect source bands and Q-block spectra" in stdout
+    assert "[kp inspect] Results" in stdout
+    assert "  selected bands  ref_Q=0; below EF [0]; above EF [1]" in stdout
+    assert "[kp inspect] OK  Completed in" in stdout
+    assert "[kp]" not in stdout
 
 
 def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp_path: Path) -> None:
@@ -213,7 +217,7 @@ def test_inspect_qsort_uses_each_qset_center(monkeypatch, tmp_path: Path) -> Non
     assert captured["q_index_order"] == [1, 0, 2, 4, 3, 5]
 
 
-def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Path) -> None:
+def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Path, capsys) -> None:
     q = np.zeros((1, 2), dtype=float)
     hamk = np.zeros((1, 4, 4), dtype=np.complex128)
     captured_plot: dict[str, object] = {}
@@ -248,6 +252,7 @@ def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Pa
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["project", "-c", str(cfg_path)])
+    stdout = capsys.readouterr().out
 
     projection_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "projection"
     assert np.load(projection_dir / "heff.npy").shape == (1, 2, 2)

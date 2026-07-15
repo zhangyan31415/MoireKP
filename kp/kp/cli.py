@@ -5,6 +5,7 @@ import inspect
 import json
 import os
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
@@ -59,6 +60,7 @@ from .symmetry.projection import (
     run_symmetry_projection_from_config,
 )
 from .config.case import normalize_case_config
+from .reporting import KpReporter
 
 HARTREE_TO_EV = 27.2113845
 
@@ -1042,11 +1044,13 @@ def _print_project_diagnostics(
     pole_warning_mev: float,
     pole_danger_mev: float,
     print_k_diagnostics: bool = False,
+    reporter: KpReporter | None = None,
 ) -> None:
     if not diag_list:
         return
 
-    print("[kp] Downfolding diagnostics:")
+    reporter = reporter or KpReporter("kp project")
+    reporter.section("Downfolding diagnostics")
 
     pole_rows = [
         (ik, d)
@@ -1058,16 +1062,21 @@ def _print_project_diagnostics(
         min_pos = int(np.argmin(pole_vals))
         min_k, _ = pole_rows[min_pos]
         median_margin = float(np.median(pole_vals))
-        print(
-            "[kp]   E_ref margin to discarded bands: "
-            f"min={pole_vals[min_pos]:.3f} meV at k={min_k:03d}, "
-            f"median={median_margin:.3f} meV"
+        near_pole = any(getattr(d, "near_pole", False) for _, d in pole_rows)
+        reporter.fields(
+            [
+                (
+                    "E_ref margin",
+                    f"min={pole_vals[min_pos]:.3f} meV at k={min_k:03d}; "
+                    f"median={median_margin:.3f} meV",
+                ),
+                (
+                    "thresholds",
+                    f"warning < {pole_warning_mev:.3f} meV; danger < {pole_danger_mev:.3f} meV",
+                ),
+            ]
         )
-        print(
-            "[kp]   status: "
-            f"{'OK' if not any(getattr(d, 'near_pole', False) for _, d in pole_rows) else 'CHECK'} "
-            f"(warning < {pole_warning_mev:.3f} meV, danger < {pole_danger_mev:.3f} meV)"
-        )
+        reporter.check("pole distance", passed=not near_pole)
 
         cond_rows = [
             (ik, float(d.pole_condition_number))
@@ -1077,7 +1086,7 @@ def _print_project_diagnostics(
         if cond_rows:
             cond_k, cond_max = max(cond_rows, key=lambda item: item[1])
             if print_k_diagnostics or cond_max >= 1.0e8:
-                print(f"[kp]   Schur solve conditioning: max={cond_max:.3e} at k={cond_k:03d}")
+                reporter.line(f"  Schur solve conditioning  max={cond_max:.3e} at k={cond_k:03d}")
 
         flagged = [
             (ik, d)
@@ -1085,20 +1094,20 @@ def _print_project_diagnostics(
             if getattr(d, "near_pole", False) or getattr(d, "warnings", None)
         ]
         if flagged:
-            print("[kp]   k-points requiring attention:")
+            reporter.warning("k-points requiring attention")
             for ik, d in flagged[:20]:
-                print(f"[kp]     k={ik:03d}: margin={float(d.pole_distance_min_mev):.3f} meV")
+                reporter.line(f"    k={ik:03d}  margin={float(d.pole_distance_min_mev):.3f} meV")
                 for warning in getattr(d, "warnings", []):
-                    print(f"[kp]       {warning}")
+                    reporter.line(f"      {warning}")
             if len(flagged) > 20:
-                print(f"[kp]     ... {len(flagged) - 20} more")
+                reporter.line(f"    ... {len(flagged) - 20} more")
 
         if print_k_diagnostics:
-            print("[kp]   per-k diagnostics:")
+            reporter.line("  per-k diagnostics:")
             for ik, d in pole_rows:
                 cond = getattr(d, "pole_condition_number", None)
                 cond_text = "" if cond is None else f", Schur condition={float(cond):.3e}"
-                print(f"[kp]     k={ik:03d}: margin={float(d.pole_distance_min_mev):.3f} meV{cond_text}")
+                reporter.line(f"    k={ik:03d}  margin={float(d.pole_distance_min_mev):.3f} meV{cond_text}")
 
     herm_vals = [
         float(d.hermiticity_residual)
@@ -1106,13 +1115,16 @@ def _print_project_diagnostics(
         if getattr(d, "hermiticity_residual", None) is not None
     ]
     if herm_vals:
-        print(f"[kp]   Hermiticity check: max residual={max(herm_vals):.3e}")
+        reporter.check("Hermiticity", passed=True, detail=f"max residual={max(herm_vals):.3e}")
 
 
 def cmd_plot_from_config(cfg_path: str) -> None:
+    started = time.perf_counter()
+    reporter = KpReporter("kp inspect")
     cfg_path = os.path.abspath(cfg_path)
     cfg_dir = os.path.dirname(cfg_path)
-    print(f"[kp] Loading config: {cfg_path}")
+    reporter.title("Inspect source bands and Q-block spectra")
+    reporter.fields([("config", cfg_path)])
     with open(cfg_path, "r") as f:
         cfg = normalize_case_config(yaml.safe_load(f), config_path=cfg_path)
 
@@ -1136,7 +1148,15 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     eigs_list: list[np.ndarray]
     band_eigs_list: list[np.ndarray] | None = None
     target = str(plot_cfg.get("target", "valence"))
-    print(f"[kp] Target: {target}")
+    reporter.section("Source")
+    reporter.fields(
+        [
+            ("material", material.get("name", "unknown")),
+            ("target", target),
+            ("mode", mode),
+            ("spin", spin),
+        ]
+    )
 
     # Initialize variables that may be needed later
     orb0 = None
@@ -1145,10 +1165,10 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     vecs_list = None
 
     if band_file:
-        print(f"[kp] Using band file for k-path panel: {band_file}")
+        reporter.path("band file", band_file)
         rows = _load_bands_from_text(band_file)
         band_eigs_list = [np.array(sorted(r)) for r in rows]
-        print(f"[kp] Loaded {len(band_eigs_list)} k-path rows from band file.")
+        reporter.fields([("k-path rows", len(band_eigs_list))])
 
     if band_eigs_list is not None and target.lower() != "all":
         # Keep normal bands for the left panel, then compute Q-block bands below.
@@ -1158,13 +1178,13 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         hamk_file = resolve(material["hamk_file"])
         qset1_file = resolve(material["qset1_file"])
         qset2_file = resolve(material["qset2_file"])
-        print(f"[kp] Using Hamiltonian: {hamk_file}")
-        print(f"[kp] Using Q-set files: {qset1_file}, {qset2_file}")
+        reporter.path("Hamiltonian", hamk_file)
+        reporter.fields([("Q-set files", f"{qset1_file}, {qset2_file}")])
 
         hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
         q1, q2 = load_Q_sets(qset1_file, qset2_file)
         # print(f"[kp] hamk shape={hamk.shape}, dtype={hamk.dtype}")
-        print(f"[kp] Q1 shape={q1.shape}, Q2 shape={q2.shape}")
+        reporter.fields([("Q shapes", f"Q1={q1.shape}; Q2={q2.shape}")])
 
         # hamk index selection (if 3D)
         hamk_index = int(plot_cfg.get("hamk_index", 0))
@@ -1175,8 +1195,6 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         else:
             raise ValueError(f"Unexpected hamk ndim: {hamk.ndim}")
 
-        print(f"[kp] spin={spin}, num_layers={num_layers}")
-
         num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
             material,
             hamk2d,
@@ -1184,14 +1202,8 @@ def cmd_plot_from_config(cfg_path: str) -> None:
             spin=spin,
             mode=mode,
         )
-        print(f"[kp] inferred per-layer orbitals per Q (single spin) = {orb0}")
-
-
         Qlayer_list = [[q1], [q2]]
-        print(f"[kp] num_layer_list = {num_layer_list}")
-        print(f"[kp] num_orb_per_layer_list = {num_orb_per_layer_list}")
         block_n = (sum(num_layer_list) * orb0) * (2 if spin == "all" else 1)
-        print(f"[kp] block dimension per Q (with spin) = {block_n}")
 
         # Not used in this branch of get_H_block but kept for API compatibility
         # nlow_state_list = [[], []]
@@ -1199,14 +1211,18 @@ def cmd_plot_from_config(cfg_path: str) -> None:
 
         nlow_state_list = plot_cfg.get("nlow_state_list", [])
         norb_fix_list = plot_cfg.get("norb_fix_list", [])
-        print("[kp] nlow_state_list = ",nlow_state_list)
-        print("[kp] norb_fix_list = ",norb_fix_list)
-        print(f"[kp] Using mode: {mode}")
+        reporter.section("Basis layout")
+        reporter.fields(
+            [
+                ("physical layers", num_layer_list),
+                ("orbitals/layer/Q", num_orb_per_layer_list),
+                ("single-spin orbitals", orb0),
+                ("block dimension", block_n),
+                ("low states", nlow_state_list),
+                ("fixed orbitals", norb_fix_list),
+            ]
+        )
         hamk2d, block_spin = _selected_spin_block_for_projection(hamk2d, spin)
-
-        print(f"[kp] q1 shape = {q1.shape}, q2 shape = {q2.shape}")
-        print(f"[kp] hamk2d shape = {hamk2d.shape}")
-        print(f"[kp] orb0 = {orb0}")
 
         H_eig, H_vec, H_blocks, U_new = get_H_block(
             hamk2d,
@@ -1220,32 +1236,36 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         )
         eigs_list = [np.asarray(ev, dtype=np.float64) for ev in H_eig]
         vecs_list = [np.asarray(v, dtype=np.complex128) for v in H_vec]
-        print(f"[kp] Diagonalized {len(eigs_list)} Q blocks.")
-        print(f"[kp] {np.array(eigs_list).shape}")
+        reporter.fields(
+            [
+                ("Q blocks", len(eigs_list)),
+                ("eigenvalue shape", np.asarray(eigs_list).shape),
+            ]
+        )
 
     # Compute efermi
     if explicit_ef is not None:
         efermi = float(explicit_ef)
-        print(f"[kp] Using explicit efermi: {efermi:.6f} eV")
+        reporter.fields([("Fermi level", f"{efermi:.6f} eV (config)")])
     elif vbm_file:
         efermi = load_efermi_from_vbm_txt(vbm_file)
-        print(f"[kp] Using VBM file for efermi: {vbm_file} -> {efermi:.6f} eV")
+        reporter.fields([("Fermi level", f"{efermi:.6f} eV ({vbm_file})")])
     else:
         # fallback: use median of top quartile as rough VBM
         concat = np.sort(np.concatenate([np.asarray(e) for e in eigs_list]))
         efermi = float(np.median(concat[-max(10, len(concat)//10):]))
-        print(f"[kp] Using fallback efermi estimate: {efermi:.6f} eV")
+        reporter.warning(f"using fallback Fermi estimate {efermi:.6f} eV")
 
     if band_eigs_list is not None and target.lower() != "all":
         hamk_file = resolve(material["hamk_file"])
         qset1_file = resolve(material["qset1_file"])
         qset2_file = resolve(material["qset2_file"])
-        print(f"[kp] Using Hamiltonian for Q-block panel: {hamk_file}")
-        print(f"[kp] Using Q-set files: {qset1_file}, {qset2_file}")
+        reporter.path("Q-block Hamiltonian", hamk_file)
+        reporter.fields([("Q-set files", f"{qset1_file}, {qset2_file}")])
 
         hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
         q1, q2 = load_Q_sets(qset1_file, qset2_file)
-        print(f"[kp] Q1 shape={q1.shape}, Q2 shape={q2.shape}")
+        reporter.fields([("Q shapes", f"Q1={q1.shape}; Q2={q2.shape}")])
 
         hamk_index = int(plot_cfg.get("hamk_index", 0))
         if hamk.ndim == 3:
@@ -1255,7 +1275,6 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         else:
             raise ValueError(f"Unexpected hamk ndim: {hamk.ndim}")
 
-        print(f"[kp] spin={spin}, num_layers={num_layers}")
         num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
             material,
             hamk2d,
@@ -1264,14 +1283,19 @@ def cmd_plot_from_config(cfg_path: str) -> None:
             mode=mode,
         )
         Qlayer_list = [[q1], [q2]]
-        print(f"[kp] num_layer_list = {num_layer_list}")
-        print(f"[kp] num_orb_per_layer_list = {num_orb_per_layer_list}")
         block_n = (sum(num_layer_list) * orb0) * (2 if spin == "all" else 1)
-        print(f"[kp] block dimension per Q (with spin) = {block_n}")
         nlow_state_list = plot_cfg.get("nlow_state_list", [])
         norb_fix_list = plot_cfg.get("norb_fix_list", [])
-        print("[kp] nlow_state_list = ", nlow_state_list)
-        print("[kp] norb_fix_list = ", norb_fix_list)
+        reporter.section("Basis layout")
+        reporter.fields(
+            [
+                ("physical layers", num_layer_list),
+                ("orbitals/layer/Q", num_orb_per_layer_list),
+                ("block dimension", block_n),
+                ("low states", nlow_state_list),
+                ("fixed orbitals", norb_fix_list),
+            ]
+        )
         hamk2d, block_spin = _selected_spin_block_for_projection(hamk2d, spin)
         H_eig, H_vec, H_blocks, U_new = get_H_block(
             hamk2d,
@@ -1285,8 +1309,12 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         )
         eigs_list = [np.asarray(ev, dtype=np.float64) for ev in H_eig]
         vecs_list = [np.asarray(v, dtype=np.complex128) for v in H_vec]
-        print(f"[kp] Diagonalized {len(eigs_list)} Q blocks.")
-        print(f"[kp] {np.array(eigs_list).shape}")
+        reporter.fields(
+            [
+                ("Q blocks", len(eigs_list)),
+                ("eigenvalue shape", np.asarray(eigs_list).shape),
+            ]
+        )
 
     out_path = resolve(plot_cfg.get("out", "bands_and_qblocks.pdf"))
     if out_path is not None and os.path.basename(out_path) == "bands_and_qblocks.pdf":
@@ -1301,10 +1329,10 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         ymin = plot_cfg.get("ymin")
         ymax = plot_cfg.get("ymax")
         ylim = (float(ymin), float(ymax)) if (ymin is not None and ymax is not None) else None
-    print(f"[kp] Saving spectrum txt to: {data_out}")
-    print(f"[kp] Saving plot to: {out_path}")
+    reporter.section("Results")
+    reporter.fields([("spectrum", data_out), ("plot", out_path)])
     if ylim is not None:
-        print(f"[kp] Using y-lim: {ylim}")
+        reporter.fields([("energy window", ylim)])
 
     # Optional Q ordering by |Q| after rotation
     index_order = None
@@ -1336,7 +1364,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
                     pieces.append(offset + layer_in_group * q_len + order)
                 offset += n_layers * q_len
             index_order = np.concatenate(pieces)
-        print(f"[kp] Using Q-norm sort with rotation {q_rotation_deg} deg. Mode: {mode}")
+        reporter.fields([("Q ordering", f"norm; rotation={q_rotation_deg:g} deg; mode={mode}")])
 
     # H_eig is an array of object vectors; normalize to list
     # Save spectrum to text
@@ -1428,13 +1456,18 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         above_idx = np.where(e_row >= efermi)[0]
         sel_below = below_idx[-below_n:].tolist() if below_idx.size else []
         sel_above = above_idx[:above_n].tolist() if above_idx.size else []
-        print(f"[kp] Selected bands at ref_Q={ref_q}: below EF {sel_below}, above EF {sel_above}")
+        reporter.fields(
+            [("selected bands", f"ref_Q={ref_q}; below EF {sel_below}; above EF {sel_above}")]
+        )
 
         # 若没有本征矢，跳过
         if vecs_ord is None or len(vecs_ord) != E2.shape[0]:
-            print("[kp] Eigenvectors not available; skip orbital decomposition. Set target:'all' or remove band_file.")
+            reporter.warning(
+                "eigenvectors unavailable; orbital decomposition skipped "
+                "(set target='all' or remove band_file)"
+            )
         elif orb0 is None:
-            print("[kp] orb0 not available; skip orbital decomposition. Need to load Hamiltonian.")
+            reporter.warning("orbital block size unavailable; orbital decomposition skipped")
         else:
             # 轨道标签准备（"层内轨道名表"，长度对齐到 orb0）
             labels_pattern = material.get("orbital_order") if isinstance(material, dict) else None
@@ -1499,7 +1532,7 @@ def cmd_plot_from_config(cfg_path: str) -> None:
             # 仅在 ref_q 做分解：对每条被选中的带打印 top-N 分量 + 复系数
             for b in (sel_below + sel_above):
                 if not (0 <= b < nBands):
-                    print(f"[kp] Skip band {b}: out of range 0..{nBands-1}")
+                    reporter.warning(f"skip band {b}: out of range 0..{nBands-1}")
                     continue
 
                 vec = np.asarray(Vq[:, b], dtype=np.complex128)  # (block_dim,)
@@ -1510,16 +1543,19 @@ def cmd_plot_from_config(cfg_path: str) -> None:
                 w_top = w[top_idx]
                 frac = w_top / tot
 
-                print(f"[kp] Band {b}: top-{top_n} orbital components ({ref_q} Q, mode={mode})")
+                reporter.line(f"  Band {b}: top-{top_n} orbital components ({ref_q} Q, mode={mode})")
                 # 列定义：rank idx spin layer orb coeff weight frac label
-                print("        rank   idx   spin  layer  orb        coeff (complex)       frac     label")
+                reporter.line("        rank   idx   spin  layer  orb        coeff (complex)       frac     label")
                 for rk, t in enumerate(top_idx.tolist(), start=1):
                     coeff = complex(vec[int(t)])
                     wt = float(w[int(t)])
                     fr = float(frac[rk-1])
                     spin_tag, layer, orb_local, label = map_index(int(t), block_layer=report_block_layer)
                     # 与你示例的对齐风格一致（数值宽度匹配），coeff 另外增加一列
-                    print(f"        {rk:>4}  {int(t):>5}  {spin_tag:<5}  {layer:>5}  {orb_local:>3}  {_format_complex(coeff)}   {fr*100:>7.2f}%   {label}")
+                    reporter.line(
+                        f"        {rk:>4}  {int(t):>5}  {spin_tag:<5}  {layer:>5}  "
+                        f"{orb_local:>3}  {_format_complex(coeff)}   {fr*100:>7.2f}%   {label}"
+                    )
 
                 # 如需一次性输出该带“所有基底分量”的复系数（可能很长），可打开以下注释：
                 # print(f"[kp] Band {b}: full coefficient vector at ref_Q={ref_q} (index, coeff)")
@@ -1527,12 +1563,9 @@ def cmd_plot_from_config(cfg_path: str) -> None:
                 #     print(f"        {idx_full:>5}  {_format_complex(complex(c_full))}")
 
     except Exception as ex:
-        print(f"[kp] Analysis step warning: {ex}")
+        reporter.warning(f"analysis step: {ex}")
 
-
-
-
-    print("[kp] DONE")
+    reporter.complete(elapsed=time.perf_counter() - started)
 
 
 def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:
@@ -1541,9 +1574,12 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     Reads the same material/plot settings for data and Q ordering, and the
     'project' section for projection parameters and outputs.
     """
+    started = time.perf_counter()
+    reporter = KpReporter("kp project")
     cfg_path = os.path.abspath(cfg_path)
     cfg_dir = os.path.dirname(cfg_path)
-    print(f"[kp] Loading config: {cfg_path}")
+    reporter.title("Project effective Hamiltonian")
+    reporter.fields([("config", cfg_path)])
     with open(cfg_path, "r") as f:
         cfg = normalize_case_config(yaml.safe_load(f), config_path=cfg_path)
 
@@ -1561,7 +1597,14 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     qset2_file = resolve(material["qset2_file"])
     spin = material.get("spin", "all")
 
-    print("[kp] Loading input data")
+    reporter.section("Inputs")
+    reporter.fields(
+        [
+            ("Hamiltonian", hamk_file),
+            ("Q set 1", qset1_file),
+            ("Q set 2", qset2_file),
+        ]
+    )
     hamk = _load_hamk_with_energy_unit(hamk_file, material, mmap_mode="r")
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
 
@@ -1633,16 +1676,23 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     original_eigs_list = [original_eigs_all[i] for i in project_indices]
     active_indices = _active_indices_from_project_cfg(project_cfg)
     model_dim = q_count * sum(len(layer_bands) for layer_bands in nlow_state_list)
-    print("[kp] Project setup:")
-    print(f"[kp]   material={material.get('name', 'unknown')}, mode={mode}, spin={spin}")
-    print(f"[kp]   k-points={len(project_indices)}/{nk}, Q-points={q_count}, orbitals/layer/Q={orb0}")
+    reporter.section("Projection setup")
+    setup_fields: list[tuple[str, object]] = [
+        ("material", material.get("name", "unknown")),
+        ("mode / spin", f"{mode} / {spin}"),
+        ("k-points", f"{len(project_indices)} / {nk}"),
+        ("Q points", q_count),
+        ("orbitals/layer/Q", orb0),
+        ("active bands", active_indices),
+        ("model dimension", model_dim),
+    ]
     if len(project_indices) != nk:
-        print(f"[kp]   k-indices={project_indices}")
-    print(f"[kp]   active bands={active_indices}, model dimension={model_dim}")
-    method_line = f"[kp]   method={_downfold_method_label(method)}"
+        setup_fields.append(("k indices", project_indices))
+    method_line = _downfold_method_label(method)
     if e_ref is not None:
         method_line += f", E_ref={e_ref:.6f} eV"
-    print(method_line)
+    setup_fields.append(("method", method_line))
+    reporter.fields(setup_fields)
     projection_spin = "all" if str(spin).lower() == "all" else "up"
     q2_for_projection = q2 if q2 is not None else q1
     gauge_report: GaugeAnchorReport | None = None
@@ -1655,7 +1705,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             "validated before production projection"
         )
     if auto_gauge:
-        print("[kp]   resolving auto gauge against TAPW source symmetry")
+        reporter.line("  resolving auto gauge against TAPW source symmetry")
         gauge_report = resolve_symmetry_validated_project_gauge(
             cfg_path,
             project_config=project_cfg,
@@ -1702,16 +1752,22 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     frame_artifact = frame_artifact_raw if isinstance(frame_artifact_raw, Mapping) else None
     _write_text(Path(out_dir) / "basis.md", _format_basis_report_markdown(basis_payload))
     basis_report_path = os.path.join(out_dir, "basis.md")
-    print(f"[kp]   gauge={gauge_report.gauge_mode}")
-    print(f"[kp]   basis selection report={basis_report_path}")
-    print(f"[kp]   output directory={out_dir}")
+    reporter.fields(
+        [
+            ("gauge", gauge_report.gauge_mode),
+            ("basis report", basis_report_path),
+            ("output", out_dir),
+        ]
+    )
     if verbose:
-        print(f"[kp]   hamk={hamk_file}")
-        print(f"[kp]   qset1={qset1_file}")
-        print(f"[kp]   qset2={qset2_file}")
-        print(f"[kp]   hamk shape={hamk.shape}, reference block shape={hamk2d.shape}")
-        print(f"[kp]   nlow_state_list={nlow_state_list}")
-        print(f"[kp]   norb_fix_list={norb_fix_list}")
+        reporter.fields(
+            [
+                ("hamk shape", hamk.shape),
+                ("reference block", hamk2d.shape),
+                ("low states", nlow_state_list),
+                ("fixed orbitals", norb_fix_list),
+            ]
+        )
     # Unified output directory for all artifacts
     out_heff = os.path.join(out_dir, "heff.npy")
     out_kpoints = os.path.join(out_dir, "kpoints.npy")
@@ -1757,11 +1813,12 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     effective_workers = max(1, min(workers, len(project_indices)))
     inner_blas_threads = _project_blas_threads(project_cfg, effective_workers)
     set_projector_blas_threads(inner_blas_threads)
-    print(f"[kp] Running projection: {len(project_indices)} k-points, workers={workers}")
+    reporter.section("Build projectors")
+    reporter.fields([("k-points", len(project_indices)), ("workers", workers)])
     if workers > effective_workers:
-        print(f"[kp]   effective workers={effective_workers} (limited by k-point count)")
+        reporter.fields([("effective workers", f"{effective_workers} (limited by k-point count)")])
     if verbose:
-        print(f"[kp]   BLAS threads per worker={inner_blas_threads}")
+        reporter.fields([("BLAS threads/worker", inner_blas_threads)])
 
     if workers <= 1:
         results = [_project_one_from_context(i, project_context) for i in project_indices]
@@ -1775,7 +1832,14 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             parallel_context["blas_threads"] = inner_blas_threads
             batches = _project_batches(project_indices, effective_workers, project_cfg.get("batch_size"))
             if len(batches) != len(project_indices):
-                print(f"[kp]   parallel batches={len(batches)}, batch_size~{len(batches[0])}; progress counts completed k-points")
+                reporter.fields(
+                    [
+                        (
+                            "parallel batches",
+                            f"{len(batches)}; batch_size~{len(batches[0])}; progress counts completed k-points",
+                        )
+                    ]
+                )
             parallel_results = Parallel(
                 n_jobs=effective_workers,
                 backend="loky",
@@ -1805,7 +1869,7 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             result_by_index = {k_index: result for batch in batch_results for k_index, result in batch}
             results = [result_by_index[int(i)] for i in project_indices]
         except Exception as ex:
-            print(f"[kp] Parallel projection failed, falling back to serial: {ex}")
+            reporter.warning(f"parallel projection failed; falling back to serial: {ex}")
             results = [_project_one_from_context(i, project_context) for i in project_indices]
 
     heff_rows = [np.asarray(r[0], dtype=np.complex128) for r in results]  # (nk, M, M)
@@ -1908,19 +1972,25 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
             raise ValueError("Projection produced ragged/object spin-operator rows")
         wavefunction_payload["spin_operator"] = spin_operator_arr
     np.savez_compressed(out_vec, **wavefunction_payload)
+    reporter.section("Results")
+    result_fields: list[tuple[str, object]] = [
+        ("Hamiltonian", out_heff),
+        ("k-points", out_kpoints),
+        ("wavefunctions", out_vec),
+        ("band plot", plot_out),
+        ("spectrum", data_out),
+    ]
     if isinstance(heff_arr, np.ndarray) and heff_arr.dtype != object:
-        print(f"[kp] Heff shape: {heff_arr.shape}")
-    print("[kp] Saved arrays:")
-    print(f"[kp]   {out_heff}")
-    print(f"[kp]   {out_kpoints}")
+        result_fields.append(("Heff shape", heff_arr.shape))
     if out_eig is not None:
-        print(f"[kp]   {out_eig}")
-    print(f"[kp]   {out_vec}")
+        result_fields.append(("eigenvalues", out_eig))
+    reporter.fields(result_fields)
     _print_project_diagnostics(
         diag_list,
         pole_warning_mev=pole_warning_mev,
         pole_danger_mev=pole_danger_mev,
         print_k_diagnostics=print_k_diagnostics,
+        reporter=reporter,
     )
 
     # Plot projected bands.  Project-specific E_F wins; canonical one-file
@@ -1960,7 +2030,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     #         print_top_n_metrics(metrics)
     #     except ValueError as ex:
     #         print(f"[kp] Top-N comparison warning: {ex}")
-    print(f"[kp] Saving TAPW/projected band comparison: {plot_out}")
     plot_eigs_scatter(
         heig_list,
         efermi,
@@ -1981,8 +2050,8 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         **kpath_axis,
     )
     save_spectrum_txt(heig_list, data_out)
-    print(f"[kp] Saved Heff spectrum: {data_out}")
     _write_case_summary(cfg, out_dir, "projection")
+    reporter.complete(elapsed=time.perf_counter() - started)
 
 
 def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:
