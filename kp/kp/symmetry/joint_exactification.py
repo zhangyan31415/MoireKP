@@ -8,9 +8,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import operator
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from scipy.linalg import expm
 
 
 class JointExactificationError(ValueError):
@@ -1363,10 +1365,680 @@ def project_u1_relations(
     return projected, report
 
 
+@dataclass(frozen=True)
+class JointExactificationConfig:
+    """Numerical safety gates shared by joint exactification stages."""
+
+    enabled: bool = True
+    max_rms_correction: float = 1.0e-3
+    max_route_correction: float = 5.0e-3
+    central_branch_margin: float = 1.0e-3
+    max_iterations: int = 20
+    condition_limit: float = 1.0e12
+
+    def __post_init__(self) -> None:
+        for name in (
+            "max_rms_correction",
+            "max_route_correction",
+            "central_branch_margin",
+            "condition_limit",
+        ):
+            value = float(getattr(self, name))
+            if not np.isfinite(value) or value <= 0.0:
+                raise JointExactificationError(
+                    f"joint exactification {name} must be finite and positive"
+                )
+            object.__setattr__(self, name, value)
+        object.__setattr__(
+            self,
+            "max_iterations",
+            _positive_limit(self.max_iterations, label="maximum iteration count"),
+        )
+        object.__setattr__(self, "enabled", bool(self.enabled))
+
+
+@dataclass(frozen=True)
+class FreeOrbitReport:
+    """Certification and optimization data for one free action orbit."""
+
+    root: int
+    fibers: tuple[int, ...]
+    block_dimension: int
+    solver: str
+    iterations: int
+    converged: bool
+    objective_initial: float
+    objective_final: float
+    route_correction_rms: float
+    route_correction_max: float
+    minimum_central_separation: float
+    central_transition_counts: Mapping[str, int]
+    condition_number: float
+    relation_residual_max: float
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "root", int(self.root))
+        object.__setattr__(self, "fibers", tuple(int(value) for value in self.fibers))
+        object.__setattr__(self, "block_dimension", int(self.block_dimension))
+        object.__setattr__(self, "solver", str(self.solver))
+        object.__setattr__(self, "iterations", int(self.iterations))
+        object.__setattr__(self, "converged", bool(self.converged))
+        object.__setattr__(
+            self,
+            "central_transition_counts",
+            MappingProxyType(
+                {
+                    str(key): int(value)
+                    for key, value in self.central_transition_counts.items()
+                }
+            ),
+        )
+
+
+def _evaluate_route_word(
+    actions: Mapping[str, BlockRouteAction],
+    word: Sequence[str],
+    source: int,
+) -> tuple[np.ndarray, int, bool]:
+    dimension = actions[next(iter(actions))].fiber_dimensions[source]
+    block = np.eye(dimension, dtype=np.complex128)
+    current = int(source)
+    antiunitary = False
+    for name in reversed(tuple(word)):
+        action = actions[name]
+        block = action.route_blocks[current] @ semilinear_kappa(
+            block,
+            action.antiunitary,
+        )
+        current = action.fiber_permutation[current]
+        antiunitary ^= action.antiunitary
+    return block, current, antiunitary
+
+
+def _canonical_transporter_frames(
+    actions: Mapping[str, BlockRouteAction],
+    orbit: ActionOrbit,
+) -> dict[int, np.ndarray]:
+    frames: dict[int, np.ndarray] = {}
+    for fiber, word in zip(orbit.fibers, orbit.transporter_words):
+        block, target, _ = _evaluate_route_word(actions, word, orbit.root)
+        if target != fiber:
+            raise JointExactificationError(
+                f"transporter word {word} maps root {orbit.root} to {target}, "
+                f"not declared fiber {fiber}"
+            )
+        frames[fiber] = np.asarray(block, dtype=np.complex128)
+    return frames
+
+
+def _central_phase_label(phase: complex) -> str:
+    return "+1" if complex(phase) == complex(1.0, 0.0) else "-1"
+
+
+def _evaluate_central_word(
+    actions: Mapping[str, BlockRouteAction],
+    central_transitions: Mapping[tuple[str, int], complex],
+    word: Sequence[str],
+    source: int,
+) -> complex:
+    value = complex(1.0, 0.0)
+    current = int(source)
+    for name in reversed(tuple(word)):
+        action = actions[name]
+        value = central_transitions[(name, current)] * (
+            value.conjugate() if action.antiunitary else value
+        )
+        current = action.fiber_permutation[current]
+    return value
+
+
+def _select_central_transitions(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    frames: Mapping[int, np.ndarray],
+    *,
+    minimum_separation: float,
+) -> tuple[dict[tuple[str, int], complex], float, Mapping[str, int]]:
+    dimension = actions[next(iter(actions))].fiber_dimensions[orbit.root]
+    identity = np.eye(dimension, dtype=np.complex128)
+    transitions: dict[tuple[str, int], complex] = {}
+    separations: list[float] = []
+    counts = {"+1": 0, "-1": 0}
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        for source in orbit.fibers:
+            target = action.fiber_permutation[source]
+            source_frame = semilinear_kappa(
+                frames[source],
+                action.antiunitary,
+            )
+            holonomy = (
+                frames[target].conj().T
+                @ action.route_blocks[source]
+                @ source_frame
+            )
+            distances = [
+                float(np.linalg.norm(holonomy - phase * identity) / np.sqrt(dimension))
+                for phase in presentation.central_phases
+            ]
+            order = sorted(range(len(distances)), key=lambda index: (distances[index], index))
+            selected = complex(presentation.central_phases[order[0]])
+            if len(order) > 1:
+                separation = float(distances[order[1]] - distances[order[0]])
+                separations.append(separation)
+                if separation <= minimum_separation:
+                    raise JointExactificationError(
+                        "central transition separation does not satisfy the configured "
+                        f"margin: generator={generator.name!r}, source={source}, "
+                        f"separation={separation:.6e}, required={minimum_separation:.6e}"
+                    )
+            transitions[(generator.name, source)] = selected
+            counts[_central_phase_label(selected)] += 1
+
+    for relation in presentation.relations:
+        for source in orbit.fibers:
+            lhs = _evaluate_central_word(
+                actions,
+                transitions,
+                relation.lhs,
+                source,
+            )
+            rhs = _evaluate_central_word(
+                actions,
+                transitions,
+                relation.rhs,
+                source,
+            )
+            if lhs != relation.central_phase * rhs:
+                raise JointExactificationError(
+                    "selected central transition table violates associativity/"
+                    f"presentation relation {relation.name!r} at source {source}: "
+                    f"lhs={lhs}, rhs={relation.central_phase * rhs}"
+                )
+    minimum = min(separations) if separations else float("inf")
+    return transitions, float(minimum), MappingProxyType(counts)
+
+
+def _predicted_free_orbit_blocks(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    frames: Mapping[int, np.ndarray],
+    central_transitions: Mapping[tuple[str, int], complex],
+) -> dict[tuple[str, int], np.ndarray]:
+    predicted: dict[tuple[str, int], np.ndarray] = {}
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        for source in orbit.fibers:
+            target = action.fiber_permutation[source]
+            source_inverse = semilinear_kappa(
+                frames[source].conj().T,
+                action.antiunitary,
+            )
+            predicted[(generator.name, source)] = np.asarray(
+                central_transitions[(generator.name, source)]
+                * frames[target]
+                @ source_inverse,
+                dtype=np.complex128,
+            )
+    return predicted
+
+
+def _complex_residual_vector(value: np.ndarray) -> np.ndarray:
+    return np.concatenate((value.real.ravel(), value.imag.ravel()))
+
+
+def _free_orbit_objective(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    predicted: Mapping[tuple[str, int], np.ndarray],
+) -> tuple[np.ndarray, float]:
+    pieces: list[np.ndarray] = []
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        for source in orbit.fibers:
+            pieces.append(
+                _complex_residual_vector(
+                    predicted[(generator.name, source)]
+                    - action.route_blocks[source]
+                )
+            )
+    residual = np.concatenate(pieces)
+    return residual, float(np.dot(residual, residual))
+
+
+def _skew_hermitian_basis(dimension: int) -> tuple[np.ndarray, ...]:
+    basis: list[np.ndarray] = []
+    for row in range(dimension):
+        value = np.zeros((dimension, dimension), dtype=np.complex128)
+        value[row, row] = 1.0j
+        basis.append(value)
+    normalization = float(1.0 / np.sqrt(2.0))
+    for row in range(dimension):
+        for column in range(row + 1, dimension):
+            real = np.zeros((dimension, dimension), dtype=np.complex128)
+            real[row, column] = normalization
+            real[column, row] = -normalization
+            basis.append(real)
+            imaginary = np.zeros((dimension, dimension), dtype=np.complex128)
+            imaginary[row, column] = 1.0j * normalization
+            imaginary[column, row] = 1.0j * normalization
+            basis.append(imaginary)
+    return tuple(basis)
+
+
+def _free_orbit_residual_and_jacobian(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    frames: Mapping[int, np.ndarray],
+    central_transitions: Mapping[tuple[str, int], complex],
+    variable_fibers: Sequence[int],
+    basis: Sequence[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, float]:
+    predicted = _predicted_free_orbit_blocks(
+        actions,
+        presentation,
+        orbit,
+        frames,
+        central_transitions,
+    )
+    residual, objective = _free_orbit_objective(
+        actions,
+        presentation,
+        orbit,
+        predicted,
+    )
+    variable_offsets = {
+        fiber: index * len(basis)
+        for index, fiber in enumerate(variable_fibers)
+    }
+    rows_per_edge = 2 * basis[0].size
+    edge_count = len(presentation.generators) * len(orbit.fibers)
+    jacobian = np.zeros(
+        (edge_count * rows_per_edge, len(variable_fibers) * len(basis)),
+        dtype=np.float64,
+    )
+    edge_index = 0
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        for source in orbit.fibers:
+            target = action.fiber_permutation[source]
+            block = predicted[(generator.name, source)]
+            row_start = edge_index * rows_per_edge
+            row_stop = row_start + rows_per_edge
+            if target in variable_offsets:
+                offset = variable_offsets[target]
+                for basis_index, value in enumerate(basis):
+                    jacobian[row_start:row_stop, offset + basis_index] += (
+                        _complex_residual_vector(value @ block)
+                    )
+            if source in variable_offsets:
+                offset = variable_offsets[source]
+                for basis_index, value in enumerate(basis):
+                    source_variation = semilinear_kappa(
+                        value,
+                        action.antiunitary,
+                    )
+                    jacobian[row_start:row_stop, offset + basis_index] += (
+                        _complex_residual_vector(-block @ source_variation)
+                    )
+            edge_index += 1
+    return residual, jacobian, objective
+
+
+def _updated_frames(
+    frames: Mapping[int, np.ndarray],
+    variable_fibers: Sequence[int],
+    basis: Sequence[np.ndarray],
+    step: np.ndarray,
+    scale: float,
+) -> dict[int, np.ndarray]:
+    updated = {fiber: np.asarray(value) for fiber, value in frames.items()}
+    for fiber_index, fiber in enumerate(variable_fibers):
+        offset = fiber_index * len(basis)
+        generator = np.zeros_like(frames[fiber])
+        for basis_index, value in enumerate(basis):
+            generator += scale * step[offset + basis_index] * value
+        updated[fiber] = expm(generator) @ frames[fiber]
+    return updated
+
+
+def _full_route_block_output(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    predicted: Mapping[tuple[str, int], np.ndarray],
+) -> dict[str, tuple[np.ndarray, ...]]:
+    output: dict[str, tuple[np.ndarray, ...]] = {}
+    orbit_fibers = set(orbit.fibers)
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        output[generator.name] = tuple(
+            np.asarray(predicted[(generator.name, source)], dtype=np.complex128)
+            if source in orbit_fibers
+            else np.asarray(action.route_blocks[source], dtype=np.complex128)
+            for source in range(len(action.route_blocks))
+        )
+    return output
+
+
+def _actions_with_route_blocks(
+    actions: Mapping[str, BlockRouteAction],
+    route_blocks: Mapping[str, tuple[np.ndarray, ...]],
+) -> dict[str, BlockRouteAction]:
+    return {
+        name: BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            route_blocks=route_blocks[name],
+            fiber_indices=action.fiber_indices,
+        )
+        for name, action in actions.items()
+    }
+
+
+def _relation_residual_for_sources(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    sources: Sequence[int],
+) -> float:
+    maximum = 0.0
+    for relation in presentation.relations:
+        for source in sources:
+            lhs, lhs_target, lhs_antiunitary = _evaluate_route_word(
+                actions,
+                relation.lhs,
+                source,
+            )
+            rhs, rhs_target, rhs_antiunitary = _evaluate_route_word(
+                actions,
+                relation.rhs,
+                source,
+            )
+            if (lhs_target, lhs_antiunitary) != (rhs_target, rhs_antiunitary):
+                raise JointExactificationError(
+                    f"relation {relation.name!r} has inconsistent discrete targets"
+                )
+            residual = float(
+                np.linalg.norm(lhs - relation.central_phase * rhs)
+                / np.sqrt(lhs.shape[0])
+            )
+            maximum = max(maximum, residual)
+    return maximum
+
+
+def _route_correction_metrics(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    route_blocks: Mapping[str, tuple[np.ndarray, ...]],
+) -> tuple[float, float]:
+    distances: list[float] = []
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        for source in orbit.fibers:
+            distances.append(
+                float(
+                    np.linalg.norm(
+                        route_blocks[generator.name][source]
+                        - action.route_blocks[source]
+                    )
+                    / np.sqrt(action.fiber_dimensions[source])
+                )
+            )
+    values = np.asarray(distances, dtype=np.float64)
+    return (
+        float(np.sqrt(np.mean(np.square(values)))),
+        float(np.max(values)),
+    )
+
+
+def synchronize_free_orbit(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+    *,
+    config: JointExactificationConfig,
+) -> tuple[dict[str, tuple[np.ndarray, ...]], FreeOrbitReport]:
+    """Find the nearest exact representation on one free fiber orbit."""
+
+    if not config.enabled:
+        raise JointExactificationError("joint exactification is disabled by configuration")
+    validate_presentation_action_relations(actions, presentation)
+    canonical_orbits = compile_action_orbits(actions, presentation)
+    if orbit not in canonical_orbits:
+        raise JointExactificationError("free-orbit input is not canonical for these actions")
+    if orbit.stabilizer_words != ((),):
+        raise JointExactificationError(
+            f"orbit rooted at {orbit.root} has a nontrivial stabilizer"
+        )
+    dimensions = {
+        actions[generator.name].fiber_dimensions[source]
+        for generator in presentation.generators
+        for source in orbit.fibers
+    }
+    if len(dimensions) != 1:
+        raise JointExactificationError(
+            "free-orbit synchronization requires one constant block dimension"
+        )
+    dimension = dimensions.pop()
+    frames = _canonical_transporter_frames(actions, orbit)
+    central, minimum_separation, central_counts = _select_central_transitions(
+        actions,
+        presentation,
+        orbit,
+        frames,
+        minimum_separation=config.central_branch_margin,
+    )
+    initial_predicted = _predicted_free_orbit_blocks(
+        actions,
+        presentation,
+        orbit,
+        frames,
+        central,
+    )
+    _, objective_initial = _free_orbit_objective(
+        actions,
+        presentation,
+        orbit,
+        initial_predicted,
+    )
+
+    condition_number = 1.0
+    iterations = 0
+    solver = "analytic_frame_gauss_newton"
+    if dimension == 1:
+        direct, direct_report = project_u1_relations(actions, presentation)
+        route_blocks = {
+            name: tuple(
+                direct[name].route_blocks[source]
+                if source in set(orbit.fibers)
+                else actions[name].route_blocks[source]
+                for source in range(len(actions[name].route_blocks))
+            )
+            for name in actions
+        }
+        solver = "u1_relation_projection"
+        condition_number = float(direct_report["condition_number"])
+    else:
+        variable_fibers = tuple(
+            fiber for fiber in orbit.fibers if fiber != orbit.root
+        )
+        basis = _skew_hermitian_basis(dimension)
+        epsilon = float(np.finfo(np.float64).eps)
+        converged = False
+        for _ in range(config.max_iterations):
+            residual, jacobian, objective = _free_orbit_residual_and_jacobian(
+                actions,
+                presentation,
+                orbit,
+                frames,
+                central,
+                variable_fibers,
+                basis,
+            )
+            left_vectors, singular_values, right_vectors_h = np.linalg.svd(
+                jacobian,
+                full_matrices=False,
+            )
+            if singular_values.size == 0 or singular_values[0] == 0.0:
+                raise JointExactificationError(
+                    "free-orbit synchronization Jacobian has zero rank"
+                )
+            rank_tolerance = float(
+                singular_values[0] * max(jacobian.shape) * epsilon
+            )
+            rank = int(np.count_nonzero(singular_values > rank_tolerance))
+            smallest = float(singular_values[rank - 1])
+            condition_number = float(singular_values[0] / smallest)
+            if condition_number > config.condition_limit:
+                raise JointExactificationError(
+                    "free-orbit synchronization Jacobian exceeds condition limit: "
+                    f"condition={condition_number:.6e}, "
+                    f"limit={config.condition_limit:.6e}"
+                )
+            gradient = jacobian.T @ residual
+            gradient_bound = float(
+                256.0
+                * epsilon
+                * max(jacobian.shape)
+                * max(
+                    1.0,
+                    float(singular_values[0] * np.linalg.norm(residual)),
+                )
+            )
+            if float(np.linalg.norm(gradient, ord=np.inf)) <= gradient_bound:
+                converged = True
+                break
+            step = right_vectors_h[:rank, :].T @ (
+                (left_vectors[:, :rank].T @ (-residual))
+                / singular_values[:rank]
+            )
+            step_bound = float(
+                256.0 * epsilon * max(jacobian.shape) * max(1.0, np.linalg.norm(step))
+            )
+            if float(np.linalg.norm(step, ord=np.inf)) <= step_bound:
+                converged = True
+                break
+            accepted = False
+            for line_search_step in range(14):
+                scale = float(0.5**line_search_step)
+                trial_frames = _updated_frames(
+                    frames,
+                    variable_fibers,
+                    basis,
+                    step,
+                    scale,
+                )
+                trial_predicted = _predicted_free_orbit_blocks(
+                    actions,
+                    presentation,
+                    orbit,
+                    trial_frames,
+                    central,
+                )
+                _, trial_objective = _free_orbit_objective(
+                    actions,
+                    presentation,
+                    orbit,
+                    trial_predicted,
+                )
+                if trial_objective < objective:
+                    frames = trial_frames
+                    iterations += 1
+                    accepted = True
+                    break
+            if not accepted:
+                if float(np.linalg.norm(step, ord=np.inf)) <= np.sqrt(epsilon):
+                    converged = True
+                    break
+                raise JointExactificationError(
+                    "free-orbit synchronization line search failed to decrease objective"
+                )
+        if not converged:
+            raise JointExactificationError(
+                "free-orbit synchronization did not converge within "
+                f"{config.max_iterations} iterations"
+            )
+        final_predicted = _predicted_free_orbit_blocks(
+            actions,
+            presentation,
+            orbit,
+            frames,
+            central,
+        )
+        route_blocks = _full_route_block_output(
+            actions,
+            presentation,
+            orbit,
+            final_predicted,
+        )
+
+    synchronized_actions = _actions_with_route_blocks(actions, route_blocks)
+    relation_residual = _relation_residual_for_sources(
+        synchronized_actions,
+        presentation,
+        orbit.fibers,
+    )
+    correction_rms, correction_max = _route_correction_metrics(
+        actions,
+        presentation,
+        orbit,
+        route_blocks,
+    )
+    if correction_rms > config.max_rms_correction:
+        raise JointExactificationError(
+            "free-orbit RMS correction exceeds configured limit: "
+            f"correction={correction_rms:.6e}, "
+            f"limit={config.max_rms_correction:.6e}"
+        )
+    if correction_max > config.max_route_correction:
+        raise JointExactificationError(
+            "free-orbit route correction exceeds configured limit: "
+            f"correction={correction_max:.6e}, "
+            f"limit={config.max_route_correction:.6e}"
+        )
+    objective_final = float(
+        sum(
+            np.linalg.norm(
+                route_blocks[generator.name][source]
+                - actions[generator.name].route_blocks[source]
+            )
+            ** 2
+            for generator in presentation.generators
+            for source in orbit.fibers
+        )
+    )
+    report = FreeOrbitReport(
+        root=orbit.root,
+        fibers=orbit.fibers,
+        block_dimension=dimension,
+        solver=solver,
+        iterations=iterations,
+        converged=True,
+        objective_initial=objective_initial,
+        objective_final=objective_final,
+        route_correction_rms=correction_rms,
+        route_correction_max=correction_max,
+        minimum_central_separation=minimum_separation,
+        central_transition_counts=central_counts,
+        condition_number=condition_number,
+        relation_residual_max=relation_residual,
+    )
+    return route_blocks, report
+
+
 __all__ = [
     "ActionOrbit",
     "BlockRouteAction",
+    "FreeOrbitReport",
     "JointExactificationError",
+    "JointExactificationConfig",
     "MagneticGenerator",
     "MagneticPresentation",
     "MagneticRelation",
@@ -1381,5 +2053,6 @@ __all__ = [
     "materialize_block_route_action",
     "project_u1_relations",
     "semilinear_kappa",
+    "synchronize_free_orbit",
     "validate_presentation_action_relations",
 ]

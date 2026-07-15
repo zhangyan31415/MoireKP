@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from scipy.linalg import expm
+from scipy.optimize import least_squares
 
 from kp.symmetry.joint_exactification import (
     ActionOrbit,
     BlockRouteAction,
+    FreeOrbitReport,
     JointExactificationError,
+    JointExactificationConfig,
     MagneticGenerator,
     MagneticPresentation,
     MagneticRelation,
@@ -20,6 +24,7 @@ from kp.symmetry.joint_exactification import (
     inverse_semilinear,
     materialize_block_route_action,
     project_u1_relations,
+    synchronize_free_orbit,
     validate_presentation_action_relations,
 )
 
@@ -812,3 +817,386 @@ def test_u1_projection_rejects_non_scalar_route_blocks() -> None:
             actions,
             compile_continuum_magnetic_presentation([_tr(phase=1), _c2(phase=1)]),
         )
+
+
+def _random_unitary(rng: np.random.Generator, dimension: int) -> np.ndarray:
+    raw = rng.normal(size=(dimension, dimension)) + 1.0j * rng.normal(
+        size=(dimension, dimension)
+    )
+    q, r = np.linalg.qr(raw)
+    phases = np.diag(r)
+    phases = np.where(np.abs(phases) > 0.0, phases / np.abs(phases), 1.0)
+    return np.asarray(q @ np.diag(phases.conj()), dtype=np.complex128)
+
+
+def _normalized_random_skew(
+    rng: np.random.Generator,
+    dimension: int,
+    amplitude: float,
+) -> np.ndarray:
+    raw = rng.normal(size=(dimension, dimension)) + 1.0j * rng.normal(
+        size=(dimension, dimension)
+    )
+    skew = 0.5 * (raw - raw.conj().T)
+    norm = np.linalg.norm(skew)
+    return np.asarray(amplitude * skew / norm, dtype=np.complex128)
+
+
+def _mote2_free_ud_actions(
+    dimension: int,
+    *,
+    perturbation: float,
+    seed: int,
+) -> dict[str, BlockRouteAction]:
+    rng = np.random.default_rng(seed)
+    permutations = {
+        "C3z": (1, 2, 0, 4, 5, 3),
+        "C2T": (3, 5, 4, 0, 2, 1),
+    }
+    sigma_z = np.diag([1.0, -1.0]).astype(np.complex128)
+    c3_two = np.diag(np.exp(1.0j * np.asarray([-np.pi / 3.0, np.pi / 3.0])))
+    c2t_two = 1.0j * sigma_z
+    copy_count = dimension // 2
+    generator_blocks = {
+        "C3z": np.kron(np.eye(copy_count), c3_two),
+        "C2T": np.kron(np.eye(copy_count), c2t_two),
+    }
+    fiber_gauge = tuple(_random_unitary(rng, dimension) for _ in range(6))
+    actions: dict[str, BlockRouteAction] = {}
+    for name, antiunitary in (("C3z", False), ("C2T", True)):
+        route_blocks: list[np.ndarray] = []
+        for source, target in enumerate(permutations[name]):
+            source_gauge = fiber_gauge[source].conj() if antiunitary else fiber_gauge[source]
+            block = (
+                fiber_gauge[target].conj().T
+                @ generator_blocks[name]
+                @ source_gauge
+            )
+            if perturbation:
+                block = (
+                    expm(
+                        _normalized_random_skew(
+                            rng,
+                            dimension,
+                            perturbation,
+                        )
+                    )
+                    @ block
+                )
+            route_blocks.append(np.asarray(block, dtype=np.complex128))
+        actions[name] = BlockRouteAction(
+            name,
+            antiunitary,
+            permutations[name],
+            tuple(dimension for _ in range(6)),
+            tuple(route_blocks),
+        )
+    return actions
+
+
+def _replace_route_blocks(
+    actions: dict[str, BlockRouteAction],
+    blocks: dict[str, tuple[np.ndarray, ...]],
+) -> dict[str, BlockRouteAction]:
+    return {
+        name: BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            route_blocks=blocks[name],
+            fiber_indices=action.fiber_indices,
+        )
+        for name, action in actions.items()
+    }
+
+
+def _test_word_block(
+    actions: dict[str, BlockRouteAction],
+    word: tuple[str, ...],
+    source: int,
+) -> np.ndarray:
+    dimension = actions[next(iter(actions))].fiber_dimensions[source]
+    block = np.eye(dimension, dtype=np.complex128)
+    current = source
+    for name in reversed(word):
+        action = actions[name]
+        inner = block.conj() if action.antiunitary else block
+        block = action.route_blocks[current] @ inner
+        current = action.fiber_permutation[current]
+    return block
+
+
+def _maximum_matrix_relation_residual(
+    actions: dict[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> float:
+    maximum = 0.0
+    fiber_count = len(next(iter(actions.values())).fiber_dimensions)
+    for relation in presentation.relations:
+        for source in range(fiber_count):
+            lhs = _test_word_block(actions, relation.lhs, source)
+            rhs = _test_word_block(actions, relation.rhs, source)
+            residual = np.linalg.norm(lhs - relation.central_phase * rhs) / np.sqrt(
+                lhs.shape[0]
+            )
+            maximum = max(maximum, float(residual))
+    return maximum
+
+
+@pytest.mark.parametrize("dimension", [2, 4])
+def test_free_orbit_ud_synchronization_restores_all_magnetic_relations(
+    dimension: int,
+) -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+    actions = _mote2_free_ud_actions(
+        dimension,
+        perturbation=8.0e-7,
+        seed=9000 + dimension,
+    )
+    orbit = compile_action_orbits(actions, presentation)[0]
+
+    blocks, report = synchronize_free_orbit(
+        actions,
+        presentation,
+        orbit,
+        config=JointExactificationConfig(max_iterations=30),
+    )
+    synchronized = _replace_route_blocks(actions, blocks)
+
+    assert isinstance(report, FreeOrbitReport)
+    assert report.converged is True
+    assert report.block_dimension == dimension
+    assert report.objective_final <= report.objective_initial
+    assert report.route_correction_rms < 5.0e-6
+    assert report.route_correction_max < 5.0e-6
+    assert report.relation_residual_max < 5.0e-12
+    assert _maximum_matrix_relation_residual(synchronized, presentation) < 5.0e-12
+    assert report.central_transition_counts["-1"] > 0
+    for action in synchronized.values():
+        for block in action.route_blocks:
+            np.testing.assert_allclose(
+                block.conj().T @ block,
+                np.eye(dimension),
+                atol=5.0e-13,
+                rtol=0.0,
+            )
+
+
+def test_free_orbit_ud_synchronization_is_idempotent_for_exact_input() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+    actions = _mote2_free_ud_actions(4, perturbation=0.0, seed=9104)
+    orbit = compile_action_orbits(actions, presentation)[0]
+
+    blocks, report = synchronize_free_orbit(
+        actions,
+        presentation,
+        orbit,
+        config=JointExactificationConfig(),
+    )
+
+    assert report.route_correction_rms < 5.0e-13
+    assert report.route_correction_max < 5.0e-13
+    for name, action in actions.items():
+        for actual, expected in zip(blocks[name], action.route_blocks):
+            np.testing.assert_allclose(actual, expected, atol=5.0e-13, rtol=0.0)
+
+
+def _gauge_transform_actions(
+    actions: dict[str, BlockRouteAction],
+    gauge: tuple[np.ndarray, ...],
+) -> dict[str, BlockRouteAction]:
+    transformed: dict[str, BlockRouteAction] = {}
+    for name, action in actions.items():
+        blocks = []
+        for source, target in enumerate(action.fiber_permutation):
+            source_gauge = gauge[source].conj() if action.antiunitary else gauge[source]
+            blocks.append(
+                gauge[target].conj().T @ action.route_blocks[source] @ source_gauge
+            )
+        transformed[name] = BlockRouteAction(
+            name,
+            action.antiunitary,
+            action.fiber_permutation,
+            action.fiber_dimensions,
+            tuple(blocks),
+        )
+    return transformed
+
+
+def test_free_orbit_ud_synchronization_is_fiber_gauge_covariant() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+    actions = _mote2_free_ud_actions(2, perturbation=7.0e-7, seed=9202)
+    orbit = compile_action_orbits(actions, presentation)[0]
+    blocks, _ = synchronize_free_orbit(
+        actions,
+        presentation,
+        orbit,
+        config=JointExactificationConfig(max_iterations=30),
+    )
+    synchronized = _replace_route_blocks(actions, blocks)
+    rng = np.random.default_rng(9203)
+    gauge = tuple(_random_unitary(rng, 2) for _ in range(6))
+    gauged_actions = _gauge_transform_actions(actions, gauge)
+    gauged_orbit = compile_action_orbits(gauged_actions, presentation)[0]
+
+    gauged_blocks, _ = synchronize_free_orbit(
+        gauged_actions,
+        presentation,
+        gauged_orbit,
+        config=JointExactificationConfig(max_iterations=30),
+    )
+    expected = _gauge_transform_actions(synchronized, gauge)
+
+    for name in expected:
+        for actual, target in zip(gauged_blocks[name], expected[name].route_blocks):
+            np.testing.assert_allclose(actual, target, atol=5.0e-10, rtol=0.0)
+
+
+def test_free_orbit_u1_path_matches_direct_phase_oracle() -> None:
+    actions = _mgi2_measured_u1_defect_actions()
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+    orbit = compile_action_orbits(actions, presentation)[0]
+    direct, _ = project_u1_relations(actions, presentation)
+
+    blocks, report = synchronize_free_orbit(
+        actions,
+        presentation,
+        orbit,
+        config=JointExactificationConfig(),
+    )
+
+    assert report.solver == "u1_relation_projection"
+    for name in actions:
+        for source in orbit.fibers:
+            np.testing.assert_allclose(
+                blocks[name][source],
+                direct[name].route_blocks[source],
+                atol=2.0e-15,
+                rtol=0.0,
+            )
+
+
+def test_free_orbit_central_transition_requires_configured_separation() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+    actions = _mote2_free_ud_actions(2, perturbation=1.0e-7, seed=9302)
+    orbit = compile_action_orbits(actions, presentation)[0]
+
+    with pytest.raises(JointExactificationError, match="central.*separation"):
+        synchronize_free_orbit(
+            actions,
+            presentation,
+            orbit,
+            config=JointExactificationConfig(central_branch_margin=3.0),
+        )
+
+
+def _test_skew_basis(dimension: int) -> tuple[np.ndarray, ...]:
+    basis: list[np.ndarray] = []
+    for row in range(dimension):
+        value = np.zeros((dimension, dimension), dtype=np.complex128)
+        value[row, row] = 1.0j
+        basis.append(value)
+    for row in range(dimension):
+        for column in range(row + 1, dimension):
+            real = np.zeros((dimension, dimension), dtype=np.complex128)
+            real[row, column] = 1.0 / np.sqrt(2.0)
+            real[column, row] = -1.0 / np.sqrt(2.0)
+            basis.append(real)
+            imaginary = np.zeros((dimension, dimension), dtype=np.complex128)
+            imaginary[row, column] = 1.0j / np.sqrt(2.0)
+            imaginary[column, row] = 1.0j / np.sqrt(2.0)
+            basis.append(imaginary)
+    return tuple(basis)
+
+
+def _independent_free_orbit_objective(
+    actions: dict[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+) -> float:
+    dimension = actions["C3z"].fiber_dimensions[orbit.root]
+    frames = {
+        fiber: _test_word_block(actions, word, orbit.root)
+        for fiber, word in zip(orbit.fibers, orbit.transporter_words)
+    }
+    central: dict[tuple[str, int], complex] = {}
+    identity = np.eye(dimension, dtype=np.complex128)
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        for source in orbit.fibers:
+            target = action.fiber_permutation[source]
+            source_frame = frames[source].conj() if action.antiunitary else frames[source]
+            holonomy = (
+                frames[target].conj().T
+                @ action.route_blocks[source]
+                @ source_frame
+            )
+            central[(generator.name, source)] = min(
+                presentation.central_phases,
+                key=lambda phase: np.linalg.norm(holonomy - phase * identity),
+            )
+    variables = tuple(fiber for fiber in orbit.fibers if fiber != orbit.root)
+    basis = _test_skew_basis(dimension)
+    parameter_count = len(variables) * len(basis)
+
+    def residual(parameters: np.ndarray) -> np.ndarray:
+        trial = {orbit.root: identity}
+        for fiber_index, fiber in enumerate(variables):
+            start = fiber_index * len(basis)
+            generator = sum(
+                parameters[start + basis_index] * value
+                for basis_index, value in enumerate(basis)
+            )
+            trial[fiber] = expm(generator) @ frames[fiber]
+        pieces = []
+        for magnetic_generator in presentation.generators:
+            action = actions[magnetic_generator.name]
+            for source in orbit.fibers:
+                target = action.fiber_permutation[source]
+                source_inverse = trial[source].conj().T
+                if action.antiunitary:
+                    source_inverse = source_inverse.conj()
+                predicted = (
+                    central[(magnetic_generator.name, source)]
+                    * trial[target]
+                    @ source_inverse
+                )
+                difference = predicted - action.route_blocks[source]
+                pieces.extend((difference.real.ravel(), difference.imag.ravel()))
+        return np.concatenate(pieces)
+
+    result = least_squares(
+        residual,
+        np.zeros(parameter_count, dtype=np.float64),
+        jac="2-point",
+        ftol=1.0e-13,
+        xtol=1.0e-13,
+        gtol=1.0e-13,
+        max_nfev=300,
+    )
+    assert result.success
+    return float(np.dot(result.fun, result.fun))
+
+
+def test_free_orbit_analytic_solver_matches_independent_numerical_oracle() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+    actions = _mote2_free_ud_actions(2, perturbation=8.0e-7, seed=9402)
+    orbit = compile_action_orbits(actions, presentation)[0]
+    reference_objective = _independent_free_orbit_objective(
+        actions,
+        presentation,
+        orbit,
+    )
+
+    _, report = synchronize_free_orbit(
+        actions,
+        presentation,
+        orbit,
+        config=JointExactificationConfig(max_iterations=30),
+    )
+
+    comparison_bound = 1.0e-18 + 1.0e-7 * reference_objective
+    assert report.objective_final <= reference_objective + comparison_bound
