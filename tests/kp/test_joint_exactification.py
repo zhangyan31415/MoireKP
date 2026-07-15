@@ -6,11 +6,16 @@ import pytest
 from kp.symmetry.joint_exactification import (
     BlockRouteAction,
     JointExactificationError,
+    MagneticGenerator,
+    MagneticPresentation,
+    MagneticRelation,
     SemilinearBlock,
+    compile_continuum_magnetic_presentation,
     compose_semilinear,
     extract_block_route_action,
     inverse_semilinear,
     materialize_block_route_action,
+    validate_presentation_action_relations,
 )
 
 
@@ -237,4 +242,258 @@ def test_route_extraction_requires_a_complete_disjoint_fiber_partition(
             fiber_indices=fiber_indices,
             fiber_permutation=tuple(range(len(fiber_indices))),
             off_route_bound=0.0,
+        )
+
+
+def _manifest_operation(
+    name: str,
+    *,
+    antiunitary: bool,
+    power: int,
+    phase: int,
+    action_type: str,
+    action_value: float | None = None,
+    sector_map: str = "identity",
+) -> dict[str, object]:
+    action_map: dict[str, object] = {
+        "type": action_type,
+        "in_model_frame": True,
+    }
+    if action_type == "rotation":
+        action_map["angle_deg"] = action_value
+    elif action_type == "reflection":
+        action_map["axis_deg"] = action_value
+    action = {
+        "antiunitary": antiunitary,
+        "k_map": dict(action_map),
+        "q_map": dict(action_map),
+        "sector_map": sector_map,
+        "valley_map": "identity",
+    }
+    return {
+        "name": name,
+        "operation": name,
+        "antiunitary": antiunitary,
+        "declared_model_action": action,
+        "group_relations": [
+            {
+                "type": "power",
+                "name": f"{name}^{power}",
+                "operation": name,
+                "power": power,
+                "phase": phase,
+                "source": "kp_symm_manifest",
+            }
+        ],
+    }
+
+
+def _tr(*, phase: int) -> dict[str, object]:
+    return _manifest_operation(
+        "TR",
+        antiunitary=True,
+        power=2,
+        phase=phase,
+        action_type="negation",
+    )
+
+
+def _c3z() -> dict[str, object]:
+    return _manifest_operation(
+        "C3z",
+        antiunitary=False,
+        power=3,
+        phase=-1,
+        action_type="rotation",
+        action_value=120.0,
+    )
+
+
+def _c2(*, phase: int) -> dict[str, object]:
+    return _manifest_operation(
+        "C2",
+        antiunitary=False,
+        power=2,
+        phase=phase,
+        action_type="reflection",
+        action_value=360.0,
+        sector_map="layer_exchange",
+    )
+
+
+def _c2t() -> dict[str, object]:
+    return _manifest_operation(
+        "C2T",
+        antiunitary=True,
+        power=2,
+        phase=1,
+        action_type="reflection",
+        action_value=360.0,
+        sector_map="layer_exchange",
+    )
+
+
+def _relation_signature(
+    relation: MagneticRelation,
+) -> tuple[str, tuple[str, ...], tuple[str, ...], complex]:
+    return relation.name, relation.lhs, relation.rhs, relation.central_phase
+
+
+def test_compiles_mgi2_m_magnetic_presentation() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+
+    assert presentation.generators == (
+        MagneticGenerator("TR", antiunitary=True),
+        MagneticGenerator("C2", antiunitary=False),
+    )
+    assert tuple(map(_relation_signature, presentation.relations)) == (
+        ("TR^2", ("TR", "TR"), (), 1.0 + 0.0j),
+        ("C2^2", ("C2", "C2"), (), 1.0 + 0.0j),
+        ("TR_C2_commute", ("TR", "C2"), ("C2", "TR"), 1.0 + 0.0j),
+    )
+    assert presentation.central_phases == (1.0 + 0.0j,)
+
+
+def test_compiles_mote2_k_magnetic_presentation_with_explicit_minus_identity() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c2t(), _c3z()])
+
+    assert presentation.generators == (
+        MagneticGenerator("C3z", antiunitary=False),
+        MagneticGenerator("C2T", antiunitary=True),
+    )
+    assert tuple(map(_relation_signature, presentation.relations)) == (
+        ("C3z^3", ("C3z", "C3z", "C3z"), (), -1.0 + 0.0j),
+        ("C2T^2", ("C2T", "C2T"), (), 1.0 + 0.0j),
+        (
+            "C2T_C3z_dihedral",
+            ("C2T", "C3z", "C2T"),
+            ("C3z", "C3z"),
+            -1.0 + 0.0j,
+        ),
+    )
+    assert presentation.central_phases == (1.0 + 0.0j, -1.0 + 0.0j)
+    assert presentation.central_phases[0] != presentation.central_phases[1]
+
+
+def test_compiles_spinful_gamma_magnetic_presentation() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_c2(phase=-1), _tr(phase=-1), _c3z()]
+    )
+
+    assert tuple(generator.name for generator in presentation.generators) == (
+        "TR",
+        "C3z",
+        "C2",
+    )
+    assert tuple(map(_relation_signature, presentation.relations)) == (
+        ("TR^2", ("TR", "TR"), (), -1.0 + 0.0j),
+        ("C3z^3", ("C3z", "C3z", "C3z"), (), -1.0 + 0.0j),
+        ("C2^2", ("C2", "C2"), (), -1.0 + 0.0j),
+        ("TR_C3z_commute", ("TR", "C3z"), ("C3z", "TR"), 1.0 + 0.0j),
+        ("TR_C2_commute", ("TR", "C2"), ("C2", "TR"), 1.0 + 0.0j),
+        (
+            "C2_C3z_dihedral",
+            ("C2", "C3z", "C2"),
+            ("C3z", "C3z"),
+            1.0 + 0.0j,
+        ),
+    )
+
+
+def test_compiles_gamma_tr_c3z_subset() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _tr(phase=-1)])
+
+    assert tuple(generator.name for generator in presentation.generators) == (
+        "TR",
+        "C3z",
+    )
+    assert presentation.relations[-1] == MagneticRelation(
+        "TR_C3z_commute",
+        lhs=("TR", "C3z"),
+        rhs=("C3z", "TR"),
+        central_phase=1.0 + 0.0j,
+    )
+
+
+@pytest.mark.parametrize(
+    "operations",
+    [
+        [_manifest_operation(
+            "C4z",
+            antiunitary=False,
+            power=4,
+            phase=-1,
+            action_type="rotation",
+            action_value=90.0,
+        )],
+        [_tr(phase=1), _tr(phase=1)],
+        [_tr(phase=1)],
+    ],
+)
+def test_presentation_compiler_fails_closed_for_unsupported_or_ambiguous_sets(
+    operations: list[dict[str, object]],
+) -> None:
+    with pytest.raises(JointExactificationError, match="unsupported|duplicate"):
+        compile_continuum_magnetic_presentation(operations)
+
+
+def test_presentation_compiler_requires_matching_explicit_k_and_q_actions() -> None:
+    c3z = _c3z()
+    c3z["declared_model_action"]["q_map"] = {
+        "type": "reflection",
+        "axis_deg": 0.0,
+        "in_model_frame": True,
+    }
+
+    with pytest.raises(JointExactificationError, match="k/Q actions"):
+        compile_continuum_magnetic_presentation([_tr(phase=-1), c3z])
+
+
+def test_discrete_relation_validation_accepts_v4_and_d3_actions() -> None:
+    unit_blocks4 = tuple(np.eye(1, dtype=np.complex128) for _ in range(4))
+    mgi2_actions = {
+        "TR": BlockRouteAction("TR", True, (1, 0, 3, 2), (1, 1, 1, 1), unit_blocks4),
+        "C2": BlockRouteAction("C2", False, (2, 3, 0, 1), (1, 1, 1, 1), unit_blocks4),
+    }
+    validate_presentation_action_relations(
+        mgi2_actions,
+        compile_continuum_magnetic_presentation([_tr(phase=1), _c2(phase=1)]),
+    )
+
+    unit_blocks6 = tuple(np.eye(1, dtype=np.complex128) for _ in range(6))
+    mote2_actions = {
+        "C3z": BlockRouteAction(
+            "C3z",
+            False,
+            (1, 2, 0, 4, 5, 3),
+            (1, 1, 1, 1, 1, 1),
+            unit_blocks6,
+        ),
+        "C2T": BlockRouteAction(
+            "C2T",
+            True,
+            (0, 2, 1, 3, 5, 4),
+            (1, 1, 1, 1, 1, 1),
+            unit_blocks6,
+        ),
+    }
+    validate_presentation_action_relations(
+        mote2_actions,
+        compile_continuum_magnetic_presentation([_c3z(), _c2t()]),
+    )
+
+
+def test_discrete_relation_validation_rejects_nonclosing_permutations() -> None:
+    blocks = tuple(np.eye(1, dtype=np.complex128) for _ in range(4))
+    actions = {
+        "TR": BlockRouteAction("TR", True, (1, 0, 2, 3), (1, 1, 1, 1), blocks),
+        "C2": BlockRouteAction("C2", False, (0, 2, 1, 3), (1, 1, 1, 1), blocks),
+    }
+
+    with pytest.raises(JointExactificationError, match="does not close"):
+        validate_presentation_action_relations(
+            actions,
+            compile_continuum_magnetic_presentation([_tr(phase=1), _c2(phase=1)]),
         )

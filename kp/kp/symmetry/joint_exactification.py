@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import operator
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -377,13 +377,516 @@ def extract_block_route_action(
     )
 
 
+@dataclass(frozen=True)
+class MagneticGenerator:
+    """A named unitary or antiunitary generator."""
+
+    name: str
+    antiunitary: bool
+
+    def __post_init__(self) -> None:
+        name = str(self.name).strip()
+        if not name:
+            raise JointExactificationError("magnetic generator name must be nonempty")
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "antiunitary", bool(self.antiunitary))
+
+
+def _v1_central_phase(value: Any, *, label: str) -> complex:
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        parts = tuple(value)
+        if len(parts) != 2:
+            raise JointExactificationError(
+                f"{label} must encode a scalar phase, got {value!r}"
+            )
+        phase = complex(float(parts[0]), float(parts[1]))
+    else:
+        phase = complex(value)
+    if not np.isfinite(phase.real) or not np.isfinite(phase.imag):
+        raise JointExactificationError(f"{label} must be finite")
+    if phase not in {complex(1.0, 0.0), complex(-1.0, 0.0)}:
+        raise JointExactificationError(
+            f"{label} must be an explicitly declared V1 central phase +1 or -1, "
+            f"got {phase}"
+        )
+    return phase
+
+
+@dataclass(frozen=True)
+class MagneticRelation:
+    """A relation ``lhs = central_phase * rhs`` between generator words."""
+
+    name: str
+    lhs: tuple[str, ...]
+    rhs: tuple[str, ...]
+    central_phase: complex
+
+    def __post_init__(self) -> None:
+        name = str(self.name).strip()
+        if not name:
+            raise JointExactificationError("magnetic relation name must be nonempty")
+        lhs = tuple(str(value).strip() for value in self.lhs)
+        rhs = tuple(str(value).strip() for value in self.rhs)
+        if any(not value for value in (*lhs, *rhs)):
+            raise JointExactificationError("magnetic relation words must name generators")
+        phase = _v1_central_phase(
+            self.central_phase,
+            label=f"magnetic relation {name!r} central phase",
+        )
+        object.__setattr__(self, "name", name)
+        object.__setattr__(self, "lhs", lhs)
+        object.__setattr__(self, "rhs", rhs)
+        object.__setattr__(self, "central_phase", phase)
+
+
+@dataclass(frozen=True)
+class MagneticPresentation:
+    """A finite central magnetic presentation used by joint exactification."""
+
+    generators: tuple[MagneticGenerator, ...]
+    relations: tuple[MagneticRelation, ...]
+    central_phases: tuple[complex, ...]
+    source: str
+
+    def __post_init__(self) -> None:
+        generators = tuple(self.generators)
+        relations = tuple(self.relations)
+        names = tuple(generator.name for generator in generators)
+        if not names or len(set(names)) != len(names):
+            raise JointExactificationError(
+                "magnetic presentation generators must be nonempty and unique"
+            )
+        relation_names = tuple(relation.name for relation in relations)
+        if len(set(relation_names)) != len(relation_names):
+            raise JointExactificationError(
+                "magnetic presentation relation names must be unique"
+            )
+        generator_names = set(names)
+        for relation in relations:
+            unknown = set((*relation.lhs, *relation.rhs)) - generator_names
+            if unknown:
+                raise JointExactificationError(
+                    f"magnetic relation {relation.name!r} references unknown "
+                    f"generators {sorted(unknown)}"
+                )
+        central_phases = tuple(
+            _v1_central_phase(value, label="presentation central phase")
+            for value in self.central_phases
+        )
+        if (
+            not central_phases
+            or central_phases[0] != complex(1.0, 0.0)
+            or len(set(central_phases)) != len(central_phases)
+        ):
+            raise JointExactificationError(
+                "presentation central phases must be unique and start with +1"
+            )
+        if any(
+            relation.central_phase not in central_phases
+            for relation in relations
+        ):
+            raise JointExactificationError(
+                "every relation central phase must belong to the declared central kernel"
+            )
+        source = str(self.source).strip()
+        if not source:
+            raise JointExactificationError("magnetic presentation source must be nonempty")
+        object.__setattr__(self, "generators", generators)
+        object.__setattr__(self, "relations", relations)
+        object.__setattr__(self, "central_phases", central_phases)
+        object.__setattr__(self, "source", source)
+
+
+_SUPPORTED_PRESENTATION_ORDERS: Mapping[frozenset[str], tuple[str, ...]] = {
+    frozenset(("TR", "C2")): ("TR", "C2"),
+    frozenset(("C3z", "C2T")): ("C3z", "C2T"),
+    frozenset(("TR", "C3z")): ("TR", "C3z"),
+    frozenset(("TR", "C3z", "C2")): ("TR", "C3z", "C2"),
+}
+
+_EXPECTED_ANTIUNITARY: Mapping[str, bool] = {
+    "TR": True,
+    "C3z": False,
+    "C2": False,
+    "C2T": True,
+}
+
+_EXPECTED_ACTION_TYPE: Mapping[str, str] = {
+    "TR": "negation",
+    "C3z": "rotation",
+    "C2": "reflection",
+    "C2T": "reflection",
+}
+
+_EXPECTED_POWER: Mapping[str, int] = {
+    "TR": 2,
+    "C3z": 3,
+    "C2": 2,
+    "C2T": 2,
+}
+
+
+def _normalized_angle(value: Any, *, period: float, label: str) -> float:
+    angle = float(value)
+    if not np.isfinite(angle):
+        raise JointExactificationError(f"{label} must be finite")
+    normalized = float(angle % period)
+    scale = max(1.0, abs(angle), period)
+    floating_bound = float(64.0 * np.finfo(np.float64).eps * scale)
+    if abs(normalized - period) <= floating_bound or abs(normalized) <= floating_bound:
+        return 0.0
+    return normalized
+
+
+def _action_map_signature(
+    value: Any,
+    *,
+    label: str,
+) -> tuple[str, float | None]:
+    if not isinstance(value, Mapping):
+        raise JointExactificationError(f"{label} must be explicit action metadata")
+    if value.get("in_model_frame") is False:
+        raise JointExactificationError(f"{label} must be expressed in the model frame")
+    action_type = str(value.get("type", "")).strip().lower()
+    if action_type in {"identity", "negation"}:
+        return action_type, None
+    if action_type == "rotation":
+        if "angle_deg" not in value:
+            raise JointExactificationError(f"{label} rotation must declare angle_deg")
+        return action_type, _normalized_angle(
+            value["angle_deg"],
+            period=360.0,
+            label=f"{label} rotation angle",
+        )
+    if action_type == "reflection":
+        if "axis_deg" not in value:
+            raise JointExactificationError(f"{label} reflection must declare axis_deg")
+        return action_type, _normalized_angle(
+            value["axis_deg"],
+            period=180.0,
+            label=f"{label} reflection axis",
+        )
+    raise JointExactificationError(
+        f"{label} has unsupported explicit action type {action_type!r}"
+    )
+
+
+def _angle_signatures_equal(
+    left: tuple[str, float | None],
+    right: tuple[str, float | None],
+) -> bool:
+    if left[0] != right[0]:
+        return False
+    if left[1] is None or right[1] is None:
+        return left[1] is None and right[1] is None
+    scale = max(1.0, abs(left[1]), abs(right[1]))
+    bound = float(64.0 * np.finfo(np.float64).eps * scale)
+    return bool(abs(left[1] - right[1]) <= bound)
+
+
+def _declared_action_signature(
+    record: Mapping[str, Any],
+    *,
+    name: str,
+) -> tuple[tuple[str, float | None], str, str]:
+    candidates: list[Mapping[str, Any]] = []
+    for key in ("declared_model_action", "model_action"):
+        value = record.get(key)
+        if isinstance(value, Mapping):
+            candidates.append(value)
+    if not candidates and isinstance(record.get("k_map"), Mapping):
+        candidates.append(record)
+    if not candidates:
+        raise JointExactificationError(
+            f"operation {name!r} lacks explicit declared model action metadata"
+        )
+
+    signatures: list[tuple[tuple[str, float | None], str, str]] = []
+    for action in candidates:
+        if "antiunitary" in action and bool(action["antiunitary"]) != bool(
+            _EXPECTED_ANTIUNITARY[name]
+        ):
+            raise JointExactificationError(
+                f"operation {name!r} action antiunitary parity is inconsistent"
+            )
+        k_signature = _action_map_signature(
+            action.get("k_map"),
+            label=f"operation {name!r} k action",
+        )
+        q_signature = _action_map_signature(
+            action.get("q_map"),
+            label=f"operation {name!r} Q action",
+        )
+        if not _angle_signatures_equal(k_signature, q_signature):
+            raise JointExactificationError(
+                f"operation {name!r} explicit k/Q actions do not match"
+            )
+        signatures.append(
+            (
+                k_signature,
+                str(action.get("sector_map", "")).strip(),
+                str(action.get("valley_map", "")).strip(),
+            )
+        )
+    first = signatures[0]
+    for candidate in signatures[1:]:
+        if (
+            not _angle_signatures_equal(first[0], candidate[0])
+            or first[1:] != candidate[1:]
+        ):
+            raise JointExactificationError(
+                f"operation {name!r} has ambiguous declared model actions"
+            )
+    expected_type = _EXPECTED_ACTION_TYPE[name]
+    if first[0][0] != expected_type:
+        raise JointExactificationError(
+            f"operation {name!r} requires explicit {expected_type} k/Q actions, "
+            f"got {first[0][0]!r}"
+        )
+    if name == "C3z":
+        angle = float(first[0][1])
+        allowed = (120.0, 240.0)
+        if not any(
+            _angle_signatures_equal(("rotation", angle), ("rotation", item))
+            for item in allowed
+        ):
+            raise JointExactificationError(
+                f"operation 'C3z' rotation angle must have order three, got {angle}"
+            )
+    return first
+
+
+def _manifest_power_phase(record: Mapping[str, Any], *, name: str) -> complex:
+    raw_relations = record.get("group_relations")
+    if not isinstance(raw_relations, Sequence) or isinstance(
+        raw_relations,
+        (str, bytes),
+    ):
+        raise JointExactificationError(
+            f"operation {name!r} must declare manifest group_relations"
+        )
+    matches: list[Mapping[str, Any]] = []
+    for relation in raw_relations:
+        if not isinstance(relation, Mapping):
+            continue
+        if str(relation.get("type", "power")) != "power":
+            continue
+        relation_operation = str(relation.get("operation", name)).strip()
+        if relation_operation == name:
+            matches.append(relation)
+    if len(matches) != 1:
+        raise JointExactificationError(
+            f"operation {name!r} requires exactly one unambiguous power relation"
+        )
+    relation = matches[0]
+    expected_power = _EXPECTED_POWER[name]
+    if int(relation.get("power", 0)) != expected_power:
+        raise JointExactificationError(
+            f"operation {name!r} power relation must use power {expected_power}"
+        )
+    return _v1_central_phase(
+        relation.get("phase"),
+        label=f"operation {name!r} power phase",
+    )
+
+
+def compile_continuum_magnetic_presentation(
+    operations: Sequence[Mapping[str, Any]],
+) -> MagneticPresentation:
+    """Compile a recognized magnetic presentation from explicit KP metadata."""
+
+    records: dict[str, Mapping[str, Any]] = {}
+    for raw_record in operations:
+        if not isinstance(raw_record, Mapping):
+            raise JointExactificationError("operation records must be mappings")
+        name = str(raw_record.get("name", raw_record.get("operation", ""))).strip()
+        operation = str(raw_record.get("operation", name)).strip()
+        if not name or name != operation:
+            raise JointExactificationError(
+                f"operation record has ambiguous name/operation fields: {name!r}, "
+                f"{operation!r}"
+            )
+        if name in records:
+            raise JointExactificationError(f"duplicate operation record {name!r}")
+        records[name] = raw_record
+
+    operation_set = frozenset(records)
+    generator_order = _SUPPORTED_PRESENTATION_ORDERS.get(operation_set)
+    if generator_order is None:
+        raise JointExactificationError(
+            "unsupported or ambiguous continuum magnetic operation set "
+            f"{sorted(operation_set)}"
+        )
+
+    power_phases: dict[str, complex] = {}
+    generators: list[MagneticGenerator] = []
+    relations: list[MagneticRelation] = []
+    for name in generator_order:
+        record = records[name]
+        antiunitary = bool(record.get("antiunitary", False))
+        expected_antiunitary = _EXPECTED_ANTIUNITARY[name]
+        if antiunitary != expected_antiunitary:
+            raise JointExactificationError(
+                f"operation {name!r} antiunitary parity must be "
+                f"{expected_antiunitary}"
+            )
+        _declared_action_signature(record, name=name)
+        phase = _manifest_power_phase(record, name=name)
+        power_phases[name] = phase
+        generators.append(MagneticGenerator(name, antiunitary))
+        power = _EXPECTED_POWER[name]
+        relations.append(
+            MagneticRelation(
+                f"{name}^{power}",
+                lhs=tuple(name for _ in range(power)),
+                rhs=(),
+                central_phase=phase,
+            )
+        )
+
+    if operation_set == frozenset(("TR", "C2")):
+        relations.append(
+            MagneticRelation(
+                "TR_C2_commute",
+                lhs=("TR", "C2"),
+                rhs=("C2", "TR"),
+                central_phase=1.0,
+            )
+        )
+    elif operation_set == frozenset(("C3z", "C2T")):
+        relations.append(
+            MagneticRelation(
+                "C2T_C3z_dihedral",
+                lhs=("C2T", "C3z", "C2T"),
+                rhs=("C3z", "C3z"),
+                central_phase=power_phases["C2T"] / power_phases["C3z"],
+            )
+        )
+    elif operation_set == frozenset(("TR", "C3z")):
+        relations.append(
+            MagneticRelation(
+                "TR_C3z_commute",
+                lhs=("TR", "C3z"),
+                rhs=("C3z", "TR"),
+                central_phase=1.0,
+            )
+        )
+    elif operation_set == frozenset(("TR", "C3z", "C2")):
+        relations.extend(
+            (
+                MagneticRelation(
+                    "TR_C3z_commute",
+                    lhs=("TR", "C3z"),
+                    rhs=("C3z", "TR"),
+                    central_phase=1.0,
+                ),
+                MagneticRelation(
+                    "TR_C2_commute",
+                    lhs=("TR", "C2"),
+                    rhs=("C2", "TR"),
+                    central_phase=1.0,
+                ),
+                MagneticRelation(
+                    "C2_C3z_dihedral",
+                    lhs=("C2", "C3z", "C2"),
+                    rhs=("C3z", "C3z"),
+                    central_phase=power_phases["C2"] / power_phases["C3z"],
+                ),
+            )
+        )
+
+    central_phases = (complex(1.0, 0.0),)
+    if any(
+        relation.central_phase == complex(-1.0, 0.0)
+        for relation in relations
+    ):
+        central_phases = (*central_phases, complex(-1.0, 0.0))
+    return MagneticPresentation(
+        generators=tuple(generators),
+        relations=tuple(relations),
+        central_phases=central_phases,
+        source="kp_symm_manifest_explicit_actions_v1",
+    )
+
+
+def _evaluate_discrete_word(
+    word: Sequence[str],
+    *,
+    actions: Mapping[str, BlockRouteAction],
+    fiber_count: int,
+) -> tuple[tuple[int, ...], bool]:
+    permutation = tuple(range(fiber_count))
+    antiunitary = False
+    for name in reversed(tuple(word)):
+        action = actions[name]
+        permutation = tuple(
+            action.fiber_permutation[permutation[source]]
+            for source in range(fiber_count)
+        )
+        antiunitary ^= action.antiunitary
+    return permutation, antiunitary
+
+
+def validate_presentation_action_relations(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> None:
+    """Require exact closure of every relation on permutation/parity data."""
+
+    generator_names = tuple(generator.name for generator in presentation.generators)
+    if set(actions) != set(generator_names):
+        raise JointExactificationError(
+            "block-route actions must match the presentation generators exactly"
+        )
+    reference: BlockRouteAction | None = None
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        if action.name != generator.name or action.antiunitary != generator.antiunitary:
+            raise JointExactificationError(
+                f"action {generator.name!r} is inconsistent with its generator"
+            )
+        if reference is None:
+            reference = action
+        elif (
+            action.fiber_dimensions != reference.fiber_dimensions
+            or action.fiber_indices != reference.fiber_indices
+        ):
+            raise JointExactificationError(
+                "all presentation actions must use one common fiber layout"
+            )
+    if reference is None:
+        raise JointExactificationError("presentation must contain generators")
+    fiber_count = len(reference.fiber_dimensions)
+    for relation in presentation.relations:
+        lhs = _evaluate_discrete_word(
+            relation.lhs,
+            actions=actions,
+            fiber_count=fiber_count,
+        )
+        rhs = _evaluate_discrete_word(
+            relation.rhs,
+            actions=actions,
+            fiber_count=fiber_count,
+        )
+        if lhs != rhs:
+            raise JointExactificationError(
+                f"magnetic relation {relation.name!r} does not close on exact "
+                f"fiber permutation/parity data: lhs={lhs}, rhs={rhs}"
+            )
+
+
 __all__ = [
     "BlockRouteAction",
     "JointExactificationError",
+    "MagneticGenerator",
+    "MagneticPresentation",
+    "MagneticRelation",
     "SemilinearBlock",
+    "compile_continuum_magnetic_presentation",
     "compose_semilinear",
     "extract_block_route_action",
     "inverse_semilinear",
     "materialize_block_route_action",
     "semilinear_kappa",
+    "validate_presentation_action_relations",
 ]
