@@ -19,6 +19,7 @@ from kp.symmetry.joint_exactification import (
     extract_block_route_action,
     inverse_semilinear,
     materialize_block_route_action,
+    project_u1_relations,
     validate_presentation_action_relations,
 )
 
@@ -684,4 +685,130 @@ def test_quotient_group_compiler_enforces_explicit_limits() -> None:
             actions,
             presentation,
             max_word_length=1,
+        )
+
+
+def _mgi2_measured_u1_defect_actions() -> dict[str, BlockRouteAction]:
+    tr_permutation = (
+        14, 8, 12, 18, 15, 11, 19, 16, 1, 17, 21, 5, 2, 20, 0, 4, 7,
+        9, 3, 6, 13, 10, 23, 22, 34, 40, 38, 33, 37, 43, 41, 39, 36,
+        27, 24, 42, 32, 28, 26, 31, 25, 30, 35, 29,
+    )
+    c2_permutation = (
+        23, 26, 30, 24, 27, 31, 28, 32, 38, 40, 42, 39, 41, 43, 22, 33,
+        36, 25, 34, 37, 29, 35, 14, 0, 3, 17, 1, 4, 6, 20, 2, 5, 7,
+        15, 18, 21, 16, 19, 8, 11, 9, 12, 10, 13,
+    )
+    positive_pi_defects = (
+        8.573551341761743e-06,
+        8.715867566788660e-06,
+        8.794147711821410e-06,
+        8.111774012053985e-06,
+        8.317126971135735e-06,
+        8.482813055987748e-06,
+        8.260437259099973e-06,
+        8.563159882957194e-06,
+        8.727936607222375e-06,
+        8.331784509429951e-06,
+        7.875880483787512e-06,
+        8.755444839803062e-06,
+        8.435707563148043e-06,
+        8.325201826586692e-06,
+        8.941317854116448e-06,
+        9.025485210756301e-06,
+        9.244602727331852e-06,
+        9.043688192544863e-06,
+        9.211630187522246e-06,
+        9.492111233466716e-06,
+        9.396686003082522e-06,
+        9.310424010422480e-06,
+    )
+    c2_angles = np.empty(44, dtype=np.float64)
+    for source, defect in enumerate(positive_pi_defects):
+        target = c2_permutation[source]
+        c2_angles[source] = -np.pi + defect
+        c2_angles[target] = np.pi - defect
+    dimensions = tuple(1 for _ in range(44))
+    return {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            tr_permutation,
+            dimensions,
+            tuple(np.ones((1, 1), dtype=np.complex128) for _ in range(44)),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            c2_permutation,
+            dimensions,
+            tuple(
+                np.asarray([[np.exp(1.0j * angle)]], dtype=np.complex128)
+                for angle in c2_angles
+            ),
+        ),
+    }
+
+
+def test_u1_projection_reproduces_measured_mgi2_joint_correction() -> None:
+    projected, report = project_u1_relations(
+        _mgi2_measured_u1_defect_actions(),
+        compile_continuum_magnetic_presentation([_tr(phase=1), _c2(phase=1)]),
+    )
+
+    assert report["constraint_shape"] == (132, 88)
+    assert report["rank"] == 55
+    assert report["nullity"] == 33
+    assert report["correction_rms_by_operation"]["TR"] == pytest.approx(
+        4.3625209915e-6,
+        rel=2.0e-10,
+    )
+    assert report["correction_rms_by_operation"]["C2"] == pytest.approx(
+        4.3625209915e-6,
+        rel=2.0e-10,
+    )
+    assert report["maximum_phase_correction"] == pytest.approx(
+        4.4519406526e-6,
+        rel=2.0e-10,
+    )
+    assert report["pre_relation_residuals"]["TR_C2_commute"]["rms"] == pytest.approx(
+        1.7450083966e-5,
+        rel=2.0e-10,
+    )
+    assert report["post_relation_residual_max"] < 5.0e-15
+    assert set(projected) == {"TR", "C2"}
+
+
+def test_u1_projection_is_idempotent_at_the_floating_floor() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+    projected, _ = project_u1_relations(
+        _mgi2_measured_u1_defect_actions(),
+        presentation,
+    )
+
+    repeated, report = project_u1_relations(projected, presentation)
+
+    assert report["maximum_phase_correction"] < 5.0e-15
+    assert report["post_relation_residual_max"] < 5.0e-15
+    for name in projected:
+        for left, right in zip(
+            repeated[name].route_blocks,
+            projected[name].route_blocks,
+        ):
+            np.testing.assert_allclose(left, right, atol=5.0e-15, rtol=0.0)
+
+
+def test_u1_projection_rejects_non_scalar_route_blocks() -> None:
+    blocks = tuple(np.eye(2, dtype=np.complex128) for _ in range(4))
+    actions = {
+        "TR": BlockRouteAction("TR", True, (1, 0, 3, 2), (2, 2, 2, 2), blocks),
+        "C2": BlockRouteAction("C2", False, (2, 3, 0, 1), (2, 2, 2, 2), blocks),
+    }
+
+    with pytest.raises(JointExactificationError, match=r"U\(1\)"):
+        project_u1_relations(
+            actions,
+            compile_continuum_magnetic_presentation([_tr(phase=1), _c2(phase=1)]),
         )

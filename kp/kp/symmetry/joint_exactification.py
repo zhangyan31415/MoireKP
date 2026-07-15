@@ -1084,6 +1084,285 @@ def compile_action_orbits(
     return tuple(orbits)
 
 
+def _u1_word_coefficients(
+    word: Sequence[str],
+    source: int,
+    *,
+    actions: Mapping[str, BlockRouteAction],
+    variable_indices: Mapping[tuple[str, int], int],
+    variable_count: int,
+) -> np.ndarray:
+    """Return the signed route-phase linear form for one semilinear word."""
+
+    names = tuple(word)
+    route_sources = [0] * len(names)
+    current_source = int(source)
+    for position in range(len(names) - 1, -1, -1):
+        name = names[position]
+        route_sources[position] = current_source
+        current_source = actions[name].fiber_permutation[current_source]
+    coefficients = np.zeros(variable_count, dtype=np.float64)
+    left_antiunitary = False
+    for position, name in enumerate(names):
+        sign = -1.0 if left_antiunitary else 1.0
+        coefficients[variable_indices[(name, route_sources[position])]] += sign
+        left_antiunitary ^= actions[name].antiunitary
+    return coefficients
+
+
+def _central_phase_angle(phase: complex) -> float:
+    return 0.0 if complex(phase) == complex(1.0, 0.0) else float(np.pi)
+
+
+def _u1_angles(
+    actions: Mapping[str, BlockRouteAction],
+    generator_names: Sequence[str],
+) -> dict[str, np.ndarray]:
+    return {
+        name: np.asarray(
+            [
+                np.angle(complex(block[0, 0]))
+                for block in actions[name].route_blocks
+            ],
+            dtype=np.float64,
+        )
+        for name in generator_names
+    }
+
+
+def _u1_relation_residual_table(
+    *,
+    constraint_matrix: np.ndarray,
+    angle_vector: np.ndarray,
+    target_angles: np.ndarray,
+    relation_names: Sequence[str],
+) -> tuple[dict[str, dict[str, float]], float]:
+    residuals = np.angle(
+        np.exp(1.0j * (constraint_matrix @ angle_vector - target_angles))
+    )
+    table: dict[str, dict[str, float]] = {}
+    for name in dict.fromkeys(str(value) for value in relation_names):
+        values = residuals[
+            np.asarray([value == name for value in relation_names], dtype=bool)
+        ]
+        table[name] = {
+            "rms": float(np.sqrt(np.mean(np.square(values)))),
+            "max": float(np.max(np.abs(values))),
+        }
+    maximum = float(np.max(np.abs(residuals))) if residuals.size else 0.0
+    return table, maximum
+
+
+def project_u1_relations(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    weights: Mapping[str, float] | None = None,
+) -> tuple[dict[str, BlockRouteAction], Mapping[str, Any]]:
+    """Project scalar route phases onto every declared magnetic relation."""
+
+    validate_presentation_action_relations(actions, presentation)
+    generator_names = tuple(
+        generator.name for generator in presentation.generators
+    )
+    reference = actions[generator_names[0]]
+    fiber_count = len(reference.fiber_dimensions)
+    if any(
+        dimension != 1
+        for action in actions.values()
+        for dimension in action.fiber_dimensions
+    ):
+        raise JointExactificationError(
+            "direct phase projection is defined only for U(1) route blocks"
+        )
+
+    raw_weights = {} if weights is None else dict(weights)
+    unknown_weights = set(raw_weights) - set(generator_names)
+    if unknown_weights:
+        raise JointExactificationError(
+            f"U(1) projection weights reference unknown generators "
+            f"{sorted(unknown_weights)}"
+        )
+    effective_weights: dict[str, float] = {}
+    for name in generator_names:
+        weight = float(raw_weights.get(name, 1.0))
+        if not np.isfinite(weight) or weight <= 0.0:
+            raise JointExactificationError(
+                f"U(1) projection weight for {name!r} must be finite and positive"
+            )
+        effective_weights[name] = weight
+
+    variable_indices = {
+        (name, source): generator_index * fiber_count + source
+        for generator_index, name in enumerate(generator_names)
+        for source in range(fiber_count)
+    }
+    variable_count = len(generator_names) * fiber_count
+    angle_by_generator = _u1_angles(actions, generator_names)
+    angle_vector = np.concatenate(
+        [angle_by_generator[name] for name in generator_names]
+    )
+    rows: list[np.ndarray] = []
+    target_angles: list[float] = []
+    relation_names: list[str] = []
+    for relation in presentation.relations:
+        for source in range(fiber_count):
+            lhs = _u1_word_coefficients(
+                relation.lhs,
+                source,
+                actions=actions,
+                variable_indices=variable_indices,
+                variable_count=variable_count,
+            )
+            rhs = _u1_word_coefficients(
+                relation.rhs,
+                source,
+                actions=actions,
+                variable_indices=variable_indices,
+                variable_count=variable_count,
+            )
+            rows.append(lhs - rhs)
+            target_angles.append(_central_phase_angle(relation.central_phase))
+            relation_names.append(relation.name)
+    constraint_matrix = np.asarray(rows, dtype=np.float64)
+    target_vector = np.asarray(target_angles, dtype=np.float64)
+    raw_mismatch = constraint_matrix @ angle_vector - target_vector
+    principal_residual = np.angle(np.exp(1.0j * raw_mismatch))
+    branch_margin = float(np.min(np.pi - np.abs(principal_residual)))
+    epsilon = float(np.finfo(np.float64).eps)
+    branch_certification_bound = float(
+        128.0
+        * epsilon
+        * max(
+            1,
+            constraint_matrix.shape[0],
+            constraint_matrix.shape[1],
+            max(
+                (len(relation.lhs) + len(relation.rhs))
+                for relation in presentation.relations
+            ),
+        )
+    )
+    if branch_margin <= branch_certification_bound:
+        raise JointExactificationError(
+            "U(1) relation phase is too close to the principal-branch boundary: "
+            f"margin={branch_margin:.6e}, certification_bound="
+            f"{branch_certification_bound:.6e}"
+        )
+
+    square_root_weights = np.concatenate(
+        [
+            np.full(fiber_count, np.sqrt(effective_weights[name]))
+            for name in generator_names
+        ]
+    )
+    weighted_constraints = constraint_matrix / square_root_weights[np.newaxis, :]
+    left_vectors, singular_values, right_vectors_h = np.linalg.svd(
+        weighted_constraints,
+        full_matrices=False,
+    )
+    if singular_values.size == 0 or singular_values[0] == 0.0:
+        raise JointExactificationError("U(1) relation constraint matrix has zero rank")
+    rank_tolerance = float(
+        singular_values[0]
+        * max(weighted_constraints.shape)
+        * epsilon
+    )
+    rank = int(np.count_nonzero(singular_values > rank_tolerance))
+    if rank == 0:
+        raise JointExactificationError("U(1) relation constraint matrix has zero rank")
+    right_vectors = right_vectors_h[:rank, :].T
+    weighted_correction = right_vectors @ (
+        (left_vectors[:, :rank].T @ (-principal_residual))
+        / singular_values[:rank]
+    )
+    correction = weighted_correction / square_root_weights
+    consistency_residual = float(
+        np.linalg.norm(constraint_matrix @ correction + principal_residual)
+    )
+    consistency_scale = max(
+        1.0,
+        float(np.linalg.norm(principal_residual)),
+        float(np.linalg.norm(constraint_matrix, ord=2) * np.linalg.norm(correction)),
+    )
+    consistency_bound = float(
+        128.0
+        * epsilon
+        * max(constraint_matrix.shape)
+        * consistency_scale
+    )
+    if consistency_residual > consistency_bound:
+        raise JointExactificationError(
+            "U(1) principal-branch relation constraints are inconsistent: "
+            f"residual={consistency_residual:.6e}, bound="
+            f"{consistency_bound:.6e}"
+        )
+
+    projected: dict[str, BlockRouteAction] = {}
+    correction_rms: dict[str, float] = {}
+    for generator_index, name in enumerate(generator_names):
+        action = actions[name]
+        start = generator_index * fiber_count
+        stop = start + fiber_count
+        generator_correction = correction[start:stop]
+        correction_rms[name] = float(
+            np.sqrt(np.mean(np.square(generator_correction)))
+        )
+        route_blocks = tuple(
+            np.asarray(
+                [[complex(block[0, 0]) * np.exp(1.0j * delta)]],
+                dtype=np.complex128,
+            )
+            for block, delta in zip(action.route_blocks, generator_correction)
+        )
+        projected[name] = BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            route_blocks=route_blocks,
+            fiber_indices=action.fiber_indices,
+        )
+
+    projected_angle_by_generator = _u1_angles(projected, generator_names)
+    projected_angles = np.concatenate(
+        [projected_angle_by_generator[name] for name in generator_names]
+    )
+    pre_table, pre_maximum = _u1_relation_residual_table(
+        constraint_matrix=constraint_matrix,
+        angle_vector=angle_vector,
+        target_angles=target_vector,
+        relation_names=relation_names,
+    )
+    post_table, post_maximum = _u1_relation_residual_table(
+        constraint_matrix=constraint_matrix,
+        angle_vector=projected_angles,
+        target_angles=target_vector,
+        relation_names=relation_names,
+    )
+    smallest = float(singular_values[rank - 1])
+    report: dict[str, Any] = {
+        "constraint_shape": tuple(int(value) for value in constraint_matrix.shape),
+        "rank": rank,
+        "nullity": int(variable_count - rank),
+        "rank_tolerance": rank_tolerance,
+        "smallest_nonzero_singular_value": smallest,
+        "condition_number": float(singular_values[0] / smallest),
+        "consistency_residual": consistency_residual,
+        "consistency_bound": consistency_bound,
+        "branch_margin": branch_margin,
+        "branch_certification_bound": branch_certification_bound,
+        "weights": dict(effective_weights),
+        "correction_rms_by_operation": correction_rms,
+        "maximum_phase_correction": float(np.max(np.abs(correction))),
+        "pre_relation_residuals": pre_table,
+        "pre_relation_residual_max": pre_maximum,
+        "post_relation_residuals": post_table,
+        "post_relation_residual_max": post_maximum,
+    }
+    return projected, report
+
+
 __all__ = [
     "ActionOrbit",
     "BlockRouteAction",
@@ -1100,6 +1379,7 @@ __all__ = [
     "extract_block_route_action",
     "inverse_semilinear",
     "materialize_block_route_action",
+    "project_u1_relations",
     "semilinear_kappa",
     "validate_presentation_action_relations",
 ]
