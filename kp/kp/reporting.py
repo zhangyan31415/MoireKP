@@ -85,6 +85,12 @@ class KpReporter:
     def path(self, label: str, value: str | Path) -> None:
         self._field(str(label), value, value_style="35")
 
+    def field(self, label: str, value: object, *, width: int | None = None) -> None:
+        self._field(str(label), value, width=width)
+
+    def metric(self, label: str, value: object) -> None:
+        self._field(str(label), value, value_style="33")
+
     def check(self, label: str, *, passed: bool, detail: str = "") -> None:
         status = "OK" if passed else "WARN"
         code = "32" if passed else "33"

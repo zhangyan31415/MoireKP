@@ -64,29 +64,31 @@ from .reporting import KpReporter
 
 HARTREE_TO_EV = 27.2113845
 
-
-def _kp_cli_color_enabled() -> bool:
-    return bool(getattr(sys.stdout, "isatty", lambda: False)()) and os.environ.get("NO_COLOR") is None
-
-
-def _kp_cli_color(text: str, code: str, *, enabled: bool) -> str:
-    if not enabled:
-        return text
-    return f"\033[{code}m{text}\033[0m"
+_KP_MODEL_REPORTER: KpReporter | None = None
 
 
 def _kp_model_print(message: str, *, style: str | None = None) -> None:
-    use_color = _kp_cli_color_enabled()
-    style_code = {
-        "header": "1;36",
-        "path": "1;35",
-        "metric": "1;33",
-        "ok": "1;32",
-        "info": "36",
-    }.get(str(style or ""))
-    prefix = _kp_cli_color("[kp model]", "36", enabled=use_color)
-    body = _kp_cli_color(str(message), style_code, enabled=use_color) if style_code else str(message)
-    print(f"{prefix} {body}")
+    reporter = _KP_MODEL_REPORTER or KpReporter("kp model")
+    if style == "header":
+        reporter.section("Model")
+        return
+    text = str(message).strip()
+    if ": " not in text:
+        reporter.line(f"  {text}")
+        return
+    label, value = text.split(": ", 1)
+    if style == "path":
+        reporter.path(label, value)
+    elif style == "metric":
+        reporter.metric(label, value)
+    else:
+        reporter.field(label, value, width=12)
+
+
+def _begin_kp_model_report() -> KpReporter:
+    global _KP_MODEL_REPORTER
+    _KP_MODEL_REPORTER = KpReporter("kp model")
+    return _KP_MODEL_REPORTER
 
 
 def _is_canonical_case_config(cfg: dict[str, Any]) -> bool:
@@ -2347,6 +2349,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.cmd == "model":
         from .model.pipeline import run_configured_model
 
+        started = time.perf_counter()
+        reporter = _begin_kp_model_report()
+        reporter.title("Fit and export continuum model")
         results = run_configured_model(args.config)
         model_cfg = results.get("configured_model")
         moire_cfg = results.get("moire_config")
@@ -2372,6 +2377,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 _kp_model_print(f"  detailed log: {results['model_log']}", style="path")
             if results.get("runtime_s") is not None:
                 _kp_model_print(f"  runtime: {float(results['runtime_s']):.2f} s", style="ok")
+        reporter.section("Results")
         if results.get("band_plot"):
             _kp_model_print(f"  band plot: {results['band_plot']}", style="path")
         if results.get("q_lattice_plot"):
@@ -2382,6 +2388,16 @@ def main(argv: Sequence[str] | None = None) -> None:
             _kp_model_print(f"  Hamiltonian element plot: {results['hamiltonian_element_plot']}", style="path")
         if results.get("hamiltonian_element_plot_pdf"):
             _kp_model_print(f"  Hamiltonian element plot PDF: {results['hamiltonian_element_plot_pdf']}", style="path")
+        has_validation = any(
+            (
+                comparison,
+                plot_comparison,
+                results.get("all_band_plot_comparison"),
+                results.get("plot_comparison_vs_full_heff"),
+            )
+        )
+        if has_validation:
+            reporter.section("Validation")
         if comparison:
             rms = float(comparison["rms_error"])
             max_abs = float(comparison["max_abs_error"])
@@ -2432,7 +2448,9 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         if _config_path_uses_canonical_case(args.config):
             _cleanup_canonical_model_output(model_cfg.output_dir)
+        reporter.section("Export")
         _kp_model_print(f"  standalone export: {export_path}", style="path")
+        reporter.complete(elapsed=time.perf_counter() - started)
     else:
         raise SystemExit(2)
 
