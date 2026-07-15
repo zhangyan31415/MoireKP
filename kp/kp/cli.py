@@ -2260,6 +2260,63 @@ def build_argparser() -> argparse.ArgumentParser:
     return p
 
 
+def _kp_symm_output_dir(config_path: str | Path) -> Path:
+    path = Path(config_path).expanduser().resolve()
+    with path.open("r", encoding="utf-8") as handle:
+        payload = yaml.safe_load(handle) or {}
+    symm_cfg = payload.get("symm", {}) if isinstance(payload, Mapping) else {}
+    raw = symm_cfg.get("output_dir", "symm_project") if isinstance(symm_cfg, Mapping) else "symm_project"
+    output = Path(str(raw)).expanduser()
+    return output if output.is_absolute() else (path.parent / output).resolve()
+
+
+def _report_kp_symm_summary(
+    reporter: KpReporter,
+    summary: Mapping[str, Any],
+    *,
+    output_dir: Path,
+) -> None:
+    operations = [row for row in summary.get("operations", []) if isinstance(row, Mapping)]
+    reporter.section("Validation")
+    reporter.fields(
+        [
+            ("valley / spin", f"{summary.get('valley', 'unknown')} / {summary.get('spin', 'unknown')}"),
+            ("basis dimension", summary.get("low_dim", "unknown")),
+            ("Q points", summary.get("q_count", "unknown")),
+            ("operations", ", ".join(str(row.get("name", "unknown")) for row in operations)),
+        ]
+    )
+    developer_rows: list[tuple[str, object]] = []
+    for operation in operations:
+        name = str(operation.get("name", "unknown"))
+        matrix_file = str(operation.get("matrix_file", "missing"))
+        matrix_kind = str(operation.get("matrix_kind", ""))
+        exactified = (
+            str(operation.get("status", "")) == "exactified"
+            and matrix_kind == "continuum_internal_rep_exact"
+        )
+        reporter.check(
+            name,
+            passed=exactified,
+            detail=f"production exactified matrix: {matrix_file}",
+        )
+        developer_outputs = operation.get("developer_outputs")
+        if isinstance(developer_outputs, Mapping):
+            for label, value in developer_outputs.items():
+                developer_rows.append((f"{name} {label}", value))
+    if developer_rows:
+        reporter.section("Developer diagnostics")
+        reporter.fields(developer_rows)
+    reporter.section("Results")
+    reporter.fields(
+        [
+            ("output", output_dir),
+            ("manifest", output_dir / "manifest.json"),
+            ("summary", output_dir / "summary.md"),
+        ]
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     p = build_argparser()
     args = p.parse_args(argv)
@@ -2269,10 +2326,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         overrides = _project_overrides_from_args(args)
         cmd_project_from_config(args.config, overrides)
     elif args.cmd == "symm":
-        run_symmetry_projection_from_config(
+        started = time.perf_counter()
+        reporter = KpReporter("kp symm")
+        reporter.title("Project and exactify symmetry representations")
+        reporter.fields([("config", Path(args.config).expanduser().resolve())])
+        summary = run_symmetry_projection_from_config(
             args.config,
             developer_outputs=True if args.developer_outputs else None,
         )
+        _report_kp_symm_summary(
+            reporter,
+            summary,
+            output_dir=_kp_symm_output_dir(args.config),
+        )
+        reporter.complete(elapsed=time.perf_counter() - started)
     elif args.cmd == "symm-rep":
         from . import symm_rep
 
