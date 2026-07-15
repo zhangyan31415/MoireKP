@@ -1251,9 +1251,11 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
     cli.main(["model", "--config", str(cfg_path)])
 
     out = capsys.readouterr().out
-    assert f"[kp model]   band plot: {plot_path.resolve()}" in out
-    assert f"[kp model]   all-band plot: {all_plot_path.resolve()}" in out
-    assert "[kp model]   all-band RMS: 2.000 meV, Max: 3.000 meV (bands=124, align=top)" in out
+    assert "[kp model] Results" in out
+    assert f"  band plot  {plot_path.resolve()}" in out
+    assert f"  all-band plot  {all_plot_path.resolve()}" in out
+    assert "[kp model] Validation" in out
+    assert "  all-band RMS  2.000 meV, Max: 3.000 meV (bands=124, align=top)" in out
 
 
 def test_canonical_model_cleanup_preserves_harmonic_recommendation_plot(tmp_path: Path) -> None:
