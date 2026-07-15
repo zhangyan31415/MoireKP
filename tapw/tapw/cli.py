@@ -20,6 +20,15 @@ from .artifacts import canonical_profile_name, canonical_qshell_name
 VALLEY_LABELS = dict(BandStructureCalculator.VALLEY_MAP)
 
 
+def _calc_reporter_identity(mode: str) -> tuple[str, str]:
+    identities = {
+        "band": ("tapw run", "Calculate source bands"),
+        "symmetry": ("tapw symm", "Analyze source symmetry"),
+        "chern": ("tapw topo", "Calculate topology"),
+    }
+    return identities.get(str(mode), ("tapw", "Run TAPW calculation"))
+
+
 def _mpi_world_rank_size() -> Tuple[int, int]:
     # Best-effort: works both under mpiexec/srun and in normal (non-MPI) runs.
     try:
@@ -148,7 +157,8 @@ def _valley_label_for_target(target) -> str:
     return VALLEY_LABELS.get(target, str(target))
 
 
-def _run_symmetry_analysis(config, processor, hr, sr, logger):
+def _run_symmetry_analysis(config, processor, hr, sr, logger, *, reporter=None):
+    reporter = reporter or TapwReporter(logger, command="tapw symm")
     runner = SymmetryAnalysisRunner(
         config=config,
         structure=processor,
@@ -162,18 +172,19 @@ def _run_symmetry_analysis(config, processor, hr, sr, logger):
     output_dir_text = getattr(runner, "output_dir", None)
     if output_dir_text is not None:
         output_dir = Path(output_dir_text)
-        logger.info("")
-        logger.info("=" * 72)
-        logger.info("[TAPW] Symmetry analysis complete")
-        logger.info("-" * 72)
-        logger.info(f"  output directory : {output_dir}")
-        logger.info(f"  summary          : {output_dir / 'summary.md'}")
-        logger.info(f"  raw-H package    : {output_dir / 'representations.npz'}")
+        reporter.section("Results")
+        reporter.fields(
+            [
+                ("output directory", output_dir),
+                ("summary", output_dir / "summary.md"),
+                ("raw-H package", output_dir / "representations.npz"),
+            ]
+        )
         timings = getattr(runner, "timing_breakdown", {}) or {}
         analysis_timings = getattr(runner, "analysis_timing_breakdown", {}) or {}
         min_timing_seconds = 0.05
         hidden_time = 0.0
-        logger.info("  time breakdown   :")
+        reporter.line("  time breakdown:")
         for key, label in [
             ("analyze", "analyze"),
             ("canonicalize", "canonicalize"),
@@ -185,16 +196,16 @@ def _run_symmetry_analysis(config, processor, hr, sr, logger):
         ]:
             value = float(timings.get(key, 0.0) or 0.0)
             if value >= min_timing_seconds:
-                logger.info(f"    {label:<14}: {value:.1f}s")
+                reporter.line(f"    {label:<14}: {value:.1f}s")
                 if key == "analyze" and isinstance(analysis_timings, dict):
                     spglib_time = float(analysis_timings.get("spglib_symmetry", 0.0) or 0.0)
                     if spglib_time >= min_timing_seconds:
-                        logger.info(f"      spglib symmetry : {spglib_time:.1f}s")
+                        reporter.line(f"      spglib symmetry : {spglib_time:.1f}s")
                     for valley in analysis_timings.get("valleys", []) or []:
                         valley_time = float(valley.get("total", 0.0) or 0.0)
                         if valley_time < min_timing_seconds:
                             continue
-                        logger.info(f"      {str(valley.get('valley', 'valley')):<15}: {valley_time:.1f}s")
+                        reporter.line(f"      {str(valley.get('valley', 'valley')):<15}: {valley_time:.1f}s")
                         for subkey, sublabel in [
                             ("setup_candidates", "setup/candidates"),
                             ("candidate_checks", "candidate checks"),
@@ -202,7 +213,7 @@ def _run_symmetry_analysis(config, processor, hr, sr, logger):
                         ]:
                             subvalue = float(valley.get(subkey, 0.0) or 0.0)
                             if subvalue >= min_timing_seconds:
-                                logger.info(f"        {sublabel:<17}: {subvalue:.1f}s")
+                                reporter.line(f"        {sublabel:<17}: {subvalue:.1f}s")
                         operations = sorted(
                             list(valley.get("operations", []) or []),
                             key=lambda item: float(item.get("total", 0.0) or 0.0),
@@ -213,7 +224,7 @@ def _run_symmetry_analysis(config, processor, hr, sr, logger):
                             if op_total < min_timing_seconds:
                                 continue
                             exported = "exported" if operation.get("exported") else "not exported"
-                            logger.info(
+                            reporter.line(
                                 "          {op:<8}: {total:.1f}s  checks={checks:.1f}s export={export:.1f}s {exported}".format(
                                     op=str(operation.get("operation", "")),
                                     total=op_total,
@@ -224,12 +235,12 @@ def _run_symmetry_analysis(config, processor, hr, sr, logger):
                             )
                     aggregate_time = float(analysis_timings.get("aggregate", 0.0) or 0.0)
                     if aggregate_time >= min_timing_seconds:
-                        logger.info(f"      aggregate       : {aggregate_time:.1f}s")
+                        reporter.line(f"      aggregate       : {aggregate_time:.1f}s")
             else:
                 hidden_time += value
         if hidden_time >= min_timing_seconds:
-            logger.info(f"    other/write    : {hidden_time:.1f}s")
-        logger.info(f"    total         : {float(timings.get('total', elapsed) or elapsed):.1f}s")
+            reporter.line(f"    other/write    : {hidden_time:.1f}s")
+        reporter.line(f"    total         : {float(timings.get('total', elapsed) or elapsed):.1f}s")
     return payload
 
 
@@ -308,6 +319,7 @@ def copy_reused_m_valley_band_outputs(qshell_path: Path, source_valley_flag: str
 
 def run_calc(args):
     """Main program"""
+    run_started = time.perf_counter()
     config = Config.from_yaml(args.config)
 
     mpi_rank, mpi_size = _mpi_world_rank_size()
@@ -362,22 +374,38 @@ def run_calc(args):
     log_suffix = f"_rank{mpi_rank}" if mpi_size > 1 else ""
     log_file = Path(config.paths.output_dir + "/logs") / f"run_{time.strftime('%Y%m%d_%H%M%S')}{log_suffix}.log"
     logger = setup_logging(str(log_file))
-    reporter = TapwReporter(logger, verbose=bool(getattr(args, "verbose", False)))
-    reporter.stage("Run configuration", "Inputs and run controls for this TAPW calculation.")
-    reporter.kv("Config file", args.config)
-    reporter.kv("Twist index", config.twist.twist_index_m)
-    reporter.kv("Output directory", config.paths.output_dir)
-    reporter.kv("Run log", log_file)
-    reporter.kv("Calculation mode", config.compute.mode)
+    command, title = _calc_reporter_identity(config.compute.mode)
+    reporter = TapwReporter(
+        logger,
+        command=command,
+        verbose=bool(getattr(args, "verbose", False)),
+    )
+    reporter.title(title)
+    config_fields = [
+        ("config", args.config),
+        ("twist index", config.twist.twist_index_m),
+        ("output", config.paths.output_dir),
+        ("run log", log_file),
+        ("mode", config.compute.mode),
+    ]
     if config.compute.TAPW:
-        reporter.kv("Valleys", config.compute.valleys)
-        reporter.kv("G-vector shell cutoff", config.compute.n_g)
+        config_fields.extend(
+            [
+                ("valleys", config.compute.valleys),
+                ("G-vector shell", config.compute.n_g),
+            ]
+        )
     else:
-        reporter.kv("Basis", "non-TAPW full-space generalized eigenproblem")
+        config_fields.append(("basis", "non-TAPW full-space generalized eigenproblem"))
     if config.compute.mode == "chern":
         num_k1, num_k2 = config.compute.get_chern_grid_shape()
-        reporter.kv("Chern k-grid", f"{num_k1}x{num_k2}")
-        reporter.kv("Processes", config.compute.num_processes)
+        config_fields.extend(
+            [
+                ("Chern k-grid", f"{num_k1}x{num_k2}"),
+                ("processes", config.compute.num_processes),
+            ]
+        )
+    reporter.fields(config_fields)
     try:
         # Initialize structure
         structure = OpenMXFile(
@@ -491,13 +519,14 @@ def run_calc(args):
                 raise ValueError("TAPW band workflow requires bands.kpath in the YAML config.")
 
         if config.compute.mode == "symmetry":
-            _run_symmetry_analysis(config, processor, hr, sr, logger)
+            _run_symmetry_analysis(config, processor, hr, sr, logger, reporter=reporter)
+            reporter.complete(elapsed=time.perf_counter() - run_started)
             shutdown_parallel_runtime(wait=False, kill_workers=True)
             logging.shutdown()
             return 0
 
         if hamiltonian_symmetrization_requested(config.compute):
-            payload = _run_symmetry_analysis(config, processor, hr, sr, logger)
+            payload = _run_symmetry_analysis(config, processor, hr, sr, logger, reporter=reporter)
             _resolve_hamiltonian_symmetrization_from_summary(config, payload)
 
         reuse_m_valley_band_outputs = can_reuse_m_valley_c3_band_outputs(config.compute)
@@ -577,7 +606,7 @@ def run_calc(args):
             and not bool(getattr(config, "release_sections_present", False))
             and not hamiltonian_symmetrization_requested(config.compute)
         ):
-            _run_symmetry_analysis(config, processor, hr, sr, logger)
+            _run_symmetry_analysis(config, processor, hr, sr, logger, reporter=reporter)
 
     except Exception as e:
         logger.error(f"Error during calculation: {str(e)}", exc_info=True)
@@ -587,7 +616,7 @@ def run_calc(args):
         sys.stderr.flush()
         return 1
 
-    logger.info("Calculation completed successfully")
+    reporter.complete(elapsed=time.perf_counter() - run_started)
     shutdown_parallel_runtime(wait=False, kill_workers=True)
     logging.shutdown()
     sys.stdout.flush()

@@ -181,6 +181,52 @@ def test_tapw_run_help_lists_verbose(capsys):
     assert "--verbose" in capsys.readouterr().out
 
 
+@pytest.mark.parametrize(
+    ("mode", "command", "title"),
+    [
+        ("band", "tapw run", "Calculate source bands"),
+        ("symmetry", "tapw symm", "Analyze source symmetry"),
+        ("chern", "tapw topo", "Calculate topology"),
+    ],
+)
+def test_calc_reporter_identity_uses_release_command(mode, command, title):
+    from tapw import cli
+
+    assert cli._calc_reporter_identity(mode) == (command, title)
+
+
+def test_symmetry_analysis_summary_uses_command_reporter(monkeypatch, tmp_path):
+    from tapw import cli
+    from tapw.reporting import TapwReporter
+
+    class _Runner:
+        output_dir = tmp_path / "symmetry"
+        timing_breakdown = {"analyze": 0.2, "write_summary": 0.1, "total": 0.4}
+        analysis_timing_breakdown = {}
+
+        def __init__(self, **_kwargs):
+            pass
+
+        def run(self):
+            return {"status": "passed"}
+
+    monkeypatch.setattr(cli, "SymmetryAnalysisRunner", _Runner)
+    logger = _ListLogger()
+    reporter = TapwReporter(logger, command="tapw symm")
+
+    payload = cli._run_symmetry_analysis(None, None, None, None, logger, reporter=reporter)
+
+    out = "\n".join(logger.messages)
+    assert payload == {"status": "passed"}
+    assert "[tapw symm] Results" in out
+    assert f"  output directory  {tmp_path / 'symmetry'}" in out
+    assert "  summary           " in out
+    assert "  raw-H package     " in out
+    assert "  time breakdown:" in out
+    assert "[TAPW]" not in out
+    assert "=" * 72 not in out
+
+
 def test_openmx_display_properties_uses_english_reporter_output():
     from tapw.io.structure import OpenMXFile
     from tapw.reporting import TapwReporter
