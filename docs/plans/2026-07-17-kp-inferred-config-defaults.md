@@ -16,7 +16,7 @@
 - Modify: `kp/kp/config/case.py:104-161`
 - Modify: `kp/kp/cli.py:842-855,1021-1027,1622-1731`
 - Modify: `kp/kp/symmetry/projection.py:542-549`
-- Test: `tests/kp/test_config_paths.py`
+- Test: `tests/kp/test_canonical_output_layout.py`
 - Test: `tests/kp/test_project_auto_gauge_cli.py`
 - Test: `tests/kp/test_configured_model.py`
 
@@ -34,7 +34,7 @@ Also assert that manual `norb_fix_list`, explicit `gauge`, and explicit downfold
 **Step 2: Run tests to verify failure**
 
 ```bash
-python -m pytest -q -p no:cacheprovider tests/kp/test_config_paths.py tests/kp/test_project_auto_gauge_cli.py tests/kp/test_configured_model.py -k 'default or gauge or downfold'
+python -m pytest -q -p no:cacheprovider tests/kp/test_canonical_output_layout.py tests/kp/test_project_auto_gauge_cli.py tests/kp/test_configured_model.py -k 'default or gauge or downfold'
 ```
 
 Expected: the new assertions fail because gauge is currently required and the helper fallback is `fixed_schur`.
@@ -59,7 +59,7 @@ Run the command from Step 2.
 **Step 5: Commit Task 1 files**
 
 ```bash
-git add kp/kp/config/case.py kp/kp/cli.py kp/kp/symmetry/projection.py tests/kp/test_config_paths.py tests/kp/test_project_auto_gauge_cli.py tests/kp/test_configured_model.py
+git add kp/kp/config/case.py kp/kp/cli.py kp/kp/symmetry/projection.py tests/kp/test_canonical_output_layout.py tests/kp/test_project_auto_gauge_cli.py tests/kp/test_configured_model.py
 git commit -m "feat(kp): default project gauge and downfolding"
 ```
 
@@ -181,7 +181,7 @@ Remove redundant fields from minimal ordinary-use snippets. Document expert over
 **Step 2: Run targeted regression tests**
 
 ```bash
-python -m pytest -q -p no:cacheprovider tests/kp/test_config_paths.py tests/kp/test_project_auto_gauge_cli.py tests/kp/test_layerwise_config_contract.py tests/kp/test_configured_model.py tests/kp/test_canonical_output_layout.py tests/kp/test_symm_projection.py
+python -m pytest -q -p no:cacheprovider tests/kp/test_canonical_output_layout.py tests/kp/test_project_auto_gauge_cli.py tests/kp/test_layerwise_config_contract.py tests/kp/test_configured_model.py tests/kp/test_symm_projection.py
 ```
 
 Expected: PASS.
