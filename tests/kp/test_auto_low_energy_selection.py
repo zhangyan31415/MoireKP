@@ -269,3 +269,123 @@ def test_impossible_symmetry_image_is_a_structural_failure() -> None:
             states,
             [action],
         )
+
+
+def _thresholds(selection):
+    return selection.SelectionThresholds(
+        band_rms_mev=1.0,
+        band_max_mev=3.0,
+        subspace_overlap=0.95,
+        symmetry_residual=1.0e-6,
+        symmetry_leakage=1.0e-5,
+    )
+
+
+def _candidate(selection, candidate_id: str, dimension: int, **overrides):
+    values = {
+        "band_rms_mev": 0.5,
+        "band_max_mev": 2.0,
+        "subspace_overlap": 0.98,
+        "symmetry_residual": 1.0e-8,
+        "symmetry_leakage": 1.0e-7,
+        "structural_failure": None,
+    }
+    values.update(overrides)
+    return selection.CandidateMetrics(
+        candidate_id=candidate_id,
+        dimension=dimension,
+        **values,
+    )
+
+
+def test_smallest_candidate_passing_every_threshold_is_selected() -> None:
+    selection = _selection_module()
+    candidates = [
+        _candidate(selection, "eight", 8, band_rms_mev=0.1),
+        _candidate(selection, "four", 4, band_rms_mev=0.8),
+        _candidate(selection, "two", 2, band_rms_mev=1.2),
+    ]
+
+    decision = selection.select_projection_candidate(candidates, _thresholds(selection))
+
+    assert decision.status == "PASS"
+    assert decision.selected.candidate_id == "four"
+    assert decision.violations == ()
+
+
+def test_same_dimension_uses_band_error_overlap_and_symmetry_tie_breaks() -> None:
+    selection = _selection_module()
+    candidates = [
+        _candidate(selection, "larger-rms", 4, band_rms_mev=0.7, subspace_overlap=0.999),
+        _candidate(
+            selection,
+            "worse-overlap",
+            4,
+            band_rms_mev=0.4,
+            subspace_overlap=0.97,
+            symmetry_residual=1.0e-10,
+        ),
+        _candidate(
+            selection,
+            "best",
+            4,
+            band_rms_mev=0.4,
+            subspace_overlap=0.99,
+            symmetry_residual=5.0e-8,
+        ),
+    ]
+
+    decision = selection.select_projection_candidate(candidates, _thresholds(selection))
+
+    assert decision.selected.candidate_id == "best"
+
+
+def test_no_passing_candidate_selects_minimax_normalized_violation_with_warning() -> None:
+    selection = _selection_module()
+    candidates = [
+        _candidate(selection, "bad-rms", 2, band_rms_mev=2.0),
+        _candidate(
+            selection,
+            "balanced",
+            4,
+            band_rms_mev=1.2,
+            band_max_mev=3.3,
+            subspace_overlap=0.94,
+        ),
+        _candidate(selection, "bad-overlap", 8, subspace_overlap=0.70),
+    ]
+
+    decision = selection.select_projection_candidate(candidates, _thresholds(selection))
+
+    assert decision.status == "WARN"
+    assert decision.selected.candidate_id == "balanced"
+    assert {violation.metric for violation in decision.violations} == {
+        "band_rms_mev",
+        "band_max_mev",
+        "subspace_overlap",
+    }
+
+
+def test_structural_failure_is_never_selected_as_warning_fallback() -> None:
+    selection = _selection_module()
+    candidates = [
+        _candidate(selection, "numerically-perfect", 1, structural_failure="projector rank loss"),
+        _candidate(selection, "valid-warning", 4, band_rms_mev=1.5),
+    ]
+
+    decision = selection.select_projection_candidate(candidates, _thresholds(selection))
+
+    assert decision.status == "WARN"
+    assert decision.selected.candidate_id == "valid-warning"
+    assert decision.structural_failures == (("numerically-perfect", "projector rank loss"),)
+
+
+def test_all_structurally_failed_candidates_raise_instead_of_warning() -> None:
+    selection = _selection_module()
+    candidates = [
+        _candidate(selection, "rank-loss", 2, structural_failure="projector rank loss"),
+        _candidate(selection, "singular", 4, structural_failure="singular downfolding"),
+    ]
+
+    with pytest.raises(selection.CandidateSelectionError, match="no structurally valid"):
+        selection.select_projection_candidate(candidates, _thresholds(selection))

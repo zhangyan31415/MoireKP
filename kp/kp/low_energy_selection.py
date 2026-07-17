@@ -72,6 +72,160 @@ class SymmetryClosureError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class SelectionThresholds:
+    band_rms_mev: float
+    band_max_mev: float
+    subspace_overlap: float
+    symmetry_residual: float
+    symmetry_leakage: float
+
+
+@dataclass(frozen=True)
+class CandidateMetrics:
+    candidate_id: str
+    dimension: int
+    band_rms_mev: float
+    band_max_mev: float
+    subspace_overlap: float
+    symmetry_residual: float
+    symmetry_leakage: float
+    structural_failure: str | None = None
+
+
+@dataclass(frozen=True)
+class ThresholdViolation:
+    metric: str
+    value: float
+    threshold: float
+    normalized_violation: float
+
+
+@dataclass(frozen=True)
+class SelectionDecision:
+    selected: CandidateMetrics
+    status: str
+    violations: tuple[ThresholdViolation, ...]
+    structural_failures: tuple[tuple[str, str], ...]
+
+
+class CandidateSelectionError(ValueError):
+    pass
+
+
+def _candidate_violations(
+    candidate: CandidateMetrics,
+    thresholds: SelectionThresholds,
+) -> tuple[ThresholdViolation, ...]:
+    violations: list[ThresholdViolation] = []
+    upper_bounds = (
+        ("band_rms_mev", candidate.band_rms_mev, thresholds.band_rms_mev),
+        ("band_max_mev", candidate.band_max_mev, thresholds.band_max_mev),
+        ("symmetry_residual", candidate.symmetry_residual, thresholds.symmetry_residual),
+        ("symmetry_leakage", candidate.symmetry_leakage, thresholds.symmetry_leakage),
+    )
+    for metric, value, threshold in upper_bounds:
+        if not np.isfinite(value) or value > threshold:
+            normalized = np.inf if not np.isfinite(value) else (value - threshold) / threshold
+            violations.append(
+                ThresholdViolation(
+                    metric=metric,
+                    value=float(value),
+                    threshold=float(threshold),
+                    normalized_violation=float(normalized),
+                )
+            )
+
+    if not np.isfinite(candidate.subspace_overlap) or candidate.subspace_overlap < thresholds.subspace_overlap:
+        normalized = (
+            np.inf
+            if not np.isfinite(candidate.subspace_overlap)
+            else (thresholds.subspace_overlap - candidate.subspace_overlap)
+            / thresholds.subspace_overlap
+        )
+        violations.append(
+            ThresholdViolation(
+                metric="subspace_overlap",
+                value=float(candidate.subspace_overlap),
+                threshold=float(thresholds.subspace_overlap),
+                normalized_violation=float(normalized),
+            )
+        )
+    return tuple(violations)
+
+
+def select_projection_candidate(
+    candidates: Sequence[CandidateMetrics],
+    thresholds: SelectionThresholds,
+) -> SelectionDecision:
+    if not candidates:
+        raise CandidateSelectionError("no projection candidates were provided")
+    threshold_values = (
+        thresholds.band_rms_mev,
+        thresholds.band_max_mev,
+        thresholds.subspace_overlap,
+        thresholds.symmetry_residual,
+        thresholds.symmetry_leakage,
+    )
+    if any(not np.isfinite(value) or value <= 0.0 for value in threshold_values):
+        raise ValueError("selection thresholds must be finite and strictly positive")
+
+    structural_failures = tuple(
+        (candidate.candidate_id, str(candidate.structural_failure))
+        for candidate in candidates
+        if candidate.structural_failure is not None
+    )
+    valid = tuple(candidate for candidate in candidates if candidate.structural_failure is None)
+    if not valid:
+        raise CandidateSelectionError("no structurally valid projection candidates remain")
+
+    violations_by_id = {
+        candidate.candidate_id: _candidate_violations(candidate, thresholds)
+        for candidate in valid
+    }
+    passing = tuple(
+        candidate for candidate in valid if not violations_by_id[candidate.candidate_id]
+    )
+    if passing:
+        selected = min(
+            passing,
+            key=lambda candidate: (
+                candidate.dimension,
+                candidate.band_rms_mev,
+                1.0 - candidate.subspace_overlap,
+                candidate.symmetry_residual,
+                candidate.candidate_id,
+            ),
+        )
+        return SelectionDecision(
+            selected=selected,
+            status="PASS",
+            violations=(),
+            structural_failures=structural_failures,
+        )
+
+    def fallback_key(candidate: CandidateMetrics) -> tuple[float, float, float, int, str]:
+        normalized = tuple(
+            violation.normalized_violation
+            for violation in violations_by_id[candidate.candidate_id]
+        )
+        return (
+            max(normalized),
+            sum(normalized),
+            candidate.band_rms_mev,
+            candidate.dimension,
+            candidate.candidate_id,
+        )
+
+    selected = min(valid, key=fallback_key)
+    return SelectionDecision(
+        selected=selected,
+        status="WARN",
+        violations=violations_by_id[selected.candidate_id],
+        structural_failures=structural_failures,
+    )
+
+
 def resolve_reference_point(
     kpoints: np.ndarray,
     qsets: Sequence[np.ndarray],
