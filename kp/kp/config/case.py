@@ -125,6 +125,34 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
     valley = out.get("valley")
     if valley is not None:
         project.setdefault("mode", str(valley))
+    if "gauge" not in project and "norb_fix_list" not in project:
+        project["gauge"] = "auto"
+    if "downfold_method" not in project and "method" not in project:
+        project["downfold_method"] = "linearized_lowdin"
+    explicit_low_states = project.get("nlow_state_list") not in (None, [])
+    selection_raw = project.get("selection")
+    if explicit_low_states:
+        project["selection"] = {"mode": "explicit"}
+    elif selection_raw is None:
+        project["selection"] = {"mode": "auto"}
+    elif isinstance(selection_raw, str):
+        if selection_raw.strip().lower() != "auto":
+            raise ValueError(
+                "project.selection string must be 'auto'; use project.nlow_state_list "
+                "for an explicit selection"
+            )
+        project["selection"] = {"mode": "auto"}
+    elif isinstance(selection_raw, Mapping):
+        selection = dict(selection_raw)
+        selection.setdefault("mode", "auto")
+        if str(selection["mode"]).strip().lower() != "auto":
+            raise ValueError(
+                "project.selection.mode must be 'auto' when project.nlow_state_list is omitted"
+            )
+        selection["mode"] = "auto"
+        project["selection"] = selection
+    else:
+        raise ValueError("project.selection must be 'auto' or a mapping")
     if "project" in out or project:
         out["project"] = project
 
@@ -179,7 +207,11 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
         out["output"] = output
 
         plot = dict(out.get("plot", {}) or {})
-        _set_default_path(plot, "out", _path_join(case_base, "inspect", "scatter.pdf"))
+        _set_default_path(
+            plot,
+            "out",
+            _path_join(case_base, "inspect", "bands_and_qblocks.pdf"),
+        )
         _set_default_path(plot, "data_out", _path_join(case_base, "inspect", "spectrum.txt"))
         out["plot"] = plot
 

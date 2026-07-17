@@ -5,6 +5,8 @@ import importlib
 import numpy as np
 import pytest
 
+from kp.config.case import normalize_case_config
+
 
 def _selection_module():
     try:
@@ -496,3 +498,41 @@ def test_report_lists_symmetry_partner_relations_and_rejected_candidates() -> No
     assert report["rejected_candidates"][0]["violations"][0]["metric"] == "band_rms_mev"
     assert "PASS" in markdown
     assert "M1:0" in markdown and "M1:1" in markdown
+
+
+def _minimal_case_config(project: dict) -> dict:
+    return {
+        "case": {"profile": "K1", "q_shell": "q01", "output_root": "outputs"},
+        "valley": "K1",
+        "material": {"num_layer_list": [1, 1]},
+        "project": project,
+    }
+
+
+def test_selection_auto_allows_omitted_nlow_state_list(tmp_path) -> None:
+    cfg = normalize_case_config(
+        _minimal_case_config({"selection": "auto"}),
+        config_path=tmp_path / "case.yaml",
+    )
+
+    assert cfg["project"]["selection"] == {"mode": "auto"}
+    assert "nlow_state_list" not in cfg["project"]
+
+
+def test_omitted_selection_and_nlow_defaults_to_auto(tmp_path) -> None:
+    cfg = normalize_case_config(
+        _minimal_case_config({}),
+        config_path=tmp_path / "case.yaml",
+    )
+
+    assert cfg["project"]["selection"] == {"mode": "auto"}
+
+
+def test_explicit_nlow_state_list_bypasses_automatic_selection(tmp_path) -> None:
+    cfg = normalize_case_config(
+        _minimal_case_config({"nlow_state_list": [[22], [22]]}),
+        config_path=tmp_path / "case.yaml",
+    )
+
+    assert cfg["project"]["selection"] == {"mode": "explicit"}
+    assert cfg["project"]["nlow_state_list"] == [[22], [22]]
