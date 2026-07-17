@@ -536,3 +536,96 @@ def test_explicit_nlow_state_list_bypasses_automatic_selection(tmp_path) -> None
 
     assert cfg["project"]["selection"] == {"mode": "explicit"}
     assert cfg["project"]["nlow_state_list"] == [[22], [22]]
+
+
+def test_non_gamma_candidates_use_same_edge_depth_on_each_active_layer() -> None:
+    selection = _selection_module()
+    blocks = [
+        _diagonal_block(selection, "L0", [-0.8, -0.10, 0.2], physical_layer=0),
+        _diagonal_block(selection, "L1", [-0.7, -0.11, 0.3], physical_layer=1),
+        _diagonal_block(selection, "L2", [-0.9, -0.50, 0.4], physical_layer=2),
+    ]
+
+    candidates = selection.generate_frozen_band_candidates(
+        blocks,
+        edge="valence",
+        efermi=0.0,
+        mode="K1",
+        total_layers=3,
+        active_layer_window=0.05,
+        max_dimension=4,
+    )
+
+    assert candidates[0].nlow_state_list == ((1,), (1,), ())
+    assert candidates[0].dimension == 2
+    assert candidates[1].nlow_state_list == ((0, 1), (0, 1), ())
+    assert candidates[1].dimension == 4
+
+
+def test_gamma_candidates_may_start_from_one_state() -> None:
+    selection = _selection_module()
+    block = _diagonal_block(
+        selection,
+        "Gamma_joint",
+        [-0.5, -0.1, 0.2],
+        joint_layers=(0,),
+    )
+    labels = {
+        "Gamma_joint": (
+            selection.BasisLabel("a", 0, "none"),
+            selection.BasisLabel("b", 0, "none"),
+            selection.BasisLabel("c", 0, "none"),
+        )
+    }
+
+    candidates = selection.generate_frozen_band_candidates(
+        [block],
+        edge="valence",
+        efermi=0.0,
+        mode="Gamma",
+        total_layers=1,
+        basis_labels=labels,
+        max_dimension=2,
+    )
+
+    assert candidates[0].nlow_state_list == ((1,),)
+    assert candidates[0].dimension == 1
+
+
+def test_gamma_joint_bands_are_assigned_by_reference_layer_weight() -> None:
+    selection = _selection_module()
+    block = selection.ReferenceBlock(
+        key="Gamma_joint",
+        eigenvalues=np.asarray([-0.4, -0.2, -0.1, 0.3]),
+        eigenvectors=np.asarray(
+            [
+                [1.0, 0.0, np.sqrt(0.1), 0.0],
+                [0.0, 1.0, 0.0, 0.0],
+                [0.0, 0.0, np.sqrt(0.9), 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            dtype=np.complex128,
+        ),
+        joint_layers=(0, 1),
+    )
+    labels = {
+        "Gamma_joint": (
+            selection.BasisLabel("a", 0, "up"),
+            selection.BasisLabel("b", 0, "up"),
+            selection.BasisLabel("a", 1, "up"),
+            selection.BasisLabel("b", 1, "up"),
+        )
+    }
+
+    candidates = selection.generate_frozen_band_candidates(
+        [block],
+        edge="valence",
+        efermi=0.0,
+        mode="gamma",
+        total_layers=2,
+        basis_labels=labels,
+        max_dimension=2,
+    )
+
+    assert candidates[0].nlow_state_list == ((), (2,))
+    assert candidates[1].nlow_state_list == ((1,), (2,))

@@ -131,6 +131,17 @@ class StateComposition:
     spin_weights: tuple[tuple[str, float], ...]
 
 
+@dataclass(frozen=True)
+class FrozenBandCandidate:
+    candidate_id: str
+    nlow_state_list: tuple[tuple[int, ...], ...]
+    states: tuple[ReferenceState, ...]
+
+    @property
+    def dimension(self) -> int:
+        return sum(len(bands) for bands in self.nlow_state_list)
+
+
 def _candidate_violations(
     candidate: CandidateMetrics,
     thresholds: SelectionThresholds,
@@ -284,6 +295,150 @@ def compute_state_compositions(
             )
         )
     return tuple(compositions)
+
+
+def _gamma_state_layer(
+    state: ReferenceState,
+    labels: Sequence[BasisLabel],
+    *,
+    total_layers: int,
+) -> int:
+    vector = np.asarray(state.vector, dtype=np.complex128)
+    if vector.size != len(labels):
+        raise ValueError(
+            f"reference block {state.block_key!r} has {vector.size} rows but "
+            f"{len(labels)} basis labels"
+        )
+    weights = np.abs(vector) ** 2
+    layer_weights = np.zeros(int(total_layers), dtype=float)
+    for label, weight in zip(labels, weights, strict=True):
+        try:
+            layer = int(label.physical_layer)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Gamma basis label physical_layer must be an integer, got {label.physical_layer!r}"
+            ) from exc
+        if layer < 0 or layer >= int(total_layers):
+            raise ValueError(
+                f"Gamma basis label layer {layer} is outside 0..{int(total_layers) - 1}"
+            )
+        layer_weights[layer] += float(weight)
+    return int(np.argmax(layer_weights))
+
+
+def generate_frozen_band_candidates(
+    blocks: Sequence[ReferenceBlock],
+    *,
+    edge: str,
+    efermi: float,
+    mode: str,
+    total_layers: int,
+    basis_labels: Mapping[str, Sequence[BasisLabel]] | None = None,
+    degeneracy_tolerance: float = 1.0e-6,
+    active_layer_window: float = 0.1,
+    max_dimension: int = 16,
+) -> tuple[FrozenBandCandidate, ...]:
+    if int(total_layers) <= 0:
+        raise ValueError("total_layers must be positive")
+    if int(max_dimension) <= 0:
+        raise ValueError("max_dimension must be positive")
+    states = build_reference_state_pool(blocks)
+    if str(mode).lower() == "gamma":
+        if len(blocks) != 1:
+            raise ValueError(f"Gamma selection requires one joint reference block, got {len(blocks)}")
+        block = blocks[0]
+        labels = tuple((basis_labels or {}).get(block.key, ()))
+        if not labels:
+            raise ValueError("Gamma selection requires physical-layer basis labels")
+        clusters = cluster_edge_states(
+            states,
+            edge=edge,
+            efermi=efermi,
+            degeneracy_tolerance=degeneracy_tolerance,
+        )
+        candidates: list[FrozenBandCandidate] = []
+        accumulated: list[ReferenceState] = []
+        for cluster in clusters:
+            accumulated.extend(cluster.states)
+            if len(accumulated) > int(max_dimension):
+                break
+            rows: list[list[int]] = [[] for _ in range(int(total_layers))]
+            for state in accumulated:
+                layer = _gamma_state_layer(state, labels, total_layers=int(total_layers))
+                rows[layer].append(int(state.band_index))
+            normalized = tuple(tuple(sorted(row)) for row in rows)
+            candidates.append(
+                FrozenBandCandidate(
+                    candidate_id=f"dim-{len(accumulated):03d}",
+                    nlow_state_list=normalized,
+                    states=tuple(accumulated),
+                )
+            )
+        return tuple(candidates)
+
+    states_by_layer: dict[int, list[ReferenceState]] = {}
+    for state in states:
+        if state.physical_layer is None:
+            raise ValueError("non-Gamma reference states require a physical_layer")
+        states_by_layer.setdefault(int(state.physical_layer), []).append(state)
+    if not states_by_layer:
+        raise ValueError("no non-Gamma physical-layer reference blocks were provided")
+
+    clusters_by_layer = {
+        layer: cluster_edge_states(
+            layer_states,
+            edge=edge,
+            efermi=efermi,
+            degeneracy_tolerance=degeneracy_tolerance,
+        )
+        for layer, layer_states in states_by_layer.items()
+    }
+    missing_edges = [layer for layer, clusters in clusters_by_layer.items() if not clusters]
+    if missing_edges:
+        raise ValueError(f"no {edge} edge states found for physical layer(s) {missing_edges}")
+    first_energies = {
+        layer: clusters[0].states[0].energy for layer, clusters in clusters_by_layer.items()
+    }
+    if str(edge).lower() == "valence":
+        best_energy = max(first_energies.values())
+    else:
+        best_energy = min(first_energies.values())
+    active_layers = tuple(
+        layer
+        for layer in sorted(first_energies)
+        if abs(first_energies[layer] - best_energy) <= float(active_layer_window)
+    )
+    if not active_layers:
+        raise ValueError("no active physical layer lies within the edge activation window")
+
+    candidates = []
+    max_depth = max(len(clusters_by_layer[layer]) for layer in active_layers)
+    for depth in range(1, max_depth + 1):
+        selected: list[ReferenceState] = []
+        rows: list[list[int]] = [[] for _ in range(int(total_layers))]
+        complete = True
+        for layer in active_layers:
+            clusters = clusters_by_layer[layer]
+            if len(clusters) < depth:
+                complete = False
+                break
+            for cluster in clusters[:depth]:
+                for state in cluster.states:
+                    selected.append(state)
+                    rows[layer].append(int(state.band_index))
+        if not complete:
+            break
+        dimension = sum(len(row) for row in rows)
+        if dimension > int(max_dimension):
+            break
+        candidates.append(
+            FrozenBandCandidate(
+                candidate_id=f"dim-{dimension:03d}-depth-{depth:03d}",
+                nlow_state_list=tuple(tuple(sorted(set(row))) for row in rows),
+                states=tuple(selected),
+            )
+        )
+    return tuple(candidates)
 
 
 def _violation_payload(violation: ThresholdViolation) -> dict[str, Any]:
