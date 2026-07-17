@@ -140,3 +140,132 @@ def test_gamma_pool_keeps_joint_block_identity_without_fake_layer_ownership() ->
 
     assert {state.physical_layer for state in states} == {None}
     assert {state.joint_layers for state in states} == {(0, 1)}
+
+
+def _seed_for(selection, states, *keys: tuple[str, int]):
+    by_key = {(state.block_key, state.band_index): state for state in states}
+    return selection.LowEnergySeed(states=tuple(by_key[key] for key in keys))
+
+
+def test_identity_closed_spinless_seed_remains_dimension_one() -> None:
+    selection = _selection_module()
+    block = _diagonal_block(selection, "L1", [-0.1, 0.2], physical_layer=0)
+    states = selection.build_reference_state_pool([block])
+    action = selection.ReferenceAction(
+        name="identity",
+        source_block="L1",
+        target_block="L1",
+        matrix=np.eye(2, dtype=np.complex128),
+        antiunitary=False,
+    )
+
+    closure = selection.close_seed_under_symmetry(
+        _seed_for(selection, states, ("L1", 0)),
+        states,
+        [action],
+    )
+
+    assert [(state.block_key, state.band_index) for state in closure.states] == [("L1", 0)]
+    assert closure.additions == ()
+
+
+def test_spinful_tr_seed_adds_its_kramers_partner() -> None:
+    selection = _selection_module()
+    block = _diagonal_block(selection, "M1", [-0.1, -0.1], physical_layer=0)
+    states = selection.build_reference_state_pool([block])
+    time_reversal = np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=np.complex128)
+    action = selection.ReferenceAction(
+        name="TR",
+        source_block="M1",
+        target_block="M1",
+        matrix=time_reversal,
+        antiunitary=True,
+    )
+
+    closure = selection.close_seed_under_symmetry(
+        _seed_for(selection, states, ("M1", 0)),
+        states,
+        [action],
+    )
+
+    assert {(state.block_key, state.band_index) for state in closure.states} == {("M1", 0), ("M1", 1)}
+    assert [(addition.operation, addition.target_band) for addition in closure.additions] == [("TR", 1)]
+
+
+def test_layer_exchange_adds_partner_from_target_layer() -> None:
+    selection = _selection_module()
+    blocks = [
+        _diagonal_block(selection, "L1", [-0.1, 0.3], physical_layer=0),
+        _diagonal_block(selection, "L2", [-0.1, 0.4], physical_layer=1),
+    ]
+    states = selection.build_reference_state_pool(blocks)
+    action = selection.ReferenceAction(
+        name="exchange",
+        source_block="L1",
+        target_block="L2",
+        matrix=np.eye(2, dtype=np.complex128),
+        antiunitary=False,
+    )
+
+    closure = selection.close_seed_under_symmetry(
+        _seed_for(selection, states, ("L1", 0)),
+        states,
+        [action],
+    )
+
+    assert {(state.block_key, state.band_index) for state in closure.states} == {("L1", 0), ("L2", 0)}
+
+
+def test_ptse2_like_joint_gamma_seed_54_closes_with_55() -> None:
+    selection = _selection_module()
+    energies = np.linspace(-2.0, 1.0, 56).tolist()
+    block = _diagonal_block(selection, "Gamma_joint", energies, joint_layers=(0, 1))
+    states = selection.build_reference_state_pool([block])
+    time_reversal = np.eye(56, dtype=np.complex128)
+    time_reversal[54, 54] = 0.0
+    time_reversal[55, 55] = 0.0
+    time_reversal[55, 54] = 1.0
+    time_reversal[54, 55] = -1.0
+    action = selection.ReferenceAction(
+        name="TR",
+        source_block="Gamma_joint",
+        target_block="Gamma_joint",
+        matrix=time_reversal,
+        antiunitary=True,
+    )
+
+    closure = selection.close_seed_under_symmetry(
+        _seed_for(selection, states, ("Gamma_joint", 54)),
+        states,
+        [action],
+    )
+
+    assert [state.band_index for state in closure.states] == [54, 55]
+    assert closure.additions[0].source_band == 54
+    assert closure.additions[0].target_band == 55
+
+
+def test_impossible_symmetry_image_is_a_structural_failure() -> None:
+    selection = _selection_module()
+    source = _diagonal_block(selection, "source", [-0.1, 0.2], physical_layer=0)
+    target = selection.ReferenceBlock(
+        key="target",
+        eigenvalues=np.asarray([-0.1]),
+        eigenvectors=np.asarray([[1.0], [0.0]], dtype=np.complex128),
+        physical_layer=1,
+    )
+    states = selection.build_reference_state_pool([source, target])
+    action = selection.ReferenceAction(
+        name="bad_exchange",
+        source_block="source",
+        target_block="target",
+        matrix=np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128),
+        antiunitary=False,
+    )
+
+    with pytest.raises(selection.SymmetryClosureError, match="cannot represent"):
+        selection.close_seed_under_symmetry(
+            _seed_for(selection, states, ("source", 0)),
+            states,
+            [action],
+        )

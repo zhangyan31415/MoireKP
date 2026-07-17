@@ -43,6 +43,35 @@ class LowEnergySeed:
     states: tuple[ReferenceState, ...]
 
 
+@dataclass(frozen=True)
+class ReferenceAction:
+    name: str
+    source_block: str
+    target_block: str
+    matrix: np.ndarray
+    antiunitary: bool
+
+
+@dataclass(frozen=True)
+class SymmetryAddition:
+    operation: str
+    source_block: str
+    source_band: int
+    target_block: str
+    target_band: int
+    overlap_weight: float
+
+
+@dataclass(frozen=True)
+class SymmetryClosure:
+    states: tuple[ReferenceState, ...]
+    additions: tuple[SymmetryAddition, ...]
+
+
+class SymmetryClosureError(ValueError):
+    pass
+
+
 def resolve_reference_point(
     kpoints: np.ndarray,
     qsets: Sequence[np.ndarray],
@@ -151,3 +180,116 @@ def cumulative_energy_seeds(clusters: Sequence[EnergyCluster]) -> tuple[LowEnerg
         accumulated.extend(cluster.states)
         seeds.append(LowEnergySeed(states=tuple(accumulated)))
     return tuple(seeds)
+
+
+def close_seed_under_symmetry(
+    seed: LowEnergySeed,
+    states: Sequence[ReferenceState],
+    actions: Sequence[ReferenceAction],
+    *,
+    leakage_tolerance: float = 1.0e-8,
+) -> SymmetryClosure:
+    by_block: dict[str, list[ReferenceState]] = {}
+    by_key: dict[tuple[str, int], ReferenceState] = {}
+    for state in states:
+        by_block.setdefault(state.block_key, []).append(state)
+        by_key[(state.block_key, state.band_index)] = state
+
+    selected: dict[tuple[str, int], ReferenceState] = {
+        (state.block_key, state.band_index): state for state in seed.states
+    }
+    additions: list[SymmetryAddition] = []
+    tolerance_squared = float(leakage_tolerance) ** 2
+
+    changed = True
+    while changed:
+        changed = False
+        selected_snapshot = tuple(selected.values())
+        for action in actions:
+            target_states = by_block.get(str(action.target_block), [])
+            if not target_states:
+                raise SymmetryClosureError(
+                    f"symmetry action {action.name!r} has no target block {action.target_block!r}"
+                )
+            matrix = np.asarray(action.matrix, dtype=np.complex128)
+            for source_state in selected_snapshot:
+                if source_state.block_key != str(action.source_block):
+                    continue
+                source_vector = np.asarray(source_state.vector, dtype=np.complex128)
+                if matrix.ndim != 2 or matrix.shape[1] != source_vector.size:
+                    raise SymmetryClosureError(
+                        f"symmetry action {action.name!r} shape {matrix.shape} cannot act on "
+                        f"block {source_state.block_key!r} vector dimension {source_vector.size}"
+                    )
+                image = matrix @ (source_vector.conjugate() if action.antiunitary else source_vector)
+                image_norm = float(np.linalg.norm(image))
+                if image_norm <= float(leakage_tolerance):
+                    raise SymmetryClosureError(
+                        f"symmetry action {action.name!r} annihilates source "
+                        f"{source_state.block_key}:{source_state.band_index}"
+                    )
+                image = image / image_norm
+
+                scored: list[tuple[float, ReferenceState]] = []
+                for target_state in target_states:
+                    target_vector = np.asarray(target_state.vector, dtype=np.complex128)
+                    if target_vector.size != image.size:
+                        raise SymmetryClosureError(
+                            f"symmetry action {action.name!r} target vector dimension "
+                            f"{target_vector.size} does not match image dimension {image.size}"
+                        )
+                    weight = float(abs(np.vdot(target_vector, image)) ** 2)
+                    scored.append((weight, target_state))
+
+                total_capture = float(sum(weight for weight, _state in scored))
+                if total_capture < 1.0 - tolerance_squared:
+                    raise SymmetryClosureError(
+                        f"target block {action.target_block!r} cannot represent symmetry image "
+                        f"of {source_state.block_key}:{source_state.band_index}; "
+                        f"captured weight={total_capture:.6g}"
+                    )
+
+                captured = float(
+                    sum(
+                        weight
+                        for weight, target_state in scored
+                        if (target_state.block_key, target_state.band_index) in selected
+                    )
+                )
+                if 1.0 - captured <= tolerance_squared:
+                    continue
+
+                unselected = sorted(
+                    (
+                        (weight, target_state)
+                        for weight, target_state in scored
+                        if (target_state.block_key, target_state.band_index) not in selected
+                    ),
+                    key=lambda item: (-item[0], item[1].band_index),
+                )
+                for weight, target_state in unselected:
+                    if weight <= tolerance_squared:
+                        continue
+                    key = (target_state.block_key, target_state.band_index)
+                    selected[key] = by_key[key]
+                    additions.append(
+                        SymmetryAddition(
+                            operation=str(action.name),
+                            source_block=source_state.block_key,
+                            source_band=int(source_state.band_index),
+                            target_block=target_state.block_key,
+                            target_band=int(target_state.band_index),
+                            overlap_weight=float(weight),
+                        )
+                    )
+                    captured += float(weight)
+                    changed = True
+                    if 1.0 - captured <= tolerance_squared:
+                        break
+                if 1.0 - captured > tolerance_squared:
+                    raise SymmetryClosureError(
+                        f"target block {action.target_block!r} cannot represent symmetry image "
+                        f"of {source_state.block_key}:{source_state.band_index} within leakage tolerance"
+                    )
+
+    return SymmetryClosure(states=tuple(selected.values()), additions=tuple(additions))
