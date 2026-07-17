@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
+from typing import Any, Mapping, Sequence
 
 import numpy as np
 
@@ -111,6 +111,24 @@ class SelectionDecision:
 
 class CandidateSelectionError(ValueError):
     pass
+
+
+@dataclass(frozen=True)
+class BasisLabel:
+    orbital: str
+    physical_layer: int | str
+    spin: str
+
+
+@dataclass(frozen=True)
+class StateComposition:
+    block_key: str
+    band_index: int
+    physical_layer: int | None
+    joint_layers: tuple[int, ...]
+    orbital_weights: tuple[tuple[str, float], ...]
+    layer_weights: tuple[tuple[str, float], ...]
+    spin_weights: tuple[tuple[str, float], ...]
 
 
 def _candidate_violations(
@@ -224,6 +242,172 @@ def select_projection_candidate(
         violations=violations_by_id[selected.candidate_id],
         structural_failures=structural_failures,
     )
+
+
+def compute_state_compositions(
+    states: Sequence[ReferenceState],
+    basis_labels: Mapping[str, Sequence[BasisLabel]],
+) -> tuple[StateComposition, ...]:
+    compositions: list[StateComposition] = []
+    for state in states:
+        labels = tuple(basis_labels.get(state.block_key, ()))
+        vector = np.asarray(state.vector, dtype=np.complex128)
+        if len(labels) != vector.size:
+            raise ValueError(
+                f"reference block {state.block_key!r} has {vector.size} rows but "
+                f"{len(labels)} basis labels"
+            )
+        weights = np.abs(vector) ** 2
+        norm = float(np.sum(weights))
+        if not np.isfinite(norm) or norm <= 0.0:
+            raise ValueError(
+                f"reference state {state.block_key}:{state.band_index} has zero or invalid norm"
+            )
+        weights = weights / norm
+
+        def grouped(attribute: str) -> tuple[tuple[str, float], ...]:
+            totals: dict[str, float] = {}
+            for label, weight in zip(labels, weights, strict=True):
+                key = str(getattr(label, attribute))
+                totals[key] = totals.get(key, 0.0) + float(weight)
+            return tuple((key, totals[key]) for key in sorted(totals))
+
+        compositions.append(
+            StateComposition(
+                block_key=state.block_key,
+                band_index=state.band_index,
+                physical_layer=state.physical_layer,
+                joint_layers=state.joint_layers,
+                orbital_weights=grouped("orbital"),
+                layer_weights=grouped("physical_layer"),
+                spin_weights=grouped("spin"),
+            )
+        )
+    return tuple(compositions)
+
+
+def _violation_payload(violation: ThresholdViolation) -> dict[str, Any]:
+    return {
+        "metric": violation.metric,
+        "value": violation.value,
+        "threshold": violation.threshold,
+        "normalized_violation": violation.normalized_violation,
+    }
+
+
+def build_selection_report(
+    *,
+    reference: ReferencePoint,
+    closure: SymmetryClosure,
+    decision: SelectionDecision,
+    compositions: Sequence[StateComposition],
+    candidates: Sequence[CandidateMetrics],
+    thresholds: SelectionThresholds,
+) -> dict[str, Any]:
+    selected_id = decision.selected.candidate_id
+    rejected: list[dict[str, Any]] = []
+    for candidate in candidates:
+        if candidate.candidate_id == selected_id:
+            continue
+        candidate_violations = (
+            ()
+            if candidate.structural_failure is not None
+            else _candidate_violations(candidate, thresholds)
+        )
+        rejected.append(
+            {
+                "candidate_id": candidate.candidate_id,
+                "dimension": candidate.dimension,
+                "structural_failure": candidate.structural_failure,
+                "metrics": {
+                    "band_rms_mev": candidate.band_rms_mev,
+                    "band_max_mev": candidate.band_max_mev,
+                    "subspace_overlap": candidate.subspace_overlap,
+                    "symmetry_residual": candidate.symmetry_residual,
+                    "symmetry_leakage": candidate.symmetry_leakage,
+                },
+                "violations": [_violation_payload(item) for item in candidate_violations],
+            }
+        )
+
+    composition_payload = [
+        {
+            "block": composition.block_key,
+            "band_index": composition.band_index,
+            "physical_layer": composition.physical_layer,
+            "joint_layers": list(composition.joint_layers),
+            "orbital_weights": dict(composition.orbital_weights),
+            "layer_weights": dict(composition.layer_weights),
+            "spin_weights": dict(composition.spin_weights),
+        }
+        for composition in compositions
+    ]
+    return {
+        "status": decision.status,
+        "selected_candidate": selected_id,
+        "selection_scope": "fixed band indices applied unchanged to every Q and every k",
+        "reference": {
+            "k_index": reference.k_index,
+            "k_coordinate": list(reference.k_coordinate),
+            "q_indices": list(reference.q_indices),
+            "q_vectors": [list(vector) for vector in reference.q_vectors],
+        },
+        "selected_states": [
+            {"block": state.block_key, "band_index": state.band_index}
+            for state in closure.states
+        ],
+        "symmetry_relations": [
+            {
+                "operation": addition.operation,
+                "source": f"{addition.source_block}:{addition.source_band}",
+                "target": f"{addition.target_block}:{addition.target_band}",
+                "overlap_weight": addition.overlap_weight,
+            }
+            for addition in closure.additions
+        ],
+        "compositions": composition_payload,
+        "selected_violations": [_violation_payload(item) for item in decision.violations],
+        "rejected_candidates": rejected,
+        "structural_failures": [
+            {"candidate_id": candidate_id, "reason": reason}
+            for candidate_id, reason in decision.structural_failures
+        ],
+    }
+
+
+def render_selection_markdown(report: Mapping[str, Any]) -> str:
+    lines = [
+        "# Automatic low-energy selection",
+        "",
+        f"Status: **{report['status']}**",
+        "",
+        f"Selection scope: {report['selection_scope']}.",
+        "",
+        "## Selected states",
+        "",
+    ]
+    for state in report["selected_states"]:
+        lines.append(f"- {state['block']}:{state['band_index']}")
+    if report["symmetry_relations"]:
+        lines.extend(["", "## Symmetry partner relations", ""])
+        for relation in report["symmetry_relations"]:
+            lines.append(
+                f"- {relation['operation']}: {relation['source']} -> {relation['target']} "
+                f"(weight {relation['overlap_weight']:.6g})"
+            )
+    if report["compositions"]:
+        lines.extend(["", "## Reference composition", ""])
+        for composition in report["compositions"]:
+            lines.append(
+                f"- {composition['block']}:{composition['band_index']}: "
+                f"orbital={composition['orbital_weights']}, "
+                f"layer={composition['layer_weights']}, spin={composition['spin_weights']}"
+            )
+    if report["rejected_candidates"]:
+        lines.extend(["", "## Rejected candidates", ""])
+        for candidate in report["rejected_candidates"]:
+            lines.append(f"- {candidate['candidate_id']} (dimension {candidate['dimension']})")
+    return "\n".join(lines) + "\n"
 
 
 def resolve_reference_point(

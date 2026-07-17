@@ -389,3 +389,110 @@ def test_all_structurally_failed_candidates_raise_instead_of_warning() -> None:
 
     with pytest.raises(selection.CandidateSelectionError, match="no structurally valid"):
         selection.select_projection_candidate(candidates, _thresholds(selection))
+
+
+def test_composition_reports_orbital_layer_and_spin_weights() -> None:
+    selection = _selection_module()
+    state = selection.ReferenceState(
+        block_key="L1",
+        band_index=44,
+        energy=-0.1,
+        vector=np.asarray([0.5, 0.5, 0.5, 0.5], dtype=np.complex128),
+        physical_layer=0,
+        joint_layers=(),
+    )
+    labels = {
+        "L1": (
+            selection.BasisLabel("dxy", 0, "up"),
+            selection.BasisLabel("dxy", 0, "down"),
+            selection.BasisLabel("dz2", 0, "up"),
+            selection.BasisLabel("dz2", 0, "down"),
+        )
+    }
+
+    composition = selection.compute_state_compositions([state], labels)[0]
+
+    assert composition.orbital_weights == (("dxy", 0.5), ("dz2", 0.5))
+    assert composition.layer_weights == (("0", 1.0),)
+    assert composition.spin_weights == (("down", 0.5), ("up", 0.5))
+
+
+def test_gamma_delocalized_state_reports_weights_not_unique_layer() -> None:
+    selection = _selection_module()
+    state = selection.ReferenceState(
+        block_key="Gamma_joint",
+        band_index=54,
+        energy=-0.1,
+        vector=np.asarray([np.sqrt(0.25), np.sqrt(0.75)], dtype=np.complex128),
+        physical_layer=None,
+        joint_layers=(0, 1),
+    )
+    labels = {
+        "Gamma_joint": (
+            selection.BasisLabel("pz", 0, "up"),
+            selection.BasisLabel("pz", 1, "up"),
+        )
+    }
+
+    composition = selection.compute_state_compositions([state], labels)[0]
+
+    assert composition.physical_layer is None
+    assert dict(composition.layer_weights) == pytest.approx({"0": 0.25, "1": 0.75})
+
+
+def test_report_states_fixed_indices_apply_to_every_q_and_k() -> None:
+    selection = _selection_module()
+    state = selection.ReferenceState(
+        block_key="L1",
+        band_index=22,
+        energy=-0.1,
+        vector=np.asarray([1.0], dtype=np.complex128),
+        physical_layer=0,
+        joint_layers=(),
+    )
+    closure = selection.SymmetryClosure(states=(state,), additions=())
+    candidate = _candidate(selection, "candidate-1", 1)
+    decision = selection.select_projection_candidate([candidate], _thresholds(selection))
+
+    report = selection.build_selection_report(
+        reference=selection.ReferencePoint(3, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+        closure=closure,
+        decision=decision,
+        compositions=(),
+        candidates=[candidate],
+        thresholds=_thresholds(selection),
+    )
+
+    assert report["selection_scope"] == "fixed band indices applied unchanged to every Q and every k"
+    assert report["selected_states"] == [{"block": "L1", "band_index": 22}]
+    assert "selected_bands_by_q" not in report
+    assert "selected_bands_by_k" not in report
+
+
+def test_report_lists_symmetry_partner_relations_and_rejected_candidates() -> None:
+    selection = _selection_module()
+    block = _diagonal_block(selection, "M1", [-0.1, -0.1], physical_layer=0)
+    states = selection.build_reference_state_pool([block])
+    closure = selection.SymmetryClosure(
+        states=states,
+        additions=(selection.SymmetryAddition("TR", "M1", 0, "M1", 1, 1.0),),
+    )
+    selected = _candidate(selection, "four", 4)
+    rejected = _candidate(selection, "two", 2, band_rms_mev=1.2)
+    decision = selection.select_projection_candidate([rejected, selected], _thresholds(selection))
+
+    report = selection.build_selection_report(
+        reference=selection.ReferencePoint(0, (0.0, 0.0), (2,), ((0.1, 0.0),)),
+        closure=closure,
+        decision=decision,
+        compositions=(),
+        candidates=[rejected, selected],
+        thresholds=_thresholds(selection),
+    )
+    markdown = selection.render_selection_markdown(report)
+
+    assert report["symmetry_relations"][0]["operation"] == "TR"
+    assert report["rejected_candidates"][0]["candidate_id"] == "two"
+    assert report["rejected_candidates"][0]["violations"][0]["metric"] == "band_rms_mev"
+    assert "PASS" in markdown
+    assert "M1:0" in markdown and "M1:1" in markdown
