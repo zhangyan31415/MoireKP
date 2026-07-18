@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Mapping, Sequence
+from typing import Callable, Mapping, Sequence
 
 import numpy as np
 
@@ -98,6 +98,94 @@ class SubspaceOverlapMetrics:
     minimum_overlap: float
     maximum_leakage: float
     minimum_singular_value: float
+
+
+@dataclass(frozen=True)
+class CenteredLinearFit:
+    """Least-squares result for a response measured relative to one k point."""
+
+    coefficients: np.ndarray = field(repr=False, compare=False)
+    validation_rms: float
+
+    def __post_init__(self) -> None:
+        coefficients = np.asarray(self.coefficients, dtype=float).copy()
+        if coefficients.ndim != 1:
+            raise ValueError("coefficients must be one-dimensional")
+        coefficients.setflags(write=False)
+        object.__setattr__(self, "coefficients", coefficients)
+
+
+@dataclass(frozen=True)
+class ResponseSubspaceOverlap:
+    """Principal-correlation audit between two family response spaces."""
+
+    maximum_correlation: float
+    minimum_principal_angle_degrees: float
+    left_rank: int
+    right_rank: int
+    defer_to_joint_stage: bool
+
+
+@dataclass(frozen=True)
+class StageSelectionResult:
+    """Candidate table and decision for one family-order stage."""
+
+    stage: str
+    active_families: tuple[str, ...]
+    candidates: tuple[CandidateScore, ...]
+    decision: SelectionDecision
+
+
+@dataclass(frozen=True)
+class StagedSelectionResult:
+    """Result of the kinetic -> intra -> inter order scan."""
+
+    status: str
+    selected_orders: FamilyOrders | None
+    stages: tuple[StageSelectionResult, ...]
+
+
+@dataclass(frozen=True)
+class ParameterGroup:
+    """Smallest symmetry/Hermiticity-closed unit allowed to be removed."""
+
+    group_id: str
+    parameter_indices: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        group_id = str(self.group_id)
+        indices = tuple(int(index) for index in self.parameter_indices)
+        if not group_id:
+            raise ValueError("parameter group id must be non-empty")
+        if not indices or min(indices) < 0 or len(set(indices)) != len(indices):
+            raise ValueError(
+                "parameter group indices must be unique non-negative integers"
+            )
+        object.__setattr__(self, "group_id", group_id)
+        object.__setattr__(self, "parameter_indices", indices)
+
+
+@dataclass(frozen=True)
+class GroupAblationStep:
+    removed_group_id: str
+    remaining_group_ids: tuple[str, ...]
+    candidate: CandidateScore
+    validation_loss_increase_mev: float
+    accepted: bool
+
+
+@dataclass(frozen=True)
+class GroupAblationResult:
+    status: str
+    selected: CandidateScore
+    active_group_ids: tuple[str, ...]
+    steps: tuple[GroupAblationStep, ...]
+
+
+@dataclass(frozen=True)
+class CorrectionSweepResult:
+    candidates: tuple[CandidateScore, ...]
+    decision: SelectionDecision
 
 
 @dataclass(frozen=True)
@@ -514,6 +602,130 @@ def subspace_overlap_metrics(
     )
 
 
+def _real_response_matrix(values: np.ndarray) -> np.ndarray:
+    array = np.asarray(values)
+    if array.ndim != 2:
+        raise ValueError("response matrix must be two-dimensional")
+    if not np.all(np.isfinite(array)):
+        raise ValueError("response matrix must be finite")
+    if np.iscomplexobj(array):
+        return np.concatenate((array.real, array.imag), axis=0)
+    return np.asarray(array, dtype=float)
+
+
+def _orthonormal_response_basis(
+    values: np.ndarray,
+    *,
+    tolerance: float,
+) -> tuple[np.ndarray, int]:
+    matrix = _real_response_matrix(values)
+    if matrix.shape[1] == 0 or not np.any(matrix):
+        return np.empty((matrix.shape[0], 0), dtype=float), 0
+    left, singular_values, _ = np.linalg.svd(matrix, full_matrices=False)
+    cutoff = float(tolerance) * max(float(singular_values[0]), 1.0)
+    rank = int(np.count_nonzero(singular_values > cutoff))
+    return left[:, :rank], rank
+
+
+def response_subspace_overlap(
+    left_response: np.ndarray,
+    right_response: np.ndarray,
+    *,
+    tolerance: float = 1.0e-10,
+    defer_threshold: float = 0.999,
+) -> ResponseSubspaceOverlap:
+    """Audit whether two term families contain indistinguishable responses.
+
+    Columns are independent real fit directions and rows are flattened target
+    observations. Complex responses are represented by stacked real and
+    imaginary parts, matching a fit with real-valued coefficients.
+    """
+
+    left = np.asarray(left_response)
+    right = np.asarray(right_response)
+    if left.ndim != 2 or right.ndim != 2 or left.shape[0] != right.shape[0]:
+        raise ValueError("family responses must have shape (Nobservation, Nterm)")
+    tol = float(tolerance)
+    threshold = float(defer_threshold)
+    if not np.isfinite(tol) or tol < 0.0:
+        raise ValueError("tolerance must be finite and non-negative")
+    if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
+        raise ValueError("defer_threshold must be finite and in [0, 1]")
+
+    left_basis, left_rank = _orthonormal_response_basis(left, tolerance=tol)
+    right_basis, right_rank = _orthonormal_response_basis(right, tolerance=tol)
+    if left_rank == 0 or right_rank == 0:
+        correlation = 0.0
+    else:
+        correlations = np.linalg.svd(left_basis.T @ right_basis, compute_uv=False)
+        correlation = float(np.clip(correlations[0], 0.0, 1.0))
+    angle = float(np.degrees(np.arccos(np.clip(correlation, 0.0, 1.0))))
+    return ResponseSubspaceOverlap(
+        maximum_correlation=correlation,
+        minimum_principal_angle_degrees=angle,
+        left_rank=left_rank,
+        right_rank=right_rank,
+        defer_to_joint_stage=bool(correlation >= threshold),
+    )
+
+
+def fit_centered_linear_response(
+    design: np.ndarray,
+    target: np.ndarray,
+    *,
+    train_indices: Sequence[int],
+    validation_indices: Sequence[int],
+    reference_index: int,
+) -> CenteredLinearFit:
+    """Fit real coefficients to ``response(k) - response(k_ref)``.
+
+    Centering prevents a constant onsite or other omitted k-independent family
+    from masquerading as a need for higher kinetic order during the first
+    staged scan.
+    """
+
+    design_array = np.asarray(design, dtype=np.complex128)
+    target_array = np.asarray(target, dtype=np.complex128)
+    if design_array.ndim != 3 or target_array.ndim != 2:
+        raise ValueError(
+            "design and target must have shape (Nk, Nobservation, Nterm) "
+            "and (Nk, Nobservation)"
+        )
+    if design_array.shape[:2] != target_array.shape:
+        raise ValueError("design and target k/observation dimensions must match")
+    if not np.all(np.isfinite(design_array)) or not np.all(np.isfinite(target_array)):
+        raise ValueError("design and target must be finite")
+    reference = int(reference_index)
+    if reference < 0 or reference >= target_array.shape[0]:
+        raise ValueError("reference_index is outside the k-point range")
+    train = np.asarray(train_indices, dtype=np.int64)
+    validation = np.asarray(validation_indices, dtype=np.int64)
+    if train.ndim != 1 or validation.ndim != 1 or train.size == 0 or validation.size == 0:
+        raise ValueError("train_indices and validation_indices must be non-empty vectors")
+    if np.any(train < 0) or np.any(train >= len(target_array)):
+        raise ValueError("train_indices are outside the k-point range")
+    if np.any(validation < 0) or np.any(validation >= len(target_array)):
+        raise ValueError("validation_indices are outside the k-point range")
+
+    centered_design = design_array - design_array[reference : reference + 1]
+    centered_target = target_array - target_array[reference : reference + 1]
+    train_design = centered_design[train].reshape(-1, design_array.shape[-1])
+    train_target = centered_target[train].reshape(-1)
+    real_design = np.concatenate((train_design.real, train_design.imag), axis=0)
+    real_target = np.concatenate((train_target.real, train_target.imag), axis=0)
+    coefficients, _, _, _ = np.linalg.lstsq(real_design, real_target, rcond=None)
+
+    predicted = np.einsum(
+        "kop,p->ko", centered_design[validation], coefficients, optimize=True
+    )
+    residual = predicted - centered_target[validation]
+    validation_rms = float(np.sqrt(np.mean(np.abs(residual) ** 2)))
+    return CenteredLinearFit(
+        coefficients=coefficients,
+        validation_rms=validation_rms,
+    )
+
+
 def _selection_key(candidate: CandidateScore) -> tuple[object, ...]:
     return (
         int(candidate.independent_real_parameters),
@@ -529,6 +741,7 @@ def select_simplest_near_best(
     *,
     overlap_target: float = 0.95,
     overlap_safety_floor: float = 0.90,
+    enforce_overlap: bool = True,
 ) -> SelectionDecision:
     """Select the simplest candidate on the best candidate's 1-SE plateau.
 
@@ -561,32 +774,47 @@ def select_simplest_near_best(
         else:
             valid.append(candidate)
 
-    pass_pool = [
-        candidate
-        for candidate in valid
-        if float(candidate.mean_subspace_overlap) >= target
-    ]
-    if pass_pool:
-        pool = pass_pool
+    if not bool(enforce_overlap):
+        pool = valid
         status = "PASS"
         unmet_targets: tuple[str, ...] = ()
     else:
-        pool = [
+        pass_pool = [
             candidate
             for candidate in valid
-            if float(candidate.mean_subspace_overlap) >= floor
+            if float(candidate.mean_subspace_overlap) >= target
         ]
-        if not pool:
-            return SelectionDecision(
-                status="FAIL",
-                selected=None,
-                best_weighted_rms_mev=None,
-                one_se_threshold_mev=None,
-                unmet_targets=(f"mean_subspace_overlap>={floor:.2f}",),
-                rejected_reasons=rejected,
-            )
-        status = "WARN_BEST_AVAILABLE"
-        unmet_targets = (f"mean_subspace_overlap>={target:.2f}",)
+        if pass_pool:
+            pool = pass_pool
+            status = "PASS"
+            unmet_targets = ()
+        else:
+            pool = [
+                candidate
+                for candidate in valid
+                if float(candidate.mean_subspace_overlap) >= floor
+            ]
+            if not pool:
+                return SelectionDecision(
+                    status="FAIL",
+                    selected=None,
+                    best_weighted_rms_mev=None,
+                    one_se_threshold_mev=None,
+                    unmet_targets=(f"mean_subspace_overlap>={floor:.2f}",),
+                    rejected_reasons=rejected,
+                )
+            status = "WARN_BEST_AVAILABLE"
+            unmet_targets = (f"mean_subspace_overlap>={target:.2f}",)
+
+    if not pool:
+        return SelectionDecision(
+            status="FAIL",
+            selected=None,
+            best_weighted_rms_mev=None,
+            one_se_threshold_mev=None,
+            unmet_targets=("valid_candidate",),
+            rejected_reasons=rejected,
+        )
 
     best = min(
         pool,
@@ -614,19 +842,213 @@ def select_simplest_near_best(
     )
 
 
+def run_staged_family_selection(
+    config: ModelSelectionConfig,
+    evaluator: Callable[
+        [str, FamilyOrders, tuple[str, ...]],
+        CandidateScore,
+    ],
+) -> StagedSelectionResult:
+    """Select family orders sequentially while jointly refitting active terms.
+
+    ``evaluator`` is invoked afresh for every candidate with all families that
+    are active at that stage. Only the previously selected *orders* are held
+    fixed; an evaluator must therefore refit their coefficients together with
+    the newly introduced family. Full-model subspace overlap is enforced only
+    after the inter-family stage completes.
+    """
+
+    if not bool(config.enabled):
+        raise ValueError("staged family selection requires an enabled config")
+    current = FamilyOrders(0, 0, 0)
+    stage_results: list[StageSelectionResult] = []
+    for stage_index, stage in enumerate(_FAMILY_ORDER):
+        active_families = _FAMILY_ORDER[: stage_index + 1]
+        candidates: list[CandidateScore] = []
+        for order in config.order_candidates[stage]:
+            values = list(current.as_tuple())
+            values[stage_index] = int(order)
+            proposed = FamilyOrders(*values)
+            candidate = evaluator(stage, proposed, active_families)
+            if candidate.orders != proposed:
+                raise ValueError(
+                    f"evaluator returned orders {candidate.orders} for proposed {proposed}"
+                )
+            candidates.append(candidate)
+        decision = select_simplest_near_best(
+            candidates,
+            overlap_target=config.overlap_target,
+            overlap_safety_floor=config.overlap_safety_floor,
+            enforce_overlap=stage == "inter",
+        )
+        stage_results.append(
+            StageSelectionResult(
+                stage=stage,
+                active_families=active_families,
+                candidates=tuple(candidates),
+                decision=decision,
+            )
+        )
+        if decision.selected is None:
+            return StagedSelectionResult(
+                status="FAIL",
+                selected_orders=None,
+                stages=tuple(stage_results),
+            )
+        current = decision.selected.orders
+    return StagedSelectionResult(
+        status=stage_results[-1].decision.status,
+        selected_orders=current,
+        stages=tuple(stage_results),
+    )
+
+
+def _validate_parameter_groups(groups: Sequence[ParameterGroup]) -> None:
+    identifiers = [group.group_id for group in groups]
+    if len(set(identifiers)) != len(identifiers):
+        raise ValueError("parameter group ids must be unique")
+    all_indices = [
+        index for group in groups for index in group.parameter_indices
+    ]
+    if len(set(all_indices)) != len(all_indices):
+        raise ValueError("parameter groups must be disjoint")
+
+
+def run_group_ablation(
+    full_candidate: CandidateScore,
+    groups: Sequence[ParameterGroup],
+    evaluator: Callable[[tuple[ParameterGroup, ...]], CandidateScore],
+    *,
+    overlap_target: float = 0.95,
+    overlap_safety_floor: float = 0.90,
+) -> GroupAblationResult:
+    """Greedily remove closed parameter groups and refit after every removal.
+
+    A removal is accepted only when the refitted reduced candidate is selected
+    on the current model's one-standard-error plateau. Individual real/imaginary
+    components or adjoint partners are never exposed to this routine separately;
+    callers encode the required closure in each :class:`ParameterGroup`.
+    """
+
+    active = list(groups)
+    _validate_parameter_groups(active)
+    current = full_candidate
+    steps: list[GroupAblationStep] = []
+    status = "PASS"
+    while active:
+        attempted: list[
+            tuple[ParameterGroup, tuple[ParameterGroup, ...], CandidateScore]
+        ] = []
+        names = {current.name}
+        for removed in active:
+            remaining = tuple(
+                group for group in active if group.group_id != removed.group_id
+            )
+            candidate = evaluator(remaining)
+            if candidate.name in names:
+                raise ValueError(
+                    "ablation evaluator candidate names must be unique per iteration"
+                )
+            names.add(candidate.name)
+            attempted.append((removed, remaining, candidate))
+        decision = select_simplest_near_best(
+            [current, *(candidate for _, _, candidate in attempted)],
+            overlap_target=overlap_target,
+            overlap_safety_floor=overlap_safety_floor,
+        )
+        status = decision.status
+        selected_name = decision.selected.name if decision.selected is not None else None
+        chosen: (
+            tuple[ParameterGroup, tuple[ParameterGroup, ...], CandidateScore] | None
+        ) = None
+        for removed, remaining, candidate in attempted:
+            accepted = candidate.name == selected_name
+            steps.append(
+                GroupAblationStep(
+                    removed_group_id=removed.group_id,
+                    remaining_group_ids=tuple(group.group_id for group in remaining),
+                    candidate=candidate,
+                    validation_loss_increase_mev=float(
+                        candidate.weighted_rms_mev - current.weighted_rms_mev
+                    ),
+                    accepted=accepted,
+                )
+            )
+            if accepted:
+                chosen = (removed, remaining, candidate)
+        if chosen is None:
+            break
+        _, remaining, current = chosen
+        active = list(remaining)
+    return GroupAblationResult(
+        status=status,
+        selected=current,
+        active_group_ids=tuple(group.group_id for group in active),
+        steps=tuple(steps),
+    )
+
+
+def run_local_order_correction_sweep(
+    selected_orders: FamilyOrders,
+    *,
+    maximum_orders: FamilyOrders,
+    evaluator: Callable[[FamilyOrders], CandidateScore],
+    overlap_target: float = 0.95,
+    overlap_safety_floor: float = 0.90,
+) -> CorrectionSweepResult:
+    """Recheck the selected point and its single-family +/-1 neighbors."""
+
+    selected = selected_orders.as_tuple()
+    maximum = maximum_orders.as_tuple()
+    if any(value > ceiling for value, ceiling in zip(selected, maximum)):
+        raise ValueError("selected orders must not exceed maximum orders")
+    order_points = {selected_orders}
+    for family_index in range(len(_FAMILY_ORDER)):
+        for delta in (-1, 1):
+            values = list(selected)
+            values[family_index] += delta
+            if 0 <= values[family_index] <= maximum[family_index]:
+                order_points.add(FamilyOrders(*values))
+    candidates = tuple(evaluator(orders) for orders in sorted(order_points))
+    for orders, candidate in zip(sorted(order_points), candidates):
+        if candidate.orders != orders:
+            raise ValueError(
+                f"evaluator returned orders {candidate.orders} for proposed {orders}"
+            )
+    decision = select_simplest_near_best(
+        candidates,
+        overlap_target=overlap_target,
+        overlap_safety_floor=overlap_safety_floor,
+    )
+    return CorrectionSweepResult(candidates=candidates, decision=decision)
+
+
 __all__ = [
     "CandidateScore",
+    "CenteredLinearFit",
+    "CorrectionSweepResult",
     "FamilyVocabulary",
     "FamilyOrders",
+    "GroupAblationResult",
+    "GroupAblationStep",
     "ModelSelectionConfig",
+    "ParameterGroup",
+    "ResponseSubspaceOverlap",
     "SelectionDecision",
+    "StageSelectionResult",
+    "StagedSelectionResult",
     "SubspaceOverlapMetrics",
     "ValidationFold",
     "WeightedBandMetrics",
     "blocked_kpath_folds",
     "build_fixed_band_weights",
     "clone_family_vocabulary",
+    "fit_centered_linear_response",
     "parse_model_selection_config",
+    "response_subspace_overlap",
+    "run_staged_family_selection",
+    "run_group_ablation",
+    "run_local_order_correction_sweep",
     "select_simplest_near_best",
     "subspace_overlap_metrics",
     "weighted_band_error",

@@ -8,10 +8,16 @@ import pytest
 from kp.model.model_selection import (
     CandidateScore,
     FamilyOrders,
+    ParameterGroup,
     clone_family_vocabulary,
     blocked_kpath_folds,
     build_fixed_band_weights,
+    fit_centered_linear_response,
     parse_model_selection_config,
+    response_subspace_overlap,
+    run_group_ablation,
+    run_local_order_correction_sweep,
+    run_staged_family_selection,
     select_simplest_near_best,
     subspace_overlap_metrics,
     weighted_band_error,
@@ -379,3 +385,247 @@ def test_clone_joint_vocabulary_updates_template_local_orders_by_family() -> Non
 
     assert [row["max_order"] for row in vocabulary.term_templates] == [3, 2, 1]
     assert vocabulary.active_families == ("kinetic", "intra", "inter")
+
+
+def test_centered_linear_fit_removes_constant_onsite_from_kinetic_selection() -> None:
+    k = np.linspace(-1.0, 1.0, 9)
+    target = (7.5 + 2.25 * k)[:, None]
+    design = k[:, None, None]
+
+    fit = fit_centered_linear_response(
+        design,
+        target,
+        train_indices=np.array([0, 2, 4, 6, 8]),
+        validation_indices=np.array([1, 3, 5, 7]),
+        reference_index=4,
+    )
+
+    np.testing.assert_allclose(fit.coefficients, [2.25], atol=1.0e-12)
+    assert fit.validation_rms == pytest.approx(0.0, abs=1.0e-12)
+
+
+def test_centered_linear_fit_handles_complex_response_with_real_coefficients() -> None:
+    k = np.linspace(-1.0, 1.0, 7)
+    design = np.empty((len(k), 1, 2), dtype=complex)
+    design[:, 0, 0] = k
+    design[:, 0, 1] = 1j * k**2
+    target = (3.0 + design @ np.array([1.5, -0.75]))
+
+    fit = fit_centered_linear_response(
+        design,
+        target,
+        train_indices=np.array([0, 1, 3, 5, 6]),
+        validation_indices=np.array([2, 4]),
+        reference_index=3,
+    )
+
+    np.testing.assert_allclose(fit.coefficients, [1.5, -0.75], atol=1.0e-12)
+    assert fit.validation_rms == pytest.approx(0.0, abs=1.0e-12)
+
+
+def test_response_subspace_overlap_defers_shared_family_direction() -> None:
+    left = np.array(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [0.0, 0.0],
+        ]
+    )
+    right = np.array(
+        [
+            [1.0],
+            [0.0],
+            [0.0],
+        ]
+    )
+
+    audit = response_subspace_overlap(left, right, defer_threshold=0.999)
+
+    assert audit.left_rank == 2
+    assert audit.right_rank == 1
+    assert audit.maximum_correlation == pytest.approx(1.0)
+    assert audit.minimum_principal_angle_degrees == pytest.approx(0.0)
+    assert audit.defer_to_joint_stage is True
+
+
+def test_response_subspace_overlap_keeps_orthogonal_family_identifiable() -> None:
+    left = np.array([[1.0], [0.0], [0.0]])
+    right = np.array([[0.0], [0.0], [2.0]])
+
+    audit = response_subspace_overlap(left, right, defer_threshold=0.95)
+
+    assert audit.maximum_correlation == pytest.approx(0.0)
+    assert audit.minimum_principal_angle_degrees == pytest.approx(90.0)
+    assert audit.defer_to_joint_stage is False
+
+
+def test_staged_selection_freezes_orders_but_refits_all_active_families() -> None:
+    config = parse_model_selection_config(
+        {
+            "orders": {
+                "kinetic": [1, 2],
+                "intra": [0, 1],
+                "inter": [0, 1],
+            }
+        },
+        maximum_orders=FamilyOrders(2, 1, 1),
+    )
+    calls: list[tuple[str, FamilyOrders, tuple[str, ...]]] = []
+    losses = {
+        "kinetic": {1: 2.0, 2: 1.0},
+        "intra": {0: 1.5, 1: 0.7},
+        "inter": {0: 1.0, 1: 0.5},
+    }
+
+    def evaluator(
+        stage: str,
+        orders: FamilyOrders,
+        active_families: tuple[str, ...],
+    ) -> CandidateScore:
+        calls.append((stage, orders, active_families))
+        scanned_order = getattr(orders, stage)
+        return _candidate(
+            f"{stage}-{scanned_order}",
+            loss=losses[stage][scanned_order],
+            loss_se=0.05,
+            parameters=sum(orders.as_tuple()) + 1,
+            orders=orders.as_tuple(),
+            # Incomplete stages deliberately have no meaningful full-model overlap.
+            overlap=0.0 if stage != "inter" else 0.97,
+        )
+
+    result = run_staged_family_selection(config, evaluator)
+
+    assert result.selected_orders == FamilyOrders(2, 1, 1)
+    assert result.status == "PASS"
+    assert [stage.stage for stage in result.stages] == ["kinetic", "intra", "inter"]
+    assert calls == [
+        ("kinetic", FamilyOrders(1, 0, 0), ("kinetic",)),
+        ("kinetic", FamilyOrders(2, 0, 0), ("kinetic",)),
+        ("intra", FamilyOrders(2, 0, 0), ("kinetic", "intra")),
+        ("intra", FamilyOrders(2, 1, 0), ("kinetic", "intra")),
+        ("inter", FamilyOrders(2, 1, 0), ("kinetic", "intra", "inter")),
+        ("inter", FamilyOrders(2, 1, 1), ("kinetic", "intra", "inter")),
+    ]
+
+
+def test_staged_selection_applies_overlap_floor_only_to_complete_model() -> None:
+    config = parse_model_selection_config(
+        {"orders": {"kinetic": [1], "intra": [0], "inter": [0, 1]}},
+        maximum_orders=FamilyOrders(1, 0, 1),
+    )
+
+    def evaluator(
+        stage: str,
+        orders: FamilyOrders,
+        active_families: tuple[str, ...],
+    ) -> CandidateScore:
+        del active_families
+        overlap = 0.0 if stage != "inter" else 0.85
+        return _candidate(
+            f"{stage}-{getattr(orders, stage)}",
+            loss=1.0,
+            loss_se=0.1,
+            parameters=sum(orders.as_tuple()) + 1,
+            orders=orders.as_tuple(),
+            overlap=overlap,
+        )
+
+    result = run_staged_family_selection(config, evaluator)
+
+    assert [stage.decision.status for stage in result.stages] == ["PASS", "PASS", "FAIL"]
+    assert result.status == "FAIL"
+    assert result.selected_orders is None
+
+
+def test_group_ablation_removes_symmetry_linked_parameters_atomically_and_refits() -> None:
+    groups = (
+        ParameterGroup("adjoint-pair", (0, 1, 4, 5)),
+        ParameterGroup("onsite-pair", (2, 3)),
+    )
+    full = _candidate(
+        "full",
+        loss=1.0,
+        loss_se=0.2,
+        parameters=6,
+        orders=(2, 1, 1),
+    )
+    evaluated_indices: list[tuple[int, ...]] = []
+
+    def evaluator(active_groups: tuple[ParameterGroup, ...]) -> CandidateScore:
+        indices = tuple(
+            sorted(index for group in active_groups for index in group.parameter_indices)
+        )
+        evaluated_indices.append(indices)
+        if indices == (2, 3):
+            loss = 1.1
+        elif indices == (0, 1, 4, 5):
+            loss = 2.0
+        elif not indices:
+            loss = 2.0
+        else:
+            raise AssertionError(indices)
+        return _candidate(
+            "remaining-" + "-".join(map(str, indices)),
+            loss=loss,
+            loss_se=0.05,
+            parameters=len(indices),
+            orders=(2, 1, 1),
+        )
+
+    result = run_group_ablation(full, groups, evaluator)
+
+    assert result.selected.independent_real_parameters == 2
+    assert result.active_group_ids == ("onsite-pair",)
+    assert (2, 3) in evaluated_indices
+    assert (0, 1, 4, 5) in evaluated_indices
+    assert all(
+        not ({0, 1, 4, 5} & set(indices))
+        or {0, 1, 4, 5}.issubset(indices)
+        for indices in evaluated_indices
+    )
+    accepted = [record for record in result.steps if record.accepted]
+    assert [record.removed_group_id for record in accepted] == ["adjoint-pair"]
+    assert accepted[0].validation_loss_increase_mev == pytest.approx(0.1)
+
+
+def test_parameter_groups_must_be_disjoint() -> None:
+    groups = (
+        ParameterGroup("a", (0, 1)),
+        ParameterGroup("b", (1, 2)),
+    )
+    full = _candidate("full", loss=1.0, loss_se=0.1, parameters=3)
+
+    with pytest.raises(ValueError, match="disjoint"):
+        run_group_ablation(full, groups, lambda active: full)
+
+
+def test_local_correction_sweep_changes_only_one_family_order_at_a_time() -> None:
+    evaluated: list[FamilyOrders] = []
+
+    def evaluator(orders: FamilyOrders) -> CandidateScore:
+        evaluated.append(orders)
+        return _candidate(
+            str(orders.as_tuple()),
+            loss=1.0,
+            loss_se=0.1,
+            parameters=sum(orders.as_tuple()) + 1,
+            orders=orders.as_tuple(),
+        )
+
+    result = run_local_order_correction_sweep(
+        FamilyOrders(2, 1, 1),
+        maximum_orders=FamilyOrders(3, 2, 2),
+        evaluator=evaluator,
+    )
+
+    assert set(evaluated) == {
+        FamilyOrders(1, 1, 1),
+        FamilyOrders(2, 0, 1),
+        FamilyOrders(2, 1, 0),
+        FamilyOrders(2, 1, 1),
+        FamilyOrders(2, 1, 2),
+        FamilyOrders(2, 2, 1),
+        FamilyOrders(3, 1, 1),
+    }
+    assert result.decision.selected.orders == FamilyOrders(1, 1, 1)
