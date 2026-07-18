@@ -8,8 +8,10 @@ import pytest
 from kp.model.model_selection import (
     CandidateScore,
     FamilyOrders,
+    clone_family_vocabulary,
     blocked_kpath_folds,
     build_fixed_band_weights,
+    parse_model_selection_config,
     select_simplest_near_best,
     subspace_overlap_metrics,
     weighted_band_error,
@@ -273,3 +275,107 @@ def test_subspace_overlap_reports_leakage_outside_target_subspace() -> None:
     assert metrics.mean_overlap == pytest.approx(0.5)
     assert metrics.maximum_leakage == pytest.approx(0.5)
     assert metrics.minimum_singular_value == pytest.approx(0.0)
+
+
+def test_model_selection_config_defaults_to_family_specific_order_ladders() -> None:
+    config = parse_model_selection_config(
+        True,
+        maximum_orders=FamilyOrders(kinetic=4, intra=2, inter=1),
+    )
+
+    assert config.enabled is True
+    assert config.order_candidates == {
+        "kinetic": (1, 2, 3, 4),
+        "intra": (0, 1, 2),
+        "inter": (0, 1),
+    }
+    assert config.overlap_target == pytest.approx(0.95)
+    assert config.overlap_safety_floor == pytest.approx(0.90)
+
+
+def test_model_selection_config_normalizes_explicit_candidates_and_limits() -> None:
+    config = parse_model_selection_config(
+        {
+            "enabled": True,
+            "folds": 4,
+            "orders": {
+                "Kinect": [4, 2, 2, 1],
+                "intralayer": {"min": 0, "max": 2},
+                "inter": [0, 1],
+            },
+            "quality": {"overlap_target": 0.96, "overlap_safety_floor": 0.91},
+        },
+        maximum_orders=FamilyOrders(kinetic=4, intra=3, inter=2),
+    )
+
+    assert config.n_folds == 4
+    assert config.order_candidates == {
+        "kinetic": (1, 2, 4),
+        "intra": (0, 1, 2),
+        "inter": (0, 1),
+    }
+    assert config.overlap_target == pytest.approx(0.96)
+    assert config.overlap_safety_floor == pytest.approx(0.91)
+
+
+def test_model_selection_config_rejects_order_above_declared_ceiling() -> None:
+    with pytest.raises(ValueError, match="kinetic.*ceiling"):
+        parse_model_selection_config(
+            {"orders": {"kinetic": [2, 6]}},
+            maximum_orders=FamilyOrders(kinetic=4, intra=2, inter=2),
+        )
+
+
+def test_clone_kinetic_vocabulary_drops_intra_and_inter_without_mutating_source() -> None:
+    max_order = {
+        "Kinect": 6,
+        "intra": 4,
+        "inter": 4,
+        "moire_intra_nonzero": 4,
+        "tunneling_zero": 4,
+    }
+    templates = [
+        {"name": "kinetic", "source": "diagonal_kp", "max_order": 6},
+        {"name": "onsite", "source": "onsite", "max_order": 0},
+        {"name": "moire", "source": "moire_potential", "max_order": 4},
+        {"name": "tunnel", "source": "tunneling", "max_order": 4},
+    ]
+
+    vocabulary = clone_family_vocabulary(
+        max_order=max_order,
+        term_templates=templates,
+        orders=FamilyOrders(kinetic=2, intra=1, inter=1),
+        active_families=("kinetic",),
+    )
+
+    assert [row["source"] for row in vocabulary.term_templates] == [
+        "diagonal_kp",
+        "onsite",
+    ]
+    assert vocabulary.term_templates[0]["max_order"] == 2
+    assert vocabulary.term_templates[1]["max_order"] == 0
+    assert vocabulary.max_order["Kinect"] == 2
+    assert vocabulary.max_order["intra"] == 1
+    assert vocabulary.max_order["inter"] == 1
+    assert vocabulary.max_order["moire_intra_nonzero"] == 1
+    assert vocabulary.max_order["tunneling_zero"] == 1
+    assert templates[0]["max_order"] == 6
+    assert max_order["Kinect"] == 6
+
+
+def test_clone_joint_vocabulary_updates_template_local_orders_by_family() -> None:
+    templates = [
+        {"name": "kinetic", "tag": "Kinect", "source": "diagonal_kp", "max_order": 8},
+        {"name": "moire", "tag": "intra", "source": "moire_potential", "max_order": 5},
+        {"name": "tunnel", "tag": "inter", "source": "tunneling", "max_order": 5},
+    ]
+
+    vocabulary = clone_family_vocabulary(
+        max_order={"Kinect": 8, "intra": 5, "inter": 5},
+        term_templates=templates,
+        orders=FamilyOrders(kinetic=3, intra=2, inter=1),
+        active_families=("Kinect", "intralayer", "interlayer"),
+    )
+
+    assert [row["max_order"] for row in vocabulary.term_templates] == [3, 2, 1]
+    assert vocabulary.active_families == ("kinetic", "intra", "inter")
