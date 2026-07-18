@@ -8,6 +8,8 @@ compared reproducibly.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
@@ -205,6 +207,7 @@ class ModelSelectionConfig:
     n_folds: int = 5
     overlap_target: float = 0.95
     overlap_safety_floor: float = 0.90
+    low_se_multiplier: float = 2.0
 
     def __post_init__(self) -> None:
         candidates = {
@@ -212,6 +215,16 @@ class ModelSelectionConfig:
             for family, values in self.order_candidates.items()
         }
         object.__setattr__(self, "order_candidates", MappingProxyType(candidates))
+
+
+@dataclass(frozen=True)
+class ProductionCandidateSpec:
+    """Deterministic identity of one fully rebuilt production vocabulary."""
+
+    name: str
+    orders: FamilyOrders
+    active_families: tuple[str, ...]
+    vocabulary_hash: str
 
 
 @dataclass(frozen=True)
@@ -366,8 +379,11 @@ def parse_model_selection_config(
 ) -> ModelSelectionConfig:
     """Parse the opt-in fit.model_selection mapping without pipeline state."""
 
-    if raw in (None, False):
+    if raw is None:
         payload: Mapping[str, object] = {}
+        enabled = True
+    elif raw is False:
+        payload = {}
         enabled = False
     elif raw is True:
         payload = {}
@@ -414,12 +430,28 @@ def parse_model_selection_config(
     n_folds = int(payload.get("folds", 5))
     if n_folds < 2:
         raise ValueError("fit.model_selection.folds must be at least 2")
+    profiles = payload.get("profiles", {})
+    if profiles is None:
+        profiles = {}
+    if not isinstance(profiles, Mapping):
+        raise ValueError("fit.model_selection.profiles must be a mapping")
+    low_profile = profiles.get("low", {})
+    if low_profile is None:
+        low_profile = {}
+    if not isinstance(low_profile, Mapping):
+        raise ValueError("fit.model_selection.profiles.low must be a mapping")
+    low_se_multiplier = float(low_profile.get("standard_error_multiplier", 2.0))
+    if not np.isfinite(low_se_multiplier) or low_se_multiplier < 0.0:
+        raise ValueError(
+            "low profile standard_error_multiplier must be finite and non-negative"
+        )
     return ModelSelectionConfig(
         enabled=enabled,
         order_candidates=candidates,
         n_folds=n_folds,
         overlap_target=overlap_target,
         overlap_safety_floor=overlap_floor,
+        low_se_multiplier=low_se_multiplier,
     )
 
 
@@ -493,6 +525,37 @@ def clone_family_vocabulary(
         max_order=cloned_max,
         term_templates=tuple(cloned_templates),
         active_families=active,
+    )
+
+
+def build_production_candidate_spec(
+    vocabulary: FamilyVocabulary,
+    orders: FamilyOrders,
+) -> ProductionCandidateSpec:
+    """Create a stable candidate name and exact-vocabulary content hash."""
+
+    active = tuple(str(family) for family in vocabulary.active_families)
+    payload = {
+        "orders": list(orders.as_tuple()),
+        "active_families": list(active),
+        "max_order": dict(vocabulary.max_order),
+        "term_templates": [dict(template) for template in vocabulary.term_templates],
+    }
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    ).encode("utf-8")
+    name = (
+        f"k{orders.kinetic}_i{orders.intra}_t{orders.inter}__"
+        + "-".join(active)
+    )
+    return ProductionCandidateSpec(
+        name=name,
+        orders=orders,
+        active_families=active,
+        vocabulary_hash=hashlib.sha256(encoded).hexdigest(),
     )
 
 
@@ -902,6 +965,56 @@ def select_high_low_profiles(
     )
 
 
+def _candidate_score_record(candidate: CandidateScore | None) -> dict[str, object] | None:
+    if candidate is None:
+        return None
+    return {
+        "name": str(candidate.name),
+        "orders": list(candidate.orders.as_tuple()),
+        "independent_real_parameters": int(candidate.independent_real_parameters),
+        "primary_weighted_rms_mev": float(candidate.weighted_rms_mev),
+        "primary_weighted_rms_se_mev": float(candidate.weighted_rms_se_mev),
+        "primary_weighted_max_mev": float(candidate.weighted_max_mev),
+        "expanded_weighted_rms_mev": (
+            None
+            if candidate.expanded_weighted_rms_mev is None
+            else float(candidate.expanded_weighted_rms_mev)
+        ),
+        "mean_subspace_overlap": float(candidate.mean_subspace_overlap),
+        "certified": bool(candidate.certified),
+        "guards_passed": bool(candidate.guards_passed),
+    }
+
+
+def _selection_decision_record(decision: SelectionDecision) -> dict[str, object]:
+    return {
+        "status": str(decision.status),
+        "selected": _candidate_score_record(decision.selected),
+        "best_primary_weighted_rms_mev": decision.best_weighted_rms_mev,
+        "quality_threshold_mev": decision.one_se_threshold_mev,
+        "plateau_names": list(decision.plateau_names),
+        "unmet_targets": list(decision.unmet_targets),
+        "rejected_reasons": dict(decision.rejected_reasons),
+    }
+
+
+def high_low_selection_record(
+    result: HighLowSelectionResult,
+) -> dict[str, object]:
+    """Convert a dual-profile decision into a JSON-safe audit record."""
+
+    high = _selection_decision_record(result.high)
+    low = _selection_decision_record(result.low)
+    high["standard_error_multiplier"] = 0.0
+    low["standard_error_multiplier"] = float(result.low_se_multiplier)
+    return {
+        "profiles": {
+            "high": high,
+            "low": low,
+        }
+    }
+
+
 def run_staged_family_selection(
     config: ModelSelectionConfig,
     evaluator: Callable[
@@ -1094,6 +1207,7 @@ __all__ = [
     "HighLowSelectionResult",
     "ModelSelectionConfig",
     "ParameterGroup",
+    "ProductionCandidateSpec",
     "ResponseSubspaceOverlap",
     "SelectionDecision",
     "StageSelectionResult",
@@ -1104,8 +1218,10 @@ __all__ = [
     "blocked_kpath_folds",
     "build_fixed_band_weights",
     "clone_family_vocabulary",
+    "build_production_candidate_spec",
     "fit_centered_linear_response",
     "parse_model_selection_config",
+    "high_low_selection_record",
     "response_subspace_overlap",
     "run_staged_family_selection",
     "run_group_ablation",

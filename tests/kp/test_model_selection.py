@@ -9,6 +9,8 @@ from kp.model.model_selection import (
     CandidateScore,
     FamilyOrders,
     ParameterGroup,
+    build_production_candidate_spec,
+    high_low_selection_record,
     clone_family_vocabulary,
     blocked_kpath_folds,
     build_fixed_band_weights,
@@ -698,3 +700,55 @@ def test_high_low_profiles_fail_together_below_overlap_safety_floor() -> None:
     assert profiles.low.status == "FAIL"
     assert profiles.high.selected is None
     assert profiles.low.selected is None
+
+
+def test_model_selection_is_default_on_with_explicit_false_opt_out() -> None:
+    maximum = FamilyOrders(kinetic=3, intra=2, inter=1)
+
+    automatic = parse_model_selection_config(None, maximum_orders=maximum)
+    manual = parse_model_selection_config(False, maximum_orders=maximum)
+
+    assert automatic.enabled is True
+    assert manual.enabled is False
+
+
+def test_model_selection_parses_low_profile_two_se_multiplier() -> None:
+    config = parse_model_selection_config(
+        {"profiles": {"low": {"standard_error_multiplier": 2.5}}},
+        maximum_orders=FamilyOrders(2, 1, 1),
+    )
+
+    assert config.low_se_multiplier == pytest.approx(2.5)
+
+
+def test_production_candidate_spec_has_deterministic_vocabulary_hash() -> None:
+    vocabulary = clone_family_vocabulary(
+        max_order={"Kinect": 4, "intra": 2, "inter": 1},
+        term_templates=(
+            {"name": "kinetic", "source": "diagonal_kp", "max_order": 4},
+            {"name": "moire", "source": "moire_potential", "max_order": 2},
+        ),
+        orders=FamilyOrders(2, 1, 0),
+        active_families=("kinetic", "intra"),
+    )
+
+    first = build_production_candidate_spec(vocabulary, FamilyOrders(2, 1, 0))
+    second = build_production_candidate_spec(vocabulary, FamilyOrders(2, 1, 0))
+
+    assert first.name == "k2_i1_t0__kinetic-intra"
+    assert first.vocabulary_hash == second.vocabulary_hash
+    assert len(first.vocabulary_hash) == 64
+
+
+def test_high_low_selection_record_is_json_safe_and_names_both_profiles() -> None:
+    candidates = [
+        _candidate("accurate", loss=0.8, loss_se=0.2, parameters=12),
+        _candidate("compact", loss=1.1, loss_se=0.1, parameters=4),
+    ]
+
+    record = high_low_selection_record(select_high_low_profiles(candidates))
+
+    assert record["profiles"]["high"]["selected"]["name"] == "accurate"
+    assert record["profiles"]["low"]["selected"]["name"] == "compact"
+    assert record["profiles"]["low"]["standard_error_multiplier"] == pytest.approx(2.0)
+    assert isinstance(record["profiles"]["high"]["selected"]["orders"], list)
