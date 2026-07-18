@@ -253,6 +253,16 @@ def test_weighted_band_error_uses_fixed_weights_and_reports_unweighted_maximum()
     assert metrics.maximum_abs_error_mev == pytest.approx(4.0)
 
 
+def test_weighted_band_error_maximum_ignores_zero_weight_diagnostic_bands() -> None:
+    target = np.zeros((1, 3))
+    model = np.array([[0.100, 0.002, 0.001]])
+    weights = np.array([[0.0, 1.0, 1.0]])
+
+    metrics = weighted_band_error(model, target, weights)
+
+    assert metrics.maximum_abs_error_mev == pytest.approx(2.0)
+
+
 def test_subspace_overlap_is_invariant_to_rotation_inside_degenerate_subspace() -> None:
     target = np.zeros((1, 3, 2), dtype=complex)
     target[0, 0, 0] = 1.0
@@ -634,7 +644,7 @@ def test_local_correction_sweep_changes_only_one_family_order_at_a_time() -> Non
     assert result.decision.selected.orders == FamilyOrders(1, 1, 1)
 
 
-def test_high_selects_best_edge_accuracy_while_low_uses_wider_two_se_plateau() -> None:
+def test_high_selects_best_edge_accuracy_while_low_uses_adaptive_compact_plateau() -> None:
     high_accuracy = _candidate(
         "high-accuracy",
         loss=1.0,
@@ -657,7 +667,7 @@ def test_high_selects_best_edge_accuracy_while_low_uses_wider_two_se_plateau() -
     assert profiles.high.selected.name == "high-accuracy"
     assert profiles.high.one_se_threshold_mev == pytest.approx(1.0)
     assert profiles.low.selected.name == "compact-edge-model"
-    assert profiles.low.one_se_threshold_mev == pytest.approx(1.4)
+    assert profiles.low.one_se_threshold_mev == pytest.approx(2.0)
     assert profiles.low_se_multiplier == pytest.approx(2.0)
 
 
@@ -714,11 +724,21 @@ def test_model_selection_is_default_on_with_explicit_false_opt_out() -> None:
 
 def test_model_selection_parses_low_profile_two_se_multiplier() -> None:
     config = parse_model_selection_config(
-        {"profiles": {"low": {"standard_error_multiplier": 2.5}}},
+        {
+            "profiles": {
+                "low": {
+                    "standard_error_multiplier": 2.5,
+                    "relative_rms_tolerance": 0.8,
+                    "minimum_tolerance_mev": 0.15,
+                }
+            }
+        },
         maximum_orders=FamilyOrders(2, 1, 1),
     )
 
     assert config.low_se_multiplier == pytest.approx(2.5)
+    assert config.low_relative_rms_tolerance == pytest.approx(0.8)
+    assert config.low_minimum_tolerance_mev == pytest.approx(0.15)
 
 
 def test_production_candidate_spec_has_deterministic_vocabulary_hash() -> None:

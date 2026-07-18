@@ -23,8 +23,9 @@ built in the following order:
    `H(k) - H(k_ref)`, without intralayer or interlayer terms;
 2. add intralayer candidates and refit every active coefficient jointly;
 3. add interlayer candidates and refit every active coefficient jointly;
-4. remove only symmetry-, Hermiticity-, real/imaginary-, and adjoint-closed
-   parameter groups, refitting after every attempted removal;
+4. rank whole symmetry- and Hermiticity-closed continuum terms by their
+   projected contribution to the requested edge subspace, scan a compact
+   keep-fraction ladder, and refit every retained vocabulary;
 5. run a local joint order sweep around the staged result.
 
 Previous stages freeze family orders, not coefficients. Every vocabulary is
@@ -69,11 +70,13 @@ Its hard physics gates are:
 - primary low-energy subspace overlap;
 - numerical and production-symmetry certification.
 
-Low uses a wider two-standard-error plateau relative to the best primary
-edge-weighted candidate, then minimizes the number of independent real
-parameters. This allows noticeably larger errors away from the target band
-edge without sacrificing the bands the user requested. The plateau multiplier
-is configurable, but `2.0` is the default.
+Low uses an adaptive plateau relative to the best primary edge-weighted
+candidate, then minimizes the number of independent real parameters. The
+allowed increase is the maximum of two standard errors, a relative RMS
+tolerance that scales with material difficulty, and a small absolute tolerance.
+The defaults are `2SE`, `1.0 * best RMS`, and `0.10 meV`; each is configurable.
+This prevents a statistically tiny SE from disabling the compact profile on a
+difficult material while the overlap gate still protects the requested bands.
 
 ## Output layout
 
@@ -86,7 +89,7 @@ The configured output directory contains:
   auto_model_selection.json
   auto_model_selection.md
   candidate_metrics.csv
-  high_low_comparison.pdf
+  model_complexity_frontier.pdf
 ```
 
 Both profile directories are independently runnable standalone exports. The

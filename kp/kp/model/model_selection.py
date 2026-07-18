@@ -79,6 +79,8 @@ class HighLowSelectionResult:
     high: SelectionDecision
     low: SelectionDecision
     low_se_multiplier: float
+    low_relative_rms_tolerance: float = 1.0
+    low_minimum_tolerance_mev: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -208,6 +210,9 @@ class ModelSelectionConfig:
     overlap_target: float = 0.95
     overlap_safety_floor: float = 0.90
     low_se_multiplier: float = 2.0
+    low_relative_rms_tolerance: float = 1.0
+    low_minimum_tolerance_mev: float = 0.10
+    pruning_keep_fractions: tuple[float, ...] = (0.25, 0.40, 0.55, 0.70, 0.85)
 
     def __post_init__(self) -> None:
         candidates = {
@@ -215,6 +220,10 @@ class ModelSelectionConfig:
             for family, values in self.order_candidates.items()
         }
         object.__setattr__(self, "order_candidates", MappingProxyType(candidates))
+        fractions = tuple(float(value) for value in self.pruning_keep_fractions)
+        if any(not np.isfinite(value) or not 0.0 < value < 1.0 for value in fractions):
+            raise ValueError("term pruning keep fractions must be finite and lie in (0, 1)")
+        object.__setattr__(self, "pruning_keep_fractions", tuple(sorted(set(fractions))))
 
 
 @dataclass(frozen=True)
@@ -445,6 +454,28 @@ def parse_model_selection_config(
         raise ValueError(
             "low profile standard_error_multiplier must be finite and non-negative"
         )
+    low_relative_rms_tolerance = float(
+        low_profile.get("relative_rms_tolerance", 1.0)
+    )
+    low_minimum_tolerance_mev = float(
+        low_profile.get("minimum_tolerance_mev", 0.10)
+    )
+    if (
+        not np.isfinite(low_relative_rms_tolerance)
+        or low_relative_rms_tolerance < 0.0
+        or not np.isfinite(low_minimum_tolerance_mev)
+        or low_minimum_tolerance_mev < 0.0
+    ):
+        raise ValueError("low profile adaptive RMS tolerances must be finite and non-negative")
+    keep_fractions_raw = low_profile.get(
+        "term_keep_fractions",
+        (0.25, 0.40, 0.55, 0.70, 0.85),
+    )
+    if not isinstance(keep_fractions_raw, Sequence) or isinstance(
+        keep_fractions_raw,
+        (str, bytes),
+    ):
+        raise ValueError("low profile term_keep_fractions must be a sequence")
     return ModelSelectionConfig(
         enabled=enabled,
         order_candidates=candidates,
@@ -452,6 +483,9 @@ def parse_model_selection_config(
         overlap_target=overlap_target,
         overlap_safety_floor=overlap_floor,
         low_se_multiplier=low_se_multiplier,
+        low_relative_rms_tolerance=low_relative_rms_tolerance,
+        low_minimum_tolerance_mev=low_minimum_tolerance_mev,
+        pruning_keep_fractions=tuple(float(value) for value in keep_fractions_raw),
     )
 
 
@@ -637,11 +671,14 @@ def weighted_band_error(
     if normalization <= 0.0:
         raise ValueError("band weights must have positive total weight")
     difference = model - target
+    weighted_support = weight > 0.0
     return WeightedBandMetrics(
         weighted_rms_mev=float(
             np.sqrt(np.sum(weight * difference**2) / normalization) * 1000.0
         ),
-        maximum_abs_error_mev=float(np.max(np.abs(difference)) * 1000.0),
+        maximum_abs_error_mev=float(
+            np.max(np.abs(difference[weighted_support])) * 1000.0
+        ),
     )
 
 
@@ -831,6 +868,8 @@ def select_simplest_near_best(
     enforce_overlap: bool = True,
     standard_error_multiplier: float = 1.0,
     prefer_simplest: bool = True,
+    relative_rms_tolerance: float = 0.0,
+    minimum_tolerance_mev: float = 0.0,
 ) -> SelectionDecision:
     """Select the simplest candidate on the best candidate's 1-SE plateau.
 
@@ -851,6 +890,15 @@ def select_simplest_near_best(
     se_multiplier = float(standard_error_multiplier)
     if not np.isfinite(se_multiplier) or se_multiplier < 0.0:
         raise ValueError("standard_error_multiplier must be finite and non-negative")
+    relative_tolerance = float(relative_rms_tolerance)
+    minimum_tolerance = float(minimum_tolerance_mev)
+    if (
+        not np.isfinite(relative_tolerance)
+        or relative_tolerance < 0.0
+        or not np.isfinite(minimum_tolerance)
+        or minimum_tolerance < 0.0
+    ):
+        raise ValueError("adaptive RMS tolerances must be finite and non-negative")
 
     valid: list[CandidateScore] = []
     rejected: dict[str, str] = {}
@@ -909,9 +957,13 @@ def select_simplest_near_best(
         )
 
     best = min(pool, key=_quality_key)
-    threshold = float(best.weighted_rms_mev) + se_multiplier * float(
-        best.weighted_rms_se_mev
+    best_rms = float(best.weighted_rms_mev)
+    tolerance = max(
+        se_multiplier * float(best.weighted_rms_se_mev),
+        relative_tolerance * best_rms,
+        minimum_tolerance,
     )
+    threshold = best_rms + tolerance
     plateau = [
         candidate
         for candidate in pool
@@ -935,6 +987,8 @@ def select_high_low_profiles(
     overlap_target: float = 0.95,
     overlap_safety_floor: float = 0.90,
     low_se_multiplier: float = 2.0,
+    low_relative_rms_tolerance: float = 1.0,
+    low_minimum_tolerance_mev: float = 0.10,
 ) -> HighLowSelectionResult:
     """Select accurate ``high`` and compact edge-preserving ``low`` models.
 
@@ -957,11 +1011,15 @@ def select_high_low_profiles(
         overlap_safety_floor=overlap_safety_floor,
         standard_error_multiplier=multiplier,
         prefer_simplest=True,
+        relative_rms_tolerance=low_relative_rms_tolerance,
+        minimum_tolerance_mev=low_minimum_tolerance_mev,
     )
     return HighLowSelectionResult(
         high=high,
         low=low,
         low_se_multiplier=multiplier,
+        low_relative_rms_tolerance=float(low_relative_rms_tolerance),
+        low_minimum_tolerance_mev=float(low_minimum_tolerance_mev),
     )
 
 
@@ -1007,6 +1065,8 @@ def high_low_selection_record(
     low = _selection_decision_record(result.low)
     high["standard_error_multiplier"] = 0.0
     low["standard_error_multiplier"] = float(result.low_se_multiplier)
+    low["relative_rms_tolerance"] = float(result.low_relative_rms_tolerance)
+    low["minimum_tolerance_mev"] = float(result.low_minimum_tolerance_mev)
     return {
         "profiles": {
             "high": high,
