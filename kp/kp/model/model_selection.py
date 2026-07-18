@@ -43,6 +43,7 @@ class CandidateScore:
     weighted_rms_se_mev: float
     weighted_max_mev: float
     mean_subspace_overlap: float
+    expanded_weighted_rms_mev: float | None = None
     certified: bool = True
     guards_passed: bool = True
 
@@ -67,6 +68,15 @@ class SelectionDecision:
     plateau_names: tuple[str, ...] = ()
     unmet_targets: tuple[str, ...] = ()
     rejected_reasons: Mapping[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class HighLowSelectionResult:
+    """High-accuracy and compact edge-preserving profile decisions."""
+
+    high: SelectionDecision
+    low: SelectionDecision
+    low_se_multiplier: float
 
 
 @dataclass(frozen=True)
@@ -230,6 +240,8 @@ def _candidate_nonfinite(candidate: CandidateScore) -> bool:
         candidate.weighted_max_mev,
         candidate.mean_subspace_overlap,
     )
+    if candidate.expanded_weighted_rms_mev is not None:
+        values = (*values, candidate.expanded_weighted_rms_mev)
     return not bool(np.all(np.isfinite(np.asarray(values, dtype=float))))
 
 
@@ -736,12 +748,26 @@ def _selection_key(candidate: CandidateScore) -> tuple[object, ...]:
     )
 
 
+def _quality_key(candidate: CandidateScore) -> tuple[object, ...]:
+    expanded = candidate.expanded_weighted_rms_mev
+    return (
+        float(candidate.weighted_rms_mev),
+        float(expanded) if expanded is not None else float("inf"),
+        float(candidate.weighted_max_mev),
+        int(candidate.independent_real_parameters),
+        candidate.orders.as_tuple(),
+        str(candidate.name),
+    )
+
+
 def select_simplest_near_best(
     candidates: Sequence[CandidateScore],
     *,
     overlap_target: float = 0.95,
     overlap_safety_floor: float = 0.90,
     enforce_overlap: bool = True,
+    standard_error_multiplier: float = 1.0,
+    prefer_simplest: bool = True,
 ) -> SelectionDecision:
     """Select the simplest candidate on the best candidate's 1-SE plateau.
 
@@ -759,6 +785,9 @@ def select_simplest_near_best(
         raise ValueError(
             "overlap thresholds must satisfy 0 <= safety_floor <= target <= 1"
         )
+    se_multiplier = float(standard_error_multiplier)
+    if not np.isfinite(se_multiplier) or se_multiplier < 0.0:
+        raise ValueError("standard_error_multiplier must be finite and non-negative")
 
     valid: list[CandidateScore] = []
     rejected: dict[str, str] = {}
@@ -816,21 +845,16 @@ def select_simplest_near_best(
             rejected_reasons=rejected,
         )
 
-    best = min(
-        pool,
-        key=lambda candidate: (
-            float(candidate.weighted_rms_mev),
-            float(candidate.weighted_max_mev),
-            _selection_key(candidate),
-        ),
+    best = min(pool, key=_quality_key)
+    threshold = float(best.weighted_rms_mev) + se_multiplier * float(
+        best.weighted_rms_se_mev
     )
-    threshold = float(best.weighted_rms_mev) + float(best.weighted_rms_se_mev)
     plateau = [
         candidate
         for candidate in pool
         if float(candidate.weighted_rms_mev) <= threshold
     ]
-    selected = min(plateau, key=_selection_key)
+    selected = min(plateau, key=_selection_key) if prefer_simplest else best
     return SelectionDecision(
         status=status,
         selected=selected,
@@ -839,6 +863,42 @@ def select_simplest_near_best(
         plateau_names=tuple(candidate.name for candidate in plateau),
         unmet_targets=unmet_targets,
         rejected_reasons=rejected,
+    )
+
+
+def select_high_low_profiles(
+    candidates: Sequence[CandidateScore],
+    *,
+    overlap_target: float = 0.95,
+    overlap_safety_floor: float = 0.90,
+    low_se_multiplier: float = 2.0,
+) -> HighLowSelectionResult:
+    """Select accurate ``high`` and compact edge-preserving ``low`` models.
+
+    Both profiles use the primary edge-weighted loss stored in
+    ``weighted_rms_mev``. Expanded-window error is a quality tie breaker for
+    high and remains a diagnostic for low; it is never a low-profile gate.
+    """
+
+    multiplier = float(low_se_multiplier)
+    high = select_simplest_near_best(
+        candidates,
+        overlap_target=overlap_target,
+        overlap_safety_floor=overlap_safety_floor,
+        standard_error_multiplier=0.0,
+        prefer_simplest=False,
+    )
+    low = select_simplest_near_best(
+        candidates,
+        overlap_target=overlap_target,
+        overlap_safety_floor=overlap_safety_floor,
+        standard_error_multiplier=multiplier,
+        prefer_simplest=True,
+    )
+    return HighLowSelectionResult(
+        high=high,
+        low=low,
+        low_se_multiplier=multiplier,
     )
 
 
@@ -1031,6 +1091,7 @@ __all__ = [
     "FamilyOrders",
     "GroupAblationResult",
     "GroupAblationStep",
+    "HighLowSelectionResult",
     "ModelSelectionConfig",
     "ParameterGroup",
     "ResponseSubspaceOverlap",
@@ -1049,6 +1110,7 @@ __all__ = [
     "run_staged_family_selection",
     "run_group_ablation",
     "run_local_order_correction_sweep",
+    "select_high_low_profiles",
     "select_simplest_near_best",
     "subspace_overlap_metrics",
     "weighted_band_error",

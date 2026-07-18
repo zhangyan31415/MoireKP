@@ -18,6 +18,7 @@ from kp.model.model_selection import (
     run_group_ablation,
     run_local_order_correction_sweep,
     run_staged_family_selection,
+    select_high_low_profiles,
     select_simplest_near_best,
     subspace_overlap_metrics,
     weighted_band_error,
@@ -629,3 +630,71 @@ def test_local_correction_sweep_changes_only_one_family_order_at_a_time() -> Non
         FamilyOrders(3, 1, 1),
     }
     assert result.decision.selected.orders == FamilyOrders(1, 1, 1)
+
+
+def test_high_selects_best_edge_accuracy_while_low_uses_wider_two_se_plateau() -> None:
+    high_accuracy = _candidate(
+        "high-accuracy",
+        loss=1.0,
+        loss_se=0.20,
+        parameters=18,
+        orders=(4, 2, 2),
+        overlap=0.98,
+    )
+    compact_edge_model = _candidate(
+        "compact-edge-model",
+        loss=1.35,
+        loss_se=0.05,
+        parameters=5,
+        orders=(2, 1, 1),
+        overlap=0.97,
+    )
+
+    profiles = select_high_low_profiles([compact_edge_model, high_accuracy])
+
+    assert profiles.high.selected.name == "high-accuracy"
+    assert profiles.high.one_se_threshold_mev == pytest.approx(1.0)
+    assert profiles.low.selected.name == "compact-edge-model"
+    assert profiles.low.one_se_threshold_mev == pytest.approx(1.4)
+    assert profiles.low_se_multiplier == pytest.approx(2.0)
+
+
+def test_low_selection_ignores_expanded_window_error_as_a_gate() -> None:
+    accurate = _candidate(
+        "accurate",
+        loss=0.8,
+        loss_se=0.2,
+        parameters=14,
+        orders=(4, 2, 2),
+    )
+    compact = _candidate(
+        "compact",
+        loss=1.1,
+        loss_se=0.1,
+        parameters=4,
+        orders=(2, 1, 0),
+    )
+    accurate = CandidateScore(
+        **{**accurate.__dict__, "expanded_weighted_rms_mev": 1.0}
+    )
+    compact = CandidateScore(
+        **{**compact.__dict__, "expanded_weighted_rms_mev": 25.0}
+    )
+
+    profiles = select_high_low_profiles([compact, accurate])
+
+    assert profiles.high.selected.name == "accurate"
+    assert profiles.low.selected.name == "compact"
+
+
+def test_high_low_profiles_fail_together_below_overlap_safety_floor() -> None:
+    candidates = [
+        _candidate("unsafe", loss=0.1, loss_se=0.1, parameters=2, overlap=0.89)
+    ]
+
+    profiles = select_high_low_profiles(candidates)
+
+    assert profiles.high.status == "FAIL"
+    assert profiles.low.status == "FAIL"
+    assert profiles.high.selected is None
+    assert profiles.low.selected is None
