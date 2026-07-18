@@ -48,6 +48,9 @@ class CandidateScore:
     expanded_weighted_rms_mev: float | None = None
     certified: bool = True
     guards_passed: bool = True
+    solver_family: str = "linear"
+    active_group_count: int = 0
+    harmonic_support_size: int = 0
 
     def __post_init__(self) -> None:
         if not str(self.name):
@@ -57,6 +60,15 @@ class CandidateScore:
                 "independent_real_parameters must be non-negative, got "
                 f"{self.independent_real_parameters}"
             )
+        solver_family = str(self.solver_family).strip().lower()
+        if solver_family not in {"linear", "nonlinear"}:
+            raise ValueError(
+                "solver_family must be 'linear' or 'nonlinear', got "
+                f"{self.solver_family!r}"
+            )
+        if int(self.active_group_count) < 0 or int(self.harmonic_support_size) < 0:
+            raise ValueError("candidate complexity counts must be non-negative")
+        object.__setattr__(self, "solver_family", solver_family)
 
 
 @dataclass(frozen=True)
@@ -81,6 +93,14 @@ class HighLowSelectionResult:
     low_se_multiplier: float
     low_relative_rms_tolerance: float = 1.0
     low_minimum_tolerance_mev: float = 0.10
+
+
+@dataclass(frozen=True)
+class FourProfileSelectionResult:
+    """Linear and nonlinear high/low profile decisions."""
+
+    linear: HighLowSelectionResult
+    nonlinear: HighLowSelectionResult
 
 
 @dataclass(frozen=True)
@@ -841,6 +861,10 @@ def fit_centered_linear_response(
 def _selection_key(candidate: CandidateScore) -> tuple[object, ...]:
     return (
         int(candidate.independent_real_parameters),
+        int(candidate.active_group_count),
+        int(candidate.harmonic_support_size),
+        sum(candidate.orders.as_tuple()),
+        max(candidate.orders.as_tuple()),
         candidate.orders.as_tuple(),
         float(candidate.weighted_max_mev),
         float(candidate.weighted_rms_mev),
@@ -1023,6 +1047,38 @@ def select_high_low_profiles(
     )
 
 
+def select_four_model_profiles(
+    candidates: Sequence[CandidateScore],
+    *,
+    overlap_target: float = 0.95,
+    overlap_safety_floor: float = 0.90,
+    low_se_multiplier: float = 2.0,
+    low_relative_rms_tolerance: float = 1.0,
+    low_minimum_tolerance_mev: float = 0.10,
+) -> FourProfileSelectionResult:
+    """Select high/low models independently for linear and nonlinear solvers."""
+
+    groups = {
+        family: tuple(
+            candidate
+            for candidate in candidates
+            if candidate.solver_family == family
+        )
+        for family in ("linear", "nonlinear")
+    }
+    options = {
+        "overlap_target": overlap_target,
+        "overlap_safety_floor": overlap_safety_floor,
+        "low_se_multiplier": low_se_multiplier,
+        "low_relative_rms_tolerance": low_relative_rms_tolerance,
+        "low_minimum_tolerance_mev": low_minimum_tolerance_mev,
+    }
+    return FourProfileSelectionResult(
+        linear=select_high_low_profiles(groups["linear"], **options),
+        nonlinear=select_high_low_profiles(groups["nonlinear"], **options),
+    )
+
+
 def _candidate_score_record(candidate: CandidateScore | None) -> dict[str, object] | None:
     if candidate is None:
         return None
@@ -1041,6 +1097,9 @@ def _candidate_score_record(candidate: CandidateScore | None) -> dict[str, objec
         "mean_subspace_overlap": float(candidate.mean_subspace_overlap),
         "certified": bool(candidate.certified),
         "guards_passed": bool(candidate.guards_passed),
+        "solver_family": str(candidate.solver_family),
+        "active_group_count": int(candidate.active_group_count),
+        "harmonic_support_size": int(candidate.harmonic_support_size),
     }
 
 
@@ -1262,6 +1321,7 @@ __all__ = [
     "CorrectionSweepResult",
     "FamilyVocabulary",
     "FamilyOrders",
+    "FourProfileSelectionResult",
     "GroupAblationResult",
     "GroupAblationStep",
     "HighLowSelectionResult",
@@ -1287,6 +1347,7 @@ __all__ = [
     "run_group_ablation",
     "run_local_order_correction_sweep",
     "select_high_low_profiles",
+    "select_four_model_profiles",
     "select_simplest_near_best",
     "subspace_overlap_metrics",
     "weighted_band_error",

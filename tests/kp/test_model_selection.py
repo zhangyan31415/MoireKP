@@ -20,6 +20,7 @@ from kp.model.model_selection import (
     run_group_ablation,
     run_local_order_correction_sweep,
     run_staged_family_selection,
+    select_four_model_profiles,
     select_high_low_profiles,
     select_simplest_near_best,
     subspace_overlap_metrics,
@@ -38,6 +39,9 @@ def _candidate(
     maximum: float = 3.0,
     certified: bool = True,
     guards_passed: bool = True,
+    solver_family: str = "linear",
+    active_groups: int | None = None,
+    harmonic_support_size: int = 0,
 ) -> CandidateScore:
     return CandidateScore(
         name=name,
@@ -49,6 +53,9 @@ def _candidate(
         mean_subspace_overlap=overlap,
         certified=certified,
         guards_passed=guards_passed,
+        solver_family=solver_family,
+        active_group_count=(parameters if active_groups is None else active_groups),
+        harmonic_support_size=harmonic_support_size,
     )
 
 
@@ -697,6 +704,59 @@ def test_low_selection_ignores_expanded_window_error_as_a_gate() -> None:
 
     assert profiles.high.selected.name == "accurate"
     assert profiles.low.selected.name == "compact"
+
+
+def test_four_profile_selection_keeps_nonlinear_low_primary_only_and_compact() -> None:
+    linear_high = _candidate(
+        "linear-high",
+        loss=0.20,
+        loss_se=0.01,
+        parameters=120,
+        orders=(8, 6, 6),
+        active_groups=70,
+        harmonic_support_size=12,
+    )
+    linear_low = _candidate(
+        "linear-low",
+        loss=0.35,
+        loss_se=0.02,
+        parameters=30,
+        orders=(4, 2, 2),
+        active_groups=18,
+        harmonic_support_size=6,
+    )
+    nonlinear_high = _candidate(
+        "nonlinear-high",
+        loss=0.08,
+        loss_se=0.01,
+        parameters=90,
+        orders=(6, 4, 4),
+        solver_family="nonlinear",
+        active_groups=52,
+        harmonic_support_size=10,
+    )
+    nonlinear_low = _candidate(
+        "nonlinear-low",
+        loss=0.14,
+        loss_se=0.02,
+        parameters=18,
+        orders=(3, 1, 1),
+        solver_family="nonlinear",
+        active_groups=9,
+        harmonic_support_size=4,
+    )
+    nonlinear_low = CandidateScore(
+        **{**nonlinear_low.__dict__, "expanded_weighted_rms_mev": 100.0}
+    )
+
+    profiles = select_four_model_profiles(
+        [linear_low, nonlinear_high, linear_high, nonlinear_low]
+    )
+
+    assert profiles.linear.high.selected.name == "linear-high"
+    assert profiles.linear.low.selected.name == "linear-low"
+    assert profiles.nonlinear.high.selected.name == "nonlinear-high"
+    assert profiles.nonlinear.low.selected.name == "nonlinear-low"
 
 
 def test_high_low_profiles_fail_together_below_overlap_safety_floor() -> None:
