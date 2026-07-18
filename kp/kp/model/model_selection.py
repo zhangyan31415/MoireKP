@@ -9,6 +9,7 @@ compared reproducibly.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -99,6 +100,41 @@ class SubspaceOverlapMetrics:
     minimum_singular_value: float
 
 
+@dataclass(frozen=True)
+class ModelSelectionConfig:
+    enabled: bool
+    order_candidates: Mapping[str, tuple[int, ...]]
+    n_folds: int = 5
+    overlap_target: float = 0.95
+    overlap_safety_floor: float = 0.90
+
+    def __post_init__(self) -> None:
+        candidates = {
+            str(family): tuple(int(value) for value in values)
+            for family, values in self.order_candidates.items()
+        }
+        object.__setattr__(self, "order_candidates", MappingProxyType(candidates))
+
+
+@dataclass(frozen=True)
+class FamilyVocabulary:
+    max_order: Mapping[str, int]
+    term_templates: tuple[Mapping[str, object], ...]
+    active_families: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "max_order",
+            MappingProxyType({str(key): int(value) for key, value in self.max_order.items()}),
+        )
+        object.__setattr__(
+            self,
+            "term_templates",
+            tuple(MappingProxyType(dict(template)) for template in self.term_templates),
+        )
+
+
 def _candidate_nonfinite(candidate: CandidateScore) -> bool:
     values = (
         candidate.weighted_rms_mev,
@@ -161,6 +197,203 @@ def blocked_kpath_folds(
             )
         )
     return tuple(folds)
+
+
+_FAMILY_ORDER = ("kinetic", "intra", "inter")
+
+
+def _canonical_family(value: object) -> str:
+    text = str(value).strip().lower()
+    aliases = {
+        "kinect": "kinetic",
+        "kinetic": "kinetic",
+        "diagonal_kp": "kinetic",
+        "intra": "intra",
+        "intralayer": "intra",
+        "moire": "intra",
+        "moire_potential": "intra",
+        "inter": "inter",
+        "interlayer": "inter",
+        "tunneling": "inter",
+    }
+    if text in aliases:
+        return aliases[text]
+    if text.startswith("moire_intra"):
+        return "intra"
+    if text.startswith("tunneling_"):
+        return "inter"
+    raise ValueError(f"unknown model-selection family {value!r}")
+
+
+def _order_spec_values(
+    raw: object,
+    *,
+    family: str,
+    ceiling: int,
+) -> tuple[int, ...]:
+    if raw is None:
+        start = 1 if family == "kinetic" and ceiling > 0 else 0
+        values = list(range(start, ceiling + 1))
+    elif isinstance(raw, Mapping):
+        start = int(raw.get("min", 1 if family == "kinetic" and ceiling > 0 else 0))
+        stop = int(raw.get("max", ceiling))
+        step = int(raw.get("step", 1))
+        if step <= 0:
+            raise ValueError(f"{family} order step must be positive")
+        values = list(range(start, stop + 1, step))
+    elif isinstance(raw, Sequence) and not isinstance(raw, (str, bytes)):
+        values = [int(value) for value in raw]
+    else:
+        raise ValueError(
+            f"{family} order candidates must be a sequence or min/max mapping"
+        )
+    normalized = tuple(sorted(set(values)))
+    if not normalized:
+        raise ValueError(f"{family} order candidate list must not be empty")
+    if normalized[0] < 0:
+        raise ValueError(f"{family} order candidates must be non-negative")
+    if normalized[-1] > int(ceiling):
+        raise ValueError(
+            f"{family} order candidate {normalized[-1]} exceeds configured ceiling {ceiling}"
+        )
+    return normalized
+
+
+def parse_model_selection_config(
+    raw: object,
+    *,
+    maximum_orders: FamilyOrders,
+) -> ModelSelectionConfig:
+    """Parse the opt-in fit.model_selection mapping without pipeline state."""
+
+    if raw in (None, False):
+        payload: Mapping[str, object] = {}
+        enabled = False
+    elif raw is True:
+        payload = {}
+        enabled = True
+    elif isinstance(raw, Mapping):
+        payload = raw
+        enabled = bool(raw.get("enabled", True))
+    else:
+        raise ValueError("fit.model_selection must be a mapping or boolean")
+
+    raw_orders = payload.get("orders", {})
+    if raw_orders is None:
+        raw_orders = {}
+    if not isinstance(raw_orders, Mapping):
+        raise ValueError("fit.model_selection.orders must be a mapping")
+    canonical_specs: dict[str, object] = {}
+    for key, value in raw_orders.items():
+        family = _canonical_family(key)
+        if family in canonical_specs:
+            raise ValueError(f"duplicate order specification for family {family!r}")
+        canonical_specs[family] = value
+    ceilings = dict(zip(_FAMILY_ORDER, maximum_orders.as_tuple()))
+    candidates = {
+        family: _order_spec_values(
+            canonical_specs.get(family),
+            family=family,
+            ceiling=int(ceilings[family]),
+        )
+        for family in _FAMILY_ORDER
+    }
+
+    quality = payload.get("quality", {})
+    if quality is None:
+        quality = {}
+    if not isinstance(quality, Mapping):
+        raise ValueError("fit.model_selection.quality must be a mapping")
+    overlap_target = float(quality.get("overlap_target", 0.95))
+    overlap_floor = float(quality.get("overlap_safety_floor", 0.90))
+    if not 0.0 <= overlap_floor <= overlap_target <= 1.0:
+        raise ValueError(
+            "model-selection overlap thresholds must satisfy "
+            "0 <= safety_floor <= target <= 1"
+        )
+    n_folds = int(payload.get("folds", 5))
+    if n_folds < 2:
+        raise ValueError("fit.model_selection.folds must be at least 2")
+    return ModelSelectionConfig(
+        enabled=enabled,
+        order_candidates=candidates,
+        n_folds=n_folds,
+        overlap_target=overlap_target,
+        overlap_safety_floor=overlap_floor,
+    )
+
+
+def _max_order_family(key: object) -> str | None:
+    text = str(key).strip().lower()
+    if text == "onsite":
+        return None
+    try:
+        return _canonical_family(text)
+    except ValueError:
+        return None
+
+
+def _template_family(template: Mapping[str, object]) -> str | None:
+    source = str(template.get("source", "")).strip().lower()
+    if source == "onsite":
+        return None
+    for value in (source, template.get("tag", ""), template.get("name", "")):
+        if not str(value).strip():
+            continue
+        try:
+            return _canonical_family(value)
+        except ValueError:
+            continue
+    raise ValueError(
+        "model selection cannot classify term template family: "
+        f"{dict(template)!r}"
+    )
+
+
+def clone_family_vocabulary(
+    *,
+    max_order: Mapping[str, int],
+    term_templates: Sequence[Mapping[str, object]],
+    orders: FamilyOrders,
+    active_families: Sequence[str],
+) -> FamilyVocabulary:
+    """Clone and restrict one staged family vocabulary.
+
+    Onsite templates are retained at every stage.  A family order of zero is a
+    valid constant vocabulary; omitting a family from ``active_families`` is
+    the distinct operation that removes its templates.
+    """
+
+    active_set = {_canonical_family(value) for value in active_families}
+    active = tuple(family for family in _FAMILY_ORDER if family in active_set)
+    order_by_family = dict(zip(_FAMILY_ORDER, orders.as_tuple()))
+    cloned_max = {str(key): int(value) for key, value in max_order.items()}
+    for key in list(cloned_max):
+        family = _max_order_family(key)
+        if family is not None:
+            cloned_max[key] = int(order_by_family[family])
+    cloned_max.update(
+        {
+            "Kinect": int(orders.kinetic),
+            "intra": int(orders.intra),
+            "inter": int(orders.inter),
+        }
+    )
+
+    cloned_templates: list[dict[str, object]] = []
+    for template in term_templates:
+        family = _template_family(template)
+        if family is not None and family not in active_set:
+            continue
+        copied = dict(template)
+        if family is not None:
+            copied["max_order"] = int(order_by_family[family])
+        cloned_templates.append(copied)
+    return FamilyVocabulary(
+        max_order=cloned_max,
+        term_templates=tuple(cloned_templates),
+        active_families=active,
+    )
 
 
 def build_fixed_band_weights(
@@ -383,13 +616,17 @@ def select_simplest_near_best(
 
 __all__ = [
     "CandidateScore",
+    "FamilyVocabulary",
     "FamilyOrders",
+    "ModelSelectionConfig",
     "SelectionDecision",
     "SubspaceOverlapMetrics",
     "ValidationFold",
     "WeightedBandMetrics",
     "blocked_kpath_folds",
     "build_fixed_band_weights",
+    "clone_family_vocabulary",
+    "parse_model_selection_config",
     "select_simplest_near_best",
     "subspace_overlap_metrics",
     "weighted_band_error",
