@@ -4,7 +4,7 @@
 
 **Goal:** Compile the finite-p `complete_linear_v2` invariant response span before physical Reynolds materialization and reduce the PtSe2 Gamma q04 cold compile to at most 18.6 seconds on bigmem001.
 
-**Architecture:** Build sparse real generator actions from certified factorized Q/sector/orbital/momentum metadata and build the exact finite-p adjoint image in the raw polynomial vocabulary. Solve the common generator/adjoint fixed space blockwise, select an independent projected seed frame, and materialize only retained responses. Keep the existing full Reynolds compiler as an oracle and fail-closed fallback.
+**Architecture:** Decompose authored finite-p responses into a closed sparse symbolic atom space, apply certified factorized Q/sector/orbital/momentum actions and adjoint there, Reynolds-project and rank-reduce authored directions symbolically, and materialize only retained physical responses. Keep the existing full Reynolds compiler as an oracle and fail-closed fallback.
 
 **Tech Stack:** Python 3.11, NumPy, SciPy sparse linear algebra, pytest, existing MoireKP exactified/factorized symmetry artifacts.
 
@@ -109,19 +109,19 @@ git add kp/kp/model/response_basis_symmetry_first.py \
 git commit -m "feat(kp): build finite-p raw and adjoint vocabularies"
 ```
 
-### Task 3: Common symmetry/adjoint fixed space
+### Task 3: Non-closed authored vocabulary and symbolic atom projection
 
 **Files:**
 - Modify: `kp/kp/model/response_basis_symmetry_first.py`
 - Modify: `tests/kp/test_response_basis_symmetry_first.py`
 - Reference: `kp/kp/model/response_basis_fixed_compiler.py`
 
-**Step 1: Write a failing dense-oracle span test**
+**Step 1: Write a failing non-closure dense-oracle span test**
 
-For a small finite-p toy model, compile the existing complete Reynolds candidate
-set and reduce it. Compile the proposed generator/adjoint fixed space and compare
-the two physical projectors by principal angles. Require equal rank and maximum
-projector residual below the propagated numerical bound.
+Construct a finite-p toy model whose authored harmonic representatives are not
+closed under C2 or T. Confirm that raw seed-label action compilation rejects it,
+then require the symbolic compiler to match the existing complete Reynolds
+candidate span. Compare ranks and physical projectors within the propagated bound.
 
 **Step 2: Run and verify failure**
 
@@ -130,19 +130,20 @@ python -m pytest -q -p no:cacheprovider \
   tests/kp/test_response_basis_symmetry_first.py -k fixed_space
 ```
 
-**Step 3: Implement blockwise fixed-space compilation**
+**Step 3: Implement symbolic atom closure and actions**
 
-Build generator images as `V @ A_g` and add the physical adjoint image. Pass the
-vocabulary and images to the existing certified fixed-vocabulary machinery so
-the union support graph is split into exact direct-sum components. Solve the
-common fixed space and retain its raw-vocabulary coordinates without materializing
-all ambient projected response columns.
+Index scalar real atoms by monomial, matrix row, matrix column, and real/imaginary
+component. Seed the atom vocabulary from authored responses and close it under
+the certified generators and adjoint. Compile exact sparse real actions on this
+closed atom space without requiring transformed harmonic representatives to be
+authored term-registry entries.
 
-**Step 4: Select a deterministic projected seed frame**
+**Step 4: Project and select a deterministic symbolic frame**
 
-Use RRQR on the logical-to-fixed projection coordinates per certified component.
-Materialize only the selected projected columns from the raw vocabulary and store
-their logical seed/component provenance. Re-certify the selected physical rank.
+Embed authored real/imaginary seed directions into atom coordinates, apply the
+finite-group Reynolds average and adjoint projection symbolically, and use RRQR
+on the projected atom coordinates. Materialize only the selected independent
+columns and retain logical seed/component provenance. Re-certify physical rank.
 
 **Step 5: Verify oracle equality and commit**
 

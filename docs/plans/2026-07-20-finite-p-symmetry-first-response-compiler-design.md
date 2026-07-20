@@ -25,81 +25,80 @@ dependencies. Only 435 finite-p channels survive. Function-level profiling shows
 that repeated CSR construction, canonicalization, masking, addition, and hashing
 dominate the runtime; the target Hamiltonian fit is not the bottleneck.
 
-## Architecture
+## Real-data correction: authored seeds are not closed
 
-Compile exact generator and adjoint actions in the authored real coefficient
-vocabulary before materializing symmetry-projected Hamiltonian responses.
+The initial coefficient-space design assumed that the authored real/imaginary
+seed vocabulary `V` was closed under every generator, so that `g(V) = V A_g`.
+That assumption is false for the production PtSe2 Gamma q04 vocabulary. For
+example, C3, C2, and T route authored finite-p harmonic representatives to other
+members of their symmetry orbits that were intentionally not authored as
+independent term-registry entries. The current Reynolds compiler generates these
+missing images during projection. Expanding the authored term registry would
+change public harmonic semantics and is therefore not acceptable.
 
-Let `V` contain the raw real/imaginary polynomial-response columns for all authored
-seeds. For every exactified generator `g`, construct a sparse real action `A_g`
-such that
+## Revised architecture
 
-```text
-g(V) = V A_g.
-```
-
-Construct a sparse real adjoint involution `J` such that
-
-```text
-V(c)^dagger = V(J c).
-```
-
-The allowed coefficient space is the common fixed space of the actual generators
-and the adjoint:
+Compile symmetry in a closed symbolic atom space rather than in the authored
+seed-label space. A complex polynomial response is decomposed into sparse atoms
 
 ```text
-A_g c = c  for every generator g
-J c = c.
+(monomial r,s; matrix row; matrix column; real/imaginary component).
 ```
 
-The fixed-space coordinates form a sparse/block-structured matrix `B`. Only
-`V @ B` is materialized as the production response basis. This avoids a complete
-full-group Reynolds projection for every finite-p real seed direction.
+Start from atoms present in the authored seeds, then take exact closure under the
+certified generator actions and adjoint. Generator application only permutes or
+mixes these scalar atoms through Q/sector routing, orbital blocks, phases, and the
+small polynomial momentum action. It does not construct or canonicalize a full
+38x38 CSR response for every group word.
+
+Each authored real/imaginary seed direction is embedded into this closed atom
+space. Reynolds projection and Hermitian projection are accumulated symbolically,
+and a deterministic rank-revealing reduction selects an independent projected
+frame. Only those retained symbolic channels are converted to physical sparse
+polynomial responses. This preserves the existing authored term registry while
+avoiding the generate-all-then-delete physical CSR path.
 
 ## Action construction
 
-Each authored seed is indexed by its full descriptor: support component, source
-and target sector, source and target orbital, explicit harmonic/Q-pair support,
-polynomial powers, and real/imaginary component.
+Each symbolic atom is indexed by its monomial, global matrix row and column, and
+real/imaginary component. Authored seed provenance is stored separately and maps
+logical fit coefficients into atom coordinates.
 
 Generator actions are derived from certified exactified metadata, not operation
 name geometry:
 
-- sector and Q permutations route the seed support;
+- sector and Q permutations route every nonzero matrix atom;
 - Q-dependent phases provide the support phase ratio;
 - small orbital blocks map one orbital pair to a sparse linear combination of
   orbital pairs;
 - the explicit Cartesian momentum action maps `w^r wbar^s` to a small polynomial
-  combination;
+  combination of atom keys;
 - antiunitary parity supplies real/imaginary conjugation signs.
 
-The finite-p adjoint swaps source and target support, sends `p` to `-p`, exchanges
-orbital indices, conjugates the coefficient, and performs the exact binomial
-translation required by the changed Q center. It is a sparse real-linear
-involution and is not approximated as a pairwise same-degree mapping.
+The finite-p adjoint swaps the atom row and column, swaps monomial powers, and
+conjugates the real/imaginary component. Because authored seeds have already been
+expanded in the global polynomial coordinate system, lower-order center-shift
+terms are explicit atoms rather than an assumed same-degree seed partner.
 
 ## Fixed-space solution
 
-Build the union support graph of all `A_g` and `J`. Its connected components are
-certified invariant and solved independently. Small component null spaces give
-the common fixed coordinates. The physical Gram metric of `V` then normalizes
-the retained fixed directions blockwise.
-
-The result stores both the compact independent channels and the mapping from
-independent amplitudes back to authored real/imaginary term coefficients. Fitting,
-nonlinear refinement, evaluation, reporting, and standalone export consume the
-same compiled basis.
+Build the exact finite group from the certified generators, project authored
+directions in atom coordinates, and perform deterministic sparse rank reduction.
+The result stores the compact independent physical channels together with their
+authored real/imaginary provenance. Fitting, nonlinear refinement, evaluation,
+reporting, and standalone export consume the same compiled basis as before.
 
 ## Certification and fallback
 
 The optimized path must fail closed unless all of the following hold:
 
-- every routed descriptor is present in the authored vocabulary;
+- symbolic atom closure terminates and every routed atom remains inside the
+  declared polynomial degree and matrix dimension;
 - factorized actions match the active exactified continuum actions within their
   propagated bounds;
-- generator matrices satisfy the certified group relations;
-- `J^2 = I` and adjoint/group compatibility hold within propagated bounds;
-- the fixed basis is invariant under every generator and `J`;
+- symbolic generator actions satisfy the certified group relations;
+- symbolic adjoint squares to identity and is compatible with every generator;
+- retained materialized channels are invariant under every generator and adjoint;
 - materialized channels satisfy physical covariance and Hermiticity checks.
 
 The existing per-seed dense/full-matrix Reynolds implementation remains the
