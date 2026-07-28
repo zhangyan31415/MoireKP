@@ -1,0 +1,41 @@
+system:
+  name: 1+2 A-AB MoTe2 A
+  output: ../outputs/k1_a
+  tapw_output: ../../tapw/outputs
+  layers: [1, 2]
+  spin: down
+  orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
+  cell:
+    - [40.0469757906, 0.0, 0.0]
+    - [-20.0234878953, 34.6816948077, 0.0]
+    - [0.0, 0.0, 27.0]
+
+project:
+  valley: K1
+  q_shell: 4
+  efermi: -4.182383738673
+  target: valence
+  nlow_state_list: [[22], [22], []]
+  e_ref: -4.55
+  workers: 64
+
+symmetry: {}
+
+model:
+  target_bands: top
+  harmonics: {intralayer: 3, interlayer: 3}
+  max_order: {kinetic: 12, intralayer: 5, interlayer: 5}
+  fit:
+    method: linear
+    kpoints: [0, 10, 20, 30, 40, 50, 60]
+    bands: 12
+    one_sided_weight: 0.0
+    two_sided_weight: 0.0
+  bands:
+    compare_to_heff: true
+    band_slice: [0, 36]
+    plot:
+      top_bands: 12
+      align: top
+      figsize: [3.2, 5.8]
+      ylim: [-0.32, 0.04]

@@ -1,0 +1,42 @@
+system:
+  output: ../outputs
+  structure: ../../openmx/soc/POSCAR_rigid
+  hamiltonian: ../../openmx/soc/H_symm.npz
+  overlap: ../../openmx/soc/S_symm.npz
+  orbitals: {Mo: s3p2d1, Te: s3p2d2}
+  twist_index: 8
+  layers: [1, 1]
+  spin: true
+
+bands:
+  valley: K1
+  q_shell: 6
+  efermi: -4.1
+  num_processes: 61
+  blas_threads: 0
+  num_bands: 100
+  save_hamiltonian: true
+  save_wavefunctions: false
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 20
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
+
+symmetry:
+  valley: K1
+  q_shell: 6
+  efermi: -4.1
+  num_processes: 4
+  blas_threads: 0
+  tolerance: 2.0e-2
+  spglib_symprec: 5.0e-2
+  debug: false
+  developer_outputs: false
+
+field:
+  zero_potential_layers: [1]
+  electric_field_eVpA: 0.0
+  inner_symmetric: false

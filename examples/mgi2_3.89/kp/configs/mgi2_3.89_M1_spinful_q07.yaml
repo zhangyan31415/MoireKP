@@ -1,13 +1,13 @@
 system:
   name: MgI2
-  output: ../outputs/m1_spinless
+  output: ../outputs/m1_spinful
   tapw_output: ../../tapw/outputs
   layers: [1, 1]
-  spin: up
+  spin: all
   orbital_order: I-s3p2d2,Mg-s2p2,I-s3p2d2
   cell:
     - [60.9508659523, 0.0, 0.0]
-    - [-30.4754329753, 52.7849982976, 0.0]
+    - [-30.4754329751, 52.7849982976, 0.0]
     - [0.0, 0.0, 50.0]
 
 project:
@@ -16,8 +16,8 @@ project:
   efermi: -4.168612
   target: conduction
   nlow_state_list:
-    - [11]
-    - [11]
+    - [22, 23]
+    - [22, 23]
   e_ref: -2.6
   workers: 64
 
@@ -25,19 +25,19 @@ symmetry: {}
 
 model:
   target_bands: bottom
-  harmonics: {intralayer: 6, interlayer: 5}
-  max_order: {kinetic: 10, intralayer: 6, interlayer: 8}
+  harmonics: {intralayer: 6, interlayer: 2}
+  max_order: {kinetic: 10, intralayer: 4, interlayer: 6}
   fit:
     method: linear
-    kpoints: [20, 40]
-    bands: 8
+    kpoints: [0, 20, 40, 60]
+    bands: 16
     one_sided_weight: 0.0
     two_sided_weight: 0.0
   bands:
     compare_to_heff: true
-    band_slice: [0, 8]
+    band_slice: [0, 16]
     plot:
       bottom_bands: 8
       align: bottom
       figsize: [3.0, 5.0]
-      ylim: [0.0, 0.16]
+      num_bands: 16

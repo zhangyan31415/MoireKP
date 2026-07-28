@@ -1,0 +1,43 @@
+system:
+  name: MoTe2
+  output: ../outputs/k1_spinful
+  tapw_output: ../../tapw/outputs
+  layers: [1, 1]
+  spin: all
+  orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
+  cell:
+    - [52.4951056667, 0.0, 0.0]
+    - [-26.247552834, 45.4620950821, 0.0]
+    - [0.0, 0.0, 27.0]
+
+project:
+  valley: K1
+  q_shell: 6
+  efermi: -4.1
+  target: valence
+  nlow_state_list:
+    - [44, 45]
+    - [44, 45]
+  e_ref: -4.65
+  workers: 64
+
+symmetry: {}
+
+model:
+  target_bands: top
+  harmonics: {intralayer: 2, interlayer: 2}
+  max_order: {kinetic: 10, intralayer: 4, interlayer: 4}
+  fit:
+    method: linear
+    kpoints: [0, 1]
+    bands: 4
+    one_sided_weight: 0.0
+    two_sided_weight: 0.0
+  bands:
+    compare_to_heff: true
+    band_slice: [92, 108]
+    plot:
+      top_bands: 8
+      align: top
+      figsize: [3.0, 5.0]
+      num_bands: 16
