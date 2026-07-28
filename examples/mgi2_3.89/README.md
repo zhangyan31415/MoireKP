@@ -1,54 +1,52 @@
-## MgI2 3.89
+# Bilayer MgI2 3.89 degree Gamma- and M-valley examples
 
-This release example covers MgI2 at 3.89 degrees. The release-facing KP entry
-points use one config per case:
+The curated cases are:
 
 ```text
-kp/configs/mgi2_3.89_Gamma_q05.yaml
-kp/configs/mgi2_3.89_M1_q07.yaml
+tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
+kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+kp/configs/mgi2_3.89_M1_spinful_q07.yaml
 kp/configs/mgi2_3.89_M1_spinless_q07.yaml
 ```
 
-Each config drives inspection, projection, symmetry projection, and model
-fitting. Release examples do not use split source/model config directories.
+Gamma remains spinful only. The M1 spinless KP model selects the spin-up
+sector of the spinful M1 TAPW Hamiltonian; it is not a separate non-SOC TAPW
+calculation.
 
-### Run KP
+The TAPW configs use the compact `system` block. `structure/POSCAR` supplies
+the lattice and atomic positions, while the OpenMX basis is declared directly
+as `{Mg: s2p2, I: s3p2d2}` in YAML. TAPW infers the hexagonal Bravais family
+from the POSCAR; automatic inference accepts only hexagonal and square cells
+and reports every other in-plane metric as unsupported. The POSCAR cell and
+exact site order match the atom/orbital block order of the external symmetrized
+H/S matrices; an equivalent structure with reordered sites is not interchangeable.
 
-From the repository root:
+## Run TAPW
 
 ```bash
-kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
-kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_q05.yaml       # external-data
-
-kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
-kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_q07.yaml          # external-data
-
-kp inspect -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
-kp symm    -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml # external-data
+tapw run  -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml  # external-data
+tapw symm -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml  # external-data
+tapw run  -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml     # external-data
+tapw symm -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml     # external-data
 ```
 
-Run `inspect` first and check `kp/outputs/<profile>/<q_shell>/inspect/` before
-changing `project.nlow_state_list`. Each case uses `project.gauge: auto`; users
-do not write `norb_fix_list`.
+## Run KP
 
-### Current Metrics
+```bash
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml  # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml  # external-data
 
-These GPU validation numbers were generated with the active release configs:
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml     # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml     # external-data
 
-| case | gauge | model dim | active terms | all-band RMS / max | plotted-band RMS / max |
-| --- | --- | ---: | ---: | ---: | ---: |
-| Gamma Q5 | auto + linear low-subspace refinement | 124 | 634 | 3.350 / 11.455 meV before refinement | top 10 plot: 0.836 / 3.180 meV |
-| M1 spinless Q7 | auto | 8 | 266 | 1.074 / 2.969 meV | bottom 8: 1.114 / 3.263 meV |
-| M1 spinful Q7 | auto | 16 | 401 | 1.886 / 4.631 meV | bottom 8: 0.695 / 2.784 meV |
+kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml    # external-data
+kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml    # external-data
+```
 
-### Data Notes
-
-The heavy TAPW arrays and symmetry-analysis outputs are external data. In this
-local checkout they are available under `tapw/` for validation, but they are
-not part of a light source release.
+`kp project` also writes the Q-block eigenspectrum and exactified symmetry
+package, so standalone `kp inspect` and `kp symm` are optional diagnostics.
+These configs retain the reviewed projection and explicit model choices.
+Generated arrays and symmetry exports are external data declared in
+`examples/data-manifest.yaml`; the complete local validation checkout exposes
+them through relative links.

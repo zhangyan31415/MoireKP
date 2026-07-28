@@ -1,50 +1,40 @@
-## MoTe2 3.89
+# Bilayer MoTe2 3.89 degree K-valley example
 
-This release example covers the MoTe2 K1 valley at 3.89 degrees. The
-release-facing KP entry points use one config per case:
+This release example contains one spinful TAPW K1 calculation and two KP
+models built from it:
 
 ```text
-kp/configs/mote2_3.89_K1_q06.yaml
-kp/configs/mote2_3.89_K1_up_q06.yaml
+tapw/configs/mote2_3.89_K1_spinful_q06.yaml
+kp/configs/mote2_3.89_K1_spinful_q06.yaml
+kp/configs/mote2_3.89_K1_spinless_q06.yaml
 ```
 
-Release examples do not use split source/model config directories. Both cases
-use automatic gauge anchors. The spinful case exercises the
-spinful C3z exactification path: the projected raw-H C3z action is treated as a
-block action first, then cleaned to a monomial continuum representation when
-the block support is clearly cleaner than the raw monomial support. This avoids
-using a single monomial phase branch for the two spinful C3z branches.
+The `spinless` KP case selects the spin-up sector of the spinful TAPW
+Hamiltonian. It is not a separate non-SOC TAPW calculation.
 
-### Run KP
+## Run TAPW
 
 From the repository root:
 
 ```bash
-kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
-kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
-kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
-kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml     # external-data
-
-kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
-kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
-kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
-kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_up_q06.yaml  # external-data
+tapw run  -c examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml  # external-data
+tapw symm -c examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml  # external-data
 ```
 
-Run `inspect` first and check `kp/outputs/<profile>/<q_shell>/inspect/` before
-changing `project.nlow_state_list`.
+## Run KP
 
-### Current Metrics
+```bash
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml   # external-data
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml   # external-data
 
-These GPU validation numbers were generated with the active release configs:
+kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml  # external-data
+kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml  # external-data
+```
 
-| case | gauge | model dim | active terms | all-band RMS / max | plotted-band RMS / max |
-| --- | --- | ---: | ---: | ---: | ---: |
-| K1 spin up | auto | 8 | 94 | 1.215 / 4.907 meV | top 8: 1.226 / 4.942 meV |
-| K1 spinful Q6 | auto | 16 | 386 | 1.470 / 4.740 meV | top 8: 1.235 / 4.841 meV |
-
-### Data Notes
-
-The heavy TAPW arrays and symmetry-analysis outputs are external data. In this
-local checkout they are available under `tapw/` for validation, but they are
-not part of a light source release.
+`kp project` writes the Q-block eigenspectrum, selected layer/spin/orbital
+content, projected bands, and the exactified symmetry package. Standalone
+`kp inspect` and `kp symm` remain optional diagnostics. Both KP cases keep the
+reviewed low-energy basis and explicit model settings. Large OpenMX matrices
+and generated TAPW/KP arrays are external data declared in
+`examples/data-manifest.yaml`; the complete local validation checkout exposes
+them through relative links.

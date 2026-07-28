@@ -1,0 +1,47 @@
+system:
+  name: PtSe2
+  output: ../outputs/gamma_spinful
+  tapw_output: ../../tapw/outputs
+  layers: [1, 1]
+  spin: all
+  orbital_order: Se-s3p2d1,Pt-s3p2d2,Se-s3p2d1
+  cell:
+    - [28.9735371378, 0.0, 0.0]
+    - [-14.4867685689, 25.091819199, 0.0]
+    - [0.0, 0.0, 30.0]
+
+project:
+  valley: Gamma
+  q_shell: 4
+  efermi: -4.5
+  target: valence
+  selection:
+    mode: auto
+    max_dimension: 4
+    validation_indices: [0, 20, 40, 60]
+    validation_bands: 10
+  e_ref: -4.8
+  workers: 64
+
+symmetry: {}
+
+model:
+  target_bands: top
+  fit:
+    method: nonlinear
+    kpoints: [0, 20, 40]
+    band_kpoints: [0, 20, 40]
+    bands: 38
+    one_sided_weight: 1.0
+    two_sided_weight: 1.0
+    band_loss_weight: 1.0
+  bands:
+    compare_to_heff: true
+    band_slice: [0, 38]
+    plot:
+      top_bands: 20
+      plot_all_bands: true
+      align: none
+      figsize: [3.2, 5.8]
+  harmonics: {intralayer: 5, interlayer: 5}
+  max_order: {kinetic: 10, intralayer: 8, interlayer: 8}

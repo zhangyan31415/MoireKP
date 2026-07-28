@@ -1,0 +1,42 @@
+system:
+  name: 1+2 A-AB MoTe2 Gamma
+  output: ../outputs/gamma_spinful
+  tapw_output: ../../tapw/outputs
+  layers: [1, 2]
+  spin: all
+  orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
+  cell:
+    - [40.0469757906, 0.0, 0.0]
+    - [-20.0234878953, 34.6816948077, 0.0]
+    - [0.0, 0.0, 27.0]
+
+project:
+  valley: Gamma
+  q_shell: 4
+  efermi: -4.182383738673
+  target: valence
+  nlow_state_list: [[], [136, 137], [134, 135]]
+  downfold_method: fixed_schur
+  e_ref: -4.6
+  workers: 64
+
+symmetry: {}
+
+model:
+  target_bands: top
+  harmonics: {intralayer: 3, interlayer: 3}
+  max_order: {kinetic: 8, intralayer: 6, interlayer: 6}
+  fit:
+    method: linear
+    kpoints: [0, 40]
+    bands: 10
+    one_sided_weight: 0.0
+    two_sided_weight: 0.0
+  bands:
+    compare_to_heff: true
+    band_slice: [0, 76]
+    plot:
+      top_bands: 6
+      align: top
+      figsize: [3.2, 5.8]
+      ylim: [-0.08, 0.03]
