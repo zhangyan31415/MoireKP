@@ -153,55 +153,67 @@ topology:
 
 ## KP 工作流
 
-KP 使用一个 case YAML 贯穿 inspect、project、symm 和 model：
+KP 使用一个 YAML 文件完成自动低能投影、对称性 exactification 和连续模型拟合：
 
 ```bash
-kp inspect -c kp/configs/K1_q06.yaml
 kp project -c kp/configs/K1_q06.yaml
-kp symm    -c kp/configs/K1_q06.yaml
 kp model   -c kp/configs/K1_q06.yaml
 ```
 
-第一步必须保留。`kp inspect` 用来查看 TAPW band、Q-block 谱和候选低能态，然后再决定 `project.nlow_state_list`、拟合窗口和参考 Q。
+`kp project` 自动选择满足对称性且投影质量合格的最小低能子空间，报告所选态的
+layer、spin 和轨道成分，输出 TAPW 能带与参考 Q-block 对照图，并准备 exactified
+continuum symmetry package。`kp inspect` 和单独的 `kp symm` 仍可作为可选诊断命令。
 
 典型 KP 配置结构：
 
 ```yaml
-case:
-  profile: K1
-  q_shell: q06
-  output_root: ../outputs
-
-material:
+system:
   name: MoTe2
+  output: ../outputs/k1_spinless
+  tapw_output: ../../tapw/outputs
+  layers: [1, 1]
   spin: up
-  efermi: -4.10
-  hamk_file: ../../tapw/outputs/K1/q06/band/hamiltonian_k.npy
-  qset1_file: ../../tapw/outputs/K1/q06/band/g_vectors_group1.npy
-  qset2_file: ../../tapw/outputs/K1/q06/band/g_vectors_group2.npy
-  band_file: ../../tapw/outputs/K1/q06/band/energies_vbm.txt
-
-inspect:
-  energy_window: [-1.0, 1.0]
+  orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
+  cell:
+    - [52.4951, 0.0, 0.0]
+    - [-26.2476, 45.4621, 0.0]
+    - [0.0, 0.0, 27.0]
 
 project:
-  nlow_state_list: [[0], [0]]
-  e_ref: -4.10
+  valley: K1
+  q_shell: 6
+  efermi: -4.10
+  target: valence
+  e_ref: -4.60
 
-symm:
-  tapw_symmetry_dir: ../../tapw/outputs/K1/q06/symmetry
+symmetry: {}
 
 model:
-  energy_window: [-1.0, 1.0]
+  target_bands: top
+  harmonics: {intralayer: 3, interlayer: 3}
+  max_order: {kinetic: 10, intralayer: 4, interlayer: 4}
+  fit:
+    method: linear
+    kpoints: [0, 2]
+    bands: 8
+    one_sided_weight: 0.0
+    two_sided_weight: 0.0
+  bands:
+    compare_to_heff: true
+    band_slice: [46, 54]
 ```
 
 几个约定：
 
-- `case` 描述输出身份，例如 `profile`、`q_shell` 和 `output_root`。
-- `material` 描述输入数据和物理参考，例如 TAPW 文件、spin 标记和 `efermi`。
-- `inspect.energy_window` 控制图中显示的 `E - material.efermi` 范围；所有能带仍会计算和绘制。
-- `project.e_ref` 是 projection/downfolding 的参考能量，和 `material.efermi` 可以相同，但语义不同。
-- `kp symm` 只需要 `symm.tapw_symmetry_dir`，operation 列表来自 TAPW symmetry 输出。
+- `system` 描述材料、TAPW source output、layer/spin convention、轨道顺序、
+  晶胞和输出目录。
+- `project` 指定 valley、Q shell、目标带边和 projection reference energy。
+- 省略 `project.nlow_state_list` 即启用自动低能选择。只有需要复用已经审核过的
+  子空间并跳过搜索时，专家用户才显式写它。
+- 通常保留空的 `symmetry: {}` 即可。`kp project` 从 TAPW raw-H symmetry
+  构造 continuum-basis action 并 exactify；用户不需要写 operation matrix。
+- `model` 包含用户控制的 harmonic support、polynomial order、fit k points、
+  拟合能带数和可选低能权重。
 - `kp model` 直接导出 standalone model，不需要 `kp export`。
 
 KP 的模型拓扑计算不新增 `kp topo` 命令。`kp model` 导出的 `model/evaluate.py` 顶部包含 Berry curvature、quantum geometry 和 WCC 的用户参数；用户进入 `model/` 目录后修改开关和网格参数，再运行：

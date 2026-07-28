@@ -86,19 +86,19 @@ clean-clone test:
 - `tapw run -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW band outputs)
 - `tapw symm -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical TAPW raw-H symmetry outputs)
 - `tapw topo -c examples/<case>/tapw/configs/K1_q06.yaml` (external-data: writes canonical topology outputs)
-- `kp inspect -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: inspect source bands before selecting low states)
-- `kp project -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes TAPW band and Q arrays; produces projected Heff)
-- `kp symm -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes TAPW symmetry-analysis exports)
+- `kp project -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: automatically selects the low-energy subspace, consumes TAPW band, Q, and raw-H symmetry outputs, and produces projected Heff plus exactified continuum symmetry)
 - `kp model -c examples/<case>/kp/configs/K1_q06.yaml` (external-data: consumes projection and symmetry outputs)
 
-New KP case configs should use `kp inspect` first, then write the selected low
-states in `project.nlow_state_list` and the projection reference in
-`project.e_ref`. The shared energy reference belongs in `material.efermi`, and
-inspect/model plots use windows relative to that value.
+New KP case configs should omit `project.nlow_state_list`; `kp project`
+automatically selects the smallest acceptable symmetry-compatible low-energy
+subspace and reports its band, layer, spin, and orbital content. Experts may
+write `nlow_state_list` only to reuse an already reviewed subspace and skip the
+search. The projection reference belongs in `project.e_ref`.
 
-For symmetry projection, KP reads TAPW raw-H symmetry output from
-`symm.tapw_symmetry_dir`. Users do not list symmetry operations in the KP case
-config; the operation set comes from the TAPW symmetry export.
+For symmetry projection, KP reads TAPW raw-H symmetry output inferred from
+`system.tapw_output`, `project.valley`, and `project.q_shell`. Users do not list
+symmetry operations or matrices in the KP case config; the operation set comes
+from the TAPW symmetry export.
 
 Dataset provenance and unresolved release metadata are tracked in
 `examples/data-manifest.yaml`. The release cannot be archived until every

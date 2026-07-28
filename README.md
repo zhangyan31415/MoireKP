@@ -154,55 +154,73 @@ The config does not use workflow `enable` switches. The command selects which se
 
 ## KP Workflow
 
-KP uses one case YAML for inspect, projection, symmetry projection, and model fitting:
+KP uses one YAML file for automatic low-energy projection, symmetry
+exactification, and continuum-model fitting:
 
 ```bash
-kp inspect -c kp/configs/K1_q06.yaml
 kp project -c kp/configs/K1_q06.yaml
-kp symm    -c kp/configs/K1_q06.yaml
 kp model   -c kp/configs/K1_q06.yaml
 ```
 
-Keep `kp inspect` as the first step. It reports TAPW bands, Q-block spectra, and candidate low-energy states before you choose `project.nlow_state_list`, fitting windows, and reference Q points.
+`kp project` selects the smallest acceptable symmetry-compatible low-energy
+subspace, reports its layer, spin, and orbital content, writes the TAPW-band
+and reference-Q-block comparison, and prepares the exactified continuum
+symmetry package. `kp inspect` and standalone `kp symm` remain optional
+diagnostic commands.
 
 A typical KP config has this shape:
 
 ```yaml
-case:
-  profile: K1
-  q_shell: q06
-  output_root: ../outputs
-
-material:
+system:
   name: MoTe2
+  output: ../outputs/k1_spinless
+  tapw_output: ../../tapw/outputs
+  layers: [1, 1]
   spin: up
-  efermi: -4.10
-  hamk_file: ../../tapw/outputs/K1/q06/band/hamiltonian_k.npy
-  qset1_file: ../../tapw/outputs/K1/q06/band/g_vectors_group1.npy
-  qset2_file: ../../tapw/outputs/K1/q06/band/g_vectors_group2.npy
-  band_file: ../../tapw/outputs/K1/q06/band/energies_vbm.txt
-
-inspect:
-  energy_window: [-1.0, 1.0]
+  orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
+  cell:
+    - [52.4951, 0.0, 0.0]
+    - [-26.2476, 45.4621, 0.0]
+    - [0.0, 0.0, 27.0]
 
 project:
-  nlow_state_list: [[0], [0]]
-  e_ref: -4.10
+  valley: K1
+  q_shell: 6
+  efermi: -4.10
+  target: valence
+  e_ref: -4.60
 
-symm:
-  tapw_symmetry_dir: ../../tapw/outputs/K1/q06/symmetry
+symmetry: {}
 
 model:
-  energy_window: [-1.0, 1.0]
+  target_bands: top
+  harmonics: {intralayer: 3, interlayer: 3}
+  max_order: {kinetic: 10, intralayer: 4, interlayer: 4}
+  fit:
+    method: linear
+    kpoints: [0, 2]
+    bands: 8
+    one_sided_weight: 0.0
+    two_sided_weight: 0.0
+  bands:
+    compare_to_heff: true
+    band_slice: [46, 54]
 ```
 
 Conventions:
 
-- `case` describes the output identity, such as `profile`, `q_shell`, and `output_root`.
-- `material` describes input data and physical references, such as TAPW files, spin labels, and `efermi`.
-- `inspect.energy_window` controls the displayed `E - material.efermi` range; all available bands are still computed and drawn.
-- `project.e_ref` is the projection/downfolding reference energy. It may equal `material.efermi`, but it has a different role.
-- `kp symm` reads `symm.tapw_symmetry_dir`; users do not list symmetry operations in the KP config.
+- `system` identifies the material, source TAPW output, layer/spin convention,
+  orbital ordering, cell, and output directory.
+- `project` identifies the valley, Q shell, target band edge, and projection
+  reference energy.
+- Omitting `project.nlow_state_list` enables automatic low-energy selection.
+  Experts may provide it only to reuse an already reviewed subspace and skip
+  the search.
+- The usual `symmetry: {}` is intentional. `kp project` reads TAPW raw-H
+  symmetry, constructs the continuum-basis actions, and exactifies them;
+  users do not write operation matrices.
+- `model` contains the user-controlled harmonic support, polynomial orders,
+  fit points, band count, and optional low-energy weights.
 - `kp model` directly writes the standalone model. There is no separate release-facing `kp export` step.
 
 Model topology is handled inside the exported standalone model. After `kp model`, edit the user parameters at the top of `model/evaluate.py` and run:
