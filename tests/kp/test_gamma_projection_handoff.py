@@ -26,6 +26,21 @@ from kp.projection_handoff import (
 )
 from kp.projection_selection import CandidateRejectionReason
 from kp.identity import PROJECTION_BASIS_HANDOFF_VERSION, hash_array
+from kp.low_energy_selection import CandidateMetrics
+from kp.selection_artifact import (
+    CertificationEvidence,
+    ResolvedCandidateIdentity,
+    SelectionArtifact,
+    SelectionBindingError,
+    SelectionFailureCode,
+    SelectionIdentity,
+    SelectionInputIdentity,
+    SelectionMetricEvidence,
+    build_certified_gamma_selection_identity,
+    gamma_routed_ordered_q_identity_hash,
+    verify_certified_gamma_selection_artifact,
+    verify_certified_gamma_selection_identity,
+)
 from kp.symmetry import candidate_certificate as candidate_certificate_mod
 from kp.symmetry import projection as projection_mod
 from kp.symmetry.candidate_certificate import (
@@ -120,6 +135,7 @@ def _spec() -> GammaRoutedBasisSpec:
         central_phases=(1.0,),
         source="gamma_handoff_test",
     )
+
     return certify_gamma_routed_basis_spec(
         candidate_id="gamma-routed-test",
         artifact_identity={
@@ -149,6 +165,37 @@ def _spec() -> GammaRoutedBasisSpec:
         presentation=presentation,
         required_pairs={"E": pairs},
         candidate_thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+
+def _selection_input(
+    spec: GammaRoutedBasisSpec,
+    **changes: str,
+) -> SelectionInputIdentity:
+    values = {
+        "selection_mode": "auto",
+        "frozen_target_window_hash": "b" * 64,
+        "validation_k_indices_hash": "c" * 64,
+        "ordered_q_hash": gamma_routed_ordered_q_identity_hash(spec),
+        "source_hamiltonian_hash": spec.source_hamiltonian_hash,
+        "action_package_hash": spec.raw_action_package_hash,
+        "row_layout_hash": spec.layout.layout_hash,
+        "selection_policy_hash": "d" * 64,
+    }
+    values.update(changes)
+    return SelectionInputIdentity.create(**values)
+
+
+def _selection_metrics(spec: GammaRoutedBasisSpec) -> CandidateMetrics:
+    return CandidateMetrics(
+        candidate_id=spec.candidate_id,
+        dimension=spec.model_dim,
+        band_rms_mev=0.1,
+        band_max_mev=0.2,
+        subspace_overlap=0.999,
+        symmetry_residual=1.0e-10,
+        symmetry_leakage=2.0e-10,
+        structural_failure=None,
     )
 
 
@@ -768,3 +815,178 @@ def test_explicit_legacy_archive_rejects_routed_variant_fields(
         projection_mod._load_persisted_projection_basis_handoff(project_dir)
 
     assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_certified_selection_identity_is_built_from_real_gamma_handoff() -> None:
+    spec = _spec()
+    selection_input = _selection_input(spec)
+
+    identity = build_certified_gamma_selection_identity(
+        selection_input=selection_input,
+        handoff=spec,
+        metrics=_selection_metrics(spec),
+    )
+
+    assert identity.resolved_candidate.basis_handoff_hash == spec.handoff_identity_hash
+    assert identity.resolved_candidate.authoritative_heff_hash == spec.heff_hash
+    assert identity.resolved_candidate.heff_k_indices_hash == hash_array(
+        np.asarray(spec.heff_k_indices, dtype=np.int64)
+    )
+    assert identity.certification_evidence is not None
+    assert (
+        identity.certification_evidence.symmetry_certificate_hash
+        == spec.candidate_certificate_hash
+    )
+    assert verify_certified_gamma_selection_identity(identity, spec) is identity
+
+    artifact = SelectionArtifact.certified(
+        transaction_id="gamma-selection",
+        identity=identity,
+        payload_manifest_hash="e" * 64,
+        projection_handoff=spec,
+    )
+    assert artifact.identity is identity
+    assert verify_certified_gamma_selection_artifact(artifact, spec) is artifact
+
+
+@pytest.mark.parametrize(
+    "changed_input",
+    (
+        {"ordered_q_hash": "1" * 64},
+        {"source_hamiltonian_hash": "2" * 64},
+        {"action_package_hash": "3" * 64},
+        {"row_layout_hash": "4" * 64},
+        {"selection_mode": "explicit"},
+    ),
+)
+def test_certified_selection_builder_rejects_input_handoff_mismatch(
+    changed_input: dict[str, str],
+) -> None:
+    spec = _spec()
+
+    with pytest.raises(SelectionBindingError) as rejected:
+        build_certified_gamma_selection_identity(
+            selection_input=_selection_input(spec, **changed_input),
+            handoff=spec,
+            metrics=_selection_metrics(spec),
+        )
+
+    assert rejected.value.failure_code is SelectionFailureCode.IDENTITY_MISMATCH
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("basis_handoff_hash", "1" * 64),
+        ("authoritative_heff_hash", "2" * 64),
+        ("heff_k_indices_hash", "3" * 64),
+    ),
+)
+def test_gamma_selection_verifier_rejects_coherent_resolved_identity_drift(
+    field: str,
+    value: str,
+) -> None:
+    spec = _spec()
+    good = build_certified_gamma_selection_identity(
+        selection_input=_selection_input(spec),
+        handoff=spec,
+        metrics=_selection_metrics(spec),
+    )
+    evidence = good.certification_evidence
+    assert evidence is not None
+    resolved_values = good.resolved_candidate.to_dict()
+    resolved_values.pop("resolved_candidate_hash")
+    resolved_values[field] = value
+    resolved = ResolvedCandidateIdentity.create(**resolved_values)
+    if field == "basis_handoff_hash":
+        metric = evidence.metric_evidence
+        metric_evidence = SelectionMetricEvidence.create(
+            candidate_id=metric.candidate_id,
+            frozen_target_window_hash=metric.frozen_target_window_hash,
+            validation_k_indices_hash=metric.validation_k_indices_hash,
+            basis_handoff_hash=value,
+            metrics=metric.metrics,
+        )
+        evidence = CertificationEvidence.create(
+            metric_evidence=metric_evidence,
+            symmetry_certificate_hash=evidence.symmetry_certificate_hash,
+            symmetry_input_identity_hash=evidence.symmetry_input_identity_hash,
+        )
+    drifted = SelectionIdentity.create(
+        selection_input=good.selection_input,
+        selection_policy_hash=good.selection_policy_hash,
+        resolved_candidate=resolved,
+        certification_evidence=evidence,
+    )
+
+    with pytest.raises(SelectionBindingError) as rejected:
+        verify_certified_gamma_selection_identity(drifted, spec)
+
+    assert rejected.value.failure_code is SelectionFailureCode.IDENTITY_MISMATCH
+
+
+@pytest.mark.parametrize(
+    "certificate_field",
+    ("symmetry_certificate_hash", "symmetry_input_identity_hash"),
+)
+def test_gamma_selection_verifier_rejects_certificate_identity_drift(
+    certificate_field: str,
+) -> None:
+    spec = _spec()
+    good = build_certified_gamma_selection_identity(
+        selection_input=_selection_input(spec),
+        handoff=spec,
+        metrics=_selection_metrics(spec),
+    )
+    evidence = good.certification_evidence
+    assert evidence is not None
+    evidence_values = {
+        "metric_evidence": evidence.metric_evidence,
+        "symmetry_certificate_hash": evidence.symmetry_certificate_hash,
+        "symmetry_input_identity_hash": evidence.symmetry_input_identity_hash,
+    }
+    evidence_values[certificate_field] = "f" * 64
+    drifted = SelectionIdentity.create(
+        selection_input=good.selection_input,
+        selection_policy_hash=good.selection_policy_hash,
+        resolved_candidate=good.resolved_candidate,
+        certification_evidence=CertificationEvidence.create(**evidence_values),
+    )
+
+    with pytest.raises(SelectionBindingError):
+        verify_certified_gamma_selection_identity(drifted, spec)
+
+
+def test_gamma_certified_artifact_cannot_bypass_handoff_verification() -> None:
+    spec = _spec()
+    identity = build_certified_gamma_selection_identity(
+        selection_input=_selection_input(spec),
+        handoff=spec,
+        metrics=_selection_metrics(spec),
+    )
+
+    with pytest.raises(SelectionBindingError):
+        SelectionArtifact.certified(
+            transaction_id="missing-handoff",
+            identity=identity,
+            payload_manifest_hash="e" * 64,
+        )
+
+
+def test_explicit_legacy_handoff_is_never_built_as_certified_selection() -> None:
+    spec = _spec()
+    legacy = ExplicitLegacyBasisSpec(
+        artifact_identity=spec.artifact_identity,
+        nlow_state_list=[[0], [1]],
+        resolved_norb_fix_list=[[[[0, 1.0]]], [[[1, 1.0]]]],
+        gauge_mode="manual",
+        frame_artifact=None,
+        model_dim=2,
+    )
+
+    with pytest.raises(SelectionBindingError):
+        build_certified_gamma_selection_identity(
+            selection_input=_selection_input(spec),
+            handoff=legacy,
+            metrics=_selection_metrics(spec),
+        )

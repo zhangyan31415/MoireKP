@@ -18,7 +18,7 @@ from typing import Any, BinaryIO, Callable, Mapping, Sequence
 
 import numpy as np
 
-from .identity import hash_mapping
+from .identity import hash_array, hash_mapping
 from .low_energy_selection import CandidateMetrics
 from .projection_selection import FrozenTargetWindow
 
@@ -47,6 +47,19 @@ class SelectionFailureCode(str, Enum):
     PERSISTENCE_FAILURE = "PERSISTENCE_FAILURE"
     TRANSACTION_SUPERSEDED = "TRANSACTION_SUPERSEDED"
     EXPLICIT_UNVERIFIED = "EXPLICIT_UNVERIFIED"
+
+
+class SelectionBindingError(ValueError):
+    """Typed rejection for a selection/handoff identity mismatch."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        failure_code: SelectionFailureCode = SelectionFailureCode.IDENTITY_MISMATCH,
+    ) -> None:
+        super().__init__(message)
+        self.failure_code = failure_code
 
 
 def _require_exact_keys(
@@ -839,6 +852,190 @@ class SelectionIdentity:
         )
 
 
+def _require_gamma_routed_handoff(handoff: Any) -> Any:
+    from .projection_handoff import GammaRoutedBasisSpec
+
+    if not isinstance(handoff, GammaRoutedBasisSpec):
+        raise SelectionBindingError(
+            "certified Gamma selection requires a GammaRoutedBasisSpec handoff"
+        )
+    if not handoff.candidate_id or not handoff.candidate_certificate_envelope_json:
+        raise SelectionBindingError(
+            "certified Gamma selection requires a complete candidate certificate"
+        )
+    return handoff
+
+
+def gamma_routed_ordered_q_identity_hash(handoff: Any) -> str:
+    """Hash the ordered Q identities owned by a routed Gamma handoff."""
+
+    routed = _require_gamma_routed_handoff(handoff)
+    return hash_mapping(
+        {
+            "schema": "kp.gamma-routed-ordered-q-identity.v1",
+            "ordered_q_hashes": list(routed.ordered_q_hashes),
+        }
+    )
+
+
+def _verified_gamma_candidate_envelope(handoff: Any) -> Mapping[str, Any]:
+    from .symmetry.candidate_certificate import (
+        CandidateSymmetryStatus,
+        candidate_action_package_hash,
+        verify_candidate_certificate_envelope,
+    )
+
+    routed = _require_gamma_routed_handoff(handoff)
+    try:
+        payload = json.loads(routed.candidate_certificate_envelope_json)
+        verified = verify_candidate_certificate_envelope(payload)
+    except (TypeError, ValueError) as exc:
+        raise SelectionBindingError(
+            "routed Gamma candidate certificate envelope is invalid"
+        ) from exc
+    if (
+        verified.get("status") != CandidateSymmetryStatus.CERTIFIED.value
+        or verified.get("candidate_id") != routed.candidate_id
+        or verified.get("certificate_hash") != routed.candidate_certificate_hash
+        or verified.get("input_identity_hash")
+        != routed.candidate_input_identity_hash
+        or candidate_action_package_hash(verified["input_identity_payload"])
+        != routed.raw_action_package_hash
+    ):
+        raise SelectionBindingError(
+            "routed Gamma candidate certificate does not match its handoff"
+        )
+    return verified
+
+
+def _gamma_handoff_identity_values(handoff: Any) -> dict[str, str | int]:
+    routed = _require_gamma_routed_handoff(handoff)
+    _verified_gamma_candidate_envelope(routed)
+    return {
+        "candidate_id": routed.candidate_id,
+        "candidate_dimension": routed.model_dim,
+        "projection_basis_kind": routed.projection_basis_kind,
+        "basis_handoff_hash": routed.handoff_identity_hash,
+        "authoritative_heff_hash": routed.heff_hash,
+        "heff_k_indices_hash": hash_array(
+            np.asarray(routed.heff_k_indices, dtype=np.int64)
+        ),
+    }
+
+
+def _verify_gamma_selection_input(
+    selection_input: SelectionInputIdentity,
+    handoff: Any,
+) -> None:
+    routed = _require_gamma_routed_handoff(handoff)
+    if not isinstance(selection_input, SelectionInputIdentity):
+        raise SelectionBindingError(
+            "certified Gamma selection requires a SelectionInputIdentity"
+        )
+    expected = {
+        "selection_mode": "auto",
+        "ordered_q_hash": gamma_routed_ordered_q_identity_hash(routed),
+        "source_hamiltonian_hash": routed.source_hamiltonian_hash,
+        "action_package_hash": routed.raw_action_package_hash,
+        "row_layout_hash": routed.layout.layout_hash,
+    }
+    mismatched = tuple(
+        field
+        for field, value in expected.items()
+        if getattr(selection_input, field) != value
+    )
+    if mismatched:
+        raise SelectionBindingError(
+            "selection input does not match routed Gamma handoff fields: "
+            + ", ".join(mismatched)
+        )
+
+
+def build_certified_gamma_selection_identity(
+    *,
+    selection_input: SelectionInputIdentity,
+    handoff: Any,
+    metrics: CandidateMetrics,
+) -> SelectionIdentity:
+    """Build certification evidence only from a validated routed handoff."""
+
+    routed = _require_gamma_routed_handoff(handoff)
+    _verify_gamma_selection_input(selection_input, routed)
+    values = _gamma_handoff_identity_values(routed)
+    try:
+        normalized_metrics = _normalized_metrics(metrics)
+    except (TypeError, ValueError) as exc:
+        raise SelectionBindingError("selection metrics are invalid") from exc
+    if (
+        normalized_metrics.candidate_id != values["candidate_id"]
+        or normalized_metrics.dimension != values["candidate_dimension"]
+    ):
+        raise SelectionBindingError(
+            "selection metrics do not match the routed Gamma candidate"
+        )
+    resolved = ResolvedCandidateIdentity.create(
+        selection_mode="auto",
+        **values,
+    )
+    metric_evidence = SelectionMetricEvidence.create(
+        candidate_id=normalized_metrics.candidate_id,
+        frozen_target_window_hash=selection_input.frozen_target_window_hash,
+        validation_k_indices_hash=selection_input.validation_k_indices_hash,
+        basis_handoff_hash=str(values["basis_handoff_hash"]),
+        metrics=normalized_metrics,
+    )
+    evidence = CertificationEvidence.create(
+        metric_evidence=metric_evidence,
+        symmetry_certificate_hash=routed.candidate_certificate_hash,
+        symmetry_input_identity_hash=routed.candidate_input_identity_hash,
+    )
+    return SelectionIdentity.create(
+        selection_input=selection_input,
+        selection_policy_hash=selection_input.selection_policy_hash,
+        resolved_candidate=resolved,
+        certification_evidence=evidence,
+    )
+
+
+def verify_certified_gamma_selection_identity(
+    identity: SelectionIdentity,
+    handoff: Any,
+) -> SelectionIdentity:
+    """Rebuild and compare every selection identity field to the handoff."""
+
+    if not isinstance(identity, SelectionIdentity):
+        raise SelectionBindingError("selection identity has the wrong type")
+    evidence = identity.certification_evidence
+    if evidence is None:
+        raise SelectionBindingError(
+            "certified Gamma selection requires certification evidence"
+        )
+    expected = build_certified_gamma_selection_identity(
+        selection_input=identity.selection_input,
+        handoff=handoff,
+        metrics=evidence.metric_evidence.metrics,
+    )
+    if identity != expected:
+        raise SelectionBindingError(
+            "selection identity does not match the routed Gamma handoff"
+        )
+    return identity
+
+
+def verify_certified_gamma_selection_artifact(
+    artifact: "SelectionArtifact",
+    handoff: Any,
+) -> "SelectionArtifact":
+    if (
+        not isinstance(artifact, SelectionArtifact)
+        or artifact.certification_status is not CertificationStatus.CERTIFIED
+        or artifact.identity is None
+    ):
+        raise SelectionBindingError("selection artifact is not CERTIFIED")
+    verify_certified_gamma_selection_identity(artifact.identity, handoff)
+    return artifact
+
+
 @dataclass(frozen=True)
 class SelectionArtifact:
     schema_version: str
@@ -1020,11 +1217,23 @@ class SelectionArtifact:
         transaction_id: str,
         identity: SelectionIdentity,
         payload_manifest_hash: str,
+        projection_handoff: Any | None = None,
     ) -> "SelectionArtifact":
         if not isinstance(identity, SelectionIdentity):
             raise TypeError("identity must be SelectionIdentity")
         if identity.certification_evidence is None:
             raise ValueError("CERTIFIED selection artifact requires certification evidence")
+        from .projection_handoff import GAMMA_ROUTED_BASIS_KIND
+
+        if (
+            identity.resolved_candidate.projection_basis_kind
+            == GAMMA_ROUTED_BASIS_KIND
+        ):
+            if projection_handoff is None:
+                raise SelectionBindingError(
+                    "CERTIFIED routed Gamma selection requires its projection handoff"
+                )
+            verify_certified_gamma_selection_identity(identity, projection_handoff)
         return cls._create(
             schema_version=SELECTION_ARTIFACT_SCHEMA_VERSION,
             transaction_id=transaction_id,
@@ -1648,6 +1857,7 @@ __all__ = [
     "SELECTION_ARTIFACT_SCHEMA_VERSION",
     "SelectionArtifact",
     "SelectionArtifactStore",
+    "SelectionBindingError",
     "SelectionFailureCode",
     "SelectionIdentity",
     "SelectionInputIdentity",
@@ -1655,7 +1865,11 @@ __all__ = [
     "SelectionTransactionError",
     "build_selection_input_identity_hash",
     "build_selection_policy_hash",
+    "build_certified_gamma_selection_identity",
+    "gamma_routed_ordered_q_identity_hash",
     "hash_frozen_target_window",
     "hash_validation_k_indices",
     "load_selection_artifact",
+    "verify_certified_gamma_selection_artifact",
+    "verify_certified_gamma_selection_identity",
 ]
