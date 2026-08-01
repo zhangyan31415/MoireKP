@@ -195,6 +195,33 @@ def test_symmetry_mode_dispatches_to_symmetry_runner_without_band_calculation(mo
     assert not any(event == "kpath" or (isinstance(event, tuple) and event[0] == "kpath") for event in events)
 
 
+def test_public_calculation_uses_shared_structure_loader(monkeypatch, tmp_path):
+    events = []
+    config = _make_config(tmp_path, mode="symmetry", symmetry_enable=False)
+    config.system = object()
+    args = _patch_main_dependencies(monkeypatch, config, events)
+
+    class SharedStructure:
+        sorted_species_coordinates = []
+        Tmat = np.eye(3)
+        reciprocal_Tmat = np.eye(3)
+        spin = False
+
+        def display_properties(self, *args, **kwargs):
+            return None
+
+    def fake_shared_loader(loaded_config, **kwargs):
+        assert loaded_config is config
+        events.append("structure.shared")
+        return SharedStructure()
+
+    monkeypatch.setattr(main_mod, "load_structure_from_config", fake_shared_loader, raising=False)
+
+    main_mod.run_calc(args)
+
+    assert "structure.shared" in events
+
+
 def test_normal_band_mode_still_uses_existing_band_calculator(monkeypatch, tmp_path):
     events = []
     config = _make_config(tmp_path, mode="band", symmetry_enable=False)

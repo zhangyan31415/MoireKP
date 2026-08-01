@@ -10,7 +10,7 @@ from typing import Optional, Tuple
 
 from .config import Config
 from .workflows.band import BandStructureCalculator
-from .io.structure import OpenMXFile, StructureProcessorSpglib
+from .io.structure import OpenMXFile, StructureProcessorSpglib, load_structure_from_config
 from .io.kpath import KPathGenerator
 from .io.hr import HrSparseHandler
 from .reporting import TapwReporter
@@ -408,11 +408,7 @@ def run_calc(args):
     reporter.fields(config_fields)
     try:
         # Initialize structure
-        structure = OpenMXFile(
-            file_path=str(Path(config.paths.input_file)),
-            twist_index=config.twist.twist_index_m,
-            spin=config.twist.spin
-        )
+        structure = load_structure_from_config(config, legacy_factory=OpenMXFile)
         try:
             structure.display_properties(reporter=reporter)
         except TypeError as exc:

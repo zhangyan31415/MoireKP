@@ -40,7 +40,7 @@ from tqdm import tqdm
 # 导入TAPW模块
 from .artifacts import array_output_filename, gvec_output_filename
 from .config import ComputeConfig, Config
-from .io.structure import OpenMXFile, StructureProcessorSpglib
+from .io.structure import OpenMXFile, StructureProcessorSpglib, load_structure_from_config
 
 
 @dataclass
@@ -275,11 +275,9 @@ class OrbitalAnalyzer:
         if self.config.verbose:
             print(f"找到结构文件: {input_file}")
         
-        # 初始化OpenMXFile
-        openmx_structure = OpenMXFile(
-            file_path=input_file,
-            twist_index=tapw_config.twist.twist_index_m,
-            spin=tapw_config.twist.spin
+        openmx_structure = load_structure_from_config(
+            tapw_config,
+            legacy_factory=OpenMXFile,
         )
 
         # 与主流程保持一致：使用 spglib 版本的结构处理器（type_structure 已废弃）

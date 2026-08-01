@@ -301,6 +301,27 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
     )
 
 
+def load_structure_from_config(config, *, legacy_factory=None):
+    """Load canonical and legacy structures through one explicit workflow boundary."""
+    if getattr(config, "system", None) is not None:
+        resolved = resolve_structure_input(config)
+        config.resolved_structure_input = resolved
+        structure = resolved.structure
+    else:
+        factory = OpenMXFile if legacy_factory is None else legacy_factory
+        bravais = str(getattr(config.twist, "bravais", "hex"))
+        structure = factory(
+            file_path=config.paths.input_file,
+            twist_index=config.twist.twist_index_m,
+            spin=config.twist.spin,
+            bravais=bravais,
+        )
+    resolved_bravais = str(getattr(structure, "bravais", getattr(config.twist, "bravais", "hex")))
+    config.twist.bravais = resolved_bravais
+    config.compute.bravais = resolved_bravais
+    return structure
+
+
 class OpenMXFile:
     def __init__(self, file_path, twist_index, spin, bravais=None):
         self.file_path = file_path
@@ -351,7 +372,7 @@ class OpenMXFile:
 
 
     def set_bravais(self, bravais: str):
-        """Public setter for bravais lattice type ("hex" or "square")."""
+        """Public setter for bravais lattice type (``hex``, ``square``, or ``rect``)."""
         if bravais is None:
             return
         bravais_norm = str(bravais).strip().lower()
@@ -359,8 +380,10 @@ class OpenMXFile:
             self.bravais = "hex"
         elif bravais_norm in {"square", "sq"}:
             self.bravais = "square"
+        elif bravais_norm in {"rect", "rectangular"}:
+            self.bravais = "rect"
         else:
-            raise ValueError(f"Unsupported bravais='{bravais}'. Expected 'hex' or 'square'.")
+            raise ValueError(f"Unsupported bravais='{bravais}'. Expected 'hex', 'square', or 'rect'.")
         self._bravais_forced = True
 
     def _auto_detect_bravais_from_Tmat(self):
@@ -394,7 +417,7 @@ class OpenMXFile:
         if m < 1:
             raise ValueError(f"twist_index must be >= 1, got {self.twist_index}")
 
-        if getattr(self, "bravais", "hex") == "square":
+        if getattr(self, "bravais", "hex") in {"square", "rect"}:
             # (m, m+1) family for square moiré:
             #   theta = 2 * arctan( 1 / (2*m + 1) )   [radians]
             theta_rad = 2.0 * np.arctan(1.0 / (2.0 * m + 1.0))
@@ -413,7 +436,7 @@ class OpenMXFile:
         计算单位晶胞的数量。
         """
         m = int(self.twist_index)
-        if getattr(self, "bravais", "hex") == "square":
+        if getattr(self, "bravais", "hex") in {"square", "rect"}:
             # Square coincidence lattice index for tan(theta/2)=1/(2m+1): Σ = (2m+1)^2 + 1
             self.num_unit_cell = int((2 * m + 1) ** 2 + 1)
         else:
@@ -698,7 +721,12 @@ class LayeredLatticeAnalyzer:
         self.layer_nearest_vectors = {}  # {layer: [nearest_vectors]}
         self.layer_all_basis_vectors = {}  # {layer: [a1,a2,a3,...]}
         bravais_norm = str(bravais).strip().lower()
-        self.bravais = "square" if bravais_norm in {"square", "sq"} else "hex"
+        if bravais_norm in {"square", "sq"}:
+            self.bravais = "square"
+        elif bravais_norm in {"rect", "rectangular"}:
+            self.bravais = "rect"
+        else:
+            self.bravais = "hex"
         
 
     def process(self,TAPW=True):

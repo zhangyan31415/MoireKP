@@ -164,6 +164,66 @@ def test_canonical_system_rejects_unknown_top_level_sections(tmp_path):
         Config.from_yaml(str(config_path))
 
 
+def test_canonical_system_save_yaml_round_trip_remains_release_facing(tmp_path):
+    source_dir = tmp_path / "source"
+    saved_dir = tmp_path / "saved"
+    source_dir.mkdir()
+    saved_dir.mkdir()
+    config = Config.from_yaml(str(_write_canonical_system_config(source_dir)))
+    saved_path = saved_dir / "config.yaml"
+
+    config.save_yaml(str(saved_path))
+    payload = yaml.safe_load(saved_path.read_text(encoding="utf-8"))
+    reloaded = Config.from_yaml(str(saved_path))
+
+    assert "system" in payload
+    assert not ({"case", "twist", "paths", "compute", "output_layout"} & set(payload))
+    assert not Path(payload["system"]["structure"]).is_absolute()
+    assert reloaded.system is not None
+    assert reloaded.system.structure == config.system.structure
+    assert reloaded.system.hamiltonian == config.system.hamiltonian
+    assert reloaded.system.overlap == config.system.overlap
+    assert reloaded.system.orbitals == config.system.orbitals
+    assert reloaded.bands == config.bands
+
+
+def test_legacy_release_save_yaml_round_trip_does_not_emit_removed_sections(tmp_path):
+    source_dir = tmp_path / "source"
+    saved_dir = tmp_path / "saved"
+    source_dir.mkdir()
+    saved_dir.mkdir()
+    config = Config.from_yaml(str(_write_release_path_config(source_dir)))
+    saved_path = saved_dir / "config.yaml"
+
+    config.save_yaml(str(saved_path))
+    payload = yaml.safe_load(saved_path.read_text(encoding="utf-8"))
+    reloaded = Config.from_yaml(str(saved_path))
+
+    assert "compute" not in payload
+    assert "output_layout" not in payload
+    assert reloaded.twist.twist_index_m == config.twist.twist_index_m
+    assert reloaded.paths.H_file == config.paths.H_file
+    assert reloaded.paths.S_file == config.paths.S_file
+    assert reloaded.paths.input_file == config.paths.input_file
+
+
+def test_packaged_tapw_template_uses_canonical_system_contract():
+    root = Path(__file__).resolve().parents[2]
+    payload = yaml.safe_load((root / "tapw/tapw/templates/config.yaml").read_text(encoding="utf-8"))
+
+    assert set(payload["system"]) == {
+        "output",
+        "structure",
+        "hamiltonian",
+        "overlap",
+        "orbitals",
+        "twist_index",
+        "layers",
+        "spin",
+    }
+    assert not ({"case", "twist", "paths"} & set(payload))
+
+
 def test_top_level_compute_config_is_rejected_for_release_only_configs(tmp_path):
     config_dir = tmp_path / "case"
     config_dir.mkdir()

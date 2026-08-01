@@ -1,19 +1,14 @@
 # TAPW single-case configuration
 
-case:
-  name: K1_q06
-  output_root: outputs
-
-twist:
-  bravais: hex
-  twist_index_m: 3
-  twist_layer: [1, 1]
+system:
+  output: outputs
+  structure: POSCAR
+  hamiltonian: H.npz
+  overlap: S.npz
+  orbitals: {Mo: s3p2d1, Te: s3p2d2}
+  twist_index: 3
+  layers: [1, 1]
   spin: true
-
-paths:
-  H_file: H.dat
-  S_file: S.dat
-  input_file: openmx.dat
 
 bands:
   valley: K1

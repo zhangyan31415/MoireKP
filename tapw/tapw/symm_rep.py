@@ -19,7 +19,7 @@ from .artifacts import canonical_profile_name, canonical_qshell_name
 from .config import Config
 from .identity import IDENTITY_SCHEMA, require_identity_fields, require_matching_identity
 from .io.hr import HrSparseHandler
-from .io.structure import OpenMXFile, StructureProcessorSpglib
+from .io.structure import OpenMXFile, StructureProcessorSpglib, load_structure_from_config
 from .reporting import TapwReporter
 from .workflows.band import BandStructureCalculator, _maybe_pin_current_worker, _set_thread_limits
 from .workflows.symmetry import RAW_H_ARTIFACT_SCHEMA_VERSION, _physics_config_hash, _source_input_hash
@@ -210,11 +210,7 @@ def _load_hr(path: str, processor: StructureProcessorSpglib, *, tapw: bool):
 def _build_point_calculator(config: Config) -> BandStructureCalculator:
     logger = logging.getLogger(__name__ + ".config")
     reporter = TapwReporter(logger)
-    structure = OpenMXFile(
-        file_path=str(Path(config.paths.input_file)),
-        twist_index=config.twist.twist_index_m,
-        spin=config.twist.spin,
-    )
+    structure = load_structure_from_config(config, legacy_factory=OpenMXFile)
     processor = StructureProcessorSpglib(
         input_data=structure.sorted_species_coordinates,
         num_layers=config.twist.num_layers,

@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Any, List, Dict, Optional, Sequence, Tuple, Union
 import yaml
 from pathlib import Path
+import os
 
 from ..artifacts import canonical_qshell_name
 
@@ -667,6 +668,7 @@ class Config:
     kpath: Optional[Dict[str, Any]] = None
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
     system: Optional[SystemConfig] = None
+    field_config: Dict[str, Any] = field(default_factory=dict)
 
     def apply_workflow_section(self, mode: Optional[str] = None) -> None:
         """Apply release-facing workflow section fields to the internal runtime config."""
@@ -863,6 +865,7 @@ class Config:
             kpath=kpath_config,
             cluster=cluster_config,
             system=system_config,
+            field_config=field_raw,
         )
         # Propagate twist bravais to compute for downstream logic
         config_obj.compute.bravais = config_obj.twist.bravais
@@ -873,20 +876,55 @@ class Config:
         return config_obj
 
     def save_yaml(self, yaml_path: str):
-        """Save configuration to YAML file"""
-        config_dict = {
-            'twist': self.twist.__dict__,
-            'paths': {k: v for k, v in self.paths.__dict__.items() if not k.startswith('_')},
-            'compute': {k: v for k, v in self.compute.__dict__.items() if k not in {'valley', 'topology'}},
-            'symmetry_analysis': self.symmetry_analysis.__dict__,
-            # Don't save cluster config as it uses fixed values
-        }
-        if self.output_layout is not None:
-            config_dict['output_layout'] = self.output_layout.__dict__
-        if getattr(self, "topology", None):
-            config_dict["topology"] = self.topology
-        with open(yaml_path, 'w') as f:
-            yaml.dump(config_dict, f, default_flow_style=False)
+        """Save a release-facing YAML that can be loaded again without compatibility fields."""
+        destination = Path(yaml_path).expanduser()
+        if not destination.is_absolute():
+            destination = Path.cwd() / destination
+        destination_dir = destination.parent
+
+        def portable(path_value: str) -> str:
+            return os.path.relpath(str(Path(path_value)), start=str(destination_dir))
+
+        config_dict: dict[str, Any] = {}
+        if self.system is not None:
+            config_dict["system"] = {
+                "output": portable(self.system.output),
+                "structure": portable(self.system.structure),
+                "hamiltonian": portable(self.system.hamiltonian),
+                "overlap": portable(self.system.overlap),
+                "orbitals": dict(self.system.orbitals),
+                "twist_index": int(self.system.twist_index),
+                "layers": list(self.system.layers),
+                "spin": bool(self.system.spin),
+            }
+        else:
+            case = dict(self.case or {})
+            case["output_root"] = portable(self.paths.output_dir)
+            config_dict["case"] = case
+            config_dict["twist"] = {
+                "bravais": self.twist.bravais,
+                "twist_index_m": int(self.twist.twist_index_m),
+                "twist_layer": list(self.twist.twist_layer),
+                "spin": bool(self.twist.spin),
+            }
+            paths = {
+                "H_file": portable(self.paths.H_file),
+                "input_file": portable(self.paths.input_file),
+            }
+            if self.paths.S_file:
+                paths["S_file"] = portable(self.paths.S_file)
+            if self.paths.kpath_in:
+                paths["kpath_in"] = portable(self.paths.kpath_in)
+            config_dict["paths"] = paths
+        for name in ("bands", "symmetry", "topology"):
+            section = dict(getattr(self, name, {}) or {})
+            if section:
+                config_dict[name] = section
+        if self.field_config:
+            config_dict["field"] = dict(self.field_config)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("w", encoding="utf-8") as handle:
+            yaml.safe_dump(config_dict, handle, sort_keys=False)
 
     def update_ng(self):
         """Reject legacy automatic n_g inference in release configs."""

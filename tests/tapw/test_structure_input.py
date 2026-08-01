@@ -8,7 +8,12 @@ from ase import Atoms
 from ase.io import write
 
 from tapw.config import Config
-from tapw.io.structure import OpenMXFile, infer_2d_bravais, resolve_structure_input
+from tapw.io.structure import (
+    OpenMXFile,
+    infer_2d_bravais,
+    load_structure_from_config,
+    resolve_structure_input,
+)
 
 
 def _write_sparse_source(path: Path, dimension: int) -> None:
@@ -134,6 +139,17 @@ def test_structure_identity_changes_with_site_order_or_orbital_mapping(tmp_path)
     assert first.source_identity != changed_orbitals.source_identity
 
 
+def test_raw_h_input_identity_includes_canonical_orbitals_and_resolved_structure(tmp_path):
+    from tapw.workflows.symmetry import _source_input_hash
+
+    config_path = _write_system_case(tmp_path)
+    first = Config.from_yaml(str(config_path))
+    second = Config.from_yaml(str(config_path))
+    second.system.orbitals = {"Mo": "p1", "Te": "s1"}
+
+    assert _source_input_hash(first) != _source_input_hash(second)
+
+
 def test_infer_2d_bravais_is_pure_and_fail_closed(monkeypatch):
     monkeypatch.setenv("TAPW_BRAVAIS", "square")
     hex_cell = np.array([[3.0, 0.0, 0.0], [1.5, 2.598076211, 0.0], [0.0, 0.0, 20.0]])
@@ -147,7 +163,8 @@ def test_infer_2d_bravais_is_pure_and_fail_closed(monkeypatch):
         infer_2d_bravais(np.array([[3.0, 0.0, 0.0], [0.7, 3.4, 0.0], [0.0, 0.0, 20.0]]))
 
 
-def test_legacy_openmx_structure_does_not_read_or_write_global_bravais(tmp_path, monkeypatch):
+@pytest.mark.parametrize("bravais", ["hex", "rect"])
+def test_legacy_openmx_structure_does_not_read_or_write_global_bravais(tmp_path, monkeypatch, bravais):
     monkeypatch.delenv("TAPW_BRAVAIS", raising=False)
     source = tmp_path / "openmx.dat"
     source.write_text(
@@ -168,7 +185,80 @@ Atoms.UnitVectors>
         encoding="utf-8",
     )
 
-    structure = OpenMXFile(source, twist_index=1, spin=False, bravais="hex")
+    structure = OpenMXFile(source, twist_index=1, spin=False, bravais=bravais)
 
-    assert structure.bravais == "hex"
+    assert structure.bravais == bravais
     assert "TAPW_BRAVAIS" not in os.environ
+
+
+def test_shared_structure_loader_records_canonical_resolution_on_config(tmp_path):
+    config = Config.from_yaml(str(_write_system_case(tmp_path)))
+
+    structure = load_structure_from_config(config)
+
+    assert structure is config.resolved_structure_input.structure
+    assert config.resolved_structure_input.source_identity
+    assert config.twist.bravais == "hex"
+    assert config.compute.bravais == "hex"
+
+
+def test_canonical_save_reload_preserves_resolved_source_identity(tmp_path):
+    source_dir = tmp_path / "source"
+    saved_dir = tmp_path / "saved"
+    source_dir.mkdir()
+    saved_dir.mkdir()
+    config = Config.from_yaml(str(_write_system_case(source_dir)))
+    original = resolve_structure_input(config)
+    saved_path = saved_dir / "config.yaml"
+
+    config.save_yaml(str(saved_path))
+    reloaded = resolve_structure_input(Config.from_yaml(str(saved_path)))
+
+    assert reloaded.source_identity == original.source_identity
+
+
+@pytest.mark.parametrize("bravais", ["square", "rect"])
+def test_shared_structure_loader_passes_explicit_bravais_to_legacy_factory(tmp_path, bravais):
+    config_path = tmp_path / "config.yaml"
+    for name in ("openmx.dat", "H.dat", "S.dat"):
+        (tmp_path / name).write_text("placeholder\n", encoding="utf-8")
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "case": {"output_root": "outputs"},
+                "twist": {
+                    "bravais": bravais,
+                    "twist_index_m": 2,
+                    "twist_layer": [1, 1],
+                    "spin": False,
+                },
+                "paths": {
+                    "input_file": "openmx.dat",
+                    "H_file": "H.dat",
+                    "S_file": "S.dat",
+                },
+                "symmetry": {"valley": "Gamma", "q_shell": 1},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    config = Config.from_yaml(str(config_path))
+    calls = []
+
+    class FakeLegacyStructure:
+        def __init__(self, **kwargs):
+            calls.append(kwargs)
+            self.bravais = kwargs["bravais"]
+
+    structure = load_structure_from_config(config, legacy_factory=FakeLegacyStructure)
+
+    assert structure.bravais == bravais
+    assert calls == [
+        {
+            "file_path": config.paths.input_file,
+            "twist_index": 2,
+            "spin": False,
+            "bravais": bravais,
+        }
+    ]
