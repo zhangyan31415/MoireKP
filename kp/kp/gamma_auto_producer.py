@@ -892,16 +892,30 @@ def _evaluate_candidate(
     target_vectors: tuple[np.ndarray, ...],
     source_hamiltonian_hash: str,
 ) -> GammaCandidateEvaluation:
+    actions_by_name = {action.name: action for action in certified_actions}
+    operation_names = {operation.name for operation in inputs.operations}
+    if set(actions_by_name) != operation_names:
+        raise ValueError(
+            "certified Gamma actions do not match the routed operation package"
+        )
+    little_group_actions_by_k = {
+        k_index: tuple(
+            actions_by_name[operation.name]
+            for operation in inputs.operations
+            if (k_index, k_index) in operation.pairs
+        )
+        for k_index in inputs.k_indices
+    }
     closures = tuple(
         close_gamma_projector_clusters(
             local_values[position],
             local_vectors[position],
             layout=layout,
             seed_band_indices=tuple(seed for _ in range(layout.q_count)),
-            actions=certified_actions,
+            actions=little_group_actions_by_k[k_index],
             thresholds=config.routing_thresholds,
         )
-        for position in range(len(inputs.k_indices))
+        for position, k_index in enumerate(inputs.k_indices)
     )
     joint = closures[0].band_indices_by_q[0]
     if any(
@@ -933,6 +947,7 @@ def _evaluate_candidate(
     routed_by_position: list[GammaRoutedFrames] = []
     routing_hashes: list[str] = []
     for position, k_index in enumerate(inputs.k_indices):
+        little_group_actions = little_group_actions_by_k[k_index]
         routed = build_gamma_routed_frames(
             local_values[position],
             local_vectors[position],
@@ -945,7 +960,7 @@ def _evaluate_candidate(
         residuals = certify_routed_covariance(
             routed.routed_projectors_by_q,
             layout=layout,
-            actions=certified_actions,
+            actions=little_group_actions,
             thresholds=config.routing_thresholds,
         )
         routed_by_position.append(routed)
@@ -954,7 +969,7 @@ def _evaluate_candidate(
                 k_index=k_index,
                 routed=routed,
                 residuals=residuals,
-                actions=certified_actions,
+                actions=little_group_actions,
                 layout=layout,
                 thresholds=config.routing_thresholds,
             )

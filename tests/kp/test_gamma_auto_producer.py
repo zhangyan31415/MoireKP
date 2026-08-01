@@ -224,6 +224,69 @@ def test_real_gamma_auto_producer_builds_all_k_handoff_and_certified_identity() 
         )
 
 
+def test_gamma_auto_same_k_closure_uses_only_operations_with_self_k_pairs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs = _producer_inputs()
+    h0 = np.asarray(inputs.source_hamiltonians[0], dtype=np.complex128)
+    cross_k_inputs = GammaAutomaticProducerInputs(
+        **{
+            **inputs.__dict__,
+            "source_hamiltonians": np.stack((h0, h0), axis=0),
+            "operations": (
+                GammaRawOperationSpec(
+                    name="E",
+                    full_action=np.eye(4, dtype=np.complex128),
+                    antiunitary=False,
+                    q_permutations=((0,), (0,)),
+                    sector_map=(0, 1),
+                    pairs=((1, 0), (0, 1)),
+                ),
+            ),
+        }
+    )
+    observed_closure: list[tuple[str, ...]] = []
+    observed_covariance: list[tuple[str, ...]] = []
+    observed_hash: list[tuple[str, ...]] = []
+    original_closure = producer_mod.close_gamma_projector_clusters
+    original_covariance = producer_mod.certify_routed_covariance
+    original_hash = producer_mod._routing_certificate_hash
+
+    def recording_closure(*args, actions, **kwargs):
+        observed_closure.append(tuple(action.name for action in actions))
+        return original_closure(*args, actions=actions, **kwargs)
+
+    def recording_covariance(*args, actions, **kwargs):
+        observed_covariance.append(tuple(action.name for action in actions))
+        return original_covariance(*args, actions=actions, **kwargs)
+
+    def recording_hash(*args, actions, **kwargs):
+        observed_hash.append(tuple(action.name for action in actions))
+        return original_hash(*args, actions=actions, **kwargs)
+
+    monkeypatch.setattr(
+        producer_mod,
+        "close_gamma_projector_clusters",
+        recording_closure,
+    )
+    monkeypatch.setattr(producer_mod, "certify_routed_covariance", recording_covariance)
+    monkeypatch.setattr(producer_mod, "_routing_certificate_hash", recording_hash)
+
+    produce_gamma_automatic_selection(
+        cross_k_inputs,
+        GammaAutomaticSelectionConfig.from_normalized_config(_config_payload()),
+    )
+    produce_gamma_automatic_selection(
+        _producer_inputs(),
+        GammaAutomaticSelectionConfig.from_normalized_config(_config_payload()),
+    )
+
+    expected = [(), (), ("E",), ("E",)]
+    assert observed_closure == expected
+    assert observed_covariance == expected
+    assert observed_hash == expected
+
+
 def test_gamma_auto_preselection_identity_binds_factorized_route_metadata() -> None:
     preparation = prepare_gamma_automatic_selection(
         _producer_inputs(),
