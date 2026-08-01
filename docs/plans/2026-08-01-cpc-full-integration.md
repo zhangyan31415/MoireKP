@@ -849,23 +849,55 @@ class CertificationStatus(str, Enum):
     UNVERIFIED_OVERRIDE = "UNVERIFIED_OVERRIDE"
 
 
+class SelectionFailureCode(str, Enum):
+    NO_CANDIDATES = "NO_CANDIDATES"
+    DUPLICATE_CANDIDATE_ID = "DUPLICATE_CANDIDATE_ID"
+    STRUCTURAL_REJECTION = "STRUCTURAL_REJECTION"
+    NONFINITE_METRIC = "NONFINITE_METRIC"
+    HARD_METRIC_FAILED = "HARD_METRIC_FAILED"
+    CANDIDATE_CERTIFICATE_FAILED = "CANDIDATE_CERTIFICATE_FAILED"
+    IDENTITY_MISMATCH = "IDENTITY_MISMATCH"
+    PERSISTENCE_FAILURE = "PERSISTENCE_FAILURE"
+    TRANSACTION_SUPERSEDED = "TRANSACTION_SUPERSEDED"
+    EXPLICIT_UNVERIFIED = "EXPLICIT_UNVERIFIED"
+
+
 @dataclass(frozen=True)
-class SelectionIdentity:
+class ResolvedCandidateIdentity:
     selection_mode: str
-    frozen_target_window_hash: str
-    ordered_q_identity_hash: str
-    row_layout_hash: str
-    source_hamiltonian_hash: str
-    action_package_hash: str
     candidate_id: str
     candidate_dimension: int
     projection_basis_kind: str
     basis_handoff_hash: str
     authoritative_heff_hash: str
     heff_k_indices_hash: str
+    resolved_candidate_hash: str
+
+
+@dataclass(frozen=True)
+class SelectionMetricEvidence:
+    candidate_id: str
+    frozen_target_window_hash: str
+    validation_k_indices_hash: str
+    basis_handoff_hash: str
+    metrics: CandidateMetrics
     metrics_hash: str
+
+
+@dataclass(frozen=True)
+class CertificationEvidence:
+    metric_evidence: SelectionMetricEvidence
     symmetry_certificate_hash: str
     symmetry_input_identity_hash: str
+    evidence_hash: str
+
+
+@dataclass(frozen=True)
+class SelectionIdentity:
+    selection_input_identity_hash: str
+    selection_policy_hash: str
+    resolved_candidate: ResolvedCandidateIdentity
+    certification_evidence: CertificationEvidence | None
     selection_identity_hash: str
 
 
@@ -877,8 +909,9 @@ class SelectionArtifact:
     identity: SelectionIdentity | None
     metrics: CandidateMetrics | None
     certification_status: CertificationStatus
-    status_reason: str
-    failure_codes: tuple[str, ...]
+    status_reason: SelectionFailureCode | None
+    failure_codes: tuple[SelectionFailureCode, ...]
+    diagnostic: str | None
     artifact_hash: str
 ```
 
@@ -890,11 +923,28 @@ their source identity. The Gamma `basis_handoff_hash` covers its full Task 8
 payload, including routed frames, joint bands, layout, group ranks/offsets,
 thresholds, authoritative Heff/k mapping, and closure/candidate certificates.
 
+`selection_policy_hash` binds all hard thresholds, candidate-envelope config,
+candidate generator/schema version, metric schema, and the versioned
+lexicographic ordering rule. `selection_input_identity_hash` is computed from
+selection mode, complete frozen target, ordered Q, source-H, raw/exact action
+package, row layout, and `selection_policy_hash`, before a candidate is chosen.
+
 `selection_identity_hash` is deterministic and command/output independent.
 `artifact_hash` additionally binds schema, transaction, status, status reason,
-failure codes, and the optional final identity. A FAILED/no-candidate artifact
-has `identity=None`; it must not invent a candidate ID. `PASS` is only a display
-word for `CERTIFIED`, never a separate persisted status.
+failure codes, diagnostic text, and the optional final identity. Each hash is
+computed from the canonical payload with its own hash field omitted; hashes are
+never self-referential. A FAILED/no-candidate artifact has `identity=None`; it
+must not invent a candidate ID. An `UNVERIFIED_OVERRIDE` keeps a complete
+`ResolvedCandidateIdentity` (including its actual basis/Heff/k map) but has
+`certification_evidence=None`. `PASS` is only a display word for `CERTIFIED`,
+never a separate persisted status.
+
+`SelectionMetricEvidence.metrics_hash` covers candidate ID, complete frozen
+target hash, validation-k hash, basis/handoff hash, and every typed finite
+metric; compute it with its own hash field omitted. `CertificationEvidence`
+then binds that metric evidence to both candidate-certificate hashes. This
+replaces reliance on the older freely constructible scalar-only
+`CandidateMetrics` as an identity boundary.
 
 **Step 3: Implement fail-closed selection**
 
@@ -915,8 +965,10 @@ cross-check every hash after persistence.
 
 **Step 4: Implement strict report serialization and atomic replace**
 
-Serialize missing values as JSON null plus a typed reason. Use a generation
-transaction:
+Serialize missing values as JSON null plus a `SelectionFailureCode` and separate
+human diagnostic. Use a generation transaction while holding an exclusive
+output-directory transaction lock from before the first marker write through
+the final marker write:
 
 1. atomically publish a new transaction's `PENDING` marker first, invalidating
    any older certified generation;
@@ -929,7 +981,10 @@ transaction:
 Consumers accept payloads only when their generation/transaction and hashes
 match the current `CERTIFIED` marker. A single atomic JSON write without this
 commit-last protocol is insufficient because projection output spans multiple
-files.
+files. Before final publication, verify that the current marker still contains
+the lock holder's transaction ID. The lock is released by process exit, so a
+crash cannot permanently block later work. Add an A/B interleaving test proving
+that an older transaction cannot overwrite a newer current generation.
 
 **Step 5: Run tests and commit**
 
@@ -949,11 +1004,15 @@ orchestration out of these pure selector/artifact commits.
 **Worktree:** `.worktrees/cpc-full-integration`
 
 **Files:**
+- Create: `kp/kp/selection_orchestration.py`
 - Modify: `kp/kp/cli.py`
 - Modify: `kp/kp/config/case.py` only if typed selection config is required
+- Modify: `kp/kp/model/pipeline.py`
 - Modify: `tests/kp/test_project_auto_gauge_cli.py`
 - Modify: `tests/kp/test_canonical_output_layout.py`
 - Modify: `tests/kp/test_kp_artifact_identity.py`
+- Modify: `tests/kp/test_symm_projection.py` for integration assertions only
+- Modify: `tests/kp/test_configured_model.py` for the pre-output model gate
 
 **Step 1: Add failing CLI orchestration tests**
 
@@ -989,8 +1048,10 @@ path: load the routed frame tensor with `allow_pickle=False`, verify ordered k
 coverage/layout/group/frame hashes, assemble `U_low` from those exact persisted
 frames, and load the authoritative persisted Heff with its exact k mapping and
 hash. It must not call legacy anchor/state resolution or re-downfold on failure.
-Legacy explicit inputs remain diagnostic and cannot create a certified symmetry
-package.
+Legacy explicit inputs remain diagnostic by default. They can create a
+certified symmetry package only after completing the exact same hard metrics,
+candidate certificate, identity checks, and certified transaction; merely
+supplying explicit indices never certifies them.
 
 Before creating or cleaning a model output directory, `kp model` requires the
 projection marker to be `CERTIFIED` and verifies the same
@@ -1011,7 +1072,9 @@ PYTHONPATH="$PWD/kp:$PWD/tapw" /data/home/zy/mambaforge/envs/moirekp/bin/python 
   tests/kp/test_selection_artifact.py \
   tests/kp/test_project_auto_gauge_cli.py \
   tests/kp/test_canonical_output_layout.py \
-  tests/kp/test_kp_artifact_identity.py
+  tests/kp/test_kp_artifact_identity.py \
+  tests/kp/test_symm_projection.py \
+  tests/kp/test_configured_model.py
 ```
 
 Expected: PASS.
@@ -1019,11 +1082,19 @@ Expected: PASS.
 **Step 5: Commit**
 
 ```bash
-git add kp/kp/cli.py kp/kp/config/case.py tests/kp
+git add kp/kp/selection_orchestration.py kp/kp/cli.py kp/kp/config/case.py \
+  tests/kp/test_project_auto_gauge_cli.py \
+  tests/kp/test_canonical_output_layout.py \
+  tests/kp/test_kp_artifact_identity.py
 git commit -m "feat(kp): share selection across inspect and project"
-git commit -m "fix(kp): consume certified routed projection in kp symm"
+git add kp/kp/model/pipeline.py tests/kp/test_configured_model.py \
+  tests/kp/test_kp_artifact_identity.py tests/kp/test_symm_projection.py
 git commit -m "fix(kp): gate model publication on certified selection"
 ```
+
+The routed `kp symm` consumer is implemented and reviewed in Task 8's second
+commit, not duplicated here. Task 10 reruns its integration tests against the
+shared selection transaction.
 
 Review staging and exclude unrelated test files.
 
