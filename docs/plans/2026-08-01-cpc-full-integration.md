@@ -521,6 +521,44 @@ identity, source-group/layer/orbital dimensions, full-row order, and spin-slice
 convention. Repeated hand-written Gamma row formulas must become wrappers around
 this one layout.
 
+Use the following exact v1 coordinates. Let
+`num_layer_list=(L0,L1)`, `Nq=len(Q0)=len(Q1)>0`, every physical layer have
+`o>0` orbitals, `O_g=L_g*o`, and `Ns=2` for `spinful_all` or `Ns=1` for an
+explicit `sliced_up`/`sliced_down` input. Sliced row coordinates always start at
+zero; their semantic spin label remains in metadata. Define:
+
+```text
+N_sigma = Nq * (O0 + O1)
+B_g = Nq * sum(O_h for h < g)
+C_g_l = sum(O_h for h < g) + l * o
+r_local(s,g,l,a) = s * (O0 + O1) + C_g_l + a
+r_full(s,q,g,l,a) = s * N_sigma + B_g + q * O_g + l * o + a
+```
+
+All addresses must cover `0..full_dim-1` exactly once. The two Q sets use the
+same joint `q_index`; every raw action must prove that its two source-group Q
+maps yield the same target joint Q, otherwise reject with
+`GAMMA_Q_ROUTE_MISMATCH`.
+
+The canonical layout payload is versioned as `kp.gamma-row-layout.v1` and
+contains at least:
+
+```text
+tapw_source_basis_hash
+ordered_qset_hashes[2]
+num_layer_list
+uniform_orbital_count
+source_group_count = 2
+spin_scope and semantic spin_labels
+full_dim and local_dim
+full_rows_by_q_hash
+basis_order = spin->group->q->layer->orbital
+```
+
+Every raw-H operation must carry the same TAPW basis hash. The source
+Hamiltonian content hash is separate from the layout hash but mandatory in the
+routed handoff and later selection identity.
+
 **Step 2: Add failing Gamma closure tests**
 
 Construct a synthetic spinful `num_layer_list=[1, 2]` Gamma case with the real
@@ -540,6 +578,13 @@ projector assembler. Assert:
 
 Production seeds must contain complete energy clusters. A rank-one Kramers seed
 may test only the low-level closure primitive, not a production candidate.
+
+The wrong-row permutation test must specifically produce a FAILED candidate
+symmetry certificate with raw-H leakage or Heff covariance above its gate. Add
+field-by-field handoff tamper tests for Q order, source basis hash, frame bytes,
+group offsets, certificate hashes, and missing required k coverage. Preserve a
+positive legacy explicit-load test. The whole-frame Procrustes negative case
+must demonstrate mixed group projectors while the groupwise algorithm passes.
 
 **Step 3: Verify failures**
 
@@ -564,6 +609,38 @@ when it uniquely captures essentially the complete normalized image; nonzero
 overlap alone is not sufficient. After convergence, check normalized closure
 residual for every required generator/q route.
 
+Define one frozen `GammaRoutingThresholds` with at least:
+
+```text
+energy_same_ev, energy_different_ev
+capture_zero_fraction, capture_loss_max
+local_action_isometry, off_route_leakage, closure_residual
+route_zero_gap, route_covariance, projector_residual
+anchor_sigma_min, max_rank, max_iterations
+```
+
+All scalar thresholds are finite. Require
+`0 <= energy_same_ev < energy_different_ev` and
+`0 <= capture_zero_fraction < 1-capture_loss_max <= 1`; rank and iteration
+limits are positive integers. Thresholds must come from the normalized
+automatic-selection config; v1 does not invent missing thresholds. Thresholds
+and their schema are identity-bound.
+
+For a local action of dimension `d`, certify
+`||D_local^dagger D_local-I||_F/sqrt(d) <= local_action_isometry`. Its off-route
+residual is the Frobenius norm of all rows outside the declared target same-Q
+block, divided by `sqrt(d)`, and must not exceed `off_route_leakage`.
+
+For adjacent sorted energies, a gap `<=energy_same_ev` joins one cluster, a gap
+`>=energy_different_ev` separates clusters, and an intermediate gap rejects.
+For a rank-`r` source cluster and image projector, define
+`eta_C = Re Tr(P_C P_image) / r`. Exactly one target cluster must satisfy
+`1-eta_C <= capture_loss_max`; every other target cluster must satisfy
+`eta_C <= capture_zero_fraction`. Any intermediate capture, multiple full
+captures, or excessive total off-cluster capture rejects as
+`AMBIGUOUS_CLUSTER_CAPTURE`. The final closure residual is
+`||(I-P_target)P_image||_F/sqrt(r)`.
+
 **Step 6: Route each production k/q projector by source group**
 
 For an orthonormal joint frame `B`, construct
@@ -575,19 +652,38 @@ Require both routed groups to be nonempty for automatic release output, stable
 ranks at every production k/q, orthogonality/completeness, and raw-H route
 covariance.
 
+For routed rank `r_g`, raw-H route covariance is
+`||D Pi_g^(*) D^dagger-Pi_sector_map(g)||_F/sqrt(r_g)` and must not exceed
+`route_covariance`. Hermiticity, idempotence, cross-group orthogonality, and
+`Pi_0+Pi_1=P` residuals use the same rank-normalized Frobenius convention and
+must not exceed `projector_residual`.
+
 Recompute this routing at every production k/q. Align frames only inside each
 routed source group using separate Procrustes/polar steps. Never align the
 whole joint frame and then split columns, because that can mix the positive and
 negative routing subspaces. Freeze joint band indices, but reject any production
 k/q with a cluster-boundary split or groupwise anchor rank loss.
 
+Use one fixed canonical `k_ref`, but a separate reference frame for every
+`(q,g)`. After sign routing, deterministically obtain and persist
+`F_ref[q,g]` using a projector/QRCP/polar gauge. At production `(k,q,g)`, choose
+an orthonormal routed frame `X_g`, form
+`M=F_ref[q,g].conj().T @ X_g = L diag(sigma) R.conj().T`, require
+`min(sigma) >= anchor_sigma_min`, and set
+`F(k,q,g)=X_g @ R @ L.conj().T`. Recheck
+`F_g F_g^dagger=Pi_g` and cross-group orthogonality. Automatic Gamma requires
+constant positive ranks `(r0,r1)` over every production `(k,q)`; a generator
+declared to exchange groups additionally requires `r0==r1`. Projector columns
+use the fixed order
+`c(g,alpha,q)=Nq*sum(r_h for h<g)+alpha*Nq+q`.
+
 **Step 7: Add a typed routed handoff and real assembler**
 
-Represent projection inputs as a typed union:
+Represent projection inputs as a typed union with a stable discriminator:
 
-- `explicit_legacy`: existing physical-layer `nlow_state_list` plus optional
+- `ExplicitLegacyBasisSpec`: existing physical-layer `nlow_state_list` plus optional
   anchors, diagnostic/unverified until separately certified;
-- `gamma_routed`: joint band set, canonical layout identity, per-k/q routed
+- `GammaRoutedBasisSpec`: joint band set, canonical layout identity, per-k/q routed
   local frames and group slices, routing/closure certificate hashes.
 
 The two variants are mutually exclusive. Add an assembler that consumes the
@@ -598,6 +694,44 @@ artifacts, bind it into the projection identity, and make `kp symm` consume that
 persisted handoff rather than re-deriving the projector from
 `nlow_state_list/norb_fix_list`. Keep this routed frame distinct from the later
 continuum `SymmetryAdaptedBasisFrame`.
+
+The routed handoff has an explicit new schema and contains at least:
+
+```text
+projection_basis_kind = gamma_routed
+layout_payload and layout_hash
+joint_band_indices
+group_ranks and group_offsets
+ordered k_indices
+frames: complex numeric tensor (Nk,Nq,local_dim,r0+r1), never object/pickle
+frame_hash and reference_frame_hash
+routing thresholds and closure/routing certificate hashes
+source-H, ordered-Q, raw-action package identities
+candidate symmetry certificate_hash and input_identity_hash
+```
+
+`basis.npz` stores the discriminator as a scalar and uses no object arrays for
+the routed variant. Its loader recomputes all content, layout, and frame hashes
+while retaining a versioned legacy loader. `kp symm` may consume only required
+k pairs present in the persisted handoff; a missing required k rejects with
+`HANDOFF_K_COVERAGE`, with no re-diagonalization or anchor fallback. The low
+frames used by symmetry are the persisted frames byte-for-byte. A high
+complement may be rebuilt from the same frozen joint band set.
+
+Automatic Gamma also has a hard Task 7 dependency. For every required k, wrap
+the routed `U_low` and Heff as `CandidateProjectionState` and call
+`certify_candidate_symmetries` with the same raw-H actions, required pairs,
+exactified actions, and magnetic presentation. A routed automatic candidate is
+eligible only when the certificate is `CERTIFIED` and its input identity binds
+the persisted frames and actions. Both certificate hashes enter the handoff.
+Until Task 9 adds the final selection transaction, no incomplete routed
+artifact may claim PASS.
+
+Use stable typed rejection codes for unsupported group/Q/orbital/spin layouts,
+layout identity/bijection, Q-route mismatch, action isometry/off-route leakage,
+energy/capture gray zones, closure/max-rank failure, route zero/empty/rank
+change/covariance, anchor rank, handoff coverage/identity, and candidate
+symmetry failure.
 
 Automatic Gamma must remain disabled until layout, per-k/q routing,
 groupwise alignment, assembler, persisted identity, and `kp symm` consumption
