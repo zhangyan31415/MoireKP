@@ -52,7 +52,13 @@ from ..plot_style import (
     kp_font_family,
     relative_energy_ylabel,
 )
+from ..projection_handoff import load_gamma_routed_basis_spec
 from ..reporting import KpReporter
+from ..selection_artifact import (
+    CertificationStatus,
+    load_selection_artifact,
+    verify_certified_gamma_selection_artifact,
+)
 from ..symmetry.action_schema import SOURCE_MATRIX_SEMANTICS, allows_inferred_action_metadata
 from ..symmetry.geometry import (
     bM_candidates_from_q_distances,
@@ -1479,6 +1485,79 @@ def _load_model_artifact_identity(
                 f"kp model symmetry operation {name!r} references missing matrix array {matrix_key!r}"
             )
     return project_identity
+
+
+def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
+    """Reject model publication unless projection and symmetry share one certificate."""
+
+    project_dir = Path(config.heff_file).resolve().parent
+    marker_path = project_dir / "selection_artifact.json"
+    if not marker_path.is_file():
+        raise FileNotFoundError(
+            f"kp model requires certified projection selection marker: {marker_path}"
+        )
+    artifact = load_selection_artifact(marker_path)
+    if artifact.certification_status is not CertificationStatus.CERTIFIED:
+        raise ValueError(
+            "kp model projection selection is not CERTIFIED: "
+            f"{artifact.certification_status.value}"
+        )
+    if artifact.identity is None:
+        raise ValueError("kp model CERTIFIED projection selection lacks identity")
+    selection_identity_hash = artifact.identity.selection_identity_hash
+
+    symmetry_source = config.symmetry_source_config
+    if str(symmetry_source.get("type", "")) != "kp_symm_output":
+        raise ValueError(
+            "kp model certified selection requires a canonical kp_symm_output package"
+        )
+    source_path = symmetry_source.get("path")
+    if source_path in (None, ""):
+        raise ValueError(
+            "kp model certified selection requires symmetry_source.path"
+        )
+    symmetry_dir = Path(str(source_path)).expanduser()
+    if not symmetry_dir.is_absolute():
+        symmetry_dir = (Path(config.path).resolve().parent / symmetry_dir).resolve()
+    representations = symmetry_dir / "representations.npz"
+    if not representations.is_file():
+        raise FileNotFoundError(
+            f"kp model requires canonical kp symm output: {representations}"
+        )
+    with np.load(representations, allow_pickle=False) as payload:
+        if "__metadata_json__" not in payload.files:
+            raise ValueError(
+                f"kp model symmetry pack lacks __metadata_json__: {representations}"
+            )
+        metadata = json.loads(str(payload["__metadata_json__"].item()))
+    if not isinstance(metadata, Mapping):
+        raise ValueError(
+            f"kp model symmetry metadata must be a mapping: {representations}"
+        )
+    if metadata.get("selection_identity_hash") != selection_identity_hash:
+        raise ValueError(
+            "kp model projection/symmetry selection_identity_hash mismatch"
+        )
+    operations = metadata.get("operations")
+    if not isinstance(operations, Sequence) or isinstance(operations, (str, bytes)):
+        raise ValueError(
+            f"kp model symmetry pack operations must be a list: {representations}"
+        )
+    for operation in operations:
+        if not isinstance(operation, Mapping):
+            raise ValueError(
+                "kp model symmetry operation metadata must be a mapping"
+            )
+        if operation.get("selection_identity_hash") != selection_identity_hash:
+            name = str(operation.get("name", operation.get("operation", "")))
+            raise ValueError(
+                "kp model symmetry operation "
+                f"{name!r} selection_identity_hash mismatch"
+            )
+
+    handoff = load_gamma_routed_basis_spec(project_dir / "basis.npz")
+    verify_certified_gamma_selection_artifact(artifact, handoff)
+    return artifact
 
 
 def _apply_project_k_indices(kpoints: np.ndarray, indices: Sequence[int]) -> np.ndarray:
@@ -15266,6 +15345,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     reporter = KpReporter("kp model")
     _progress_line("loading configuration ...", enabled=True, style="start")
     moire_config, model_config = build_moire_config_from_file(path)
+    _preflight_certified_model_selection(model_config)
     output_dir = model_config.output_dir
     output_profile = _model_output_profile(model_config)
     canonical_output = isinstance(model_config.raw.get("case"), Mapping) and bool(model_config.raw["case"].get("profile")) and bool(model_config.raw["case"].get("q_shell"))

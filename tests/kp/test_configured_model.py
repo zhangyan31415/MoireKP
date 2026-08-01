@@ -53,6 +53,7 @@ from kp.model.pipeline import (  # noqa: E402
     _matrix_loss_block_masks,
     _matrix_loss_residual,
     _load_model_artifact_identity,
+    _preflight_certified_model_selection,
     _low_cost_harmonic_recommendation_candidate,
     _load_kpoints,
     _load_kpoints_from_inputs,
@@ -105,6 +106,7 @@ from kp.model.model_selection import (  # noqa: E402
     select_high_low_profiles,
 )
 from kp.identity import hash_array  # noqa: E402
+from kp.selection_artifact import CertificationStatus  # noqa: E402
 from kp.model.core import (  # noqa: E402
     ContinuumModel,
     ContinuumModelBuilder,
@@ -122,6 +124,19 @@ from kp.symmetry.projection import (  # noqa: E402
     _merged_exactification_overrides,
     _operation_power_relation,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_selection_preflight_from_legacy_model_behavior_tests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Legacy model tests exercise behavior after the separately tested gate."""
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_preflight_certified_model_selection",
+        lambda _config: None,
+    )
 
 
 def _source_meta(*, antiunitary: bool = False, representation: bool = False) -> dict[str, object]:
@@ -201,6 +216,189 @@ def test_model_artifact_identity_rejects_projection_symmetry_mismatch(tmp_path: 
             project_dir / "heff.npy",
             {"type": "kp_symm_output", "path": str(symmetry_dir)},
         )
+
+
+def _selection_gate_config(
+    tmp_path: Path,
+    *,
+    selection_identity_hash: str,
+    operation_identity_hash: str | None = None,
+) -> SimpleNamespace:
+    project_dir = tmp_path / "projection"
+    symmetry_dir = tmp_path / "symmetry"
+    project_dir.mkdir(exist_ok=True)
+    symmetry_dir.mkdir(exist_ok=True)
+    np.save(project_dir / "heff.npy", np.eye(2, dtype=np.complex128)[None, :, :])
+    np.savez(project_dir / "basis.npz", placeholder=np.asarray(1))
+    (project_dir / "selection_artifact.json").write_text("{}\n", encoding="utf-8")
+    operation = {
+        "name": "C3z",
+        "selection_identity_hash": (
+            selection_identity_hash
+            if operation_identity_hash is None
+            else operation_identity_hash
+        ),
+    }
+    np.savez(
+        symmetry_dir / "representations.npz",
+        C3z=np.eye(2, dtype=np.complex128),
+        __metadata_json__=np.asarray(
+            json.dumps(
+                {
+                    "selection_identity_hash": selection_identity_hash,
+                    "operations": [operation],
+                },
+                sort_keys=True,
+            )
+        ),
+    )
+    return SimpleNamespace(
+        path=tmp_path / "case.yaml",
+        heff_file=project_dir / "heff.npy",
+        symmetry_source_config={
+            "type": "kp_symm_output",
+            "path": str(symmetry_dir),
+        },
+    )
+
+
+def test_model_selection_preflight_requires_current_certified_marker(
+    tmp_path: Path,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    (Path(config.heff_file).parent / "selection_artifact.json").unlink()
+
+    with pytest.raises(FileNotFoundError, match="certified projection selection marker"):
+        _preflight_certified_model_selection(config)
+
+
+@pytest.mark.parametrize(
+    "status",
+    (
+        CertificationStatus.PENDING,
+        CertificationStatus.FAILED,
+        CertificationStatus.UNVERIFIED_OVERRIDE,
+    ),
+)
+def test_model_selection_preflight_rejects_every_noncertified_status(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: CertificationStatus,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    artifact = SimpleNamespace(
+        certification_status=status,
+        identity=SimpleNamespace(selection_identity_hash=selection_hash),
+    )
+    monkeypatch.setattr(pipeline_module, "load_selection_artifact", lambda _path: artifact)
+
+    with pytest.raises(ValueError, match=f"not CERTIFIED: {status.value}"):
+        _preflight_certified_model_selection(config)
+
+
+@pytest.mark.parametrize("mismatch", ("package", "operation"))
+def test_model_selection_preflight_rejects_cross_artifact_identity_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    certified_hash = "a" * 64
+    package_hash = "b" * 64 if mismatch == "package" else certified_hash
+    operation_hash = "c" * 64 if mismatch == "operation" else package_hash
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=package_hash,
+        operation_identity_hash=operation_hash,
+    )
+    artifact = SimpleNamespace(
+        certification_status=CertificationStatus.CERTIFIED,
+        identity=SimpleNamespace(selection_identity_hash=certified_hash),
+    )
+    monkeypatch.setattr(pipeline_module, "load_selection_artifact", lambda _path: artifact)
+
+    with pytest.raises(ValueError, match="selection_identity_hash"):
+        _preflight_certified_model_selection(config)
+
+
+def test_model_selection_preflight_calls_routed_gamma_handoff_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    artifact = SimpleNamespace(
+        certification_status=CertificationStatus.CERTIFIED,
+        identity=SimpleNamespace(selection_identity_hash=selection_hash),
+    )
+    handoff = object()
+    seen: dict[str, object] = {}
+
+    def fake_load_selection(path: Path) -> object:
+        seen["marker"] = Path(path)
+        return artifact
+
+    def fake_load_handoff(path: Path) -> object:
+        seen["handoff_path"] = Path(path)
+        return handoff
+
+    def fake_verify(actual_artifact: object, actual_handoff: object) -> object:
+        seen["verified"] = (actual_artifact, actual_handoff)
+        return actual_artifact
+
+    monkeypatch.setattr(pipeline_module, "load_selection_artifact", fake_load_selection)
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_routed_basis_spec",
+        fake_load_handoff,
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_certified_gamma_selection_artifact",
+        fake_verify,
+    )
+
+    assert _preflight_certified_model_selection(config) is artifact
+    project_dir = Path(config.heff_file).parent
+    assert seen == {
+        "marker": project_dir / "selection_artifact.json",
+        "handoff_path": project_dir / "basis.npz",
+        "verified": (artifact, handoff),
+    }
+
+
+def test_run_configured_model_preflight_fails_before_output_directory_creation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    output_dir = tmp_path / "model-output"
+    model_config = SimpleNamespace(output_dir=output_dir)
+    monkeypatch.setattr(
+        pipeline_module,
+        "build_moire_config_from_file",
+        lambda _path: (object(), model_config),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "_preflight_certified_model_selection",
+        lambda _config: (_ for _ in ()).throw(ValueError("selection gate rejected")),
+        raising=False,
+    )
+
+    with pytest.raises(ValueError, match="selection gate rejected"):
+        run_configured_model(tmp_path / "case.yaml")
+
+    assert not output_dir.exists()
 
 
 def test_model_kpoints_follow_projection_source_indices(tmp_path: Path) -> None:
