@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 from pathlib import Path
 
@@ -185,6 +186,36 @@ def test_later_project_failure_leaves_pending_instead_of_previous_final(
 
     marker = load_selection_artifact(tmp_path / "project" / "selection_artifact.json")
     assert marker.certification_status is CertificationStatus.PENDING
+
+
+def test_keyboard_interrupt_releases_pending_selection_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_tiny_project_config(tmp_path, _explicit_project_config())
+    real_begin = cli.begin_case_selection
+    retained_sessions = []
+
+    def retain_session(**kwargs):
+        session = real_begin(**kwargs)
+        retained_sessions.append(session)
+        return session
+
+    def interrupt_project(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "begin_case_selection", retain_session)
+    monkeypatch.setattr(cli, "_cmd_project_from_config_impl", interrupt_project)
+    with pytest.raises(KeyboardInterrupt):
+        cli.cmd_project_from_config(str(cfg_path))
+
+    project_dir = tmp_path / "project"
+    marker = load_selection_artifact(project_dir / "selection_artifact.json")
+    assert marker.certification_status is CertificationStatus.PENDING
+    assert retained_sessions
+    with (project_dir / ".selection-artifact.lock").open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
 def test_project_auto_requires_source_symmetry(tmp_path: Path) -> None:

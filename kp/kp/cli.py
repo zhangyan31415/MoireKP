@@ -1779,6 +1779,7 @@ def cmd_project_from_config(
         selection_input=request.selection_input,
         transaction_id=uuid.uuid4().hex,
     )
+    owns_session = True
     try:
         materialized = _cmd_project_from_config_impl(cfg_path, overrides)
         if request.selection_input.selection_mode != "explicit":
@@ -1799,17 +1800,19 @@ def cmd_project_from_config(
             if request.project_config.get("active_indices") is not None
             else "user supplied explicit project.nlow_state_list"
         )
+        final_inputs = CaseSelectionInputs.explicit(
+            selection_input=request.selection_input,
+            resolved_candidate=resolved,
+            diagnostic=diagnostic,
+        )
+        owns_session = False
         return resolve_case_selection(
-            CaseSelectionInputs.explicit(
-                selection_input=request.selection_input,
-                resolved_candidate=resolved,
-                diagnostic=diagnostic,
-            ),
+            final_inputs,
             session=session,
         )
-    except Exception:
-        session.close()
-        raise
+    finally:
+        if owns_session:
+            session.close()
 
 
 def _cmd_project_from_config_impl(
