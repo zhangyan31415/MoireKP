@@ -177,6 +177,49 @@ def _serialize_gamma_handoff(handoff: GammaRoutedBasisSpec) -> bytes:
         return path.read_bytes()
 
 
+def _gamma_projected_spin_operator(
+    handoff: GammaRoutedBasisSpec,
+) -> np.ndarray:
+    """Project canonical full-space Sz through each certified routed frame."""
+
+    if not isinstance(handoff, GammaRoutedBasisSpec):
+        raise TypeError("handoff must be a GammaRoutedBasisSpec")
+    layout = handoff.layout
+    if layout.spin_scope != "spinful_all" or layout.spin_labels != ("up", "down"):
+        raise ValueError(
+            "automatic Gamma spin projection requires the canonical full-spin layout"
+        )
+    spin_eigenvalue = {"up": 1.0, "down": -1.0}
+    full_spin_diagonal = np.asarray(
+        [
+            spin_eigenvalue[address.spin_label]
+            for address in layout.addresses_by_full_row
+        ],
+        dtype=np.complex128,
+    )
+    if full_spin_diagonal.shape != (layout.full_dimension,):
+        raise ValueError("canonical Gamma spin rows do not cover the full source space")
+
+    projected_rows: list[np.ndarray] = []
+    for k_index in handoff.k_indices:
+        routed_frame, _ = handoff.assemble_for_k(k_index, include_high=False)
+        if routed_frame.shape != (layout.full_dimension, handoff.model_dim):
+            raise ValueError(
+                f"routed Gamma frame at k={k_index} has shape {routed_frame.shape}, "
+                f"expected {(layout.full_dimension, handoff.model_dim)}"
+            )
+        raw = routed_frame.conj().T @ (
+            full_spin_diagonal[:, np.newaxis] * routed_frame
+        )
+        projected = 0.5 * (raw + raw.conj().T)
+        if not np.all(np.isfinite(projected)):
+            raise ValueError(
+                f"routed Gamma spin projection is nonfinite at k={k_index}"
+            )
+        projected_rows.append(np.ascontiguousarray(projected, dtype=np.complex128))
+    return np.stack(projected_rows, axis=0)
+
+
 def _gamma_project_payloads(
     handoff: GammaRoutedBasisSpec,
     kpoints: Any,
@@ -194,10 +237,13 @@ def _gamma_project_payloads(
 
     heff = np.asarray(handoff.authoritative_heff, dtype=np.complex128)
     eigenvalues, eigenvectors = np.linalg.eigh(heff)
+    spin_operator = _gamma_projected_spin_operator(handoff)
     wavefunction_payload = {
         "wavefunctions": eigenvectors,
         "eigenvalues": eigenvalues,
         "k_indices": np.asarray(handoff.k_indices, dtype=np.int64),
+        "spin_convention": np.asarray("all"),
+        "spin_operator": spin_operator,
         **{
             str(name): np.asarray(value)
             for name, value in handoff.artifact_identity.items()

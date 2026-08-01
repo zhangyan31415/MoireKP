@@ -460,6 +460,63 @@ def test_gamma_auto_project_end_to_end_commits_identical_canonical_and_staged_pa
     assert identity["basis_hash"] == handoff.artifact_identity["basis_hash"]
 
 
+def test_gamma_auto_wavefunctions_embed_loader_compatible_routed_spin_operator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kp.symm_rep import _load_spin_operator
+
+    cfg_path = _write_packed_gamma_runtime_case(tmp_path)
+    monkeypatch.setattr(
+        cli,
+        "_cmd_project_from_config_impl",
+        lambda *_args, **_kwargs: pytest.fail("Gamma auto entered legacy projection"),
+    )
+
+    cli.cmd_project_from_config(str(cfg_path))
+
+    project_dir = tmp_path / "projection"
+    wavefunctions_path = project_dir / "wavefunctions.npz"
+    handoff = load_gamma_routed_basis_spec(project_dir / "basis.npz")
+    spin_signs = np.asarray(
+        [
+            1.0 if address.spin_label == "up" else -1.0
+            for address in handoff.layout.addresses_by_full_row
+        ],
+        dtype=np.complex128,
+    )
+    expected_rows = []
+    for k_index in handoff.k_indices:
+        routed_frame, _ = handoff.assemble_for_k(k_index, include_high=False)
+        expected_rows.append(
+            routed_frame.conj().T
+            @ (spin_signs[:, np.newaxis] * routed_frame)
+        )
+    expected = np.stack(expected_rows, axis=0)
+
+    with np.load(wavefunctions_path, allow_pickle=False) as archive:
+        assert str(np.asarray(archive["spin_convention"]).item()) == "all"
+        assert archive["spin_operator"].shape == (
+            len(handoff.k_indices),
+            handoff.model_dim,
+            handoff.model_dim,
+        )
+        np.testing.assert_allclose(archive["spin_operator"], expected, atol=1.0e-12)
+        np.testing.assert_allclose(
+            archive["spin_operator"],
+            archive["spin_operator"].conj().transpose(0, 2, 1),
+            atol=1.0e-12,
+        )
+
+    loaded = _load_spin_operator(
+        wavefunctions_path,
+        len(handoff.k_indices),
+        handoff.model_dim,
+    )
+    assert loaded is not None
+    np.testing.assert_allclose(loaded, expected, atol=1.0e-12)
+
+
 def test_gamma_auto_canonical_write_failure_leaves_pending_and_never_certified(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -540,6 +597,12 @@ def test_gamma_runtime_payloads_bind_handoff_heff_kpoints_and_wavefunctions(
         "_serialize_gamma_handoff",
         lambda _handoff: b"basis-bytes",
     )
+    projected_spin = np.asarray([np.diag([1.0, -1.0])], dtype=np.complex128)
+    monkeypatch.setattr(
+        runtime,
+        "_gamma_projected_spin_operator",
+        lambda _handoff: projected_spin,
+    )
 
     payloads = runtime._gamma_project_payloads(handoff, kpoints)
 
@@ -557,6 +620,8 @@ def test_gamma_runtime_payloads_bind_handoff_heff_kpoints_and_wavefunctions(
     with np.load(runtime._bytes_buffer(payloads["wavefunctions.npz"]), allow_pickle=False) as archive:
         assert str(archive["kpoints_hash"].item()) == runtime.hash_array(kpoints)
         np.testing.assert_array_equal(archive["k_indices"], np.asarray([0]))
+        assert str(archive["spin_convention"].item()) == "all"
+        np.testing.assert_array_equal(archive["spin_operator"], projected_spin)
         np.testing.assert_allclose(
             archive["wavefunctions"].conj().transpose(0, 2, 1)
             @ archive["wavefunctions"],
