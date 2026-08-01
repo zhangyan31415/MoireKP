@@ -1095,6 +1095,58 @@ def _prepare_cli_selection_request(
     )
 
 
+def _gamma_auto_requested(
+    cfg_path: str | Path,
+    overrides: Mapping[str, Any] | None = None,
+) -> bool:
+    """Return whether this command belongs to the supported Gamma auto path."""
+
+    path = Path(cfg_path).expanduser().resolve()
+    with path.open("r", encoding="utf-8") as handle:
+        cfg = normalize_case_config(yaml.safe_load(handle), config_path=path)
+    project_cfg = _apply_project_overrides(
+        dict(cfg.get("project", {})),
+        None if overrides is None else dict(overrides),
+    )
+    if _selection_mode_from_project_config(project_cfg) != "auto":
+        return False
+    symm_cfg = cfg.get("symm", {})
+    symm_valley = (
+        str(symm_cfg.get("valley", ""))
+        if isinstance(symm_cfg, Mapping)
+        else ""
+    )
+    configured_mode = str(
+        project_cfg.get("mode", cfg.get("plot", {}).get("mode", ""))
+    )
+    return any(
+        value.strip().casefold() == "gamma"
+        for value in (configured_mode, symm_valley)
+        if value.strip()
+    )
+
+
+def _preview_cli_selection_from_config(
+    cfg_path: str | Path,
+) -> ResolvedProjectionSelection:
+    """Resolve the command-independent inspect preview for legacy or Gamma auto."""
+
+    if _gamma_auto_requested(cfg_path):
+        from .gamma_auto_runtime import prepare_gamma_automatic_runtime
+
+        preparation = prepare_gamma_automatic_runtime(cfg_path)
+        return resolve_case_selection(
+            CaseSelectionInputs.preview(
+                preparation.selection_preparation.selection_input
+            )
+        )
+    return resolve_case_selection(
+        CaseSelectionInputs.preview(
+            _prepare_cli_selection_request(str(cfg_path)).selection_input
+        )
+    )
+
+
 def _project_heff_full_kwargs_supports(name: str) -> bool:
     try:
         sig = inspect.signature(project_heff_full)
@@ -1335,11 +1387,7 @@ def cmd_plot_from_config(cfg_path: str) -> ResolvedProjectionSelection:
     reporter.fields([("config", cfg_path)])
     with open(cfg_path, "r") as f:
         cfg = normalize_case_config(yaml.safe_load(f), config_path=cfg_path)
-    selection_preview = resolve_case_selection(
-        CaseSelectionInputs.preview(
-            _prepare_cli_selection_request(cfg_path).selection_input
-        )
-    )
+    selection_preview = _preview_cli_selection_from_config(cfg_path)
 
     material = cfg.get("material", {})
     plot_cfg = cfg.get("plot", {})
@@ -1424,6 +1472,18 @@ def cmd_plot_from_config(cfg_path: str) -> ResolvedProjectionSelection:
 
         nlow_state_list = plot_cfg.get("nlow_state_list", [])
         norb_fix_list = plot_cfg.get("norb_fix_list", [])
+        if (
+            selection_preview.selection_input.selection_mode == "auto"
+            and mode == "gamma"
+            and not nlow_state_list
+        ):
+            nlow_state_list = [[] for _ in range(sum(num_layer_list))]
+        if (
+            selection_preview.selection_input.selection_mode == "auto"
+            and mode == "gamma"
+            and not norb_fix_list
+        ):
+            norb_fix_list = [[] for _ in range(sum(num_layer_list))]
         reporter.section("Basis layout")
         reporter.fields(
             [
@@ -1499,6 +1559,18 @@ def cmd_plot_from_config(cfg_path: str) -> ResolvedProjectionSelection:
         block_n = (sum(num_layer_list) * orb0) * (2 if spin == "all" else 1)
         nlow_state_list = plot_cfg.get("nlow_state_list", [])
         norb_fix_list = plot_cfg.get("norb_fix_list", [])
+        if (
+            selection_preview.selection_input.selection_mode == "auto"
+            and mode == "gamma"
+            and not nlow_state_list
+        ):
+            nlow_state_list = [[] for _ in range(sum(num_layer_list))]
+        if (
+            selection_preview.selection_input.selection_mode == "auto"
+            and mode == "gamma"
+            and not norb_fix_list
+        ):
+            norb_fix_list = [[] for _ in range(sum(num_layer_list))]
         reporter.section("Basis layout")
         reporter.fields(
             [
@@ -1786,6 +1858,25 @@ def cmd_project_from_config(
     cfg_path: str,
     overrides: dict[str, Any] | None = None,
 ) -> ResolvedProjectionSelection:
+    if _gamma_auto_requested(cfg_path, overrides):
+        from .gamma_auto_runtime import (
+            finalize_gamma_automatic_runtime,
+            prepare_gamma_automatic_runtime,
+        )
+
+        preparation = prepare_gamma_automatic_runtime(cfg_path, overrides)
+        session = begin_case_selection(
+            store=SelectionArtifactStore(preparation.output_directory),
+            selection_input=preparation.selection_preparation.selection_input,
+            transaction_id=uuid.uuid4().hex,
+        )
+        try:
+            return finalize_gamma_automatic_runtime(
+                preparation,
+                session=session,
+            )
+        finally:
+            session.close()
     request = _prepare_cli_selection_request(cfg_path, overrides)
     session = begin_case_selection(
         store=SelectionArtifactStore(request.output_directory),

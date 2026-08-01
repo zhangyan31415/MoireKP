@@ -3805,6 +3805,7 @@ class _ProjectionRunConfig:
 class _ProjectionRunContext:
     config: _ProjectionRunConfig
     rep_root: Path
+    manifest: Mapping[str, Any]
     operation_requests: list[dict[str, Any]]
     spin_route_inference: Mapping[str, Any]
     q1: np.ndarray
@@ -3816,7 +3817,8 @@ class _ProjectionRunContext:
     nlow_state_list: list[list[int]]
     num_layer_list: list[int]
     orb0: int
-    num_orb_per_layer_list: list[int]
+    num_orb_per_layer_list: list[list[int]]
+    hamk3d: np.ndarray
     required_k: list[int]
     hamk_source_by_k: dict[int, np.ndarray]
     hamk_target_by_k: dict[int, np.ndarray]
@@ -3834,6 +3836,19 @@ class _ProjectionRunContext:
         dict[int, ProjectionState],
         ProjectionState,
     ] | None = None
+
+
+@dataclass(frozen=True)
+class _ProjectionPhysicalInputs:
+    """Projection arrays/layout that do not depend on a selected low basis."""
+
+    hamk: np.ndarray
+    q1: np.ndarray
+    q2: np.ndarray
+    mode: str
+    num_layer_list: tuple[int, ...]
+    orb0: int
+    num_orb_per_layer_list: tuple[tuple[int, ...], ...]
 
 
 @dataclass(frozen=True)
@@ -3989,9 +4004,11 @@ def _load_packed_tapw_symmetry_manifest(packed_path: Path) -> tuple[Path, Mappin
     return packed_path.parent, manifest
 
 
-def _load_projection_arrays_and_layout(
+def _load_projection_physical_arrays_and_layout(
     run_cfg: _ProjectionRunConfig,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str, float | None, list[list[int]], list[int], int, list[int]]:
+) -> _ProjectionPhysicalInputs:
+    """Load source physics before either explicit or automatic basis selection."""
+
     hamk_file = _resolve(run_cfg.material.get("hamk_file"), run_cfg.cfg_dir)
     qset1_file = _resolve(run_cfg.material.get("qset1_file"), run_cfg.cfg_dir)
     qset2_file = _resolve(run_cfg.material.get("qset2_file"), run_cfg.cfg_dir)
@@ -4000,32 +4017,52 @@ def _load_projection_arrays_and_layout(
     hamk = _load_hamk_with_energy_unit(hamk_file, run_cfg.material, mmap_mode="r")
     q1, q2 = load_Q_sets(qset1_file, qset2_file)
     if q2 is None:
-        raise ValueError("K-valley symmetry projection requires qset2_file")
+        raise ValueError("symmetry projection requires qset2_file")
 
     hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
     q_count = int(len(q1))
     mode = str(run_cfg.project_cfg.get("mode", "K1")).lower()
-    method = _downfold_method(run_cfg.project_cfg)
-    e_ref = _e_ref(run_cfg.project_cfg)
-    if method in {"fixed_schur", "linearized_lowdin"} and e_ref is None:
-        raise ValueError(f"project.downfold_method={method!r} requires project.e_ref")
-    nlow_state_list = _normalize_nlow_state_list(run_cfg.project_cfg)
     num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
         run_cfg.material,
         np.asarray(hamk3d[0]),
         q_count,
     )
+    return _ProjectionPhysicalInputs(
+        hamk=hamk3d,
+        q1=np.asarray(q1, dtype=np.float64),
+        q2=np.asarray(q2, dtype=np.float64),
+        mode=mode,
+        num_layer_list=tuple(int(value) for value in num_layer_list),
+        orb0=int(orb0),
+        num_orb_per_layer_list=tuple(
+            tuple(int(value) for value in group)
+            for group in num_orb_per_layer_list
+        ),
+    )
+
+
+def _load_projection_arrays_and_layout(
+    run_cfg: _ProjectionRunConfig,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str, str, float | None, list[list[int]], list[int], int, list[list[int]]]:
+    """Legacy selected-basis wrapper around the physical input frontend."""
+
+    physical = _load_projection_physical_arrays_and_layout(run_cfg)
+    method = _downfold_method(run_cfg.project_cfg)
+    e_ref = _e_ref(run_cfg.project_cfg)
+    if method in {"fixed_schur", "linearized_lowdin"} and e_ref is None:
+        raise ValueError(f"project.downfold_method={method!r} requires project.e_ref")
+    nlow_state_list = _normalize_nlow_state_list(run_cfg.project_cfg)
     return (
-        hamk3d,
-        q1,
-        q2,
-        mode,
+        physical.hamk,
+        physical.q1,
+        physical.q2,
+        physical.mode,
         method,
         e_ref,
         nlow_state_list,
-        num_layer_list,
-        orb0,
-        num_orb_per_layer_list,
+        list(physical.num_layer_list),
+        physical.orb0,
+        [list(group) for group in physical.num_orb_per_layer_list],
     )
 
 
@@ -4152,20 +4189,36 @@ def _build_projection_run_context(
     *,
     create_output_dir: bool = True,
     validate_full_space_covariance: bool = True,
+    require_nlow_state_list: bool = True,
 ) -> _ProjectionRunContext:
     rep_root, manifest, operation_requests = _load_manifest_and_operation_requests(run_cfg)
-    (
-        hamk3d,
-        q1,
-        q2,
-        mode,
-        method,
-        e_ref,
-        nlow_state_list,
-        num_layer_list,
-        orb0,
-        num_orb_per_layer_list,
-    ) = _load_projection_arrays_and_layout(run_cfg)
+    if require_nlow_state_list:
+        (
+            hamk3d,
+            q1,
+            q2,
+            mode,
+            method,
+            e_ref,
+            nlow_state_list,
+            num_layer_list,
+            orb0,
+            num_orb_per_layer_list,
+        ) = _load_projection_arrays_and_layout(run_cfg)
+    else:
+        physical = _load_projection_physical_arrays_and_layout(run_cfg)
+        hamk3d = physical.hamk
+        q1 = physical.q1
+        q2 = physical.q2
+        mode = physical.mode
+        method = "automatic_gamma"
+        e_ref = None
+        nlow_state_list = []
+        num_layer_list = list(physical.num_layer_list)
+        orb0 = physical.orb0
+        num_orb_per_layer_list = [
+            list(group) for group in physical.num_orb_per_layer_list
+        ]
 
     nk = int(hamk3d.shape[0])
     default_k_index = int(run_cfg.plot_cfg.get("hamk_index", 0))
@@ -4219,6 +4272,7 @@ def _build_projection_run_context(
     return _ProjectionRunContext(
         config=run_cfg,
         rep_root=rep_root,
+        manifest=manifest,
         operation_requests=operation_requests,
         spin_route_inference=spin_route_inference,
         q1=q1,
@@ -4231,6 +4285,7 @@ def _build_projection_run_context(
         num_layer_list=num_layer_list,
         orb0=orb0,
         num_orb_per_layer_list=num_orb_per_layer_list,
+        hamk3d=hamk3d,
         required_k=required_k,
         hamk_source_by_k=hamk_source_by_k,
         hamk_target_by_k=hamk_target_by_k,
