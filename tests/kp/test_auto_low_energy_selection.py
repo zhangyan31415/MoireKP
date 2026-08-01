@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 
 import numpy as np
 import pytest
@@ -558,6 +559,48 @@ def test_subspace_overlap_must_lie_in_closed_unit_interval(overlap: float) -> No
     assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
 
 
+@pytest.mark.parametrize(
+    "field",
+    (
+        "band_rms_mev",
+        "band_max_mev",
+        "subspace_overlap",
+        "symmetry_residual",
+        "symmetry_leakage",
+    ),
+)
+@pytest.mark.parametrize(
+    "value",
+    (True, np.bool_(False), "0.5", 0.5 + 0.0j, [0.5], {"value": 0.5}),
+)
+def test_selection_thresholds_reject_non_real_scalar_boundary_types(
+    field: str,
+    value: object,
+) -> None:
+    selection = _selection_module()
+    values = _thresholds(selection).__dict__ | {field: value}
+
+    with pytest.raises(ValueError, match="real scalars"):
+        selection.select_projection_candidate(
+            [_candidate(selection, "candidate", 2)],
+            selection.SelectionThresholds(**values),
+        )
+
+
+@pytest.mark.parametrize("overlap", (0.0, 1.0 + 1.0e-9))
+def test_overlap_threshold_must_lie_in_open_closed_unit_interval(overlap: float) -> None:
+    selection = _selection_module()
+    thresholds = selection.SelectionThresholds(
+        **(_thresholds(selection).__dict__ | {"subspace_overlap": overlap})
+    )
+
+    with pytest.raises(ValueError, match="subspace_overlap"):
+        selection.select_projection_candidate(
+            [_candidate(selection, "candidate", 2)],
+            thresholds,
+        )
+
+
 def test_composition_reports_orbital_layer_and_spin_weights() -> None:
     selection = _selection_module()
     state = selection.ReferenceState(
@@ -663,6 +706,110 @@ def test_report_lists_symmetry_partner_relations_and_rejected_candidates() -> No
     assert report["rejected_candidates"][0]["violations"][0]["metric"] == "band_rms_mev"
     assert "PASS" in markdown
     assert "M1:0" in markdown and "M1:1" in markdown
+
+
+def test_numpy_scalar_candidate_envelope_reports_as_strict_json() -> None:
+    selection = _selection_module()
+    candidate = selection.CandidateMetrics(
+        candidate_id="numpy-scalars",
+        dimension=np.int64(4),
+        band_rms_mev=np.float64(0.5),
+        band_max_mev=np.float64(2.0),
+        subspace_overlap=np.float64(0.98),
+        symmetry_residual=np.float64(1.0e-8),
+        symmetry_leakage=np.float64(1.0e-7),
+    )
+    thresholds = selection.SelectionThresholds(
+        band_rms_mev=np.float64(1.0),
+        band_max_mev=np.float64(3.0),
+        subspace_overlap=np.float64(0.95),
+        symmetry_residual=np.float64(1.0e-6),
+        symmetry_leakage=np.float64(1.0e-5),
+    )
+    decision = selection.select_projection_candidate([candidate], thresholds)
+
+    report = selection.build_selection_report(
+        reference=selection.ReferencePoint(
+            np.int64(0),
+            (np.float64(0.0), np.float64(0.0)),
+            (np.int64(0),),
+            ((np.float64(0.0), np.float64(0.0)),),
+        ),
+        closure=selection.SymmetryClosure(states=(), additions=()),
+        decision=decision,
+        compositions=(),
+        candidates=[candidate],
+        thresholds=thresholds,
+    )
+
+    assert isinstance(decision.selected.dimension, int)
+    assert all(
+        isinstance(getattr(decision.selected, metric), float)
+        for metric in (
+            "band_rms_mev",
+            "band_max_mev",
+            "subspace_overlap",
+            "symmetry_residual",
+            "symmetry_leakage",
+        )
+    )
+    json.dumps(report, allow_nan=False)
+
+
+def test_report_rejects_candidate_envelope_different_from_decision() -> None:
+    selection = _selection_module()
+    selected = _candidate(selection, "selected", 4)
+    decision = selection.select_projection_candidate([selected], _thresholds(selection))
+
+    with pytest.raises(ValueError, match="candidate envelope"):
+        selection.build_selection_report(
+            reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+            closure=selection.SymmetryClosure(states=(), additions=()),
+            decision=decision,
+            compositions=(),
+            candidates=[_candidate(selection, "different", 4)],
+            thresholds=_thresholds(selection),
+        )
+
+
+def test_report_rejects_duplicate_candidate_envelope() -> None:
+    selection = _selection_module()
+    selected = _candidate(selection, "selected", 4)
+    decision = selection.select_projection_candidate([selected], _thresholds(selection))
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.build_selection_report(
+            reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+            closure=selection.SymmetryClosure(states=(), additions=()),
+            decision=decision,
+            compositions=(),
+            candidates=[selected, selected],
+            thresholds=_thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.DUPLICATE_CANDIDATE_ID
+
+
+@pytest.mark.parametrize("value", (0.0, True, "1.0", float("nan")))
+def test_report_rejects_invalid_thresholds_without_recomputing_violations(
+    value: object,
+) -> None:
+    selection = _selection_module()
+    selected = _candidate(selection, "selected", 4)
+    decision = selection.select_projection_candidate([selected], _thresholds(selection))
+    invalid = selection.SelectionThresholds(
+        **(_thresholds(selection).__dict__ | {"band_rms_mev": value})
+    )
+
+    with pytest.raises(ValueError, match="threshold"):
+        selection.build_selection_report(
+            reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+            closure=selection.SymmetryClosure(states=(), additions=()),
+            decision=decision,
+            compositions=(),
+            candidates=[selected],
+            thresholds=invalid,
+        )
 
 
 def _minimal_case_config(project: dict) -> dict:

@@ -109,6 +109,11 @@ class SelectionDecision:
     status: str
     violations: tuple[ThresholdViolation, ...]
     structural_failures: tuple[tuple[str, str], ...]
+    candidates: tuple[CandidateMetrics, ...]
+    thresholds: SelectionThresholds
+    violations_by_candidate: tuple[
+        tuple[str, tuple[ThresholdViolation, ...]], ...
+    ]
 
 
 class CandidateSelectionFailureCode(str, Enum):
@@ -177,6 +182,37 @@ _CANDIDATE_METRIC_NAMES = (
     "symmetry_residual",
     "symmetry_leakage",
 )
+
+_SELECTION_THRESHOLD_NAMES = (
+    "band_rms_mev",
+    "band_max_mev",
+    "subspace_overlap",
+    "symmetry_residual",
+    "symmetry_leakage",
+)
+
+
+def _normalized_thresholds(thresholds: SelectionThresholds) -> SelectionThresholds:
+    if not isinstance(thresholds, SelectionThresholds):
+        raise ValueError("selection thresholds must be a SelectionThresholds record")
+    values = tuple(
+        getattr(thresholds, field_name)
+        for field_name in _SELECTION_THRESHOLD_NAMES
+    )
+    if any(
+        not isinstance(value, Real)
+        or isinstance(value, (bool, np.bool_))
+        for value in values
+    ):
+        raise ValueError("selection thresholds must be real scalars, excluding booleans")
+    normalized = tuple(float(value) for value in values)
+    if any(not np.isfinite(value) for value in normalized):
+        raise ValueError("selection thresholds must be finite")
+    if not 0.0 < normalized[2] <= 1.0:
+        raise ValueError("selection threshold subspace_overlap must lie in (0, 1]")
+    if any(value <= 0.0 for value in normalized):
+        raise ValueError("selection thresholds must be strictly positive")
+    return SelectionThresholds(*normalized)
 
 
 def _normalized_candidates(
@@ -345,15 +381,7 @@ def select_projection_candidate(
             CandidateSelectionFailureCode.NO_CANDIDATES,
             "no projection candidates were provided",
         )
-    threshold_values = (
-        thresholds.band_rms_mev,
-        thresholds.band_max_mev,
-        thresholds.subspace_overlap,
-        thresholds.symmetry_residual,
-        thresholds.symmetry_leakage,
-    )
-    if any(not np.isfinite(value) or value <= 0.0 for value in threshold_values):
-        raise ValueError("selection thresholds must be finite and strictly positive")
+    thresholds = _normalized_thresholds(thresholds)
     candidates = _normalized_candidates(candidates)
 
     structural_failures = tuple(
@@ -371,8 +399,12 @@ def select_projection_candidate(
         )
 
     violations_by_id = {
-        candidate.candidate_id: _candidate_violations(candidate, thresholds)
-        for candidate in valid
+        candidate.candidate_id: (
+            ()
+            if candidate.structural_failure is not None
+            else _candidate_violations(candidate, thresholds)
+        )
+        for candidate in candidates
     }
     passing = tuple(
         candidate for candidate in valid if not violations_by_id[candidate.candidate_id]
@@ -393,6 +425,12 @@ def select_projection_candidate(
             status="PASS",
             violations=(),
             structural_failures=structural_failures,
+            candidates=candidates,
+            thresholds=thresholds,
+            violations_by_candidate=tuple(
+                (candidate.candidate_id, violations_by_id[candidate.candidate_id])
+                for candidate in candidates
+            ),
         )
 
     raise CandidateSelectionError(
@@ -591,10 +629,10 @@ def generate_frozen_band_candidates(
 
 def _violation_payload(violation: ThresholdViolation) -> dict[str, Any]:
     return {
-        "metric": violation.metric,
-        "value": violation.value,
-        "threshold": violation.threshold,
-        "normalized_violation": violation.normalized_violation,
+        "metric": str(violation.metric),
+        "value": float(violation.value),
+        "threshold": float(violation.threshold),
+        "normalized_violation": float(violation.normalized_violation),
     }
 
 
@@ -607,27 +645,35 @@ def build_selection_report(
     candidates: Sequence[CandidateMetrics],
     thresholds: SelectionThresholds,
 ) -> dict[str, Any]:
-    selected_id = decision.selected.candidate_id
+    normalized_thresholds = _normalized_thresholds(thresholds)
+    normalized_candidates = _normalized_candidates(candidates)
+    if normalized_thresholds != decision.thresholds:
+        raise ValueError("report thresholds do not match the selection decision")
+    if normalized_candidates != decision.candidates:
+        raise ValueError("report candidate envelope does not match the selection decision")
+
+    selected_id = str(decision.selected.candidate_id)
+    violations_by_id = dict(decision.violations_by_candidate)
     rejected: list[dict[str, Any]] = []
-    for candidate in candidates:
+    for candidate in decision.candidates:
         if candidate.candidate_id == selected_id:
             continue
-        candidate_violations = (
-            ()
-            if candidate.structural_failure is not None
-            else _candidate_violations(candidate, thresholds)
-        )
+        candidate_violations = violations_by_id[candidate.candidate_id]
         rejected.append(
             {
-                "candidate_id": candidate.candidate_id,
-                "dimension": candidate.dimension,
-                "structural_failure": candidate.structural_failure,
+                "candidate_id": str(candidate.candidate_id),
+                "dimension": int(candidate.dimension),
+                "structural_failure": (
+                    None
+                    if candidate.structural_failure is None
+                    else str(candidate.structural_failure)
+                ),
                 "metrics": {
-                    "band_rms_mev": candidate.band_rms_mev,
-                    "band_max_mev": candidate.band_max_mev,
-                    "subspace_overlap": candidate.subspace_overlap,
-                    "symmetry_residual": candidate.symmetry_residual,
-                    "symmetry_leakage": candidate.symmetry_leakage,
+                    "band_rms_mev": float(candidate.band_rms_mev),
+                    "band_max_mev": float(candidate.band_max_mev),
+                    "subspace_overlap": float(candidate.subspace_overlap),
+                    "symmetry_residual": float(candidate.symmetry_residual),
+                    "symmetry_leakage": float(candidate.symmetry_leakage),
                 },
                 "violations": [_violation_payload(item) for item in candidate_violations],
             }
@@ -635,36 +681,49 @@ def build_selection_report(
 
     composition_payload = [
         {
-            "block": composition.block_key,
-            "band_index": composition.band_index,
-            "physical_layer": composition.physical_layer,
-            "joint_layers": list(composition.joint_layers),
-            "orbital_weights": dict(composition.orbital_weights),
-            "layer_weights": dict(composition.layer_weights),
-            "spin_weights": dict(composition.spin_weights),
+            "block": str(composition.block_key),
+            "band_index": int(composition.band_index),
+            "physical_layer": (
+                None
+                if composition.physical_layer is None
+                else int(composition.physical_layer)
+            ),
+            "joint_layers": [int(layer) for layer in composition.joint_layers],
+            "orbital_weights": {
+                str(key): float(value) for key, value in composition.orbital_weights
+            },
+            "layer_weights": {
+                str(key): float(value) for key, value in composition.layer_weights
+            },
+            "spin_weights": {
+                str(key): float(value) for key, value in composition.spin_weights
+            },
         }
         for composition in compositions
     ]
     return {
-        "status": decision.status,
+        "status": str(decision.status),
         "selected_candidate": selected_id,
         "selection_scope": "fixed band indices applied unchanged to every Q and every k",
         "reference": {
-            "k_index": reference.k_index,
-            "k_coordinate": list(reference.k_coordinate),
-            "q_indices": list(reference.q_indices),
-            "q_vectors": [list(vector) for vector in reference.q_vectors],
+            "k_index": int(reference.k_index),
+            "k_coordinate": [float(value) for value in reference.k_coordinate],
+            "q_indices": [int(index) for index in reference.q_indices],
+            "q_vectors": [
+                [float(value) for value in vector]
+                for vector in reference.q_vectors
+            ],
         },
         "selected_states": [
-            {"block": state.block_key, "band_index": state.band_index}
+            {"block": str(state.block_key), "band_index": int(state.band_index)}
             for state in closure.states
         ],
         "symmetry_relations": [
             {
-                "operation": addition.operation,
+                "operation": str(addition.operation),
                 "source": f"{addition.source_block}:{addition.source_band}",
                 "target": f"{addition.target_block}:{addition.target_band}",
-                "overlap_weight": addition.overlap_weight,
+                "overlap_weight": float(addition.overlap_weight),
             }
             for addition in closure.additions
         ],
@@ -672,7 +731,7 @@ def build_selection_report(
         "selected_violations": [_violation_payload(item) for item in decision.violations],
         "rejected_candidates": rejected,
         "structural_failures": [
-            {"candidate_id": candidate_id, "reason": reason}
+            {"candidate_id": str(candidate_id), "reason": str(reason)}
             for candidate_id, reason in decision.structural_failures
         ],
     }
