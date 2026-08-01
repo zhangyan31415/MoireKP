@@ -1487,8 +1487,28 @@ def _load_model_artifact_identity(
     return project_identity
 
 
+def _first_symlink_component(path: Path) -> Path | None:
+    current = Path(path.anchor)
+    for part in path.parts:
+        if part == path.anchor:
+            continue
+        current = current / part
+        if current.is_symlink():
+            return current
+    return None
+
+
 def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
     """Reject model publication unless projection and symmetry share one certificate."""
+
+    valley_model = config.valley_model
+    valley_type = (
+        str(valley_model.get("valley_type", "")).strip().casefold()
+        if isinstance(valley_model, Mapping)
+        else ""
+    )
+    if valley_type != "gamma":
+        return None
 
     project_dir = Path(config.heff_file).resolve().parent
     marker_path = project_dir / "selection_artifact.json"
@@ -1522,7 +1542,18 @@ def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
         )
     symmetry_dir = Path(str(source_path)).expanduser()
     if not symmetry_dir.is_absolute():
-        symmetry_dir = (Path(config.path).resolve().parent / symmetry_dir).resolve()
+        symmetry_dir = Path(config.path).resolve().parent / symmetry_dir
+    symlink_component = _first_symlink_component(symmetry_dir)
+    if symlink_component is not None:
+        raise ValueError(
+            "kp model symmetry_source.path component must not be a symlink: "
+            f"{symlink_component}"
+        )
+    symmetry_dir = symmetry_dir.resolve()
+    config.symmetry_source_config = {
+        **dict(symmetry_source),
+        "path": str(symmetry_dir),
+    }
     representations = symmetry_dir / "representations.npz"
     if representations.is_symlink():
         raise ValueError("kp model symmetry package must not be a symlink")

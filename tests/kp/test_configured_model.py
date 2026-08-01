@@ -255,6 +255,7 @@ def _selection_gate_config(
     return SimpleNamespace(
         path=tmp_path / "case.yaml",
         heff_file=project_dir / "heff.npy",
+        valley_model={"valley_type": "Gamma"},
         symmetry_source_config={
             "type": "kp_symm_output",
             "path": str(symmetry_dir),
@@ -285,18 +286,39 @@ def _patch_selection_store(
     )
 
 
-def test_model_selection_preflight_requires_current_certified_marker(
+@pytest.mark.parametrize("valley_type", ("Gamma", " gamma ", "GAMMA"))
+def test_model_selection_preflight_requires_current_certified_marker_for_gamma(
     tmp_path: Path,
+    valley_type: str,
 ) -> None:
     selection_hash = "a" * 64
     config = _selection_gate_config(
         tmp_path,
         selection_identity_hash=selection_hash,
     )
+    config.valley_model = {"valley_type": valley_type}
     (Path(config.heff_file).parent / "selection_artifact.json").unlink()
 
     with pytest.raises(FileNotFoundError, match="certified projection selection marker"):
         _preflight_certified_model_selection(config)
+
+
+@pytest.mark.parametrize("valley_type", ("K", " k ", "M"))
+def test_model_selection_preflight_preserves_non_gamma_release_path(
+    tmp_path: Path,
+    valley_type: str,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    config.valley_model = {"valley_type": valley_type}
+    project_dir = Path(config.heff_file).parent
+    (project_dir / "selection_artifact.json").unlink()
+    (Path(config.symmetry_source_config["path"]) / "representations.npz").unlink()
+
+    assert _preflight_certified_model_selection(config) is None
 
 
 def test_model_selection_preflight_rejects_symlinked_current_marker(
@@ -378,6 +400,7 @@ def test_model_selection_preflight_calls_routed_gamma_handoff_verifier(
         tmp_path,
         selection_identity_hash=selection_hash,
     )
+    config.symmetry_source_config["path"] = "symmetry"
     artifact = SimpleNamespace(
         certification_status=CertificationStatus.CERTIFIED,
         identity=SimpleNamespace(selection_identity_hash=selection_hash),
@@ -413,6 +436,9 @@ def test_model_selection_preflight_calls_routed_gamma_handoff_verifier(
         "handoff_path": project_dir / "basis.npz",
         "verified": (artifact, handoff),
     }
+    assert config.symmetry_source_config["path"] == str(
+        (tmp_path / "symmetry").resolve()
+    )
 
 
 def test_model_selection_preflight_rejects_symlinked_symmetry_package(
@@ -447,6 +473,33 @@ def test_model_selection_preflight_rejects_symlinked_symmetry_package(
     )
 
     with pytest.raises(ValueError, match="symmetry package must not be a symlink"):
+        _preflight_certified_model_selection(config)
+
+
+def test_model_selection_preflight_rejects_symlinked_symmetry_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    artifact = SimpleNamespace(
+        certification_status=CertificationStatus.CERTIFIED,
+        identity=SimpleNamespace(selection_identity_hash=selection_hash),
+    )
+    original_symmetry = Path(config.symmetry_source_config["path"])
+    real_parent = tmp_path / "real-symmetry-parent"
+    real_parent.mkdir()
+    real_symmetry = real_parent / "symmetry"
+    original_symmetry.rename(real_symmetry)
+    linked_parent = tmp_path / "linked-symmetry-parent"
+    linked_parent.symlink_to(real_parent, target_is_directory=True)
+    config.symmetry_source_config["path"] = str(linked_parent / "symmetry")
+    _patch_selection_store(monkeypatch, artifact)
+
+    with pytest.raises(ValueError, match="symmetry_source.path.*symlink"):
         _preflight_certified_model_selection(config)
 
 
