@@ -47,6 +47,8 @@ from ..identity import (
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
 from ..projection_handoff import (
     ExplicitLegacyBasisSpec,
+    GAMMA_SAMPLED_K_GRAY_TOLERANCE,
+    GAMMA_SAMPLED_K_MATCH_TOLERANCE,
     GAMMA_ROUTED_ONLY_BASIS_FIELDS,
     GammaRoutedBasisSpec,
     ProjectionBasisSpec,
@@ -6594,6 +6596,84 @@ def _exactify_and_write_projection_summary(
     return summary
 
 
+def _actual_sampled_k_route_resolver(
+    run_cfg: _ProjectionRunConfig,
+) -> Callable[[dict[str, Any], str, int], tuple[tuple[int, int], ...]]:
+    """Build the same strict packed sampled-k resolver used by Gamma project."""
+
+    from ..cli import _load_project_source_kpoints
+    from ..gamma_auto_runtime import _infer_sampled_k_pairs
+
+    normalized: dict[str, Any] | None = None
+    material: dict[str, Any] | None = None
+    hamk_file: str | None = None
+    sampled_kpoints: np.ndarray | None = None
+
+    def resolve(
+        entry: dict[str, Any],
+        operation: str,
+        nk: int,
+    ) -> tuple[tuple[int, int], ...]:
+        nonlocal normalized, material, hamk_file, sampled_kpoints
+        route_fields = {
+            "k_pairs",
+            "pairs",
+            "target_indices",
+            "source_indices",
+            "source_k_rule",
+            "k_rule",
+            "target_k_rule",
+        }
+        declared_pairs = (
+            tuple(_pairs_from_entry(entry, nk))
+            if route_fields.intersection(entry)
+            else None
+        )
+        if sampled_kpoints is None:
+            with open(run_cfg.cfg_path, "r", encoding="utf-8") as handle:
+                normalized = normalize_case_config(
+                    yaml.safe_load(handle),
+                    config_path=run_cfg.cfg_path,
+                )
+            material = dict(normalized.get("material", {}))
+            hamk_file = _resolve(material.get("hamk_file"), run_cfg.cfg_dir)
+            if hamk_file is None:
+                raise ValueError(
+                    "material.hamk_file is required for sampled k-route inference"
+                )
+            sampled_kpoints = _load_project_source_kpoints(
+                normalized,
+                material,
+                cfg_dir=run_cfg.cfg_dir,
+                hamk_file=str(hamk_file),
+                nk=nk,
+                project_indices=tuple(range(nk)),
+            )
+        pairs = _infer_sampled_k_pairs(
+            operation=operation,
+            kpoints=sampled_kpoints,
+            k_map=entry.get("k_map"),
+        )
+        if declared_pairs is not None and sorted(declared_pairs) != sorted(pairs):
+            raise ValueError(
+                f"operation {operation!r} packed k-route disagrees with actual "
+                "sampled k-set intersection"
+            )
+        entry["k_pairs"] = [list(pair) for pair in pairs]
+        entry["k_pair_source"] = "actual_sampled_k_set_intersection"
+        entry["_k_pairs_provenance"] = {
+            "schema": "kp.gamma-sampled-k-route.v1",
+            "authored_in_manifest": declared_pairs is not None,
+            "candidate_source": "actual_sampled_k_set_intersection",
+            "kpoints_hash": hash_array(sampled_kpoints),
+            "match_tolerance": GAMMA_SAMPLED_K_MATCH_TOLERANCE,
+            "gray_tolerance": GAMMA_SAMPLED_K_GRAY_TOLERANCE,
+        }
+        return pairs
+
+    return resolve
+
+
 def run_symmetry_projection_from_config(
     cfg_path: str,
     *,
@@ -6631,6 +6711,11 @@ def run_symmetry_projection_from_config(
             run_cfg,
             create_output_dir=False,
             validate_full_space_covariance=validate_full_space_covariance,
+            packed_k_route_resolver=(
+                _actual_sampled_k_route_resolver(run_cfg)
+                if _valley_family(getattr(run_cfg, "valley", "")) == "Gamma"
+                else None
+            ),
         )
         project_dir = _resolve(run_cfg.project_cfg.get("out_dir"), run_cfg.cfg_dir)
         if project_dir is None:
