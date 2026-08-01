@@ -1229,6 +1229,7 @@ def test_kp_symm_validates_routed_selection_before_invalidating_outputs(
     ):
         projection_mod.run_symmetry_projection_from_config("unused.yaml")
     assert build_context.call_args.kwargs["create_output_dir"] is False
+    assert build_context.call_args.kwargs["require_nlow_state_list"] is False
 
 
 @pytest.mark.parametrize(

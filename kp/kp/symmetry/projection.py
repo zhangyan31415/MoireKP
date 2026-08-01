@@ -6725,16 +6725,6 @@ def run_symmetry_projection_from_config(
             )
             or "symm_project"
         )
-        ctx = _build_projection_run_context(
-            run_cfg,
-            create_output_dir=False,
-            validate_full_space_covariance=validate_full_space_covariance,
-            packed_k_route_resolver=(
-                _actual_sampled_k_route_resolver(run_cfg)
-                if _valley_family(getattr(run_cfg, "valley", "")) == "Gamma"
-                else None
-            ),
-        )
         project_dir = _resolve(run_cfg.project_cfg.get("out_dir"), run_cfg.cfg_dir)
         if project_dir is None:
             raise ValueError(
@@ -6746,6 +6736,20 @@ def run_symmetry_projection_from_config(
                 project_dir,
                 persisted_handoff,
             )
+        ctx = _build_projection_run_context(
+            run_cfg,
+            create_output_dir=False,
+            validate_full_space_covariance=validate_full_space_covariance,
+            require_nlow_state_list=not isinstance(
+                persisted_handoff,
+                GammaRoutedBasisSpec,
+            ),
+            packed_k_route_resolver=(
+                _actual_sampled_k_route_resolver(run_cfg)
+                if _valley_family(getattr(run_cfg, "valley", "")) == "Gamma"
+                else None
+            ),
+        )
         _invalidate_stale_canonical_symmetry_outputs(configured_output_dir)
         _invalidate_stale_canonical_symmetry_outputs(ctx.output_dir)
         ctx.output_dir.mkdir(parents=True, exist_ok=True)
