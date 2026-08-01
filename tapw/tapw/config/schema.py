@@ -60,6 +60,7 @@ _CANONICAL_SYSTEM_KEYS = {
     "layers",
     "spin",
 }
+_CANONICAL_SYSTEM_REQUIRED_KEYS = _CANONICAL_SYSTEM_KEYS - {"overlap"}
 _RELEASE_TOP_LEVEL_KEYS = {
     "system",
     "case",
@@ -78,47 +79,55 @@ _RELEASE_TOP_LEVEL_KEYS = {
 }
 
 
-@dataclass
-class SystemConfig:
-    """Canonical release-facing source-system input."""
+@dataclass(frozen=True)
+class SystemInputConfig:
+    """Deeply immutable normalized TAPW source input shared by every workflow."""
 
-    output: str
-    structure: str
-    hamiltonian: str
-    overlap: str
-    orbitals: Dict[str, str]
+    source_kind: str
+    output: Path
+    structure: Path
+    hamiltonian: Path
+    overlap: Optional[Path]
+    orbitals: Optional[Tuple[Tuple[str, str], ...]]
     twist_index: int
-    layers: List[int]
+    layers: Tuple[int, ...]
     spin: bool
+    explicit_bravais: Optional[str]
 
     def __post_init__(self) -> None:
-        for key in ("output", "structure", "hamiltonian", "overlap"):
-            if getattr(self, key) in (None, ""):
-                raise ValueError(f"system.{key} is required.")
-        if not isinstance(self.orbitals, dict) or not self.orbitals:
-            raise ValueError("system.orbitals must be a non-empty species-to-orbitals mapping.")
-        self.orbitals = {str(species): str(spec) for species, spec in self.orbitals.items()}
-        if int(self.twist_index) < 1:
+        if self.source_kind not in {"canonical_structure", "legacy_openmx"}:
+            raise ValueError(f"Unsupported system input source_kind={self.source_kind!r}.")
+        for key in ("output", "structure", "hamiltonian"):
+            if not isinstance(getattr(self, key), Path):
+                raise TypeError(f"system_input.{key} must be a resolved pathlib.Path.")
+        if self.overlap is not None and not isinstance(self.overlap, Path):
+            raise TypeError("system_input.overlap must be a resolved pathlib.Path or None.")
+        if self.source_kind == "canonical_structure" and not self.orbitals:
+            raise ValueError("Canonical system.orbitals must be a non-empty species-to-orbitals mapping.")
+        if self.source_kind == "legacy_openmx" and self.orbitals is not None:
+            raise ValueError("Legacy OpenMX orbitals are source-owned and must not be synthesized in system_input.")
+        if self.twist_index < 1:
             raise ValueError("system.twist_index must be a positive integer.")
-        self.twist_index = int(self.twist_index)
-        if not isinstance(self.layers, list) or not self.layers or any(int(value) < 1 for value in self.layers):
+        if not self.layers or any(value < 1 for value in self.layers):
             raise ValueError("system.layers must be a non-empty list of positive integers.")
-        self.layers = [int(value) for value in self.layers]
         if not isinstance(self.spin, bool):
             raise ValueError("system.spin must be true or false.")
 
-    def normalize(self, base_dir: Path) -> None:
-        self.output = PathConfig._resolve_path(self.output, base_dir)
-        self.structure = PathConfig._resolve_path(self.structure, base_dir)
-        self.hamiltonian = PathConfig._resolve_path(self.hamiltonian, base_dir)
-        self.overlap = PathConfig._resolve_path(self.overlap, base_dir)
+    @property
+    def orbital_mapping(self) -> Optional[Dict[str, str]]:
+        return None if self.orbitals is None else dict(self.orbitals)
+
+
+def _resolved_path(path_value: str, base_dir: Path) -> Path:
+    path = Path(path_value).expanduser()
+    return path.resolve() if path.is_absolute() else (base_dir / path).resolve()
 
 
 def _normalize_canonical_system(
     config_dict: dict[str, Any],
     *,
     config_dir: Path,
-) -> SystemConfig | None:
+) -> SystemInputConfig | None:
     if "system" not in config_dict:
         return None
     conflicting = [name for name in ("case", "twist", "paths") if name in config_dict]
@@ -133,12 +142,29 @@ def _normalize_canonical_system(
     unknown = sorted(set(raw) - _CANONICAL_SYSTEM_KEYS)
     if unknown:
         raise ValueError(f"system contains unknown field(s): {unknown}")
-    missing = sorted(_CANONICAL_SYSTEM_KEYS - set(raw))
+    missing = sorted(_CANONICAL_SYSTEM_REQUIRED_KEYS - set(raw))
     if missing:
         raise ValueError(f"system is missing required field(s): {missing}")
-    system = SystemConfig(**raw)
-    system.normalize(config_dir)
-    return system
+    orbitals = raw.get("orbitals")
+    if not isinstance(orbitals, dict) or not orbitals:
+        raise ValueError("system.orbitals must be a non-empty species-to-orbitals mapping.")
+    layers = raw.get("layers")
+    if not isinstance(layers, list):
+        raise ValueError("system.layers must be a list of positive integers.")
+    if not isinstance(raw.get("spin"), bool):
+        raise ValueError("system.spin must be true or false.")
+    return SystemInputConfig(
+        source_kind="canonical_structure",
+        output=_resolved_path(raw["output"], config_dir),
+        structure=_resolved_path(raw["structure"], config_dir),
+        hamiltonian=_resolved_path(raw["hamiltonian"], config_dir),
+        overlap=None if raw.get("overlap") in (None, "") else _resolved_path(raw["overlap"], config_dir),
+        orbitals=tuple(sorted((str(species), str(spec)) for species, spec in orbitals.items())),
+        twist_index=int(raw["twist_index"]),
+        layers=tuple(int(value) for value in layers),
+        spin=raw["spin"],
+        explicit_bravais=None,
+    )
 
 
 def _reject_keys(section: dict[str, Any], keys: set[str], *, section_name: str) -> None:
@@ -659,6 +685,7 @@ class Config:
     twist: TwistConfig
     paths: PathConfig
     compute: ComputeConfig
+    system_input: SystemInputConfig
     symmetry_analysis: SymmetryAnalysisConfig = field(default_factory=SymmetryAnalysisConfig)
     output_layout: Optional[OutputLayoutConfig] = None
     case: Dict[str, Any] = field(default_factory=dict)
@@ -667,7 +694,6 @@ class Config:
     topology: Dict[str, Any] = field(default_factory=dict)
     kpath: Optional[Dict[str, Any]] = None
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
-    system: Optional[SystemConfig] = None
     field_config: Dict[str, Any] = field(default_factory=dict)
 
     def apply_workflow_section(self, mode: Optional[str] = None) -> None:
@@ -726,7 +752,7 @@ class Config:
         unknown_top_level = sorted(set(config_dict) - _RELEASE_TOP_LEVEL_KEYS)
         if unknown_top_level:
             raise ValueError(f"TAPW config contains unknown top-level section(s): {unknown_top_level}")
-        system_config = _normalize_canonical_system(config_dict, config_dir=config_dir)
+        system_input = _normalize_canonical_system(config_dict, config_dir=config_dir)
         if 'slab' in config_dict:
             raise ValueError("The release TAPW package does not support slab configuration.")
         if config_dict.get("output_layout") is not None:
@@ -734,8 +760,8 @@ class Config:
         if config_dict.get("compute") not in (None, {}):
             raise ValueError("Top-level compute is not supported in release-only TAPW configs; use bands/symmetry/topology.")
         case_raw = _copy_section(config_dict.get("case"))
-        if system_config is not None:
-            case_raw = {"output_root": system_config.output}
+        if system_input is not None:
+            case_raw = {"output_root": str(system_input.output)}
         bands_raw = _copy_section(config_dict.get("bands"))
         symmetry_raw = _copy_section(config_dict.get("symmetry"))
         field_raw = _copy_section(config_dict.get("field"))
@@ -804,11 +830,12 @@ class Config:
             )
 
         twist_raw = dict(config_dict.get('twist', {}) or {})
-        if system_config is not None:
+        explicit_legacy_bravais = twist_raw.get("bravais") if "bravais" in twist_raw else None
+        if system_input is not None:
             twist_raw = {
-                "twist_index_m": system_config.twist_index,
-                "twist_layer": list(system_config.layers),
-                "spin": system_config.spin,
+                "twist_index_m": system_input.twist_index,
+                "twist_layer": list(system_input.layers),
+                "spin": system_input.spin,
             }
         if "num_layers" in twist_raw:
             raise ValueError("twist.num_layers is not supported in release-only TAPW configs; use twist.twist_layer.")
@@ -817,12 +844,12 @@ class Config:
         twist_config = TwistConfig(**twist_raw)
 
         paths_raw = dict(config_dict.get('paths', {}) or {})
-        if system_config is not None:
+        if system_input is not None:
             paths_raw = {
-                "H_file": system_config.hamiltonian,
-                "S_file": system_config.overlap,
-                "input_file": system_config.structure,
-                "output_dir": system_config.output,
+                "H_file": str(system_input.hamiltonian),
+                "S_file": None if system_input.overlap is None else str(system_input.overlap),
+                "input_file": str(system_input.structure),
+                "output_dir": str(system_input.output),
             }
         if paths_raw.get("kpath_out") not in (None, ""):
             raise ValueError("paths.kpath_out is not supported in release-only TAPW configs; it is inferred from case/output.")
@@ -830,6 +857,19 @@ class Config:
             paths_raw["output_dir"] = case_raw["output_root"]
         paths_config = PathConfig(**paths_raw)
         paths_config.normalize(config_dir)
+        if system_input is None:
+            system_input = SystemInputConfig(
+                source_kind="legacy_openmx",
+                output=Path(paths_config.output_dir),
+                structure=Path(paths_config.input_file),
+                hamiltonian=Path(paths_config.H_file),
+                overlap=None if paths_config.S_file is None else Path(paths_config.S_file),
+                orbitals=None,
+                twist_index=int(twist_config.twist_index_m),
+                layers=tuple(int(value) for value in twist_config.twist_layer),
+                spin=bool(twist_config.spin),
+                explicit_bravais=None if explicit_legacy_bravais is None else str(explicit_legacy_bravais),
+            )
         if "orthogonal_basis" not in compute_raw and paths_raw.get("S_file") in (None, ""):
             compute_raw["orthogonal_basis"] = True
         compute_config = ComputeConfig(**compute_raw)
@@ -864,7 +904,7 @@ class Config:
             topology=topology_config,
             kpath=kpath_config,
             cluster=cluster_config,
-            system=system_config,
+            system_input=system_input,
             field_config=field_raw,
         )
         # Propagate twist bravais to compute for downstream logic
@@ -886,17 +926,21 @@ class Config:
             return os.path.relpath(str(Path(path_value)), start=str(destination_dir))
 
         config_dict: dict[str, Any] = {}
-        if self.system is not None:
+        if self.system_input.source_kind == "canonical_structure":
+            orbitals = self.system_input.orbital_mapping
+            if orbitals is None:
+                raise ValueError("Canonical system_input is missing orbital metadata.")
             config_dict["system"] = {
-                "output": portable(self.system.output),
-                "structure": portable(self.system.structure),
-                "hamiltonian": portable(self.system.hamiltonian),
-                "overlap": portable(self.system.overlap),
-                "orbitals": dict(self.system.orbitals),
-                "twist_index": int(self.system.twist_index),
-                "layers": list(self.system.layers),
-                "spin": bool(self.system.spin),
+                "output": portable(self.system_input.output),
+                "structure": portable(self.system_input.structure),
+                "hamiltonian": portable(self.system_input.hamiltonian),
+                "orbitals": orbitals,
+                "twist_index": int(self.system_input.twist_index),
+                "layers": list(self.system_input.layers),
+                "spin": bool(self.system_input.spin),
             }
+            if self.system_input.overlap is not None:
+                config_dict["system"]["overlap"] = portable(self.system_input.overlap)
         else:
             case = dict(self.case or {})
             case["output_root"] = portable(self.paths.output_dir)

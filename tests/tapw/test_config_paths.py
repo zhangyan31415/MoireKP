@@ -1,4 +1,5 @@
 import builtins
+from dataclasses import FrozenInstanceError
 from pathlib import Path
 from typing import Optional
 
@@ -6,7 +7,7 @@ import numpy as np
 import pytest
 import yaml
 
-from tapw.config import Config, PathConfig
+from tapw.config import Config, PathConfig, SystemInputConfig
 from tapw.io.kpath import KPathGenerator
 
 
@@ -114,7 +115,7 @@ def test_canonical_system_normalizes_to_runtime_sections_relative_to_yaml(tmp_pa
 
     config = Config.from_yaml(str(config_path))
 
-    assert config.system is not None
+    assert config.system_input.source_kind == "canonical_structure"
     assert Path(config.paths.input_file) == config_dir / "POSCAR"
     assert Path(config.paths.H_file) == config_dir / "H.npz"
     assert Path(config.paths.S_file) == config_dir / "S.npz"
@@ -123,7 +124,59 @@ def test_canonical_system_normalizes_to_runtime_sections_relative_to_yaml(tmp_pa
     assert config.twist.twist_layer == [1, 2]
     assert config.twist.num_layers == 3
     assert config.twist.spin is True
-    assert config.system.orbitals == {"Mo": "s3p2d1", "Te": "s3p2d2"}
+    assert config.system_input.orbital_mapping == {"Mo": "s3p2d1", "Te": "s3p2d2"}
+
+
+def test_canonical_system_input_is_frozen_deeply_immutable_and_typed(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config = Config.from_yaml(str(_write_canonical_system_config(config_dir)))
+
+    assert isinstance(config.system_input, SystemInputConfig)
+    assert config.system_input.source_kind == "canonical_structure"
+    assert isinstance(config.system_input.structure, Path)
+    assert isinstance(config.system_input.hamiltonian, Path)
+    assert isinstance(config.system_input.overlap, Path)
+    assert config.system_input.layers == (1, 2)
+    assert config.system_input.orbitals == (("Mo", "s3p2d1"), ("Te", "s3p2d2"))
+    assert config.system_input.explicit_bravais is None
+    with pytest.raises(FrozenInstanceError):
+        config.system_input.spin = False
+    with pytest.raises(TypeError):
+        config.system_input.orbitals[0] = ("Mo", "s1")
+
+
+def test_canonical_system_overlap_is_optional_for_orthogonal_or_raw_h_workflows(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config_path = _write_canonical_system_config(config_dir)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    del payload["system"]["overlap"]
+    del payload["bands"]
+    payload["symmetry"] = {"valley": "Gamma", "q_shell": 4}
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    config = Config.from_yaml(str(config_path))
+
+    assert config.system_input.overlap is None
+    assert config.paths.S_file is None
+    assert config.compute.orthogonal_basis is True
+
+
+def test_legacy_and_canonical_configs_share_one_typed_system_input(tmp_path):
+    legacy_dir = tmp_path / "legacy"
+    canonical_dir = tmp_path / "canonical"
+    legacy_dir.mkdir()
+    canonical_dir.mkdir()
+    legacy = Config.from_yaml(str(_write_release_path_config(legacy_dir)))
+    canonical = Config.from_yaml(str(_write_canonical_system_config(canonical_dir)))
+
+    assert isinstance(legacy.system_input, SystemInputConfig)
+    assert isinstance(canonical.system_input, SystemInputConfig)
+    assert legacy.system_input.source_kind == "legacy_openmx"
+    assert legacy.system_input.orbitals is None
+    assert legacy.system_input.explicit_bravais is None
+    assert canonical.system_input.source_kind == "canonical_structure"
 
 
 @pytest.mark.parametrize("unknown_key", ["node", "python", "validation_dir"])
@@ -179,11 +232,11 @@ def test_canonical_system_save_yaml_round_trip_remains_release_facing(tmp_path):
     assert "system" in payload
     assert not ({"case", "twist", "paths", "compute", "output_layout"} & set(payload))
     assert not Path(payload["system"]["structure"]).is_absolute()
-    assert reloaded.system is not None
-    assert reloaded.system.structure == config.system.structure
-    assert reloaded.system.hamiltonian == config.system.hamiltonian
-    assert reloaded.system.overlap == config.system.overlap
-    assert reloaded.system.orbitals == config.system.orbitals
+    assert reloaded.system_input.source_kind == "canonical_structure"
+    assert reloaded.system_input.structure == config.system_input.structure
+    assert reloaded.system_input.hamiltonian == config.system_input.hamiltonian
+    assert reloaded.system_input.overlap == config.system_input.overlap
+    assert reloaded.system_input.orbitals == config.system_input.orbitals
     assert reloaded.bands == config.bands
 
 
@@ -555,3 +608,27 @@ def test_release_tapw_example_paths_are_config_relative(config_path):
     assert config.paths.kpath_in is None
     assert config.kpath["labels"] == ["G", "M", "K", "G"]
     assert Path(config.paths.output_dir) == case_root / "outputs"
+
+
+@pytest.mark.parametrize(
+    "config_path",
+    [
+        "examples/bitei/AA/6_5.09/tapw/configs/bitei_AA_6_5.09_Gamma_spinful_q05.yaml",
+        "examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml",
+        "examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml",
+        "examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml",
+        "examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml",
+        "examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_K1_spinful_q04.yaml",
+        "examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml",
+        "examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml",
+    ],
+)
+def test_tracked_canonical_tapw_configs_use_typed_system_input(config_path):
+    root = Path(__file__).resolve().parents[2]
+
+    config = Config.from_yaml(str(root / config_path))
+
+    assert config.system_input.source_kind == "canonical_structure"
+    assert config.system_input.structure == Path(config.paths.input_file)
+    assert config.system_input.hamiltonian == Path(config.paths.H_file)
+    assert config.system_input.overlap == Path(config.paths.S_file)
