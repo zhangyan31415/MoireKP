@@ -220,6 +220,7 @@ dependency graph permits; otherwise use one documented atomic commit.
 - Modify: `kp/kp/model/export.py`
 - Modify: `kp/kp/model/model_selection.py`
 - Modify: `kp/kp/model/pipeline.py`
+- Modify: `kp/kp/config/case.py` (tracked example entry-point schema only)
 - Modify: `kp/kp/reporting.py`
 - Modify: `kp/kp/cli.py` (model-command handoff and cleanup allowlist only)
 - Test: `tests/kp/test_complete_response_basis.py`
@@ -245,9 +246,10 @@ required response integration. Add only the reporter primitives and
 model-command result handoff needed by configured model selection; keep the
 existing Hamiltonian-comparison diagnostics in the cleanup allowlist.
 
-The validated source worktree also has an uncommitted `kp/kp/config/case.py`
-delta for a separate TAPW-style public YAML schema. It is not a dependency of
-the response compiler and is intentionally excluded. The required
+The tracked release examples use the TAPW-style public YAML schema, so migrate
+the focused `kp/kp/config/case.py` normalization delta even though it is an
+entry-point dependency rather than an internal response-compiler dependency.
+Do not use it to justify migrating unrelated project/CLI changes. The required
 `kp/kp/identity.py` delta was already integrated and verified in Task 4.
 
 **Step 4: Run focused configured/response/export tests**

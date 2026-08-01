@@ -25,6 +25,139 @@ def _path_join(root: str | Path, *parts: str) -> str:
     return Path(str(root)).joinpath(*parts).as_posix()
 
 
+def _normalize_q_shell(value: Any) -> str:
+    text = str(value).strip()
+    if text.lower().startswith("q"):
+        text = text[1:]
+    try:
+        index = int(text)
+    except ValueError as exc:
+        raise ValueError(f"project.q_shell must be an integer or qNN label, got {value!r}") from exc
+    if index < 0:
+        raise ValueError(f"project.q_shell must be non-negative, got {value!r}")
+    return f"q{index:02d}"
+
+
+def _require_mapping(value: Any, *, label: str) -> dict[str, Any]:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"{label} must be a mapping")
+    return dict(value)
+
+
+def _expand_tapw_style_config(raw: Mapping[str, Any]) -> dict[str, Any]:
+    """Expand the public TAPW-style schema into legacy internal section views."""
+
+    out = dict(raw)
+    system = _require_mapping(out.get("system"), label="system")
+    project = _require_mapping(out.get("project"), label="project")
+    legacy_keys = [
+        key
+        for key in ("case", "valley", "spin", "material", "plot", "symm", "kpath")
+        if key in out
+    ]
+    if legacy_keys:
+        raise ValueError(
+            "A system-style KP config cannot mix legacy top-level key(s): "
+            + ", ".join(legacy_keys)
+        )
+    public_sections = {"system", "project", "symmetry", "model", "bands", "symm_rep"}
+    unknown_sections = sorted(set(out) - public_sections)
+    if unknown_sections:
+        raise ValueError(
+            "A system-style KP config contains unsupported top-level section(s): "
+            + ", ".join(unknown_sections)
+        )
+
+    required_system = ("name", "output", "tapw_output", "layers", "spin", "orbital_order", "cell")
+    missing_system = [key for key in required_system if system.get(key) in (None, "")]
+    if missing_system:
+        raise ValueError(f"system is missing required field(s): {missing_system}")
+    required_project = ("valley", "q_shell", "efermi", "target")
+    missing_project = [key for key in required_project if project.get(key) in (None, "")]
+    if missing_project:
+        raise ValueError(f"project is missing required field(s): {missing_project}")
+
+    layers = system["layers"]
+    if not isinstance(layers, list) or not layers:
+        raise ValueError("system.layers must be a non-empty list such as [1, 1]")
+    cell = system["cell"]
+    if not isinstance(cell, list) or len(cell) != 3 or any(not isinstance(row, list) or len(row) != 3 for row in cell):
+        raise ValueError("system.cell must be a 3x3 real-space lattice matrix")
+
+    valley = str(project["valley"])
+    q_shell = _normalize_q_shell(project["q_shell"])
+    tapw_root = str(system["tapw_output"])
+    band_root = _path_join(tapw_root, valley, q_shell, "band")
+    target_raw = str(project["target"]).strip().lower()
+    if target_raw in {"top", "vbm", "valence"}:
+        target = "valence"
+        band_filename = "energies_vbm.txt"
+    elif target_raw in {"bottom", "cbm", "conduction"}:
+        target = "conduction"
+        band_filename = "energies_cbm.txt"
+    else:
+        raise ValueError(
+            "project.target must be one of valence/top/vbm or "
+            f"conduction/bottom/cbm, got {project['target']!r}"
+        )
+
+    material = {
+        "name": str(system["name"]),
+        "num_layer_list": [int(value) for value in layers],
+        "spin": str(system["spin"]),
+        "orbital_order": str(system["orbital_order"]),
+        "efermi": float(project["efermi"]),
+        "hamk_file": _path_join(band_root, "hamiltonian_k.npy"),
+        "kpoints_file": _path_join(band_root, "kpoints.npy"),
+        "qset1_file": _path_join(band_root, "g_vectors_group1.npy"),
+        "qset2_file": _path_join(band_root, "g_vectors_group2.npy"),
+        "band_file": _path_join(band_root, band_filename),
+    }
+
+    expanded_project = dict(project)
+    expanded_project["mode"] = valley
+    expanded_project.pop("valley", None)
+    expanded_project["q_shell"] = q_shell
+    expanded_project["target"] = target
+
+    symmetry = out.get("symmetry", {})
+    if symmetry is None:
+        symmetry = {}
+    symmetry = _require_mapping(symmetry, label="symmetry")
+    symmetry.setdefault("tapw_symmetry_dir", _path_join(tapw_root, valley, q_shell, "symmetry"))
+
+    bands = out.get("bands", {})
+    if bands is None:
+        bands = {}
+    bands = _require_mapping(bands, label="bands")
+    kpath = bands.get("kpath", {})
+    if kpath is None:
+        kpath = {}
+    kpath = _require_mapping(kpath, label="bands.kpath")
+    if "tmat" in kpath:
+        raise ValueError("bands.kpath.tmat is not supported; put the real-space lattice in system.cell")
+    internal_kpath = dict(kpath)
+    internal_kpath["tmat"] = cell
+
+    out.update(
+        {
+            "case": {
+                "profile": valley,
+                "q_shell": q_shell,
+                "output_root": str(system["output"]),
+            },
+            "valley": valley,
+            "spin": str(system["spin"]),
+            "material": material,
+            "project": expanded_project,
+            "plot": {"mode": valley, "target": target},
+            "symm": symmetry,
+            "kpath": internal_kpath,
+        }
+    )
+    return out
+
+
 def _canonical_case_base(case_raw: Any) -> str | None:
     if not isinstance(case_raw, Mapping):
         return None
@@ -102,8 +235,10 @@ def _apply_tapw_band_manifest(material: dict[str, Any], *, config_dir: Path) -> 
 
 
 def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | Path) -> dict[str, Any]:
-    """Normalize the compact one-file KP case YAML into internal section views."""
+    """Normalize public TAPW-style or legacy KP YAML into internal section views."""
     out = dict(raw or {})
+    if "system" in out:
+        out = _expand_tapw_style_config(out)
     path = Path(config_path)
     case_base = _require_canonical_case(out.get("case"))
     case_name = _case_name(out.get("case"), path.stem)
@@ -132,7 +267,21 @@ def normalize_case_config(raw: Mapping[str, Any] | None, *, config_path: str | P
     explicit_low_states = project.get("nlow_state_list") not in (None, [])
     selection_raw = project.get("selection")
     if explicit_low_states:
-        project["selection"] = {"mode": "explicit"}
+        if selection_raw is None:
+            selection = {}
+        elif isinstance(selection_raw, str):
+            if selection_raw.strip().lower() not in {"auto", "explicit"}:
+                raise ValueError(
+                    "project.selection string must be 'auto' or 'explicit' when "
+                    "project.nlow_state_list is provided"
+                )
+            selection = {}
+        elif isinstance(selection_raw, Mapping):
+            selection = dict(selection_raw)
+        else:
+            raise ValueError("project.selection must be a string or mapping")
+        selection["mode"] = "explicit"
+        project["selection"] = selection
     elif selection_raw is None:
         project["selection"] = {"mode": "auto"}
     elif isinstance(selection_raw, str):
