@@ -678,7 +678,7 @@ def _projection_layerwise_orbital_counts(
     project: Mapping[str, Any],
     num_layer_list: Sequence[int],
 ) -> tuple[list[int] | None, str | None]:
-    """Return physical-layer orbital counts recorded by the projection step."""
+    """Return orbital counts recorded by the projection step."""
 
     total_layers = int(sum(int(value) for value in num_layer_list))
     rows: Any = None
@@ -686,9 +686,18 @@ def _projection_layerwise_orbital_counts(
     basis_file = heff_file.parent / "basis.npz"
     if basis_file.is_file():
         with np.load(basis_file, allow_pickle=True) as basis:
+            basis_kind = None
+            if "projection_basis_kind" in basis.files:
+                basis_kind_raw = np.asarray(basis["projection_basis_kind"])
+                if basis_kind_raw.shape != ():
+                    raise ValueError("projection basis kind must be a scalar")
+                basis_kind = str(basis_kind_raw.item())
             if "nlow_state_list" in basis.files:
                 rows = basis["nlow_state_list"].tolist()
                 source = "projection_basis"
+        if basis_kind == "gamma_routed":
+            handoff = load_gamma_routed_basis_spec(basis_file)
+            return [int(rank) for rank in handoff.group_ranks], "projection_gamma_routed"
     if rows is None:
         project_rows = project.get("nlow_state_list")
         if project_rows not in (None, []):
@@ -1826,9 +1835,14 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         prefer_active_layer_sectors=prefer_active_layer_sectors,
     )
     if projection_n_orb_input is not None:
+        projection_count_name = (
+            "projection Gamma group_ranks"
+            if projection_n_orb_source == "projection_gamma_routed"
+            else "projection nlow_state_list"
+        )
         projection_n_orb_values, _ = _resolve_layerwise_counts(
             projection_n_orb_input,
-            name="projection nlow_state_list",
+            name=projection_count_name,
             num_layer_list=num_layer_list,
             prefer_active_layer_sectors=prefer_active_layer_sectors,
         )
@@ -15392,6 +15406,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     n_orb_source = str(n_orb_meta.get("source", "model_config")) if isinstance(n_orb_meta, Mapping) else "model_config"
     n_orb_source_label = {
         "projection_basis": "inferred from projection/basis.npz",
+        "projection_gamma_routed": "inferred from routed projection group ranks",
         "source_project": "inferred from project.nlow_state_list",
         "model_config": "explicit model.n_orb assertion",
         "legacy_dimension_inference": "legacy dimension inference",

@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 import yaml
 
 from kp.model.pipeline import load_model_config
+from kp.model import pipeline as pipeline_module
 from kp.symmetry.projection import _sector_orbital_counts, _validate_project_layer_lists
 
 
@@ -107,6 +109,35 @@ def test_model_infers_layerwise_n_orb_from_projection_basis(tmp_path: Path) -> N
     assert cfg.n_orb == (1, 1)
     assert cfg.nlow_state == [1, 1]
     assert cfg.raw["model"]["n_orb_resolution"]["source"] == "projection_basis"
+
+
+def test_model_infers_n_orb_from_gamma_routed_group_ranks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[1, 1, 0])
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["material"]["num_layers"] = 2
+    raw["material"]["num_layer_list"] = [1, 1]
+    raw["model"].pop("n_orb")
+    raw["model"].pop("nlow_state")
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_routed"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_routed_basis_spec",
+        lambda path: SimpleNamespace(group_ranks=(2, 2)),
+    )
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (2, 2)
+    assert cfg.nlow_state == [2, 2]
+    assert cfg.raw["model"]["n_orb_resolution"]["source"] == "projection_gamma_routed"
 
 
 def test_model_rejects_n_orb_that_conflicts_with_projection_basis(tmp_path: Path) -> None:
