@@ -342,7 +342,7 @@ def test_same_dimension_uses_band_error_overlap_and_symmetry_tie_breaks() -> Non
     assert decision.selected.candidate_id == "best"
 
 
-def test_no_passing_candidate_selects_minimax_normalized_violation_with_warning() -> None:
+def test_no_passing_candidate_fails_closed() -> None:
     selection = _selection_module()
     candidates = [
         _candidate(selection, "bad-rms", 2, band_rms_mev=2.0),
@@ -357,29 +357,28 @@ def test_no_passing_candidate_selects_minimax_normalized_violation_with_warning(
         _candidate(selection, "bad-overlap", 8, subspace_overlap=0.70),
     ]
 
-    decision = selection.select_projection_candidate(candidates, _thresholds(selection))
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(candidates, _thresholds(selection))
 
-    assert decision.status == "WARN"
-    assert decision.selected.candidate_id == "balanced"
-    assert {violation.metric for violation in decision.violations} == {
-        "band_rms_mev",
-        "band_max_mev",
-        "subspace_overlap",
-    }
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.HARD_METRIC_FAILED
+    assert exc_info.value.candidate_ids == ("bad-rms", "balanced", "bad-overlap")
 
 
-def test_structural_failure_is_never_selected_as_warning_fallback() -> None:
+def test_structural_failure_cannot_enable_a_warning_fallback() -> None:
     selection = _selection_module()
     candidates = [
         _candidate(selection, "numerically-perfect", 1, structural_failure="projector rank loss"),
         _candidate(selection, "valid-warning", 4, band_rms_mev=1.5),
     ]
 
-    decision = selection.select_projection_candidate(candidates, _thresholds(selection))
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(candidates, _thresholds(selection))
 
-    assert decision.status == "WARN"
-    assert decision.selected.candidate_id == "valid-warning"
-    assert decision.structural_failures == (("numerically-perfect", "projector rank loss"),)
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.HARD_METRIC_FAILED
+    assert exc_info.value.candidate_ids == ("valid-warning",)
+    assert exc_info.value.structural_failures == (
+        ("numerically-perfect", "projector rank loss"),
+    )
 
 
 def test_all_structurally_failed_candidates_raise_instead_of_warning() -> None:
@@ -389,8 +388,72 @@ def test_all_structurally_failed_candidates_raise_instead_of_warning() -> None:
         _candidate(selection, "singular", 4, structural_failure="singular downfolding"),
     ]
 
-    with pytest.raises(selection.CandidateSelectionError, match="no structurally valid"):
+    with pytest.raises(selection.CandidateSelectionError, match="no structurally valid") as exc_info:
         selection.select_projection_candidate(candidates, _thresholds(selection))
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+def test_empty_candidate_envelope_fails_with_typed_reason() -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate([], _thresholds(selection))
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.NO_CANDIDATES
+    assert exc_info.value.candidate_ids == ()
+
+
+def test_duplicate_candidate_ids_fail_closed_before_selection() -> None:
+    selection = _selection_module()
+    candidates = [
+        _candidate(selection, "duplicate", 2),
+        _candidate(selection, "duplicate", 4),
+    ]
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(candidates, _thresholds(selection))
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.DUPLICATE_CANDIDATE_ID
+    assert exc_info.value.candidate_ids == ("duplicate",)
+
+
+@pytest.mark.parametrize("dimension", (0, -1))
+def test_nonpositive_candidate_dimension_fails_closed(dimension: int) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, "bad-dimension", dimension)],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+    assert exc_info.value.candidate_ids == ("bad-dimension",)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        "band_rms_mev",
+        "band_max_mev",
+        "subspace_overlap",
+        "symmetry_residual",
+        "symmetry_leakage",
+    ),
+)
+@pytest.mark.parametrize("value", (float("nan"), float("inf"), float("-inf")))
+def test_nonfinite_candidate_metric_fails_closed(metric: str, value: float) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, "nonfinite", 2, **{metric: value})],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.NONFINITE_METRIC
+    assert exc_info.value.candidate_ids == ("nonfinite",)
 
 
 def test_composition_reports_orbital_layer_and_spin_weights() -> None:

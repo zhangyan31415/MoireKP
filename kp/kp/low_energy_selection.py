@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -109,8 +110,34 @@ class SelectionDecision:
     structural_failures: tuple[tuple[str, str], ...]
 
 
+class CandidateSelectionFailureCode(str, Enum):
+    """Stable reasons why automatic candidate selection failed closed."""
+
+    NO_CANDIDATES = "NO_CANDIDATES"
+    DUPLICATE_CANDIDATE_ID = "DUPLICATE_CANDIDATE_ID"
+    STRUCTURAL_REJECTION = "STRUCTURAL_REJECTION"
+    NONFINITE_METRIC = "NONFINITE_METRIC"
+    HARD_METRIC_FAILED = "HARD_METRIC_FAILED"
+
+
 class CandidateSelectionError(ValueError):
-    pass
+    """Typed failure from automatic projection candidate selection."""
+
+    def __init__(
+        self,
+        failure_code: CandidateSelectionFailureCode,
+        message: str,
+        *,
+        candidate_ids: Sequence[str] = (),
+        structural_failures: Sequence[tuple[str, str]] = (),
+    ) -> None:
+        super().__init__(message)
+        self.failure_code = CandidateSelectionFailureCode(failure_code)
+        self.candidate_ids = tuple(str(candidate_id) for candidate_id in candidate_ids)
+        self.structural_failures = tuple(
+            (str(candidate_id), str(reason))
+            for candidate_id, reason in structural_failures
+        )
 
 
 @dataclass(frozen=True)
@@ -188,7 +215,10 @@ def select_projection_candidate(
     thresholds: SelectionThresholds,
 ) -> SelectionDecision:
     if not candidates:
-        raise CandidateSelectionError("no projection candidates were provided")
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.NO_CANDIDATES,
+            "no projection candidates were provided",
+        )
     threshold_values = (
         thresholds.band_rms_mev,
         thresholds.band_max_mev,
@@ -199,6 +229,55 @@ def select_projection_candidate(
     if any(not np.isfinite(value) or value <= 0.0 for value in threshold_values):
         raise ValueError("selection thresholds must be finite and strictly positive")
 
+    candidate_ids = tuple(str(candidate.candidate_id) for candidate in candidates)
+    duplicate_ids = tuple(
+        candidate_id
+        for candidate_id in dict.fromkeys(candidate_ids)
+        if candidate_ids.count(candidate_id) > 1
+    )
+    if duplicate_ids:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.DUPLICATE_CANDIDATE_ID,
+            "projection candidate IDs must be unique",
+            candidate_ids=duplicate_ids,
+        )
+
+    invalid_dimensions = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if not isinstance(candidate.dimension, (int, np.integer))
+        or isinstance(candidate.dimension, (bool, np.bool_))
+        or int(candidate.dimension) <= 0
+    )
+    if invalid_dimensions:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "projection candidate dimensions must be positive integers",
+            candidate_ids=invalid_dimensions,
+        )
+
+    metric_names = (
+        "band_rms_mev",
+        "band_max_mev",
+        "subspace_overlap",
+        "symmetry_residual",
+        "symmetry_leakage",
+    )
+    nonfinite_ids = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if any(
+            not np.isfinite(float(getattr(candidate, metric_name)))
+            for metric_name in metric_names
+        )
+    )
+    if nonfinite_ids:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.NONFINITE_METRIC,
+            "projection candidate metrics must be finite",
+            candidate_ids=nonfinite_ids,
+        )
+
     structural_failures = tuple(
         (candidate.candidate_id, str(candidate.structural_failure))
         for candidate in candidates
@@ -206,7 +285,12 @@ def select_projection_candidate(
     )
     valid = tuple(candidate for candidate in candidates if candidate.structural_failure is None)
     if not valid:
-        raise CandidateSelectionError("no structurally valid projection candidates remain")
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "no structurally valid projection candidates remain",
+            candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
+            structural_failures=structural_failures,
+        )
 
     violations_by_id = {
         candidate.candidate_id: _candidate_violations(candidate, thresholds)
@@ -233,24 +317,10 @@ def select_projection_candidate(
             structural_failures=structural_failures,
         )
 
-    def fallback_key(candidate: CandidateMetrics) -> tuple[float, float, float, int, str]:
-        normalized = tuple(
-            violation.normalized_violation
-            for violation in violations_by_id[candidate.candidate_id]
-        )
-        return (
-            max(normalized),
-            sum(normalized),
-            candidate.band_rms_mev,
-            candidate.dimension,
-            candidate.candidate_id,
-        )
-
-    selected = min(valid, key=fallback_key)
-    return SelectionDecision(
-        selected=selected,
-        status="WARN",
-        violations=violations_by_id[selected.candidate_id],
+    raise CandidateSelectionError(
+        CandidateSelectionFailureCode.HARD_METRIC_FAILED,
+        "no projection candidate passed every hard metric",
+        candidate_ids=tuple(candidate.candidate_id for candidate in valid),
         structural_failures=structural_failures,
     )
 
