@@ -301,6 +301,8 @@ class OrbitalAnalyzer:
         
         # 执行处理过程以生成df
         processor.process()
+        processor.resolved_structure_input = tapw_config.resolved_structure_input
+        processor.source_identity = tapw_config.resolved_structure_input.source_identity
         
         if self.config.verbose:
             if processor.df is None:

@@ -38,6 +38,18 @@ def _make_config(tmp_path: Path, *, mode: str, symmetry_enable: bool = False):
         slepc_comm="self",
     )
     config = SimpleNamespace(
+        system_input=SimpleNamespace(
+            source_kind="legacy_openmx",
+            output=output_dir,
+            structure=tmp_path / "openmx.dat",
+            hamiltonian=tmp_path / "H.dat",
+            overlap=s_file,
+            orbitals=None,
+            twist_index=6,
+            layers=(1, 1),
+            spin=False,
+            explicit_bravais=None,
+        ),
         twist=SimpleNamespace(
             twist_index_m=6,
             spin=False,
@@ -198,7 +210,6 @@ def test_symmetry_mode_dispatches_to_symmetry_runner_without_band_calculation(mo
 def test_public_calculation_uses_shared_structure_loader(monkeypatch, tmp_path):
     events = []
     config = _make_config(tmp_path, mode="symmetry", symmetry_enable=False)
-    config.system = object()
     args = _patch_main_dependencies(monkeypatch, config, events)
 
     class SharedStructure:

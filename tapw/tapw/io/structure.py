@@ -296,6 +296,38 @@ class ResolvedStructureInput:
     identity_components: dict[str, Any]
 
 
+def _structure_order_components(structure, *, spin: bool) -> tuple[list[str], list[str]]:
+    atoms = list(getattr(structure, "species_coordinates", []) or [])
+    site_order = [str(atom["species"]) for atom in atoms]
+    scalar_basis_order = []
+    for fallback_index, atom in enumerate(atoms, start=1):
+        site_index = int(atom.get("original_index", fallback_index))
+        species = str(atom["species"])
+        orbital_count = int(atom.get("orb_num", len(atom.get("orb_global_index", []))))
+        scalar_basis_order.extend(
+            f"site:{site_index}:{species}:orbital:{local_index}"
+            for local_index in range(orbital_count)
+        )
+    if not spin:
+        return site_order, scalar_basis_order
+    return site_order, [
+        f"spin:{spin_index}:{label}"
+        for spin_index in range(2)
+        for label in scalar_basis_order
+    ]
+
+
+def _legacy_source_identity(system) -> str:
+    """Preserve the historical legacy source hash while enriching its sidecar contract."""
+    return hash_mapping(
+        {
+            "H_file": hash_file(system.hamiltonian),
+            "S_file": None if system.overlap is None else hash_file(system.overlap),
+            "input_file": hash_file(system.structure),
+        }
+    )
+
+
 def resolve_structure_input(config) -> ResolvedStructureInput:
     """Resolve and certify one canonical ``system.structure`` source input."""
     system = config.system_input
@@ -315,6 +347,7 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
         for atom in structure.species_coordinates
     )
     expected = scalar_orbitals * (2 if system.spin else 1)
+    site_order, basis_order = _structure_order_components(structure, spin=system.spin)
     h_source = _source_matrix_basis_dimension(
         system.hamiltonian,
         expected_dimension=expected,
@@ -343,7 +376,9 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
         "structure_hash": hash_file(system.structure),
         "hamiltonian_hash": hash_file(system.hamiltonian),
         "overlap_hash": None if system.overlap is None else hash_file(system.overlap),
-        "site_order": [atom["species"] for atom in structure.species_coordinates],
+        "source_kind": system.source_kind,
+        "site_order": site_order,
+        "basis_order": basis_order,
         "lattice": np.asarray(structure.Tmat).tolist(),
         "coordinates": [
             [atom["x"], atom["y"], atom["z"]]
@@ -371,8 +406,75 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
     )
 
 
+def resolve_legacy_structure_input(config, structure) -> ResolvedStructureInput:
+    """Certify one already parsed legacy OpenMX structure at the shared boundary."""
+    system = config.system_input
+    if system.source_kind != "legacy_openmx":
+        raise ValueError("resolve_legacy_structure_input requires a legacy OpenMX system input.")
+    atoms = list(getattr(structure, "species_coordinates", []) or [])
+    scalar_orbitals = sum(int(atom.get("orb_num", 0)) for atom in atoms)
+    expected = scalar_orbitals * (2 if system.spin else 1)
+    if expected <= 0:
+        raise ValueError("Legacy OpenMX structure defines no source orbitals.")
+    h_source = _source_matrix_basis_dimension(
+        system.hamiltonian,
+        expected_dimension=expected,
+    )
+    s_source = (
+        None
+        if system.overlap is None
+        else _source_matrix_basis_dimension(system.overlap, expected_dimension=expected)
+    )
+    if s_source is not None and h_source.dimension != s_source.dimension:
+        raise ValueError(
+            f"H/S basis dimension mismatch: H={h_source.dimension}, S={s_source.dimension}."
+        )
+    for label, source in (("H", h_source), ("S", s_source)):
+        if source is not None and source.dimension != expected:
+            raise ValueError(
+                f"Legacy {label} source basis dimension {source.dimension} does not match expected "
+                f"basis dimension {expected} from OpenMX orbitals and spin."
+            )
+    site_order, basis_order = _structure_order_components(structure, spin=system.spin)
+    components = {
+        "schema": "tapw.resolved-structure-input.v1",
+        "source_kind": system.source_kind,
+        "structure_hash": hash_file(system.structure),
+        "hamiltonian_hash": hash_file(system.hamiltonian),
+        "overlap_hash": None if system.overlap is None else hash_file(system.overlap),
+        "site_order": site_order,
+        "basis_order": basis_order,
+        "lattice": np.asarray(structure.Tmat).tolist(),
+        "coordinates": [[atom["x"], atom["y"], atom["z"]] for atom in atoms],
+        "spin": bool(system.spin),
+        "bravais": str(structure.bravais),
+        "basis_dimension": expected,
+        "hamiltonian_basis_dimension": h_source.dimension,
+        "hamiltonian_dimension_provenance": h_source.provenance,
+        "overlap_basis_dimension": None if s_source is None else s_source.dimension,
+        "overlap_dimension_provenance": None if s_source is None else s_source.provenance,
+    }
+    return ResolvedStructureInput(
+        structure=structure,
+        bravais=str(structure.bravais),
+        expected_basis_dimension=expected,
+        hamiltonian_basis_dimension=h_source.dimension,
+        overlap_basis_dimension=None if s_source is None else s_source.dimension,
+        hamiltonian_dimension_provenance=h_source.provenance,
+        overlap_dimension_provenance=None if s_source is None else s_source.provenance,
+        source_identity=_legacy_source_identity(system),
+        identity_components=components,
+    )
+
+
 def load_structure_from_config(config, *, legacy_factory=None):
     """Load canonical and legacy structures through one explicit workflow boundary."""
+    cached = getattr(config, "resolved_structure_input", None)
+    if cached is not None:
+        structure = cached.structure
+        config.twist.bravais = cached.bravais
+        config.compute.bravais = cached.bravais
+        return structure
     system = config.system_input
     if system.source_kind == "canonical_structure":
         resolved = resolve_structure_input(config)
@@ -386,10 +488,25 @@ def load_structure_from_config(config, *, legacy_factory=None):
             spin=system.spin,
             bravais=system.explicit_bravais,
         )
+        if factory is OpenMXFile:
+            resolved = resolve_legacy_structure_input(config, structure)
+            config.resolved_structure_input = resolved
     resolved_bravais = str(getattr(structure, "bravais", getattr(config.twist, "bravais", "hex")))
     config.twist.bravais = resolved_bravais
     config.compute.bravais = resolved_bravais
     return structure
+
+
+def source_identity_from_config(config) -> str:
+    """Return the one source identity used by every public TAPW workflow."""
+    resolved = getattr(config, "resolved_structure_input", None)
+    system = config.system_input
+    if resolved is None and system.source_kind == "legacy_openmx":
+        return _legacy_source_identity(system)
+    if resolved is None:
+        load_structure_from_config(config)
+        resolved = config.resolved_structure_input
+    return str(resolved.source_identity)
 
 
 class OpenMXFile:

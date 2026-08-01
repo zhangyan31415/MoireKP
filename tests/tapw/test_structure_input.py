@@ -24,6 +24,8 @@ def _write_sparse_source(
     dimension: int,
     *,
     metadata_dimension=None,
+    metadata_schema=SPARSE_NPZ_SCHEMA,
+    metadata_version=1,
     coordinate_indices=None,
 ) -> None:
     diagonal = np.asarray(
@@ -39,8 +41,8 @@ def _write_sparse_source(
         payload[SPARSE_NPZ_METADATA_KEY] = np.asarray(
             json.dumps(
                 {
-                    "schema": SPARSE_NPZ_SCHEMA,
-                    "schema_version": 1,
+                    "schema": metadata_schema,
+                    "schema_version": metadata_version,
                     "basis_dimension": int(metadata_dimension),
                 },
                 sort_keys=True,
@@ -79,8 +81,12 @@ def _write_system_case(
     orbitals = orbitals or {"Mo": "s1", "Te": "p1"}
     atoms = Atoms(
         symbols=list(symbols),
-        positions=[[0.0, 0.0, 1.0], [1.0, 1.0, 2.0]],
-        cell=cell or [[3.0, 0.0, 0.0], [1.5, 2.598076211, 0.0], [0.0, 0.0, 20.0]],
+        positions=[[float(index), float(index), float(index + 1)] for index in range(len(symbols))],
+        cell=(
+            [[3.0, 0.0, 0.0], [1.5, 2.598076211, 0.0], [0.0, 0.0, 20.0]]
+            if cell is None
+            else cell
+        ),
         pbc=[True, True, False],
     )
     structure_path = tmp_path / ("POSCAR" if structure_format == "vasp" else "structure.cif")
@@ -107,6 +113,50 @@ def _write_system_case(
     return config_path
 
 
+def _write_openmx_case(tmp_path: Path, *, square: bool = True, explicit_bravais=None) -> Path:
+    a2 = "0.0 3.0 0.0" if square else "1.5 2.598076211 0.0"
+    (tmp_path / "openmx.dat").write_text(
+        f"""<Definition.of.Atomic.Species
+Te Te7.0-s1 Te_PBE
+Definition.of.Atomic.Species>
+Atoms.Number 1
+Atoms.SpeciesAndCoordinates.Unit Ang
+<Atoms.SpeciesAndCoordinates
+1 Te 0.0 0.0 1.0 0.0 0.0
+Atoms.SpeciesAndCoordinates>
+<Atoms.UnitVectors
+3.0 0.0 0.0
+{a2}
+0.0 0.0 20.0
+Atoms.UnitVectors>
+""",
+        encoding="utf-8",
+    )
+    _write_sparse_dat(tmp_path / "H.dat", 1)
+    _write_sparse_dat(tmp_path / "S.dat", 1)
+    twist = {"twist_index_m": 1, "twist_layer": [1, 1], "spin": False}
+    if explicit_bravais is not None:
+        twist["bravais"] = explicit_bravais
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        yaml.safe_dump(
+            {
+                "case": {"output_root": "outputs"},
+                "twist": twist,
+                "paths": {
+                    "input_file": "openmx.dat",
+                    "H_file": "H.dat",
+                    "S_file": "S.dat",
+                },
+                "symmetry": {"valley": "Gamma", "q_shell": 1},
+            },
+            sort_keys=False,
+        ),
+        encoding="utf-8",
+    )
+    return config_path
+
+
 @pytest.mark.parametrize("structure_format", ["vasp", "cif"])
 def test_resolved_structure_preserves_ase_site_order_and_compact_orbitals(tmp_path, structure_format):
     config = Config.from_yaml(str(_write_system_case(tmp_path, structure_format=structure_format)))
@@ -128,6 +178,16 @@ def test_resolved_structure_counts_spin_in_hs_basis_validation(tmp_path):
     resolved = resolve_structure_input(config)
 
     assert resolved.expected_basis_dimension == 8
+
+
+def test_resolved_structure_rejects_unspun_source_for_spinful_system(tmp_path):
+    config_path = _write_system_case(tmp_path, spin=True, matrix_dimension=4)
+    _write_sparse_source(tmp_path / "H.npz", 4, metadata_dimension=4)
+    _write_sparse_source(tmp_path / "S.npz", 4, metadata_dimension=4)
+    config = Config.from_yaml(str(config_path))
+
+    with pytest.raises(ValueError, match=r"source basis dimension.*4.*expected.*8"):
+        resolve_structure_input(config)
 
 
 def test_canonical_structure_rejects_rectangular_bravais_metric(tmp_path):
@@ -195,6 +255,32 @@ def test_versioned_npz_basis_dimension_is_exact_and_must_match_expected(tmp_path
 
     with pytest.raises(ValueError, match=r"source basis dimension.*5.*expected.*4"):
         resolve_structure_input(config)
+
+
+@pytest.mark.parametrize(
+    ("metadata_schema", "metadata_version", "message"),
+    [
+        ("tapw.sparse-realspace.unknown", 1, "Unsupported sparse NPZ schema"),
+        (SPARSE_NPZ_SCHEMA, 2, "Unsupported sparse NPZ schema version"),
+    ],
+)
+def test_versioned_npz_rejects_unknown_schema_or_version(
+    tmp_path,
+    metadata_schema,
+    metadata_version,
+    message,
+):
+    config_path = _write_system_case(tmp_path, matrix_dimension=4)
+    _write_sparse_source(
+        tmp_path / "H.npz",
+        4,
+        metadata_dimension=4,
+        metadata_schema=metadata_schema,
+        metadata_version=metadata_version,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        resolve_structure_input(Config.from_yaml(str(config_path)))
 
 
 def test_dat_header_basis_dimension_is_exact(tmp_path):
@@ -371,6 +457,85 @@ def test_shared_structure_loader_records_canonical_resolution_on_config(tmp_path
     assert config.resolved_structure_input.source_identity
     assert config.twist.bravais == "hex"
     assert config.compute.bravais == "hex"
+
+
+def test_legacy_square_without_explicit_bravais_matches_direct_auto_detection(tmp_path):
+    config = Config.from_yaml(str(_write_openmx_case(tmp_path, square=True)))
+
+    direct = OpenMXFile(
+        config.system_input.structure,
+        twist_index=config.system_input.twist_index,
+        spin=config.system_input.spin,
+        bravais=None,
+    )
+    shared = load_structure_from_config(config)
+
+    assert config.system_input.explicit_bravais is None
+    assert direct.bravais == "square"
+    assert shared.bravais == direct.bravais
+    assert config.resolved_structure_input.structure is shared
+    assert config.resolved_structure_input.identity_components["site_order"] == ["Te"]
+    assert config.resolved_structure_input.identity_components["basis_order"] == ["site:1:Te:orbital:0"]
+    from tapw.identity import hash_file, hash_mapping
+    from tapw.workflows.symmetry import _source_input_hash
+
+    historical = hash_mapping(
+        {
+            "H_file": hash_file(config.system_input.hamiltonian),
+            "S_file": hash_file(config.system_input.overlap),
+            "input_file": hash_file(config.system_input.structure),
+        }
+    )
+    assert config.resolved_structure_input.source_identity == historical
+    assert _source_input_hash(config) == historical
+
+
+def test_equivalent_canonical_and_legacy_sources_share_internal_site_basis_mapping(tmp_path):
+    canonical_dir = tmp_path / "canonical"
+    legacy_dir = tmp_path / "legacy"
+    canonical_dir.mkdir()
+    legacy_dir.mkdir()
+    canonical_path = _write_system_case(
+        canonical_dir,
+        symbols=("Te",),
+        orbitals={"Te": "s1"},
+        matrix_dimension=1,
+        cell=np.diag([3.0, 3.0, 20.0]),
+    )
+    legacy_path = _write_openmx_case(legacy_dir, square=True)
+
+    canonical_config = Config.from_yaml(str(canonical_path))
+    legacy_config = Config.from_yaml(str(legacy_path))
+    load_structure_from_config(canonical_config)
+    load_structure_from_config(legacy_config)
+
+    canonical_mapping = canonical_config.resolved_structure_input.identity_components
+    legacy_mapping = legacy_config.resolved_structure_input.identity_components
+    assert canonical_mapping["site_order"] == legacy_mapping["site_order"]
+    assert canonical_mapping["basis_order"] == legacy_mapping["basis_order"]
+
+
+@pytest.mark.parametrize("source_kind", ["canonical", "legacy"])
+def test_five_public_workflow_loads_share_source_site_and_basis_identity(tmp_path, source_kind):
+    if source_kind == "canonical":
+        config_path = _write_system_case(tmp_path)
+    else:
+        config_path = _write_openmx_case(tmp_path, square=True)
+
+    contracts = []
+    for _workflow in ("run", "symm", "symm-rep", "topo", "orbital"):
+        config = Config.from_yaml(str(config_path))
+        load_structure_from_config(config)
+        resolved = config.resolved_structure_input
+        contracts.append(
+            (
+                resolved.source_identity,
+                resolved.identity_components["site_order"],
+                resolved.identity_components["basis_order"],
+            )
+        )
+
+    assert all(contract == contracts[0] for contract in contracts[1:])
 
 
 def test_canonical_save_reload_preserves_resolved_source_identity(tmp_path):

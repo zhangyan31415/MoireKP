@@ -108,14 +108,10 @@ def _identity_config_value(value: Any) -> Any:
 
 def _source_input_hash(config: Any) -> str:
     system_input = getattr(config, "system_input", None)
-    if system_input is not None and system_input.source_kind == "canonical_structure":
-        resolved = getattr(config, "resolved_structure_input", None)
-        if resolved is None:
-            from ..io.structure import resolve_structure_input
+    if system_input is not None:
+        from ..io.structure import source_identity_from_config
 
-            resolved = resolve_structure_input(config)
-            config.resolved_structure_input = resolved
-        return hash_mapping({"resolved_structure_input": resolved.source_identity})
+        return source_identity_from_config(config)
     paths = getattr(config, "paths", None)
     if paths is None:
         raise ValueError("TAPW source identity requires config.paths")
