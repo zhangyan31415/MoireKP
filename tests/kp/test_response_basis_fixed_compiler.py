@@ -278,6 +278,22 @@ def test_direct_actions_certify_rank_after_independent_column_scaling() -> None:
     )
 
 
+def test_direct_actions_assign_zero_residual_to_empty_fixed_subspace() -> None:
+    api = _api()
+
+    result = api.compile_generator_fixed_vocabulary_from_actions(
+        np.eye(2, dtype=np.float64),
+        generator_actions={"sign": -np.eye(2, dtype=np.float64)},
+        antiunitary_parities={"sign": False},
+        logical_channel_ids=("x", "y"),
+    )
+
+    assert result.rank == 0
+    assert result.fixed_vectors.shape == (2, 0)
+    certification = result.metadata["fixed_physical_action_certification"][0]
+    assert certification["residual_operator_norm"] == 0.0
+
+
 def test_direct_actions_still_reject_normalized_rank_ambiguity() -> None:
     api = _api()
     vocabulary = np.asarray(

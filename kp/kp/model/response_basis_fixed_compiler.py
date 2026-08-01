@@ -1232,8 +1232,10 @@ def compile_generator_fixed_vocabulary_from_actions(
                 physical_action_representations[name] @ physical_fixed
                 - physical_fixed
             )
-            residual_operator = float(
-                np.linalg.norm(physical_residual, ord=2)
+            residual_operator = (
+                0.0
+                if fixed.rank == 0
+                else float(np.linalg.norm(physical_residual, ord=2))
             )
             roundoff = float(
                 np.finfo(np.float64).eps
