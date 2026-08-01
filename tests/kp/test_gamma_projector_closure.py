@@ -7,6 +7,7 @@ import pytest
 from scipy import sparse
 
 import kp.blocks as public_blocks
+import kp.blocks.gamma_layout as gamma_layout_module
 
 from kp.blocks.gamma_layout import (
     GammaLayoutError,
@@ -299,6 +300,16 @@ def test_routing_thresholds_are_explicit_identity_bound_and_domain_checked() -> 
         GammaRoutingThresholds.from_normalized_config(noninteger)
 
 
+def test_routing_threshold_scalars_reject_bool_string_and_overflow() -> None:
+    for field, invalid in (
+        ("capture_loss_max", "0.1"),
+        ("local_action_isometry", True),
+        ("route_covariance", 10**10000),
+    ):
+        with pytest.raises(ValueError, match="strict finite numeric"):
+            replace(_thresholds(), **{field: invalid})
+
+
 def test_raw_action_rejects_group_dependent_q_route_before_projection() -> None:
     layout = _layout()
     with pytest.raises(GammaRoutingError, match="q route mismatch"):
@@ -490,6 +501,108 @@ def test_dense_and_csr_raw_actions_have_equal_identity_without_full_densificatio
             thresholds=_thresholds(),
             tapw_source_basis_hash="tapw-source-basis-a",
         )
+
+
+def test_noncanonical_sparse_formats_equal_dense_without_format_errors() -> None:
+    layout = _layout()
+    dimension = layout.full_dimension
+    indptr = [0]
+    indices = []
+    data = []
+    for row in range(dimension):
+        indices.extend((row, row))
+        data.extend((0.75, 0.25))
+        indptr.append(len(indices))
+    noncanonical_csr = sparse.csr_matrix(
+        (
+            np.asarray(data, dtype=np.complex128),
+            np.asarray(indices, dtype=np.int32),
+            np.asarray(indptr, dtype=np.int32),
+        ),
+        shape=(dimension, dimension),
+    )
+    assert not noncanonical_csr.has_canonical_format
+    coo = sparse.coo_matrix(
+        (
+            np.asarray(data, dtype=np.complex128),
+            (
+                np.repeat(np.arange(dimension), 2),
+                np.asarray(indices),
+            ),
+        ),
+        shape=(dimension, dimension),
+    )
+    dia = sparse.dia_matrix(
+        (np.ones((1, dimension), dtype=np.complex128), np.asarray([0])),
+        shape=(dimension, dimension),
+    )
+    common = dict(
+        name="identity-all-sparse-formats",
+        layout=layout,
+        q_permutations=((0, 1), (0, 1)),
+        sector_map=(0, 1),
+        antiunitary=False,
+        thresholds=_thresholds(),
+        tapw_source_basis_hash=layout.tapw_source_basis_hash,
+    )
+    dense = certify_gamma_raw_action(
+        full_action=np.eye(dimension, dtype=np.complex128), **common
+    )
+    for candidate in (noncanonical_csr, coo, dia):
+        certified = certify_gamma_raw_action(full_action=candidate, **common)
+        assert certified.action_hash == dense.action_hash
+        for actual, expected in zip(
+            certified.local_actions_by_source_q,
+            dense.local_actions_by_source_q,
+            strict=True,
+        ):
+            np.testing.assert_array_equal(actual, expected)
+
+
+def test_noncanonical_csr_route_leakage_uses_mathematical_duplicate_sum() -> None:
+    layout = _layout()
+    dimension = layout.full_dimension
+    leak_row = int(layout.same_q_full_rows(1)[0])
+    leak_column = int(layout.same_q_full_rows(0)[0])
+    rows = []
+    for row in range(dimension):
+        entries = [(row, 1.0)]
+        if row == leak_row:
+            entries.extend(((leak_column, 0.2), (leak_column, 0.2)))
+        rows.append(entries)
+    indptr = [0]
+    indices = []
+    data = []
+    for entries in rows:
+        for column, value in reversed(entries):
+            indices.append(column)
+            data.append(value)
+        indptr.append(len(indices))
+    noncanonical = sparse.csr_matrix(
+        (
+            np.asarray(data, dtype=np.complex128),
+            np.asarray(indices, dtype=np.int32),
+            np.asarray(indptr, dtype=np.int32),
+        ),
+        shape=(dimension, dimension),
+    )
+    assert not noncanonical.has_canonical_format
+    gates = replace(_thresholds(), off_route_leakage=0.1)
+    common = dict(
+        name="duplicate-leakage",
+        layout=layout,
+        q_permutations=((0, 1), (0, 1)),
+        sector_map=(0, 1),
+        antiunitary=False,
+        thresholds=gates,
+        tapw_source_basis_hash=layout.tapw_source_basis_hash,
+    )
+    dense = np.eye(dimension, dtype=np.complex128)
+    dense[leak_row, leak_column] = 0.4
+    for candidate in (dense, noncanonical):
+        with pytest.raises(GammaRoutingError) as exc_info:
+            certify_gamma_raw_action(full_action=candidate, **common)
+        assert exc_info.value.reason is CandidateRejectionReason.RAW_ACTION_ROUTE_LEAKAGE
 
 
 def test_cluster_closure_adds_complete_kramers_clusters_and_is_gauge_invariant() -> None:
@@ -1028,6 +1141,52 @@ def test_assembler_uses_exact_c_g_alpha_q_order_and_revalidates_frame_hash() -> 
     assert duplicate.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
+def test_assembler_rejects_hash_consistent_positive_negative_group_swap() -> None:
+    layout = _layout()
+    evals, vecs, joint = _routed_eigensystems(layout)
+    routed = build_gamma_routed_frames(
+        evals,
+        vecs,
+        joint_band_indices=joint,
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    assert routed.group_dimensions == (2, 2)
+    swapped_frames = tuple(
+        np.column_stack((frame[:, 2:], frame[:, :2]))
+        for frame in routed.local_frames_by_q
+    )
+    swapped_references = tuple(
+        (groups[1], groups[0])
+        for groups in routed.reference_frames_by_q_group
+    )
+    swapped_projectors = tuple(
+        (groups[1], groups[0])
+        for groups in routed.routed_projectors_by_q
+    )
+    frame_tensor = np.stack(swapped_frames, axis=0)
+    reference_tensor = np.stack(
+        [np.column_stack(groups) for groups in swapped_references], axis=0
+    )
+    swapped = replace(
+        routed,
+        local_frames_by_q=swapped_frames,
+        reference_frames_by_q_group=swapped_references,
+        routed_projectors_by_q=swapped_projectors,
+        frame_hash=gamma_layout_module._hash_array(frame_tensor),
+        reference_frame_hash=gamma_layout_module._hash_array(reference_tensor),
+    )
+    with pytest.raises(GammaRoutingError) as exc_info:
+        assemble_gamma_routed_projectors(
+            swapped,
+            layout=layout,
+            thresholds=_thresholds(),
+            include_high=False,
+        )
+    assert exc_info.value.reason is CandidateRejectionReason.PROJECTOR_FRAME_RANK
+
+
 def test_routed_frame_route_gaps_require_strict_finite_numeric_values() -> None:
     layout = _layout()
     evals, vecs, joint = _routed_eigensystems(layout)
@@ -1046,9 +1205,81 @@ def test_routed_frame_route_gaps_require_strict_finite_numeric_values() -> None:
     for invalid in (np.nan, True):
         with pytest.raises(ValueError, match="strict finite numeric"):
             replace(routed, route_gaps=(invalid, 1.0))
+    with pytest.raises(ValueError, match="strict finite numeric"):
+        replace(routed, route_gaps=(10**10000, 1.0))
     normalized = replace(routed, route_gaps=(np.float32(1.0), np.int64(1)))
     assert normalized.route_gaps == (1.0, 1.0)
     assert all(type(gap) is float for gap in normalized.route_gaps)
+
+
+def test_assembler_rejects_float_group_offsets_with_typed_error() -> None:
+    layout = _layout()
+    evals, vecs, joint = _routed_eigensystems(layout)
+    routed = build_gamma_routed_frames(
+        evals,
+        vecs,
+        joint_band_indices=joint,
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    invalid = replace(routed, group_offsets=(0.0, 2.0, 4.0))
+    with pytest.raises(GammaRoutingError) as exc_info:
+        assemble_gamma_routed_projectors(
+            invalid,
+            layout=layout,
+            thresholds=_thresholds(),
+            include_high=False,
+        )
+    assert exc_info.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_assembler_rejects_missing_group_projector_with_typed_error() -> None:
+    layout = _layout()
+    evals, vecs, joint = _routed_eigensystems(layout)
+    routed = build_gamma_routed_frames(
+        evals,
+        vecs,
+        joint_band_indices=joint,
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    invalid_projectors = (
+        (routed.routed_projectors_by_q[0][0],),
+        routed.routed_projectors_by_q[1],
+    )
+    invalid = replace(routed, routed_projectors_by_q=invalid_projectors)
+    with pytest.raises(GammaRoutingError) as exc_info:
+        assemble_gamma_routed_projectors(
+            invalid,
+            layout=layout,
+            thresholds=_thresholds(),
+            include_high=False,
+        )
+    assert exc_info.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_mixed_type_certified_q_permutation_fails_closed() -> None:
+    layout = _layout()
+    evals, vecs, joint = _routed_eigensystems(layout)
+    routed = build_gamma_routed_frames(
+        evals,
+        vecs,
+        joint_band_indices=joint,
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    action = replace(_identity_action(layout), q_permutation=(0, "1"))
+    with pytest.raises(GammaRoutingError) as exc_info:
+        certify_routed_covariance(
+            routed.routed_projectors_by_q,
+            layout=layout,
+            actions=(action,),
+            thresholds=_thresholds(),
+        )
+    assert exc_info.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
 def test_assembler_certifies_high_frame_orthogonality_and_completeness(monkeypatch) -> None:

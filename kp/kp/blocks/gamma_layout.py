@@ -83,9 +83,7 @@ def _canonical_matrix_hash(matrix: Any) -> str:
     """Hash dense and sparse matrices through the same sorted COO encoding."""
 
     if scipy.sparse.issparse(matrix):
-        canonical = scipy.sparse.coo_matrix(matrix, dtype=np.complex128, copy=True)
-        canonical.sum_duplicates()
-        canonical.eliminate_zeros()
+        canonical = _canonical_sparse_csr(matrix).tocoo(copy=False)
         order = np.lexsort((canonical.col, canonical.row))
         rows = np.asarray(canonical.row[order], dtype=np.int64)
         columns = np.asarray(canonical.col[order], dtype=np.int64)
@@ -109,6 +107,22 @@ def _canonical_matrix_hash(matrix: Any) -> str:
         digest.update(b"\0")
         digest.update(memoryview(np.ascontiguousarray(value)).cast("B"))
     return digest.hexdigest()
+
+
+def _canonical_sparse_csr(matrix: Any) -> scipy.sparse.csr_matrix:
+    """Return one format-safe mathematical sparse matrix without densifying."""
+
+    try:
+        canonical = scipy.sparse.csr_matrix(
+            matrix, dtype=np.complex128, copy=True
+        )
+        canonical.sum_duplicates()
+        canonical.sort_indices()
+        canonical.eliminate_zeros()
+        canonical.sort_indices()
+    except (IndexError, OverflowError, TypeError, ValueError) as error:
+        raise ValueError("Gamma sparse action cannot be canonicalized") from error
+    return canonical
 
 
 def _matrix_is_finite(matrix: Any) -> bool:
@@ -176,9 +190,24 @@ class GammaRoutingThresholds:
             "projector_residual",
             "anchor_sigma_min",
         )
-        values = {name: float(getattr(self, name)) for name in scalar_names}
+        raw_values = {name: getattr(self, name) for name in scalar_names}
+        if any(
+            isinstance(value, (bool, np.bool_)) or not isinstance(value, Real)
+            for value in raw_values.values()
+        ):
+            raise ValueError(
+                "Gamma routing thresholds must be strict finite numeric values"
+            )
+        try:
+            values = {name: float(value) for name, value in raw_values.items()}
+        except (OverflowError, TypeError, ValueError) as error:
+            raise ValueError(
+                "Gamma routing thresholds must be strict finite numeric values"
+            ) from error
         if any(not np.isfinite(value) for value in values.values()):
-            raise ValueError("Gamma routing thresholds must be finite")
+            raise ValueError(
+                "Gamma routing thresholds must be strict finite numeric values"
+            )
         if not 0.0 <= values["energy_same_ev"] < values["energy_different_ev"]:
             raise ValueError("Gamma energy thresholds require 0 <= same < different")
         capture_full = 1.0 - values["capture_loss_max"]
@@ -785,8 +814,8 @@ def _validate_action_certificate(
     expected_q = tuple(range(layout.q_count))
     valid_routes = (
         len(action.q_permutation) == layout.q_count
-        and tuple(sorted(action.q_permutation)) == expected_q
         and all(_strict_integral(value) for value in action.q_permutation)
+        and tuple(sorted(int(value) for value in action.q_permutation)) == expected_q
     )
     valid_sector = (
         len(action.sector_map) == 2
@@ -914,9 +943,21 @@ def certify_gamma_raw_action(
             "Gamma sector_map must be a permutation of two source groups",
         )
     if scipy.sparse.issparse(full_action):
-        action = full_action.astype(np.complex128, copy=False)
+        try:
+            action = _canonical_sparse_csr(full_action)
+        except ValueError as error:
+            raise GammaRoutingError(
+                CandidateRejectionReason.LOCAL_ACTION_ISOMETRY,
+                "raw-H sparse action cannot be canonicalized safely",
+            ) from error
     else:
-        action = np.asarray(full_action, dtype=np.complex128)
+        try:
+            action = np.asarray(full_action, dtype=np.complex128)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise GammaRoutingError(
+                CandidateRejectionReason.LOCAL_ACTION_ISOMETRY,
+                "raw-H action cannot be represented on the Gamma row space",
+            ) from error
     if action.shape != (layout.full_dimension, layout.full_dimension) or not _matrix_is_finite(
         action
     ):
@@ -1222,6 +1263,52 @@ def _residual(matrix: np.ndarray, *, rank: int) -> float:
     return float(np.linalg.norm(matrix, ord="fro") / np.sqrt(max(1, rank)))
 
 
+def _certify_signed_routing_frames(
+    groups: Sequence[np.ndarray],
+    *,
+    routing_operator: np.ndarray,
+    thresholds: GammaRoutingThresholds,
+    context: str,
+    expected_gap: float | None = None,
+) -> float:
+    if len(groups) != 2 or any(
+        group.ndim != 2
+        or group.shape[0] != routing_operator.shape[0]
+        or group.shape[1] <= 0
+        or not np.all(np.isfinite(group))
+        for group in groups
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+            f"{context} does not contain two finite routed group frames",
+        )
+    compressed0 = groups[0].conj().T @ routing_operator @ groups[0]
+    compressed1 = groups[1].conj().T @ routing_operator @ groups[1]
+    compressed0 = 0.5 * (compressed0 + compressed0.conj().T)
+    compressed1 = 0.5 * (compressed1 + compressed1.conj().T)
+    cross = _residual(
+        groups[0].conj().T @ routing_operator @ groups[1],
+        rank=min(groups[0].shape[1], groups[1].shape[1]),
+    )
+    positive_gap = float(np.min(np.linalg.eigvalsh(compressed0)))
+    negative_gap = float(-np.max(np.linalg.eigvalsh(compressed1)))
+    actual_gap = min(positive_gap, negative_gap)
+    invalid_expected_gap = (
+        expected_gap is not None
+        and abs(actual_gap - expected_gap) > thresholds.projector_residual
+    )
+    if (
+        cross > thresholds.projector_residual
+        or actual_gap <= thresholds.route_zero_gap
+        or invalid_expected_gap
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+            f"{context} does not preserve certified positive/negative routing",
+        )
+    return actual_gap
+
+
 def _canonical_projector_frame(projector: np.ndarray, rank: int) -> np.ndarray:
     if rank <= 0:
         return np.zeros((projector.shape[0], 0), dtype=np.complex128)
@@ -1293,7 +1380,12 @@ class GammaRoutedFrames:
             raise ValueError(
                 "routed Gamma route gaps must be strict finite numeric values"
             )
-        normalized_route_gaps = tuple(float(gap) for gap in raw_route_gaps)
+        try:
+            normalized_route_gaps = tuple(float(gap) for gap in raw_route_gaps)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise ValueError(
+                "routed Gamma route gaps must be strict finite numeric values"
+            ) from error
         if any(not np.isfinite(gap) for gap in normalized_route_gaps):
             raise ValueError(
                 "routed Gamma route gaps must be strict finite numeric values"
@@ -1722,21 +1814,35 @@ def assemble_gamma_routed_projectors(
             CandidateRejectionReason.HANDOFF_K_COVERAGE,
             "routed frames do not cover every ordered Q",
         )
-    if (
-        len(routed.group_dimensions) != 2
-        or any(
-            not _strict_integral(rank) or int(rank) <= 0
-            for rank in routed.group_dimensions
+    try:
+        raw_ranks = tuple(routed.group_dimensions)
+        raw_offsets = tuple(routed.group_offsets)
+        complete_group_slices = all(
+            len(groups) == 2
+            for groups in routed.reference_frames_by_q_group
+        ) and all(
+            len(groups) == 2 for groups in routed.routed_projectors_by_q
         )
-        or routed.group_offsets != (
-            0,
-            routed.group_dimensions[0],
-            sum(routed.group_dimensions),
-        )
-    ):
+    except (OverflowError, TypeError) as error:
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
-            "routed group offsets do not match group ranks",
+            "routed group metadata is not structurally valid",
+        ) from error
+    valid_ranks = (
+        len(raw_ranks) == 2
+        and all(_strict_integral(rank) and int(rank) > 0 for rank in raw_ranks)
+    )
+    ranks = tuple(int(rank) for rank in raw_ranks) if valid_ranks else ()
+    expected_offsets = (0, ranks[0], sum(ranks)) if valid_ranks else ()
+    valid_offsets = (
+        len(raw_offsets) == 3
+        and all(_strict_integral(offset) for offset in raw_offsets)
+        and tuple(int(offset) for offset in raw_offsets) == expected_offsets
+    )
+    if not (valid_ranks and valid_offsets and complete_group_slices):
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "routed group ranks, offsets, or group slices are invalid",
         )
     if (
         not routed.joint_band_indices
@@ -1746,7 +1852,7 @@ def assemble_gamma_routed_projectors(
             int(band) < 0 or int(band) >= layout.same_q_dimension
             for band in routed.joint_band_indices
         )
-        or len(routed.joint_band_indices) != sum(routed.group_dimensions)
+        or len(routed.joint_band_indices) != sum(ranks)
     ):
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
@@ -1762,7 +1868,7 @@ def assemble_gamma_routed_projectors(
             "routed source-group gaps do not satisfy the certified routing gate",
         )
     q_count = layout.q_count
-    ranks = tuple(int(rank) for rank in routed.group_dimensions)
+    offsets = tuple(int(offset) for offset in raw_offsets)
     try:
         frame_tensor = np.stack(
             [np.asarray(frame, dtype=np.complex128) for frame in routed.local_frames_by_q],
@@ -1795,6 +1901,10 @@ def assemble_gamma_routed_projectors(
     low_dimension = q_count * sum(ranks)
     u_low = np.zeros((layout.full_dimension, low_dimension), dtype=np.complex128)
     high_frames: list[np.ndarray] = []
+    routing_operator = (
+        layout.source_group_local_projector(0)
+        - layout.source_group_local_projector(1)
+    )
     for q_index, raw_frame in enumerate(routed.local_frames_by_q):
         frame = np.asarray(raw_frame, dtype=np.complex128)
         if (
@@ -1815,19 +1925,21 @@ def assemble_gamma_routed_projectors(
                 f"q={q_index} routed local frame is not orthonormal",
             )
         reference_groups = routed.reference_frames_by_q_group[q_index]
-        if len(reference_groups) != 2:
-            raise GammaRoutingError(
-                CandidateRejectionReason.HANDOFF_IDENTITY,
-                f"q={q_index} routed reference does not contain two groups",
-            )
+        local_groups = tuple(
+            frame[:, offsets[group] : offsets[group + 1]] for group in range(2)
+        )
+        reference_arrays = tuple(
+            np.asarray(reference, dtype=np.complex128)
+            for reference in reference_groups
+        )
         for group in range(2):
-            start, stop = routed.group_offsets[group : group + 2]
-            group_frame = frame[:, start:stop]
+            start, stop = offsets[group : group + 2]
+            group_frame = local_groups[group]
             expected_projector = np.asarray(
                 routed.routed_projectors_by_q[q_index][group],
                 dtype=np.complex128,
             )
-            reference = np.asarray(reference_groups[group], dtype=np.complex128)
+            reference = reference_arrays[group]
             if (
                 expected_projector.shape
                 != (layout.same_q_dimension, layout.same_q_dimension)
@@ -1871,8 +1983,20 @@ def assemble_gamma_routed_projectors(
             for alpha in range(ranks[group]):
                 column = q_count * sum(ranks[:group]) + alpha * q_count + q_index
                 u_low[rows, column] = frame[:, start + alpha]
-        reference0 = np.asarray(reference_groups[0], dtype=np.complex128)
-        reference1 = np.asarray(reference_groups[1], dtype=np.complex128)
+        _certify_signed_routing_frames(
+            local_groups,
+            routing_operator=routing_operator,
+            thresholds=thresholds,
+            context=f"q={q_index} routed local frame",
+            expected_gap=routed.route_gaps[q_index],
+        )
+        _certify_signed_routing_frames(
+            reference_arrays,
+            routing_operator=routing_operator,
+            thresholds=thresholds,
+            context=f"q={q_index} routed reference frame",
+        )
+        reference0, reference1 = reference_arrays
         projector0 = np.asarray(
             routed.routed_projectors_by_q[q_index][0], dtype=np.complex128
         )
