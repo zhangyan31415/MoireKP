@@ -317,9 +317,15 @@ examples/data-manifest.yaml
 
 外部数据齐全后，按各示例目录中的配置运行 TAPW 和 KP workflow。
 
+## 许可证
+
+MoireKP 软件以及仓库作者编写的文档、配置文件和小型示例采用 `LGPL-3.0-or-later` 许可证。版权声明和完整许可条款见 [COPYRIGHT](COPYRIGHT)、[COPYING.LESSER](COPYING.LESSER) 和 [COPYING](COPYING)。
+
+该软件许可证不会自动覆盖外部 OpenMX/TAPW/KP 输入、大型示例数据集或生成物。这些数据的来源和许可信息在 `examples/data-manifest.yaml` 中单独记录，并须在正式数据归档前确认。
+
 ## 发布状态
 
-当前 checkout 的 license、DOI 和公开数据 URL 仍需最终确认。正式归档前必须处理：
+软件许可证已经确定。外部数据集许可证、DOI、公开数据 URL 和 checksum 仍需最终确认。正式归档前必须处理：
 
 ```text
 RELEASE_BLOCKERS.md
@@ -333,4 +339,4 @@ examples/data-manifest.yaml
 scripts/release_gate.sh
 ```
 
-该脚本会启用最终发布检查；license、DOI、公开数据 URL、checksum 和 release blocker 未完成时应当失败。
+该脚本会启用最终发布检查；数据集许可证、DOI、公开数据 URL、checksum 和 release blocker 未完成时应当失败。

@@ -324,9 +324,15 @@ examples/data-manifest.yaml
 
 Once the external data are available, run TAPW and KP workflows using the configs in each example directory.
 
+## License
+
+The MoireKP software and repository-authored documentation, configuration files, and small examples are licensed under `LGPL-3.0-or-later`. See [COPYRIGHT](COPYRIGHT), [COPYING.LESSER](COPYING.LESSER), and [COPYING](COPYING) for the copyright notice and complete license terms.
+
+This software license does not automatically cover external OpenMX/TAPW/KP inputs, large example datasets, or generated artifacts. Their provenance and license metadata are tracked separately in `examples/data-manifest.yaml` and must be confirmed before an archival data release.
+
 ## Release Status
 
-The release license, DOI, and public data URL still need final confirmation. Before an archival release, review:
+The software license is resolved. External dataset licenses, the DOI, public data URLs, and checksums still need final confirmation. Before an archival release, review:
 
 ```text
 RELEASE_BLOCKERS.md
@@ -340,4 +346,4 @@ Before tagging a formal CPC archive, run:
 scripts/release_gate.sh
 ```
 
-This enables final release checks and should fail until license, DOI, public data URL, checksums, and release blockers are resolved.
+This enables final release checks and should fail until dataset licenses, DOI, public data URLs, checksums, and release blockers are resolved.

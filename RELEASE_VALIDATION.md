@@ -38,7 +38,7 @@ python -m pytest -q -p no:cacheprovider tests/test_release_contract.py tests/kp/
 The checkout remains pre-release until the following values are supplied and
 encoded in `examples/data-manifest.yaml` and project metadata:
 
-- final license
+- external dataset licenses and provenance
 - CPC DOI or submission DOI metadata
 - public data archive URL
 - final external data checksums

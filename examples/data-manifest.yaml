@@ -1,7 +1,7 @@
 schema_version: 2
 status: pending
 release_blockers:
-  - license
+  - dataset_license
   - doi
   - data_url
 metadata:
@@ -11,6 +11,9 @@ metadata:
 notes: >-
   Release dataset metadata is not finalized. Do not publish an archival release
   until every dataset has confirmed license, DOI, and public data URL values.
+  The repository software license does not automatically apply to externally
+  sourced OpenMX/TAPW/KP inputs or generated datasets; their license fields
+  remain unresolved until provenance is confirmed.
   Pending external entries describe files or generated artifact directories that
   are intentionally absent from a clean source clone.
 external_data:
@@ -276,8 +279,8 @@ datasets:
         sha256: 67ab363ac606c173a5b32283a388d8db94911278af60b345af142b8d06d5dbfe
       - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
         kind: file
-        size_bytes: 1657
-        sha256: 8383234dee4a3ce3bc35b1ae7a843b5398fa7ee5b3a8b132f7409640faa0516d
+        size_bytes: 830
+        sha256: f52c12c5204201d77a0c3b8695f081b8272b5c76b3ba7deb8f1d8fea02a1167b
       - path: examples/mgi2_3.89/tapw/outputs/Gamma/q05/band
         kind: directory
         external:

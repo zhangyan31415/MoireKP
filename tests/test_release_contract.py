@@ -413,6 +413,8 @@ def test_release_validation_matches_cli_exit_contract() -> None:
     assert "unimplemented sentinels" in validation
     assert "unit placeholder overrides" in validation
     assert "Python CLI boundary" in validation
+    assert "external dataset licenses" in validation
+    assert "- final license" not in validation
 
 
 def test_kp_model_core_has_no_import_time_demo_entrypoint() -> None:
@@ -445,7 +447,7 @@ def test_release_final_mode_rejects_unresolved_manifest_metadata(monkeypatch) ->
     assert _release_manifest_final_blockers(
         {
             "status": "pending",
-            "release_blockers": ["license", "doi", "data_url"],
+            "release_blockers": ["dataset_license", "doi", "data_url"],
             "metadata": {"license": None, "doi": "TBD", "data_url": None},
             "external_data": {"marker": "pending_external"},
             "datasets": [
@@ -525,6 +527,16 @@ def test_readmes_do_not_claim_mit_license() -> None:
         )
 
 
+def test_root_readmes_distinguish_software_and_dataset_licenses() -> None:
+    english = _read(ROOT / "README.md")
+    chinese = _read(ROOT / "README.zh.md")
+
+    assert "LGPL-3.0-or-later" in english
+    assert "not automatically cover external" in english
+    assert "LGPL-3.0-or-later" in chinese
+    assert "不会自动覆盖外部" in chinese
+
+
 def test_environment_yml_release_contract() -> None:
     env_path = ROOT / "environment.yml"
     assert env_path.exists(), "root environment.yml is required for release"
@@ -568,11 +580,20 @@ def test_data_manifest_tracks_release_dataset_provenance() -> None:
         assert manifest["release_blockers"] == []
     else:
         assert manifest["status"] in {"pending", "provisional", "complete"}
-        assert manifest["release_blockers"] == ["license", "doi", "data_url"]
+        assert manifest["release_blockers"] == [
+            "dataset_license",
+            "doi",
+            "data_url",
+        ]
+        assert _pyproject()["tool"]["moirekp"]["release"]["release_blockers"] == [
+            "dataset_license",
+            "doi",
+            "data_url",
+        ]
 
     metadata = manifest["metadata"]
     if not _final_release_mode():
-        assert metadata["license"] in UNRESOLVED_METADATA_VALUES
+        assert metadata["license"] is None
         assert metadata["doi"] in UNRESOLVED_METADATA_VALUES
         assert metadata["data_url"] in UNRESOLVED_METADATA_VALUES
 
@@ -609,7 +630,7 @@ def test_data_manifest_tracks_release_dataset_provenance() -> None:
             assert dataset["doi"] not in UNRESOLVED_METADATA_VALUES
             assert dataset["data_url"] not in UNRESOLVED_METADATA_VALUES
         else:
-            assert dataset["license"] in UNRESOLVED_METADATA_VALUES
+            assert dataset["license"] is None
             assert dataset["doi"] in UNRESOLVED_METADATA_VALUES
             assert dataset["data_url"] in UNRESOLVED_METADATA_VALUES
         assert dataset["required_files"], f"{dataset['id']} must list required files"
@@ -653,7 +674,10 @@ def test_release_blockers_record_unresolved_metadata() -> None:
     blockers_path = ROOT / "RELEASE_BLOCKERS.md"
     assert blockers_path.exists(), "RELEASE_BLOCKERS.md is required for release"
 
-    text = _read(blockers_path).lower()
+    original_text = _read(blockers_path)
+    text = original_text.lower()
+    assert "| Software license | Resolved |" in original_text
+    assert "| Dataset licenses | TBD |" in original_text
     assert "license" in text
     assert "doi" in text
     assert "data url" in text or "data_url" in text
