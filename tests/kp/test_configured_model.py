@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sys
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -16,14 +17,20 @@ import kp.model.export as export_module  # noqa: E402
 import kp.model.operator_runtime as operator_runtime_module  # noqa: E402
 from kp.model.pipeline import (  # noqa: E402
     _auto_harmonics_from_q_sets,
+    _automatic_term_group_keep_sets,
+    _apply_model_selection_term_filter,
     _auto_harmonics_from_support,
     _all_band_plot_config,
     _apply_refinement_acceptance_guard,
     _auto_low_energy_windows,
     _auto_low_energy_refinement_indices,
+    _automatic_low_profile_band_count,
+    _balanced_family_order_candidates,
     _build_operation_registry,
     _default_term_template_profile_metadata,
     _default_term_templates_for_model,
+    _LEGACY_TERM_TEMPLATE_PROFILES,
+    _TERM_TEMPLATE_PROFILES,
     _band_refinement_band_residual,
     _band_refinement_eigenvalue_jacobian,
     _band_refinement_global_matrix_jacobian,
@@ -46,6 +53,7 @@ from kp.model.pipeline import (  # noqa: E402
     _matrix_loss_block_masks,
     _matrix_loss_residual,
     _load_model_artifact_identity,
+    _low_cost_harmonic_recommendation_candidate,
     _load_kpoints,
     _load_kpoints_from_inputs,
     _operation_matrix_is_exactified,
@@ -53,18 +61,28 @@ from kp.model.pipeline import (  # noqa: E402
     _principal_angle_subspace_residual,
     _q_shell_row_indices,
     _representative_score,
+    _resolve_layerwise_counts,
     _select_adaptive_fit_indices,
     _select_band_refinement_variables,
     _shell_band_window_from_target_eig,
     _shell_subspace_overlap_report,
     _solve_band_refinement_gauss_newton,
+    _band_refinement_gauss_newton_available,
     _subspace_overlap_metrics,
     _symmetry_operation_index,
     _term_component_hamiltonians_for_kpoints,
     _term_response_pair_hamiltonians_for_kpoints,
+    _print_automatic_harmonic_selection_report,
     _progress_line,
     _run_model_pipeline,
     _write_auto_model_selection_outputs,
+    _select_nonlinear_frontier_scores,
+    _refine_nonlinear_frontier_candidates,
+    _refit_linear_profile_candidates,
+    _harmonic_support_size,
+    _linear_profile_fit_objective,
+    _write_high_low_model_selection_outputs,
+    _materialize_automatic_profile_output,
     _window_band_plot_config,
     ConfiguredModel,
     build_moire_config_from_file,
@@ -80,6 +98,12 @@ from kp.model.pipeline import (  # noqa: E402
 )
 import kp.model.core as model_core  # noqa: E402
 import kp.model.pipeline as pipeline_module  # noqa: E402
+from kp.model.model_selection import (  # noqa: E402
+    CandidateScore,
+    FamilyOrders,
+    ModelSelectionConfig,
+    select_high_low_profiles,
+)
 from kp.identity import hash_array  # noqa: E402
 from kp.model.core import (  # noqa: E402
     ContinuumModel,
@@ -136,7 +160,7 @@ def test_model_artifact_identity_rejects_projection_symmetry_mismatch(tmp_path: 
         "config_hash": "config-a",
         "basis_hash": "basis-a",
         "package_version": "0.1.0",
-        "schema_version": 1,
+        "schema_version": 2,
         "k_indices_hash": hash_array(np.asarray([0], dtype=np.int64)),
         "heff_hash": hash_array(heff),
     }
@@ -1076,7 +1100,7 @@ def _write_symm_frame_manifest(
             "config_hash": "config-fixture",
             "basis_hash": "basis-fixture",
             "package_version": "0.1.0",
-            "schema_version": 1,
+            "schema_version": 2,
             "k_indices_hash": hash_array(
                 np.asarray(project_k_indices, dtype=np.int64)
             ),
@@ -1169,6 +1193,323 @@ def _write_unified_case_fixture(tmp_path: Path) -> Path:
     return path
 
 
+def test_public_fit_method_parses_linear_contract(tmp_path: Path) -> None:
+    cfg_path = _write_unified_case_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["fit"] = {
+        "method": "linear",
+        "kpoints": [0, 2],
+        "bands": 2,
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    config = load_model_config(cfg_path)
+
+    assert config.response_semantics == "complete_linear_v2"
+    assert config.fit_indices == [0, 2]
+    assert config.model_selection_config is None
+    assert config.fit_method_config == {
+        "method": "linear",
+        "hamiltonian_kpoints": [0, 2],
+        "band_kpoints": None,
+        "requested_bands": 2,
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+        "band_loss_weight": None,
+        "max_steps": None,
+        "normalization": "dimension_mean_square_v1",
+    }
+    assert config.response_fit_objective == {
+        "mode": "normalized_low_energy_linear_v1",
+        "target_reference": "current_heff_support_mask",
+        "edge": "top",
+        "window": {
+            "mode": "fixed_count_degeneracy_safe",
+            "bands": 2,
+            "degeneracy_tol_mev": 0.1,
+        },
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+        "normalization": "dimension_mean_square_v1",
+    }
+    assert config.band_refinement_config == {"enabled": False}
+
+
+def test_public_fit_method_parses_nonlinear_contract(tmp_path: Path) -> None:
+    cfg_path = _write_unified_case_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["fit"] = {
+        "method": "nonlinear",
+        "kpoints": [0, 2],
+        "band_kpoints": "all",
+        "bands": 2,
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+        "band_loss_weight": 2.0,
+        "max_steps": 17,
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    config = load_model_config(cfg_path)
+
+    assert config.response_semantics == "complete_linear_v2"
+    assert config.fit_indices == [0, 2]
+    assert config.model_selection_config is None
+    assert config.fit_method_config == {
+        "method": "nonlinear",
+        "hamiltonian_kpoints": [0, 2],
+        "band_kpoints": [0, 1, 2],
+        "requested_bands": 2,
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+        "band_loss_weight": 2.0,
+        "max_steps": 17,
+        "normalization": "dimension_mean_square_v1",
+    }
+    assert config.response_fit_objective["mode"] == "normalized_low_energy_linear_v1"
+    assert config.band_refinement_config == {
+        "enabled": True,
+        "mode": "public_nonlinear_v1",
+        "reference": "current_heff_support_mask",
+        "hamiltonian_kpoints": [0, 2],
+        "band_kpoints": [0, 1, 2],
+        "target_bands": "top",
+        "bands": 2,
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+        "band_loss_weight": 2.0,
+        "max_steps": 17,
+    }
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (lambda model: model.pop("max_order"), "model.max_order"),
+        (lambda model: model.update({"profiles": ["linear/high"]}), "model.profiles"),
+        (
+            lambda model: model.update({"max_derivative_order": {"intralayer_zero": 0}}),
+            "max_derivative_order",
+        ),
+    ],
+)
+def test_public_fit_method_requires_explicit_simple_model_space(
+    tmp_path: Path,
+    mutation,
+    message: str,
+) -> None:
+    cfg_path = _write_unified_case_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["fit"] = {
+        "method": "linear",
+        "kpoints": [0, 2],
+        "bands": 2,
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+    }
+    mutation(raw["model"])
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_model_config(cfg_path)
+
+
+@pytest.mark.parametrize("method", ["linear", "nonlinear"])
+def test_public_fit_method_automatically_selects_omitted_harmonics(
+    tmp_path: Path,
+    method: str,
+) -> None:
+    cfg_path = _write_unified_case_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    fit = {
+        "method": method,
+        "kpoints": [0, 2],
+        "bands": 2,
+        "one_sided_weight": 1.5,
+        "two_sided_weight": 3.0,
+    }
+    if method == "nonlinear":
+        fit.update(
+            {
+                "band_kpoints": [0, 2],
+                "band_loss_weight": 2.0,
+                "max_steps": 5,
+            }
+        )
+    raw["model"]["fit"] = fit
+    raw["model"].pop("harmonics")
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    config = load_model_config(cfg_path)
+
+    report = config.automatic_harmonic_selection
+    assert config.raw["model"]["automatic_defaults"]["harmonics"] is True
+    assert config.harmonics_config["intra"]["count"] == report["selected"]["intra_shells"]
+    assert config.harmonics_config["inter"]["count"] == report["selected"]["inter_shells"]
+    assert config.fit_method_config["method"] == method
+
+
+@pytest.mark.parametrize(
+    ("fit", "message"),
+    [
+        (
+            {
+                "method": "other",
+                "kpoints": [0],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+            },
+            "fit.method",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+            },
+            "fit.kpoints",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [0, 0],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+            },
+            "fit.kpoints.*unique",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [3],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+            },
+            "fit.kpoints.*0..2",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [0],
+                "bands": 8,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+            },
+            "fit.bands.*dimension",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [0],
+                "bands": 1,
+                "one_sided_weight": -1.0,
+                "two_sided_weight": 1.0,
+            },
+            "one_sided_weight",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [0],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": float("inf"),
+            },
+            "two_sided_weight",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [0],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+                "band_loss_weight": 1.0,
+            },
+            "band_loss_weight.*nonlinear",
+        ),
+        (
+            {
+                "method": "nonlinear",
+                "kpoints": [0],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+                "band_loss_weight": 1.0,
+            },
+            "band_kpoints",
+        ),
+        (
+            {
+                "method": "nonlinear",
+                "kpoints": [0],
+                "band_kpoints": [1, 1],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+                "band_loss_weight": 1.0,
+            },
+            "band_kpoints.*unique",
+        ),
+        (
+            {
+                "method": "nonlinear",
+                "kpoints": [0],
+                "band_kpoints": [1],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+                "band_loss_weight": 0.0,
+            },
+            "band_loss_weight",
+        ),
+        (
+            {
+                "method": "nonlinear",
+                "kpoints": [0],
+                "band_kpoints": [1],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+                "band_loss_weight": 1.0,
+                "max_steps": 0,
+            },
+            "max_steps",
+        ),
+        (
+            {
+                "method": "linear",
+                "kpoints": [0],
+                "bands": 1,
+                "one_sided_weight": 1.0,
+                "two_sided_weight": 1.0,
+                "objective": {"mode": "equal_matrix_v1"},
+            },
+            "cannot be mixed.*objective",
+        ),
+    ],
+)
+def test_public_fit_method_rejects_invalid_contract(
+    tmp_path: Path,
+    fit: dict[str, object],
+    message: str,
+) -> None:
+    cfg_path = _write_unified_case_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["fit"] = fit
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=message):
+        load_model_config(cfg_path)
+
+
 def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: Path) -> None:
     import kp.cli as cli
     import kp.model.export as export_mod
@@ -1206,6 +1547,147 @@ def test_cli_model_subcommand_invokes_configured_runner(monkeypatch, tmp_path: P
     assert seen["export"] == (model_output, model_output, True, False)
 
 
+def test_cli_model_subcommand_does_not_reexport_materialized_profiles(monkeypatch, tmp_path: Path) -> None:
+    import kp.cli as cli
+    import kp.model.export as export_mod
+    import kp.model.pipeline as configured
+
+    cfg_path = tmp_path / "model.yaml"
+    cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
+    model_output = tmp_path / "model_out"
+    exports: list[tuple[Path, Path]] = []
+
+    class FakeModelConfig:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+
+    high_cfg = FakeModelConfig(model_output / "high")
+    low_cfg = FakeModelConfig(model_output / "low")
+    root_cfg = FakeModelConfig(model_output)
+
+    def fake_run(path: str) -> dict:
+        return {
+            "configured_model": root_cfg,
+            "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
+            "profile_results": {
+                "high": {"model_config": high_cfg, "results": {}},
+                "low": {"model_config": low_cfg, "results": {}},
+            },
+        }
+
+    def fake_export(model_output_dir, output_dir, **kwargs):
+        exports.append((Path(model_output_dir), Path(output_dir)))
+        return Path(output_dir)
+
+    monkeypatch.setattr(configured, "run_configured_model", fake_run)
+    monkeypatch.setattr(export_mod, "export_standalone_model", fake_export)
+
+    cli.main(["model", "--config", str(cfg_path)])
+
+    assert exports == []
+
+
+def test_cli_model_subcommand_preserves_four_materialized_profile_directories(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import kp.cli as cli
+    import kp.model.export as export_mod
+    import kp.model.pipeline as configured
+
+    cfg_path = tmp_path / "model.yaml"
+    cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
+    model_output = tmp_path / "model_out"
+    exports: list[tuple[Path, Path]] = []
+
+    class FakeModelConfig:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+
+    nested = {
+        family: {
+            quality: {
+                "model_config": FakeModelConfig(model_output / family / quality),
+                "results": {},
+            }
+            for quality in ("high", "low")
+        }
+        for family in ("linear", "nonlinear")
+    }
+
+    monkeypatch.setattr(
+        configured,
+        "run_configured_model",
+        lambda path: {
+            "configured_model": nested["nonlinear"]["high"]["model_config"],
+            "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
+            "profile_results": nested,
+        },
+    )
+    monkeypatch.setattr(
+        export_mod,
+        "export_standalone_model",
+        lambda source, output, **kwargs: exports.append((Path(source), Path(output))),
+    )
+
+    cli.main(["model", "--config", str(cfg_path)])
+
+    assert exports == []
+
+
+@pytest.mark.parametrize(
+    "profile_paths",
+    [
+        ("linear/low", "linear/high"),
+        ("nonlinear/high",),
+    ],
+)
+def test_cli_model_subcommand_preserves_requested_profile_subset(
+    monkeypatch,
+    tmp_path: Path,
+    profile_paths: tuple[str, ...],
+) -> None:
+    import kp.cli as cli
+    import kp.model.export as export_mod
+    import kp.model.pipeline as configured
+
+    cfg_path = tmp_path / "model.yaml"
+    cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
+    model_output = tmp_path / "model_out"
+    exports: list[tuple[Path, Path]] = []
+
+    class FakeModelConfig:
+        def __init__(self, output_dir):
+            self.output_dir = Path(output_dir)
+
+    nested: dict[str, dict[str, dict[str, object]]] = {}
+    for profile_path in profile_paths:
+        family, quality = profile_path.split("/")
+        nested.setdefault(family, {})[quality] = {
+            "model_config": FakeModelConfig(model_output / family / quality),
+            "results": {},
+        }
+    primary_family, primary_quality = profile_paths[-1].split("/")
+    monkeypatch.setattr(
+        configured,
+        "run_configured_model",
+        lambda path: {
+            "configured_model": nested[primary_family][primary_quality]["model_config"],
+            "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
+            "profile_results": nested,
+        },
+    )
+    monkeypatch.setattr(
+        export_mod,
+        "export_standalone_model",
+        lambda source, output, **kwargs: exports.append((Path(source), Path(output))),
+    )
+
+    cli.main(["model", "--config", str(cfg_path)])
+
+    assert exports == []
+
+
 def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path, capsys) -> None:
     import kp.cli as cli
     import kp.model.export as export_mod
@@ -1215,6 +1697,7 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
     cfg_path.write_text("source_config: source.yaml\n", encoding="utf-8")
     plot_path = tmp_path / "model_out" / "band_comparison.pdf"
     all_plot_path = tmp_path / "model_out" / "band_comparison_all.pdf"
+    full_heff_plot_path = tmp_path / "model_out" / "band_comparison_vs_full_heff.pdf"
 
     class FakeModelConfig:
         output_dir = tmp_path / "model_out"
@@ -1224,7 +1707,22 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
             "configured_model": FakeModelConfig(),
             "band_plot": str(plot_path.resolve()),
             "all_band_plot": str(all_plot_path.resolve()),
-            "comparison": {"rms_error": 0.0, "max_abs_error": 0.0},
+            "full_heff_band_plot": str(full_heff_plot_path.resolve()),
+            "comparison": {
+                "rms_error": 0.0,
+                "max_abs_error": 0.0,
+                "reference": "current_heff_support_mask",
+            },
+            "plot_comparison": {
+                "rms_error": 0.001,
+                "max_abs_error": 0.002,
+                "rms_error_mev": 1.0,
+                "max_abs_error_mev": 2.0,
+                "num_bands": 6,
+                "align": "top",
+                "model_alignment_shift_meV": -0.5,
+                "reference": "current_heff_support_mask",
+            },
             "all_band_plot_comparison": {
                 "rms_error": 0.002,
                 "max_abs_error": 0.003,
@@ -1232,6 +1730,17 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
                 "max_abs_error_mev": 3.0,
                 "num_bands": 124,
                 "align": "top",
+                "reference": "current_heff_support_mask",
+            },
+            "plot_comparison_vs_full_heff": {
+                "rms_error": 0.019,
+                "max_abs_error": 0.037,
+                "rms_error_mev": 19.0,
+                "max_abs_error_mev": 37.0,
+                "num_bands": 6,
+                "align": "top",
+                "model_alignment_shift_meV": -37.0,
+                "reference": "original_heff",
             },
         }
 
@@ -1254,8 +1763,12 @@ def test_cli_model_subcommand_prints_band_plot_path(monkeypatch, tmp_path: Path,
     assert "[kp model] Results" in out
     assert f"  band plot  {plot_path.resolve()}" in out
     assert f"  all-band plot  {all_plot_path.resolve()}" in out
+    assert f"  full-Heff band plot  {full_heff_plot_path.resolve()}" in out
     assert "[kp model] Validation" in out
-    assert "  all-band RMS  2.000 meV, Max: 3.000 meV (bands=124, align=top)" in out
+    assert "  RMS error vs current Heff support mask  0.000000e+00 eV (0.000 meV)" in out
+    assert "  plot bands RMS vs current Heff support mask  1.000 meV, Max: 2.000 meV" in out
+    assert "  all-band RMS vs current Heff support mask  2.000 meV, Max: 3.000 meV" in out
+    assert "  plot bands RMS vs original Heff  19.000 meV, Max: 37.000 meV" in out
 
 
 def test_canonical_model_cleanup_preserves_harmonic_recommendation_plot(tmp_path: Path) -> None:
@@ -1269,6 +1782,14 @@ def test_canonical_model_cleanup_preserves_harmonic_recommendation_plot(tmp_path
     heatmap.write_bytes(b"heatmap")
     heatmap_pdf = output / "hamiltonian_element_comparison.pdf"
     heatmap_pdf.write_bytes(b"%PDF-1.4\n")
+    support_heatmap = output / "hamiltonian_element_comparison_selected_support.png"
+    support_heatmap.write_bytes(b"support heatmap")
+    support_heatmap_pdf = output / "hamiltonian_element_comparison_selected_support.pdf"
+    support_heatmap_pdf.write_bytes(b"%PDF-1.4\n")
+    heatmap_dir = output / "hamiltonian_element_comparisons"
+    heatmap_dir.mkdir()
+    grouped_heatmap = heatmap_dir / "native_full.png"
+    grouped_heatmap.write_bytes(b"grouped heatmap")
     stale = output / "temporary.txt"
     stale.write_text("remove", encoding="utf-8")
 
@@ -1277,7 +1798,27 @@ def test_canonical_model_cleanup_preserves_harmonic_recommendation_plot(tmp_path
     assert keep.exists()
     assert heatmap.exists()
     assert heatmap_pdf.exists()
+    assert not support_heatmap.exists()
+    assert not support_heatmap_pdf.exists()
+    assert grouped_heatmap.exists()
     assert not stale.exists()
+
+
+def test_model_band_cleanup_removes_stale_primary_and_secondary_comparisons(tmp_path: Path) -> None:
+    output = tmp_path / "model_out"
+    output.mkdir()
+    primary = output / "band_comparison.pdf"
+    secondary = output / "band_comparison_vs_full_heff.pdf"
+    harmonic = output / "harmonic_recommendation_bands.png"
+    primary.write_bytes(b"old primary")
+    secondary.write_bytes(b"old secondary")
+    harmonic.write_bytes(b"keep")
+
+    pipeline_module._cleanup_stale_band_outputs(output)
+
+    assert not primary.exists()
+    assert not secondary.exists()
+    assert harmonic.exists()
 
 
 def test_cli_model_subcommand_rejects_explicit_standalone_export_path(tmp_path: Path) -> None:
@@ -1388,6 +1929,33 @@ def test_hamiltonian_element_panels_reorder_q_blocks_and_subtract_layer_diagonal
     assert panels["heff"][0, 0, 1] == pytest.approx(3.0)
     assert panels["model"][0, 0, 0] == pytest.approx(7.0)
     assert panels["diff"][0, 0, 1] == pytest.approx(1.0)
+
+
+def test_q_block_display_metadata_orders_each_layer_by_q_norm_shell() -> None:
+    q1 = np.array(
+        [
+            [2.0, 0.0],
+            [0.0, 0.0],
+            [0.0, 1.0],
+            [1.0 + 1.0e-10, 0.0],
+        ],
+        dtype=float,
+    )
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+
+    metadata = pipeline_module._q_block_display_metadata(
+        q1,
+        q2,
+        (2, 1),
+        dim=9,
+        q_order="norm_shell",
+        q_norm_tol=1.0e-6,
+    )
+
+    assert metadata["order"] == [1, 5, 3, 7, 2, 6, 0, 4, 8]
+    assert metadata["q_block_boundaries"] == [2, 4, 6, 8]
+    assert metadata["q_shell_boundaries"] == [2, 6]
+    assert metadata["layer_boundaries"] == [8]
 
 
 def test_cli_project_rejects_unimplemented_qdpt2() -> None:
@@ -1567,8 +2135,601 @@ def _write_fixture(tmp_path: Path) -> Path:
     return path
 
 
+def _disable_model_selection_for_mock_pipeline(path: Path) -> None:
+    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+    raw.setdefault("fit", {})["model_selection"] = False
+    path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+
 def _expected_project_eigvals(tmp_path: Path) -> np.ndarray:
     return np.linalg.eigvalsh(np.load(tmp_path / "project" / "heff.npy"))
+
+
+def test_response_semantics_defaults_legacy_and_v2_requires_explicit_template_policy(
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    legacy = load_model_config(cfg_path)
+    assert legacy.response_semantics == "legacy_frozen_v1"
+
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    complete = load_model_config(cfg_path)
+    assert complete.response_semantics == "complete_linear_v2"
+    assert complete.term_templates == []
+    assert complete.term_template_metadata["generator"] == "gamma_case_derived_v1"
+
+    raw["model"]["term_templates"] = [
+        {
+            "name": "custom",
+            "source": "onsite",
+            "sector_pairs": [[1, 1]],
+            "orbital_pairs": "all",
+            "max_order": 0,
+        }
+    ]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    with pytest.raises(ValueError, match="term_space_policy"):
+        load_model_config(cfg_path)
+
+
+def test_complete_gamma_default_defers_to_case_derived_generator(
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    configured = load_model_config(cfg_path)
+
+    assert configured.term_templates == []
+    assert configured.term_template_metadata == {
+        "input_kind": "default",
+        "valley_type": "Gamma",
+        "n_orb": [1, 1],
+        "profiles": [],
+        "generator": "gamma_case_derived_v1",
+        "term_space_policies": ["complete"],
+    }
+
+
+@pytest.mark.parametrize(
+    ("valley_type", "generator"),
+    [
+        ("K", "k_case_derived_v1"),
+        ("M", "m_case_derived_v1"),
+    ],
+)
+def test_complete_k_m_default_defers_to_case_derived_generator(
+    tmp_path: Path,
+    valley_type: str,
+    generator: str,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["valley_model"]["valley_type"] = valley_type
+    raw["valley_model"]["active_valleys"] = [valley_type]
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    configured = load_model_config(cfg_path)
+
+    assert configured.term_templates == []
+    assert configured.term_template_metadata == {
+        "input_kind": "default",
+        "valley_type": valley_type,
+        "n_orb": [1, 1],
+        "profiles": [],
+        "generator": generator,
+        "term_space_policies": ["complete"],
+    }
+
+
+@pytest.mark.parametrize("valley_type", ["K", "M"])
+def test_complete_k_m_explicit_templates_bypass_case_generator(
+    tmp_path: Path,
+    valley_type: str,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["valley_model"]["valley_type"] = valley_type
+    raw["valley_model"]["active_valleys"] = [valley_type]
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    raw["model"]["term_templates"] = [
+        {
+            "name": "custom",
+            "source": "onsite",
+            "sector_pairs": [[1, 1]],
+            "orbital_pairs": "all",
+            "max_order": 0,
+            "term_space_policy": "complete",
+        }
+    ]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    configured = load_model_config(cfg_path)
+
+    assert configured.term_templates == raw["model"]["term_templates"]
+    assert configured.term_template_metadata == {"input_kind": "explicit"}
+
+
+def test_default_profile_registry_contains_no_complete_valley_profiles() -> None:
+    assert not any(
+        profile.valley_type in {"Gamma", "K", "M"}
+        for profile in _TERM_TEMPLATE_PROFILES
+    )
+
+
+def test_gamma_case_derived_templates_follow_actual_q_support() -> None:
+    qset1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    qset2 = np.array([[0.0, 0.0], [-1.0, 0.0]], dtype=float)
+    sectors = [
+        {"name": "L1", "qset": "qset1", "n_orb": 2},
+        {"name": "L2", "qset": "qset2", "n_orb": 2},
+    ]
+
+    templates, diagnostics = pipeline_module._case_derived_gamma_term_templates(
+        sectors=sectors,
+        n_orb=(2, 2),
+        max_order={
+            "Kinect": 2,
+            "Onsite": 0,
+            "intra": 1,
+            "inter": 1,
+        },
+        Q_set1=qset1,
+        Q_set2=qset2,
+        intra_harmonics_map={
+            1: np.array([0.0, 0.0]),
+            2: np.array([1.0, 0.0]),
+        },
+        inter_harmonics_map={
+            1: np.array([0.0, 0.0]),
+            2: np.array([1.0, 0.0]),
+            3: np.array([7.0, 0.0]),
+        },
+    )
+
+    assert {row["term_space_policy"] for row in templates} == {"complete"}
+    assert {row["source"] for row in templates} == {
+        "diagonal_kp",
+        "onsite",
+        "moire_potential",
+        "tunneling",
+    }
+    assert all(row["orbital_pairs"] == "all" for row in templates)
+    assert all("positive" not in row["name"] for row in templates)
+    assert all("negative" not in row["name"] for row in templates)
+    assert diagnostics["generator"] == "gamma_case_derived_v1"
+
+    by_name = {str(sector["name"]): sector for sector in sectors}
+    inter_directions: set[tuple[str, str]] = set()
+    for row in templates:
+        records = row.get("harmonic_records", [])
+        for from_name, to_name in row["sector_pairs"]:
+            if row["source"] == "tunneling":
+                inter_directions.add((from_name, to_name))
+            for record in records:
+                support = pipeline_module._model_q_pair_support_count_for_sector_pair(
+                    sector_from=by_name[from_name],
+                    sector_to=by_name[to_name],
+                    p_vector=np.asarray(record["vector"], dtype=float),
+                    Q_set1=qset1,
+                    Q_set2=qset2,
+                    tol=1.0e-8,
+                )
+                assert support == record["support_count"]
+                assert support > 0
+
+    assert inter_directions == {("L1", "L2"), ("L2", "L1")}
+    assert any(
+        record["kind"] == "inter"
+        and np.allclose(np.abs(record["vector"]), [7.0, 0.0])
+        and record["reason"] == "no_q_pair_support"
+        for record in diagnostics["omitted_harmonics"]
+    )
+
+
+@pytest.mark.parametrize(
+    ("valley_type", "generator", "name_prefix"),
+    [
+        ("K", "k_case_derived_v1", "k_case_"),
+        ("M", "m_case_derived_v1", "m_case_"),
+    ],
+)
+def test_k_m_case_derived_templates_follow_actual_q_support(
+    valley_type: str,
+    generator: str,
+    name_prefix: str,
+) -> None:
+    qset1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    qset2 = np.array([[0.0, 0.0], [-1.0, 0.0]], dtype=float)
+    sectors = [
+        {"name": "L1", "qset": "qset1", "n_orb": 2},
+        {"name": "L2", "qset": "qset2", "n_orb": 2},
+    ]
+
+    templates, diagnostics = pipeline_module._case_derived_term_templates(
+        valley_type=valley_type,
+        sectors=sectors,
+        n_orb=(2, 2),
+        max_order={"Kinect": 3, "intra": 2, "inter": 1},
+        Q_set1=qset1,
+        Q_set2=qset2,
+        intra_harmonics_map={
+            1: np.array([0.0, 0.0]),
+            2: np.array([1.0, 0.0]),
+        },
+        inter_harmonics_map={
+            1: np.array([0.0, 0.0]),
+            2: np.array([1.0, 0.0]),
+            3: np.array([7.0, 0.0]),
+        },
+    )
+
+    assert templates
+    assert all(row["name"].startswith(name_prefix) for row in templates)
+    assert all(row["orbital_pairs"] == "all" for row in templates)
+    assert {row["term_space_policy"] for row in templates} == {"complete"}
+    assert not any("monomial_constraints" in row for row in templates)
+    assert diagnostics["generator"] == generator
+    assert diagnostics["valley_type"] == valley_type
+    assert diagnostics["orders"] == {"Kinect": 3, "intra": 2, "inter": 1}
+
+    kinetic = [row for row in templates if row["source"] == "diagonal_kp"]
+    onsite = [row for row in templates if row["source"] == "onsite"]
+    intra = [row for row in templates if row["source"] == "moire_potential"]
+    inter = [row for row in templates if row["source"] == "tunneling"]
+    assert {tuple(row["sector_pairs"][0]) for row in kinetic} == {
+        ("L1", "L1"),
+        ("L2", "L2"),
+    }
+    assert {row["max_order"] for row in kinetic} == {3}
+    assert {tuple(row["sector_pairs"][0]) for row in onsite} == {
+        ("L1", "L1"),
+        ("L2", "L2"),
+    }
+    assert {row["max_order"] for row in onsite} == {0}
+    assert {tuple(row["sector_pairs"][0]) for row in intra} == {
+        ("L1", "L1"),
+        ("L2", "L2"),
+    }
+    assert {row["max_order"] for row in intra} == {2}
+    assert {tuple(row["sector_pairs"][0]) for row in inter} == {
+        ("L1", "L2"),
+        ("L2", "L1"),
+    }
+    assert {row["max_order"] for row in inter} == {1}
+
+    by_name = {str(sector["name"]): sector for sector in sectors}
+    for row in intra + inter:
+        for record in row["harmonic_records"]:
+            from_name, to_name = row["sector_pairs"][0]
+            assert record["support_count"] == pipeline_module._model_q_pair_support_count_for_sector_pair(
+                sector_from=by_name[from_name],
+                sector_to=by_name[to_name],
+                p_vector=np.asarray(record["vector"], dtype=float),
+                Q_set1=qset1,
+                Q_set2=qset2,
+                tol=1.0e-8,
+            )
+            assert record["support_count"] > 0
+
+    assert any(
+        record["kind"] == "inter"
+        and np.allclose(np.abs(record["vector"]), [7.0, 0.0])
+        and record["reason"] == "no_q_pair_support"
+        for record in diagnostics["omitted_harmonics"]
+    )
+
+
+def test_case_support_count_matches_core_q_pair_convention_with_sector_offsets() -> None:
+    qset1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    qset2 = np.array([[0.5, 0.0], [1.5, 0.0]], dtype=float)
+    sector1 = {
+        "name": "L1",
+        "qset": "qset1",
+        "n_orb": 1,
+        "q_offset": [0.2, 0.0],
+    }
+    sector2 = {
+        "name": "L2",
+        "qset": "qset2",
+        "n_orb": 1,
+        "q_offset": [-0.1, 0.0],
+    }
+
+    for layer_from, layer_to, sector_from, sector_to, p_vector in (
+        (1, 2, sector1, sector2, np.array([-0.5, 0.0])),
+        (2, 1, sector2, sector1, np.array([0.5, 0.0])),
+    ):
+        key = ContinuumTermKey(
+            Mz=0,
+            Mz_star=0,
+            layer_from=layer_from,
+            layer_to=layer_to,
+            orbital_from=1,
+            orbital_to=1,
+            p=tuple(p_vector),
+        )
+        core_response = ContinuumModelBuilder.make_Y_basis_function(
+            key,
+            qset1,
+            qset2,
+            1,
+            1,
+        )(np.zeros(2, dtype=float))
+
+        support_count = pipeline_module._model_q_pair_support_count_for_sector_pair(
+            sector_from=sector_from,
+            sector_to=sector_to,
+            p_vector=p_vector,
+            Q_set1=qset1,
+            Q_set2=qset2,
+            tol=1.0e-8,
+        )
+
+        assert support_count == np.count_nonzero(core_response) == 2
+
+
+def test_build_materializes_default_gamma_case_envelope(
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    symm_dir = tmp_path / "symm"
+    np.save(symm_dir / "q_model_layer1.npy", np.load(tmp_path / "q1.npy"))
+    np.save(symm_dir / "q_model_layer2.npy", np.load(tmp_path / "q2.npy"))
+    _write_symm_frame_manifest(
+        tmp_path,
+        rotation_deg=0.0,
+        q_model_files={
+            "layer1": "q_model_layer1.npy",
+            "layer2": "q_model_layer2.npy",
+        },
+    )
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    moire, configured = build_moire_config_from_file(cfg_path)
+
+    assert configured.term_template_metadata["generator"] == "gamma_case_derived_v1"
+    assert configured.term_template_metadata["generation_status"] == "materialized"
+    assert moire.term_templates
+    assert moire.term_templates == configured.term_templates
+    assert {
+        row["term_space_policy"]
+        for row in moire.term_templates
+    } == {"complete"}
+    names = {row["name"] for row in moire.term_templates}
+    assert not any(name.startswith("gamma_inter_") for name in names)
+    assert "gamma_case_kinetic" in names
+
+
+@pytest.mark.parametrize(
+    ("valley_type", "generator", "name_prefix"),
+    [
+        ("K", "k_case_derived_v1", "k_case_"),
+        ("M", "m_case_derived_v1", "m_case_"),
+    ],
+)
+def test_build_materializes_default_k_m_case_envelope(
+    tmp_path: Path,
+    valley_type: str,
+    generator: str,
+    name_prefix: str,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    symm_dir = tmp_path / "symm"
+    np.save(symm_dir / "q_model_layer1.npy", np.load(tmp_path / "q1.npy"))
+    np.save(symm_dir / "q_model_layer2.npy", np.load(tmp_path / "q2.npy"))
+    _write_symm_frame_manifest(
+        tmp_path,
+        rotation_deg=0.0,
+        q_model_files={
+            "layer1": "q_model_layer1.npy",
+            "layer2": "q_model_layer2.npy",
+        },
+    )
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["valley_model"]["valley_type"] = valley_type
+    raw["valley_model"]["active_valleys"] = [valley_type]
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    moire, configured = build_moire_config_from_file(cfg_path)
+
+    assert configured.term_template_metadata["generator"] == generator
+    assert configured.term_template_metadata["generation_status"] == "materialized"
+    assert configured.term_template_metadata["valley_type"] == valley_type
+    assert "inter_sector_pair_resolution" not in configured.term_template_metadata
+    assert moire.term_templates == configured.term_templates
+    assert moire.term_templates
+    assert all(
+        row["name"].startswith(name_prefix)
+        for row in moire.term_templates
+    )
+    assert {
+        row["term_space_policy"]
+        for row in moire.term_templates
+    } == {"complete"}
+
+
+def test_explicit_gamma_templates_bypass_case_derived_generation(
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    symm_dir = tmp_path / "symm"
+    np.save(symm_dir / "q_model_layer1.npy", np.load(tmp_path / "q1.npy"))
+    np.save(symm_dir / "q_model_layer2.npy", np.load(tmp_path / "q2.npy"))
+    _write_symm_frame_manifest(
+        tmp_path,
+        rotation_deg=0.0,
+        q_model_files={
+            "layer1": "q_model_layer1.npy",
+            "layer2": "q_model_layer2.npy",
+        },
+    )
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    explicit = {
+        "name": "user_gamma_onsite",
+        "source": "onsite",
+        "sector_pairs": [["L1", "L1"]],
+        "orbital_pairs": "all",
+        "max_order": 0,
+        "term_space_policy": "complete",
+    }
+    raw["model"]["term_templates"] = [explicit]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    moire, configured = build_moire_config_from_file(cfg_path)
+
+    assert configured.term_template_metadata == {"input_kind": "explicit"}
+    assert moire.term_templates == [explicit]
+
+
+def test_complete_v2_parses_target_spectral_fit_objective(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    raw["model"]["target_bands"] = "top"
+    raw["fit"]["objective"] = {
+        "mode": "target_spectral_linear",
+        "target_reference": "current_heff_support_mask",
+        "window": {
+            "mode": "fixed_count_degeneracy_safe",
+            "bands": 10,
+            "degeneracy_tol_mev": 0.1,
+        },
+        "floor": 0.05,
+        "alpha": 1.0,
+        "normalization": "mean_trace_per_dimension_v1",
+        "two_sided_projector": {
+            "enabled": True,
+            "weight": 300.0,
+        },
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    config = load_model_config(cfg_path)
+
+    assert config.response_fit_objective == {
+        "mode": "target_spectral_linear",
+        "target_reference": "current_heff_support_mask",
+        "edge": "top",
+        "window": {
+            "mode": "fixed_count_degeneracy_safe",
+            "bands": 10,
+            "degeneracy_tol_mev": 0.1,
+        },
+        "floor": 0.05,
+        "alpha": 1.0,
+        "normalization": "mean_trace_per_dimension_v1",
+        "two_sided_projector": {
+            "enabled": True,
+            "weight": 300.0,
+        },
+    }
+
+
+@pytest.mark.parametrize("weight", [-1.0, float("inf"), float("nan")])
+def test_target_spectral_projector_rejects_invalid_weight(
+    tmp_path: Path,
+    weight: float,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    raw["fit"]["objective"] = {
+        "mode": "target_spectral_linear",
+        "window": {"mode": "fixed_count_degeneracy_safe", "bands": 2},
+        "two_sided_projector": {"enabled": True, "weight": weight},
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="two_sided_projector.weight"):
+        load_model_config(cfg_path)
+
+
+def test_target_spectral_fit_objective_rejects_legacy_semantics(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["objective"] = {
+        "mode": "target_spectral_linear",
+        "window": {"mode": "fixed_count_degeneracy_safe", "bands": 2},
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="complete_linear_v2"):
+        load_model_config(cfg_path)
+
+
+def test_target_spectral_fit_uses_current_heff_support_target(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["response_semantics"] = "complete_linear_v2"
+    raw["symmetry_source"] = {"type": "toy_generator", "allow": True}
+    raw["fit"]["objective"] = {
+        "mode": "target_spectral_linear",
+        "window": {"mode": "fixed_count_degeneracy_safe", "bands": 2},
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    original = np.load(tmp_path / "project" / "heff.npy")
+    replacement = np.asarray(original, dtype=np.complex128).copy()
+    replacement += 7.0 * np.eye(replacement.shape[-1], dtype=np.complex128)[None, :, :]
+    calls: list[dict[str, object]] = []
+
+    def fake_support(values: np.ndarray, **kwargs: object) -> np.ndarray:
+        calls.append(dict(kwargs))
+        np.testing.assert_allclose(values, original)
+        return replacement
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_current_heff_support_hamiltonians",
+        fake_support,
+    )
+
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+
+    assert calls
+    assert moire_config.response_fit_objective["mode"] == "target_spectral_linear"
+    dim = replacement.shape[-1]
+    fitted_blocks = np.asarray(
+        [
+            moire_config.heff[i * dim : (i + 1) * dim, i * dim : (i + 1) * dim]
+            for i in range(len(model_config.fit_indices))
+        ]
+    )
+    np.testing.assert_allclose(fitted_blocks, replacement[model_config.fit_indices])
+
+
+def test_all_builtin_term_profiles_and_templates_declare_space_policy() -> None:
+    for profile in _LEGACY_TERM_TEMPLATE_PROFILES:
+        assert profile.term_space_policy in {
+            "complete",
+            "explicit_reduced",
+            "orbit_representative",
+        }
+        for template in profile.templates:
+            assert template["term_space_policy"] == profile.term_space_policy
+
+
+def test_builtin_curated_reduced_profiles_are_declared_as_orbit_representatives() -> None:
+    policies = {
+        (profile.valley_type, profile.n_orb): profile.term_space_policy
+        for profile in _LEGACY_TERM_TEMPLATE_PROFILES
+    }
+
+    assert policies[("K", None)] == "orbit_representative"
+    assert policies[("M", None)] == "orbit_representative"
+    assert policies[("Gamma", (2, 2))] == "orbit_representative"
 
 
 def test_build_moire_config_remaps_projected_heff_rows_to_source_kpoints(tmp_path: Path) -> None:
@@ -1609,6 +2770,194 @@ def test_load_model_config_resolves_paths_relative_to_yaml(tmp_path: Path) -> No
     assert cfg.band_indices == [0, 1, 2]
 
 
+def test_load_model_config_parses_opt_in_model_selection(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["max_order"] = {
+        "kinetic": 4,
+        "intralayer": 2,
+        "interlayer": 1,
+    }
+    raw["fit"]["model_selection"] = {
+        "enabled": True,
+        "folds": 3,
+        "orders": {
+            "kinetic": [1, 2, 4],
+            "intralayer": [0, 1, 2],
+            "interlayer": [0, 1],
+        },
+        "quality": {
+            "overlap_target": 0.95,
+            "overlap_safety_floor": 0.90,
+        },
+        "profiles": {
+            "low": {
+                "standard_error_multiplier": 2.0,
+                "term_keep_fractions": [0.25, 0.5, 0.75],
+            }
+        },
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.model_selection_config.enabled is True
+    assert cfg.model_selection_config.n_folds == 3
+    assert cfg.model_selection_config.order_candidates == {
+        "kinetic": (1, 2, 4),
+        "intra": (0, 1, 2),
+        "inter": (0, 1),
+    }
+    assert cfg.model_selection_config.pruning_keep_fractions == (0.25, 0.5, 0.75)
+
+
+def test_automatic_term_group_keep_sets_preserve_most_important_groups() -> None:
+    ranked = [("weak", 0.1), ("medium", 1.0), ("strong", 10.0), ("dominant", 100.0)]
+
+    keep_sets = _automatic_term_group_keep_sets(
+        ranked,
+        keep_fractions=(0.25, 0.5, 0.75),
+    )
+
+    assert keep_sets == (
+        ("dominant",),
+        ("strong", "dominant"),
+        ("medium", "strong", "dominant"),
+    )
+
+
+def test_apply_model_selection_term_filter_removes_whole_closed_terms() -> None:
+    keep = SimpleNamespace(key="keep")
+    remove = SimpleNamespace(key="remove")
+    model = SimpleNamespace(
+        terms={"keep": keep, "remove": remove},
+        candidate_terms=[keep, remove],
+    )
+
+    report = _apply_model_selection_term_filter(model, ("remove",))
+
+    assert model.terms == {"keep": keep}
+    assert model.candidate_terms == [keep]
+    assert report == {"requested": 1, "removed": 1, "remaining": 1}
+
+
+def test_load_model_config_enables_model_selection_by_default(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.model_selection_config.enabled is True
+
+
+def test_automatic_family_order_scan_rebuilds_and_refits_each_stage(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
+    moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
+    model_cfg = replace(
+        model_cfg,
+        band_refinement_config={
+            "enabled": True,
+            "solver": "nonlinear_band",
+            "frontier_max_candidates": 3,
+            "max_variables": 3000,
+        },
+        model_selection_config=ModelSelectionConfig(
+            enabled=True,
+            order_candidates={
+                "kinetic": (1, 2),
+                "intra": (0, 1),
+                "inter": (0, 1),
+            },
+            n_folds=2,
+            pruning_keep_fractions=(),
+        ),
+    )
+    dim = int(
+        len(moire_cfg.Q_set1) * moire_cfg.n_orb1
+        + len(moire_cfg.Q_set2) * moire_cfg.n_orb2
+    )
+    target = np.stack(
+        [
+            np.diag(np.arange(dim, dtype=float) + 0.01 * index)
+            for index in range(len(moire_cfg.kpoints))
+        ]
+    ).astype(complex)
+    calls: list[tuple[FamilyOrders, tuple[str, ...]]] = []
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_current_heff_support_hamiltonians",
+        lambda *args, **kwargs: target.copy(),
+    )
+
+    def fake_pipeline(candidate_moire, candidate_model, log_path, *, verbose, progress):
+        del log_path, verbose, progress
+        orders = FamilyOrders(
+            int(candidate_moire.max_order["Kinect"]),
+            int(candidate_moire.max_order["intra"]),
+            int(candidate_moire.max_order["inter"]),
+        )
+        sources = tuple(
+            sorted(
+                {
+                    str(item.get("source"))
+                    for item in candidate_moire.term_templates
+                    if str(item.get("source")) != "onsite"
+                }
+            )
+        )
+        calls.append((orders, sources))
+        error_mev = 80.0 / (10 ** sum(orders.as_tuple()))
+        profile = np.linspace(0.5, 1.5, len(target)) * error_mev * 1.0e-3
+        hamiltonians = target + profile[:, None, None] * np.eye(dim)[None, :, :]
+        eigvals, eigvecs = np.linalg.eigh(hamiltonians)
+        terms = {
+            f"p{index}": SimpleNamespace(
+                active=True,
+                r_value_real=1.0,
+                r_value_imag=0.0,
+            )
+            for index in range(1 + sum(orders.as_tuple()))
+        }
+        return {
+            "model": SimpleNamespace(terms=terms),
+            "eigvals": (eigvals, eigvecs),
+            "band_hamiltonians": hamiltonians,
+            "band_refinement": {"enabled": False},
+        }
+
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+
+    scan = pipeline_module._run_automatic_family_order_scan(
+        moire_config=moire_cfg,
+        model_config=model_cfg,
+        output_dir=tmp_path / "scan",
+        verbose=False,
+        progress=False,
+    )
+
+    assert scan["staged_selection"].selected_orders == FamilyOrders(2, 1, 1)
+    assert scan["profiles"].high.selected.orders == FamilyOrders(2, 1, 1)
+    assert scan["profile_families"]["linear"] is scan["profiles"]
+    assert scan["profile_families"]["nonlinear"].high.selected is not None
+    assert scan["profile_families"]["nonlinear"].low.selected is not None
+    assert all(
+        run["score"].solver_family == "nonlinear"
+        for name, run in scan["runs"].items()
+        if name.endswith("__nonlinear")
+    )
+    assert scan["correction_sweep"] is not None
+    assert any(orders == FamilyOrders(1, 1, 1) for orders, _sources in calls)
+    assert calls[:2] == [
+        (FamilyOrders(1, 0, 0), ("diagonal_kp",)),
+        (FamilyOrders(2, 0, 0), ("diagonal_kp",)),
+    ]
+    assert all("tunneling" not in sources for _orders, sources in calls[:4])
+
+
 def test_load_model_config_accepts_single_case_yaml_with_nested_model_sections(tmp_path: Path) -> None:
     cfg_path = _write_unified_case_fixture(tmp_path)
 
@@ -1640,6 +2989,27 @@ def test_load_model_config_accepts_single_case_yaml_with_nested_model_sections(t
     assert cfg.sectors_config == [{"name": "L3", "qset": "qset2", "n_orb": 1}]
     assert cfg.term_template_metadata["profiles"] == ["k_sector_aware"]
     assert [row["name"] for row in cfg.term_templates] == ["kinetic_L3", "onsite_L3"]
+    assert {row["term_space_policy"] for row in cfg.term_templates} == {
+        "orbit_representative"
+    }
+
+
+def test_gamma_layerwise_orbitals_resolve_by_source_qset_not_nonempty_layers() -> None:
+    gamma_counts, gamma_metadata = _resolve_layerwise_counts(
+        [0, 2, 2],
+        name="model.n_orb",
+        num_layer_list=[1, 2],
+    )
+    k_counts, _ = _resolve_layerwise_counts(
+        [0, 2, 2],
+        name="model.n_orb",
+        num_layer_list=[1, 2],
+        prefer_active_layer_sectors=True,
+    )
+
+    assert gamma_counts == [0, 4]
+    assert gamma_metadata["resolved_qset"] == [0, 4]
+    assert k_counts == [2, 2]
 
 
 def test_load_model_config_accepts_band_refinement_block(tmp_path: Path) -> None:
@@ -2041,6 +3411,721 @@ def test_band_refinement_gauss_newton_solver_fits_nonlinear_residual() -> None:
     assert result.njev > 0
 
 
+def test_band_only_analytic_refinement_can_use_gauss_newton() -> None:
+    assert _band_refinement_gauss_newton_available(
+        analytic_jacobian_enabled=True,
+        matrix_jacobian=None,
+    )
+    assert not _band_refinement_gauss_newton_available(
+        analytic_jacobian_enabled=False,
+        matrix_jacobian=None,
+    )
+    assert not _band_refinement_gauss_newton_available(
+        analytic_jacobian_enabled=True,
+        matrix_jacobian=object(),
+    )
+
+
+def test_nonlinear_frontier_keeps_linear_high_low_and_pareto_vocabularies() -> None:
+    compact = CandidateScore(
+        name="compact",
+        orders=FamilyOrders(3, 1, 1),
+        independent_real_parameters=10,
+        weighted_rms_mev=1.0,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=2.0,
+        mean_subspace_overlap=0.98,
+    )
+    middle = CandidateScore(
+        name="middle",
+        orders=FamilyOrders(4, 2, 2),
+        independent_real_parameters=20,
+        weighted_rms_mev=0.5,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=1.0,
+        mean_subspace_overlap=0.98,
+    )
+    dominated = CandidateScore(
+        name="dominated",
+        orders=FamilyOrders(5, 3, 3),
+        independent_real_parameters=30,
+        weighted_rms_mev=0.8,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=1.5,
+        mean_subspace_overlap=0.98,
+    )
+    accurate = CandidateScore(
+        name="accurate",
+        orders=FamilyOrders(6, 4, 4),
+        independent_real_parameters=40,
+        weighted_rms_mev=0.2,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=0.5,
+        mean_subspace_overlap=0.98,
+    )
+    oversized = CandidateScore(
+        name="oversized",
+        orders=FamilyOrders(8, 6, 6),
+        independent_real_parameters=3001,
+        weighted_rms_mev=0.1,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=0.3,
+        mean_subspace_overlap=0.98,
+    )
+    over_order = CandidateScore(
+        name="over-order",
+        orders=FamilyOrders(10, 6, 10),
+        independent_real_parameters=50,
+        weighted_rms_mev=0.1,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=0.3,
+        mean_subspace_overlap=0.98,
+    )
+    profiles = select_high_low_profiles((compact, middle, dominated, accurate))
+
+    selected = _select_nonlinear_frontier_scores(
+        (compact, middle, dominated, accurate, oversized),
+        profiles=profiles,
+        maximum_candidates=4,
+        maximum_variables=3000,
+    )
+
+    assert [candidate.name for candidate in selected] == [
+        "compact",
+        "middle",
+        "accurate",
+    ]
+
+    capped = _select_nonlinear_frontier_scores(
+        (compact, middle, accurate, over_order),
+        profiles=profiles,
+        maximum_candidates=4,
+        maximum_variables=3000,
+        maximum_orders=FamilyOrders(6, 4, 4),
+    )
+    assert [candidate.name for candidate in capped] == [
+        "compact",
+        "middle",
+        "accurate",
+    ]
+
+    dominated_endpoint = replace(
+        middle,
+        name="dominated-endpoint",
+        weighted_rms_mev=1.2,
+    )
+    endpoint_capped = _select_nonlinear_frontier_scores(
+        (compact, dominated_endpoint),
+        profiles=select_high_low_profiles((compact, dominated_endpoint)),
+        maximum_candidates=4,
+        maximum_orders=FamilyOrders(4, 2, 2),
+    )
+    assert [candidate.name for candidate in endpoint_capped] == [
+        "compact",
+        "dominated-endpoint",
+    ]
+
+
+def test_harmonic_support_size_uses_active_fitted_harmonics_not_configured_ceiling() -> None:
+    model_config = SimpleNamespace(harmonics_config={"intra": 4, "inter": 4})
+    model = SimpleNamespace(
+        terms={
+            "a": SimpleNamespace(
+                active=True,
+                r_value_real=1.0,
+                r_value_imag=0.0,
+                tag="intra",
+                registry_metadata={"harmonic_id": 1},
+            ),
+            "b": SimpleNamespace(
+                active=True,
+                r_value_real=2.0,
+                r_value_imag=0.0,
+                tag="intra",
+                registry_metadata={"harmonic_id": 1},
+            ),
+            "c": SimpleNamespace(
+                active=True,
+                r_value_real=0.0,
+                r_value_imag=0.0,
+                tag="inter",
+                registry_metadata={"harmonic_id": 4},
+            ),
+        }
+    )
+
+    assert _harmonic_support_size(model_config, model=model, tolerance=1.0e-8) == 1
+
+
+def test_nonlinear_frontier_refines_each_selected_vocabulary(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+    model_config = replace(
+        model_config,
+        band_refinement_config={
+            "enabled": True,
+            "solver": "nonlinear_band",
+            "weighted_band_loss": {"enabled": True, "primary_bands": 4},
+        },
+    )
+    target = np.asarray(
+        pipeline_module._current_heff_support_hamiltonians(
+            np.load(model_config.heff_file),
+            qset1=np.asarray(moire_config.Q_set1),
+            qset2=np.asarray(moire_config.Q_set2),
+            n_orb=model_config.n_orb,
+            harmonics_config=model_config.harmonics_config,
+        )
+    )
+    target = pipeline_module._select_rows(target, model_config.band_indices)
+    scores = (
+        CandidateScore(
+            name="compact",
+            orders=FamilyOrders(2, 1, 1),
+            independent_real_parameters=8,
+            weighted_rms_mev=0.8,
+            weighted_rms_se_mev=0.1,
+            weighted_max_mev=1.0,
+            mean_subspace_overlap=0.98,
+        ),
+        CandidateScore(
+            name="accurate",
+            orders=FamilyOrders(4, 2, 2),
+            independent_real_parameters=16,
+            weighted_rms_mev=0.4,
+            weighted_rms_se_mev=0.1,
+            weighted_max_mev=0.7,
+            mean_subspace_overlap=0.99,
+        ),
+    )
+    linear_config = replace(
+        model_config,
+        band_refinement_config={"enabled": False},
+    )
+    runs = {
+        score.name: {
+            "score": score,
+            "model_config": linear_config,
+            "moire_config": moire_config,
+        }
+        for score in scores
+    }
+    seen: list[tuple[str, dict[str, object]]] = []
+
+    def fake_pipeline(candidate_moire, candidate_model, log_path, **kwargs):
+        seen.append((Path(log_path).stem, dict(candidate_model.band_refinement_config)))
+        assert candidate_model.band_refinement_config["enabled"] is True
+        eigvals, eigvecs = np.linalg.eigh(target)
+        return {
+            "model": SimpleNamespace(terms={}),
+            "eigvals": (eigvals, eigvecs),
+            "band_hamiltonians": target,
+            "band_refinement": {"enabled": True},
+        }
+
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+
+    refined = _refine_nonlinear_frontier_candidates(
+        frontier_scores=scores,
+        linear_runs=runs,
+        model_config=model_config,
+        target_hamiltonians=target,
+        kpoints=np.asarray(moire_config.kpoints),
+        n_folds=3,
+        low_primary_count=4,
+        high_primary_count=3,
+        candidate_dir=tmp_path / "candidate_logs",
+        verbose=False,
+    )
+
+    assert set(refined) == {
+        "compact__nonlinear_high",
+        "compact__nonlinear_low",
+        "accurate__nonlinear_high",
+        "accurate__nonlinear_low",
+    }
+    assert [name for name, _config in seen] == [
+        "compact__nonlinear_high",
+        "compact__nonlinear_low",
+        "accurate__nonlinear_high",
+        "accurate__nonlinear_low",
+    ]
+    assert all(run["score"].solver_family == "nonlinear" for run in refined.values())
+    assert refined["compact__nonlinear_high"]["score"].selection_scope == "high"
+    assert refined["compact__nonlinear_low"]["score"].selection_scope == "low"
+    low_configs = [config for name, config in seen if name.endswith("_low")]
+    high_configs = [config for name, config in seen if name.endswith("_high")]
+    assert all(config["matrix_weight"] == 0.0 for config in low_configs)
+    assert all(config["optimizer"] == "auto" for config in low_configs)
+    assert all(config["band_slice"] == [0, 4] for config in low_configs)
+    assert all(config["acceptance_guard"]["guard_all_bands"] is False for config in low_configs)
+    assert all(config["band_slice"] == [target.shape[-1] - 3, target.shape[-1]] for config in high_configs)
+    assert all(config["weighted_band_loss"]["primary_bands"] == 3 for config in high_configs)
+    assert {run["score"].orders for run in refined.values()} == {
+        FamilyOrders(2, 1, 1),
+        FamilyOrders(4, 2, 2),
+    }
+
+    seen.clear()
+    scoped = _refine_nonlinear_frontier_candidates(
+        frontier_scores=(
+            replace(scores[0], selection_scope="high"),
+            replace(scores[1], selection_scope="low"),
+        ),
+        linear_runs=runs,
+        model_config=model_config,
+        target_hamiltonians=target,
+        kpoints=np.asarray(moire_config.kpoints),
+        n_folds=3,
+        low_primary_count=4,
+        high_primary_count=4,
+        candidate_dir=tmp_path / "candidate_logs_scoped",
+        verbose=False,
+    )
+    assert set(scoped) == {
+        "compact__nonlinear_high",
+        "accurate__nonlinear_low",
+    }
+
+
+def test_uniform_nonlinear_frontier_keeps_equal_band_weights(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    moire_config, model_config = build_moire_config_from_file(_write_fixture(tmp_path))
+    model_config = replace(
+        model_config,
+        fit_weighting="uniform",
+        requested_profiles=("nonlinear/high",),
+        band_refinement_config={
+            "enabled": True,
+            "solver": "nonlinear_band",
+            "weighted_band_loss": {"enabled": False},
+        },
+    )
+    target = np.asarray(
+        pipeline_module._current_heff_support_hamiltonians(
+            np.load(model_config.heff_file),
+            qset1=np.asarray(moire_config.Q_set1),
+            qset2=np.asarray(moire_config.Q_set2),
+            n_orb=model_config.n_orb,
+            harmonics_config=model_config.harmonics_config,
+        )
+    )
+    target = pipeline_module._select_rows(target, model_config.band_indices)
+    score = CandidateScore(
+        name="uniform-source",
+        orders=FamilyOrders(2, 1, 1),
+        independent_real_parameters=8,
+        weighted_rms_mev=0.8,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=1.0,
+        mean_subspace_overlap=0.98,
+        selection_scope="high",
+    )
+    linear_config = replace(model_config, band_refinement_config={"enabled": False})
+    seen: list[dict[str, object]] = []
+
+    def fake_pipeline(candidate_moire, candidate_model, log_path, **kwargs):
+        seen.append(dict(candidate_model.band_refinement_config))
+        eigvals, eigvecs = np.linalg.eigh(target)
+        return {
+            "model": SimpleNamespace(terms={}),
+            "eigvals": (eigvals, eigvecs),
+            "band_hamiltonians": target,
+            "band_refinement": dict(candidate_model.band_refinement_config),
+        }
+
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+
+    refined = _refine_nonlinear_frontier_candidates(
+        frontier_scores=(score,),
+        linear_runs={
+            score.name: {
+                "score": score,
+                "model_config": linear_config,
+                "moire_config": moire_config,
+            }
+        },
+        model_config=model_config,
+        target_hamiltonians=target,
+        kpoints=np.asarray(moire_config.kpoints),
+        n_folds=3,
+        low_primary_count=2,
+        high_primary_count=4,
+        candidate_dir=tmp_path / "uniform_nonlinear_logs",
+        verbose=False,
+    )
+
+    assert set(refined) == {"uniform-source__nonlinear_high"}
+    assert len(seen) == 1
+    assert seen[0]["weighted_band_loss"] == {
+        "enabled": False,
+        "primary_bands": 4,
+    }
+
+
+def test_linear_profile_refit_uses_complete_two_sided_objective(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+    target = np.asarray(
+        pipeline_module._current_heff_support_hamiltonians(
+            np.load(model_config.heff_file),
+            qset1=np.asarray(moire_config.Q_set1),
+            qset2=np.asarray(moire_config.Q_set2),
+            n_orb=model_config.n_orb,
+            harmonics_config=model_config.harmonics_config,
+        )
+    )
+    target = pipeline_module._select_rows(target, model_config.band_indices)
+    high = CandidateScore(
+        name="high-source",
+        orders=FamilyOrders(4, 2, 2),
+        independent_real_parameters=16,
+        weighted_rms_mev=0.4,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=0.7,
+        mean_subspace_overlap=0.99,
+        selection_scope="high",
+    )
+    low = CandidateScore(
+        name="low-source",
+        orders=FamilyOrders(2, 1, 1),
+        independent_real_parameters=8,
+        weighted_rms_mev=0.8,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=1.0,
+        mean_subspace_overlap=0.98,
+        selection_scope="low",
+    )
+    linear_config = replace(model_config, band_refinement_config={"enabled": False})
+    runs = {
+        score.name: {
+            "score": score,
+            "model_config": linear_config,
+            "moire_config": moire_config,
+        }
+        for score in (high, low)
+    }
+    seen: list[tuple[str, str, int, float, tuple[str, ...], tuple[str, ...]]] = []
+
+    def fake_pipeline(candidate_moire, candidate_model, log_path, **kwargs):
+        objective = candidate_model.response_fit_objective
+        seen.append(
+            (
+                Path(log_path).stem,
+                candidate_model.response_semantics,
+                objective["window"]["bands"],
+                objective["two_sided_projector"]["weight"],
+                tuple(row["name"] for row in candidate_model.term_templates),
+                tuple(row["term_space_policy"] for row in candidate_model.term_templates),
+            )
+        )
+        return {
+            "model": SimpleNamespace(terms={}),
+            "band_hamiltonians": target,
+            "band_refinement": {"enabled": False},
+        }
+
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+
+    refitted = _refit_linear_profile_candidates(
+        frontier_scores=(high, low),
+        linear_runs=runs,
+        target_hamiltonians=target,
+        kpoints=np.asarray(moire_config.kpoints),
+        n_folds=3,
+        low_primary_count=2,
+        high_primary_count=4,
+        candidate_dir=tmp_path / "linear_profile_logs",
+        verbose=False,
+    )
+
+    assert set(refitted) == {
+        "high-source__linear_high_weighted",
+        "low-source__linear_low_weighted",
+    }
+    assert [row[:4] for row in seen] == [
+        ("high-source__linear_high_weighted", "complete_linear_v2", 4, 300.0),
+        ("low-source__linear_low_weighted", "complete_linear_v2", 2, 300.0),
+    ]
+    for row in seen:
+        assert row[4] == (
+            "gamma_1x1_kinetic",
+            "gamma_1x1_onsite",
+            "gamma_1x1_intra_nonzero",
+            "gamma_1x1_inter_zero",
+            "gamma_1x1_inter_nonzero",
+        )
+        assert set(row[5]) == {"complete"}
+
+
+def test_uniform_linear_profile_refit_reuses_equal_matrix_candidates(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    moire_config, model_config = build_moire_config_from_file(_write_fixture(tmp_path))
+    model_config = replace(
+        model_config,
+        fit_weighting="uniform",
+        response_fit_objective={"mode": "equal_matrix_v1"},
+        band_refinement_config={"enabled": False},
+    )
+    target = np.asarray(
+        pipeline_module._current_heff_support_hamiltonians(
+            np.load(model_config.heff_file),
+            qset1=np.asarray(moire_config.Q_set1),
+            qset2=np.asarray(moire_config.Q_set2),
+            n_orb=model_config.n_orb,
+            harmonics_config=model_config.harmonics_config,
+        )
+    )
+    target = pipeline_module._select_rows(target, model_config.band_indices)
+    eigvals, eigvecs = np.linalg.eigh(target)
+    base_result = {
+        "model": SimpleNamespace(terms={}),
+        "eigvals": (eigvals, eigvecs),
+        "band_hamiltonians": target,
+        "band_refinement": {"enabled": False},
+    }
+    high = CandidateScore(
+        name="high-source",
+        orders=FamilyOrders(4, 2, 2),
+        independent_real_parameters=16,
+        weighted_rms_mev=0.4,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=0.7,
+        mean_subspace_overlap=0.99,
+        selection_scope="high",
+    )
+    low = replace(
+        high,
+        name="low-source",
+        orders=FamilyOrders(2, 1, 1),
+        independent_real_parameters=8,
+        selection_scope="low",
+    )
+    runs = {
+        score.name: {
+            "score": score,
+            "result": base_result,
+            "model_config": model_config,
+            "moire_config": moire_config,
+        }
+        for score in (high, low)
+    }
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_model_pipeline",
+        lambda *args, **kwargs: pytest.fail("uniform linear profiles must reuse equal-matrix fits"),
+    )
+
+    refitted = _refit_linear_profile_candidates(
+        frontier_scores=(high, low),
+        linear_runs=runs,
+        target_hamiltonians=target,
+        kpoints=np.asarray(moire_config.kpoints),
+        n_folds=3,
+        low_primary_count=2,
+        high_primary_count=4,
+        candidate_dir=tmp_path / "uniform_linear_logs",
+        verbose=False,
+    )
+
+    assert set(refitted) == {
+        "high-source__linear_high_uniform",
+        "low-source__linear_low_uniform",
+    }
+    assert all(
+        run["model_config"].response_fit_objective == {"mode": "equal_matrix_v1"}
+        for run in refitted.values()
+    )
+    assert all(run["result"] is base_result for run in refitted.values())
+
+
+def test_complete_profile_refit_uses_resolved_gamma_case_envelope(
+    tmp_path: Path,
+) -> None:
+    moire_config, model_config = build_moire_config_from_file(_write_fixture(tmp_path))
+    legacy = replace(
+        model_config,
+        term_templates=[
+            {
+                "name": "gamma_kinetic",
+                "source": "diagonal_kp",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": [[1, 1]],
+                "max_order": 2,
+                "term_space_policy": "explicit_reduced",
+            }
+        ],
+    )
+
+    templates = pipeline_module._complete_term_templates_for_profile_refit(
+        legacy,
+        moire_config=moire_config,
+    )
+
+    assert templates
+    assert all(row["name"].startswith("gamma_case_") for row in templates)
+    assert {row["term_space_policy"] for row in templates} == {"complete"}
+
+
+@pytest.mark.parametrize(
+    ("valley_type", "name_prefix"),
+    [
+        ("K", "k_case_"),
+        ("M", "m_case_"),
+    ],
+)
+def test_complete_profile_refit_uses_resolved_k_m_case_envelope(
+    tmp_path: Path,
+    valley_type: str,
+    name_prefix: str,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["valley_model"]["valley_type"] = valley_type
+    raw["valley_model"]["active_valleys"] = [valley_type]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+    legacy = replace(
+        model_config,
+        term_templates=[
+            {
+                "name": "legacy_kinetic",
+                "source": "diagonal_kp",
+                "sector_pairs": [[1, 1]],
+                "orbital_pairs": "diagonal",
+                "max_order": 2,
+                "term_space_policy": "orbit_representative",
+            }
+        ],
+    )
+
+    templates = pipeline_module._complete_term_templates_for_profile_refit(
+        legacy,
+        moire_config=moire_config,
+    )
+
+    assert templates
+    assert all(row["name"].startswith(name_prefix) for row in templates)
+    assert {row["term_space_policy"] for row in templates} == {"complete"}
+    assert all(row["orbital_pairs"] == "all" for row in templates)
+
+
+@pytest.mark.parametrize("valley_type", ["K", "M"])
+def test_complete_profile_refit_k_m_requires_resolved_case(
+    tmp_path: Path,
+    valley_type: str,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["valley_model"]["valley_type"] = valley_type
+    raw["valley_model"]["active_valleys"] = [valley_type]
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    model_config = load_model_config(cfg_path)
+
+    with pytest.raises(
+        ValueError,
+        match=rf"{valley_type} complete-response profile refit requires resolved",
+    ):
+        pipeline_module._complete_term_templates_for_profile_refit(model_config)
+
+
+def test_reverted_refinement_baseline_remains_selectable() -> None:
+    assert pipeline_module._band_refinement_result_is_selectable(
+        {
+            "band_refinement": {
+                "acceptance_guard": {
+                    "enabled": True,
+                    "accepted": False,
+                    "reverted": True,
+                }
+            }
+        }
+    )
+    assert not pipeline_module._band_refinement_result_is_selectable(
+        {
+            "band_refinement": {
+                "acceptance_guard": {
+                    "enabled": True,
+                    "accepted": False,
+                    "reverted": False,
+                }
+            }
+        }
+    )
+
+
+def test_selected_profile_reuses_completed_frontier_result(monkeypatch, tmp_path: Path) -> None:
+    cached = {"model": object(), "eigvals": np.zeros((1, 1))}
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_model_pipeline",
+        lambda *args, **kwargs: pytest.fail("completed frontier result must be reused"),
+    )
+
+    result = pipeline_module._selected_profile_pipeline_result(
+        selected_run={"result": cached},
+        selected_moire=SimpleNamespace(),
+        selected_model=SimpleNamespace(),
+        profile_log=tmp_path / "unused.log",
+        verbose=False,
+        progress=False,
+    )
+
+    assert result is cached
+
+
+def test_automatic_low_profile_uses_twice_projected_model_dimension() -> None:
+    model_config = SimpleNamespace(n_orb=(2, 2))
+
+    assert _automatic_low_profile_band_count(model_config, total_bands=76) == 8
+
+
+def test_linear_profile_fit_objective_uses_fixed_window_and_two_sided_weight() -> None:
+    low = _linear_profile_fit_objective(
+        target_bands="top",
+        band_count=8,
+        two_sided_projector_weight=300.0,
+    )
+    high = _linear_profile_fit_objective(
+        target_bands="top",
+        band_count=28,
+        two_sided_projector_weight=300.0,
+    )
+
+    assert low["mode"] == "target_spectral_linear"
+    assert low["window"] == {
+        "mode": "fixed_count_degeneracy_safe",
+        "bands": 8,
+        "degeneracy_tol_mev": 0.1,
+    }
+    assert low["two_sided_projector"] == {"enabled": True, "weight": 300.0}
+    assert high["window"]["bands"] == 28
+
+
+def test_balanced_family_order_candidates_include_compact_joint_models() -> None:
+    assert _balanced_family_order_candidates(
+        {
+            "kinetic": (2, 4, 6, 10),
+            "intra": (0, 2, 4, 6),
+            "inter": (0, 2, 4, 10),
+        }
+    ) == (
+        FamilyOrders(2, 0, 0),
+        FamilyOrders(4, 2, 2),
+        FamilyOrders(6, 4, 4),
+    )
+
+
 def test_edge_weighted_band_weights_prioritize_top_bands() -> None:
     weights = _edge_weighted_band_weights(
         n_bands=6,
@@ -2295,6 +4380,22 @@ def test_harmonic_selection_default_thresholds_are_conservative() -> None:
     assert _harmonic_ablation_candidate_is_accepted(accurate_candidate, thresholds)
 
 
+def test_low_cost_harmonic_recommendation_requires_relaxed_accuracy() -> None:
+    report = {
+        "candidates": [
+            {
+                "intra_shells": 1,
+                "inter_shells": 1,
+                "plot_rms_mev": 2.0,
+                "plot_max_mev": 4.0,
+                "subspace_mean_overlap": 0.99,
+            }
+        ]
+    }
+
+    assert _low_cost_harmonic_recommendation_candidate(report) is None
+
+
 def test_harmonic_ablation_selection_uses_quality_plateau_not_first_compact_candidate() -> None:
     candidates = [
         {
@@ -2511,15 +4612,32 @@ def test_load_model_config_auto_low_energy_fills_harmonics_and_orders(tmp_path: 
 
     config = load_model_config(cfg_path)
 
-    assert config.harmonics_config["intra"]["count"] == 2
-    assert config.harmonics_config["inter"]["count"] == 2
+    report = config.automatic_harmonic_selection
+    assert config.harmonics_config["intra"]["count"] == report["selected"]["intra_shells"]
+    assert config.harmonics_config["inter"]["count"] == report["selected"]["inter_shells"]
     assert config.max_order["Kinect"] == 6
     assert config.max_order["intra"] == 4
     assert config.max_order["inter"] == 6
     assert config.max_order["moire_intra_zero"] == 0
     assert config.max_order["tunneling_zero"] == 6
     assert config.raw["model"]["auto_low_energy_order_profile"]["profile"] == "gamma_compact_ladder_start"
-    assert config.raw["model"]["auto_low_energy_defaults"]["harmonics"] is True
+    assert config.raw["model"]["automatic_defaults"]["harmonics"] is True
+    assert report["selection_profile"] == "low_cost"
+
+
+def test_load_model_config_omitted_harmonics_uses_low_cost_scan_in_manual_fit_mode(tmp_path: Path) -> None:
+    cfg_path = _write_auto_fixture(tmp_path)
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    data["model"].pop("harmonics", None)
+    data["fit"] = {"indices": [0]}
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+
+    config = load_model_config(cfg_path)
+
+    report = config.automatic_harmonic_selection
+    assert report["selection_profile"] == "low_cost"
+    assert config.harmonics_config["intra"]["count"] == report["selected"]["intra_shells"]
+    assert config.harmonics_config["inter"]["count"] == report["selected"]["inter_shells"]
 
 
 def test_auto_low_energy_order_defaults_are_valley_aware() -> None:
@@ -2571,10 +4689,10 @@ def test_load_model_config_auto_low_energy_can_select_harmonics_from_heff(tmp_pa
 
     assert config.harmonics_config["intra"]["count"] == 2
     assert config.harmonics_config["inter"]["count"] == 0
-    report = config.raw["model"]["auto_low_energy_harmonic_selection"]
-    assert report["selection_status"] == "accepted_quality_plateau_candidate"
+    report = config.automatic_harmonic_selection
+    assert report["selection_status"] == "selected_low_cost_relaxed_accuracy"
     assert report["selected"]["accepted"] is True
-    assert config.band_refinement_config["auto_harmonic_selection"]["selected"]["intra_shells"] == 2
+    assert config.band_refinement_config["auto_harmonic_selection"]["enabled"] is False
 
 
 def test_load_model_config_auto_low_energy_preserves_explicit_harmonics(tmp_path: Path) -> None:
@@ -2592,7 +4710,7 @@ def test_load_model_config_auto_low_energy_preserves_explicit_harmonics(tmp_path
     config = load_model_config(cfg_path)
 
     assert config.harmonics_config == {"intra": 3, "inter": 2}
-    assert "auto_low_energy_harmonic_selection" not in config.raw["model"]
+    assert config.automatic_harmonic_selection == {}
     assert config.band_refinement_config["auto_harmonic_selection"]["enabled"] is False
 
 
@@ -2625,7 +4743,12 @@ def test_run_configured_model_prints_single_compact_harmonic_recommendation(
     data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     data["model"]["harmonics"] = {"intralayer": 3, "interlayer": 2}
     data["model"]["target_bands"] = "bottom"
-    data["fit"] = {"mode": "auto_low_energy", "max_points": 2}
+    data["fit"] = {
+        "mode": "auto_low_energy",
+        "max_points": 2,
+        "harmonic_recommendation": True,
+        "model_selection": False,
+    }
     cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
@@ -2637,7 +4760,7 @@ def test_run_configured_model_prints_single_compact_harmonic_recommendation(
     stdout = capsys.readouterr().out
 
     assert result["configured_model"].harmonics_config == {"intra": 3, "inter": 2}
-    assert "auto_low_energy_harmonic_selection" not in result["configured_model"].raw["model"]
+    assert result["configured_model"].automatic_harmonic_selection == {}
     assert stdout.count("Harmonic recommendation") == 1
     assert "--- Harmonic recommendation (diagnostic only) ---" in stdout
     assert "actual model.harmonics: intra=3 inter=2 (unchanged)" in stdout
@@ -2645,8 +4768,84 @@ def test_run_configured_model_prints_single_compact_harmonic_recommendation(
     assert "high-acc" in stdout
     assert "faithful recommended" not in stdout
     assert "plot " in stdout
+    assert "mean subspace overlap" in stdout
     assert "band plot" in stdout
     assert (tmp_path / "model_out" / "harmonic_recommendation_bands.png").exists()
+
+
+def test_run_configured_model_prints_automatic_low_cost_harmonics_without_plot(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    cfg_path = _write_auto_fixture(tmp_path)
+    expected_eigvals = _expected_project_eigvals(tmp_path)
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    data["model"].pop("harmonics", None)
+    data["fit"] = {
+        "method": "linear",
+        "kpoints": [0],
+        "bands": 2,
+        "one_sided_weight": 0.0,
+        "two_sided_weight": 0.0,
+    }
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
+    _write_symm_frame_manifest(
+        tmp_path,
+        rotation_deg=0.0,
+        q_model_files={"layer1": "../q1.npy", "layer2": "../q2.npy"},
+    )
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {"eigvals": expected_eigvals, "diagnostics": {}}
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+
+    result = run_configured_model(cfg_path)
+    stdout = capsys.readouterr().out
+
+    assert result["configured_model"].raw["model"]["automatic_defaults"]["harmonics"] is True
+    assert "auto_low_energy_harmonic_selection" not in result["configured_model"].raw["model"]
+    assert stdout.count("Automatic harmonic selection  PASS") == 1
+    assert "Choice" in stdout
+    assert "Plot RMS/Max (meV)" in stdout
+    assert "Primary RMS/Max (meV)" in stdout
+    assert stdout.count("selected") == 1
+    assert "quality" in stdout
+    assert "low-cost" in stdout
+    assert "high-accuracy" in stdout
+    assert "[kp model] Model setup" in stdout
+    assert "basis" in stdout and "n_orb=[1, 1]" in stdout
+    assert "method" in stdout and "linear" in stdout
+    assert "target" in stdout and "top 2 bands" in stdout
+    assert "fit k rows" in stdout and "[0] · projected Heff row indices" in stdout
+    assert "H weights" in stdout and "full=1 · one-sided=0 · two-sided=0" in stdout
+    assert not (tmp_path / "model_out" / "harmonic_recommendation_bands.png").exists()
+
+
+def test_automatic_harmonic_selection_always_shows_high_reference(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    candidate = {
+        "intra_shells": 3,
+        "inter_shells": 3,
+        "plot_rms_mev": 0.842,
+        "plot_max_mev": 1.721,
+        "primary_rms_mev": 0.678,
+        "primary_max_mev": 1.446,
+        "subspace_mean_overlap": 0.999084,
+    }
+
+    _print_automatic_harmonic_selection_report(
+        {"selected": candidate, "quality_selected": dict(candidate)}
+    )
+    stdout = capsys.readouterr().out
+
+    assert "Automatic harmonic selection  PASS" in stdout
+    assert stdout.count("selected") == 1
+    assert any(line.lstrip().startswith("high") for line in stdout.splitlines())
+    assert stdout.count("0.842 / 1.721") == 2
+    assert stdout.count("0.678 / 1.446") == 2
 
 
 def test_band_refinement_invokes_subspace_and_low_matrix_losses(monkeypatch, tmp_path: Path) -> None:
@@ -2713,8 +4912,8 @@ def test_band_refinement_invokes_subspace_and_low_matrix_losses(monkeypatch, tmp
         fit_indices=[0],
         fit_selection_metadata={},
         band_indices=None,
-        n_orb=(1, 0),
-        nlow_state=[1, 0],
+        n_orb=(2, 0),
+        nlow_state=[2, 0],
         bM_config={},
         harmonics_config={},
         max_order={},
@@ -2877,6 +5076,13 @@ def test_band_refinement_acceptance_guard_reverts_worse_plot_window(monkeypatch,
 
     monkeypatch.setattr(pipeline, "_model_hamiltonians_for_kpoints", fake_hamiltonians)
     monkeypatch.setattr(pipeline.scipy.optimize, "least_squares", lambda *_args, **_kwargs: Result())
+    support_targets: list[np.ndarray] = []
+
+    def capture_support_target(target, **_kwargs):
+        support_targets.append(np.asarray(target))
+        return np.asarray(target)
+
+    monkeypatch.setattr(pipeline, "_current_heff_support_hamiltonians", capture_support_target)
 
     moire_cfg = MoireConfig(
         Q_set1=np.zeros((1, 2), dtype=float),
@@ -2918,6 +5124,7 @@ def test_band_refinement_acceptance_guard_reverts_worse_plot_window(monkeypatch,
             "variable_tags": ["Kinect"],
             "components": ["real"],
             "max_nfev": 1,
+            "optimizer": "scipy_least_squares",
             "subspace_loss": {"enabled": False},
             "low_subspace_matrix_loss": {"enabled": False},
             "acceptance_guard": {"enabled": True, "max_rms_increase_mev": 0.0, "max_max_increase_mev": 0.0},
@@ -2928,6 +5135,8 @@ def test_band_refinement_acceptance_guard_reverts_worse_plot_window(monkeypatch,
 
     assert report["acceptance_guard"]["accepted"] is False
     assert report["acceptance_guard"]["reverted"] is True
+    assert report["reference"] == "current_heff_support_mask"
+    assert support_targets
     assert model.term.r_value_real == pytest.approx(0.0)
     assert report["max_scaled_coefficient_drift"] == pytest.approx(0.0)
 
@@ -3054,8 +5263,8 @@ def test_band_refinement_uses_fit_kpoints_not_full_band_path(monkeypatch, tmp_pa
         fit_indices=[0, 2],
         fit_selection_metadata={"mode": "auto_low_energy", "selected_indices": [0, 2]},
         band_indices=[0, 1, 2],
-        n_orb=(1, 0),
-        nlow_state=[1, 0],
+        n_orb=(2, 0),
+        nlow_state=[2, 0],
         bM_config={},
         harmonics_config={},
         max_order={},
@@ -3421,6 +5630,13 @@ def test_auto_model_selection_outputs_write_user_facing_reports(monkeypatch, tmp
 
     heff = np.array(
         [
+            [[0.0, 0.4], [0.4, 1.0]],
+            [[0.0, 0.4], [0.4, 1.1]],
+        ],
+        dtype=np.complex128,
+    )
+    support_heff = np.array(
+        [
             [[0.0, 0.0], [0.0, 1.0]],
             [[0.0, 0.0], [0.0, 1.1]],
         ],
@@ -3430,15 +5646,20 @@ def test_auto_model_selection_outputs_write_user_facing_reports(monkeypatch, tmp
     np.save(heff_file, heff)
 
     def fake_hamiltonians(_moire_config, _model, _kpoints):
-        return heff.copy()
+        return support_heff.copy()
 
     monkeypatch.setattr(pipeline, "_model_hamiltonians_for_kpoints", fake_hamiltonians)
+    monkeypatch.setattr(
+        pipeline,
+        "_selected_harmonic_support_mask",
+        lambda *args, **kwargs: np.eye(2, dtype=bool),
+    )
 
     output_dir = tmp_path / "out"
     output_dir.mkdir()
     model_cfg = ConfiguredModel(
         path=tmp_path / "model.yaml",
-        raw={"model": {"n_orb": [1, 0], "target_bands": "top"}, "fit": {"mode": "auto_low_energy"}},
+        raw={"model": {"n_orb": [1, 1], "target_bands": "top"}, "fit": {"mode": "auto_low_energy"}},
         source_config=tmp_path / "source.yaml",
         source_raw={},
         qset1_file=tmp_path / "q1.npy",
@@ -3451,10 +5672,10 @@ def test_auto_model_selection_outputs_write_user_facing_reports(monkeypatch, tmp
         fit_indices=[0, 1],
         fit_selection_metadata={"mode": "auto_low_energy", "selected_indices": [0, 1]},
         band_indices=None,
-        n_orb=(1, 0),
-        nlow_state=[1, 0],
+        n_orb=(1, 1),
+        nlow_state=[1, 1],
         bM_config={},
-        harmonics_config={},
+        harmonics_config={"intra": 0, "inter": 0},
         max_order={},
         symmetry_map={},
         coeff_tol=1.0e-8,
@@ -3486,9 +5707,9 @@ def test_auto_model_selection_outputs_write_user_facing_reports(monkeypatch, tmp
     )
     moire_cfg = MoireConfig(
         Q_set1=np.zeros((1, 2), dtype=float),
-        Q_set2=np.zeros((0, 2), dtype=float),
+        Q_set2=np.zeros((1, 2), dtype=float),
         n_orb1=1,
-        n_orb2=0,
+        n_orb2=1,
         kpoints=np.array([[0.0, 0.0], [0.1, 0.0]], dtype=float),
     )
     results = {
@@ -3517,8 +5738,707 @@ def test_auto_model_selection_outputs_write_user_facing_reports(monkeypatch, tmp
     assert (output_dir / "subspace_leakage.pdf").exists()
     payload = json.loads((output_dir / "auto_model_selection.json").read_text(encoding="utf-8"))
     assert payload["harmonic_selection"]["selected"]["intra_shells"] == 1
+    candidate = payload["candidates"][0]
+    assert candidate["reference"] == "current_heff_support_mask"
+    assert candidate["windows"][0]["band"]["top_band_rms_mev"] == pytest.approx(0.0)
+    assert candidate["secondary_original_heff"]["reference"] == "original_heff"
+    assert candidate["secondary_original_heff"]["plot_rms_mev"] > 0.0
     md = (output_dir / "auto_model_selection.md").read_text(encoding="utf-8")
     assert "Harmonic Selection" in md
+    assert "current Heff support mask" in md
+
+
+def test_high_low_model_selection_outputs_write_dual_profile_frontier(tmp_path: Path) -> None:
+    candidates = (
+        CandidateScore(
+            name="k2_i1_t1",
+            orders=FamilyOrders(2, 1, 1),
+            independent_real_parameters=18,
+            weighted_rms_mev=0.40,
+            weighted_rms_se_mev=0.05,
+            weighted_max_mev=1.2,
+            mean_subspace_overlap=0.98,
+            expanded_weighted_rms_mev=1.0,
+        ),
+        CandidateScore(
+            name="k1_i1_t1",
+            orders=FamilyOrders(1, 1, 1),
+            independent_real_parameters=8,
+            weighted_rms_mev=0.47,
+            weighted_rms_se_mev=0.05,
+            weighted_max_mev=1.8,
+            mean_subspace_overlap=0.96,
+            expanded_weighted_rms_mev=4.0,
+        ),
+    )
+    profiles = select_high_low_profiles(
+        candidates,
+        overlap_target=0.95,
+        overlap_safety_floor=0.90,
+        low_se_multiplier=2.0,
+    )
+    scan = {
+        "profiles": profiles,
+        "runs": {candidate.name: {"score": candidate} for candidate in candidates},
+    }
+
+    summary = _write_high_low_model_selection_outputs(
+        scan=scan,
+        output_dir=tmp_path,
+    )
+
+    assert summary["profiles"]["high"]["selected"]["name"] == "k2_i1_t1"
+    assert summary["profiles"]["low"]["selected"]["name"] == "k1_i1_t1"
+    assert summary["profiles"]["low"]["standard_error_multiplier"] == 2.0
+    assert (tmp_path / "auto_model_selection.json").exists()
+    assert (tmp_path / "auto_model_selection.md").exists()
+    assert (tmp_path / "candidate_metrics.csv").exists()
+    assert (tmp_path / "model_complexity_frontier.pdf").exists()
+    markdown = (tmp_path / "auto_model_selection.md").read_text(encoding="utf-8")
+    assert "High Accuracy" in markdown
+    assert "Low Parameter" in markdown
+    assert "expanded/all-band error is diagnostic only" in markdown
+
+
+def test_four_profile_report_records_solver_and_complexity_metadata(tmp_path: Path) -> None:
+    linear = CandidateScore(
+        name="linear",
+        orders=FamilyOrders(4, 2, 2),
+        independent_real_parameters=40,
+        weighted_rms_mev=0.4,
+        weighted_rms_se_mev=0.05,
+        weighted_max_mev=1.0,
+        mean_subspace_overlap=0.98,
+        active_group_count=20,
+        harmonic_support_size=8,
+        primary_band_count=10,
+    )
+    nonlinear = CandidateScore(
+        name="nonlinear",
+        orders=FamilyOrders(3, 1, 1),
+        independent_real_parameters=18,
+        weighted_rms_mev=0.2,
+        weighted_rms_se_mev=0.03,
+        weighted_max_mev=0.6,
+        mean_subspace_overlap=0.97,
+        solver_family="nonlinear",
+        active_group_count=9,
+        harmonic_support_size=4,
+        primary_band_count=4,
+    )
+    linear_profiles = select_high_low_profiles((linear,))
+    nonlinear_profiles = select_high_low_profiles((nonlinear,))
+    scan = {
+        "profiles": linear_profiles,
+        "profile_families": {
+            "linear": linear_profiles,
+            "nonlinear": nonlinear_profiles,
+        },
+        "runs": {
+            linear.name: {"score": linear},
+            nonlinear.name: {"score": nonlinear},
+        },
+        "nonlinear_frontier": {"enabled": True, "linear_sources": ["linear"]},
+    }
+
+    summary = _write_high_low_model_selection_outputs(scan=scan, output_dir=tmp_path)
+
+    assert summary["mode"] == "automatic_four_model_profiles"
+    assert summary["profile_families"]["nonlinear"]["low"]["selected"][
+        "solver_family"
+    ] == "nonlinear"
+    assert summary["profile_families"]["nonlinear"]["low"]["selected"][
+        "active_group_count"
+    ] == 9
+    assert summary["profile_families"]["nonlinear"]["low"]["selected"][
+        "primary_band_count"
+    ] == 4
+    assert summary["nonlinear_frontier"]["enabled"] is True
+    csv_text = (tmp_path / "candidate_metrics.csv").read_text(encoding="utf-8")
+    assert "solver_family" in csv_text.splitlines()[0]
+    assert "primary_band_count" in csv_text.splitlines()[0]
+    assert "nonlinear" in csv_text
+    markdown = (tmp_path / "auto_model_selection.md").read_text(encoding="utf-8")
+    assert "Nonlinear High" in markdown
+    assert "Nonlinear Low" in markdown
+
+
+def test_materialize_automatic_profile_output_writes_runnable_inputs(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+    model_config = replace(
+        model_config,
+        response_semantics="complete_linear_v2",
+        response_fit_objective={"mode": "target_spectral_linear"},
+    )
+    target = np.asarray(
+        pipeline_module._current_heff_support_hamiltonians(
+            np.load(model_config.heff_file),
+            qset1=np.asarray(moire_config.Q_set1),
+            qset2=np.asarray(moire_config.Q_set2),
+            n_orb=model_config.n_orb,
+            harmonics_config=model_config.harmonics_config,
+        )
+    )
+    target = pipeline_module._select_rows(target, model_config.band_indices)
+    eigvals, eigvecs = np.linalg.eigh(target)
+    score = CandidateScore(
+        name="k1_i0_t0",
+        orders=FamilyOrders(1, 0, 0),
+        independent_real_parameters=2,
+        weighted_rms_mev=0.0,
+        weighted_rms_se_mev=0.0,
+        weighted_max_mev=0.0,
+        mean_subspace_overlap=1.0,
+    )
+    result = {"model": SimpleNamespace(terms={}), "eigvals": (eigvals, eigvecs)}
+    profile = {
+        "results": result,
+        "moire_config": moire_config,
+        "model_config": model_config,
+        "score": score,
+        "status": "PASS",
+    }
+    registry_calls: list[Path] = []
+
+    def fake_band_plot(*args, **kwargs):
+        path = Path(args[2])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return path
+
+    def fake_q_plot(*args, **kwargs):
+        path = Path(kwargs["path"])
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.touch()
+        return path
+
+    def fake_registry(**kwargs):
+        registry_calls.append(Path(kwargs["output_dir"]))
+        (Path(kwargs["output_dir"]) / "active_terms.json").write_text("[]\n", encoding="utf-8")
+        (Path(kwargs["output_dir"]) / "run_summary.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline_module, "save_band_comparison_plot", fake_band_plot)
+    monkeypatch.setattr(pipeline_module, "save_q_lattice_harmonics_plot", fake_q_plot)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_compute_validation_outputs",
+        lambda **kwargs: ({}, {"validation_incomplete": False, "missing": []}),
+    )
+    monkeypatch.setattr(pipeline_module, "_write_model_registry_outputs", fake_registry)
+    def fake_export(model_output, output_dir, **kwargs):
+        output = Path(output_dir)
+        (output / "evaluate.py").write_text("# standalone\n", encoding="utf-8")
+        np.savez(output / "model_data.npz", dimension_dim=np.asarray(4))
+        return output
+
+    monkeypatch.setattr("kp.model.export.export_standalone_model", fake_export)
+
+    materialized = _materialize_automatic_profile_output(
+        profile_name="low",
+        profile=profile,
+        target_hamiltonians=target,
+        root_output_dir=tmp_path / "out",
+    )
+
+    profile_dir = tmp_path / "out" / "low"
+    assert registry_calls == [profile_dir]
+    assert (profile_dir / "eigvals.npy").exists()
+    assert (profile_dir / "current_heff_support_eigvals.npy").exists()
+    assert (profile_dir / "selected_model_config.yaml").exists()
+    selected_config = yaml.safe_load(
+        (profile_dir / "selected_model_config.yaml").read_text(encoding="utf-8")
+    )
+    assert selected_config["model"]["response_semantics"] == "complete_linear_v2"
+    assert selected_config["model"]["fit"]["objective"] == {
+        "mode": "target_spectral_linear"
+    }
+    assert (profile_dir / "band_comparison.pdf").exists()
+    assert (profile_dir / "band_comparison_all.pdf").exists()
+    assert materialized["comparison"]["reference"] == "current_heff_support_mask"
+    assert materialized["auto_model_selection"]["profile"] == "low"
+
+
+def test_run_configured_model_default_auto_writes_high_and_low_profiles(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+
+    def fake_scan(*, moire_config, model_config, **kwargs):
+        target = np.asarray(
+            pipeline_module._current_heff_support_hamiltonians(
+                np.load(model_config.heff_file),
+                qset1=np.asarray(moire_config.Q_set1),
+                qset2=np.asarray(moire_config.Q_set2),
+                n_orb=model_config.n_orb,
+                harmonics_config=model_config.harmonics_config,
+            )
+        )
+        target = pipeline_module._select_rows(target, model_config.band_indices)
+        score = CandidateScore(
+            name="k2_i0_t0",
+            orders=FamilyOrders(2, 0, 0),
+            independent_real_parameters=4,
+            weighted_rms_mev=0.0,
+            weighted_rms_se_mev=0.0,
+            weighted_max_mev=0.0,
+            mean_subspace_overlap=1.0,
+        )
+        profiles = select_high_low_profiles(
+            (score,),
+            overlap_target=0.95,
+            overlap_safety_floor=0.90,
+            low_se_multiplier=2.0,
+        )
+        return {
+            "profiles": profiles,
+            "runs": {
+                score.name: {
+                    "score": score,
+                    "model_config": model_config,
+                    "moire_config": moire_config,
+                }
+            },
+            "target_hamiltonians": target,
+            "staged_selection": None,
+            "correction_sweep": None,
+        }
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        target = np.asarray(
+            pipeline_module._current_heff_support_hamiltonians(
+                np.load(model_config.heff_file),
+                qset1=np.asarray(moire_config.Q_set1),
+                qset2=np.asarray(moire_config.Q_set2),
+                n_orb=model_config.n_orb,
+                harmonics_config=model_config.harmonics_config,
+            )
+        )
+        target = pipeline_module._select_rows(target, model_config.band_indices)
+        eigvals, eigvecs = np.linalg.eigh(target)
+        return {
+            "model": SimpleNamespace(terms={}),
+            "eigvals": (eigvals, eigvecs),
+            "band_hamiltonians": target,
+            "diagnostics": {},
+            "band_refinement": {"enabled": False},
+        }
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "_run_automatic_family_order_scan",
+        fake_scan,
+    )
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+    def fake_export(model_output, output_dir, **kwargs):
+        output = Path(output_dir)
+        (output / "evaluate.py").write_text("# standalone\n", encoding="utf-8")
+        np.savez(output / "model_data.npz", dimension_dim=np.asarray(4))
+        return output
+
+    monkeypatch.setattr("kp.model.export.export_standalone_model", fake_export)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_compute_validation_outputs",
+        lambda **kwargs: ({}, {"validation_incomplete": False, "missing": []}),
+    )
+
+    results = run_configured_model(cfg_path)
+
+    output_dir = results["configured_model"].output_dir
+    assert results["auto_model_selection"]["mode"] == "automatic_high_low_family_orders"
+    for profile_name in ("high", "low"):
+        profile_dir = output_dir / profile_name
+        assert (profile_dir / "eigvals.npy").exists()
+        assert (profile_dir / "active_terms.json").exists()
+        assert (profile_dir / "run_summary.json").exists()
+        assert (profile_dir / "selected_model_config.yaml").exists()
+        assert results["profile_results"][profile_name]["results"]["auto_model_selection"]["profile"] == profile_name
+
+
+def test_run_configured_model_writes_four_linear_nonlinear_profiles(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+
+    def fake_scan(*, moire_config, model_config, **kwargs):
+        target = np.asarray(
+            pipeline_module._current_heff_support_hamiltonians(
+                np.load(model_config.heff_file),
+                qset1=np.asarray(moire_config.Q_set1),
+                qset2=np.asarray(moire_config.Q_set2),
+                n_orb=model_config.n_orb,
+                harmonics_config=model_config.harmonics_config,
+            )
+        )
+        target = pipeline_module._select_rows(target, model_config.band_indices)
+        linear = CandidateScore(
+            name="linear",
+            orders=FamilyOrders(2, 0, 0),
+            independent_real_parameters=4,
+            weighted_rms_mev=0.1,
+            weighted_rms_se_mev=0.01,
+            weighted_max_mev=0.2,
+            mean_subspace_overlap=1.0,
+        )
+        nonlinear = CandidateScore(
+            name="nonlinear",
+            orders=FamilyOrders(2, 0, 0),
+            independent_real_parameters=4,
+            weighted_rms_mev=0.05,
+            weighted_rms_se_mev=0.01,
+            weighted_max_mev=0.1,
+            mean_subspace_overlap=1.0,
+            solver_family="nonlinear",
+        )
+        linear_profiles = select_high_low_profiles((linear,))
+        nonlinear_profiles = select_high_low_profiles((nonlinear,))
+        return {
+            "profiles": linear_profiles,
+            "profile_families": {
+                "linear": linear_profiles,
+                "nonlinear": nonlinear_profiles,
+            },
+            "runs": {
+                linear.name: {
+                    "score": linear,
+                    "model_config": replace(
+                        model_config,
+                        band_refinement_config={"enabled": False},
+                    ),
+                    "moire_config": moire_config,
+                },
+                nonlinear.name: {
+                    "score": nonlinear,
+                    "model_config": replace(
+                        model_config,
+                        band_refinement_config={"enabled": True},
+                    ),
+                    "moire_config": moire_config,
+                },
+            },
+            "target_hamiltonians": target,
+            "staged_selection": None,
+            "correction_sweep": None,
+            "nonlinear_frontier": {"enabled": True},
+        }
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        target = np.asarray(
+            pipeline_module._current_heff_support_hamiltonians(
+                np.load(model_config.heff_file),
+                qset1=np.asarray(moire_config.Q_set1),
+                qset2=np.asarray(moire_config.Q_set2),
+                n_orb=model_config.n_orb,
+                harmonics_config=model_config.harmonics_config,
+            )
+        )
+        target = pipeline_module._select_rows(target, model_config.band_indices)
+        eigvals, eigvecs = np.linalg.eigh(target)
+        return {
+            "model": SimpleNamespace(terms={}),
+            "eigvals": (eigvals, eigvecs),
+            "band_hamiltonians": target,
+            "diagnostics": {},
+            "band_refinement": dict(model_config.band_refinement_config),
+        }
+
+    monkeypatch.setattr(pipeline_module, "_run_automatic_family_order_scan", fake_scan)
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+    def fake_registry(**kwargs):
+        output = Path(kwargs["output_dir"])
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "active_terms.json").write_text("[{}]\n", encoding="utf-8")
+        (output / "run_summary.json").write_text("{}\n", encoding="utf-8")
+
+    monkeypatch.setattr(pipeline_module, "_write_model_registry_outputs", fake_registry)
+    def fake_export(model_output, output_dir, **kwargs):
+        output = Path(output_dir)
+        (output / "evaluate.py").write_text("# standalone\n", encoding="utf-8")
+        np.savez(output / "model_data.npz", dimension_dim=np.asarray(4))
+        return output
+
+    monkeypatch.setattr("kp.model.export.export_standalone_model", fake_export)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_compute_validation_outputs",
+        lambda **kwargs: ({}, {"validation_incomplete": False, "missing": []}),
+    )
+
+    results = run_configured_model(cfg_path)
+
+    output_dir = tmp_path / "model_out"
+    assert results["auto_model_selection"]["mode"] == "automatic_four_model_profiles"
+    for solver_family in ("linear", "nonlinear"):
+        for quality in ("high", "low"):
+            profile_dir = output_dir / solver_family / quality
+            assert (profile_dir / "eigvals.npy").exists()
+            assert (profile_dir / "active_terms.json").exists()
+            assert (profile_dir / "run_summary.json").exists()
+            assert (profile_dir / "evaluate.py").exists()
+            assert (profile_dir / "model_data.npz").exists()
+            profile_result = results["profile_results"][solver_family][quality]["results"]
+            assert profile_result["auto_model_selection"]["profile"] == (
+                f"{solver_family}/{quality}"
+            )
+    assert results["configured_model"].output_dir == output_dir / "nonlinear" / "high"
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected_primary"),
+    [
+        (("linear/low", "linear/high"), "linear/high"),
+        (("nonlinear/high",), "nonlinear/high"),
+    ],
+)
+def test_run_configured_model_materializes_only_requested_profile_outputs(
+    monkeypatch,
+    tmp_path: Path,
+    requested: tuple[str, ...],
+    expected_primary: str,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["profiles"] = list(requested)
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    def fake_scan(*, moire_config, model_config, **kwargs):
+        target = np.asarray(
+            pipeline_module._current_heff_support_hamiltonians(
+                np.load(model_config.heff_file),
+                qset1=np.asarray(moire_config.Q_set1),
+                qset2=np.asarray(moire_config.Q_set2),
+                n_orb=model_config.n_orb,
+                harmonics_config=model_config.harmonics_config,
+            )
+        )
+        target = pipeline_module._select_rows(target, model_config.band_indices)
+        linear = CandidateScore(
+            name="linear",
+            orders=FamilyOrders(2, 0, 0),
+            independent_real_parameters=4,
+            weighted_rms_mev=0.1,
+            weighted_rms_se_mev=0.01,
+            weighted_max_mev=0.2,
+            mean_subspace_overlap=1.0,
+        )
+        nonlinear = replace(
+            linear,
+            name="nonlinear",
+            solver_family="nonlinear",
+            weighted_rms_mev=0.05,
+        )
+        linear_profiles = select_high_low_profiles((linear,))
+        nonlinear_profiles = select_high_low_profiles((nonlinear,))
+        return {
+            "profiles": linear_profiles,
+            "profile_families": {
+                "linear": linear_profiles,
+                "nonlinear": nonlinear_profiles,
+            },
+            "runs": {
+                "linear": {
+                    "score": linear,
+                    "model_config": replace(
+                        model_config,
+                        band_refinement_config={"enabled": False},
+                    ),
+                    "moire_config": moire_config,
+                },
+                "nonlinear": {
+                    "score": nonlinear,
+                    "model_config": replace(
+                        model_config,
+                        band_refinement_config={"enabled": True},
+                    ),
+                    "moire_config": moire_config,
+                },
+            },
+            "target_hamiltonians": target,
+            "staged_selection": None,
+            "correction_sweep": None,
+            "nonlinear_frontier": {"enabled": True},
+        }
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        target = np.asarray(
+            pipeline_module._current_heff_support_hamiltonians(
+                np.load(model_config.heff_file),
+                qset1=np.asarray(moire_config.Q_set1),
+                qset2=np.asarray(moire_config.Q_set2),
+                n_orb=model_config.n_orb,
+                harmonics_config=model_config.harmonics_config,
+            )
+        )
+        target = pipeline_module._select_rows(target, model_config.band_indices)
+        eigvals, eigvecs = np.linalg.eigh(target)
+        return {
+            "model": SimpleNamespace(terms={}),
+            "eigvals": (eigvals, eigvecs),
+            "band_hamiltonians": target,
+            "diagnostics": {},
+            "band_refinement": dict(model_config.band_refinement_config),
+        }
+
+    monkeypatch.setattr(pipeline_module, "_run_automatic_family_order_scan", fake_scan)
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+
+    def fake_registry(**kwargs):
+        output = Path(kwargs["output_dir"])
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "active_terms.json").write_text("[{}]\n", encoding="utf-8")
+        (output / "run_summary.json").write_text("{}\n", encoding="utf-8")
+
+    def fake_export(model_output, output_dir, **kwargs):
+        output = Path(output_dir)
+        output.mkdir(parents=True, exist_ok=True)
+        (output / "evaluate.py").write_text("# standalone\n", encoding="utf-8")
+        np.savez(output / "model_data.npz", dimension_dim=np.asarray(4))
+        return output
+
+    monkeypatch.setattr(pipeline_module, "_write_model_registry_outputs", fake_registry)
+    monkeypatch.setattr("kp.model.export.export_standalone_model", fake_export)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_compute_validation_outputs",
+        lambda **kwargs: ({}, {"validation_incomplete": False, "missing": []}),
+    )
+
+    results = run_configured_model(cfg_path)
+
+    output_dir = tmp_path / "model_out"
+    supported = {
+        "linear/low",
+        "linear/high",
+        "nonlinear/low",
+        "nonlinear/high",
+    }
+    for profile_name in supported:
+        profile_dir = output_dir.joinpath(*profile_name.split("/"))
+        if profile_name in requested:
+            assert (profile_dir / "evaluate.py").is_file()
+            assert (profile_dir / "model_data.npz").is_file()
+        else:
+            assert not profile_dir.exists()
+    assert results["configured_model"].output_dir == output_dir.joinpath(
+        *expected_primary.split("/")
+    )
+
+
+def test_auto_fit_candidate_scan_uses_current_support_as_primary_target(monkeypatch, tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    heff_path = tmp_path / "project" / "heff.npy"
+    original_heff = np.load(heff_path)
+    original_heff[:, 1, 3] = np.array([0.35, 0.40, 0.45])
+    original_heff[:, 3, 1] = original_heff[:, 1, 3]
+    np.save(heff_path, original_heff)
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+    support_mask = np.eye(original_heff.shape[-1], dtype=bool)
+    support_heff = original_heff * support_mask[None, :, :]
+    support_eigvals = np.linalg.eigvalsh(support_heff)
+    raw = dict(model_config.raw)
+    raw["fit"] = {
+        "mode": "auto_low_energy",
+        "candidate_scan": True,
+        "disable_residual_augmented_fit": True,
+    }
+    model_config = replace(
+        model_config,
+        raw=raw,
+        fit_selection_metadata={
+            "mode": "auto_low_energy",
+            "fit_candidate_sets": [
+                {"name": "center", "indices": [0]},
+                {"name": "ends", "indices": [0, 2]},
+            ],
+        },
+    )
+    seen_fit_heff: list[np.ndarray] = []
+
+    def fake_pipeline(candidate_moire, *_args, **_kwargs):
+        seen_fit_heff.append(np.asarray(candidate_moire.heff))
+        return {"eigvals": support_eigvals, "diagnostics": {}}
+
+    monkeypatch.setattr(pipeline_module, "_run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_selected_harmonic_support_mask",
+        lambda *args, **kwargs: support_mask,
+    )
+
+    scan = pipeline_module._run_auto_low_energy_fit_candidate_scan(
+        moire_config=moire_config,
+        model_config=model_config,
+        output_dir=tmp_path / "scan",
+        log_path=tmp_path / "scan" / "selected.log",
+        verbose=False,
+        progress=False,
+    )
+
+    assert scan is not None
+    selected_results, selected_moire, _selected_model = scan
+    report = selected_results["auto_fit_candidate_scan"]
+    assert report["reference"] == "current_heff_support_mask"
+    assert report["secondary_reference"] == "original_heff"
+    for candidate in report["candidates"]:
+        assert candidate["reference"] == "current_heff_support_mask"
+        assert candidate["plot_rms_mev"] == pytest.approx(0.0)
+        assert candidate["secondary_original_heff"]["plot_rms_mev"] > 0.0
+    assert seen_fit_heff
+    assert np.max(np.abs(np.asarray(selected_moire.heff)[1, 3])) == pytest.approx(0.0)
+
+
+def test_auto_low_energy_without_candidate_scan_still_uses_current_support_target(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"] = {
+        "mode": "auto_low_energy",
+        "candidate_scan": False,
+        "max_points": 2,
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    heff_path = tmp_path / "project" / "heff.npy"
+    original_heff = np.load(heff_path)
+    original_heff[:, 1, 3] = np.array([0.35, 0.40, 0.45])
+    original_heff[:, 3, 1] = original_heff[:, 1, 3]
+    np.save(heff_path, original_heff)
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
+    support_mask = np.eye(original_heff.shape[-1], dtype=bool)
+    support_heff = original_heff * support_mask[None, :, :]
+    seen_window_targets: list[np.ndarray] = []
+    real_windows = pipeline_module._auto_low_energy_windows
+
+    def capture_windows(target_eigvals, **kwargs):
+        seen_window_targets.append(np.asarray(target_eigvals))
+        return real_windows(target_eigvals, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "_auto_low_energy_windows", capture_windows)
+    monkeypatch.setattr(
+        pipeline_module,
+        "_selected_harmonic_support_mask",
+        lambda *args, **kwargs: support_mask,
+    )
+
+    moire_config, model_config = build_moire_config_from_file(cfg_path)
+
+    assert seen_window_targets
+    np.testing.assert_allclose(seen_window_targets[-1], np.linalg.eigvalsh(support_heff))
+    assert model_config.band_refinement_config["reference"] == "current_heff_support_mask"
+    assert model_config.band_refinement_config["auto_windows"]["reference"] == (
+        "current_heff_support_mask"
+    )
+    fit_target = np.asarray(moire_config.heff)
+    assert fit_target[1, 3] == pytest.approx(0.0)
+    assert fit_target[5, 7] == pytest.approx(0.0)
 
 
 def test_band_refinement_variable_selection_accepts_string_aliases() -> None:
@@ -3636,6 +6556,85 @@ def test_auto_compact_fit_indices_are_selected_when_indices_are_omitted(tmp_path
     }
 
 
+def test_missing_fit_section_defaults_to_auto_low_energy(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw.pop("fit", None)
+    if isinstance(raw.get("model"), dict):
+        raw["model"].pop("fit", None)
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.fit_selection_metadata["mode"] == "auto_low_energy"
+    assert cfg.fit_indices
+    assert cfg.raw["model"]["automatic_defaults"]["fit"] is True
+
+
+def test_load_model_config_parses_requested_profiles_and_uniform_fit_weighting(
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["profiles"] = ["linear/low", "linear/high"]
+    raw["fit"] = {
+        "mode": "auto_low_energy",
+        "weighting": "uniform",
+    }
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.requested_profiles == ("linear/low", "linear/high")
+    assert cfg.fit_weighting == "uniform"
+    assert cfg.response_fit_objective == {"mode": "equal_matrix_v1"}
+    assert cfg.band_refinement_config["weighted_band_loss"]["enabled"] is False
+
+
+@pytest.mark.parametrize(
+    ("profiles", "match"),
+    [
+        ([], "model.profiles must not be empty"),
+        (["linear/high", "linear/high"], "model.profiles contains duplicate"),
+        (["linear/high", "quadratic/ultra"], "unsupported model profile"),
+    ],
+)
+def test_load_model_config_rejects_invalid_requested_profiles(
+    tmp_path: Path,
+    profiles: list[str],
+    match: str,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"]["profiles"] = profiles
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=match):
+        load_model_config(cfg_path)
+
+
+def test_load_model_config_rejects_unknown_fit_weighting(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["fit"]["weighting"] = "mystery"
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="fit.weighting"):
+        load_model_config(cfg_path)
+
+
+def test_model_target_edge_defaults_from_project_plot_target(tmp_path: Path) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["plot"]["target"] = "conduction"
+    raw["model"].pop("target_bands", None)
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.raw["model"]["target_bands"] == "bottom"
+
+
 def test_auto_compact_fit_indices_use_deterministic_path_spacing() -> None:
     import kp.model.pipeline as configured_pipeline
 
@@ -3707,6 +6706,7 @@ def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> Non
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["valley_model"]["allowed_internal_symmetries"] = []
+    raw["project"]["nlow_state_list"] = [[0], [0]]
     raw["model"] = {
         "bM": {"bM1": [1.0, 0.0], "bM2": [0.0, 1.0]},
         "harmonics": {
@@ -3722,6 +6722,7 @@ def test_load_model_config_infers_n_orb_and_safe_defaults(tmp_path: Path) -> Non
 
     assert cfg.n_orb == (1, 1)
     assert cfg.nlow_state == [1, 1]
+    assert cfg.raw["model"]["n_orb_resolution"]["source"] == "source_project"
     assert {key: cfg.max_order[key] for key in ("Kinect", "intra", "inter")} == {
         "Kinect": 2,
         "intra": 0,
@@ -3755,7 +6756,9 @@ def test_load_model_config_resolves_layerwise_n_orb_from_num_layer_list(tmp_path
     assert cfg.orbital_count_metadata["nlow_state"]["input_kind"] == "default_from_n_orb"
 
 
-def test_load_model_config_drops_inactive_layer_for_gamma_1plus2_model(tmp_path: Path) -> None:
+def test_load_model_config_preserves_gamma_source_qset_totals_for_1plus2_model(
+    tmp_path: Path,
+) -> None:
     cfg_path = _write_fixture(tmp_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["material"]["num_layer_list"] = [1, 2]
@@ -3765,10 +6768,10 @@ def test_load_model_config_drops_inactive_layer_for_gamma_1plus2_model(tmp_path:
 
     cfg = load_model_config(cfg_path)
 
-    assert cfg.n_orb == (2, 2)
-    assert cfg.nlow_state == [2, 2]
-    assert cfg.orbital_count_metadata["n_orb"]["resolved_model_sectors"] == [2, 2]
-    assert cfg.term_template_metadata["profiles"] == ["gamma_2x2_independent_sectors"]
+    assert cfg.n_orb == (0, 4)
+    assert cfg.nlow_state == [0, 4]
+    assert cfg.orbital_count_metadata["n_orb"]["resolved_model_sectors"] == [0, 4]
+    assert cfg.term_template_metadata["profiles"] == ["gamma_default"]
 
 
 def test_load_model_config_resolves_layerwise_nlow_state_independently(tmp_path: Path) -> None:
@@ -3782,10 +6785,10 @@ def test_load_model_config_resolves_layerwise_nlow_state_independently(tmp_path:
     cfg = load_model_config(cfg_path)
 
     assert cfg.n_orb == (2, 2)
-    assert cfg.nlow_state == [2, 2]
+    assert cfg.nlow_state == [0, 4]
     assert cfg.orbital_count_metadata["n_orb"]["resolved_qset"] == [2, 2]
     assert cfg.orbital_count_metadata["nlow_state"]["resolved_qset"] == [0, 4]
-    assert cfg.orbital_count_metadata["nlow_state"]["resolved_model_sectors"] == [2, 2]
+    assert cfg.orbital_count_metadata["nlow_state"]["resolved_model_sectors"] == [0, 4]
 
 
 def test_load_model_config_rejects_legacy_two_entry_n_orb_with_num_layer_list(tmp_path: Path) -> None:
@@ -3839,25 +6842,41 @@ def test_load_model_config_rejects_user_exactification_knobs(tmp_path: Path) -> 
         load_model_config(cfg_path)
 
 
-def test_ptse2_release_config_hides_internal_exactification_knobs() -> None:
+def test_ptse2_release_config_exposes_only_public_model_knobs() -> None:
     path = (
         Path(__file__).resolve().parents[2]
         / "examples"
-        / "ptse2_gamma_q4"
+        / "ptse2_7.34"
         / "kp"
         / "configs"
-        / "ptse2_gamma_q4_symmhamk_fourpz_Q4.yaml"
+        / "ptse2_7.34_Gamma_spinful_q04.yaml"
     )
     if not path.exists():
         pytest.skip("PtSe2 release example is not present in this checkout")
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
 
-    assert "exactification" not in raw.get("symm", {})
+    symmetry = raw.get("symmetry", {})
+    assert "exactification" not in symmetry
+    assert "operation_actions" not in symmetry
+    assert "spin_sector_sewing" not in symmetry
     model = raw.get("model", {})
-    assert "harmonics" not in model
-    assert "max_order" not in model
+    assert model["harmonics"] == {"intralayer": 5, "interlayer": 5}
+    assert model["max_order"] == {
+        "kinetic": 10,
+        "intralayer": 8,
+        "interlayer": 8,
+    }
     assert "max_derivative_order" not in model
-    assert model.get("fit") == {"mode": "auto_low_energy"}
+    fit = model.get("fit", {})
+    assert fit == {
+        "method": "nonlinear",
+        "kpoints": [0, 20, 40],
+        "band_kpoints": [0, 20, 40],
+        "bands": 38,
+        "one_sided_weight": 1.0,
+        "two_sided_weight": 1.0,
+        "band_loss_weight": 1.0,
+    }
 
 
 def test_load_model_config_marks_symmetry_source_inferred_from_case_symm_section(tmp_path: Path) -> None:
@@ -4076,6 +7095,7 @@ def test_default_gamma_templates_use_generic_onsite_fallback_for_arbitrary_orbit
         "source": "diagonal_kp",
         "sector_pairs": [[1, 1], [2, 2]],
         "orbital_pairs": "diagonal",
+        "term_space_policy": "complete",
         "max_order": 4,
     }
     assert by_name["gamma_generic_onsite"] == {
@@ -4083,6 +7103,7 @@ def test_default_gamma_templates_use_generic_onsite_fallback_for_arbitrary_orbit
         "source": "onsite",
         "sector_pairs": [[1, 1], [2, 2]],
         "orbital_pairs": "diagonal",
+        "term_space_policy": "complete",
         "max_order": 0,
     }
     assert by_name["gamma_generic_intra"]["harmonics"] == "intra"
@@ -4507,11 +7528,11 @@ def test_operation_registry_keeps_distinct_geometry_and_records_usage_tags(tmp_p
     assert by_source["C2_raw"]["term_tags"] == ["intra_layer1", "kinetic_layer1"]
 
 
-def test_kp_symm_exactification_uses_manifest_actions_without_model_discovery() -> None:
+def test_kp_symm_exactification_infers_projected_basis_support_by_default() -> None:
     exact_cfg = _kp_symm_exactification_config()
 
-    assert not exact_cfg.get("discover_action_candidates", False)
-    assert not exact_cfg.get("accept_support_resolved_action", False)
+    assert exact_cfg["discover_action_candidates"] is True
+    assert exact_cfg["accept_support_resolved_action"] is True
     assert "central_phase" not in exact_cfg
     assert exact_cfg["require_group_relations"] is True
     assert exact_cfg["source"] == "kp_symm"
@@ -4547,6 +7568,28 @@ def test_kp_symm_explicit_exactification_override_wins_over_symmetry_tolerance()
     )
 
     assert exact_cfg["reject_if_off_support_rel_gt"] == pytest.approx(3.0e-3)
+
+
+def test_kp_symm_public_operation_action_is_lowered_to_internal_candidate() -> None:
+    tr_action = {
+        "antiunitary": True,
+        "k_map": {"type": "negation", "in_model_frame": True},
+        "q_map": {"type": "negation", "in_model_frame": True},
+        "sector_map": "layer_exchange",
+    }
+
+    exact_cfg = _merged_exactification_overrides(
+        "Gamma",
+        None,
+        symmetry_tolerance=2.0e-2,
+        operation_actions={"TR": tr_action},
+    )
+
+    assert exact_cfg["operations"]["TR"] == {"action_candidates": [tr_action]}
+    assert exact_cfg["operations"]["C3z"] == {
+        "support_mode": "auto",
+        "algebraic_template": "auto",
+    }
 
 
 def test_kp_symm_exactification_preserves_operation_overrides() -> None:
@@ -5702,6 +8745,7 @@ def test_joint_fit_does_not_double_count_duplicate_diagonal_terms_across_tags() 
 
 def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
+    _disable_model_selection_for_mock_pipeline(cfg_path)
     expected_eigvals = _expected_project_eigvals(tmp_path)
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
@@ -5736,6 +8780,7 @@ def test_coefficients_and_term_registry_written(monkeypatch, tmp_path: Path) -> 
 
 def test_release_output_profile_serializes_only_active_terms(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
+    _disable_model_selection_for_mock_pipeline(cfg_path)
     expected_eigvals = _expected_project_eigvals(tmp_path)
     active_key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
     inactive_key = ContinuumTermKey(1, 0, 1, 1, 1, 1, (0.0, 0.0))
@@ -5790,6 +8835,7 @@ def test_release_output_profile_serializes_only_active_terms(monkeypatch, tmp_pa
 
 def test_release_active_terms_use_compact_symmetry_ops(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
+    _disable_model_selection_for_mock_pipeline(cfg_path)
     expected_eigvals = _expected_project_eigvals(tmp_path)
     key = ContinuumTermKey(0, 0, 1, 1, 1, 1, (0.0, 0.0))
     heavy_symmetry = [
@@ -5846,6 +8892,7 @@ def test_release_active_terms_use_compact_symmetry_ops(monkeypatch, tmp_path: Pa
 
 def test_debug_output_profile_writes_diagnostics_subdir(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
+    _disable_model_selection_for_mock_pipeline(cfg_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["output"]["profile"] = "debug"
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -5912,7 +8959,7 @@ def test_run_configured_model_quiet_writes_detailed_log(monkeypatch, capsys, tmp
     captured = capsys.readouterr()
 
     assert "very noisy coefficient dump" not in captured.out
-    assert "[kp model] building continuum terms" in captured.out
+    assert "[kp model] automatic family-order scan selected" in captured.out
     log_path = Path(results["model_log"])
     assert log_path.exists()
     assert "very noisy coefficient dump" in log_path.read_text(encoding="utf-8")
@@ -5956,6 +9003,13 @@ def test_run_model_pipeline_prints_term_summary_and_fit_progress(
         assert progress_callback is not None
         progress_callback("fit block 1/1 tag=Onsite terms=1 start", state="start")
         progress_callback("fit block 1/1 done in 0.01 s | variables=2 support_components=1 skipped_empty=0", state="done")
+        model.terms[key_inter].active = False
+        model._compiled_response_basis = SimpleNamespace(channels=("c0", "c1", "c2"))
+        model._fitted_response_model = SimpleNamespace(
+            coefficients=np.array([1.0, 0.0, 2.0]),
+            nonzero_channel_ids=("c0", "c2"),
+            fit_objective={},
+        )
         return model, {}
 
     def fake_compute_bands(moire_config, model, kpoints, return_eigvecs=False, hamiltonians_out=None, compiled_runtime_out=None):
@@ -5972,12 +9026,85 @@ def test_run_model_pipeline_prints_term_summary_and_fit_progress(
     _run_model_pipeline(moire_cfg, model_cfg, tmp_path / "model.log", verbose=False, progress=True)
     stdout = capsys.readouterr().out
 
-    assert "term summary before fitting" in stdout
-    assert "Onsite: terms=1, fit_components=2" in stdout
-    assert "inter: terms=1, fit_components=2" in stdout
+    assert "[kp model] Continuum basis" in stdout
+    assert "Family  Terms  Components" in stdout
+    assert "Onsite" in stdout
+    assert "inter" in stdout
+    basis_lines = stdout.split("[kp model] Continuum basis", maxsplit=1)[1].splitlines()
+    onsite_index = next(index for index, line in enumerate(basis_lines) if "Onsite" in line)
+    inter_index = next(index for index, line in enumerate(basis_lines) if "inter" in line)
+    assert onsite_index < inter_index
+    assert "[kp model] Fitted continuum basis" in stdout
+    assert "Family  Seed terms  Active terms" in stdout
+    assert "active semantic terms" in stdout
+    assert "1 / 2" in stdout
+    assert "independent coefficients  3" in stdout
+    assert "nonzero coefficients      2" in stdout
+    assert "Onsite: terms=1, fit_components=2" not in stdout
+    assert "inter: terms=1, fit_components=2" not in stdout
     assert "fit block 1/1 tag=Onsite terms=1 start" in stdout
     assert "fit block 1/1 done in 0.01 s | variables=2 support_components=1 skipped_empty=0" in stdout
     assert "variables=0 support=0" not in stdout
+
+
+def test_run_model_pipeline_exposes_output_directory_only_to_complete_v2_fit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    fake_model = SimpleNamespace(terms={})
+    expected_eigvals = np.asarray([[0.0]], dtype=float)
+    moire_cfg = MoireConfig(
+        Q_set1=np.zeros((1, 2), dtype=float),
+        Q_set2=np.empty((0, 2), dtype=float),
+        n_orb1=1,
+        n_orb2=0,
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.0, 1.0]),
+        kpoints=np.array([[0.0, 0.0]], dtype=float),
+        kpoints_fit=np.array([[0.0, 0.0]], dtype=float),
+        heff=np.zeros((1, 1, 1), dtype=np.complex128),
+        response_semantics="complete_linear_v2",
+    )
+    model_cfg = SimpleNamespace(
+        null_channel_abs_tol=0.0,
+        null_channel_rel_tol=0.0,
+        coeff_prune_threshold=0.0,
+        band_refinement_config={},
+        compare_to_heff=False,
+    )
+    log_path = tmp_path / "model" / "model_run.log"
+
+    def fake_compute_coefficients(moire_config, model, *, progress_callback=None):
+        assert Path(moire_config.output_dir) == log_path.parent
+        return model, {}
+
+    def fake_compute_bands(
+        moire_config,
+        model,
+        kpoints,
+        return_eigvecs=False,
+        hamiltonians_out=None,
+        compiled_runtime_out=None,
+    ):
+        if hamiltonians_out is not None:
+            hamiltonians_out.append(np.zeros((1, 1), dtype=np.complex128))
+        if compiled_runtime_out is not None:
+            compiled_runtime_out.append(None)
+        return expected_eigvals
+
+    monkeypatch.setattr("kp.model.pipeline.build_model", lambda _config: fake_model)
+    monkeypatch.setattr("kp.model.pipeline.compute_coefficients", fake_compute_coefficients)
+    monkeypatch.setattr("kp.model.pipeline.compute_bands", fake_compute_bands)
+
+    _run_model_pipeline(
+        moire_cfg,
+        model_cfg,
+        log_path,
+        verbose=False,
+        progress=False,
+    )
+
+    assert moire_cfg.output_dir is None
 
 
 def test_progress_line_can_emit_ansi_color(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
@@ -5989,6 +9116,20 @@ def test_progress_line_can_emit_ansi_color(monkeypatch: pytest.MonkeyPatch, caps
 
     assert "\033[" in stdout
     assert "fitting coefficients done in 1.23 s" in stdout
+
+
+def test_progress_line_reserves_yellow_for_warnings(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+
+    _progress_line("fitting coefficients ...", enabled=True, style="fit_start")
+    stdout = capsys.readouterr().out
+
+    assert "\033[1;33m" not in stdout
+    assert "fitting coefficients ..." in stdout
 
 
 def test_harmonic_recommendation_plot_candidates_include_current_low_and_high() -> None:
@@ -6006,10 +9147,146 @@ def test_harmonic_recommendation_plot_candidates_include_current_low_and_high() 
     assert [item[0] for item in selected] == ["current", "low", "high"]
     assert (selected[0][1]["intra_shells"], selected[0][1]["inter_shells"]) == (1, 1)
     assert (selected[1][1]["intra_shells"], selected[1][1]["inter_shells"]) == (2, 1)
-    assert (selected[2][1]["intra_shells"], selected[2][1]["inter_shells"]) == (4, 3)
+    assert (selected[2][1]["intra_shells"], selected[2][1]["inter_shells"]) == (2, 1)
 
 
-def test_hamiltonian_element_comparison_arrays_apply_harmonic_mask() -> None:
+def test_harmonic_recommendation_uses_balanced_tiers_before_strict_plateau() -> None:
+    report = {
+        "selected": {
+            "intra_shells": 5,
+            "inter_shells": 5,
+            "plot_rms_mev": 0.006,
+            "plot_max_mev": 0.024,
+            "low_matrix_rms_mev": 0.0,
+            "primary_rms_mev": 0.001,
+            "primary_max_mev": 0.002,
+            "subspace_mean_overlap": 1.0,
+            "accepted": True,
+        },
+        "candidates": [
+            {
+                "intra_shells": 1,
+                "inter_shells": 1,
+                "plot_rms_mev": 10.558,
+                "plot_max_mev": 26.418,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 11.038,
+                "primary_max_mev": 26.418,
+                "subspace_mean_overlap": 0.799516,
+                "accepted": False,
+            },
+            {
+                "intra_shells": 2,
+                "inter_shells": 2,
+                "plot_rms_mev": 0.550,
+                "plot_max_mev": 3.470,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 0.203,
+                "primary_max_mev": 0.395,
+                "subspace_mean_overlap": 0.999477,
+                "accepted": False,
+            },
+            {
+                "intra_shells": 3,
+                "inter_shells": 3,
+                "plot_rms_mev": 0.623,
+                "plot_max_mev": 2.274,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 0.282,
+                "primary_max_mev": 0.649,
+                "subspace_mean_overlap": 0.999583,
+                "accepted": False,
+            },
+            {
+                "intra_shells": 5,
+                "inter_shells": 5,
+                "plot_rms_mev": 0.006,
+                "plot_max_mev": 0.024,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 0.001,
+                "primary_max_mev": 0.002,
+                "subspace_mean_overlap": 1.0,
+                "accepted": True,
+            },
+        ],
+    }
+
+    selected = _harmonic_recommendation_plot_candidates(report, current_counts={"intra": 1, "inter": 1})
+
+    assert [item[0] for item in selected] == ["current", "low", "high"]
+    assert (selected[1][1]["intra_shells"], selected[1][1]["inter_shells"]) == (2, 2)
+    assert (selected[2][1]["intra_shells"], selected[2][1]["inter_shells"]) == (3, 3)
+    assert (report["selected"]["intra_shells"], report["selected"]["inter_shells"]) == (5, 5)
+
+
+def test_harmonic_recommendation_uses_requested_low_and_high_accuracy_thresholds() -> None:
+    report = {
+        "selected": {
+            "intra_shells": 4,
+            "inter_shells": 4,
+            "plot_rms_mev": 0.99,
+            "plot_max_mev": 2.99,
+            "low_matrix_rms_mev": 0.0,
+            "primary_rms_mev": 0.01,
+            "primary_max_mev": 0.02,
+            "subspace_mean_overlap": 0.951,
+            "accepted": True,
+        },
+        "candidates": [
+            {
+                "intra_shells": 1,
+                "inter_shells": 1,
+                "plot_rms_mev": 0.9,
+                "plot_max_mev": 0.9,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 0.1,
+                "primary_max_mev": 0.2,
+                "subspace_mean_overlap": 0.9,
+                "accepted": False,
+            },
+            {
+                "intra_shells": 2,
+                "inter_shells": 2,
+                "plot_rms_mev": 1.0,
+                "plot_max_mev": 30.0,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 0.1,
+                "primary_max_mev": 0.2,
+                "subspace_mean_overlap": 0.91,
+                "accepted": False,
+            },
+            {
+                "intra_shells": 3,
+                "inter_shells": 3,
+                "plot_rms_mev": 0.99,
+                "plot_max_mev": 2.99,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 0.05,
+                "primary_max_mev": 0.1,
+                "subspace_mean_overlap": 0.95,
+                "accepted": False,
+            },
+            {
+                "intra_shells": 4,
+                "inter_shells": 4,
+                "plot_rms_mev": 0.99,
+                "plot_max_mev": 2.99,
+                "low_matrix_rms_mev": 0.0,
+                "primary_rms_mev": 0.01,
+                "primary_max_mev": 0.02,
+                "subspace_mean_overlap": 0.951,
+                "accepted": True,
+            },
+        ],
+    }
+
+    selected = _harmonic_recommendation_plot_candidates(report, current_counts={"intra": 1, "inter": 1})
+
+    assert (selected[1][1]["intra_shells"], selected[1][1]["inter_shells"]) == (2, 2)
+    assert (selected[2][1]["intra_shells"], selected[2][1]["inter_shells"]) == (4, 4)
+
+
+def test_hamiltonian_element_comparison_arrays_keep_full_and_selected_support_views() -> None:
     heff = np.array(
         [
             [[1.0, 2.0j, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]],
@@ -6041,9 +9318,13 @@ def test_hamiltonian_element_comparison_arrays_apply_harmonic_mask() -> None:
     assert panels["heff"][0, 0, 0] == pytest.approx(10.0)
     assert panels["model"][0, 0, 0] == pytest.approx(11.0)
     assert panels["diff"][0, 0, 0] == pytest.approx(1.0)
-    assert np.isnan(panels["heff"][0, 0, 1])
-    assert np.isnan(panels["model"][0, 1, 2])
-    assert np.isnan(panels["diff"][0, 1, 0])
+    assert panels["heff"][0, 0, 1] == pytest.approx(11.0)
+    assert panels["model"][0, 1, 2] == pytest.approx(16.0)
+    assert panels["diff"][0, 1, 0] == pytest.approx(1.0)
+    assert np.isnan(panels["support_heff"][0, 0, 1])
+    assert np.isnan(panels["support_model"][0, 1, 2])
+    assert np.isnan(panels["support_diff"][0, 1, 0])
+    assert panels["support_fraction"] == pytest.approx(5.0 / 9.0)
 
 
 def test_selected_harmonic_support_mask_shape_and_zero_support() -> None:
@@ -6065,6 +9346,36 @@ def test_selected_harmonic_support_mask_shape_and_zero_support() -> None:
     assert not mask[0, 1]
 
 
+def test_selected_harmonic_support_mask_keeps_all_nonzero_inter_shells() -> None:
+    q1 = np.array([[0.0, 0.0]], dtype=float)
+    q2 = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]], dtype=float)
+
+    mask = _selected_harmonic_support_mask(
+        q1,
+        q2,
+        n_orb=(1, 1),
+        current_counts={"intra": 0, "inter": 3},
+    )
+
+    np.testing.assert_array_equal(mask[0, 1:], np.ones(3, dtype=bool))
+    np.testing.assert_array_equal(mask[1:, 0], np.ones(3, dtype=bool))
+
+
+def test_selected_harmonic_support_mask_counts_shared_zero_inter_shell() -> None:
+    q1 = np.array([[0.0, 0.0]], dtype=float)
+    q2 = np.array([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=float)
+
+    mask = _selected_harmonic_support_mask(
+        q1,
+        q2,
+        n_orb=(1, 1),
+        current_counts={"intra": 0, "inter": 3},
+    )
+
+    np.testing.assert_array_equal(mask[0, 1:], np.ones(3, dtype=bool))
+    np.testing.assert_array_equal(mask[1:, 0], np.ones(3, dtype=bool))
+
+
 def test_save_hamiltonian_element_comparison_plot_writes_n_by_three_panel(tmp_path: Path) -> None:
     heff = np.stack([np.eye(3), 2.0 * np.eye(3)]).astype(np.complex128)
     model = heff + 0.1 * np.ones_like(heff)
@@ -6084,6 +9395,56 @@ def test_save_hamiltonian_element_comparison_plot_writes_n_by_three_panel(tmp_pa
     pdf_path = path.with_suffix(".pdf")
     assert pdf_path.exists()
     assert pdf_path.stat().st_size > 0
+
+    support_path = save_hamiltonian_element_comparison_plot(
+        model,
+        heff,
+        tmp_path / "hamiltonian_element_comparison_selected_support.png",
+        harmonic_mask=mask,
+        positions=[0, 1],
+        k_indices=[3, 7],
+        view="selected_support",
+    )
+    assert support_path.exists()
+    assert support_path.with_suffix(".pdf").exists()
+
+
+def test_save_hamiltonian_element_comparison_plot_draws_q_norm_shell_boundaries(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    import matplotlib.axes
+
+    q1 = np.array(
+        [[2.0, 0.0], [0.0, 0.0], [0.0, 1.0], [1.0 + 1.0e-10, 0.0]],
+        dtype=float,
+    )
+    q2 = np.array([[0.0, 0.0]], dtype=float)
+    heff = np.eye(5, dtype=np.complex128)[None, :, :]
+    shell_lines: list[tuple[float, float]] = []
+    original_axhline = matplotlib.axes.Axes.axhline
+
+    def spy_axhline(self, y=0, *args, **kwargs):
+        linewidth = float(kwargs.get("linewidth", kwargs.get("lw", 0.0)))
+        if linewidth == pytest.approx(0.7):
+            shell_lines.append((float(y), linewidth))
+        return original_axhline(self, y, *args, **kwargs)
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "axhline", spy_axhline)
+
+    save_hamiltonian_element_comparison_plot(
+        heff,
+        heff,
+        tmp_path / "qnorm.png",
+        harmonic_mask=np.eye(5, dtype=bool),
+        qset1=q1,
+        qset2=q2,
+        n_orb=(1, 1),
+        q_order="norm_shell",
+        q_norm_tol=1.0e-6,
+    )
+
+    assert {position for position, _linewidth in shell_lines} == {0.5, 2.5}
 
 
 def test_matrix_residual_not_only_band() -> None:
@@ -6876,6 +10237,9 @@ def test_full_bilayer_block_detection_accepts_generic_two_sector_exchange() -> N
 def test_run_configured_model_saves_auto_harmonics_diagnostic_plot(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_auto_fixture(tmp_path)
     expected_eigvals = _expected_project_eigvals(tmp_path)
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    data["fit"]["model_selection"] = False
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         return {"eigvals": expected_eigvals, "diagnostics": {}}
@@ -6952,6 +10316,9 @@ def test_q_lattice_hex_shell_uses_outer_vertex_radius_for_offset_valleys() -> No
 def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
     expected_eigvals = _expected_project_eigvals(tmp_path)
+    data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    data["fit"]["model_selection"] = False
+    cfg_path.write_text(yaml.safe_dump(data, sort_keys=False), encoding="utf-8")
 
     def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
         assert moire_config.output_dir is None
@@ -6972,13 +10339,227 @@ def test_run_configured_model_saves_outputs_without_legacy_diagnostics_json(monk
     assert results["band_plot"] == str((tmp_path / "model_out" / "band_comparison.pdf").resolve())
     assert (tmp_path / "model_out" / "band_comparison_all.pdf").exists()
     assert results["all_band_plot"] == str((tmp_path / "model_out" / "band_comparison_all.pdf").resolve())
+    assert (tmp_path / "model_out" / "band_comparison_vs_full_heff.pdf").exists()
+    assert results["full_heff_band_plot"] == str(
+        (tmp_path / "model_out" / "band_comparison_vs_full_heff.pdf").resolve()
+    )
     assert results["all_band_plot_comparison"]["num_bands"] == expected_eigvals.shape[1]
+    assert results["comparison"]["reference"] == "current_heff_support_mask"
+    assert results["comparison_vs_full_heff"]["reference"] == "original_heff"
     summary = json.loads((tmp_path / "model_out" / "run_summary.json").read_text(encoding="utf-8"))
     assert summary["comparison"]["max_abs_error"] == 0.0
     assert summary["plot_comparison"]["max_abs_error"] == 0.0
     assert summary["all_band_plot"] == "band_comparison_all.pdf"
     assert summary["q_lattice_plot"] == "q_lattice_harmonics.pdf"
     assert summary["all_band_plot_comparison"]["num_bands"] == expected_eigvals.shape[1]
+    assert summary["comparison"]["reference"] == "current_heff_support_mask"
+    assert summary["comparison_vs_full_heff"]["reference"] == "original_heff"
+    assert summary["full_heff_band_plot"] == "band_comparison_vs_full_heff.pdf"
+
+
+def test_run_configured_model_uses_current_support_as_primary_energy_and_overlap_reference(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw_config = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw_config["bands"]["plot"] = {"top_bands": 3, "align": "top"}
+    raw_config["fit"]["model_selection"] = False
+    cfg_path.write_text(yaml.safe_dump(raw_config, sort_keys=False), encoding="utf-8")
+    heff_path = tmp_path / "project" / "heff.npy"
+    heff = np.load(heff_path)
+    heff[:, 1, 3] = np.array([0.35, 0.40, 0.45])
+    heff[:, 3, 1] = heff[:, 1, 3]
+    np.save(heff_path, heff)
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
+
+    q1 = np.load(tmp_path / "q1.npy")
+    q2 = np.load(tmp_path / "q2.npy")
+    support_mask = _selected_harmonic_support_mask(
+        q1,
+        q2,
+        n_orb=(1, 1),
+        current_counts={"intra": 3, "inter": 2},
+    )
+    support_heff = heff * support_mask[None, :, :]
+    support_heff = 0.5 * (support_heff + np.swapaxes(support_heff.conj(), -1, -2))
+    support_eigvals, support_eigvecs = np.linalg.eigh(support_heff)
+    full_eigvals = np.linalg.eigvalsh(heff)
+    assert not np.allclose(support_eigvals, full_eigvals)
+
+    plot_calls: dict[str, dict[str, object]] = {}
+    overlap_target: dict[str, np.ndarray] = {}
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {"eigvals": (support_eigvals, support_eigvecs), "diagnostics": {}}
+
+    def fake_save_band_comparison_plot(model, heff, path, **kwargs):
+        output = Path(path)
+        plot_calls[output.name] = {"heff": np.asarray(heff), **dict(kwargs)}
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.touch()
+        return output
+
+    def fake_band_overlap_weights(model_basis, target_basis, **kwargs):
+        overlap_target["basis"] = np.asarray(target_basis)
+        overlap_target["eigvals"] = np.asarray(kwargs["reference_eigvals"])
+        return np.ones(np.asarray(kwargs["model_eigvals"]).shape, dtype=float)
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline.save_band_comparison_plot", fake_save_band_comparison_plot)
+    monkeypatch.setattr("kp.model.pipeline._band_overlap_weights", fake_band_overlap_weights)
+    monkeypatch.setattr(
+        "kp.model.pipeline._selected_harmonic_support_mask",
+        lambda *args, **kwargs: support_mask,
+    )
+
+    results = run_configured_model(cfg_path)
+
+    np.testing.assert_allclose(plot_calls["band_comparison.pdf"]["heff"], support_eigvals)
+    assert plot_calls["band_comparison.pdf"].get("current_support_eigvals") is None
+    assert plot_calls["band_comparison.pdf"]["plot_config"]["top_bands"] == 3
+    np.testing.assert_allclose(plot_calls["band_comparison_vs_full_heff.pdf"]["heff"], full_eigvals)
+    assert plot_calls["band_comparison_vs_full_heff.pdf"]["plot_config"]["top_bands"] == 3
+    np.testing.assert_allclose(overlap_target["basis"], support_eigvecs)
+    np.testing.assert_allclose(overlap_target["eigvals"], support_eigvals)
+    assert results["comparison"]["max_abs_error"] == pytest.approx(0.0)
+    assert results["comparison"]["reference"] == "current_heff_support_mask"
+    assert results["plot_comparison"]["max_abs_error"] == pytest.approx(0.0)
+    assert results["plot_comparison"]["reference"] == "current_heff_support_mask"
+    assert results["all_band_plot_comparison"]["max_abs_error"] == pytest.approx(0.0)
+    assert results["all_band_plot_comparison"]["reference"] == "current_heff_support_mask"
+    assert results["comparison_vs_full_heff"]["max_abs_error"] > 0.0
+    assert results["comparison_vs_full_heff"]["reference"] == "original_heff"
+    assert results["plot_comparison_vs_full_heff"]["reference"] == "original_heff"
+    assert results["all_band_plot_comparison_vs_full_heff"]["reference"] == "original_heff"
+
+
+def test_run_configured_model_fails_closed_when_current_support_reference_cannot_be_built(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    expected_eigvals = _expected_project_eigvals(tmp_path)
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {"eigvals": expected_eigvals, "diagnostics": {}}
+
+    def fail_support(*args, **kwargs):
+        raise RuntimeError("support construction failed")
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline._selected_harmonic_support_mask", fail_support)
+
+    with pytest.raises(
+        ValueError,
+        match="current Heff support mask is required as the primary model-comparison reference",
+    ):
+        run_configured_model(cfg_path)
+
+
+def test_run_configured_model_does_not_reapply_band_indices_to_model_eigenvectors(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["bands"]["indices"] = [1, 2]
+    raw["fit"]["model_selection"] = False
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    selected_eigvals = _expected_project_eigvals(tmp_path)[[1, 2]]
+    model_eigvecs = np.stack(
+        [
+            np.eye(4, dtype=np.complex128),
+            np.eye(4, dtype=np.complex128)[:, [1, 0, 2, 3]],
+        ]
+    )
+    captured: dict[str, np.ndarray] = {}
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {"eigvals": (selected_eigvals, model_eigvecs), "diagnostics": {}}
+
+    def fake_band_overlap_weights(model_basis, target_basis, **kwargs):
+        captured["model_basis"] = np.asarray(model_basis)
+        captured["target_basis"] = np.asarray(target_basis)
+        return np.ones(np.asarray(kwargs["model_eigvals"]).shape, dtype=float)
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr("kp.model.pipeline._band_overlap_weights", fake_band_overlap_weights)
+
+    run_configured_model(cfg_path)
+
+    np.testing.assert_allclose(captured["model_basis"], model_eigvecs)
+    assert captured["target_basis"].shape == model_eigvecs.shape
+
+
+def test_run_configured_model_writes_all_heatmaps_only_to_subdirectory(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_fixture(tmp_path)
+    expected_eigvals = _expected_project_eigvals(tmp_path)
+    heff = np.load(tmp_path / "project" / "heff.npy")
+    heatmap_calls: list[tuple[Path, str, str]] = []
+
+    def fake_pipeline(moire_config, model_config, log_path, *, verbose, progress):
+        return {
+            "eigvals": expected_eigvals,
+            "band_hamiltonians": heff,
+            "diagnostics": {},
+        }
+
+    def fake_save_hamiltonian_element_comparison_plot(model, target, path, **kwargs):
+        output = Path(path)
+        heatmap_calls.append(
+            (
+                output,
+                str(kwargs.get("view", "full")),
+                str(kwargs.get("q_order", "native")),
+            )
+        )
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.touch()
+        output.with_suffix(".pdf").touch()
+        return output
+
+    monkeypatch.setattr("kp.model.pipeline._run_model_pipeline", fake_pipeline)
+    monkeypatch.setattr(
+        "kp.model.pipeline.save_hamiltonian_element_comparison_plot",
+        fake_save_hamiltonian_element_comparison_plot,
+    )
+
+    output = tmp_path / "model_out"
+    output.mkdir(parents=True, exist_ok=True)
+    legacy_names = (
+        "hamiltonian_element_comparison.png",
+        "hamiltonian_element_comparison.pdf",
+        "hamiltonian_element_comparison_selected_support.png",
+        "hamiltonian_element_comparison_selected_support.pdf",
+    )
+    for name in legacy_names:
+        (output / name).touch()
+
+    run_configured_model(cfg_path)
+
+    qnorm_dir = output / "hamiltonian_element_comparisons"
+    assert heatmap_calls == [
+        (qnorm_dir / "native_full.png", "full", "native"),
+        (qnorm_dir / "native_selected_support.png", "selected_support", "native"),
+        (qnorm_dir / "qnorm_full.png", "full", "norm_shell"),
+        (qnorm_dir / "qnorm_selected_support.png", "selected_support", "norm_shell"),
+    ]
+    assert all(not (output / name).exists() for name in legacy_names)
+    assert {path.name for path in qnorm_dir.iterdir()} == {
+        "native_full.png",
+        "native_full.pdf",
+        "native_selected_support.png",
+        "native_selected_support.pdf",
+        "qnorm_full.png",
+        "qnorm_full.pdf",
+        "qnorm_selected_support.png",
+        "qnorm_selected_support.pdf",
+    }
 
 
 def test_json_safe_recurses_into_complex_numpy_arrays() -> None:
@@ -7103,6 +10684,70 @@ def test_save_band_comparison_plot_draws_all_bands_by_default(monkeypatch, tmp_p
 
     assert plotted_colors.count(KP_REFERENCE_STYLE["color"]) == 5
     assert plotted_colors.count(KP_MODEL_STYLE["color"]) == 5
+
+
+def test_save_band_comparison_plot_draws_current_heff_support_mask(monkeypatch, tmp_path: Path) -> None:
+    import matplotlib.axes
+    import matplotlib.pyplot as plt
+
+    model = np.array([[0.0, 0.1], [0.02, 0.12]])
+    heff = model + 0.01
+    current_support = model + 0.005
+    support_color = "#E69F00"
+    plotted_support_colors: list[str] = []
+    legend_labels: list[str] = []
+
+    original_plot = matplotlib.axes.Axes.plot
+
+    def spy_plot(self, *args, **kwargs):
+        if kwargs.get("color") == support_color:
+            plotted_support_colors.append(support_color)
+        return original_plot(self, *args, **kwargs)
+
+    def spy_close(fig=None):
+        if fig is not None and fig.axes:
+            legend = fig.axes[0].get_legend()
+            if legend is not None:
+                legend_labels.extend(item.get_text() for item in legend.get_texts())
+
+    monkeypatch.setattr(matplotlib.axes.Axes, "plot", spy_plot)
+    monkeypatch.setattr(plt, "close", spy_close)
+
+    save_band_comparison_plot(
+        model,
+        heff,
+        tmp_path / "bands.png",
+        current_support_eigvals=current_support,
+    )
+
+    assert plotted_support_colors == [support_color, support_color]
+    assert "Current Heff support mask" in legend_labels
+
+
+def test_save_band_comparison_plot_labels_the_primary_reference_explicitly(monkeypatch, tmp_path: Path) -> None:
+    import matplotlib.pyplot as plt
+
+    model = np.array([[0.0, 0.1], [0.02, 0.12]])
+    reference = model + 0.005
+    legend_labels: list[str] = []
+
+    def spy_close(fig=None):
+        if fig is not None and fig.axes:
+            legend = fig.axes[0].get_legend()
+            if legend is not None:
+                legend_labels.extend(item.get_text() for item in legend.get_texts())
+
+    monkeypatch.setattr(plt, "close", spy_close)
+
+    save_band_comparison_plot(
+        model,
+        reference,
+        tmp_path / "bands.png",
+        reference_label="Current Heff support mask",
+    )
+
+    assert "Current Heff support mask" in legend_labels
+    assert "Reference" not in legend_labels
 
 
 def test_save_band_comparison_plot_uses_release_style_by_default(monkeypatch, tmp_path: Path) -> None:
@@ -7290,6 +10935,7 @@ def test_run_configured_model_preserves_plot_ylim_in_config(monkeypatch, tmp_pat
     raw.setdefault("bands", {})
     raw["bands"].setdefault("plot", {})
     raw["bands"]["plot"]["ylim"] = [0.0, 0.16]
+    raw["fit"]["model_selection"] = False
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
 
     expected_eigvals = _expected_project_eigvals(tmp_path)
@@ -7358,6 +11004,7 @@ def test_M_spinless_kp_symm_output_physical_source_ops_stay_physical_with_effect
 
 def test_validation_strict_rejects_unavailable_validation_outputs(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
+    _disable_model_selection_for_mock_pipeline(cfg_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["validation"] = {"strict": True}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -7374,6 +11021,7 @@ def test_validation_strict_rejects_unavailable_validation_outputs(monkeypatch, t
 
 def test_validation_production_mode_rejects_unavailable_validation_outputs(monkeypatch, tmp_path: Path) -> None:
     cfg_path = _write_fixture(tmp_path)
+    _disable_model_selection_for_mock_pipeline(cfg_path)
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
     raw["validation"] = {"mode": "production"}
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")

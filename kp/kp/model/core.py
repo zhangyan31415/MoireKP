@@ -602,6 +602,7 @@ class MoireConfig:
     symmetry_source_metadata: Dict[str, Any] = field(default_factory=dict)
     sectors: List[Dict[str, Any]] = field(default_factory=list)
     term_templates: List[Dict[str, Any]] = field(default_factory=list)
+    response_semantics: str = "legacy_frozen_v1"
     bM_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     # --- k sampling / fitting ---
@@ -611,6 +612,12 @@ class MoireConfig:
     coeff_tol: float = 1e-6
     null_channel_abs_tol: float = 0.0
     null_channel_rel_tol: float = 0.0
+    response_regularization: float = 0.0
+    response_fit_indices: List[int] = field(default_factory=list)
+    response_band_window: List[int] = field(default_factory=list)
+    response_fit_objective: Dict[str, Any] = field(
+        default_factory=lambda: {"mode": "equal_matrix_v1"}
+    )
 
     # --- band reduction (optional Schur complement) ---
     keep_indices: np.ndarray | None = None
@@ -987,6 +994,11 @@ class ContinuumModel:
     """
     def __init__(self):
         self.terms: Dict[ContinuumTermKey, ContinuumTerm] = {}
+        # Preserve every authored seed independently of the legacy runtime
+        # dictionary.  Distinct templates can intentionally produce the same
+        # physical key; complete_linear_v2 must see those candidates before its
+        # target-independent coefficient-space reducer decides dependency.
+        self.candidate_terms: List[ContinuumTerm] = []
     
     def add_term(
         self,
@@ -1000,13 +1012,15 @@ class ContinuumModel:
             symmetry_ops = []
         if key in self.terms:
             print(f"Warning: Term {key} already exists, overwriting.")
-        self.terms[key] = ContinuumTerm(
+        term = ContinuumTerm(
             key,
             Y_basis,
             tag=tag,
             symmetry_ops=symmetry_ops,
             registry_metadata=dict(registry_metadata or {}),
         )
+        self.candidate_terms.append(term)
+        self.terms[key] = term
     
     def update_term_coefficients(self, key: ContinuumTermKey, r_real: complex, r_imag: complex):
         if key not in self.terms:
@@ -1074,7 +1088,8 @@ class ContinuumModelBuilder:
                  symmetry_gen: SymmetryGenerator,
                  symmetry_map: Dict[str, List[Dict[str, Any]]] = None,
                  term_templates: List[Dict[str, Any]] | None = None,
-                 sectors: List[Dict[str, Any]] | None = None):
+                 sectors: List[Dict[str, Any]] | None = None,
+                 response_semantics: str = "legacy_frozen_v1"):
         self.Q_set1 = Q_set1
         self.Q_set2 = Q_set2
         self.n_orb1 = n_orb1
@@ -1086,6 +1101,7 @@ class ContinuumModelBuilder:
         self.max_order = max_order
         self.symmetry_gen = symmetry_gen
         self.term_templates = list(term_templates or [])
+        self.response_semantics = str(response_semantics)
         self.sectors = list(sectors or [
             {"name": "L1", "qset": "qset1", "n_orb": int(n_orb1)},
             {"name": "L2", "qset": "qset2", "n_orb": int(n_orb2)},
@@ -3432,10 +3448,10 @@ class ContinuumModelBuilder:
 
     def _default_term_templates(self) -> List[Dict[str, Any]]:
         return [
-            {"name": "kinetic", "source": "diagonal_kp", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Kinect", 0)},
-            {"name": "onsite", "source": "onsite", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Onsite", 0)},
-            {"name": "intra", "source": "moire_potential", "sector_pairs": "same", "orbital_pairs": "all", "harmonics": "intra", "max_order": self.max_order.get("intra", 0)},
-            {"name": "inter", "source": "tunneling", "sector_pairs": [[2, 1], [1, 2]], "orbital_pairs": "all", "harmonics": "inter", "max_order": self.max_order.get("inter", 0)},
+            {"name": "kinetic", "source": "diagonal_kp", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Kinect", 0), "term_space_policy": "explicit_reduced"},
+            {"name": "onsite", "source": "onsite", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Onsite", 0), "term_space_policy": "explicit_reduced"},
+            {"name": "intra", "source": "moire_potential", "sector_pairs": "same", "orbital_pairs": "all", "harmonics": "intra", "max_order": self.max_order.get("intra", 0), "term_space_policy": "explicit_reduced"},
+            {"name": "inter", "source": "tunneling", "sector_pairs": [[2, 1], [1, 2]], "orbital_pairs": "all", "harmonics": "inter", "max_order": self.max_order.get("inter", 0), "term_space_policy": "explicit_reduced"},
         ]
 
     def _sector_slot_from_ref(self, ref: Any) -> int:
@@ -3477,6 +3493,15 @@ class ContinuumModelBuilder:
     def _orbital_pairs_from_template(self, template: Mapping[str, Any], l_from: int, l_to: int) -> List[Tuple[int, int]]:
         n_from = self.n_orb1 if l_from == 1 else self.n_orb2
         n_to = self.n_orb1 if l_to == 1 else self.n_orb2
+        policy = template.get("term_space_policy")
+        if self.response_semantics == "complete_linear_v2":
+            if policy not in {"complete", "explicit_reduced", "orbit_representative"}:
+                raise ValueError(
+                    "complete_linear_v2 requires every term template to declare "
+                    "term_space_policy: complete, explicit_reduced, or orbit_representative"
+                )
+            if policy == "complete":
+                return [(a, b) for a in range(1, n_from + 1) for b in range(1, n_to + 1)]
         raw = template.get("orbital_pairs", "all")
         if raw == "diagonal":
             return [(a, a) for a in range(1, min(n_from, n_to) + 1)]
@@ -3591,11 +3616,77 @@ class ContinuumModelBuilder:
                     "source": "implicit_zero",
                 }
             ]
+        has_literal_records = "harmonic_records" in template
         has_harmonics = "harmonics" in template
         has_harmonic_filter = "harmonic_filter" in template
-        if has_harmonics and has_harmonic_filter:
+        if has_harmonics and has_harmonic_filter and not has_literal_records:
             name = template.get("name", source)
             raise ValueError(f"{name}: use either harmonics or harmonic_filter, not both")
+        if sum((has_literal_records, has_harmonics, has_harmonic_filter)) > 1:
+            name = template.get("name", source)
+            raise ValueError(
+                f"{name}: use exactly one of harmonic_records, harmonics, or harmonic_filter"
+            )
+        if has_literal_records:
+            raw_records = template.get("harmonic_records")
+            if not isinstance(raw_records, Sequence) or isinstance(raw_records, (str, bytes)):
+                raise ValueError(
+                    f"{template.get('name', source)}: harmonic_records must be a list"
+                )
+            records: List[Dict[str, Any]] = []
+            seen_ids: set[str] = set()
+            seen_vectors: set[Tuple[str, float, float]] = set()
+            for index, raw_record in enumerate(raw_records):
+                if not isinstance(raw_record, Mapping):
+                    raise ValueError(
+                        f"{template.get('name', source)}: harmonic record {index} must be a mapping"
+                    )
+                vector = np.asarray(raw_record.get("vector"), dtype=float)
+                if vector.shape != (2,) or not np.all(np.isfinite(vector)):
+                    raise ValueError(
+                        f"{template.get('name', source)}: harmonic record {index} "
+                        "must contain a finite two-vector"
+                    )
+                support_count = int(raw_record.get("support_count", 0))
+                if support_count <= 0:
+                    raise ValueError(
+                        f"{template.get('name', source)}: harmonic record {index} "
+                        "requires positive support_count"
+                    )
+                record_id = str(raw_record.get("id", "")).strip()
+                if not record_id:
+                    raise ValueError(
+                        f"{template.get('name', source)}: harmonic record {index} requires id"
+                    )
+                kind = str(raw_record.get("kind", "")).strip()
+                if not kind:
+                    raise ValueError(
+                        f"{template.get('name', source)}: harmonic record {index} requires kind"
+                    )
+                vector_key = (
+                    kind,
+                    round(float(vector[0]), 14),
+                    round(float(vector[1]), 14),
+                )
+                if record_id in seen_ids or vector_key in seen_vectors:
+                    raise ValueError(
+                        f"{template.get('name', source)}: duplicate harmonic record "
+                        f"{record_id!r}"
+                    )
+                seen_ids.add(record_id)
+                seen_vectors.add(vector_key)
+                records.append(
+                    {
+                        "id": record_id,
+                        "kind": kind,
+                        "vector": vector,
+                        "source": str(
+                            raw_record.get("source", "case_q_pair_support")
+                        ),
+                        "support_count": support_count,
+                    }
+                )
+            return records
         raw = (
             template.get("harmonics")
             if has_harmonics
@@ -3716,6 +3807,8 @@ class ContinuumModelBuilder:
                             "monomial": {"Mz": int(Mz), "Mz_star": int(Mz_star)},
                             "symmetry_orbit_id": None,
                             "generation_mode": generation_mode,
+                            "term_space_policy": str(template.get("term_space_policy", "legacy_unspecified")),
+                            "response_semantics": self.response_semantics,
                             "generated_by": generated_by,
                             "coefficient_unit": "eV",
                             "coefficient_role": "fitted",
@@ -4199,6 +4292,7 @@ def build_model(config: MoireConfig) -> ContinuumModel:
         dict(config.symmetry_map) if config.symmetry_map else None,
         list(config.term_templates),
         list(config.sectors),
+        str(getattr(config, "response_semantics", "legacy_frozen_v1")),
     )
     builder.build_terms()
     model = builder.get_model()
@@ -4206,6 +4300,75 @@ def build_model(config: MoireConfig) -> ContinuumModel:
     setattr(model, "_moire_symmetry_gen", symmetry_gen)
     setattr(model, "_moire_builder", builder)
     return model
+
+def _basis_spectral_weighting_from_fit_objective(
+    objective: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Translate user-facing fit objective metadata to response-basis API keys."""
+
+    if not objective:
+        return {"mode": "equal_matrix_v1"}
+    mode = str(objective.get("mode", "equal_matrix_v1")).strip().lower()
+    if mode in {"equal_matrix", "equal_matrix_v1"}:
+        return {"mode": "equal_matrix_v1"}
+    if mode == "normalized_low_energy_linear_v1":
+        window = objective.get("window", {})
+        if not isinstance(window, Mapping):
+            raise ValueError(
+                "normalized_low_energy_linear_v1 response_fit_objective.window must be a mapping"
+            )
+        window_mode = str(
+            window.get("mode", "fixed_count_degeneracy_safe")
+        ).strip().lower()
+        if window_mode != "fixed_count_degeneracy_safe":
+            raise ValueError(
+                "normalized_low_energy_linear_v1 requires a fixed degeneracy-safe window"
+            )
+        return {
+            "mode": "normalized_low_energy_linear_v1",
+            "band_edge": str(objective.get("edge", "top")).strip().lower(),
+            "window_mode": "fixed_count_degeneracy_safe",
+            "n_bands": int(window.get("bands", 0)),
+            "one_sided_weight": float(objective.get("one_sided_weight", 0.0)),
+            "two_sided_weight": float(objective.get("two_sided_weight", 0.0)),
+            "degeneracy_atol_ev": float(window.get("degeneracy_tol_mev", 0.1))
+            * 1.0e-3,
+            "degeneracy_rtol": 0.0,
+        }
+    if mode != "target_spectral_linear":
+        raise ValueError(
+            "response_fit_objective.mode must be 'equal_matrix_v1', "
+            "'normalized_low_energy_linear_v1', or 'target_spectral_linear'"
+        )
+    if "band_edge" in objective:
+        return dict(objective)
+    window = objective.get("window", {})
+    if not isinstance(window, Mapping):
+        raise ValueError("target_spectral_linear response_fit_objective.window must be a mapping")
+    window_mode = str(window.get("mode", "fixed_count_degeneracy_safe")).strip().lower()
+    translated: dict[str, Any] = {
+        "mode": "target_spectral_linear",
+        "band_edge": str(objective.get("edge", "top")).strip().lower(),
+        "floor": float(objective.get("floor", 0.05)),
+        "alpha": float(objective.get("alpha", 1.0)),
+        "degeneracy_atol_ev": float(window.get("degeneracy_tol_mev", 0.1)) * 1.0e-3,
+        "degeneracy_rtol": 0.0,
+        "normalization": "global_mean_trace_per_dimension_v1",
+    }
+    projector = objective.get("two_sided_projector")
+    if isinstance(projector, Mapping) and bool(projector.get("enabled", False)):
+        translated["two_sided_projector_weight"] = float(projector["weight"])
+    if window_mode == "fixed_count_degeneracy_safe":
+        translated["window_mode"] = "fixed_count_degeneracy_safe"
+        translated["n_bands"] = int(window.get("bands", 0))
+    elif window_mode == "auto_gap_degeneracy_safe":
+        translated["window_mode"] = "auto_gap"
+        translated["min_bands"] = int(window.get("min_bands", 0))
+        translated["max_bands"] = int(window.get("max_bands", 0))
+    else:
+        raise ValueError(f"unsupported target_spectral_linear window mode {window_mode!r}")
+    return translated
+
 
 def compute_coefficients(
     config: MoireConfig,
@@ -4238,6 +4401,99 @@ def compute_coefficients(
     if config.kpoints_fit is None:
         raise ValueError("config.kpoints_fit must be provided for coefficient fitting.")
 
+    if str(getattr(config, "response_semantics", "legacy_frozen_v1")) == "complete_linear_v2":
+        from .response_basis import compile_model_response_basis
+
+        basis = getattr(model, "_compiled_response_basis", None)
+        if basis is None:
+            basis = compile_model_response_basis(
+                model,
+                config,
+                reduce=True,
+                progress_callback=progress_callback,
+            )
+        if progress_callback is not None:
+            candidate = basis.candidate_artifact
+            progress_callback(
+                "response basis vocabulary: "
+                f"authored={int(candidate.get('authored_ordered_seed_count', 0))} "
+                f"adjoint_orbits={int(candidate.get('adjoint_orbit_descriptor_count', 0))} "
+                f"hermitian_ambient={int(candidate.get('hermitian_ambient_channel_count', 0))} "
+                f"fixed={int(len(basis.channels))} "
+                "materialized="
+                f"{int(candidate.get('physically_materialized_projected_channel_count', len(basis.channels)))}",
+                state="done",
+            )
+        kpts = np.asarray(config.kpoints_fit, dtype=float)
+        nk = int(kpts.shape[0])
+        target_raw = np.asarray(config.heff, dtype=np.complex128)
+        if target_raw.ndim == 3:
+            target = target_raw
+        elif target_raw.ndim == 2 and target_raw.shape == (nk * basis.dim, nk * basis.dim):
+            target = np.asarray(
+                [
+                    target_raw[
+                        index * basis.dim : (index + 1) * basis.dim,
+                        index * basis.dim : (index + 1) * basis.dim,
+                    ]
+                    for index in range(nk)
+                ],
+                dtype=np.complex128,
+            )
+        else:
+            raise ValueError(
+                "complete_linear_v2 heff must have shape (Nk,dim,dim) or be the corresponding block diagonal; "
+                f"got {target_raw.shape} for Nk={nk}, dim={basis.dim}"
+            )
+        fit_indices = list(getattr(config, "response_fit_indices", []) or range(nk))
+        band_window = list(getattr(config, "response_band_window", []) or [0, basis.dim])
+        fitted = basis.fit(
+            kpts,
+            target,
+            fit_indices=fit_indices,
+            regularization=float(getattr(config, "response_regularization", 0.0) or 0.0),
+            band_window=band_window,
+            spectral_weighting=_basis_spectral_weighting_from_fit_objective(
+                getattr(config, "response_fit_objective", {"mode": "equal_matrix_v1"})
+            ),
+            coefficient_tolerance=float(config.coeff_tol),
+            progress_callback=progress_callback,
+        )
+        terms = list(getattr(model, "candidate_terms", ()) or model.terms.values())
+        for term in terms:
+            term.active = False
+            term.r_value_real = 0.0
+            term.r_value_imag = 0.0
+        for channel, coefficient in zip(basis.channels, fitted.coefficients):
+            term_index = int(channel.metadata.get("term_index", -1))
+            if term_index < 0 or term_index >= len(terms):
+                raise ValueError(f"compiled response channel {channel.channel_id!r} has invalid term_index={term_index}")
+            term = terms[term_index]
+            if channel.component == "real":
+                term.r_value_real = float(coefficient)
+            elif channel.component == "imag":
+                term.r_value_imag = float(coefficient)
+            else:
+                raise ValueError(f"compiled response channel has unknown component {channel.component!r}")
+            if coefficient != 0.0:
+                term.active = True
+        setattr(model, "_compiled_response_basis", basis)
+        setattr(model, "_fitted_response_model", fitted)
+        diagnostics = {
+            "response_semantics": "complete_linear_v2",
+            "basis_hash": basis.basis_hash,
+            "fit_hash": fitted.fit_hash,
+            "candidate_response_channels": int(basis.candidate_artifact.get("candidate_channel_count", 0)),
+            "retained_basis_channels": int(len(basis.channels)),
+            "fit_solver_channels": int(len(fitted.fit_solver_channel_ids)),
+            "fit_selected_channels": int(len(fitted.fit_solver_channel_ids)),
+            "fit_rrqr_pivot_channels": int(len(fitted.fit_selected_channel_ids)),
+            "nonzero_coefficient_channels": int(len(fitted.nonzero_channel_ids)),
+            "basis_artifact": basis.artifact(),
+            "fit_artifact": fitted.artifact(),
+        }
+        return model, diagnostics
+
     Q_set1 = np.asarray(config.Q_set1, dtype=float)
     Q_set2 = np.asarray(config.Q_set2, dtype=float)
     nlow_state = config.nlow_state if config.nlow_state is not None else [int(config.n_orb1), int(config.n_orb2)]
@@ -4251,6 +4507,8 @@ def compute_coefficients(
         symmetry_gen,
         dict(config.symmetry_map) if config.symmetry_map else None,
         list(config.term_templates),
+        list(config.sectors),
+        str(getattr(config, "response_semantics", "legacy_frozen_v1")),
     )
     builder.model = model
     builder.null_channel_abs_tol = float(getattr(config, "null_channel_abs_tol", 0.0) or 0.0)
@@ -4447,12 +4705,57 @@ def compute_bands(
     (eigvals, eigvecs): Tuple[np.ndarray, np.ndarray]
         If requested, eigvecs has shape (Nk, dim_kept, dim_kept).
     """
-    state = _prepare_band_state(config, model)
     kpts = np.asarray(kpoints, dtype=float)
     if kpts.ndim != 2:
         raise ValueError(f"kpoints must be a 2D array, got shape {kpts.shape}.")
     if kpts.shape[1] != 2:
         raise ValueError(f"kpoints must have shape (Nk, 2) (kx,ky), got {kpts.shape}.")
+
+    if str(getattr(config, "response_semantics", "legacy_frozen_v1")) == "complete_linear_v2":
+        from .response_basis import CompiledResponseRuntime
+
+        basis = getattr(model, "_compiled_response_basis", None)
+        fitted = getattr(model, "_fitted_response_model", None)
+        if basis is None or fitted is None:
+            raise ValueError("complete_linear_v2 bands require a fitted CompiledResponseBasis")
+        runtime = CompiledResponseRuntime(basis=basis, fitted=fitted)
+        if compiled_runtime_out is not None:
+            compiled_runtime_out.append(runtime)
+        dim_full = int(basis.dim)
+        keep = (
+            np.arange(dim_full, dtype=int)
+            if config.keep_indices is None
+            else np.asarray(config.keep_indices, dtype=int)
+        )
+        remove = (
+            np.asarray(config.remove_indices, dtype=int)
+            if config.remove_indices is not None
+            else np.array([], dtype=int)
+        )
+        state = SimpleNamespace(keep=keep, remove=remove)
+        want_vecs = bool(config.save_eigvecs) if return_eigvecs is None else bool(return_eigvecs)
+        eigvals_out = np.empty((kpts.shape[0], keep.size), dtype=float)
+        eigvecs_out = (
+            np.empty((kpts.shape[0], keep.size, keep.size), dtype=np.complex128)
+            if want_vecs
+            else None
+        )
+        for index, point in enumerate(kpts):
+            hamiltonian = _reduce_and_hermitize_hamiltonian(runtime.hamiltonian(point), state)
+            if hamiltonians_out is not None:
+                hamiltonians_out.append(np.asarray(hamiltonian, dtype=np.complex128).copy())
+            if want_vecs:
+                eigenvalues, eigenvectors = scipy.linalg.eigh(hamiltonian, check_finite=False)
+                eigvals_out[index] = eigenvalues
+                assert eigvecs_out is not None
+                eigvecs_out[index] = eigenvectors
+            else:
+                eigvals_out[index] = scipy.linalg.eigvalsh(hamiltonian, check_finite=False)
+        if eigvecs_out is not None:
+            return eigvals_out, eigvecs_out
+        return eigvals_out
+
+    state = _prepare_band_state(config, model)
 
     want_vecs = bool(config.save_eigvecs) if return_eigvecs is None else bool(return_eigvecs)
     nk = kpts.shape[0]

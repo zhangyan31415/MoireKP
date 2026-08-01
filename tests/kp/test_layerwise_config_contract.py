@@ -85,9 +85,51 @@ def test_model_layerwise_n_orb_can_empty_first_qset(tmp_path: Path) -> None:
 
     cfg = load_model_config(cfg_path)
 
-    assert cfg.n_orb == (2, 2)
-    assert cfg.nlow_state == [2, 2]
+    assert cfg.n_orb == (0, 4)
+    assert cfg.nlow_state == [0, 4]
     assert cfg.raw["model"]["n_orb_resolved_qset"] == [0, 4]
+
+
+def test_model_infers_layerwise_n_orb_from_projection_basis(tmp_path: Path) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[1, 1, 0])
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"].pop("n_orb")
+    raw["model"].pop("nlow_state")
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        nlow_state_list=np.asarray([[0], [0], []], dtype=object),
+    )
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (1, 1)
+    assert cfg.nlow_state == [1, 1]
+    assert cfg.raw["model"]["n_orb_resolution"]["source"] == "projection_basis"
+
+
+def test_model_rejects_n_orb_that_conflicts_with_projection_basis(tmp_path: Path) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[0, 2, 2])
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        nlow_state_list=np.asarray([[0], [0], []], dtype=object),
+    )
+
+    with pytest.raises(ValueError, match="model.n_orb.*projection"):
+        load_model_config(cfg_path)
+
+
+def test_model_omitted_n_orb_requires_projection_metadata(tmp_path: Path) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[1, 1, 0])
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"].pop("n_orb")
+    raw["model"].pop("nlow_state")
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="model.n_orb.*projection/basis.npz"):
+        load_model_config(cfg_path)
 
 
 def test_model_rejects_wrong_layerwise_n_orb_length(tmp_path: Path) -> None:

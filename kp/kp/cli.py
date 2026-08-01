@@ -185,6 +185,7 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "eigvals.npy",
         "band_comparison.pdf",
         "band_comparison_all.pdf",
+        "band_comparison_vs_full_heff.pdf",
         "q_lattice_harmonics.pdf",
         "harmonic_recommendation_bands.png",
         "hamiltonian_element_comparison.png",
@@ -2370,7 +2371,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             _kp_model_print(f"  config: {model_cfg.path}", style="path")
             _kp_model_print(f"  output: {model_cfg.output_dir}", style="path")
             _kp_model_print(f"  basis: dim={dim}, Q=({q1}, {q2}), n_orb={model_cfg.n_orb}", style="info")
-            _kp_model_print(f"  fit k-points: {len(model_cfg.fit_indices)}, band k-points: {len(moire_cfg.kpoints)}", style="info")
+            _kp_model_print(
+                f"  Hamiltonian fit k-points: {len(model_cfg.fit_indices)}, "
+                f"evaluation-path k-points: {len(moire_cfg.kpoints)}",
+                style="info",
+            )
             _kp_model_print(f"  bM source: {model_cfg.bM_diagnostics.get('source', 'unknown')}", style="info")
             intra_count = len(getattr(moire_cfg, "intra_harmonics_map", {}) or {})
             inter_count = len(getattr(moire_cfg, "inter_harmonics_map", {}) or {})
@@ -2388,6 +2393,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             _kp_model_print(f"  q lattice plot: {results['q_lattice_plot']}", style="path")
         if results.get("all_band_plot"):
             _kp_model_print(f"  all-band plot: {results['all_band_plot']}", style="path")
+        if results.get("full_heff_band_plot"):
+            _kp_model_print(f"  full-Heff band plot: {results['full_heff_band_plot']}", style="path")
         if results.get("hamiltonian_element_plot"):
             _kp_model_print(f"  Hamiltonian element plot: {results['hamiltonian_element_plot']}", style="path")
         if results.get("hamiltonian_element_plot_pdf"):
@@ -2405,16 +2412,40 @@ def main(argv: Sequence[str] | None = None) -> None:
         if comparison:
             rms = float(comparison["rms_error"])
             max_abs = float(comparison["max_abs_error"])
-            _kp_model_print(f"  RMS error: {rms:.6e} eV ({1000.0 * rms:.3f} meV)", style="metric")
-            _kp_model_print(f"  Max error: {max_abs:.6e} eV ({1000.0 * max_abs:.3f} meV)", style="metric")
+            reference = (
+                "current Heff support mask"
+                if comparison.get("reference") == "current_heff_support_mask"
+                else str(comparison.get("reference", "configured reference"))
+            )
+            _kp_model_print(
+                f"  RMS error vs {reference}: {rms:.6e} eV ({1000.0 * rms:.3f} meV)",
+                style="metric",
+            )
+            _kp_model_print(
+                f"  Max error vs {reference}: {max_abs:.6e} eV ({1000.0 * max_abs:.3f} meV)",
+                style="metric",
+            )
         if plot_comparison:
             rms_mev = float(plot_comparison.get("rms_error_mev", 1000.0 * float(plot_comparison["rms_error"])))
             max_mev = float(plot_comparison.get("max_abs_error_mev", 1000.0 * float(plot_comparison["max_abs_error"])))
             bands = int(plot_comparison.get("num_bands", 0))
             align = str(plot_comparison.get("align", "none"))
-            _kp_model_print(f"  plot bands RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})", style="metric")
+            reference = (
+                "current Heff support mask"
+                if plot_comparison.get("reference") == "current_heff_support_mask"
+                else str(plot_comparison.get("reference", "configured reference"))
+            )
+            _kp_model_print(
+                f"  plot bands RMS vs {reference}: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV "
+                f"(bands={bands}, align={align})",
+                style="metric",
+            )
             if plot_comparison.get("model_alignment_shift_meV") is not None:
-                _kp_model_print(f"  plot alignment shift: {float(plot_comparison['model_alignment_shift_meV']):.3f} meV", style="metric")
+                _kp_model_print(
+                    f"  plot alignment shift vs {reference}: "
+                    f"{float(plot_comparison['model_alignment_shift_meV']):.3f} meV",
+                    style="metric",
+                )
         all_band_comparison = results.get("all_band_plot_comparison")
         if all_band_comparison:
             rms_mev = float(
@@ -2431,29 +2462,93 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
             bands = int(all_band_comparison.get("num_bands", 0))
             align = str(all_band_comparison.get("align", "none"))
-            _kp_model_print(f"  all-band RMS: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV (bands={bands}, align={align})", style="metric")
+            reference = (
+                "current Heff support mask"
+                if all_band_comparison.get("reference") == "current_heff_support_mask"
+                else str(all_band_comparison.get("reference", "configured reference"))
+            )
+            _kp_model_print(
+                f"  all-band RMS vs {reference}: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV "
+                f"(bands={bands}, align={align})",
+                style="metric",
+            )
+        full_heff_comparison = results.get("plot_comparison_vs_full_heff")
+        if full_heff_comparison:
+            rms_mev = float(
+                full_heff_comparison.get(
+                    "rms_error_mev",
+                    1000.0 * float(full_heff_comparison["rms_error"]),
+                )
+            )
+            max_mev = float(
+                full_heff_comparison.get(
+                    "max_abs_error_mev",
+                    1000.0 * float(full_heff_comparison["max_abs_error"]),
+                )
+            )
+            bands = int(full_heff_comparison.get("num_bands", 0))
+            align = str(full_heff_comparison.get("align", "none"))
+            _kp_model_print(
+                f"  plot bands RMS vs original Heff: {rms_mev:.3f} meV, Max: {max_mev:.3f} meV "
+                f"(bands={bands}, align={align})",
+                style="metric",
+            )
+            if full_heff_comparison.get("model_alignment_shift_meV") is not None:
+                _kp_model_print(
+                    "  plot alignment shift vs original Heff: "
+                    f"{float(full_heff_comparison['model_alignment_shift_meV']):.3f} meV",
+                    style="metric",
+                )
         if model_cfg is None:
             raise RuntimeError("standalone export requires configured model results")
         from .model.export import export_standalone_model
 
-        standalone_dir = Path(model_cfg.output_dir)
-        compiled_runtime = results.get("compiled_operator_runtime")
-        operator_data = (
-            compiled_runtime.export_arrays()
-            if compiled_runtime is not None
-            else None
-        )
-        export_path = export_standalone_model(
-            model_cfg.output_dir,
-            standalone_dir,
-            force=True,
-            debug_files=False,
-            operator_data=operator_data,
-        )
-        if _config_path_uses_canonical_case(args.config):
-            _cleanup_canonical_model_output(model_cfg.output_dir)
         reporter.section("Export")
-        _kp_model_print(f"  standalone export: {export_path}", style="path")
+        profile_results = results.get("profile_results")
+        materialized_profiles: list[tuple[str, Mapping[str, Any]]] = []
+        if isinstance(profile_results, Mapping):
+            for family in ("linear", "nonlinear"):
+                family_results = profile_results.get(family)
+                if not isinstance(family_results, Mapping):
+                    continue
+                for quality in ("high", "low"):
+                    profile = family_results.get(quality)
+                    if isinstance(profile, Mapping):
+                        materialized_profiles.append((f"{family}/{quality}", profile))
+            if not materialized_profiles:
+                for profile_name in ("high", "low"):
+                    profile = profile_results.get(profile_name)
+                    if isinstance(profile, Mapping):
+                        materialized_profiles.append((profile_name, profile))
+        if materialized_profiles:
+            for profile_name, profile in materialized_profiles:
+                profile_cfg = profile.get("model_config")
+                if profile_cfg is None:
+                    raise RuntimeError(
+                        f"automatic {profile_name} profile is missing its configured model"
+                    )
+                _kp_model_print(
+                    f"  {profile_name} standalone export: {Path(profile_cfg.output_dir)}",
+                    style="path",
+                )
+        else:
+            standalone_dir = Path(model_cfg.output_dir)
+            compiled_runtime = results.get("compiled_operator_runtime")
+            operator_data = (
+                compiled_runtime.export_arrays()
+                if compiled_runtime is not None
+                else None
+            )
+            export_path = export_standalone_model(
+                model_cfg.output_dir,
+                standalone_dir,
+                force=True,
+                debug_files=False,
+                operator_data=operator_data,
+            )
+            if _config_path_uses_canonical_case(args.config):
+                _cleanup_canonical_model_output(model_cfg.output_dir)
+            _kp_model_print(f"  standalone export: {export_path}", style="path")
         reporter.complete(elapsed=time.perf_counter() - started)
     else:
         raise SystemExit(2)

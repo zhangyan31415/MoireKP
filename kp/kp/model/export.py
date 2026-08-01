@@ -172,14 +172,35 @@ def _build_standalone_export(
     dim = sum(int(block["dim"]) for block in basis_blocks)
     exactified = _load_exactified_matrices(model_config, dim)
     semantic_terms, runtime_terms = _runtime_terms_from_active_terms(active_terms, moire_config)
-    if operator_data is None:
-        resolved_operator_data = _expand_operator_recipe(runtime_terms, moire_config, dim)
+    response_semantics = "legacy_frozen_v1"
+    frozen_response_data: dict[str, np.ndarray] | None = None
+    if operator_data is not None and "response_semantics" in operator_data:
+        response_semantics = str(np.asarray(operator_data["response_semantics"]).item())
+    if response_semantics == "complete_linear_v2":
+        from .response_basis import CompiledResponseRuntime
+
+        frozen_runtime = CompiledResponseRuntime.from_frozen_arrays(operator_data or {})
+        if int(frozen_runtime.basis.dim) != int(dim):
+            raise ValueError(
+                "complete_linear_v2 frozen basis dimension does not match the configured model: "
+                f"{frozen_runtime.basis.dim} != {dim}"
+            )
+        frozen_response_data = {
+            str(key): np.asarray(value)
+            for key, value in (operator_data or {}).items()
+        }
+        resolved_operator_data = None
+    elif response_semantics == "legacy_frozen_v1":
+        if operator_data is None:
+            resolved_operator_data = _expand_operator_recipe(runtime_terms, moire_config, dim)
+        else:
+            resolved_operator_data = validate_operator_recipe(
+                operator_data,
+                dim=dim,
+                term_count=len(runtime_terms),
+            )
     else:
-        resolved_operator_data = validate_operator_recipe(
-            operator_data,
-            dim=dim,
-            term_count=len(runtime_terms),
-        )
+        raise ValueError(f"unsupported response_semantics in standalone operator data: {response_semantics!r}")
 
     reference_eigvals = _load_required_array(model_output / "eigvals.npy", "model reference eigenvalues")
     reference_kpoints = np.asarray(moire_config.kpoints, dtype=float)
@@ -192,6 +213,15 @@ def _build_standalone_export(
     reference_heff_eig = None
     if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
         reference_heff_eig = np.load(model_config.heff_eig_file, allow_pickle=False)
+    current_support_eig_path = model_output / "current_heff_support_eigvals.npy"
+    reference_current_support_eig = None
+    if current_support_eig_path.exists():
+        reference_current_support_eig = np.load(current_support_eig_path, allow_pickle=False)
+        if reference_current_support_eig.shape != reference_eigvals.shape:
+            raise ValueError(
+                "current-support/model reference eigvals shape mismatch: "
+                f"{reference_current_support_eig.shape} vs {reference_eigvals.shape}"
+            )
 
     run_summary = _load_json_if_exists(model_output / "run_summary.json")
     if not isinstance(run_summary, Mapping):
@@ -212,25 +242,28 @@ def _build_standalone_export(
         comparison_plot,
         reference_heff_eig is not None,
         reference_heff_eig_shape=None if reference_heff_eig is None else tuple(reference_heff_eig.shape),
+        has_current_support_eig=reference_current_support_eig is not None,
+        reference_current_support_eig_shape=(
+            None
+            if reference_current_support_eig is None
+            else tuple(reference_current_support_eig.shape)
+        ),
     )
+    if validation["reference_kind"] == "current_heff_support_mask" and reference_current_support_eig is None:
+        raise ValueError(
+            "standalone export requires current_heff_support_eigvals.npy when validation "
+            "uses current_heff_support_mask"
+        )
 
     model_data: dict[str, np.ndarray] = {
         "qset1": qsets["qset1"],
         "qset2": qsets["qset2"],
         "qset_layer1": qsets["qset1"],
         "qset_layer2": qsets["qset2"],
-        "operator_term_index": resolved_operator_data["term_index"],
-        "operator_row": resolved_operator_data["row"],
-        "operator_col": resolved_operator_data["col"],
-        "operator_mz": resolved_operator_data["mz"],
-        "operator_mz_star": resolved_operator_data["mz_star"],
-        "operator_q_center": resolved_operator_data["q_center"],
-        "operator_prefactor_real": resolved_operator_data["prefactor_real"],
-        "operator_prefactor_imag": resolved_operator_data["prefactor_imag"],
-        "dynamic_hermitization_term_index": resolved_operator_data["dynamic_hermitization_term_index"],
         "term_r_value_real": np.asarray([float(term["r_value_real"]) for term in semantic_terms], dtype=float),
         "term_r_value_imag": np.asarray([float(term["r_value_imag"]) for term in semantic_terms], dtype=float),
         "dimension_dim": np.asarray(dim, dtype=np.int64),
+        "response_semantics": np.asarray(response_semantics),
         "runtime_hermitianize_before_eigvalsh": np.asarray(True, dtype=np.bool_),
         "reference_kpoints": reference_kpoints,
         "reference_eigvals": np.asarray(reference_eigvals, dtype=float),
@@ -243,6 +276,31 @@ def _build_standalone_export(
         "basis_block_n_orb": basis_metadata["basis_block_n_orb"],
         "model_reciprocal_basis": reciprocal_basis,
     }
+    fit_method = run_summary.get("fit_method")
+    if isinstance(fit_method, Mapping) and fit_method:
+        model_data["fit_method_json"] = np.asarray(
+            json.dumps(_json_safe(fit_method), sort_keys=True, allow_nan=False)
+        )
+    if response_semantics == "complete_linear_v2":
+        assert frozen_response_data is not None
+        model_data.update(frozen_response_data)
+    else:
+        assert resolved_operator_data is not None
+        model_data.update(
+            {
+                "operator_term_index": resolved_operator_data["term_index"],
+                "operator_row": resolved_operator_data["row"],
+                "operator_col": resolved_operator_data["col"],
+                "operator_mz": resolved_operator_data["mz"],
+                "operator_mz_star": resolved_operator_data["mz_star"],
+                "operator_q_center": resolved_operator_data["q_center"],
+                "operator_prefactor_real": resolved_operator_data["prefactor_real"],
+                "operator_prefactor_imag": resolved_operator_data["prefactor_imag"],
+                "dynamic_hermitization_term_index": resolved_operator_data[
+                    "dynamic_hermitization_term_index"
+                ],
+            }
+        )
     for key in PROJECTION_ARTIFACT_IDENTITY_FIELDS:
         if key in model_config.artifact_identity:
             model_data[key] = np.asarray(model_config.artifact_identity[key])
@@ -250,6 +308,11 @@ def _build_standalone_export(
         model_data[f"exactified_{name}"] = matrix
     if reference_heff_eig is not None:
         model_data["reference_heff_eig"] = np.asarray(reference_heff_eig, dtype=float)
+    if reference_current_support_eig is not None:
+        model_data["reference_current_heff_support_eigvals"] = np.asarray(
+            reference_current_support_eig,
+            dtype=float,
+        )
 
     operations = _portable_operations(model_config, exactified)
     coordinate_payload = _resolve_standalone_kpath_metadata(model_output, model_config, moire_config)
@@ -258,6 +321,7 @@ def _build_standalone_export(
     model_json = {
         "schema_version": SCHEMA_VERSION,
         "exporter_version": EXPORTER_VERSION,
+        "response_semantics": response_semantics,
         "model_id": model_id,
         "model_name": model_id,
         "material": {"name": str(model_config.source_raw.get("material", {}).get("name", ""))},
@@ -293,17 +357,29 @@ def _build_standalone_export(
         "energy_reference": _energy_reference(validation),
         "runtime": {"hermitianize_before_eigvalsh": True},
         "p_match_tolerance": P_MATCH_TOLERANCE,
-        "runtime_recipe": {
-            "array_file": "model_data.npz",
-            "kind": "preexpanded_global_z_zstar_polynomial",
-            "formula": (
-                "H[row,col] += r_real[t] * prefactor_real[c] * z(k)**mz[c] * z*(k)**mz_star[c] "
-                "+ r_imag[t] * prefactor_imag[c] * z(k)**mz[c] * z*(k)**mz_star[c]"
-            ),
-        },
+        "runtime_recipe": (
+            {
+                "array_file": "model_data.npz",
+                "kind": "compiled_response_basis_global_dimensionless_polynomial_v2",
+                "formula": (
+                    "u=(k-origin)/scale; w=u_x+i*u_y; "
+                    "H[row,col] += coefficient[channel] * value * w**r * conjugate(w)**s"
+                ),
+            }
+            if response_semantics == "complete_linear_v2"
+            else {
+                "array_file": "model_data.npz",
+                "kind": "preexpanded_global_z_zstar_polynomial",
+                "formula": (
+                    "H[row,col] += r_real[t] * prefactor_real[c] * z(k)**mz[c] * z*(k)**mz_star[c] "
+                    "+ r_imag[t] * prefactor_imag[c] * z(k)**mz[c] * z*(k)**mz_star[c]"
+                ),
+            }
+        ),
         "terms": semantic_terms,
         "operations": operations,
         "validation": validation,
+        "fit_method": _json_safe(fit_method) if isinstance(fit_method, Mapping) else None,
         "hashes": {
             "active_terms_sha256": hashlib.sha256(active_terms_text.encode("utf-8")).hexdigest(),
             "model_data_arrays": array_hashes,
@@ -459,9 +535,56 @@ def _resolve_standalone_kpath_metadata(model_output: Path, model_config: Any, mo
             if resolved is not None:
                 return resolved
 
+    lattice_default = _standalone_payload_from_lattice_default(
+        model_config,
+        moire_config,
+    )
+    if lattice_default is not None:
+        return lattice_default
+
     raise ValueError(
         "standalone export requires explicit coordinate convention, high_symmetry_points, and default_kpath "
         f"for {model_config.path}; add standalone_export.yaml near the model config or a complete kpath section"
+    )
+
+
+def _standalone_payload_from_lattice_default(
+    model_config: Any,
+    moire_config: Any,
+) -> dict[str, Any] | None:
+    """Return the canonical model-basis path for a supported lattice."""
+
+    valley_model = getattr(model_config, "valley_model", {})
+    if not isinstance(valley_model, Mapping):
+        return None
+    if str(valley_model.get("lattice", "")).strip().lower() != "hexagonal":
+        return None
+    kpath_config = getattr(model_config, "kpath_config", {})
+    if not isinstance(kpath_config, Mapping):
+        kpath_config = {}
+    coord = {
+        "type": "fractional_model_basis",
+        "k_units": "fractional coordinates in bM1/bM2 basis",
+        "q_units": "same as k",
+        "hsp_coordinates_are": "fractional_model_basis",
+    }
+    hsp = {
+        "G": [0.0, 0.0],
+        "M": [0.5, 0.0],
+        "K": [1.0 / 3.0, 1.0 / 3.0],
+    }
+    points_per_segment = kpath_config.get(
+        "points_per_segment",
+        kpath_config.get("segment_points", 80),
+    )
+    return _normalise_standalone_kpath_payload(
+        coord,
+        hsp,
+        ["G", "M", "K", "G"],
+        points_per_segment,
+        getattr(model_config, "band_slice", None),
+        moire_config,
+        source="automatic hexagonal model-basis path",
     )
 
 
@@ -1455,6 +1578,8 @@ def _validation_summary(
     has_heff_eig: bool,
     *,
     reference_heff_eig_shape: Sequence[int] | None = None,
+    has_current_support_eig: bool = False,
+    reference_current_support_eig_shape: Sequence[int] | None = None,
 ) -> dict[str, Any]:
     comparison_record = comparison_plot if isinstance(comparison_plot, Mapping) else comparison
     if not isinstance(comparison_record, Mapping):
@@ -1464,11 +1589,20 @@ def _validation_summary(
     kpoint_count = comparison_record.get("num_kpoints")
     rms_mev = comparison_record.get("rms_error_mev", comparison_record.get("aligned_rms_error_meV"))
     max_mev = comparison_record.get("max_abs_error_mev", comparison_record.get("aligned_max_abs_error_meV"))
-    reference_arrays = {"eigvals": "model_data.npz:reference_eigvals"}
+    reference_arrays = {"model_eigvals": "model_data.npz:reference_eigvals"}
+    if has_current_support_eig:
+        reference_arrays["primary_current_heff_support_eigvals"] = (
+            "model_data.npz:reference_current_heff_support_eigvals"
+        )
     if has_heff_eig:
-        reference_arrays["heff_eig"] = "model_data.npz:reference_heff_eig"
+        reference_arrays["secondary_original_heff_eigvals"] = "model_data.npz:reference_heff_eig"
     summary: dict[str, Any] = {
-        "reference_kind": str(comparison_record.get("reference_kind", "packaged_reference_eigvals")),
+        "reference_kind": str(
+            comparison_record.get(
+                "reference",
+                comparison_record.get("reference_kind", "packaged_reference_eigvals"),
+            )
+        ),
         "band_window": None if band_window is None else [int(x) for x in band_window],
         "compared_band_count": None if compared_band_count is None else int(compared_band_count),
         "kpoint_count": None if kpoint_count is None else int(kpoint_count),
@@ -1477,6 +1611,11 @@ def _validation_summary(
         "max_error_mev": None if max_mev is None else float(max_mev),
         "reference_arrays": reference_arrays,
         "reference_heff_eig_shape": None if reference_heff_eig_shape is None else [int(x) for x in reference_heff_eig_shape],
+        "reference_current_support_eig_shape": (
+            None
+            if reference_current_support_eig_shape is None
+            else [int(x) for x in reference_current_support_eig_shape]
+        ),
         "is_full_tapw_validation": False,
     }
     if isinstance(comparison, Mapping):
@@ -2016,11 +2155,8 @@ def _render_validation_section(model: Mapping[str, Any]) -> str:
     if not isinstance(comparison, Mapping):
         comparison = {}
     reference_source = str(comparison.get("reference_source", comparison.get("source", "not recorded")))
-    reference_note = (
-        "archived `reference_eigvals` shipped in `model_data.npz`; original source is not separately recorded"
-        if reference_source == "not recorded"
-        else reference_source
-    )
+    reference_arrays = validation.get("reference_arrays", {})
+    reference_note = reference_source if reference_source != "not recorded" else str(reference_arrays)
     band_slice = comparison.get("band_slice", "not recorded")
     num_bands = comparison.get("num_bands", "not recorded")
     num_kpoints = comparison.get("num_kpoints", "not recorded")
@@ -2065,6 +2201,89 @@ def _render_model_doc(model: Mapping[str, Any], model_data: Mapping[str, np.ndar
     operations_text = _operation_names_text(model)
     operation_table = _render_operation_table(model)
     symmetry_rules = _render_symmetry_reconstruction(model, model_data or {}, include_q_permutation=False)
+    response_semantics = str(model.get("response_semantics", "legacy_frozen_v1"))
+    fit_method = model.get("fit_method")
+    if isinstance(fit_method, Mapping) and fit_method:
+        fit_lines = [
+            "## Fit Method",
+            "",
+            f"- Method: `{fit_method.get('method')}`",
+            f"- Hamiltonian k-point rows: `{fit_method.get('hamiltonian_kpoints')}`",
+            f"- Requested bands: `{fit_method.get('requested_bands')}`",
+            f"- One-sided / two-sided weights: `{fit_method.get('one_sided_weight')}` / `{fit_method.get('two_sided_weight')}`",
+        ]
+        if str(fit_method.get("method")) == "nonlinear":
+            fit_lines.extend(
+                [
+                    f"- Band k-point rows: `{fit_method.get('band_kpoints')}`",
+                    f"- Band-loss weight: `{fit_method.get('band_loss_weight')}`",
+                    f"- Maximum steps: `{fit_method.get('max_steps')}`",
+                ]
+            )
+        fit_section = "\n".join(fit_lines) + "\n\n"
+    else:
+        fit_section = ""
+    if response_semantics == "complete_linear_v2":
+        runtime_recipe_text = r"""The exported Hamiltonian consumes the frozen compiled response basis directly:
+
+$$
+u=(k-k_0)/k_\star,\qquad w=u_x+i u_y,
+$$
+
+$$
+H(k)=\sum_j c_j\sum_{r,s} B_{j,rs}w^r\bar w^s.
+$$
+
+`basis_entry_channel` selects response channel $j$; `basis_entry_monomial`
+selects $(r,s)$ from the coordinate metadata; `basis_entry_row/col/value`
+stores the sparse matrix coefficient $B_{j,rs}$; and
+`fitted_coefficients` stores $c_j$. The runtime does not regenerate or dynamically Hermitianize terms."""
+        files_description = (
+            "compiled response-basis arrays, fitted coefficients, exactified symmetry matrices, "
+            "and compact reference arrays"
+        )
+        term_runtime_note = (
+            "The semantic term list records the seeds from which the frozen compiled basis was built. "
+            "Editing it does not change `basis_entry_*`; perform a complete refit and re-export instead."
+        )
+        folded_runtime_arrays = "the frozen `basis_entry_*` response arrays"
+        limitations_runtime_note = (
+            "runtime evaluation uses the frozen `basis_entry_*` arrays and never calls the compiler"
+        )
+    else:
+        runtime_recipe_text = r"""The exported Hamiltonian is evaluated by category:
+
+$$
+H_X(k)=
+\sum_{t\in T_X}
+\sum_{c\in C_t}
+\left[
+r_t^R P_c^R+r_t^I P_c^I
+\right]
+\phi_c(k)|i_c\rangle\langle j_c|.
+$$
+
+$$
+\phi_c(k)=z(k-q_c)^{m_c}\bar z(k-q_c)^{\bar m_c},
+\qquad z(u)=u_x+i u_y.
+$$
+
+Runtime mapping: `operator_term_index -> t`, `operator_row/col -> i_c/j_c`,
+`operator_mz/operator_mz_star -> m_c/\bar m_c`, `operator_q_center -> q_c`,
+and `operator_prefactor_real/imag -> P_c^R/P_c^I`.
+`evaluate.py` combines these arrays with `term_r_value_real` and
+`term_r_value_imag` from `model_data.npz`."""
+        files_description = (
+            "q sets, fitted coefficients, exactified symmetry matrices, operator arrays, "
+            "and compact reference arrays"
+        )
+        term_runtime_note = (
+            "Semantic fields such as `key.Mz`, `key.p`, `operation_names`, and "
+            "`metadata.term_name` explain the source term before export. Editing them does not "
+            "rebuild `operator_*`; re-export with `kp` if the term structure changes."
+        )
+        folded_runtime_arrays = "the pre-expanded `operator_*` arrays"
+        limitations_runtime_note = "runtime evaluation uses the pre-expanded `operator_*` arrays"
     return f"""# Model Description
 
 ## Scope
@@ -2076,12 +2295,11 @@ Standalone NumPy evaluator for `{model['model_id']}`.
 - Spin convention: `{model.get('spin_convention', 'not recorded')}`
 - Dimension: `{dim}`
 - Energy unit: `{model.get('energy_unit', 'eV')}`
+- Response semantics: `{response_semantics}`
 
-Files: `evaluate.py` runs the model; `model_data.npz` stores q sets, fitted
-coefficients, exactified symmetry matrices, operator arrays, and compact
-reference arrays.
+Files: `evaluate.py` runs the model; `model_data.npz` stores {files_description}.
 
-## Basis And Q Sets
+{fit_section}## Basis And Q Sets
 
 Basis order is qset-slot major, then orbital index, then q index:
 
@@ -2113,28 +2331,7 @@ $$
 
 ## Hamiltonian And Runtime Recipe
 
-The exported Hamiltonian is evaluated by category:
-
-$$
-H_X(k)=
-\\sum_{{t\\in T_X}}
-\\sum_{{c\\in C_t}}
-\\left[
-r_t^R P_c^R+r_t^I P_c^I
-\\right]
-\\phi_c(k)|i_c\\rangle\\langle j_c|.
-$$
-
-$$
-\\phi_c(k)=z(k-q_c)^{{m_c}}\\bar z(k-q_c)^{{\\bar m_c}},
-\\qquad z(u)=u_x+i u_y.
-$$
-
-Runtime mapping: `operator_term_index -> t`, `operator_row/col -> i_c/j_c`,
-`operator_mz/operator_mz_star -> m_c/\\bar m_c`, `operator_q_center -> q_c`,
-and `operator_prefactor_real/imag -> P_c^R/P_c^I`.
-`evaluate.py` combines these arrays with `term_r_value_real` and
-`term_r_value_imag` from `model_data.npz`.
+{runtime_recipe_text}
 
 Output bands are `{energy.get('output_bands', 'not recorded')}`.
 Validation alignment is `{energy.get('validation_alignment')}` and is applied
@@ -2144,16 +2341,13 @@ to output bands: `{energy.get('alignment_applied_to_output', False)}`.
 
 Active term counts: {count_text}; total `{len(terms)}`.
 Kinetic (`"Kinect"` tag) terms, `Onsite`, `intra`, and `inter`
-terms share the same runtime recipe. Semantic fields such as `key.Mz`,
-`key.p`, `operation_names`, and `metadata.term_name` explain the source term
-before export. Editing them does not rebuild `operator_*`; re-export with `kp`
-if the term structure changes.
+terms share the same runtime recipe. {term_runtime_note}
 
 ## Symmetry
 
 Production operations: {operations_text}. The standalone evaluator does not
 apply these operations dynamically; their effects are already folded into
-`operator_*`.
+{folded_runtime_arrays}.
 
 | Operation | Antiunitary | Matrix | k action | Q action | Sector map |
 | --- | --- | --- | --- | --- | --- |
@@ -2174,6 +2368,7 @@ For this exported model, the actual nonzero \\(\\rho_g\\) rules are:
 ## Validation
 
 - Reference kind: `{validation.get('reference_kind')}`
+- Reference arrays: `{validation.get('reference_arrays')}`
 - Band window: `{validation.get('band_window')}`
 - Compared bands: `{validation.get('compared_band_count')}`
 - K points: `{validation.get('kpoint_count')}`
@@ -2189,7 +2384,7 @@ invented during export.
 
 This package uses the current two-qset KP core. Custom k-points must use the
 recorded coordinate convention. Exactified matrices are included for diagnostics;
-runtime evaluation uses the pre-expanded `operator_*` arrays. The default
+{limitations_runtime_note}. The default
 `MODEL.md` includes compact nonzero block rules needed to reconstruct
 the exported symmetry matrices. Use `debug_files=True` only for separated
 developer-facing metadata files.
@@ -2280,6 +2475,51 @@ class StandaloneModel:
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.data = np.load(self.root / "model_data.npz", allow_pickle=False)
+        self.response_semantics = (
+            str(np.asarray(self.data["response_semantics"]).item())
+            if "response_semantics" in self.data.files
+            else "legacy_frozen_v1"
+        )
+        self.dim = int(np.asarray(self.data["dimension_dim"]).item())
+        self.hermitianize_before_eigvalsh = bool(
+            np.asarray(self.data["runtime_hermitianize_before_eigvalsh"]).item()
+        )
+        if self.response_semantics == "complete_linear_v2":
+            self._required = [
+                "basis_metadata_json",
+                "basis_entry_channel",
+                "basis_entry_monomial",
+                "basis_entry_row",
+                "basis_entry_col",
+                "basis_entry_value",
+                "fitted_coefficients",
+            ]
+            missing = [key for key in self._required if key not in self.data.files]
+            if missing:
+                raise KeyError(f"model_data.npz is missing complete-response keys: {{missing}}")
+            metadata = json.loads(str(np.asarray(self.data["basis_metadata_json"]).item()))
+            coordinate = metadata["coordinate"]
+            self.response_origin = np.asarray(coordinate["origin"], dtype=float)
+            self.response_scale = float(coordinate["scale"])
+            self.response_monomials = np.asarray(coordinate["monomials"], dtype=np.int64)
+            self.response_coefficients = np.asarray(self.data["fitted_coefficients"], dtype=float)
+            entry_arrays = [
+                np.asarray(self.data[name])
+                for name in (
+                    "basis_entry_channel",
+                    "basis_entry_monomial",
+                    "basis_entry_row",
+                    "basis_entry_col",
+                    "basis_entry_value",
+                )
+            ]
+            if len({{array.size for array in entry_arrays}}) != 1:
+                raise ValueError("complete-response frozen entry arrays have inconsistent lengths")
+            if self.response_origin.shape != (2,) or self.response_scale <= 0.0:
+                raise ValueError("invalid complete-response polynomial coordinate metadata")
+            return
+        if self.response_semantics != "legacy_frozen_v1":
+            raise ValueError(f"unsupported response_semantics: {{self.response_semantics!r}}")
         self._required = [
             "dimension_dim",
             "operator_term_index",
@@ -2297,12 +2537,8 @@ class StandaloneModel:
         missing = [key for key in self._required if key not in self.data.files]
         if missing:
             raise KeyError(f"model_data.npz is missing runtime keys: {{missing}}")
-        self.dim = int(np.asarray(self.data["dimension_dim"]).item())
         self.r_real = np.asarray(self.data["term_r_value_real"], dtype=float)
         self.r_imag = np.asarray(self.data["term_r_value_imag"], dtype=float)
-        self.hermitianize_before_eigvalsh = bool(
-            np.asarray(self.data["runtime_hermitianize_before_eigvalsh"]).item()
-        )
         term_index = np.asarray(self.data["operator_term_index"], dtype=np.int64)
         if self.r_real.shape != self.r_imag.shape or self.r_real.ndim != 1:
             raise ValueError("term_r_value_real and term_r_value_imag must be one-dimensional arrays of equal shape")
@@ -2313,6 +2549,23 @@ class StandaloneModel:
         k = np.asarray(k, dtype=float)
         if k.shape != (2,):
             raise ValueError(f"k must have shape (2,), got {{k.shape}}")
+        if self.response_semantics == "complete_linear_v2":
+            channel = np.asarray(self.data["basis_entry_channel"], dtype=np.int64)
+            monomial_index = np.asarray(self.data["basis_entry_monomial"], dtype=np.int64)
+            rows = np.asarray(self.data["basis_entry_row"], dtype=np.int64)
+            cols = np.asarray(self.data["basis_entry_col"], dtype=np.int64)
+            values = np.asarray(self.data["basis_entry_value"], dtype=np.complex128)
+            exponents = self.response_monomials[monomial_index]
+            u = (k - self.response_origin) / self.response_scale
+            w = u[0] + 1j * u[1]
+            monomial = (w ** exponents[:, 0]) * (np.conjugate(w) ** exponents[:, 1])
+            h = np.zeros((self.dim, self.dim), dtype=np.complex128)
+            np.add.at(
+                h,
+                (rows, cols),
+                self.response_coefficients[channel] * values * monomial,
+            )
+            return h
         term_index = np.asarray(self.data["operator_term_index"], dtype=np.int64)
         rows = np.asarray(self.data["operator_row"], dtype=np.int64)
         cols = np.asarray(self.data["operator_col"], dtype=np.int64)

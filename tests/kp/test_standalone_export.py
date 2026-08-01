@@ -11,6 +11,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 import yaml
+from scipy import sparse
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -22,13 +23,50 @@ from kp.model.export import (  # noqa: E402
     _expand_operator_recipe,
     _iter_transformed_sparse_entries,
     _load_exactified_matrices,
+    _resolve_standalone_kpath_metadata,
     _runtime_terms_from_active_terms,
     _standalone_payload_from_kpath_config,
+    _validation_summary,
     export_all_standalone_models,
     export_standalone_model,
 )
 from kp.model.pipeline import _term_to_release_dict, build_moire_config_from_file, run_configured_model  # noqa: E402
+from kp.model.response_basis import (  # noqa: E402
+    CompiledResponseBasis,
+    CompiledResponseRuntime,
+    PolynomialCoordinateBasis,
+    RawPolynomialSeed,
+    compile_candidate_responses,
+    identity_finite_group,
+)
 from kp.identity import hash_array  # noqa: E402
+
+
+def test_standalone_validation_preserves_comparison_target_separately_from_alignment() -> None:
+    comparison = {
+        "reference": "current_heff_support_mask",
+        "rms_error_mev": 1.25,
+        "max_abs_error_mev": 2.5,
+        "num_bands": 6,
+        "num_kpoints": 61,
+        "align": "top",
+    }
+
+    summary = _validation_summary(
+        comparison,
+        comparison,
+        False,
+        has_current_support_eig=True,
+        reference_current_support_eig_shape=(61, 152),
+    )
+
+    assert summary["reference_kind"] == "current_heff_support_mask"
+    assert summary["alignment"] == "top"
+    assert summary["reference_arrays"]["model_eigvals"] == "model_data.npz:reference_eigvals"
+    assert summary["reference_arrays"]["primary_current_heff_support_eigvals"] == (
+        "model_data.npz:reference_current_heff_support_eigvals"
+    )
+    assert summary["reference_current_support_eig_shape"] == [61, 152]
 
 
 def _write_symm_frame_manifest(
@@ -133,7 +171,7 @@ def _write_export_fixture(
         "config_hash": "config-fixture",
         "basis_hash": "basis-fixture",
         "package_version": "0.1.0",
-        "schema_version": 1,
+        "schema_version": 2,
         "k_indices_hash": hash_array(np.arange(len(kpoints), dtype=np.int64)),
         "heff_hash": hash_array(heff),
     }
@@ -259,6 +297,34 @@ def test_standalone_export_does_not_require_or_write_license(tmp_path: Path) -> 
     assert not (out_dir / "LICENSE").exists()
 
 
+def test_standalone_export_freezes_current_support_primary_reference(tmp_path: Path) -> None:
+    model_output, cfg_path = _write_export_fixture(tmp_path)
+    out_dir = tmp_path / "standalone"
+
+    export_standalone_model(model_output, out_dir)
+
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    heff_path = cfg_path.parent / raw["project"].get(
+        "heff_file",
+        f"../outputs/{raw['case']['profile']}/{raw['case']['q_shell']}/projection/heff.npy",
+    )
+    expected = np.linalg.eigvalsh(np.load(heff_path.resolve()))
+    with np.load(out_dir / "model_data.npz", allow_pickle=False) as data:
+        assert "reference_current_heff_support_eigvals" in data.files
+        np.testing.assert_allclose(data["reference_current_heff_support_eigvals"], expected)
+    model_doc = (out_dir / "MODEL.md").read_text(encoding="utf-8")
+    assert "current_heff_support_mask" in model_doc
+    assert "reference_current_heff_support_eigvals" in model_doc
+
+
+def test_standalone_export_fails_closed_without_current_support_primary_reference(tmp_path: Path) -> None:
+    model_output, _cfg_path = _write_export_fixture(tmp_path)
+    (model_output / "current_heff_support_eigvals.npy").unlink()
+
+    with pytest.raises(ValueError, match="requires current_heff_support_eigvals.npy"):
+        export_standalone_model(model_output, tmp_path / "standalone")
+
+
 def test_standalone_export_removes_stale_model_json_in_place(tmp_path: Path) -> None:
     model_output, _cfg_path = _write_export_fixture(tmp_path)
     (model_output / "model.json").write_text('{"stale": true}\n', encoding="utf-8")
@@ -363,6 +429,80 @@ def test_standalone_export_reuses_supplied_operator_recipe(monkeypatch, tmp_path
                 else f"operator_{name}"
             )
             np.testing.assert_array_equal(reused[key], expected)
+
+
+def test_standalone_export_consumes_complete_response_frozen_arrays_without_legacy_recipe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    model_output, _cfg_path = _write_export_fixture(tmp_path)
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=[0.0, 0.0],
+        reciprocal_basis=[[1.0, 0.0], [0.0, 1.0]],
+        max_degree=1,
+    )
+    seeds = [
+        RawPolynomialSeed(
+            "E11",
+            {(0, 0): sparse.csr_matrix(np.diag([1.0, 0.0]).astype(complex))},
+            "diag",
+            {},
+        ),
+        RawPolynomialSeed(
+            "kx_E22",
+            {
+                (1, 0): sparse.csr_matrix(np.diag([0.0, 0.5]).astype(complex)),
+                (0, 1): sparse.csr_matrix(np.diag([0.0, 0.5]).astype(complex)),
+            },
+            "diag",
+            {},
+        ),
+    ]
+    candidates = compile_candidate_responses(
+        seeds,
+        coordinate=coordinate,
+        group=identity_finite_group(2),
+    )
+    basis = CompiledResponseBasis.from_candidates(
+        candidates,
+        identity_payload={"basis_layout": ["q1o1", "q2o1"]},
+        reduce=True,
+    )
+    fit = basis.fit(
+        [[0.0, 0.0], [0.2, 0.0]],
+        np.asarray([np.diag([0.4, 0.0]), np.diag([0.4, 0.06])], dtype=complex),
+        fit_indices=[0, 1],
+        regularization=0.0,
+        band_window=[0, 2],
+    )
+    runtime = CompiledResponseRuntime(basis=basis, fitted=fit)
+
+    def fail_legacy_recipe(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("complete_linear_v2 export entered legacy operator recipe validation")
+
+    monkeypatch.setattr(export_module, "validate_operator_recipe", fail_legacy_recipe)
+    out_dir = tmp_path / "standalone_v2"
+    export_standalone_model(
+        model_output,
+        out_dir,
+        operator_data=runtime.export_arrays(),
+    )
+
+    module = _load_exported_evaluator(out_dir)
+    standalone = module.load_model(out_dir)
+    for kpoint in ([0.0, 0.0], [0.17, -0.08]):
+        np.testing.assert_allclose(
+            standalone.hamiltonian(kpoint),
+            runtime.hamiltonian(kpoint),
+            atol=1.0e-13,
+        )
+    with np.load(out_dir / "model_data.npz", allow_pickle=False) as arrays:
+        assert str(np.asarray(arrays["response_semantics"]).item()) == "complete_linear_v2"
+        assert str(np.asarray(arrays["basis_metadata_json"]).item())
+    model_doc = (out_dir / "MODEL.md").read_text(encoding="utf-8")
+    assert "`complete_linear_v2`" in model_doc
+    assert "`basis_entry_channel`" in model_doc
+    assert "does not regenerate or dynamically Hermitianize terms" in model_doc
 
 
 def test_standalone_export_default_layout_and_user_run(tmp_path: Path) -> None:
@@ -937,11 +1077,27 @@ def test_standalone_export_debug_files_are_opt_in(tmp_path: Path) -> None:
     assert not (debug_dir / "debug" / "arrays").exists()
 
 
-def test_standalone_export_requires_explicit_kpath_metadata(tmp_path: Path) -> None:
-    model_output, _cfg_path = _write_export_fixture(tmp_path, standalone_override=False)
+def test_standalone_export_requires_explicit_kpath_for_unknown_lattice(
+    tmp_path: Path,
+) -> None:
+    model_config = SimpleNamespace(
+        path=tmp_path / "case.yaml",
+        raw={},
+        kpath_config={},
+        valley_model={"lattice": "unknown"},
+        band_slice=None,
+    )
+    moire_config = SimpleNamespace(
+        bM1=np.array([1.0, 0.0]),
+        bM2=np.array([0.0, 1.0]),
+    )
 
     with pytest.raises(ValueError, match="standalone export requires explicit coordinate convention"):
-        export_standalone_model(model_output, tmp_path / "standalone")
+        _resolve_standalone_kpath_metadata(
+            tmp_path / "model",
+            model_config,
+            moire_config,
+        )
 
 
 def test_standalone_export_converts_inline_kpath_to_fractional_model_basis(tmp_path: Path) -> None:
@@ -977,6 +1133,38 @@ def test_standalone_export_converts_inline_kpath_to_fractional_model_basis(tmp_p
     assert payload["coordinate_convention"]["source"] == "inline kpath coordinates"
 
 
+def test_standalone_export_infers_canonical_hexagonal_model_path(tmp_path: Path) -> None:
+    model_config = SimpleNamespace(
+        path=tmp_path / "case.yaml",
+        raw={},
+        kpath_config={},
+        valley_model={"lattice": "hexagonal"},
+        band_slice=[34, 38],
+    )
+    moire_config = SimpleNamespace(
+        bM1=np.array([2.0, 0.0]),
+        bM2=np.array([-1.0, np.sqrt(3.0)]),
+    )
+
+    payload = _resolve_standalone_kpath_metadata(
+        tmp_path / "model",
+        model_config,
+        moire_config,
+    )
+
+    assert payload["default_kpath"] == ["G", "M", "K", "G"]
+    assert payload["high_symmetry_points"] == {
+        "G": [0.0, 0.0],
+        "M": [0.5, 0.0],
+        "K": [1.0 / 3.0, 1.0 / 3.0],
+    }
+    assert payload["points_per_segment"] == 80
+    assert payload["default_band_slice"] == [34, 38]
+    assert payload["coordinate_convention"]["source"] == (
+        "automatic hexagonal model-basis path"
+    )
+
+
 def test_standalone_export_is_deterministic(tmp_path: Path) -> None:
     model_output, _cfg_path = _write_export_fixture(tmp_path)
     out_a = tmp_path / "standalone_a"
@@ -1001,6 +1189,9 @@ def test_export_all_standalone_models_dry_run_reports_blockers(tmp_path: Path) -
         case_id="toy_blocked",
         standalone_override=False,
     )
+    blocked_raw = yaml.safe_load(_blocked_cfg.read_text(encoding="utf-8"))
+    blocked_raw["valley_model"]["lattice"] = "unknown"
+    _blocked_cfg.write_text(yaml.safe_dump(blocked_raw, sort_keys=False), encoding="utf-8")
     examples_root = tmp_path
     output_root = tmp_path / "exports"
 
@@ -1010,7 +1201,7 @@ def test_export_all_standalone_models_dry_run_reports_blockers(tmp_path: Path) -
     assert any(Path(row["model_output_dir"]) == ok_output for row in report["exportable"])
     blocked = [row for row in report["blocked"] if Path(row["model_output_dir"]) == blocked_output]
     assert blocked
-    assert "coordinate convention" in blocked[0]["reason"]
+    assert "Only lattice=hexagonal" in blocked[0]["reason"]
 
 
 def test_cli_model_export_standalone_subcommand(monkeypatch, tmp_path: Path) -> None:
@@ -1054,6 +1245,7 @@ def test_cli_model_config_exports_standalone_inside_output_dir_by_default(monkey
     model_output = tmp_path / "model_out"
     model_output.mkdir()
     (model_output / "run_summary.json").write_text("{}", encoding="utf-8")
+    (model_output / "band_comparison_vs_full_heff.pdf").write_bytes(b"%PDF-1.4\n")
     calls: dict[str, object] = {}
 
     class FakeModelConfig:
@@ -1098,6 +1290,7 @@ def test_cli_model_config_exports_standalone_inside_output_dir_by_default(monkey
     assert calls["run"] == str(cfg_path)
     assert calls["export"] == (model_output, model_output, True, False)
     assert not (model_output / "run_summary.json").exists()
+    assert (model_output / "band_comparison_vs_full_heff.pdf").exists()
 
 
 def test_cli_model_config_uses_explicit_standalone_export_path(monkeypatch, tmp_path: Path) -> None:

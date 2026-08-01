@@ -52,6 +52,7 @@ from ..plot_style import (
     kp_font_family,
     relative_energy_ylabel,
 )
+from ..reporting import KpReporter
 from ..symmetry.action_schema import SOURCE_MATRIX_SEMANTICS, allows_inferred_action_metadata
 from ..symmetry.geometry import (
     bM_candidates_from_q_distances,
@@ -65,6 +66,7 @@ from .core import (
     SymmetryGenerator,
     _compute_one_k,
     _prepare_band_state,
+    _reduce_and_hermitize_hamiltonian,
     build_model,
     compute_bands,
     compute_coefficients,
@@ -73,6 +75,24 @@ from .core import (
     reciprocal_Tmat_from_Tmat,
     rot,
     setup_logging,
+)
+from .model_selection import (
+    BandWindowMetrics,
+    CandidateScore,
+    FamilyOrders,
+    ModelSelectionConfig,
+    blocked_kpath_folds,
+    build_fixed_band_weights,
+    build_production_candidate_spec,
+    clone_family_vocabulary,
+    high_low_selection_record,
+    parse_model_selection_config,
+    run_local_order_correction_sweep,
+    run_staged_family_selection,
+    select_four_model_profiles,
+    select_high_low_profiles,
+    subspace_overlap_metrics,
+    weighted_band_error,
 )
 
 DEFAULT_MAX_ORDER = {"Kinect": 2, "intra": 0, "inter": 0}
@@ -131,6 +151,13 @@ _MODEL_DEBUG_OUTPUT_FILES = {
     "comparison_plot.json",
 }
 
+_SUPPORTED_MODEL_PROFILES = (
+    "linear/low",
+    "linear/high",
+    "nonlinear/low",
+    "nonlinear/high",
+)
+
 
 @dataclass
 class ConfiguredModel:
@@ -157,6 +184,11 @@ class ConfiguredModel:
     coeff_tol: float
     coeff_prune_threshold: float
     compare_to_heff: bool
+    response_semantics: str = "legacy_frozen_v1"
+    response_regularization: float = 0.0
+    response_fit_objective: dict[str, Any] = field(
+        default_factory=lambda: {"mode": "equal_matrix_v1"}
+    )
     kpath_config: dict[str, Any] = field(default_factory=dict)
     valley_model: dict[str, Any] = field(default_factory=dict)
     symmetry_source_config: dict[str, Any] = field(default_factory=dict)
@@ -169,6 +201,7 @@ class ConfiguredModel:
     band_plot_config: dict[str, Any] = field(default_factory=dict)
     bM_diagnostics: dict[str, Any] = field(default_factory=dict)
     harmonics_diagnostics: dict[str, Any] = field(default_factory=dict)
+    automatic_harmonic_selection: dict[str, Any] = field(default_factory=dict)
     orbital_count_metadata: dict[str, Any] = field(default_factory=dict)
     validation_config: dict[str, Any] = field(default_factory=dict)
     band_refinement_config: dict[str, Any] = field(default_factory=dict)
@@ -177,6 +210,159 @@ class ConfiguredModel:
     artifact_identity: dict[str, Any] = field(default_factory=dict)
     project_k_indices: list[int] = field(default_factory=list)
     kpoints_from_projection: bool = False
+    model_selection_config: ModelSelectionConfig | None = None
+    model_selection_excluded_term_keys: tuple[Any, ...] = ()
+    requested_profiles: tuple[str, ...] = ()
+    fit_weighting: str = "automatic"
+    fit_method_config: dict[str, Any] = field(default_factory=dict)
+
+
+def _canonical_public_fit_method(
+    fit: Mapping[str, Any],
+    *,
+    heff_shape: Sequence[int],
+) -> dict[str, Any]:
+    method_raw = fit.get("method")
+    if method_raw is None:
+        return {}
+    method = str(method_raw).strip().lower()
+    if method not in {"linear", "nonlinear"}:
+        raise ValueError("fit.method must be 'linear' or 'nonlinear'")
+    if method == "linear":
+        nonlinear_only = [
+            key for key in ("band_kpoints", "band_loss_weight", "max_steps") if key in fit
+        ]
+        if nonlinear_only:
+            raise ValueError(
+                f"fit.{nonlinear_only[0]} is only valid for fit.method: nonlinear"
+            )
+    legacy = [
+        key
+        for key in (
+            "mode",
+            "indices",
+            "objective",
+            "refine_bands",
+            "weighting",
+            "model_selection",
+        )
+        if key in fit
+    ]
+    if legacy:
+        raise ValueError(
+            "fit.method cannot be mixed with legacy fit keys: " + ", ".join(legacy)
+        )
+    allowed = {
+        "method",
+        "kpoints",
+        "bands",
+        "one_sided_weight",
+        "two_sided_weight",
+    }
+    if method == "nonlinear":
+        allowed.update({"band_kpoints", "band_loss_weight", "max_steps"})
+    unsupported = sorted(str(key) for key in fit if key not in allowed)
+    if unsupported:
+        raise ValueError(
+            "fit.method does not accept advanced/legacy fit keys: "
+            + ", ".join(unsupported)
+        )
+    if len(heff_shape) != 3 or int(heff_shape[-1]) != int(heff_shape[-2]):
+        raise ValueError(f"fit.method requires Heff with shape (Nk,dim,dim), got {tuple(heff_shape)}")
+    n_kpoints = int(heff_shape[0])
+    dimension = int(heff_shape[-1])
+
+    def checked_indices(value: Any, *, name: str) -> list[int]:
+        if value is None:
+            raise ValueError(f"{name} is required")
+        indices = _as_int_list(value, name=name)
+        if not indices:
+            raise ValueError(f"{name} must be a non-empty list")
+        if len(set(indices)) != len(indices):
+            raise ValueError(f"{name} must contain unique row indices")
+        if any(index < 0 or index >= n_kpoints for index in indices):
+            raise ValueError(f"{name} entries must be in 0..{n_kpoints - 1}")
+        return [int(value) for value in indices]
+
+    hamiltonian_kpoints = checked_indices(fit.get("kpoints"), name="fit.kpoints")
+    requested_bands = int(fit.get("bands", 0))
+    if requested_bands <= 0 or requested_bands > dimension:
+        raise ValueError(
+            f"fit.bands must be positive and not exceed Hamiltonian dimension {dimension}"
+        )
+
+    def checked_weight(key: str, *, positive: bool = False) -> float:
+        if key not in fit:
+            raise ValueError(f"fit.{key} is required")
+        value = float(fit[key])
+        valid = value > 0.0 if positive else value >= 0.0
+        if not np.isfinite(value) or not valid:
+            condition = "positive" if positive else "non-negative"
+            raise ValueError(f"fit.{key} must be finite and {condition}")
+        return value
+
+    one_sided_weight = checked_weight("one_sided_weight")
+    two_sided_weight = checked_weight("two_sided_weight")
+    band_kpoints: list[int] | None = None
+    band_loss_weight: float | None = None
+    max_steps: int | None = None
+    if method == "nonlinear":
+        raw_band_kpoints = fit.get("band_kpoints")
+        if isinstance(raw_band_kpoints, str) and raw_band_kpoints.strip().lower() == "all":
+            band_kpoints = list(range(int(heff_shape[0])))
+        else:
+            band_kpoints = checked_indices(raw_band_kpoints, name="fit.band_kpoints")
+        band_loss_weight = checked_weight("band_loss_weight", positive=True)
+        max_steps = int(fit.get("max_steps", 30))
+        if max_steps <= 0:
+            raise ValueError("fit.max_steps must be positive")
+    return {
+        "method": method,
+        "hamiltonian_kpoints": [int(value) for value in hamiltonian_kpoints],
+        "band_kpoints": band_kpoints,
+        "requested_bands": requested_bands,
+        "one_sided_weight": one_sided_weight,
+        "two_sided_weight": two_sided_weight,
+        "band_loss_weight": band_loss_weight,
+        "max_steps": max_steps,
+        "normalization": "dimension_mean_square_v1",
+    }
+
+
+def _parse_requested_model_profiles(raw_profiles: Any) -> tuple[str, ...]:
+    """Normalize optional public model profile identifiers."""
+
+    if raw_profiles is None:
+        return ()
+    if not isinstance(raw_profiles, Sequence) or isinstance(raw_profiles, (str, bytes)):
+        raise ValueError("model.profiles must be a non-empty list of solver/quality names")
+    profiles = tuple(str(value).strip().lower() for value in raw_profiles)
+    if not profiles:
+        raise ValueError("model.profiles must not be empty")
+    if any(not profile for profile in profiles):
+        raise ValueError("model.profiles entries must not be empty")
+    if len(set(profiles)) != len(profiles):
+        raise ValueError("model.profiles contains duplicate profile names")
+    unsupported = [profile for profile in profiles if profile not in _SUPPORTED_MODEL_PROFILES]
+    if unsupported:
+        raise ValueError(
+            f"unsupported model profile(s) {unsupported}; supported profiles are "
+            f"{list(_SUPPORTED_MODEL_PROFILES)}"
+        )
+    return profiles
+
+
+def _parse_fit_weighting(raw_weighting: Any) -> str:
+    """Normalize the public automatic-fit weighting policy."""
+
+    if raw_weighting in (None, ""):
+        return "automatic"
+    weighting = str(raw_weighting).strip().lower()
+    if weighting == "auto":
+        weighting = "automatic"
+    if weighting not in {"automatic", "uniform"}:
+        raise ValueError("fit.weighting must be 'automatic' or 'uniform'")
+    return weighting
 
 
 def _resolve_path(value: str | Path | None, base: Path) -> Path | None:
@@ -253,6 +439,7 @@ def _resolve_layerwise_counts(
     name: str,
     num_layer_list: Sequence[int],
     default_from: str | None = None,
+    prefer_active_layer_sectors: bool = False,
 ) -> tuple[list[int], dict[str, Any]]:
     raw_values = [int(value) for value in values]
     qset_count = 2
@@ -287,12 +474,17 @@ def _resolve_layerwise_counts(
     groups = _layer_groups_metadata(num_layer_list, raw_values)
     qset_values = [int(group["total"]) for group in groups]
     active_layer_values = [int(value) for value in raw_values if int(value) > 0]
-    resolved_model_sectors = active_layer_values if len(active_layer_values) == qset_count else qset_values
+    resolved_model_sectors = (
+        active_layer_values
+        if prefer_active_layer_sectors and len(active_layer_values) == qset_count
+        else qset_values
+    )
     metadata.update(
         {
             "input_kind": "default_from_n_orb" if default_from is not None else "physical_layer",
             "resolved_qset": list(qset_values),
             "resolved_model_sectors": list(resolved_model_sectors),
+            "prefer_active_layer_sectors": bool(prefer_active_layer_sectors),
             "groups": groups,
         }
     )
@@ -338,6 +530,133 @@ def _model_section(raw: Mapping[str, Any]) -> Mapping[str, Any]:
     return section
 
 
+def _canonical_response_fit_objective(
+    raw_objective: Any,
+    *,
+    response_semantics: str,
+    target_bands: str,
+    default_min_bands: int,
+) -> dict[str, Any]:
+    """Validate the target-dependent complete-response fitting objective."""
+    if raw_objective in (None, {}):
+        return {"mode": "equal_matrix_v1"}
+    if not isinstance(raw_objective, Mapping):
+        raise ValueError("fit.objective must be a mapping when provided")
+    objective = dict(raw_objective)
+    mode = str(objective.get("mode", "equal_matrix_v1")).strip().lower()
+    if mode in {"equal_matrix", "equal_matrix_v1"}:
+        return {"mode": "equal_matrix_v1"}
+    if mode != "target_spectral_linear":
+        raise ValueError(
+            "fit.objective.mode must be 'equal_matrix_v1' or 'target_spectral_linear'"
+        )
+    if response_semantics != "complete_linear_v2":
+        raise ValueError(
+            "fit.objective.mode='target_spectral_linear' requires "
+            "model.response_semantics='complete_linear_v2'"
+        )
+    reference = str(
+        objective.get("target_reference", "current_heff_support_mask")
+    ).strip().lower()
+    if reference != "current_heff_support_mask":
+        raise ValueError(
+            "target_spectral_linear currently requires "
+            "fit.objective.target_reference='current_heff_support_mask'"
+        )
+    edge = str(objective.get("edge", target_bands)).strip().lower()
+    if edge not in {"top", "bottom"}:
+        raise ValueError("fit.objective.edge must be 'top' or 'bottom'")
+    if edge != target_bands:
+        raise ValueError(
+            "fit.objective.edge must match model.target_bands so fitting and validation "
+            "use the same band edge"
+        )
+    window_raw = objective.get("window", {})
+    if not isinstance(window_raw, Mapping):
+        raise ValueError("fit.objective.window must be a mapping")
+    window = dict(window_raw)
+    window_mode = str(
+        window.get("mode", "auto_gap_degeneracy_safe")
+    ).strip().lower()
+    degeneracy_tol_mev = float(window.get("degeneracy_tol_mev", 0.1))
+    if not np.isfinite(degeneracy_tol_mev) or degeneracy_tol_mev < 0.0:
+        raise ValueError("fit.objective.window.degeneracy_tol_mev must be non-negative")
+    if window_mode == "fixed_count_degeneracy_safe":
+        bands = int(window.get("bands", 0))
+        if bands <= 0:
+            raise ValueError(
+                "fit.objective.window.bands must be positive for fixed_count_degeneracy_safe"
+            )
+        canonical_window = {
+            "mode": window_mode,
+            "bands": bands,
+            "degeneracy_tol_mev": degeneracy_tol_mev,
+        }
+    elif window_mode == "auto_gap_degeneracy_safe":
+        min_bands = int(window.get("min_bands", default_min_bands))
+        max_bands = int(window.get("max_bands", max(min_bands, 2 * default_min_bands)))
+        if min_bands <= 0 or max_bands < min_bands:
+            raise ValueError(
+                "fit.objective.window requires 0 < min_bands <= max_bands"
+            )
+        canonical_window = {
+            "mode": window_mode,
+            "min_bands": min_bands,
+            "max_bands": max_bands,
+            "degeneracy_tol_mev": degeneracy_tol_mev,
+        }
+    else:
+        raise ValueError(
+            "fit.objective.window.mode must be 'fixed_count_degeneracy_safe' "
+            "or 'auto_gap_degeneracy_safe'"
+        )
+    floor = float(objective.get("floor", 0.05))
+    alpha = float(objective.get("alpha", 1.0))
+    if not np.isfinite(floor) or not 0.0 < floor <= 1.0:
+        raise ValueError("fit.objective.floor must satisfy 0 < floor <= 1")
+    if not np.isfinite(alpha) or alpha < 0.0:
+        raise ValueError("fit.objective.alpha must be non-negative")
+    normalization = str(
+        objective.get("normalization", "mean_trace_per_dimension_v1")
+    ).strip().lower()
+    if normalization != "mean_trace_per_dimension_v1":
+        raise ValueError(
+            "fit.objective.normalization must be 'mean_trace_per_dimension_v1'"
+        )
+    projector_raw = objective.get("two_sided_projector")
+    projector: dict[str, Any] | None = None
+    if projector_raw is not None:
+        if not isinstance(projector_raw, Mapping):
+            raise ValueError("fit.objective.two_sided_projector must be a mapping")
+        enabled_raw = projector_raw.get("enabled", True)
+        if not isinstance(enabled_raw, (bool, np.bool_)):
+            raise ValueError("fit.objective.two_sided_projector.enabled must be boolean")
+        enabled = bool(enabled_raw)
+        weight = float(projector_raw.get("weight", 0.0))
+        if not np.isfinite(weight) or weight < 0.0:
+            raise ValueError(
+                "fit.objective.two_sided_projector.weight must be finite and non-negative"
+            )
+        if enabled and weight <= 0.0:
+            raise ValueError(
+                "fit.objective.two_sided_projector.weight must be positive when enabled"
+            )
+        if enabled:
+            projector = {"enabled": True, "weight": weight}
+    canonical = {
+        "mode": "target_spectral_linear",
+        "target_reference": reference,
+        "edge": edge,
+        "window": canonical_window,
+        "floor": floor,
+        "alpha": alpha,
+        "normalization": normalization,
+    }
+    if projector is not None:
+        canonical["two_sided_projector"] = projector
+    return canonical
+
+
 def _get_path_value(raw: Mapping[str, Any], key: str) -> Any:
     if key in raw:
         return raw[key]
@@ -347,18 +666,46 @@ def _get_path_value(raw: Mapping[str, Any], key: str) -> Any:
     return None
 
 
-def _infer_n_orb_pair_from_arrays(qset1_file: Path, qset2_file: Path, heff_file: Path) -> list[int]:
-    q1 = np.load(qset1_file, mmap_mode="r")
-    q2 = np.load(qset2_file, mmap_mode="r")
-    heff = np.load(heff_file, mmap_mode="r")
-    if heff.ndim < 2:
-        raise ValueError(f"Cannot infer model.n_orb from heff shape {heff.shape}")
-    dim = int(heff.shape[-1])
-    total_q = int(q1.shape[0]) + int(q2.shape[0])
-    if total_q <= 0 or dim % total_q != 0:
-        raise ValueError(f"Cannot infer model.n_orb: heff dim={dim}, total Q count={total_q}")
-    n_orb = dim // total_q
-    return [int(n_orb), int(n_orb)]
+def _projection_layerwise_orbital_counts(
+    *,
+    heff_file: Path,
+    project: Mapping[str, Any],
+    num_layer_list: Sequence[int],
+) -> tuple[list[int] | None, str | None]:
+    """Return physical-layer orbital counts recorded by the projection step."""
+
+    total_layers = int(sum(int(value) for value in num_layer_list))
+    rows: Any = None
+    source: str | None = None
+    basis_file = heff_file.parent / "basis.npz"
+    if basis_file.is_file():
+        with np.load(basis_file, allow_pickle=True) as basis:
+            if "nlow_state_list" in basis.files:
+                rows = basis["nlow_state_list"].tolist()
+                source = "projection_basis"
+    if rows is None:
+        project_rows = project.get("nlow_state_list")
+        if project_rows not in (None, []):
+            rows = project_rows
+            source = "source_project"
+    if rows is None:
+        return None, None
+    if not isinstance(rows, Sequence) or isinstance(rows, (str, bytes)):
+        raise ValueError(f"projection nlow_state_list must be a sequence, got {type(rows).__name__}")
+    if len(rows) != total_layers:
+        raise ValueError(
+            "projection nlow_state_list must contain one entry per physical layer: "
+            f"expected {total_layers}, got {len(rows)}"
+        )
+    counts: list[int] = []
+    for layer_index, row in enumerate(rows, start=1):
+        if not isinstance(row, Sequence) or isinstance(row, (str, bytes)):
+            raise ValueError(
+                "projection nlow_state_list entries must be band-index lists; "
+                f"layer {layer_index} has {type(row).__name__}"
+            )
+        counts.append(len(row))
+    return counts, source
 
 
 def _default_symmetry_map_from_valley_model(valley_model: Mapping[str, Any]) -> dict[str, list[dict[str, Any]]]:
@@ -1199,6 +1546,9 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     raw = normalize_case_config(_load_yaml(cfg_path), config_path=cfg_path)
     base = cfg_path.parent
     raw = dict(raw)
+    fit_defaulted = "fit" not in raw
+    if fit_defaulted:
+        raw["fit"] = {"mode": "auto_low_energy"}
     validation = raw.get("validation", {})
     if validation is None:
         validation = {}
@@ -1261,6 +1611,8 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         raise ValueError("Failed to resolve output directory")
 
     model_raw = _normalize_model_user_aliases(_model_section(raw))
+    user_explicit_max_order = "max_order" in model_raw
+    user_explicit_max_derivative_order = "max_derivative_order" in model_raw
     valley_model_raw = raw.get("valley_model", {})
     if not isinstance(valley_model_raw, Mapping):
         valley_model_raw = {}
@@ -1272,11 +1624,15 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     if not isinstance(fit_for_defaults, Mapping):
         fit_for_defaults = {}
     auto_low_energy_mode = str(fit_for_defaults.get("mode", "")).strip().lower() == "auto_low_energy"
+    automatic_defaults_meta: dict[str, bool] = {
+        "fit": True,
+    } if fit_defaulted else {}
+    if "harmonics" not in model_raw:
+        automatic_defaults_meta["harmonics"] = True
+    if automatic_defaults_meta:
+        model_raw["automatic_defaults"] = dict(automatic_defaults_meta)
     if auto_low_energy_mode:
         defaults_meta: dict[str, bool] = {}
-        if "harmonics" not in model_raw:
-            model_raw["harmonics"] = {"intra": {"count": 2}, "inter": {"count": 2}}
-            defaults_meta["harmonics"] = True
         if "max_order" not in model_raw and "max_derivative_order" not in model_raw:
             order_defaults = _default_auto_low_energy_order_config(
                 raw.get("valley_model", {}) if isinstance(raw.get("valley_model", {}), Mapping) else {}
@@ -1320,18 +1676,56 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
 
     model = _model_section(raw)
     model_raw = _normalize_model_user_aliases(model)
+    valley_type_for_counts = str(
+        (
+            raw.get("valley_model", {})
+            if isinstance(raw.get("valley_model", {}), Mapping)
+            else {}
+        ).get("valley_type", "")
+    )
+    prefer_active_layer_sectors = valley_type_for_counts in {"K", "M"}
+    projection_n_orb_input, projection_n_orb_source = _projection_layerwise_orbital_counts(
+        heff_file=heff_file,
+        project=project,
+        num_layer_list=num_layer_list,
+    )
+    explicit_n_orb = "n_orb" in model or "n_orb1" in model or "n_orb2" in model
     if "n_orb" in model:
         n_orb_raw = model["n_orb"]
     elif "n_orb1" in model or "n_orb2" in model:
         n_orb_raw = [model.get("n_orb1", 2), model.get("n_orb2", 2)]
+    elif projection_n_orb_input is not None:
+        n_orb_raw = projection_n_orb_input
     else:
-        n_orb_raw = _infer_n_orb_pair_from_arrays(qset1_file, qset2_file, heff_file)
+        raise ValueError(
+            "model.n_orb was omitted, but projection orbital metadata is unavailable; "
+            "rerun kp project to create projection/basis.npz or set model.n_orb explicitly "
+            "for a legacy projection artifact"
+        )
     n_orb_input = _as_int_list(n_orb_raw, name="model.n_orb")
     n_orb_values, n_orb_resolution = _resolve_layerwise_counts(
         n_orb_input,
         name="model.n_orb",
         num_layer_list=num_layer_list,
+        prefer_active_layer_sectors=prefer_active_layer_sectors,
     )
+    if projection_n_orb_input is not None:
+        projection_n_orb_values, _ = _resolve_layerwise_counts(
+            projection_n_orb_input,
+            name="projection nlow_state_list",
+            num_layer_list=num_layer_list,
+            prefer_active_layer_sectors=prefer_active_layer_sectors,
+        )
+        if explicit_n_orb and (
+            n_orb_input != projection_n_orb_input or n_orb_values != projection_n_orb_values
+        ):
+            raise ValueError(
+                "model.n_orb conflicts with projection orbital counts: "
+                f"configured {n_orb_input}, projection {projection_n_orb_input}"
+            )
+        n_orb_resolution["source"] = projection_n_orb_source
+    elif explicit_n_orb:
+        n_orb_resolution["source"] = "model_config"
     nlow_state_default_from_n_orb = "nlow_state" not in model
     nlow_state_input = _as_int_list(model.get("nlow_state", n_orb_input), name="model.nlow_state")
     nlow_state, nlow_state_resolution = _resolve_layerwise_counts(
@@ -1339,6 +1733,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         name="model.nlow_state",
         num_layer_list=num_layer_list,
         default_from="model.n_orb" if nlow_state_default_from_n_orb else None,
+        prefer_active_layer_sectors=prefer_active_layer_sectors,
     )
     if len(n_orb_values) != 2:
         raise ValueError(f"model.n_orb must resolve to two qset counts, got {n_orb_values}")
@@ -1371,14 +1766,72 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     fit = raw.get("fit", {})
     if not isinstance(fit, Mapping):
         raise ValueError("fit section must be a mapping")
-    target_bands = str(model.get("target_bands", raw.get("target_bands", "top"))).strip().lower()
+    heff_shape = tuple(int(value) for value in np.load(heff_file, mmap_mode="r").shape)
+    fit_method_config = _canonical_public_fit_method(fit, heff_shape=heff_shape)
+    if fit_method_config:
+        if (
+            not user_explicit_max_order
+            or not isinstance(model.get("max_order"), Mapping)
+            or not model.get("max_order")
+        ):
+            raise ValueError("fit.method requires explicit model.max_order")
+        if model.get("profiles") is not None:
+            raise ValueError("fit.method cannot be combined with model.profiles")
+        if user_explicit_max_derivative_order:
+            raise ValueError(
+                "fit.method uses model.max_order; remove advanced model.max_derivative_order"
+            )
+    requested_profiles = _parse_requested_model_profiles(model.get("profiles"))
+    fit_weighting = _parse_fit_weighting(fit.get("weighting"))
+    model_selection_config = (
+        None
+        if fit_method_config
+        else parse_model_selection_config(
+            fit.get("model_selection"),
+            maximum_orders=FamilyOrders(
+                kinetic=int(max_order_values.get("Kinect", 0)),
+                intra=int(max_order_values.get("intra", 0)),
+                inter=int(max_order_values.get("inter", 0)),
+            ),
+        )
+    )
+    plot_target = str(plot.get("target", "valence")).strip().lower()
+    default_target_bands = (
+        "bottom"
+        if plot_target in {"conduction", "cbm", "bottom"}
+        else "top"
+    )
+    target_bands = str(
+        model.get(
+            "target_bands",
+            raw.get("target_bands", default_target_bands),
+        )
+    ).strip().lower()
     if target_bands not in {"top", "bottom"}:
         raise ValueError("model.target_bands must be 'top' or 'bottom'")
     model_raw["target_bands"] = target_bands
+    response_semantics = str(
+        "complete_linear_v2"
+        if fit_method_config
+        else model.get("response_semantics", "legacy_frozen_v1")
+    ).strip()
+    if response_semantics not in {"legacy_frozen_v1", "complete_linear_v2"}:
+        raise ValueError(
+            "model.response_semantics must be 'legacy_frozen_v1' or 'complete_linear_v2', "
+            f"got {response_semantics!r}"
+        )
+    model_raw["response_semantics"] = response_semantics
     raw["model"] = model_raw
 
     auto_low_energy_refine_indices: list[int] | None = None
-    if fit.get("indices") is not None:
+    if fit_method_config:
+        fit_indices = [int(value) for value in fit_method_config["hamiltonian_kpoints"]]
+        fit_selection_metadata = {
+            "mode": "manual",
+            "source": "fit.kpoints",
+            "selected_indices": list(fit_indices),
+        }
+    elif fit.get("indices") is not None:
         fit_indices = _as_int_list(fit.get("indices", []), name="fit.indices")
         fit_selection_metadata = {
             "mode": "manual",
@@ -1455,13 +1908,9 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         raise ValueError("bands.plot section must be a mapping when provided")
 
     harmonic_selection_report: dict[str, Any] | None = None
-    harmonic_selection_enabled, harmonic_selection_cfg = _harmonic_selection_options(fit)
-    harmonics_defaulted = bool(model.get("auto_low_energy_defaults", {}).get("harmonics", False))
-    if (
-        str(fit.get("mode", "")).strip().lower() == "auto_low_energy"
-        and harmonics_defaulted
-        and harmonic_selection_enabled
-    ):
+    _, harmonic_selection_cfg = _harmonic_selection_options(fit)
+    harmonics_defaulted = bool(model.get("automatic_defaults", {}).get("harmonics", False))
+    if harmonics_defaulted:
         thresholds_raw = harmonic_selection_cfg.get("thresholds", {})
         if thresholds_raw is None:
             thresholds_raw = {}
@@ -1510,17 +1959,22 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             tol=float(harmonic_selection_cfg.get("tol", 1.0e-6)),
         )
         harmonic_selection_report["sample_indices"] = sample_indices
-        selected_harmonics = harmonic_selection_report["selected"]
-        if bool(harmonic_selection_cfg.get("require_accepted", False)) and not bool(selected_harmonics.get("accepted", False)):
+        quality_selected = _high_accuracy_harmonic_recommendation_candidate(harmonic_selection_report)
+        selected_harmonics = _low_cost_harmonic_recommendation_candidate(harmonic_selection_report)
+        if selected_harmonics is None:
             raise ValueError(
-                "auto_low_energy harmonic selection did not find an accepted support; "
-                f"best status={harmonic_selection_report['selection_status']}"
+                "automatic low-cost harmonic selection found no candidate with "
+                "plot RMS <= 1 meV and mean subspace overlap > 0.9; "
+                "set model.harmonics explicitly or enlarge fit.harmonic_selection.max_shell"
             )
+        harmonic_selection_report["quality_selected"] = quality_selected
+        harmonic_selection_report["selected"] = dict(selected_harmonics)
+        harmonic_selection_report["selection_status"] = "selected_low_cost_relaxed_accuracy"
+        harmonic_selection_report["selection_profile"] = "low_cost"
         model_raw["harmonics"] = {
             "intra": {"count": int(selected_harmonics["intra_shells"])},
             "inter": {"count": int(selected_harmonics["inter_shells"])},
         }
-        model_raw["auto_low_energy_harmonic_selection"] = harmonic_selection_report
         raw["model"] = model_raw
         model = _model_section(raw)
 
@@ -1558,12 +2012,14 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             harmonic_counts=harmonic_count_limits,
             symmetry_operations=template_symmetry_operations,
             sectors=sectors,
+            response_semantics=response_semantics,
         )
         term_template_metadata = _default_term_template_profile_metadata(
             valley_model=valley_model if isinstance(valley_model, Mapping) else {},
             n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
             symmetry_operations=template_symmetry_operations,
             sectors=sectors,
+            response_semantics=response_semantics,
         )
     if not isinstance(term_templates, Sequence) or isinstance(term_templates, (str, bytes)):
         raise ValueError("term_templates must be a list when provided")
@@ -1575,13 +2031,29 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             harmonic_counts=harmonic_count_limits,
             symmetry_operations=template_symmetry_operations,
             sectors=sectors,
+            response_semantics=response_semantics,
         )
         term_template_metadata = _default_term_template_profile_metadata(
             valley_model=valley_model if isinstance(valley_model, Mapping) else {},
             n_orb=(int(n_orb_values[0]), int(n_orb_values[1])),
             symmetry_operations=template_symmetry_operations,
             sectors=sectors,
+            response_semantics=response_semantics,
         )
+    term_templates = [dict(item) for item in term_templates]
+    if response_semantics == "complete_linear_v2":
+        invalid_policies = [
+            str(item.get("name", item.get("source", "term")))
+            for item in term_templates
+            if item.get("term_space_policy")
+            not in {"complete", "explicit_reduced", "orbit_representative"}
+        ]
+        if invalid_policies:
+            raise ValueError(
+                "complete_linear_v2 requires term_space_policy: complete, explicit_reduced, "
+                "or orbit_representative "
+                f"for every template; missing/invalid templates: {invalid_policies}"
+            )
 
     symmetry_source_metadata = {}
     if isinstance(symmetry_source, Mapping) and bool(symmetry_source.get("inferred_from_source_config", False)):
@@ -1598,6 +2070,36 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     null_channel_rel_tol = float(fit.get("null_channel_rel_tol", 0.0))
     if null_channel_rel_tol < 0.0:
         raise ValueError(f"fit.null_channel_rel_tol must be non-negative, got {null_channel_rel_tol}")
+    response_regularization = float(fit.get("regularization", 0.0))
+    if response_regularization < 0.0:
+        raise ValueError(f"fit.regularization must be non-negative, got {response_regularization}")
+    response_fit_objective = _canonical_response_fit_objective(
+        fit.get("objective"),
+        response_semantics=response_semantics,
+        target_bands=target_bands,
+        default_min_bands=max(1, int(sum(n_orb_values))),
+    )
+    if fit_method_config:
+        response_fit_objective = {
+            "mode": "normalized_low_energy_linear_v1",
+            "target_reference": "current_heff_support_mask",
+            "edge": target_bands,
+            "window": {
+                "mode": "fixed_count_degeneracy_safe",
+                "bands": int(fit_method_config["requested_bands"]),
+                "degeneracy_tol_mev": 0.1,
+            },
+            "one_sided_weight": float(fit_method_config["one_sided_weight"]),
+            "two_sided_weight": float(fit_method_config["two_sided_weight"]),
+            "normalization": "dimension_mean_square_v1",
+        }
+    if fit_weighting == "uniform":
+        if response_fit_objective.get("mode") != "equal_matrix_v1":
+            raise ValueError(
+                "fit.weighting='uniform' conflicts with a weighted fit.objective; "
+                "remove fit.objective or use equal_matrix_v1"
+            )
+        response_fit_objective = {"mode": "equal_matrix_v1"}
     output_profile = str(output_section.get("profile", "release")).strip().lower()
     if output_profile in {"", "default"}:
         output_profile = "release"
@@ -1616,22 +2118,30 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
     else:
         raise ValueError("fit.refine_bands must be a mapping or boolean when provided")
     if str(fit.get("mode", "")).strip().lower() == "auto_low_energy":
-        heff_eig_for_windows = (
-            np.load(heff_eig_file)
-            if heff_eig_file is not None and heff_eig_file.exists()
-            else np.linalg.eigvalsh(np.load(heff_file, mmap_mode="r"))
-        )
-        heff_eig_for_windows = _select_rows(heff_eig_for_windows, band_indices)
+        heff_shape = tuple(int(value) for value in np.load(heff_file, mmap_mode="r").shape)
+        if len(heff_shape) != 3 or heff_shape[-1] != heff_shape[-2]:
+            raise ValueError(f"auto_low_energy requires Heff with shape (Nk,dim,dim), got {heff_shape}")
+        dim_for_windows = int(heff_shape[-1])
         n_primary = int(sum(n_orb_values))
         gap_tolerance_mev = float(fit.get("gap_tolerance_mev", 0.1))
-        windows = _auto_low_energy_windows(
-            heff_eig_for_windows,
-            n_primary=n_primary,
-            target_bands=target_bands,
-            gap_tolerance_mev=gap_tolerance_mev,
-            max_expanded=int(fit.get("max_expanded_windows", 2)),
+        primary_band_slice = _auto_low_energy_band_slice(
+            dim_for_windows,
+            n_primary,
+            target_bands,
         )
-        dim_for_windows = int(np.asarray(heff_eig_for_windows).shape[1])
+        windows = {
+            "primary": {
+                "role": "primary",
+                "n_bands": n_primary,
+                "band_slice": list(primary_band_slice),
+                "boundary_gap_mev": None,
+                "state": "pending_current_support_target",
+                "use_for_loss": True,
+                "reference": "pending_current_heff_support_mask",
+            },
+            "expanded": [],
+            "reference": "pending_current_heff_support_mask",
+        }
         weighted_fit_bands = int(fit.get("weighted_fit_bands", fit.get("fit_bands", min(dim_for_windows, max(n_primary, 10)))))
         if weighted_fit_bands < n_primary:
             raise ValueError(
@@ -1642,25 +2152,29 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             raise ValueError(
                 f"fit.weighted_fit_bands={weighted_fit_bands} exceeds Hamiltonian dimension {dim_for_windows}"
             )
-        weighted_fit_window = _auto_low_energy_window_record(
-            heff_eig_for_windows,
-            n_bands=weighted_fit_bands,
-            target_bands=target_bands,
-            role="weighted_fit",
-            gap_tolerance_mev=gap_tolerance_mev,
-            use_for_loss=True,
+        weighted_band_slice = _auto_low_energy_band_slice(
+            dim_for_windows,
+            weighted_fit_bands,
+            target_bands,
         )
+        weighted_fit_window = {
+            "role": "weighted_fit",
+            "n_bands": weighted_fit_bands,
+            "band_slice": list(weighted_band_slice),
+            "boundary_gap_mev": None,
+            "state": "pending_current_support_target",
+            "use_for_loss": True,
+            "reference": "pending_current_heff_support_mask",
+        }
         windows["weighted_fit"] = weighted_fit_window
-        primary_band_slice = list(windows["primary"]["band_slice"])
-        weighted_band_slice = list(weighted_fit_window["band_slice"])
+        primary_band_slice = list(primary_band_slice)
+        weighted_band_slice = list(weighted_band_slice)
         auto_refine_defaults = {
             "enabled": True,
             "mode": "auto_low_energy",
             "target_bands": target_bands,
             "auto_windows": windows,
-            "auto_harmonic_selection": _json_safe(harmonic_selection_report)
-            if harmonic_selection_report is not None
-            else {"enabled": False},
+            "auto_harmonic_selection": {"enabled": False},
             "band_slice": list(weighted_fit_window["band_slice"]),
             "align": target_bands,
             "solver": str(fit.get("refinement_solver", "linear_low_subspace")),
@@ -1757,6 +2271,38 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             refine_config = merged
         else:
             refine_config = auto_refine_defaults
+    if fit_weighting == "uniform":
+        weighted_band_loss = dict(refine_config.get("weighted_band_loss", {}))
+        weighted_band_loss.update(
+            {
+                "enabled": False,
+                "reason": "fit.weighting=uniform",
+            }
+        )
+        refine_config["weighted_band_loss"] = weighted_band_loss
+    if requested_profiles and not any(
+        profile.startswith("nonlinear/") for profile in requested_profiles
+    ):
+        refine_config["enabled"] = False
+    if fit_method_config:
+        if fit_method_config["method"] == "linear":
+            refine_config = {"enabled": False}
+        else:
+            refine_config = {
+                "enabled": True,
+                "mode": "public_nonlinear_v1",
+                "reference": "current_heff_support_mask",
+                "hamiltonian_kpoints": list(
+                    fit_method_config["hamiltonian_kpoints"]
+                ),
+                "band_kpoints": list(fit_method_config["band_kpoints"] or []),
+                "target_bands": target_bands,
+                "bands": int(fit_method_config["requested_bands"]),
+                "one_sided_weight": float(fit_method_config["one_sided_weight"]),
+                "two_sided_weight": float(fit_method_config["two_sided_weight"]),
+                "band_loss_weight": float(fit_method_config["band_loss_weight"]),
+                "max_steps": int(fit_method_config["max_steps"]),
+            }
 
     return ConfiguredModel(
         path=cfg_path,
@@ -1786,6 +2332,9 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         null_channel_rel_tol=null_channel_rel_tol,
         coeff_prune_threshold=coeff_prune_threshold,
         compare_to_heff=bool(bands.get("compare_to_heff", True)),
+        response_semantics=response_semantics,
+        response_regularization=response_regularization,
+        response_fit_objective=response_fit_objective,
         kpath_config=dict(kpath_config),
         valley_model=dict(valley_model),
         symmetry_source_config=dict(symmetry_source) if isinstance(symmetry_source, Mapping) else {},
@@ -1796,9 +2345,16 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
         output_config=dict(output_section),
         band_slice=band_slice,
         band_plot_config=dict(band_plot),
+        automatic_harmonic_selection=(
+            dict(harmonic_selection_report) if harmonic_selection_report is not None else {}
+        ),
         orbital_count_metadata=orbital_count_metadata,
         validation_config=dict(raw.get("validation", {})),
         band_refinement_config=refine_config,
+        model_selection_config=model_selection_config,
+        requested_profiles=requested_profiles,
+        fit_weighting=fit_weighting,
+        fit_method_config=fit_method_config,
     )
 
 
@@ -1896,7 +2452,24 @@ def _harmonic_count_limits(harmonics: Mapping[str, Any]) -> dict[str, int]:
 class _TermTemplateProfile:
     valley_type: str
     templates: tuple[Mapping[str, Any], ...]
+    term_space_policy: str
     n_orb: tuple[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        if self.term_space_policy not in {
+            "complete",
+            "explicit_reduced",
+            "orbit_representative",
+        }:
+            raise ValueError(f"invalid term template profile policy {self.term_space_policy!r}")
+        object.__setattr__(
+            self,
+            "templates",
+            tuple(
+                {**copy.deepcopy(dict(template)), "term_space_policy": self.term_space_policy}
+                for template in self.templates
+            ),
+        )
 
 
 def _term_template_row(
@@ -1910,6 +2483,7 @@ def _term_template_row(
     harmonics: Any | None = None,
     harmonic_filter: Mapping[str, Any] | None = None,
     monomial_constraints: Mapping[str, Any] | None = None,
+    term_space_policy: str = "explicit_reduced",
 ) -> dict[str, Any]:
     if max_order is not None and max_order_from is not None:
         raise ValueError(f"{name}: use either max_order or max_order_from, not both")
@@ -1926,6 +2500,7 @@ def _term_template_row(
         "source": source,
         "sector_pairs": [[_sector_ref(i), _sector_ref(j)] for i, j in sector_pairs],
         "orbital_pairs": copy.deepcopy(orbital_pairs),
+        "term_space_policy": str(term_space_policy),
     }
     if max_order is not None:
         row["max_order"] = int(max_order)
@@ -1948,9 +2523,10 @@ _K_C3_MONOMIAL_CONSTRAINTS: dict[str, Any] = {
 }
 
 
-_TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
+_TERM_TEMPLATE_PROFILES_WITH_LEGACY_GAMMA: tuple[_TermTemplateProfile, ...] = (
     _TermTemplateProfile(
         valley_type="K",
+        term_space_policy="orbit_representative",
         templates=(
             _term_template_row(
                 "kinetic_layer1",
@@ -1995,6 +2571,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
     _TermTemplateProfile(
         valley_type="Gamma",
         n_orb=(1, 1),
+        term_space_policy="complete",
         templates=(
             _term_template_row("gamma_1x1_kinetic", "diagonal_kp", [[1, 1], [2, 2]], [[1, 1]], max_order_from="Kinect"),
             _term_template_row("gamma_1x1_onsite", "onsite", [[1, 1], [2, 2]], [[1, 1]], max_order=0),
@@ -2027,6 +2604,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
     _TermTemplateProfile(
         valley_type="Gamma",
         n_orb=(2, 2),
+        term_space_policy="orbit_representative",
         templates=(
             _term_template_row("gamma_kinetic", "diagonal_kp", [[1, 1]], [[1, 1]], max_order_from="Kinect"),
             _term_template_row("gamma_onsite", "onsite", [[1, 1]], [[1, 1]], max_order=0),
@@ -2083,6 +2661,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
     ),
     _TermTemplateProfile(
         valley_type="Gamma",
+        term_space_policy="complete",
         templates=(
             _term_template_row(
                 "gamma_generic_kinetic",
@@ -2118,6 +2697,7 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
     ),
     _TermTemplateProfile(
         valley_type="M",
+        term_space_policy="orbit_representative",
         templates=(
             _term_template_row("m1_kinetic_bottom", "diagonal_kp", [[1, 1]], "diagonal", max_order_from="Kinect"),
             _term_template_row("m1_onsite_bottom", "onsite", [[1, 1]], "diagonal", max_order=0),
@@ -2140,6 +2720,15 @@ _TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = (
         ),
     ),
 )
+
+_CASE_DERIVED_GENERATORS = {
+    "Gamma": "gamma_case_derived_v1",
+    "K": "k_case_derived_v1",
+    "M": "m_case_derived_v1",
+}
+_GAMMA_CASE_DERIVED_GENERATOR = _CASE_DERIVED_GENERATORS["Gamma"]
+_LEGACY_TERM_TEMPLATE_PROFILES = _TERM_TEMPLATE_PROFILES_WITH_LEGACY_GAMMA
+_TERM_TEMPLATE_PROFILES: tuple[_TermTemplateProfile, ...] = ()
 
 
 def _clamp_harmonic_filter(filter_spec: Mapping[str, Any], harmonic_counts: Mapping[str, int] | None) -> dict[str, Any]:
@@ -2179,10 +2768,20 @@ def _expand_term_template_profile(
     return row
 
 
-def _term_template_profile_for(valley_type: str, n_orb: tuple[int, int]) -> tuple[_TermTemplateProfile, ...]:
+def _term_template_profile_for(
+    valley_type: str,
+    n_orb: tuple[int, int],
+    *,
+    response_semantics: str = "legacy_frozen_v1",
+) -> tuple[_TermTemplateProfile, ...]:
     exact_matches: list[_TermTemplateProfile] = []
     generic_matches: list[_TermTemplateProfile] = []
-    for profile in _TERM_TEMPLATE_PROFILES:
+    profiles = (
+        _LEGACY_TERM_TEMPLATE_PROFILES
+        if str(response_semantics) == "legacy_frozen_v1"
+        else _TERM_TEMPLATE_PROFILES
+    )
+    for profile in profiles:
         if profile.valley_type != str(valley_type):
             continue
         if profile.n_orb == tuple(n_orb):
@@ -2305,6 +2904,8 @@ def _default_k_sector_term_templates(
                         max_order=int(max_order.get("inter", 0)),
                     )
                 )
+    for template in templates:
+        template["term_space_policy"] = "orbit_representative"
     return templates
 
 
@@ -2447,10 +3048,33 @@ def _default_term_template_profile_metadata(
     n_orb: tuple[int, int],
     symmetry_operations: Sequence[Mapping[str, Any]] | None,
     sectors: Sequence[Mapping[str, Any]] | None = None,
+    response_semantics: str = "legacy_frozen_v1",
 ) -> dict[str, Any]:
     valley_type = str(valley_model.get("valley_type", ""))
-    sector_profile = valley_type == "K" and bool(_active_template_sectors(sectors, n_orb))
-    profiles = () if sector_profile else _term_template_profile_for(valley_type, n_orb)
+    generator = _CASE_DERIVED_GENERATORS.get(valley_type)
+    if generator is not None and str(response_semantics) == "complete_linear_v2":
+        return {
+            "input_kind": "default",
+            "valley_type": valley_type,
+            "n_orb": [int(n_orb[0]), int(n_orb[1])],
+            "profiles": [],
+            "generator": generator,
+            "term_space_policies": ["complete"],
+        }
+    sector_profile = (
+        valley_type == "K"
+        and str(response_semantics) == "legacy_frozen_v1"
+        and bool(_active_template_sectors(sectors, n_orb))
+    )
+    profiles = (
+        ()
+        if sector_profile
+        else _term_template_profile_for(
+            valley_type,
+            n_orb,
+            response_semantics=response_semantics,
+        )
+    )
     profile_names: list[str] = []
     if sector_profile:
         profile_names.append("k_sector_aware")
@@ -2472,6 +3096,11 @@ def _default_term_template_profile_metadata(
         "valley_type": valley_type,
         "n_orb": [int(n_orb[0]), int(n_orb[1])],
         "profiles": profile_names,
+        "term_space_policies": (
+            sorted({profile.term_space_policy for profile in profiles})
+            if profiles
+            else ["orbit_representative"]
+        ),
     }
     if valley_type == "Gamma" and n_orb == (2, 2):
         metadata["gamma_2x2_sector_diagonal_pairs"] = _gamma_2x2_sector_diagonal_pairs(symmetry_operations)
@@ -2556,9 +3185,14 @@ def _default_term_templates_for_model(
     harmonic_counts: Mapping[str, int] | None = None,
     symmetry_operations: Sequence[Mapping[str, Any]] | None = None,
     sectors: Sequence[Mapping[str, Any]] | None = None,
+    response_semantics: str = "legacy_frozen_v1",
 ) -> list[dict[str, Any]]:
     valley_type = str(valley_model.get("valley_type", ""))
-    if valley_type == "K" and sectors:
+    if (
+        valley_type == "K"
+        and str(response_semantics) == "legacy_frozen_v1"
+        and sectors
+    ):
         templates = _default_k_sector_term_templates(
             sectors=sectors,
             n_orb=n_orb,
@@ -2567,7 +3201,11 @@ def _default_term_templates_for_model(
         )
         if templates:
             return templates
-    profiles = _term_template_profile_for(valley_type, n_orb)
+    profiles = _term_template_profile_for(
+        valley_type,
+        n_orb,
+        response_semantics=response_semantics,
+    )
     if profiles:
         templates = [
             _expand_term_template_profile(template, max_order, harmonic_counts=harmonic_counts)
@@ -2775,6 +3413,282 @@ def _support_count_for_sector_pair(
         delta = np.linalg.norm(q - p_vector - shifted_to, axis=1)
         count += int(np.count_nonzero(delta <= tol))
     return count
+
+
+def _model_q_pair_support_count_for_sector_pair(
+    *,
+    sector_from: Mapping[str, Any],
+    sector_to: Mapping[str, Any],
+    p_vector: np.ndarray,
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    tol: float,
+) -> int:
+    """Count support in the exact Q convention consumed by the model core."""
+
+    q_from = sector_qset(sector_from, Q_set1, Q_set2)
+    q_to = sector_qset(sector_to, Q_set1, Q_set2)
+    count = 0
+    for q in q_from:
+        delta = np.linalg.norm(q - p_vector - q_to, axis=1)
+        count += int(np.count_nonzero(delta <= tol))
+    return count
+
+
+def _signed_case_harmonic_records(
+    mapping: Mapping[int, np.ndarray],
+    *,
+    kind: str,
+    tol: float,
+) -> list[dict[str, Any]]:
+    grouped: dict[tuple[int, int], dict[str, Any]] = {}
+    for raw_id, raw_vector in sorted(mapping.items(), key=lambda item: int(item[0])):
+        vector = np.asarray(raw_vector, dtype=float)
+        if vector.shape != (2,) or not np.all(np.isfinite(vector)):
+            raise ValueError(
+                f"Case-derived {kind} harmonic {raw_id!r} must be a finite two-vector"
+            )
+        for sign in (1.0, -1.0):
+            oriented = sign * vector
+            key = _vector_key(oriented, tol)
+            grouped.setdefault(
+                key,
+                {
+                    "kind": str(kind),
+                    "vector": oriented,
+                    "source_harmonic_id": int(raw_id),
+                },
+            )
+    ordered = sorted(
+        grouped.values(),
+        key=lambda record: (
+            round(float(np.linalg.norm(record["vector"])) / tol),
+            round(float(record["vector"][0]) / tol),
+            round(float(record["vector"][1]) / tol),
+            int(record["source_harmonic_id"]),
+        ),
+    )
+    return [
+        {
+            **record,
+            "id": f"case:{kind}:{index}",
+            "source": "case_q_pair_support",
+        }
+        for index, record in enumerate(ordered, start=1)
+    ]
+
+
+def _case_derived_term_templates(
+    *,
+    valley_type: str,
+    sectors: Sequence[Mapping[str, Any]],
+    n_orb: tuple[int, int],
+    max_order: Mapping[str, int],
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    intra_harmonics_map: Mapping[int, np.ndarray],
+    inter_harmonics_map: Mapping[int, np.ndarray],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    valley_type = str(valley_type)
+    generator = _CASE_DERIVED_GENERATORS.get(valley_type)
+    if generator is None:
+        raise ValueError(
+            f"Case-derived response generation does not support valley_type={valley_type!r}"
+        )
+    name_prefix = f"{valley_type.lower()}_case"
+    active = _active_template_sectors(sectors, n_orb)
+    if not active:
+        raise ValueError(
+            f"{valley_type} case-derived response space requires at least one active sector"
+        )
+    required_orders = {
+        "Kinect": int(max_order.get("Kinect", 0)),
+        "intra": int(max_order.get("intra", 0)),
+        "inter": int(max_order.get("inter", 0)),
+    }
+    if any(value < 0 for value in required_orders.values()):
+        raise ValueError(
+            f"{valley_type} case-derived response orders must be non-negative, got {required_orders}"
+        )
+
+    q_scale = max(
+        float(np.max(np.linalg.norm(np.asarray(Q_set1, dtype=float), axis=1)))
+        if np.asarray(Q_set1).size
+        else 0.0,
+        float(np.max(np.linalg.norm(np.asarray(Q_set2, dtype=float), axis=1)))
+        if np.asarray(Q_set2).size
+        else 0.0,
+        1.0,
+    )
+    tol = max(1.0e-10, q_scale * 1.0e-8)
+    harmonic_candidates = {
+        "intra": _signed_case_harmonic_records(
+            intra_harmonics_map,
+            kind="intra",
+            tol=tol,
+        ),
+        "inter": _signed_case_harmonic_records(
+            inter_harmonics_map,
+            kind="inter",
+            tol=tol,
+        ),
+    }
+    templates: list[dict[str, Any]] = []
+    included_harmonics: list[dict[str, Any]] = []
+    omitted_harmonics: list[dict[str, Any]] = []
+
+    for sector in active:
+        sector_name = str(sector["name"])
+        pair = [[sector_name, sector_name]]
+        templates.extend(
+            [
+                _term_template_row(
+                    f"{name_prefix}_kinetic",
+                    "diagonal_kp",
+                    pair,
+                    "all",
+                    max_order=required_orders["Kinect"],
+                    term_space_policy="complete",
+                ),
+                _term_template_row(
+                    f"{name_prefix}_onsite",
+                    "onsite",
+                    pair,
+                    "all",
+                    max_order=0,
+                    term_space_policy="complete",
+                ),
+            ]
+        )
+        supported: list[dict[str, Any]] = []
+        for record in harmonic_candidates["intra"]:
+            support_count = _model_q_pair_support_count_for_sector_pair(
+                sector_from=sector,
+                sector_to=sector,
+                p_vector=np.asarray(record["vector"], dtype=float),
+                Q_set1=Q_set1,
+                Q_set2=Q_set2,
+                tol=tol,
+            )
+            diagnostic = {
+                **record,
+                "vector": np.asarray(record["vector"], dtype=float).tolist(),
+                "sector_pair": [sector_name, sector_name],
+            }
+            if support_count <= 0:
+                omitted_harmonics.append(
+                    {**diagnostic, "reason": "no_q_pair_support"}
+                )
+                continue
+            literal = {**record, "support_count": int(support_count)}
+            supported.append(literal)
+            included_harmonics.append(
+                {**diagnostic, "support_count": int(support_count)}
+            )
+        if supported:
+            row = _term_template_row(
+                f"{name_prefix}_intra",
+                "moire_potential",
+                pair,
+                "all",
+                max_order=required_orders["intra"],
+                term_space_policy="complete",
+            )
+            row["harmonic_records"] = supported
+            templates.append(row)
+
+    for sector_from in active:
+        for sector_to in active:
+            if str(sector_from["qset"]) == str(sector_to["qset"]):
+                continue
+            from_name = str(sector_from["name"])
+            to_name = str(sector_to["name"])
+            supported = []
+            for record in harmonic_candidates["inter"]:
+                support_count = _model_q_pair_support_count_for_sector_pair(
+                    sector_from=sector_from,
+                    sector_to=sector_to,
+                    p_vector=np.asarray(record["vector"], dtype=float),
+                    Q_set1=Q_set1,
+                    Q_set2=Q_set2,
+                    tol=tol,
+                )
+                diagnostic = {
+                    **record,
+                    "vector": np.asarray(record["vector"], dtype=float).tolist(),
+                    "sector_pair": [from_name, to_name],
+                }
+                if support_count <= 0:
+                    omitted_harmonics.append(
+                        {**diagnostic, "reason": "no_q_pair_support"}
+                    )
+                    continue
+                literal = {**record, "support_count": int(support_count)}
+                supported.append(literal)
+                included_harmonics.append(
+                    {**diagnostic, "support_count": int(support_count)}
+                )
+            if supported:
+                pair_label = "_".join(
+                    sorted(
+                        (
+                            _term_name_fragment(from_name),
+                            _term_name_fragment(to_name),
+                        )
+                    )
+                )
+                row = _term_template_row(
+                    f"{name_prefix}_inter_{pair_label}",
+                    "tunneling",
+                    [[from_name, to_name]],
+                    "all",
+                    max_order=required_orders["inter"],
+                    term_space_policy="complete",
+                )
+                row["harmonic_records"] = supported
+                templates.append(row)
+
+    return templates, {
+        "generator": generator,
+        "valley_type": valley_type,
+        "generation_status": "materialized",
+        "n_orb": [int(n_orb[0]), int(n_orb[1])],
+        "active_sectors": [
+            {
+                "name": str(sector["name"]),
+                "qset": str(sector["qset"]),
+                "n_orb": int(n_orb[_sector_qset_slot(sector) - 1]),
+            }
+            for sector in active
+        ],
+        "orders": required_orders,
+        "tolerance": float(tol),
+        "included_harmonics": included_harmonics,
+        "omitted_harmonics": omitted_harmonics,
+        "template_count": int(len(templates)),
+    }
+
+
+def _case_derived_gamma_term_templates(
+    *,
+    sectors: Sequence[Mapping[str, Any]],
+    n_orb: tuple[int, int],
+    max_order: Mapping[str, int],
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
+    intra_harmonics_map: Mapping[int, np.ndarray],
+    inter_harmonics_map: Mapping[int, np.ndarray],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    return _case_derived_term_templates(
+        valley_type="Gamma",
+        sectors=sectors,
+        n_orb=n_orb,
+        max_order=max_order,
+        Q_set1=Q_set1,
+        Q_set2=Q_set2,
+        intra_harmonics_map=intra_harmonics_map,
+        inter_harmonics_map=inter_harmonics_map,
+    )
 
 
 def _harmonic_action_key(action: Mapping[str, Any]) -> tuple[Any, ...]:
@@ -3619,6 +4533,34 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     )
     heff_list = np.load(config.heff_file, mmap_mode="r")
     Q_set1, Q_set2 = _load_model_q_sets(config)
+    fit_heff_list = heff_list
+    auto_low_energy_fit = (
+        str(config.fit_selection_metadata.get("mode", "")).strip().lower()
+        == "auto_low_energy"
+    )
+    spectral_support_fit = (
+        str(config.response_fit_objective.get("mode", "")).strip().lower()
+        in {"target_spectral_linear", "normalized_low_energy_linear_v1"}
+        and str(
+            config.response_fit_objective.get(
+                "target_reference", "current_heff_support_mask"
+            )
+        ).strip().lower()
+        == "current_heff_support_mask"
+    )
+    if auto_low_energy_fit or spectral_support_fit:
+        fit_heff_list = _current_heff_support_hamiltonians(
+            heff_list,
+            qset1=Q_set1,
+            qset2=Q_set2,
+            n_orb=config.n_orb,
+            harmonics_config=config.harmonics_config,
+        )
+    if auto_low_energy_fit:
+        _retarget_auto_low_energy_windows_to_current_support(
+            config,
+            _select_rows(fit_heff_list, config.band_indices),
+        )
 
     bM1, bM2, bM_diagnostics = _build_bM_vectors(Q_set1, Q_set2, config)
     config.bM_diagnostics = bM_diagnostics
@@ -3650,16 +4592,60 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         symmetry_map=preliminary_symmetry_map,
     )
     config.harmonics_diagnostics = harmonics_diagnostics
-    term_templates, inter_direction_diagnostics = _orient_k_sector_inter_templates_by_raw_support(
-        config.term_templates,
-        valley_model=config.valley_model,
-        n_orb=config.n_orb,
-        sectors=sectors,
-        Q_set1=Q_set1,
-        Q_set2=Q_set2,
-        inter_harmonics_map=inter,
-        term_template_metadata=config.term_template_metadata,
-    )
+    case_generator = config.term_template_metadata.get("generator")
+    if case_generator in set(_CASE_DERIVED_GENERATORS.values()):
+        valley_type = str(config.valley_model.get("valley_type", ""))
+        expected_generator = _CASE_DERIVED_GENERATORS.get(valley_type)
+        if config.response_semantics != "complete_linear_v2":
+            raise ValueError(
+                "Case-derived response generation requires complete_linear_v2"
+            )
+        if case_generator != expected_generator:
+            raise ValueError(
+                "Case-derived response generator metadata is inconsistent with "
+                f"valley_type={valley_type!r}: got {case_generator!r}, "
+                f"expected {expected_generator!r}"
+            )
+        if config.term_templates:
+            raise ValueError(
+                "Case-derived response generation cannot replace explicit term_templates"
+            )
+        generated_templates, generator_diagnostics = (
+            _case_derived_term_templates(
+                valley_type=valley_type,
+                sectors=sectors,
+                n_orb=config.n_orb,
+                max_order=config.max_order,
+                Q_set1=Q_set1,
+                Q_set2=Q_set2,
+                intra_harmonics_map=intra,
+                inter_harmonics_map=inter,
+            )
+        )
+        if not generated_templates:
+            raise ValueError(
+                f"{valley_type} case-derived response generation produced no physical candidates"
+            )
+        config.term_templates = generated_templates
+        config.term_template_metadata = {
+            **dict(config.term_template_metadata),
+            **generator_diagnostics,
+            "term_space_policies": ["complete"],
+        }
+    if case_generator in set(_CASE_DERIVED_GENERATORS.values()):
+        term_templates = [dict(row) for row in config.term_templates]
+        inter_direction_diagnostics: list[dict[str, Any]] = []
+    else:
+        term_templates, inter_direction_diagnostics = _orient_k_sector_inter_templates_by_raw_support(
+            config.term_templates,
+            valley_model=config.valley_model,
+            n_orb=config.n_orb,
+            sectors=sectors,
+            Q_set1=Q_set1,
+            Q_set2=Q_set2,
+            inter_harmonics_map=inter,
+            term_template_metadata=config.term_template_metadata,
+        )
     config.term_templates = term_templates
     if inter_direction_diagnostics:
         config.term_template_metadata = dict(config.term_template_metadata)
@@ -3702,10 +4688,15 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         symmetry_map=dict(enriched_symmetry_map),
         kpoints=band_kpoints,
         kpoints_fit=fit_kpoints,
-        heff=_block_diag_heff(heff_list, config.fit_indices),
+        heff=_block_diag_heff(fit_heff_list, config.fit_indices),
         coeff_tol=config.coeff_tol,
         null_channel_abs_tol=config.null_channel_abs_tol,
         null_channel_rel_tol=config.null_channel_rel_tol,
+        response_semantics=config.response_semantics,
+        response_regularization=config.response_regularization,
+        response_fit_indices=list(config.fit_indices),
+        response_band_window=list(config.band_slice or []),
+        response_fit_objective=dict(config.response_fit_objective),
         output_dir=config.output_dir,
     )
     if loaded_symmetry.generator is not None:
@@ -3946,7 +4937,8 @@ def _selected_harmonic_support_mask(
     intra_count = int(current_counts.get("intra", 0))
     inter_count = int(current_counts.get("inter", 0))
     intra_positive_shells = max(0, intra_count - 1)
-    inter_positive_shells = max(0, inter_count - 1)
+    has_inter_zero = bool(np.any(np.logical_and(~same_layer, zero)))
+    inter_positive_shells = max(0, inter_count - int(has_inter_zero))
     intra_shell = _shell_index_matrix(norms, shell_norms.get("intra", []))
     inter_shell = _shell_index_matrix(norms, shell_norms.get("inter", []))
     onsite_or_local = np.logical_and(same_layer, zero)
@@ -3964,6 +4956,132 @@ def _selected_harmonic_support_mask(
     return np.logical_or.reduce((onsite_or_local, intra, inter_zero, inter))
 
 
+def _current_heff_support_hamiltonians(
+    heff_hamiltonians: np.ndarray,
+    *,
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    n_orb: tuple[int, int],
+    harmonics_config: Mapping[str, Any],
+) -> np.ndarray:
+    """Project Heff onto the support represented by the configured harmonics."""
+    heff = np.asarray(heff_hamiltonians, dtype=np.complex128)
+    if heff.ndim != 3 or heff.shape[-1] != heff.shape[-2]:
+        raise ValueError(f"Heff support projection expects (Nk,dim,dim), got {heff.shape}")
+    mask = _selected_harmonic_support_mask(
+        np.asarray(qset1, dtype=float),
+        np.asarray(qset2, dtype=float),
+        n_orb=(int(n_orb[0]), int(n_orb[1])),
+        current_counts=_resolved_harmonic_count_limits(harmonics_config),
+    )
+    if mask.shape != heff.shape[-2:]:
+        raise ValueError(
+            f"Heff support mask shape {mask.shape} does not match Hamiltonian shape {heff.shape[-2:]}"
+        )
+    supported = heff * mask[None, :, :]
+    return 0.5 * (supported + np.swapaxes(supported.conj(), -1, -2))
+
+
+def _retarget_auto_low_energy_windows_to_current_support(
+    model_config: ConfiguredModel,
+    support_heff: np.ndarray,
+) -> None:
+    """Finalize auto-low-energy windows after canonical Q/support is available."""
+    target_eigvals = np.linalg.eigvalsh(np.asarray(support_heff, dtype=np.complex128))
+    fit_cfg = model_config.raw.get("fit", {})
+    if not isinstance(fit_cfg, Mapping):
+        fit_cfg = {}
+    target_bands = str(
+        model_config.raw.get("model", {}).get("target_bands", "top")
+    ).strip().lower()
+    n_primary = int(sum(model_config.n_orb))
+    gap_tolerance_mev = float(fit_cfg.get("gap_tolerance_mev", 0.1))
+    windows = _auto_low_energy_windows(
+        target_eigvals,
+        n_primary=n_primary,
+        target_bands=target_bands,
+        gap_tolerance_mev=gap_tolerance_mev,
+        max_expanded=int(fit_cfg.get("max_expanded_windows", 2)),
+    )
+    dim = int(target_eigvals.shape[1])
+    weighted_fit_bands = int(
+        fit_cfg.get(
+            "weighted_fit_bands",
+            fit_cfg.get("fit_bands", min(dim, max(n_primary, 10))),
+        )
+    )
+    weighted_fit_window = _auto_low_energy_window_record(
+        target_eigvals,
+        n_bands=weighted_fit_bands,
+        target_bands=target_bands,
+        role="weighted_fit",
+        gap_tolerance_mev=gap_tolerance_mev,
+        use_for_loss=True,
+    )
+    windows["weighted_fit"] = weighted_fit_window
+    for key in ("primary", "weighted_fit"):
+        if isinstance(windows.get(key), Mapping):
+            windows[key] = {**dict(windows[key]), "reference": "current_heff_support_mask"}
+    windows["expanded"] = [
+        {**dict(window), "reference": "current_heff_support_mask"}
+        for window in windows.get("expanded", [])
+        if isinstance(window, Mapping)
+    ]
+    windows["reference"] = "current_heff_support_mask"
+
+    refinement = dict(model_config.band_refinement_config or {})
+    weighted_slice = list(windows["weighted_fit"]["band_slice"])
+    refinement["auto_windows"] = windows
+    refinement["band_slice"] = weighted_slice
+    refinement["reference"] = "current_heff_support_mask"
+    for loss_name in ("subspace_loss", "low_subspace_matrix_loss"):
+        loss = refinement.get(loss_name)
+        if isinstance(loss, Mapping):
+            refinement[loss_name] = {**dict(loss), "band_slice": weighted_slice}
+    model_config.band_refinement_config = refinement
+
+
+def _refinement_target_hamiltonians(
+    moire_config: MoireConfig,
+    model_config: ConfiguredModel,
+    raw_cfg: Mapping[str, Any],
+    row_selector: Sequence[int] | None,
+) -> tuple[np.ndarray, np.ndarray, str]:
+    original = _select_rows(
+        np.load(model_config.heff_file, mmap_mode="r"),
+        row_selector,
+    )
+    fit_mode = str(
+        getattr(model_config, "fit_selection_metadata", {}).get("mode", "")
+    ).strip().lower()
+    requested_reference = str(raw_cfg.get("reference", "")).strip().lower()
+    response_semantics = str(
+        getattr(model_config, "response_semantics", "legacy_frozen_v1")
+    ).strip().lower()
+    use_current_support = (
+        requested_reference == "current_heff_support_mask"
+        or str(raw_cfg.get("mode", "")).strip().lower() == "auto_low_energy"
+        or fit_mode == "auto_low_energy"
+        or response_semantics == "complete_linear_v2"
+    )
+    if use_current_support:
+        target = _current_heff_support_hamiltonians(
+            original,
+            qset1=np.asarray(moire_config.Q_set1, dtype=float),
+            qset2=np.asarray(moire_config.Q_set2, dtype=float),
+            n_orb=tuple(int(value) for value in model_config.n_orb),
+            harmonics_config=getattr(model_config, "harmonics_config", {}) or {},
+        )
+        return target, np.linalg.eigvalsh(target), "current_heff_support_mask"
+
+    heff_eig_file = getattr(model_config, "heff_eig_file", None)
+    if heff_eig_file is not None and heff_eig_file.exists():
+        eigvals = _select_rows(np.load(heff_eig_file), row_selector)
+    else:
+        eigvals = np.linalg.eigvalsh(original)
+    return np.asarray(original), np.asarray(eigvals), "original_heff"
+
+
 def _hamiltonian_element_comparison_arrays(
     model_hamiltonians: np.ndarray,
     heff_hamiltonians: np.ndarray,
@@ -3974,6 +5092,8 @@ def _hamiltonian_element_comparison_arrays(
     qset2: np.ndarray | None = None,
     n_orb: tuple[int, int] | None = None,
     subtract_layer_diagonal_mean: bool = False,
+    q_order: str = "native",
+    q_norm_tol: float = 1.0e-6,
 ) -> dict[str, Any]:
     model = np.asarray(model_hamiltonians, dtype=np.complex128)
     heff = np.asarray(heff_hamiltonians, dtype=np.complex128)
@@ -4002,12 +5122,21 @@ def _hamiltonian_element_comparison_arrays(
 
     display_order = list(range(model.shape[-1]))
     q_block_boundaries: list[int] = []
+    q_shell_boundaries: list[int] = []
     layer_boundaries: list[int] = []
     display_layers: np.ndarray | None = None
     if qset1 is not None and qset2 is not None and n_orb is not None:
-        display = _q_block_display_metadata(qset1, qset2, n_orb, dim=model.shape[-1])
+        display = _q_block_display_metadata(
+            qset1,
+            qset2,
+            n_orb,
+            dim=model.shape[-1],
+            q_order=q_order,
+            q_norm_tol=q_norm_tol,
+        )
         display_order = display["order"]
         q_block_boundaries = display["q_block_boundaries"]
+        q_shell_boundaries = display["q_shell_boundaries"]
         layer_boundaries = display["layer_boundaries"]
         display_layers = display["layers"]
     else:
@@ -4025,15 +5154,24 @@ def _hamiltonian_element_comparison_arrays(
     mask = mask[np.ix_(order, order)]
     diff_selected = model_selected - heff_selected
     mask3 = mask[None, :, :]
+    heff_abs = np.abs(heff_selected)
+    model_abs = np.abs(model_selected)
+    diff_abs = np.abs(diff_selected)
     return {
         "positions": selected,
-        "heff": np.where(mask3, np.abs(heff_selected), np.nan),
-        "model": np.where(mask3, np.abs(model_selected), np.nan),
-        "diff": np.where(mask3, np.abs(diff_selected), np.nan),
+        "heff": heff_abs,
+        "model": model_abs,
+        "diff": diff_abs,
+        "support_heff": np.where(mask3, heff_abs, np.nan),
+        "support_model": np.where(mask3, model_abs, np.nan),
+        "support_diff": np.where(mask3, diff_abs, np.nan),
         "mask": mask,
+        "support_fraction": float(np.count_nonzero(mask) / mask.size),
         "display_order": display_order,
         "q_block_boundaries": q_block_boundaries,
+        "q_shell_boundaries": q_shell_boundaries,
         "layer_boundaries": layer_boundaries,
+        "q_order": str(q_order).strip().lower(),
         "diag_offsets": {
             "heff": heff_offsets,
             "model": model_offsets,
@@ -4047,21 +5185,62 @@ def _q_block_display_metadata(
     n_orb: tuple[int, int],
     *,
     dim: int,
+    q_order: str = "native",
+    q_norm_tol: float = 1.0e-6,
 ) -> dict[str, Any]:
     rows = _model_row_metadata_for_harmonic_scan(qset1, qset2, n_orb)
     if len(rows) != int(dim):
         raise ValueError(f"basis metadata dimension {len(rows)} does not match Hamiltonian dimension {dim}")
+    order_mode = str(q_order).strip().lower()
+    if order_mode not in {"native", "norm_shell"}:
+        raise ValueError(f"q_order must be 'native' or 'norm_shell', got {q_order!r}")
+    tol = float(q_norm_tol)
+    if tol <= 0.0:
+        raise ValueError(f"q_norm_tol must be positive, got {q_norm_tol}")
+
+    shell_index: dict[tuple[int, int], int] = {}
+    polar_angle: dict[tuple[int, int], float] = {}
+    for layer in (1, 2):
+        q_rows = {
+            int(row["q_index"]): np.asarray(row["q"], dtype=float)
+            for row in rows
+            if int(row["layer"]) == layer
+        }
+        shell_norms = _unique_nonnegative_norms(
+            [float(np.linalg.norm(qvec)) for qvec in q_rows.values()],
+            tol=tol,
+        )
+        for q_index, qvec in q_rows.items():
+            norm = float(np.linalg.norm(qvec))
+            shell_index[(layer, q_index)] = int(
+                np.argmin(np.abs(np.asarray(shell_norms, dtype=float) - norm))
+            )
+            angle = 0.0 if norm <= tol else float(np.mod(np.arctan2(qvec[1], qvec[0]), 2.0 * np.pi))
+            polar_angle[(layer, q_index)] = angle
+
+    def display_key(idx: int) -> tuple[Any, ...]:
+        row = rows[idx]
+        layer = int(row["layer"])
+        q_index = int(row["q_index"])
+        orbital = int(row["orbital"])
+        if order_mode == "native":
+            return (layer, q_index, orbital)
+        return (
+            layer,
+            shell_index[(layer, q_index)],
+            polar_angle[(layer, q_index)],
+            q_index,
+            orbital,
+        )
+
     order = sorted(
         range(len(rows)),
-        key=lambda idx: (
-            int(rows[idx]["layer"]),
-            int(rows[idx]["q_index"]),
-            int(rows[idx]["orbital"]),
-        ),
+        key=display_key,
     )
     ordered_rows = [rows[idx] for idx in order]
     layers = np.asarray([int(row["layer"]) for row in ordered_rows], dtype=np.int16)
     q_block_boundaries: list[int] = []
+    q_shell_boundaries: list[int] = []
     layer_boundaries: list[int] = []
     for idx in range(1, len(ordered_rows)):
         prev = ordered_rows[idx - 1]
@@ -4071,11 +5250,18 @@ def _q_block_display_metadata(
             q_block_boundaries.append(idx)
         elif int(prev["q_index"]) != int(curr["q_index"]):
             q_block_boundaries.append(idx)
+            if order_mode == "norm_shell":
+                prev_key = (int(prev["layer"]), int(prev["q_index"]))
+                curr_key = (int(curr["layer"]), int(curr["q_index"]))
+                if shell_index[prev_key] != shell_index[curr_key]:
+                    q_shell_boundaries.append(idx)
     return {
         "order": [int(idx) for idx in order],
         "layers": layers,
         "q_block_boundaries": q_block_boundaries,
+        "q_shell_boundaries": q_shell_boundaries,
         "layer_boundaries": layer_boundaries,
+        "q_order": order_mode,
     }
 
 
@@ -4139,6 +5325,9 @@ def save_hamiltonian_element_comparison_plot(
     qset2: np.ndarray | None = None,
     n_orb: tuple[int, int] | None = None,
     subtract_layer_diagonal_mean: bool = True,
+    view: str = "full",
+    q_order: str = "native",
+    q_norm_tol: float = 1.0e-6,
 ) -> Path:
     panels = _hamiltonian_element_comparison_arrays(
         model_hamiltonians,
@@ -4149,10 +5338,15 @@ def save_hamiltonian_element_comparison_plot(
         qset2=qset2,
         n_orb=n_orb,
         subtract_layer_diagonal_mean=subtract_layer_diagonal_mean,
+        q_order=q_order,
+        q_norm_tol=q_norm_tol,
     )
-    heff = np.asarray(panels["heff"], dtype=float)
-    model = np.asarray(panels["model"], dtype=float)
-    diff = np.asarray(panels["diff"], dtype=float)
+    if view not in {"full", "selected_support"}:
+        raise ValueError("Hamiltonian element comparison view must be 'full' or 'selected_support'")
+    prefix = "support_" if view == "selected_support" else ""
+    heff = np.asarray(panels[f"{prefix}heff"], dtype=float)
+    model = np.asarray(panels[f"{prefix}model"], dtype=float)
+    diff = np.asarray(panels[f"{prefix}diff"], dtype=float)
     nrows = int(heff.shape[0])
     if k_indices is None:
         labels = [f"k position {idx}" for idx in panels["positions"]]
@@ -4177,6 +5371,7 @@ def save_hamiltonian_element_comparison_plot(
     dim = int(heff.shape[-1])
     index_ticks = _matrix_index_ticks(dim)
     q_boundaries = [int(item) for item in panels.get("q_block_boundaries", [])]
+    q_shell_boundaries = [int(item) for item in panels.get("q_shell_boundaries", [])]
     layer_boundaries = [int(item) for item in panels.get("layer_boundaries", [])]
     diag_offsets = panels.get("diag_offsets", {})
 
@@ -4195,6 +5390,10 @@ def save_hamiltonian_element_comparison_plot(
             pos = float(boundary) - 0.5
             ax.axhline(pos, color="0.65", linewidth=0.3, alpha=0.85)
             ax.axvline(pos, color="0.65", linewidth=0.3, alpha=0.85)
+        for boundary in q_shell_boundaries:
+            pos = float(boundary) - 0.5
+            ax.axhline(pos, color="0.32", linewidth=0.7, alpha=0.95)
+            ax.axvline(pos, color="0.32", linewidth=0.7, alpha=0.95)
         for boundary in layer_boundaries:
             pos = float(boundary) - 0.5
             ax.axhline(pos, color="black", linewidth=1.0, alpha=0.9)
@@ -4267,7 +5466,15 @@ def save_hamiltonian_element_comparison_plot(
                 if irow == nrows - 1:
                     ax.set_xlabel("column: layer/Q/orbital")
         if title:
-            fig.suptitle(title)
+            order_suffix = "\nQ ordered by |Q| shell" if panels.get("q_order") == "norm_shell" else ""
+            if view == "selected_support":
+                support_fraction = 100.0 * float(panels["support_fraction"])
+                fig.suptitle(
+                    f"{title}{order_suffix}\n"
+                    f"selected harmonic support ({support_fraction:.2f}% shown; white = excluded, not zero)"
+                )
+            else:
+                fig.suptitle(f"{title}{order_suffix}\nfull matrix")
         main_sm = ScalarMappable(norm=main_norm, cmap=main_cmap)
         diff_sm = ScalarMappable(norm=diff_norm, cmap=diff_cmap)
         fig.colorbar(main_sm, ax=axes[:, :2].ravel().tolist(), fraction=0.025, pad=0.02, label="|H| (eV)")
@@ -4469,6 +5676,9 @@ def _window_band_plot_config(
 
 def _cleanup_stale_band_outputs(output_dir: Path) -> None:
     for pattern in (
+        "band_comparison.pdf",
+        "band_comparison_vs_full_heff.pdf",
+        "current_heff_support_eigvals.npy",
         "comparison_top*.json",
         "band_comparison_top*.pdf",
         "comparison_plot.json",
@@ -4504,6 +5714,21 @@ def _cleanup_stale_model_debug_outputs(output_dir: Path) -> None:
     diagnostics_dir = _model_diagnostics_dir(output_dir)
     if diagnostics_dir.exists():
         shutil.rmtree(diagnostics_dir)
+
+
+def _cleanup_stale_hamiltonian_element_outputs(output_dir: Path) -> None:
+    for filename in (
+        "hamiltonian_element_comparison.png",
+        "hamiltonian_element_comparison.pdf",
+        "hamiltonian_element_comparison_selected_support.png",
+        "hamiltonian_element_comparison_selected_support.pdf",
+    ):
+        path = output_dir / filename
+        if path.exists() and path.is_file():
+            path.unlink()
+    grouped_dir = output_dir / "hamiltonian_element_comparisons"
+    if grouped_dir.exists():
+        shutil.rmtree(grouped_dir)
 
 
 def _plot_axis_from_kpath(config: ConfiguredModel, npoints: int) -> tuple[np.ndarray, list[float] | None, list[str] | None]:
@@ -4608,6 +5833,8 @@ def save_band_comparison_plot(
     x_ticklabels: Sequence[str] | None = None,
     title: str | None = None,
     overlap_weights: np.ndarray | None = None,
+    current_support_eigvals: np.ndarray | None = None,
+    reference_label: str = "Reference",
 ) -> Path:
     model = np.asarray(model_eigvals, dtype=float)
     heff = np.asarray(heff_eigvals)
@@ -4618,12 +5845,31 @@ def save_band_comparison_plot(
         raise ValueError(f"model/heff eigvals must be 2D after eigensolve, got {model.shape} and {heff.shape}")
     if model.shape[0] != heff.shape[0]:
         raise ValueError(f"k-point counts differ: model={model.shape[0]}, heff={heff.shape[0]}")
+    current_support = None
+    if current_support_eigvals is not None:
+        current_support = np.asarray(current_support_eigvals)
+        if current_support.ndim == 3:
+            current_support = np.linalg.eigvalsh(current_support)
+        current_support = np.asarray(current_support, dtype=float)
+        if current_support.ndim != 2:
+            raise ValueError(
+                "current_support_eigvals must be 2D after eigensolve, "
+                f"got {current_support.shape}"
+            )
+        if current_support.shape[0] != heff.shape[0]:
+            raise ValueError(
+                "current-support/heff k-point counts differ: "
+                f"current_support={current_support.shape[0]}, heff={heff.shape[0]}"
+            )
 
     nbands = min(model.shape[1], heff.shape[1])
+    if current_support is not None:
+        nbands = min(nbands, current_support.shape[1])
     plot_options = dict(plot_config or {})
     start, stop = _resolve_plot_band_slice(nbands=nbands, metric_band_slice=band_slice, plot_config=plot_options)
     model_sorted = np.sort(model, axis=1)[:, :nbands]
     heff_sorted = np.sort(heff, axis=1)[:, :nbands]
+    current_support_sorted = np.sort(current_support, axis=1)[:, :nbands] if current_support is not None else None
     overlap_sorted = None
     if overlap_weights is not None:
         overlap = np.asarray(overlap_weights, dtype=float)
@@ -4637,30 +5883,44 @@ def save_band_comparison_plot(
         overlap_sorted = np.clip(overlap[:, :nbands], 0.0, 1.0)
     model_sel = model_sorted[:, start:stop]
     heff_sel = heff_sorted[:, start:stop]
+    current_support_sel = current_support_sorted[:, start:stop] if current_support_sorted is not None else None
     overlap_sel = overlap_sorted[:, start:stop] if overlap_sorted is not None else None
     align = str(plot_options.get("align", "none")).lower()
     model_ref = 0.0
     heff_ref = 0.0
+    current_support_ref = 0.0
     if align in {"top", "top_band", "top-band"}:
         model_ref = float(np.max(model_sel[:, -1]))
         heff_ref = float(np.max(heff_sel[:, -1]))
+        if current_support_sel is not None:
+            current_support_ref = float(np.max(current_support_sel[:, -1]))
         model_sel = model_sel - model_ref
         heff_sel = heff_sel - heff_ref
+        if current_support_sel is not None:
+            current_support_sel = current_support_sel - current_support_ref
     elif align in {"bottom", "bottom_band", "bottom-band"}:
         model_ref = float(np.min(model_sel[:, 0]))
         heff_ref = float(np.min(heff_sel[:, 0]))
+        if current_support_sel is not None:
+            current_support_ref = float(np.min(current_support_sel[:, 0]))
         model_sel = model_sel - model_ref
         heff_sel = heff_sel - heff_ref
+        if current_support_sel is not None:
+            current_support_sel = current_support_sel - current_support_ref
     elif align not in {"none", "false", "0"}:
         raise ValueError(f"Unsupported bands.plot.align={plot_options.get('align')!r}; expected 'none', 'top', or 'bottom'")
     plot_all_bands = bool(plot_options.get("plot_all_bands", plot_options.get("show_all_bands", True)))
     if plot_all_bands:
         model_plot = model_sorted - model_ref
         heff_plot = heff_sorted - heff_ref
+        current_support_plot = (
+            current_support_sorted - current_support_ref if current_support_sorted is not None else None
+        )
         overlap_plot = overlap_sorted
     else:
         model_plot = model_sel
         heff_plot = heff_sel
+        current_support_plot = current_support_sel
         overlap_plot = overlap_sel
 
     import matplotlib
@@ -4687,6 +5947,15 @@ def save_band_comparison_plot(
     overlap_label = str(plot_options.get("overlap_label", "Wavefunction overlap"))
     for ib in range(heff_plot.shape[1]):
         ax.plot(x_values, heff_plot[:, ib], **KP_REFERENCE_STYLE)
+    current_support_style = {
+        "color": "#E69F00",
+        "linestyle": "--",
+        "linewidth": 1.05,
+        "alpha": 0.86,
+    }
+    if current_support_plot is not None:
+        for ib in range(current_support_plot.shape[1]):
+            ax.plot(x_values, current_support_plot[:, ib], **current_support_style)
     if overlap_plot is not None:
         cmap = plt.get_cmap(str(plot_options.get("overlap_cmap", "Blues")))
         colorbar_values = overlap_sel if overlap_sel is not None and overlap_sel.size else overlap_plot
@@ -4755,8 +6024,11 @@ def save_band_comparison_plot(
     ax.grid(True, axis="y", color="0.88", linewidth=0.65)
     ax.axhline(0.0, color="0.88", linewidth=0.7, zorder=0)
     if model_sel.size and heff_sel.size:
-        ymin = float(min(np.min(model_sel), np.min(heff_sel)))
-        ymax = float(max(np.max(model_sel), np.max(heff_sel)))
+        plotted_windows = [model_sel, heff_sel]
+        if current_support_sel is not None:
+            plotted_windows.append(current_support_sel)
+        ymin = float(min(np.min(values) for values in plotted_windows))
+        ymax = float(max(np.max(values) for values in plotted_windows))
         pad = max(0.004, 0.08 * (ymax - ymin if ymax > ymin else 1.0))
         ylim_cfg = plot_options.get("ylim")
         if ylim_cfg is not None:
@@ -4784,9 +6056,13 @@ def save_band_comparison_plot(
             fontsize=9,
         )
     legend_handles = [
-        Line2D([0], [0], label="Reference", **KP_REFERENCE_STYLE),
-        Line2D([0], [0], label="KP model", **KP_MODEL_STYLE),
+        Line2D([0], [0], label=str(reference_label), **KP_REFERENCE_STYLE),
     ]
+    if current_support_plot is not None:
+        legend_handles.append(
+            Line2D([0], [0], label="Current Heff support mask", **current_support_style)
+        )
+    legend_handles.append(Line2D([0], [0], label="KP model", **KP_MODEL_STYLE))
     if bool(plot_options.get("legend_outside", False)):
         ax.legend(
             handles=legend_handles,
@@ -5741,6 +7017,16 @@ def _build_run_summary(
     output_profile: str = "release",
 ) -> dict[str, Any]:
     uses_toy = model_config.symmetry_source_config.get("type") == "toy_generator"
+    fitted_response = getattr(results.get("model"), "_fitted_response_model", None)
+    fit_method = dict(model_config.fit_method_config or {})
+    if fit_method and fitted_response is not None:
+        fit_method["resolved_objective"] = _json_safe(
+            getattr(fitted_response, "fit_objective", {})
+        )
+        if fit_method.get("method") == "nonlinear":
+            fit_method["nonlinear_result"] = _json_safe(
+                results.get("band_refinement", {})
+            )
     summary = {
         "output_profile": output_profile,
         "model_config_path": str(model_config.path),
@@ -5754,7 +7040,15 @@ def _build_run_summary(
         "comparison": _json_safe(results.get("comparison")),
         "plot_comparison": _json_safe(results.get("plot_comparison")),
         "all_band_plot_comparison": _json_safe(results.get("all_band_plot_comparison")),
+        "comparison_vs_full_heff": _json_safe(results.get("comparison_vs_full_heff")),
+        "plot_comparison_vs_full_heff": _json_safe(results.get("plot_comparison_vs_full_heff")),
+        "all_band_plot_comparison_vs_full_heff": _json_safe(
+            results.get("all_band_plot_comparison_vs_full_heff")
+        ),
         "all_band_plot": "band_comparison_all.pdf" if results.get("all_band_plot") else None,
+        "full_heff_band_plot": (
+            "band_comparison_vs_full_heff.pdf" if results.get("full_heff_band_plot") else None
+        ),
         "q_lattice_plot": "q_lattice_harmonics.pdf" if results.get("q_lattice_plot") else None,
         "null_channel_filter": _json_safe(results.get("null_channel_filter")),
         "coefficient_pruning": _json_safe(results.get("coefficient_pruning")),
@@ -5762,6 +7056,7 @@ def _build_run_summary(
         "auto_model_selection": _json_safe(results.get("auto_model_selection", {"enabled": False})),
         "orbital_counts": _json_safe(model_config.orbital_count_metadata),
         "fit_selection": _json_safe(model_config.fit_selection_metadata),
+        "fit_method": _json_safe(fit_method) if fit_method else None,
         "term_template_profile": _json_safe(model_config.term_template_metadata),
         "operations": list(operation_registry),
     }
@@ -5771,6 +7066,583 @@ def _build_run_summary(
         summary["active_terms_hash"] = active_terms_hash
         summary["active_terms_hash_file"] = "active_terms.sha256"
     return summary
+
+
+def _model_selection_candidate_record(candidate: CandidateScore) -> dict[str, Any]:
+    def window_record(metrics: BandWindowMetrics | None) -> dict[str, Any] | None:
+        if metrics is None:
+            return None
+        return {
+            "band_count": int(metrics.band_count),
+            "weighted_rms_mev": float(metrics.weighted_rms_mev),
+            "weighted_max_mev": float(metrics.weighted_max_mev),
+            "mean_subspace_overlap": float(metrics.mean_subspace_overlap),
+            "minimum_singular_value": float(metrics.minimum_singular_value),
+        }
+
+    return {
+        "name": str(candidate.name),
+        "solver_family": str(candidate.solver_family),
+        "orders": {
+            "kinetic": int(candidate.orders.kinetic),
+            "intra": int(candidate.orders.intra),
+            "inter": int(candidate.orders.inter),
+        },
+        "independent_real_parameters": int(candidate.independent_real_parameters),
+        "active_group_count": int(candidate.active_group_count),
+        "harmonic_support_size": int(candidate.harmonic_support_size),
+        "selection_scope": str(candidate.selection_scope),
+        "primary_band_count": int(candidate.primary_band_count),
+        "primary_weighted_rms_mev": float(candidate.weighted_rms_mev),
+        "primary_weighted_rms_se_mev": float(candidate.weighted_rms_se_mev),
+        "primary_weighted_max_mev": float(candidate.weighted_max_mev),
+        "expanded_all_band_rms_mev": (
+            None
+            if candidate.expanded_weighted_rms_mev is None
+            else float(candidate.expanded_weighted_rms_mev)
+        ),
+        "mean_subspace_overlap": float(candidate.mean_subspace_overlap),
+        "certified": bool(candidate.certified),
+        "guards_passed": bool(candidate.guards_passed),
+        "low_window": window_record(candidate.low_window_metrics),
+        "high_window": window_record(candidate.high_window_metrics),
+    }
+
+
+def _write_high_low_model_selection_outputs(
+    *,
+    scan: Mapping[str, Any],
+    output_dir: Path,
+) -> dict[str, Any]:
+    """Write the auditable high/low decision and its complexity frontier."""
+
+    profiles = scan["profiles"]
+    profile_families = scan.get("profile_families") or {
+        "linear": profiles,
+        "nonlinear": None,
+    }
+    requested_profiles = tuple(str(value) for value in scan.get("requested_profiles", ()))
+    requested_profile_set = set(requested_profiles)
+    nonlinear_profiles = profile_families.get("nonlinear")
+    unique: dict[str, CandidateScore] = {}
+    for run in scan.get("runs", {}).values():
+        score = run.get("score") if isinstance(run, Mapping) else None
+        if isinstance(score, CandidateScore):
+            unique[score.name] = score
+    candidates = sorted(
+        unique.values(),
+        key=lambda item: (
+            item.independent_real_parameters,
+            item.weighted_rms_mev,
+            item.name,
+        ),
+    )
+    summary = {
+        "enabled": True,
+        "mode": (
+            "automatic_four_model_profiles"
+            if nonlinear_profiles is not None
+            else "automatic_high_low_family_orders"
+        ),
+        "reference": "current_heff_support_mask",
+        "selection_rule": {
+            "high": "minimum primary edge weighted validation RMS subject to overlap gate",
+            "low": "fewest independent real parameters on the adaptive max(2SE, relative RMS, minimum tolerance) plateau subject to overlap gate",
+            "expanded_all_band_error": "diagnostic_only",
+        },
+        "profile_band_windows": _json_safe(scan.get("profile_band_windows", {})),
+        **high_low_selection_record(profiles),
+        "term_group_pruning": _json_safe(
+            scan.get("term_group_pruning", {"enabled": False})
+        ),
+        "nonlinear_frontier": _json_safe(
+            scan.get("nonlinear_frontier", {"enabled": False})
+        ),
+        "candidates": [
+            _model_selection_candidate_record(candidate) for candidate in candidates
+        ],
+    }
+    if nonlinear_profiles is not None:
+        summary["profile_families"] = {
+            "linear": high_low_selection_record(profile_families["linear"])["profiles"],
+            "nonlinear": high_low_selection_record(nonlinear_profiles)["profiles"],
+        }
+        for solver_family in ("linear", "nonlinear"):
+            for quality in ("high", "low"):
+                profile_name = f"{solver_family}/{quality}"
+                if not requested_profiles or profile_name in requested_profile_set:
+                    summary["profile_families"][solver_family][quality]["output_dir"] = (
+                        profile_name
+                    )
+    if requested_profiles:
+        summary["requested_profiles"] = list(requested_profiles)
+        summary["published_profiles"] = {
+            profile_name: {"output_dir": profile_name}
+            for profile_name in requested_profiles
+        }
+    else:
+        summary["profiles"]["high"]["output_dir"] = "high"
+        summary["profiles"]["low"]["output_dir"] = "low"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    (output_dir / "auto_model_selection.json").write_text(
+        json.dumps(_json_safe(summary), indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+    csv_lines = [
+        "candidate,solver_family,selection_scope,primary_band_count,kinetic_order,intra_order,inter_order,independent_real_parameters,active_group_count,harmonic_support_size,primary_weighted_rms_mev,primary_weighted_rms_se_mev,primary_weighted_max_mev,mean_subspace_overlap,low_band_count,low_rms_mev,low_max_mev,low_mean_overlap,low_minimum_singular_value,high_band_count,high_rms_mev,high_max_mev,high_mean_overlap,high_minimum_singular_value,expanded_all_band_rms_mev,selected_high,selected_low"
+    ]
+    high_name = (
+        None if profiles.high.selected is None else profiles.high.selected.name
+    )
+    low_name = None if profiles.low.selected is None else profiles.low.selected.name
+    for candidate in candidates:
+        low_window = candidate.low_window_metrics
+        high_window = candidate.high_window_metrics
+        csv_lines.append(
+            ",".join(
+                [
+                    candidate.name,
+                    candidate.solver_family,
+                    candidate.selection_scope,
+                    str(candidate.primary_band_count),
+                    str(candidate.orders.kinetic),
+                    str(candidate.orders.intra),
+                    str(candidate.orders.inter),
+                    str(candidate.independent_real_parameters),
+                    str(candidate.active_group_count),
+                    str(candidate.harmonic_support_size),
+                    f"{candidate.weighted_rms_mev:.12g}",
+                    f"{candidate.weighted_rms_se_mev:.12g}",
+                    f"{candidate.weighted_max_mev:.12g}",
+                    f"{candidate.mean_subspace_overlap:.12g}",
+                    "" if low_window is None else str(low_window.band_count),
+                    "" if low_window is None else f"{low_window.weighted_rms_mev:.12g}",
+                    "" if low_window is None else f"{low_window.weighted_max_mev:.12g}",
+                    "" if low_window is None else f"{low_window.mean_subspace_overlap:.12g}",
+                    "" if low_window is None else f"{low_window.minimum_singular_value:.12g}",
+                    "" if high_window is None else str(high_window.band_count),
+                    "" if high_window is None else f"{high_window.weighted_rms_mev:.12g}",
+                    "" if high_window is None else f"{high_window.weighted_max_mev:.12g}",
+                    "" if high_window is None else f"{high_window.mean_subspace_overlap:.12g}",
+                    "" if high_window is None else f"{high_window.minimum_singular_value:.12g}",
+                    "" if candidate.expanded_weighted_rms_mev is None else f"{candidate.expanded_weighted_rms_mev:.12g}",
+                    str(candidate.name == high_name).lower(),
+                    str(candidate.name == low_name).lower(),
+                ]
+            )
+        )
+    (output_dir / "candidate_metrics.csv").write_text(
+        "\n".join(csv_lines) + "\n",
+        encoding="utf-8",
+    )
+
+    def profile_line(label: str, decision: Any) -> str:
+        selected = decision.selected
+        if selected is None:
+            return f"- {label}: no acceptable candidate (`{decision.status}`)."
+        low_rms = (
+            "n/a"
+            if selected.low_window_metrics is None
+            else f"{selected.low_window_metrics.weighted_rms_mev:.3f}"
+        )
+        high_rms = (
+            "n/a"
+            if selected.high_window_metrics is None
+            else f"{selected.high_window_metrics.weighted_rms_mev:.3f}"
+        )
+        return (
+            f"- {label}: `{selected.name}`; orders "
+            f"k/intra/inter=`{selected.orders.kinetic}/{selected.orders.intra}/{selected.orders.inter}`; "
+            f"{selected.independent_real_parameters} independent real parameters; "
+            f"primary RMS `{selected.weighted_rms_mev:.3f} meV`; "
+            f"low/high RMS `{low_rms}/{high_rms} meV`; "
+            f"mean overlap `{selected.mean_subspace_overlap:.6f}`; status `{decision.status}`."
+        )
+
+    if nonlinear_profiles is None:
+        profile_lines = [
+            profile_line("High Accuracy", profile_families["linear"].high),
+            profile_line("Low Parameter", profile_families["linear"].low),
+        ]
+    else:
+        profile_lines = [
+            profile_line("Linear High", profile_families["linear"].high),
+            profile_line("Linear Low", profile_families["linear"].low),
+        ]
+        profile_lines.extend(
+            [
+                profile_line("Nonlinear High", nonlinear_profiles.high),
+                profile_line("Nonlinear Low", nonlinear_profiles.low),
+            ]
+        )
+    md_lines = [
+        "# Automatic High/Low KP Model Selection",
+        "",
+        *profile_lines,
+        "",
+        "Both profiles are selected using the fixed primary edge-band weights and the subspace-overlap gate. Low uses an adaptive statistical/material-difficulty tolerance. The expanded/all-band error is diagnostic only and never disqualifies the low profile.",
+        "",
+        "| candidate | solver | orders k/i/t | real parameters | groups | harmonics | primary RMS ± SE (meV) | max (meV) | overlap | all-band RMS (meV) |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+    ]
+    for candidate in candidates:
+        selected_marks = []
+        if candidate.name == high_name:
+            selected_marks.append("high")
+        if candidate.name == low_name:
+            selected_marks.append("low")
+        label = candidate.name
+        if selected_marks:
+            label += " (" + ", ".join(selected_marks) + ")"
+        expanded = candidate.expanded_weighted_rms_mev
+        md_lines.append(
+            f"| {label} | {candidate.solver_family} | {candidate.orders.kinetic}/{candidate.orders.intra}/{candidate.orders.inter} | "
+            f"{candidate.independent_real_parameters} | {candidate.active_group_count} | "
+            f"{candidate.harmonic_support_size} | {candidate.weighted_rms_mev:.3f} ± "
+            f"{candidate.weighted_rms_se_mev:.3f} | {candidate.weighted_max_mev:.3f} | "
+            f"{candidate.mean_subspace_overlap:.6f} | "
+            f"{'n/a' if expanded is None else f'{expanded:.3f}'} |"
+        )
+    (output_dir / "auto_model_selection.md").write_text(
+        "\n".join(md_lines) + "\n",
+        encoding="utf-8",
+    )
+
+    import matplotlib
+
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    fig, ax = plt.subplots(figsize=(5.6, 4.4), dpi=KP_DPI)
+    if candidates:
+        parameter_counts = np.asarray(
+            [candidate.independent_real_parameters for candidate in candidates],
+            dtype=float,
+        )
+        errors = np.asarray(
+            [candidate.weighted_rms_mev for candidate in candidates],
+            dtype=float,
+        )
+        error_bars = np.asarray(
+            [candidate.weighted_rms_se_mev for candidate in candidates],
+            dtype=float,
+        )
+        ax.errorbar(
+            parameter_counts,
+            errors,
+            yerr=error_bars,
+            fmt="o",
+            color=KP_REFERENCE_STYLE["color"],
+            alpha=0.75,
+            capsize=2.5,
+            label="candidates",
+        )
+        for label, selected, color in (
+            ("high", profiles.high.selected, KP_PRIMARY_STYLE["color"]),
+            ("low", profiles.low.selected, KP_MODEL_STYLE["color"]),
+        ):
+            if selected is not None:
+                ax.scatter(
+                    [selected.independent_real_parameters],
+                    [selected.weighted_rms_mev],
+                    s=85,
+                    marker="*",
+                    color=color,
+                    label=label,
+                    zorder=5,
+                )
+    ax.set_xlabel("independent real parameters")
+    ax.set_ylabel("primary weighted validation RMS (meV)")
+    ax.set_title("KP model complexity frontier")
+    ax.grid(True, alpha=0.25, linewidth=0.6)
+    ax.legend(**KP_LEGEND_KWARGS)
+    apply_kp_axis_style(ax, box_aspect=KP_BAND_BOX_ASPECT, font_family=kp_font_family())
+    fig.tight_layout()
+    fig.savefig(output_dir / "model_complexity_frontier.pdf", dpi=KP_DPI)
+    plt.close(fig)
+    return summary
+
+
+def _materialize_automatic_profile_output(
+    *,
+    profile_name: str,
+    profile: Mapping[str, Any],
+    target_hamiltonians: np.ndarray,
+    root_output_dir: Path,
+) -> dict[str, Any]:
+    """Write one selected profile as a complete configured-model output."""
+
+    name = str(profile_name).strip().lower()
+    parts = tuple(part for part in name.split("/") if part)
+    if parts not in {
+        ("high",),
+        ("low",),
+        ("linear", "high"),
+        ("linear", "low"),
+        ("nonlinear", "high"),
+        ("nonlinear", "low"),
+    }:
+        raise ValueError(
+            "automatic profile name must be high/low or "
+            f"linear/nonlinear high/low, got {profile_name!r}"
+        )
+    output_dir = Path(root_output_dir).joinpath(*parts)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    results = dict(profile["results"])
+    profile["results"] = results
+    moire_config = profile["moire_config"]
+    original_model_config = profile["model_config"]
+    model_config = replace(original_model_config, output_dir=output_dir)
+    profile["model_config"] = model_config
+
+    eig_output = results["eigvals"]
+    model_eigvecs = None
+    if isinstance(eig_output, tuple):
+        eigvals = np.asarray(eig_output[0], dtype=float)
+        if len(eig_output) > 1:
+            model_eigvecs = np.asarray(eig_output[1], dtype=np.complex128)
+    else:
+        eigvals = np.asarray(eig_output, dtype=float)
+    target = np.asarray(target_hamiltonians, dtype=np.complex128)
+    target_eigvals, target_eigvecs = np.linalg.eigh(target)
+    if eigvals.shape != target_eigvals.shape:
+        raise ValueError(
+            f"{name} profile eigenvalue shape {eigvals.shape} does not match "
+            f"selection target {target_eigvals.shape}"
+        )
+    np.save(output_dir / "eigvals.npy", eigvals)
+    np.save(output_dir / "current_heff_support_eigvals.npy", target_eigvals)
+
+    heff_matrix_all = np.load(model_config.heff_file, mmap_mode="r")
+    heff_matrix_selected = np.asarray(
+        _select_rows(heff_matrix_all, model_config.band_indices)
+    )
+    original_heff_eigvals = np.linalg.eigvalsh(heff_matrix_selected)
+    comparison = {
+        **compare_bands(
+            eigvals,
+            target_eigvals,
+            band_slice=model_config.band_slice,
+        ),
+        "reference": "current_heff_support_mask",
+    }
+    comparison_vs_full_heff = {
+        **compare_bands(
+            eigvals,
+            original_heff_eigvals,
+            band_slice=model_config.band_slice,
+        ),
+        "reference": "original_heff",
+    }
+    target_bands = str(
+        model_config.raw.get("model", {}).get("target_bands", "top")
+    ).strip().lower()
+    band_plot_config = _window_band_plot_config(
+        model_config.band_plot_config,
+        target_bands=target_bands,
+    )
+    overlap_weights = None
+    if model_eigvecs is not None:
+        if model_eigvecs.shape != target_eigvecs.shape:
+            raise ValueError(
+                f"{name} profile eigenvector shape {model_eigvecs.shape} does not "
+                f"match selection target {target_eigvecs.shape}"
+            )
+        overlap_weights = _band_overlap_weights(
+            model_eigvecs,
+            target_eigvecs,
+            model_eigvals=eigvals,
+            reference_eigvals=target_eigvals,
+            degeneracy_tol=float(
+                model_config.band_plot_config.get(
+                    "overlap_degeneracy_tol",
+                    3.0e-3,
+                )
+            ),
+        )
+        band_plot_config["plot_all_bands"] = True
+    plot_comparison = compare_bands_for_plot(
+        eigvals,
+        target_eigvals,
+        band_slice=model_config.band_slice,
+        plot_config=band_plot_config,
+    )
+    plot_comparison["reference"] = "current_heff_support_mask"
+    plot_comparison_vs_full_heff = compare_bands_for_plot(
+        eigvals,
+        original_heff_eigvals,
+        band_slice=model_config.band_slice,
+        plot_config=band_plot_config,
+    )
+    plot_comparison_vs_full_heff["reference"] = "original_heff"
+    all_band_config = _all_band_plot_config(model_config.band_plot_config)
+    all_band_plot_comparison = compare_bands_for_plot(
+        eigvals,
+        target_eigvals,
+        band_slice=None,
+        plot_config=all_band_config,
+    )
+    all_band_plot_comparison["reference"] = "current_heff_support_mask"
+    all_band_plot_comparison_vs_full_heff = compare_bands_for_plot(
+        eigvals,
+        original_heff_eigvals,
+        band_slice=None,
+        plot_config=all_band_config,
+    )
+    all_band_plot_comparison_vs_full_heff["reference"] = "original_heff"
+
+    x_values, x_ticks, x_ticklabels = _plot_axis_from_kpath(
+        model_config,
+        eigvals.shape[0],
+    )
+    band_plot_path = save_band_comparison_plot(
+        eigvals,
+        target_eigvals,
+        output_dir / "band_comparison.pdf",
+        band_slice=model_config.band_slice,
+        plot_config=band_plot_config,
+        x=x_values,
+        x_ticks=x_ticks,
+        x_ticklabels=x_ticklabels,
+        title=f"{_band_plot_title(model_config)} ({name})",
+        overlap_weights=overlap_weights,
+        reference_label="Current Heff support mask",
+    )
+    full_heff_plot_path = save_band_comparison_plot(
+        eigvals,
+        original_heff_eigvals,
+        output_dir / "band_comparison_vs_full_heff.pdf",
+        band_slice=model_config.band_slice,
+        plot_config=band_plot_config,
+        x=x_values,
+        x_ticks=x_ticks,
+        x_ticklabels=x_ticklabels,
+        title=f"{_band_plot_title(model_config)} ({name}, vs original Heff)",
+        reference_label="Original Heff",
+    )
+    all_band_plot_path = save_band_comparison_plot(
+        eigvals,
+        target_eigvals,
+        output_dir / "band_comparison_all.pdf",
+        band_slice=None,
+        plot_config=all_band_config,
+        x=x_values,
+        x_ticks=x_ticks,
+        x_ticklabels=x_ticklabels,
+        title=f"{_band_plot_title(model_config)} ({name}, all bands)",
+        reference_label="Current Heff support mask",
+    )
+    q_lattice_plot_path = save_q_lattice_harmonics_plot(
+        Q_set1=np.asarray(moire_config.Q_set1, dtype=float),
+        Q_set2=np.asarray(moire_config.Q_set2, dtype=float),
+        bM1=np.asarray(moire_config.bM1, dtype=float),
+        bM2=np.asarray(moire_config.bM2, dtype=float),
+        intra_harmonics=getattr(moire_config, "intra_harmonics_map", {}) or {},
+        inter_harmonics=getattr(moire_config, "inter_harmonics_map", {}) or {},
+        path=output_dir / "q_lattice_harmonics.pdf",
+        sectors=getattr(moire_config, "sectors", []),
+        inter_sector_pairs=[
+            list(pair)
+            for row in getattr(moire_config, "term_templates", [])
+            if str(row.get("source", "")) == "tunneling"
+            for pair in row.get("sector_pairs", [])
+            if isinstance(pair, Sequence)
+            and not isinstance(pair, (str, bytes))
+            and len(pair) == 2
+        ],
+    )
+
+    score = profile.get("score")
+    selected_record = (
+        _model_selection_candidate_record(score)
+        if isinstance(score, CandidateScore)
+        else _json_safe(score)
+    )
+    results.update(
+        {
+            "configured_model": model_config,
+            "moire_config": moire_config,
+            "comparison": comparison,
+            "plot_comparison": plot_comparison,
+            "all_band_plot_comparison": all_band_plot_comparison,
+            "comparison_vs_full_heff": comparison_vs_full_heff,
+            "plot_comparison_vs_full_heff": plot_comparison_vs_full_heff,
+            "all_band_plot_comparison_vs_full_heff": all_band_plot_comparison_vs_full_heff,
+            "band_plot": str(Path(band_plot_path).resolve()),
+            "full_heff_band_plot": str(Path(full_heff_plot_path).resolve()),
+            "all_band_plot": str(Path(all_band_plot_path).resolve()),
+            "q_lattice_plot": str(Path(q_lattice_plot_path).resolve()),
+            "auto_model_selection": {
+                "enabled": True,
+                "mode": (
+                    "automatic_four_model_profiles"
+                    if len(parts) == 2
+                    else "automatic_high_low_family_orders"
+                ),
+                "profile": name,
+                "status": str(profile.get("status", "unknown")),
+                "selected": selected_record,
+                "reference": "current_heff_support_mask",
+            },
+        }
+    )
+    selected_raw = copy.deepcopy(model_config.raw)
+    selected_model_section = selected_raw.setdefault("model", {})
+    if isinstance(selected_model_section, dict):
+        selected_model_section["max_order"] = dict(model_config.max_order)
+        selected_model_section["response_semantics"] = str(
+            model_config.response_semantics
+        )
+        selected_model_section["term_templates"] = [
+            copy.deepcopy(row) for row in model_config.term_templates
+        ]
+        selected_fit = selected_model_section.setdefault("fit", {})
+        if isinstance(selected_fit, dict):
+            selected_fit["objective"] = copy.deepcopy(
+                model_config.response_fit_objective
+            )
+            selected_fit["refine_bands"] = copy.deepcopy(
+                model_config.band_refinement_config
+            )
+    (output_dir / "selected_model_config.yaml").write_text(
+        yaml.safe_dump(_json_safe(selected_raw), sort_keys=False),
+        encoding="utf-8",
+    )
+    validations, validation_summary = _compute_validation_outputs(
+        results=results,
+        model_config=model_config,
+        moire_config=moire_config,
+    )
+    results["validations"] = validations
+    results["validation_summary"] = validation_summary
+    _write_model_registry_outputs(
+        results=results,
+        output_dir=output_dir,
+        model_config=model_config,
+        validations=validations,
+        validation_summary=validation_summary,
+        diagnostics_dir=None,
+    )
+    active_terms_path = output_dir / "active_terms.json"
+    active_terms_payload = json.loads(active_terms_path.read_text(encoding="utf-8"))
+    if isinstance(active_terms_payload, list) and active_terms_payload:
+        from .export import export_standalone_model
+
+        try:
+            export_standalone_model(output_dir, output_dir, force=True)
+        except (FileNotFoundError, ValueError) as exc:
+            if len(parts) == 2:
+                raise
+            results["standalone_export"] = {
+                "status": "skipped_unavailable_metadata",
+                "reason": str(exc),
+            }
+        else:
+            results["standalone_export"] = {"status": "exported"}
+    else:
+        results["standalone_export"] = {"status": "skipped_empty_model"}
+    return results
 
 
 def _null_channel_filter_summary(model: Any, abs_tol: float, rel_tol: float) -> dict[str, Any]:
@@ -5900,9 +7772,20 @@ def _write_auto_model_selection_outputs(
     if model is None:
         return {"enabled": False, "reason": "missing_model"}
 
-    heff_all = _select_rows(np.load(model_config.heff_file, mmap_mode="r"), model_config.band_indices)
+    original_heff_all = _select_rows(
+        np.load(model_config.heff_file, mmap_mode="r"),
+        model_config.band_indices,
+    )
+    heff_all = _current_heff_support_hamiltonians(
+        original_heff_all,
+        qset1=np.asarray(moire_config.Q_set1, dtype=float),
+        qset2=np.asarray(moire_config.Q_set2, dtype=float),
+        n_orb=model_config.n_orb,
+        harmonics_config=model_config.harmonics_config,
+    )
     h_model = _model_hamiltonians_for_kpoints(moire_config, model, np.asarray(moire_config.kpoints, dtype=float))
     heff_eig, heff_vec = np.linalg.eigh(heff_all)
+    original_heff_eig = np.linalg.eigvalsh(original_heff_all)
     model_eig, model_vec = np.linalg.eigh(h_model)
     target_bands = str(refine_cfg.get("target_bands", model_config.raw.get("model", {}).get("target_bands", "top"))).strip().lower()
     auto_windows = refine_cfg.get("auto_windows")
@@ -5937,6 +7820,7 @@ def _write_auto_model_selection_outputs(
     candidate = {
         "name": "configured_auto_low_energy",
         "selected": True,
+        "reference": "current_heff_support_mask",
         "active_terms": int(len(active_terms)),
         "n_variables": n_variables,
         "fit_selection": _json_safe(model_config.fit_selection_metadata),
@@ -5991,6 +7875,20 @@ def _write_auto_model_selection_outputs(
         if window_payload["role"] == "primary":
             primary_leakage_curve = _subspace_leakage_curve(model_basis, target_basis)
 
+    primary = candidate["windows"][0]
+    secondary_plot = compare_bands_for_plot(
+        model_eig,
+        original_heff_eig,
+        band_slice=primary["band_slice"],
+        plot_config={**model_config.band_plot_config, "band_slice": primary["band_slice"]},
+    )
+    candidate["secondary_original_heff"] = {
+        "reference": "original_heff",
+        "plot_rms_mev": float(secondary_plot["rms_error_mev"]),
+        "plot_max_mev": float(secondary_plot["max_abs_error_mev"]),
+        "comparison": secondary_plot,
+    }
+
     summary = {
         "enabled": True,
         "mode": "auto_low_energy",
@@ -6039,6 +7937,8 @@ def _write_auto_model_selection_outputs(
         "# Auto Low-Energy Model Selection",
         "",
         f"Selected candidate: `{candidate['name']}`.",
+        "",
+        "Primary energy, matrix, and subspace metrics use the current Heff support mask. Original Heff is retained only as a labelled secondary diagnostic.",
         "",
     ]
     harmonic_selection = refine_cfg.get("auto_harmonic_selection", {"enabled": False})
@@ -6099,7 +7999,6 @@ def _write_auto_model_selection_outputs(
     )
     (output_dir / "auto_model_selection.md").write_text("\n".join(md_lines) + "\n", encoding="utf-8")
 
-    primary = candidate["windows"][0]
     save_band_comparison_plot(
         model_eig,
         heff_eig,
@@ -6107,6 +8006,16 @@ def _write_auto_model_selection_outputs(
         band_slice=primary["band_slice"],
         plot_config={**model_config.band_plot_config, "band_slice": primary["band_slice"]},
         title="Auto low-energy primary window",
+        reference_label="Current Heff support mask",
+    )
+    save_band_comparison_plot(
+        model_eig,
+        original_heff_eig,
+        output_dir / "band_comparison_top_vs_full_heff.pdf",
+        band_slice=primary["band_slice"],
+        plot_config={**model_config.band_plot_config, "band_slice": primary["band_slice"]},
+        title="Auto low-energy primary window (vs original Heff)",
+        reference_label="Original Heff",
     )
     weighted_window = next((item for item in candidate["windows"] if item.get("role") == "weighted_fit"), None)
     if weighted_window is not None:
@@ -6117,6 +8026,7 @@ def _write_auto_model_selection_outputs(
             band_slice=weighted_window["band_slice"],
             plot_config={**model_config.band_plot_config, "band_slice": weighted_window["band_slice"]},
             title="Auto low-energy weighted fit window",
+            reference_label="Current Heff support mask",
         )
     if primary_leakage_curve is not None:
         import matplotlib
@@ -6175,14 +8085,14 @@ def _progress_line(
         out = stream if stream is not None else sys.stdout
         use_color = _terminal_color_enabled(out)
         style_code = {
-            "start": "36",
-            "done": "1;32",
-            "section": "1;35",
-            "fit_start": "1;33",
-            "fit_done": "1;32",
-            "path": "1;35",
-            "warning": "1;33",
-            "error": "1;31",
+            "start": "1",
+            "done": "32",
+            "section": "1",
+            "fit_start": "1",
+            "fit_done": "32",
+            "path": "2",
+            "warning": "33",
+            "error": "31",
         }.get(str(style or ""))
         prefix = _terminal_color("[kp model]", "2;36", enabled=use_color)
         body = _terminal_color(str(message), style_code, enabled=use_color) if style_code else str(message)
@@ -6198,31 +8108,118 @@ def _term_progress_summary_rows(model: Any) -> list[tuple[str, int, int, int]]:
         if bool(getattr(term, "active", True)):
             row["active_terms"] += 1
         row["variables"] += 2
+    family_order = {
+        "onsite": 0,
+        "kinect": 1,
+        "kinetic": 1,
+        "intra": 2,
+        "intralayer": 2,
+        "inter": 3,
+        "interlayer": 3,
+    }
     return [
         (tag, int(values["terms"]), int(values["active_terms"]), int(values["variables"]))
-        for tag, values in sorted(rows.items(), key=lambda item: item[0].lower())
+        for tag, values in sorted(
+            rows.items(),
+            key=lambda item: (
+                family_order.get(item[0].strip().lower(), len(family_order)),
+                item[0].lower(),
+            ),
+        )
     ]
 
 
 def _print_term_progress_summary(model: Any, *, enabled: bool, stream: Any | None = None) -> None:
-    rows = _term_progress_summary_rows(model)
-    if not rows:
-        _progress_line("term summary before fitting: no terms", enabled=enabled, style="section", stream=stream)
+    if not enabled:
         return
-    _progress_line("term summary before fitting:", enabled=enabled, style="section", stream=stream)
-    for tag, terms, active_terms, variables in rows:
-        _progress_line(
-            f"  {tag}: terms={terms}, fit_components={variables}",
-            enabled=enabled,
-            style="fit_start",
-            stream=stream,
-        )
+    out = stream if stream is not None else sys.stdout
+    reporter = KpReporter("kp model", stream=out)
+    rows = _term_progress_summary_rows(model)
+    reporter.line()
+    reporter.section("Continuum basis")
+    if not rows:
+        reporter.field("status", "no terms")
+        return
+    reporter.table(
+        ("Family", "Terms", "Components"),
+        ((tag, terms, variables) for tag, terms, _active_terms, variables in rows),
+        right_align=(1, 2),
+    )
+
+
+def _print_fitted_term_progress_summary(
+    model: Any,
+    *,
+    enabled: bool,
+    stream: Any | None = None,
+) -> None:
+    if not enabled:
+        return
+    out = stream if stream is not None else sys.stdout
+    reporter = KpReporter("kp model", stream=out)
+    rows = _term_progress_summary_rows(model)
+    reporter.line()
+    reporter.section("Fitted continuum basis")
+    if not rows:
+        reporter.field("status", "no terms")
+        return
+    reporter.table(
+        ("Family", "Seed terms", "Active terms"),
+        ((tag, terms, active_terms) for tag, terms, active_terms, _variables in rows),
+        right_align=(1, 2),
+    )
+    seed_terms = sum(row[1] for row in rows)
+    active_terms = sum(row[2] for row in rows)
+    fields: list[tuple[str, object]] = [
+        ("active semantic terms", f"{active_terms} / {seed_terms}"),
+    ]
+    basis = getattr(model, "_compiled_response_basis", None)
+    fitted = getattr(model, "_fitted_response_model", None)
+    if basis is not None:
+        fields.append(("independent coefficients", len(getattr(basis, "channels", ()))))
+    if fitted is not None:
+        coefficients = np.asarray(getattr(fitted, "coefficients", ()), dtype=float)
+        fields.append(("nonzero coefficients", int(np.count_nonzero(coefficients))))
+    reporter.fields(fields)
 
 
 def _prune_small_coefficients(model: Any, threshold: float) -> dict[str, Any]:
     threshold = float(threshold)
     if threshold <= 0.0:
         return {"enabled": False, "threshold": threshold, "dropped": 0, "kept": None}
+    basis = getattr(model, "_compiled_response_basis", None)
+    fitted = getattr(model, "_fitted_response_model", None)
+    if basis is not None or fitted is not None:
+        if basis is None or fitted is None:
+            raise ValueError("complete response model has an incomplete basis/fit runtime pair")
+        coefficients = np.asarray(fitted.coefficients, dtype=float).copy()
+        active = coefficients != 0.0
+        amplitudes = np.abs(coefficients) * basis.response_scales
+        drop = active & (amplitudes < threshold)
+        keep = active & ~drop
+        coefficients[drop] = 0.0
+        refined_fit = fitted.with_coefficients(
+            coefficients,
+            channel_ids=basis.channel_ids,
+            response_scales=basis.response_scales,
+            provenance={
+                "operation": "coefficient_pruning",
+                "threshold": threshold,
+                "normalization": basis.coefficient_normalization,
+            },
+        )
+        setattr(model, "_fitted_response_model", refined_fit)
+        _sync_complete_response_coefficients_to_terms(model, coefficients)
+        return {
+            "enabled": True,
+            "threshold": threshold,
+            "normalization": basis.coefficient_normalization,
+            "dropped": int(np.count_nonzero(drop)),
+            "kept": int(np.count_nonzero(keep)),
+            "dropped_channel_ids": [
+                basis.channels[index].channel_id for index in np.flatnonzero(drop)
+            ],
+        }
     terms = list(getattr(model, "terms", {}).values())
     dropped = 0
     kept = 0
@@ -6275,6 +8272,33 @@ def _refinement_band_slice(config: Mapping[str, Any], model_config: ConfiguredMo
 
 
 def _model_hamiltonians_for_kpoints(moire_config: MoireConfig, model: Any, kpoints: np.ndarray) -> np.ndarray:
+    basis = getattr(model, "_compiled_response_basis", None)
+    fitted = getattr(model, "_fitted_response_model", None)
+    if basis is not None or fitted is not None:
+        if basis is None or fitted is None:
+            raise ValueError("complete response model has an incomplete basis/fit runtime pair")
+        from .response_basis import CompiledResponseRuntime
+
+        runtime = CompiledResponseRuntime(basis=basis, fitted=fitted)
+        dim_full = int(basis.dim)
+        keep = (
+            np.arange(dim_full, dtype=int)
+            if moire_config.keep_indices is None
+            else np.asarray(moire_config.keep_indices, dtype=int)
+        )
+        remove = (
+            np.asarray(moire_config.remove_indices, dtype=int)
+            if moire_config.remove_indices is not None
+            else np.array([], dtype=int)
+        )
+        reduction_state = type("_ResponseReductionState", (), {"keep": keep, "remove": remove})()
+        return np.asarray(
+            [
+                _reduce_and_hermitize_hamiltonian(hamiltonian, reduction_state)
+                for hamiltonian in runtime.hamiltonians(np.asarray(kpoints, dtype=float))
+            ],
+            dtype=np.complex128,
+        )
     state = _prepare_band_state(moire_config, model)
     hamiltonians = []
     for index, kval in enumerate(np.asarray(kpoints, dtype=float)):
@@ -6582,6 +8606,21 @@ class _BandRefinementOptimizeResult:
     njev: int
     status: int
     message: str
+
+
+def _band_refinement_gauss_newton_available(
+    *,
+    analytic_jacobian_enabled: bool,
+    matrix_jacobian: Any | None,
+) -> bool:
+    """Return whether the dense/reduced analytic Jacobian can use GN.
+
+    A reduced matrix-loss block is optional: a band-only analytic Jacobian is
+    already a valid dense Gauss--Newton system.  Only the explicit sparse
+    matrix-loss Jacobian stays on SciPy's sparse trust-region path.
+    """
+
+    return bool(analytic_jacobian_enabled and matrix_jacobian is None)
 
 
 def _solve_band_refinement_gauss_newton(
@@ -7590,7 +9629,7 @@ def _harmonic_recommendation_options(
     *,
     inherit_from: Mapping[str, Any] | None = None,
 ) -> tuple[bool, dict[str, Any]]:
-    raw = fit.get("harmonic_recommendation", True)
+    raw = fit.get("harmonic_recommendation", False)
     if raw is False:
         return False, {}
     if raw in (True, None):
@@ -7611,7 +9650,7 @@ def _format_harmonic_recommendation_candidate(candidate: Mapping[str, Any]) -> s
         f"Max={float(candidate['plot_max_mev']):.3f} meV | "
         f"primary RMS={float(candidate['primary_rms_mev']):.3f} meV "
         f"Max={float(candidate['primary_max_mev']):.3f} meV | "
-        f"overlap={float(candidate['subspace_mean_overlap']):.6f}"
+        f"mean subspace overlap={float(candidate['subspace_mean_overlap']):.6f}"
     )
 
 
@@ -7619,7 +9658,7 @@ def _format_harmonic_recommendation_metrics(candidate: Mapping[str, Any]) -> str
     return (
         f"plot {float(candidate['plot_rms_mev']):.3f}/{float(candidate['plot_max_mev']):.3f} meV | "
         f"primary {float(candidate['primary_rms_mev']):.3f}/{float(candidate['primary_max_mev']):.3f} meV | "
-        f"overlap {float(candidate['subspace_mean_overlap']):.6f}"
+        f"mean subspace overlap {float(candidate['subspace_mean_overlap']):.6f}"
     )
 
 
@@ -7653,25 +9692,41 @@ def _low_cost_harmonic_recommendation_candidate(report: Mapping[str, Any]) -> Ma
     candidates = [item for item in report.get("candidates", []) if isinstance(item, Mapping)]
     if not candidates:
         return None
-    relaxed_thresholds = {
-        "plot_rms_mev": 1.0,
-        "plot_max_mev": 3.0,
-        "min_overlap": 0.98,
-    }
     relaxed = [
         item
         for item in candidates
-        if _harmonic_ablation_candidate_is_accepted(item, relaxed_thresholds)
+        if float(item["plot_rms_mev"]) <= 1.0
+        and float(item["subspace_mean_overlap"]) > 0.9
     ]
-    rows = relaxed or candidates
-    return min(rows, key=_harmonic_recommendation_support_key)
+    if not relaxed:
+        return None
+    return min(relaxed, key=_harmonic_recommendation_support_key)
+
+
+def _high_accuracy_harmonic_recommendation_candidate(report: Mapping[str, Any]) -> Mapping[str, Any] | None:
+    candidates = [item for item in report.get("candidates", []) if isinstance(item, Mapping)]
+    if not candidates:
+        return None
+    high_accuracy = [
+        item
+        for item in candidates
+        if float(item["plot_rms_mev"]) < 1.0
+        and float(item["plot_max_mev"]) < 3.0
+        and float(item["subspace_mean_overlap"]) > 0.95
+    ]
+    if high_accuracy:
+        return min(high_accuracy, key=_harmonic_recommendation_support_key)
+    selected = report.get("selected")
+    if isinstance(selected, Mapping):
+        return selected
+    return min(candidates, key=_harmonic_recommendation_quality_key)
 
 
 def _harmonic_recommendation_named_candidates(report: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
-    selected = report.get("selected", {})
     out: dict[str, Mapping[str, Any]] = {}
-    if isinstance(selected, Mapping):
-        out["high"] = selected
+    high_accuracy = _high_accuracy_harmonic_recommendation_candidate(report)
+    if high_accuracy is not None:
+        out["high"] = high_accuracy
     low_cost = _low_cost_harmonic_recommendation_candidate(report)
     if low_cost is not None:
         out["low"] = low_cost
@@ -7792,7 +9847,7 @@ def _print_harmonic_recommendation_report(
         + _format_harmonic_recommendation_support(selected)
         + " | "
         + _format_harmonic_recommendation_metrics(selected)
-        + f" | {report.get('selection_status', 'unknown')}"
+        + " | balanced high accuracy"
     )
     print(f"{prefix} " + _terminal_color(line, "32", enabled=use_color), flush=True)
     if plot_path is not None:
@@ -7801,6 +9856,43 @@ def _print_harmonic_recommendation_report(
             + _terminal_color(f"  band plot: {plot_path.resolve()}", "35", enabled=use_color),
             flush=True,
         )
+
+
+def _print_automatic_harmonic_selection_report(
+    report: Mapping[str, Any],
+    *,
+    reporter: KpReporter | None = None,
+) -> None:
+    selected = report.get("selected")
+    if not isinstance(selected, Mapping):
+        return
+    output = reporter if reporter is not None else KpReporter("kp model")
+
+    def candidate_row(label: str, candidate: Mapping[str, Any]) -> tuple[object, ...]:
+        return (
+            label,
+            int(candidate["intra_shells"]),
+            int(candidate["inter_shells"]),
+            f"{float(candidate['plot_rms_mev']):.3f} / {float(candidate['plot_max_mev']):.3f}",
+            f"{float(candidate['primary_rms_mev']):.3f} / {float(candidate['primary_max_mev']):.3f}",
+            f"{float(candidate['subspace_mean_overlap']):.6f}",
+        )
+
+    output.status("Automatic harmonic selection", "PASS")
+    rows = [candidate_row("selected", selected)]
+    quality = report.get("quality_selected")
+    if isinstance(quality, Mapping):
+        rows.append(candidate_row("high", quality))
+    output.table(
+        ("Choice", "Intra", "Inter", "Plot RMS/Max (meV)", "Primary RMS/Max (meV)", "Overlap"),
+        rows,
+        right_align=(1, 2, 5),
+        column_styles={0: "1"},
+    )
+    quality_label = "low-cost choice"
+    if isinstance(quality, Mapping):
+        quality_label += " · high-accuracy reference"
+    output.fields([("quality", quality_label)])
 
 
 def _aligned_harmonic_plot_bands(eig: np.ndarray, target_slice: np.ndarray, *, band_slice: tuple[int, int], target_bands: str) -> np.ndarray:
@@ -8034,13 +10126,16 @@ def _run_model_harmonic_recommendation_once(
     *,
     model_config: ConfiguredModel,
     output_dir: Path,
+    reporter: KpReporter | None = None,
 ) -> None:
     fit = model_config.raw.get("fit", {})
     if not isinstance(fit, Mapping):
         return
-    harmonic_selection_enabled, harmonic_selection_cfg = _harmonic_selection_options(fit)
-    if harmonic_selection_enabled and isinstance(model_config.raw.get("model", {}).get("auto_low_energy_harmonic_selection"), Mapping):
+    automatic_report = model_config.automatic_harmonic_selection
+    if isinstance(automatic_report, Mapping) and automatic_report:
+        _print_automatic_harmonic_selection_report(automatic_report, reporter=reporter)
         return
+    _, harmonic_selection_cfg = _harmonic_selection_options(fit)
     recommendation_enabled, recommendation_cfg = _harmonic_recommendation_options(
         fit,
         inherit_from=harmonic_selection_cfg,
@@ -9154,12 +11249,928 @@ def _apply_refinement_acceptance_guard(
     }
 
 
-def refine_band_coefficients(moire_config: MoireConfig, model_config: ConfiguredModel, model: Any) -> dict[str, Any]:
+def _sync_complete_response_coefficients_to_terms(model: Any, coefficients: np.ndarray) -> None:
+    basis = getattr(model, "_compiled_response_basis")
+    # ``term_index`` is authored against the complete candidate registry in
+    # ``compile_model_response_basis``.  The legacy ``model.terms`` dictionary
+    # may have already overwritten duplicate physical keys, so indexing that
+    # dictionary can assign a fitted coefficient to the wrong authored seed.
+    terms = list(
+        getattr(model, "candidate_terms", ())
+        or getattr(model, "terms", {}).values()
+    )
+    for term in terms:
+        term.active = False
+        term.r_value_real = 0.0
+        term.r_value_imag = 0.0
+    for channel, value in zip(basis.channels, np.asarray(coefficients, dtype=float)):
+        term_index = int(channel.metadata.get("term_index", -1))
+        if term_index < 0 or term_index >= len(terms):
+            raise ValueError(
+                f"compiled response channel {channel.channel_id!r} has invalid term_index={term_index}"
+            )
+        term = terms[term_index]
+        if channel.component == "real":
+            term.r_value_real = float(value)
+        elif channel.component == "imag":
+            term.r_value_imag = float(value)
+        else:
+            raise ValueError(f"compiled response channel has unknown component {channel.component!r}")
+        if float(value) != 0.0:
+            term.active = True
+
+
+def _public_hamiltonian_quadratic_residual(
+    basis: Any,
+    channel_indices: np.ndarray,
+    kpoints: np.ndarray,
+    target: np.ndarray,
+    *,
+    target_bands: str,
+    bands: int,
+    one_sided_weight: float,
+    two_sided_weight: float,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Compress the public normalized Hamiltonian loss to coefficient space."""
+
+    from .response_basis import (
+        NormalizedLowEnergyWeightingSpec,
+        build_normalized_low_energy_weighting,
+    )
+
+    points = np.asarray(kpoints, dtype=float)
+    target_array = np.asarray(target, dtype=np.complex128)
+    selected = np.asarray(channel_indices, dtype=np.int64)
+    complex_design, support = basis._response_design_on_union_support(points, selected)
+    weighting = build_normalized_low_energy_weighting(
+        target_array,
+        NormalizedLowEnergyWeightingSpec(
+            band_edge=str(target_bands),
+            n_bands=int(bands),
+            one_sided_weight=float(one_sided_weight),
+            two_sided_weight=float(two_sided_weight),
+        ),
+    )
+    complex_design, complex_target = basis._normalized_low_energy_complex_rows(
+        complex_design,
+        support,
+        target_array,
+        weighting,
+    )
+    n_kpoints = max(1, int(points.shape[0]))
+    design = np.vstack((complex_design.real, complex_design.imag)) / np.sqrt(n_kpoints)
+    target_vector = np.concatenate((complex_target.real, complex_target.imag)) / np.sqrt(
+        n_kpoints
+    )
+    gram = design.T @ design
+    linear = design.T @ target_vector
+    gram = 0.5 * (gram + gram.T)
+    values, vectors = np.linalg.eigh(gram)
+    tolerance = np.finfo(float).eps * max(gram.shape) * max(
+        float(np.max(np.abs(values))) if values.size else 0.0,
+        1.0,
+    )
+    retained = values > tolerance
+    if not np.any(retained):
+        raise ValueError("public nonlinear Hamiltonian loss has zero coefficient rank")
+    root = np.sqrt(values[retained])[:, None] * vectors[:, retained].T
+    center = (vectors[:, retained].T @ linear) / np.sqrt(values[retained])
+    constant = max(0.0, float(target_vector @ target_vector - center @ center))
+    if constant > tolerance:
+        root = np.vstack((root, np.zeros((1, root.shape[1]), dtype=float)))
+        center = np.concatenate((center, np.asarray([np.sqrt(constant)], dtype=float)))
+    return root, center, {
+        **weighting.artifact(),
+        "hamiltonian_kpoints": int(points.shape[0]),
+        "coefficient_rank": int(np.count_nonzero(retained)),
+        "coefficient_count": int(selected.size),
+    }
+
+
+def _compiled_response_band_jacobian(
+    basis: Any,
+    channel_indices: np.ndarray,
+    kpoints: np.ndarray,
+    eigenvectors: np.ndarray,
+    selected_masks: np.ndarray,
+) -> np.ndarray:
+    """Hellmann--Feynman derivatives without a dense response tensor."""
+
+    points = np.asarray(kpoints, dtype=float)
+    vectors = np.asarray(eigenvectors, dtype=np.complex128)
+    masks = np.asarray(selected_masks, dtype=bool)
+    selected = np.asarray(channel_indices, dtype=np.int64)
+    dimensionless = basis.coordinate.to_dimensionless(points)
+    w = dimensionless[:, 0] + 1j * dimensionless[:, 1]
+    monomial_values = {
+        monomial: (w ** monomial[0]) * (np.conjugate(w) ** monomial[1])
+        for monomial in basis.coordinate.monomials
+    }
+    offsets = np.cumsum([0] + [int(np.count_nonzero(mask)) for mask in masks])
+    jacobian = np.zeros((int(offsets[-1]), int(selected.size)), dtype=float)
+    for output_index, channel_index in enumerate(selected):
+        channel = basis.channels[int(channel_index)]
+        for k_index in range(points.shape[0]):
+            band_indices = np.flatnonzero(masks[k_index])
+            selected_vectors = vectors[k_index][:, band_indices]
+            derivatives = np.zeros(int(band_indices.size), dtype=np.complex128)
+            for monomial, matrix in channel.coefficients.items():
+                coo = matrix.tocoo()
+                if coo.nnz == 0:
+                    continue
+                left = np.conjugate(selected_vectors[np.asarray(coo.row, dtype=int), :])
+                right = selected_vectors[np.asarray(coo.col, dtype=int), :]
+                derivatives += monomial_values[monomial][k_index] * np.sum(
+                    left * np.asarray(coo.data, dtype=np.complex128)[:, None] * right,
+                    axis=0,
+                )
+            jacobian[offsets[k_index] : offsets[k_index + 1], output_index] = (
+                derivatives.real
+            )
+    return jacobian
+
+
+@dataclass(frozen=True)
+class _PublicBandResponseEvaluator:
+    """Cached selected-channel responses for public nonlinear fitting."""
+
+    basis: Any
+    coefficients0: np.ndarray
+    channel_indices: np.ndarray
+    y0: np.ndarray
+    kpoints: np.ndarray
+    base_hamiltonians: np.ndarray
+    support: np.ndarray
+    design_by_k: np.ndarray | None
+    backend: str
+    cache_bytes: int
+
+    def hamiltonians(self, y: np.ndarray) -> np.ndarray:
+        values = np.asarray(y, dtype=float)
+        if values.shape != self.y0.shape:
+            raise ValueError(
+                f"public nonlinear coefficient vector has shape {values.shape}, "
+                f"expected {self.y0.shape}"
+            )
+        if self.design_by_k is None:
+            coefficients = np.asarray(self.coefficients0, dtype=float).copy()
+            coefficients[self.channel_indices] = values
+            return self.basis.hamiltonians(self.kpoints, coefficients)
+        delta_support = np.einsum(
+            "ksj,j->ks",
+            self.design_by_k,
+            values - self.y0,
+            optimize=True,
+        )
+        hamiltonians = np.asarray(self.base_hamiltonians, dtype=np.complex128).copy()
+        hamiltonians.reshape(len(self.kpoints), -1)[:, self.support] += delta_support
+        return hamiltonians
+
+    def band_jacobian(
+        self,
+        eigenvectors: np.ndarray,
+        selected_masks: np.ndarray,
+    ) -> np.ndarray:
+        vectors = np.asarray(eigenvectors, dtype=np.complex128)
+        masks = np.asarray(selected_masks, dtype=bool)
+        if self.design_by_k is None:
+            return _compiled_response_band_jacobian(
+                self.basis,
+                self.channel_indices,
+                self.kpoints,
+                vectors,
+                masks,
+            )
+        if vectors.shape != (
+            len(self.kpoints),
+            int(self.basis.dim),
+            int(self.basis.dim),
+        ):
+            raise ValueError(
+                "public nonlinear eigenvectors must have shape "
+                f"(Nk,dim,dim), got {vectors.shape}"
+            )
+        if masks.shape != (len(self.kpoints), int(self.basis.dim)):
+            raise ValueError(
+                "public nonlinear selected masks must have shape "
+                f"(Nk,dim), got {masks.shape}"
+            )
+        offsets = np.cumsum([0] + [int(np.count_nonzero(mask)) for mask in masks])
+        jacobian = np.zeros(
+            (int(offsets[-1]), int(self.channel_indices.size)),
+            dtype=float,
+        )
+        support_rows = self.support // int(self.basis.dim)
+        support_cols = self.support % int(self.basis.dim)
+        for k_index, mask in enumerate(masks):
+            band_indices = np.flatnonzero(mask)
+            selected_vectors = vectors[k_index][:, band_indices]
+            projected_support = (
+                np.conjugate(selected_vectors[support_rows, :])
+                * selected_vectors[support_cols, :]
+            )
+            jacobian[offsets[k_index] : offsets[k_index + 1]] = (
+                projected_support.T @ self.design_by_k[k_index]
+            ).real
+        return jacobian
+
+
+_PUBLIC_NONLINEAR_CACHE_LIMIT_BYTES = 768 * 1024**2
+
+
+def _public_band_response_union_support(
+    basis: Any,
+    channel_indices: np.ndarray,
+) -> np.ndarray:
+    support_parts: list[np.ndarray] = []
+    for channel_index in np.asarray(channel_indices, dtype=np.int64):
+        channel = basis.channels[int(channel_index)]
+        for matrix in channel.coefficients.values():
+            coo = matrix.tocoo()
+            if coo.nnz:
+                support_parts.append(
+                    np.asarray(coo.row, dtype=np.int64) * int(basis.dim)
+                    + np.asarray(coo.col, dtype=np.int64)
+                )
+    if not support_parts:
+        return np.zeros(0, dtype=np.int64)
+    return np.unique(np.concatenate(support_parts))
+
+
+def _prepare_public_band_response_evaluator(
+    basis: Any,
+    coefficients0: np.ndarray,
+    channel_indices: np.ndarray,
+    kpoints: np.ndarray,
+    *,
+    cache_limit_bytes: int = _PUBLIC_NONLINEAR_CACHE_LIMIT_BYTES,
+) -> _PublicBandResponseEvaluator:
+    """Compile selected complete-response channels once at band-loss k-points."""
+
+    points = np.asarray(kpoints, dtype=float)
+    indices = np.asarray(channel_indices, dtype=np.int64)
+    coefficients = np.asarray(coefficients0, dtype=float)
+    if points.ndim != 2 or points.shape[1] != 2 or points.shape[0] == 0:
+        raise ValueError(f"public nonlinear kpoints must have shape (Nk,2), got {points.shape}")
+    if indices.ndim != 1 or indices.size == 0:
+        raise ValueError("public nonlinear channel_indices must be non-empty and one-dimensional")
+    if coefficients.shape != (len(basis.channels),):
+        raise ValueError(
+            f"public nonlinear coefficient vector has shape {coefficients.shape}, "
+            f"expected {(len(basis.channels),)}"
+        )
+    limit = int(cache_limit_bytes)
+    if limit < 0:
+        raise ValueError("public nonlinear cache_limit_bytes must be non-negative")
+    support_array = _public_band_response_union_support(basis, indices)
+    estimated_bytes = int(
+        points.shape[0]
+        * support_array.size
+        * indices.size
+        * np.dtype(np.complex128).itemsize
+    )
+    if estimated_bytes <= limit:
+        complex_design, compiled_support = basis._response_design_on_union_support(
+            points,
+            indices,
+        )
+        if not np.array_equal(support_array, np.asarray(compiled_support, dtype=np.int64)):
+            raise ValueError("public nonlinear union-support discovery disagrees with compiler")
+        design_by_k: np.ndarray | None = np.asarray(
+            complex_design,
+            dtype=np.complex128,
+        ).reshape(
+            points.shape[0],
+            support_array.size,
+            indices.size,
+        )
+        backend = "union_support_vectorized"
+        cache_bytes = int(design_by_k.nbytes)
+    else:
+        design_by_k = None
+        backend = "sparse_low_memory"
+        cache_bytes = 0
+    return _PublicBandResponseEvaluator(
+        basis=basis,
+        coefficients0=coefficients.copy(),
+        channel_indices=indices.copy(),
+        y0=coefficients[indices].copy(),
+        kpoints=points.copy(),
+        base_hamiltonians=np.asarray(
+            basis.hamiltonians(points, coefficients),
+            dtype=np.complex128,
+        ),
+        support=support_array,
+        design_by_k=design_by_k,
+        backend=backend,
+        cache_bytes=cache_bytes,
+    )
+
+
+def _public_band_residual_and_jacobian(
+    basis: Any,
+    full_coefficients: np.ndarray,
+    channel_indices: np.ndarray,
+    y: np.ndarray,
+    kpoints: np.ndarray,
+    target: np.ndarray,
+    *,
+    target_bands: str,
+    bands: int,
+    band_loss_weight: float,
+    evaluator: _PublicBandResponseEvaluator | None = None,
+    weighting: Any | None = None,
+    target_eigenvalues: np.ndarray | None = None,
+) -> tuple[np.ndarray, np.ndarray, tuple[int, ...]]:
+    """Evaluate the public eigenvalue residual and analytic Jacobian."""
+
+    from .response_basis import (
+        NormalizedLowEnergyWeightingSpec,
+        build_normalized_low_energy_weighting,
+    )
+
+    target_array = np.asarray(target, dtype=np.complex128)
+    points = np.asarray(kpoints, dtype=float)
+    indices = np.asarray(channel_indices, dtype=np.int64)
+    if evaluator is None:
+        coefficients = np.asarray(full_coefficients, dtype=float).copy()
+        coefficients[indices] = np.asarray(y, dtype=float)
+        model_h = basis.hamiltonians(points, coefficients)
+    else:
+        model_h = evaluator.hamiltonians(np.asarray(y, dtype=float))
+    model_eigenvalues, model_eigenvectors = np.linalg.eigh(model_h)
+    if target_eigenvalues is None:
+        target_eigenvalue_array = np.linalg.eigvalsh(target_array)
+    else:
+        target_eigenvalue_array = np.asarray(target_eigenvalues, dtype=float)
+    resolved_weighting = weighting
+    if resolved_weighting is None:
+        resolved_weighting = build_normalized_low_energy_weighting(
+            target_array,
+            NormalizedLowEnergyWeightingSpec(
+                band_edge=str(target_bands),
+                n_bands=int(bands),
+                one_sided_weight=0.0,
+                two_sided_weight=0.0,
+            ),
+        )
+    if evaluator is None:
+        raw_jacobian = _compiled_response_band_jacobian(
+            basis,
+            indices,
+            points,
+            model_eigenvectors,
+            resolved_weighting.selected_mask,
+        )
+    else:
+        raw_jacobian = evaluator.band_jacobian(
+            model_eigenvectors,
+            resolved_weighting.selected_mask,
+        )
+    residual_parts: list[np.ndarray] = []
+    jacobian_parts: list[np.ndarray] = []
+    offset = 0
+    n_kpoints = max(1, int(points.shape[0]))
+    for k_index, count in enumerate(resolved_weighting.selected_counts):
+        mask = resolved_weighting.selected_mask[k_index]
+        scale = np.sqrt(float(band_loss_weight) / (n_kpoints * int(count)))
+        residual_parts.append(
+            scale
+            * (
+                model_eigenvalues[k_index, mask]
+                - target_eigenvalue_array[k_index, mask]
+            )
+        )
+        jacobian_parts.append(scale * raw_jacobian[offset : offset + int(count)])
+        offset += int(count)
+    return (
+        np.concatenate(residual_parts),
+        np.vstack(jacobian_parts),
+        tuple(int(value) for value in resolved_weighting.selected_counts),
+    )
+
+
+def _refine_public_nonlinear_complete_response(
+    moire_config: MoireConfig,
+    model_config: ConfiguredModel,
+    model: Any,
+    raw_cfg: Mapping[str, Any],
+    progress_callback: Callable[..., None] | None = None,
+) -> dict[str, Any]:
+    """Add only the public band loss to the exact public linear objective."""
+
+    basis = getattr(model, "_compiled_response_basis", None)
+    fitted = getattr(model, "_fitted_response_model", None)
+    if basis is None or fitted is None:
+        raise ValueError("public nonlinear fitting requires the completed linear response fit")
+    indices = np.asarray(fitted.fit_solver_channel_indices, dtype=np.int64)
+    if indices.size == 0:
+        raise ValueError("public nonlinear fitting has no retained linear solver channels")
+    coefficients0 = np.asarray(fitted.coefficients, dtype=float)
+    y0 = coefficients0[indices].copy()
+
+    all_kpoints = _load_kpoints(model_config)
+    original_heff = np.asarray(
+        np.load(model_config.heff_file, mmap_mode="r"),
+        dtype=np.complex128,
+    )
+    target_all = _current_heff_support_hamiltonians(
+        original_heff,
+        qset1=np.asarray(moire_config.Q_set1, dtype=float),
+        qset2=np.asarray(moire_config.Q_set2, dtype=float),
+        n_orb=tuple(int(value) for value in model_config.n_orb),
+        harmonics_config=model_config.harmonics_config,
+    )
+    h_indices = np.asarray(raw_cfg["hamiltonian_kpoints"], dtype=int)
+    band_indices = np.asarray(raw_cfg["band_kpoints"], dtype=int)
+    target_bands = str(raw_cfg["target_bands"])
+    requested_bands = int(raw_cfg["bands"])
+    one_sided_weight = float(raw_cfg["one_sided_weight"])
+    two_sided_weight = float(raw_cfg["two_sided_weight"])
+    band_loss_weight = float(raw_cfg["band_loss_weight"])
+    h_root, h_center, h_report = _public_hamiltonian_quadratic_residual(
+        basis,
+        indices,
+        all_kpoints[h_indices],
+        target_all[h_indices],
+        target_bands=target_bands,
+        bands=requested_bands,
+        one_sided_weight=one_sided_weight,
+        two_sided_weight=two_sided_weight,
+    )
+    band_points = all_kpoints[band_indices]
+    band_target = target_all[band_indices]
+    from .response_basis import (
+        NormalizedLowEnergyWeightingSpec,
+        build_normalized_low_energy_weighting,
+    )
+
+    band_weighting = build_normalized_low_energy_weighting(
+        band_target,
+        NormalizedLowEnergyWeightingSpec(
+            band_edge=target_bands,
+            n_bands=requested_bands,
+            one_sided_weight=0.0,
+            two_sided_weight=0.0,
+        ),
+    )
+    band_target_eigenvalues = np.linalg.eigvalsh(band_target)
+    band_response_start = time.perf_counter()
+    band_response_evaluator = _prepare_public_band_response_evaluator(
+        basis,
+        coefficients0,
+        indices,
+        band_points,
+    )
+    band_response_seconds = float(time.perf_counter() - band_response_start)
+    band_response_message = (
+        "nonlinear band response backend: "
+        f"{band_response_evaluator.backend}, "
+        f"support={band_response_evaluator.support.size}, "
+        f"cache={band_response_evaluator.cache_bytes / (1024**2):.1f} MiB, "
+        f"{band_response_seconds:.2f} s"
+    )
+    if progress_callback is not None:
+        progress_callback(band_response_message, state="done")
+    else:
+        print(f"[kp model] {band_response_message}", flush=True)
+
+    initial_band_residual, _initial_band_jacobian, resolved_counts = (
+        _public_band_residual_and_jacobian(
+            basis,
+            coefficients0,
+            indices,
+            y0,
+            band_points,
+            band_target,
+            target_bands=target_bands,
+            bands=requested_bands,
+            band_loss_weight=band_loss_weight,
+            evaluator=band_response_evaluator,
+            weighting=band_weighting,
+            target_eigenvalues=band_target_eigenvalues,
+        )
+    )
+
+    max_steps = int(raw_cfg["max_steps"])
+    evaluation_cache: dict[str, Any] = {}
+    loss_evaluations = 0
+
+    def evaluate_band(y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        values = np.asarray(y, dtype=float)
+        cached_y = evaluation_cache.get("y")
+        if cached_y is None or not np.array_equal(cached_y, values):
+            band_residual, band_jacobian, _counts = _public_band_residual_and_jacobian(
+                basis,
+                coefficients0,
+                indices,
+                values,
+                band_points,
+                band_target,
+                target_bands=target_bands,
+                bands=requested_bands,
+                band_loss_weight=band_loss_weight,
+                evaluator=band_response_evaluator,
+                weighting=band_weighting,
+                target_eigenvalues=band_target_eigenvalues,
+            )
+            evaluation_cache.update(
+                {
+                    "y": values.copy(),
+                    "residual": band_residual,
+                    "jacobian": band_jacobian,
+                }
+            )
+        return evaluation_cache["residual"], evaluation_cache["jacobian"]
+
+    def objective(y: np.ndarray) -> np.ndarray:
+        nonlocal loss_evaluations
+        loss_evaluations += 1
+        if progress_callback is not None:
+            progress_callback(
+                f"nonlinear loss evaluation {loss_evaluations}/{max_steps}",
+                state="start",
+            )
+        band_residual, _band_jacobian = evaluate_band(y)
+        return np.concatenate((h_root @ np.asarray(y, dtype=float) - h_center, band_residual))
+
+    def jacobian(y: np.ndarray) -> np.ndarray:
+        _band_residual, band_jacobian = evaluate_band(y)
+        return np.vstack((h_root, band_jacobian))
+
+    result = scipy.optimize.least_squares(
+        objective,
+        y0,
+        jac=jacobian,
+        max_nfev=max_steps,
+    )
+    final_y = np.asarray(result.x, dtype=float)
+    final_band_residual, _final_jacobian, final_counts = _public_band_residual_and_jacobian(
+        basis,
+        coefficients0,
+        indices,
+        final_y,
+        band_points,
+        band_target,
+        target_bands=target_bands,
+        bands=requested_bands,
+        band_loss_weight=band_loss_weight,
+        evaluator=band_response_evaluator,
+        weighting=band_weighting,
+        target_eigenvalues=band_target_eigenvalues,
+    )
+    coefficients = coefficients0.copy()
+    coefficients[indices] = final_y
+    refined_fit = fitted.with_coefficients(
+        coefficients,
+        channel_ids=basis.channel_ids,
+        response_scales=basis.response_scales,
+        provenance={
+            "operation": "public_nonlinear_v1",
+            "hamiltonian_kpoints": h_indices.tolist(),
+            "band_kpoints": band_indices.tolist(),
+            "requested_bands": requested_bands,
+            "resolved_band_counts": list(final_counts),
+            "band_loss_weight": band_loss_weight,
+            "max_steps": max_steps,
+        },
+    )
+    setattr(model, "_fitted_response_model", refined_fit)
+    _sync_complete_response_coefficients_to_terms(model, coefficients)
+    return {
+        "enabled": True,
+        "mode": "public_nonlinear_v1",
+        "solver": "scipy_least_squares_analytic_hf",
+        "reference": "current_heff_support_mask",
+        "hamiltonian_kpoints": h_indices.tolist(),
+        "band_kpoints": band_indices.tolist(),
+        "requested_bands": requested_bands,
+        "resolved_band_counts": list(final_counts),
+        "one_sided_weight": one_sided_weight,
+        "two_sided_weight": two_sided_weight,
+        "band_loss_weight": band_loss_weight,
+        "band_response_backend": band_response_evaluator.backend,
+        "band_response_support_entries": int(band_response_evaluator.support.size),
+        "band_response_cache_bytes": int(band_response_evaluator.cache_bytes),
+        "band_response_cache_seconds": band_response_seconds,
+        "hamiltonian_loss": h_report,
+        "linear_initial_band_loss": float(np.sum(initial_band_residual**2)),
+        "nonlinear_final_band_loss": float(np.sum(final_band_residual**2)),
+        "initial_coefficients": y0.tolist(),
+        "final_coefficients": final_y.tolist(),
+        "max_steps": max_steps,
+        "nfev": int(result.nfev),
+        "njev": None if result.njev is None else int(result.njev),
+        "cost": float(result.cost),
+        "status": int(result.status),
+        "message": str(result.message),
+        "accepted": True,
+        "acceptance_guard": {"enabled": False, "reason": "public nonlinear result is not silently rolled back"},
+    }
+
+
+def _refine_complete_response_basis(
+    moire_config: MoireConfig,
+    model_config: ConfiguredModel,
+    model: Any,
+    raw_cfg: Mapping[str, Any],
+    progress_callback: Callable[..., None] | None = None,
+) -> dict[str, Any]:
+    """Refine retained v2 channels without regenerating legacy term responses."""
+    if str(raw_cfg.get("mode", "")).strip().lower() == "public_nonlinear_v1":
+        return _refine_public_nonlinear_complete_response(
+            moire_config,
+            model_config,
+            model,
+            raw_cfg,
+            progress_callback=progress_callback,
+        )
+    basis = getattr(model, "_compiled_response_basis", None)
+    fitted = getattr(model, "_fitted_response_model", None)
+    if basis is None or fitted is None:
+        raise ValueError("complete_linear_v2 refinement requires a fitted CompiledResponseBasis")
+    if fitted.basis_hash != basis.basis_hash:
+        raise ValueError("complete_linear_v2 refinement received a fit from a different basis")
+
+    refine_row_selector: Sequence[int] | None = getattr(model_config, "band_indices", None)
+    kpoints = np.asarray(moire_config.kpoints, dtype=float)
+    fit_kpoints_report = {
+        "source": "band_indices",
+        "count": int(len(kpoints)),
+        "selected_indices": [int(value) for value in (refine_row_selector or [])],
+    }
+    if raw_cfg.get("indices") is not None:
+        explicit_indices = _as_int_list(raw_cfg.get("indices"), name="fit.refine_bands.indices")
+        for index in explicit_indices:
+            if index < 0 or index >= len(kpoints):
+                raise IndexError(
+                    f"fit.refine_bands.indices contains {index}, but available k indices are 0..{len(kpoints) - 1}"
+                )
+        kpoints = _select_rows(kpoints, explicit_indices)
+        refine_row_selector = [int(value) for value in explicit_indices]
+        fit_kpoints_report = {
+            "source": "fit.refine_bands.indices",
+            "count": int(len(kpoints)),
+            "selected_indices": list(refine_row_selector),
+        }
+    else:
+        use_fit_kpoints = bool(
+            raw_cfg.get(
+                "use_fit_kpoints",
+                str(raw_cfg.get("mode", "")).strip().lower() == "auto_low_energy",
+            )
+        )
+        fit_indices = list(getattr(model_config, "fit_indices", []) or [])
+        if use_fit_kpoints and moire_config.kpoints_fit is not None and fit_indices:
+            kpoints = np.asarray(moire_config.kpoints_fit, dtype=float)
+            refine_row_selector = [int(value) for value in fit_indices]
+            fit_kpoints_report = {
+                "source": "fit.indices",
+                "count": int(len(kpoints)),
+                "selected_indices": list(refine_row_selector),
+            }
+
+    if getattr(model_config, "heff_file", None) is None:
+        raise ValueError("fit.refine_bands requires the projected Heff file")
+    heff_all, heff_eig, target_reference = _refinement_target_hamiltonians(
+        moire_config,
+        model_config,
+        raw_cfg,
+        refine_row_selector,
+    )
+    if int(heff_all.shape[0]) != int(len(kpoints)):
+        raise ValueError(
+            "fit.refine_bands k-point/Heff row mismatch: "
+            f"kpoints={len(kpoints)}, heff_rows={heff_all.shape[0]}, source={fit_kpoints_report['source']}"
+        )
+
+    raw_tags = raw_cfg.get("variable_tags", ["Kinect", "Onsite", "inter"])
+    if isinstance(raw_tags, str):
+        raw_tags = [raw_tags]
+    selected_tags = {_refinement_tag_alias(str(tag)) for tag in raw_tags}
+    raw_components = raw_cfg.get("components", ["real"])
+    if isinstance(raw_components, str):
+        raw_components = [raw_components]
+    selected_components = {str(component).strip().lower() for component in raw_components}
+    if not selected_components <= {"real", "imag"}:
+        raise ValueError("fit.refine_bands.components must contain only 'real' and/or 'imag'")
+
+    all_responses = basis.response_tensor(kpoints)
+    norm_tol = float(raw_cfg.get("variable_norm_tol", 1.0e-12))
+    selected_indices = []
+    zero_grid_channels = []
+    excluded_unconfirmed_channels = []
+    for index, channel in enumerate(basis.channels):
+        tag = _refinement_tag_alias(str(channel.metadata.get("tag", "")))
+        if tag not in selected_tags or channel.component not in selected_components:
+            continue
+        if channel.classification != "confirmed_nonzero":
+            excluded_unconfirmed_channels.append(channel.channel_id)
+            continue
+        if float(np.linalg.norm(all_responses[:, index])) <= norm_tol:
+            zero_grid_channels.append(channel.channel_id)
+            continue
+        selected_indices.append(index)
+    if not selected_indices:
+        raise ValueError("fit.refine_bands selected no retained complete-response channels")
+
+    max_variables_raw = raw_cfg.get("max_variables")
+    max_variables = int(max_variables_raw) if max_variables_raw is not None else None
+    base_h = _model_hamiltonians_for_kpoints(moire_config, model, kpoints)
+    band_slice = _refinement_band_slice(raw_cfg, model_config, base_h.shape[-1])
+    align = str(raw_cfg.get("align", getattr(model_config, "band_plot_config", {}).get("align", "top"))).strip().lower()
+    initial_metrics = _band_refinement_metrics(
+        base_h,
+        heff_eig,
+        heff_all,
+        band_slice=band_slice,
+        align=align,
+    )
+    response_report = {
+        "mode": "compiled_response_basis_v2",
+        "basis_hash": basis.basis_hash,
+        "candidate_channels": int(basis.candidate_artifact.get("candidate_channel_count", 0)),
+        "retained_basis_channels": int(len(basis.channels)),
+        "fit_solver_channels": int(len(fitted.fit_solver_channel_ids)),
+        "fit_selected_channels": int(len(fitted.fit_solver_channel_ids)),
+        "fit_rrqr_pivot_channels": int(len(fitted.fit_selected_channel_ids)),
+        "requested_refinement_channels": int(
+            len(selected_indices) + len(zero_grid_channels) + len(excluded_unconfirmed_channels)
+        ),
+        "confirmed_refinement_channels": int(len(selected_indices) + len(zero_grid_channels)),
+        "refinement_channels": int(len(selected_indices)),
+        "zero_on_refinement_grid": list(zero_grid_channels),
+        "excluded_unconfirmed_channels": list(excluded_unconfirmed_channels),
+        "selected_channel_ids": [basis.channels[index].channel_id for index in selected_indices],
+    }
+    if max_variables is not None and max_variables > 0 and len(selected_indices) > max_variables:
+        return {
+            "enabled": True,
+            "skipped": True,
+            "reason": "variable_count_exceeds_max_variables",
+            "fit_kpoints": fit_kpoints_report,
+            "band_slice": [int(band_slice[0]), int(band_slice[1])],
+            "align": align,
+            "n_variables": int(len(selected_indices)),
+            "max_variables": int(max_variables),
+            "response_basis": response_report,
+            "initial": initial_metrics,
+            "refined": initial_metrics,
+            "max_nfev": int(raw_cfg.get("max_nfev", 250)),
+            "nfev": 0,
+        }
+
+    indices = np.asarray(selected_indices, dtype=int)
+    responses = np.moveaxis(all_responses[:, indices], 1, 0)
+    coefficients0 = np.asarray(fitted.coefficients, dtype=float)
+    y0 = coefficients0[indices].copy()
+    target_slice = heff_eig[:, band_slice[0] : band_slice[1]]
+    band_sigma = float(raw_cfg.get("band_sigma_mev", 1.0)) * 1.0e-3
+    matrix_sigma = float(raw_cfg.get("matrix_sigma_mev", 10.0)) * 1.0e-3
+    matrix_weight = float(raw_cfg.get("matrix_weight", 0.0))
+    coefficient_weight = float(raw_cfg.get("coefficient_weight", 0.0))
+    if band_sigma <= 0.0 or matrix_sigma <= 0.0:
+        raise ValueError("fit.refine_bands band_sigma_mev and matrix_sigma_mev must be positive")
+    if matrix_weight < 0.0 or coefficient_weight < 0.0:
+        raise ValueError("fit.refine_bands matrix_weight and coefficient_weight must be non-negative")
+
+    def h_from_y(y: np.ndarray) -> np.ndarray:
+        return base_h + np.tensordot(np.asarray(y, dtype=float) - y0, responses, axes=(0, 0))
+
+    def aligned_selected_eigs(hamiltonians: np.ndarray) -> np.ndarray:
+        selected = np.linalg.eigvalsh(hamiltonians)[:, band_slice[0] : band_slice[1]]
+        if align == "top":
+            selected = selected + (target_slice[0, -1] - selected[0, -1])
+        elif align == "bottom":
+            selected = selected + (target_slice[0, 0] - selected[0, 0])
+        elif align not in {"none", ""}:
+            raise ValueError(
+                "fit.refine_bands.align currently supports 'top', 'bottom', or 'none', "
+                f"got {align!r}"
+            )
+        return selected
+
+    response_scales = basis.response_scales[indices]
+
+    def objective(y: np.ndarray) -> np.ndarray:
+        hamiltonians = h_from_y(y)
+        chunks = [(aligned_selected_eigs(hamiltonians) - target_slice).reshape(-1) / band_sigma]
+        if matrix_weight > 0.0:
+            matrix_delta = hamiltonians - heff_all
+            matrix_scale = np.sqrt(matrix_weight) / (matrix_sigma * np.sqrt(max(1, matrix_delta.size)))
+            chunks.extend(
+                [
+                    matrix_scale * matrix_delta.real.reshape(-1),
+                    matrix_scale * matrix_delta.imag.reshape(-1),
+                ]
+            )
+        if coefficient_weight > 0.0:
+            chunks.append(np.sqrt(coefficient_weight) * (np.asarray(y) - y0) * response_scales)
+        return np.concatenate(chunks)
+
+    max_nfev = int(raw_cfg.get("max_nfev", 250))
+    result = scipy.optimize.least_squares(objective, y0, max_nfev=max_nfev)
+    candidate_y = np.asarray(result.x, dtype=float)
+    accepted_y, acceptance_guard = _apply_refinement_acceptance_guard(
+        raw_cfg=raw_cfg,
+        model_config=model_config,
+        base_h=base_h,
+        heff_eig=heff_eig,
+        heff_all=heff_all,
+        y0=y0,
+        candidate_y=candidate_y,
+        h_from_y=h_from_y,
+    )
+    coefficients = coefficients0.copy()
+    coefficients[indices] = accepted_y
+    refined_fit = fitted.with_coefficients(
+        coefficients,
+        channel_ids=basis.channel_ids,
+        response_scales=basis.response_scales,
+        provenance={
+            "operation": "band_refinement",
+            "selected_channel_ids": response_report["selected_channel_ids"],
+            "fit_kpoints": fit_kpoints_report,
+            "band_slice": list(band_slice),
+            "align": align,
+        },
+    )
+    setattr(model, "_fitted_response_model", refined_fit)
+    _sync_complete_response_coefficients_to_terms(model, coefficients)
+    refined_h = h_from_y(accepted_y)
+    refined_metrics = _band_refinement_metrics(
+        refined_h,
+        heff_eig,
+        heff_all,
+        band_slice=band_slice,
+        align=align,
+    )
+    normalized_drift = np.abs((accepted_y - y0) * response_scales)
+    return {
+        "enabled": True,
+        "solver": "compiled_response_least_squares",
+        "reference": target_reference,
+        "fit_kpoints": fit_kpoints_report,
+        "band_slice": [int(band_slice[0]), int(band_slice[1])],
+        "align": align,
+        "variable_tags": sorted(selected_tags),
+        "components": sorted(selected_components),
+        "n_variables": int(len(selected_indices)),
+        "max_variables": int(max_variables) if max_variables is not None else None,
+        "response_basis": response_report,
+        "band_sigma_mev": float(band_sigma * 1000.0),
+        "matrix_weight": matrix_weight,
+        "matrix_sigma_mev": float(matrix_sigma * 1000.0),
+        "coefficient_weight": coefficient_weight,
+        "acceptance_guard": acceptance_guard if acceptance_guard is not None else {"enabled": False},
+        "max_nfev": max_nfev,
+        "nfev": int(result.nfev),
+        "cost": float(result.cost),
+        "optimizer": {
+            "mode": "scipy_least_squares",
+            "status": int(result.status),
+            "message": str(result.message),
+        },
+        "initial": initial_metrics,
+        "refined": refined_metrics,
+        "max_scaled_coefficient_drift": float(np.max(normalized_drift)) if normalized_drift.size else 0.0,
+        "p95_scaled_coefficient_drift": (
+            float(np.quantile(normalized_drift, 0.95)) if normalized_drift.size else 0.0
+        ),
+        "variables": [
+            {
+                "channel_id": basis.channels[index].channel_id,
+                "tag": str(basis.channels[index].metadata.get("tag", "")),
+                "component": basis.channels[index].component,
+                "initial": float(initial),
+                "refined": float(refined),
+                "response_scale": float(basis.response_scales[index]),
+            }
+            for index, initial, refined in zip(selected_indices, y0, accepted_y)
+        ],
+    }
+
+
+def refine_band_coefficients(
+    moire_config: MoireConfig,
+    model_config: ConfiguredModel,
+    model: Any,
+    *,
+    progress_callback: Callable[..., None] | None = None,
+) -> dict[str, Any]:
     raw_cfg = dict(model_config.band_refinement_config or {})
     if not bool(raw_cfg.get("enabled", False)):
         return {"enabled": False}
     if moire_config.kpoints is None:
         raise ValueError("fit.refine_bands requires model kpoints")
+    if getattr(model, "_compiled_response_basis", None) is not None:
+        return _refine_complete_response_basis(
+            moire_config,
+            model_config,
+            model,
+            raw_cfg,
+            progress_callback=progress_callback,
+        )
     use_fit_kpoints = bool(raw_cfg.get("use_fit_kpoints", str(raw_cfg.get("mode", "")).strip().lower() == "auto_low_energy"))
     refine_row_selector: Sequence[int] | None = model_config.band_indices
     kpoints = np.asarray(moire_config.kpoints, dtype=float)
@@ -9190,12 +12201,12 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             "count": int(len(kpoints)),
             "selected_indices": [int(value) for value in refine_row_selector],
         }
-    if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
-        heff_eig = np.load(model_config.heff_eig_file)
-    else:
-        heff_eig = np.linalg.eigvalsh(np.load(model_config.heff_file, mmap_mode="r"))
-    heff_eig = _select_rows(heff_eig, refine_row_selector)
-    heff_all = _select_rows(np.load(model_config.heff_file, mmap_mode="r"), refine_row_selector)
+    heff_all, heff_eig, target_reference = _refinement_target_hamiltonians(
+        moire_config,
+        model_config,
+        raw_cfg,
+        refine_row_selector,
+    )
     if int(heff_all.shape[0]) != int(len(kpoints)):
         raise ValueError(
             "fit.refine_bands k-point/Heff row mismatch: "
@@ -9672,6 +12683,7 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
         return {
             "enabled": True,
             "solver": "linear_low_subspace",
+            "reference": target_reference,
             "fit_kpoints": fit_kpoints_report,
             "band_slice": [int(band_slice[0]), int(band_slice[1])],
             "align": align,
@@ -9932,14 +12944,18 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
             "fit.refine_bands.optimizer must be 'auto', 'gauss_newton', or 'scipy_least_squares', "
             f"got {raw_cfg.get('optimizer')!r}"
         )
-    use_gauss_newton = (
-        optimizer_mode in {"auto", "gauss_newton"}
-        and analytic_jacobian_enabled
-        and matrix_loss_reduced is not None
-        and matrix_jacobian is None
+    use_gauss_newton = optimizer_mode in {
+        "auto",
+        "gauss_newton",
+    } and _band_refinement_gauss_newton_available(
+        analytic_jacobian_enabled=analytic_jacobian_enabled,
+        matrix_jacobian=matrix_jacobian,
     )
     if optimizer_mode == "gauss_newton" and not use_gauss_newton:
-        raise ValueError("fit.refine_bands.optimizer='gauss_newton' requires analytic reduced Jacobian support")
+        raise ValueError(
+            "fit.refine_bands.optimizer='gauss_newton' requires dense or reduced "
+            "analytic Jacobian support"
+        )
     if analytic_jacobian_enabled:
         least_squares_kwargs["jac"] = lambda y: jacobian(y)
         if matrix_jacobian is not None and least_squares_kwargs["method"] != "lm":
@@ -10153,6 +13169,7 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
         raw_components = [raw_components]
     return {
         "enabled": True,
+        "reference": target_reference,
         "fit_kpoints": fit_kpoints_report,
         "band_slice": [int(band_slice[0]), int(band_slice[1])],
         "align": align,
@@ -10195,6 +13212,33 @@ def refine_band_coefficients(moire_config: MoireConfig, model_config: Configured
     }
 
 
+def _apply_model_selection_term_filter(
+    model: Any,
+    excluded_keys: Sequence[Any],
+) -> dict[str, int]:
+    """Remove symmetry/Hermiticity-closed ContinuumTerm groups before fitting."""
+
+    excluded = set(excluded_keys)
+    terms = getattr(model, "terms", {})
+    initial = len(terms)
+    if excluded:
+        for key in list(terms):
+            if key in excluded:
+                terms.pop(key)
+        candidate_terms = getattr(model, "candidate_terms", None)
+        if candidate_terms is not None:
+            model.candidate_terms = [
+                term
+                for term in candidate_terms
+                if getattr(term, "key", None) not in excluded
+            ]
+    return {
+        "requested": int(len(excluded)),
+        "removed": int(initial - len(terms)),
+        "remaining": int(len(terms)),
+    }
+
+
 def _run_model_pipeline(
     moire_config: MoireConfig,
     model_config: ConfiguredModel,
@@ -10219,6 +13263,10 @@ def _run_model_pipeline(
         return result
 
     model = run_stage("building continuum terms", lambda: build_model(moire_config))
+    term_filter = _apply_model_selection_term_filter(
+        model,
+        getattr(model_config, "model_selection_excluded_term_keys", ()),
+    )
     diagnostics = None
     null_filter = _null_channel_filter_summary(
         model,
@@ -10234,10 +13282,34 @@ def _run_model_pipeline(
             style = "fit_done" if state == "done" else "fit_start" if state == "start" else None
             _progress_line(str(message), enabled=progress, style=style, stream=progress_stream)
 
-        model, diagnostics = run_stage(
-            "fitting coefficients",
-            lambda: compute_coefficients(moire_config, model, progress_callback=fit_progress),
-        )
+        previous_output_dir = moire_config.output_dir
+        if (
+            str(getattr(moire_config, "response_semantics", "legacy_frozen_v1"))
+            == "complete_linear_v2"
+            and previous_output_dir is None
+        ):
+            moire_config.output_dir = log_path.parent
+        try:
+            model, diagnostics = run_stage(
+                "fitting coefficients",
+                lambda: compute_coefficients(moire_config, model, progress_callback=fit_progress),
+            )
+        finally:
+            moire_config.output_dir = previous_output_dir
+        public_fit = dict(getattr(model_config, "fit_method_config", {}) or {})
+        if public_fit:
+            fitted_response = getattr(model, "_fitted_response_model", None)
+            objective = getattr(fitted_response, "fit_objective", {}) or {}
+            resolved = list(objective.get("resolved_band_counts", ()))
+            if resolved:
+                unique_counts = sorted({int(value) for value in resolved})
+                _progress_line(
+                    "low-energy window: "
+                    f"requested={int(public_fit['requested_bands'])}, "
+                    f"resolved={unique_counts}",
+                    enabled=progress,
+                    style="fit_done",
+                )
         null_filter = _null_channel_filter_summary(
             model,
             model_config.null_channel_abs_tol,
@@ -10258,7 +13330,12 @@ def _run_model_pipeline(
         if bool(model_config.band_refinement_config.get("enabled", False)):
             refinement = run_stage(
                 "refining band coefficients",
-                lambda: refine_band_coefficients(moire_config, model_config, model),
+                lambda: refine_band_coefficients(
+                    moire_config,
+                    model_config,
+                    model,
+                    progress_callback=fit_progress,
+                ),
             )
             refined = refinement.get("refined", {})
             if refined:
@@ -10268,12 +13345,26 @@ def _run_model_pipeline(
                     enabled=progress,
                 )
             guard = refinement.get("acceptance_guard", {})
+            if str(refinement.get("mode", "")) == "public_nonlinear_v1":
+                _progress_line(
+                    "nonlinear band loss: "
+                    f"{float(refinement['linear_initial_band_loss']):.6g} -> "
+                    f"{float(refinement['nonlinear_final_band_loss']):.6g}; "
+                    f"steps={int(refinement['nfev'])}/{int(refinement['max_steps'])}",
+                    enabled=progress,
+                    style="fit_done",
+                )
             if guard.get("enabled") and not bool(guard.get("accepted", True)):
                 failed = ", ".join(str(item) for item in guard.get("failed_windows", [])) or "validation"
                 _progress_line(
                     f"band refinement rejected by acceptance guard; reverted=True; failed windows: {failed}",
                     enabled=progress,
                 )
+        _print_fitted_term_progress_summary(
+            model,
+            enabled=progress,
+            stream=progress_stream,
+        )
     if moire_config.kpoints is None:
         raise ValueError("config.kpoints must be provided for band computation.")
     want_band_overlap_vectors = bool(model_config.compare_to_heff)
@@ -10303,6 +13394,8 @@ def _run_model_pipeline(
         "null_channel_filter": null_filter,
         "coefficient_pruning": pruning,
         "band_refinement": refinement,
+        "term_group_filter": term_filter,
+        "model_log": str(log_path),
     }
 
 
@@ -10345,8 +13438,1542 @@ def _moire_config_for_fit_indices(
     out = copy.copy(moire_config)
     out.kpoints_fit = _select_rows(kpoints_all, indices)
     out.heff = _block_diag_heff(heff_list, indices)
+    out.response_fit_indices = [int(index) for index in indices]
     out.output_dir = None
     return out
+
+
+def _model_and_moire_for_order_candidate(
+    *,
+    moire_config: MoireConfig,
+    model_config: ConfiguredModel,
+    orders: FamilyOrders,
+    active_families: Sequence[str],
+) -> tuple[MoireConfig, ConfiguredModel, Any]:
+    vocabulary = clone_family_vocabulary(
+        max_order=model_config.max_order,
+        term_templates=model_config.term_templates,
+        orders=orders,
+        active_families=active_families,
+    )
+    candidate_model = replace(
+        model_config,
+        max_order=dict(vocabulary.max_order),
+        term_templates=[dict(item) for item in vocabulary.term_templates],
+        band_refinement_config={
+            "enabled": False,
+            "disabled_for": "automatic_family_order_scan",
+        },
+    )
+    candidate_moire = copy.copy(moire_config)
+    candidate_moire.max_order = dict(vocabulary.max_order)
+    candidate_moire.term_templates = [
+        dict(item) for item in vocabulary.term_templates
+    ]
+    candidate_moire.output_dir = None
+    specification = build_production_candidate_spec(vocabulary, orders)
+    return candidate_moire, candidate_model, specification
+
+
+def _active_independent_real_parameter_count(
+    model: Any,
+    *,
+    tolerance: float,
+) -> int:
+    count = 0
+    for term in getattr(model, "terms", {}).values():
+        if not bool(getattr(term, "active", True)):
+            continue
+        for attribute in ("r_value_real", "r_value_imag"):
+            value = float(getattr(term, attribute, 0.0))
+            if abs(value) > float(tolerance):
+                count += 1
+    return int(count)
+
+
+def _active_term_group_count(model: Any, *, tolerance: float) -> int:
+    return int(
+        sum(
+            1
+            for term in getattr(model, "terms", {}).values()
+            if bool(getattr(term, "active", True))
+            and (
+                abs(float(getattr(term, "r_value_real", 0.0))) > float(tolerance)
+                or abs(float(getattr(term, "r_value_imag", 0.0))) > float(tolerance)
+            )
+        )
+    )
+
+
+def _harmonic_support_size(
+    model_config: ConfiguredModel,
+    *,
+    model: Any | None = None,
+    tolerance: float = 0.0,
+) -> int:
+    if model is not None:
+        active_harmonics: set[tuple[str, str]] = set()
+        for term in getattr(model, "terms", {}).values():
+            if not bool(getattr(term, "active", True)):
+                continue
+            if (
+                abs(float(getattr(term, "r_value_real", 0.0))) <= float(tolerance)
+                and abs(float(getattr(term, "r_value_imag", 0.0))) <= float(tolerance)
+            ):
+                continue
+            tag = str(getattr(term, "tag", "")).strip().lower()
+            if tag not in {"intra", "intralayer", "inter", "interlayer"}:
+                continue
+            metadata = getattr(term, "registry_metadata", {}) or {}
+            harmonic_id = metadata.get("harmonic_id")
+            if harmonic_id is None:
+                harmonic_id = tuple(metadata.get("harmonic_vector", ()))
+            family = "intra" if tag.startswith("intra") else "inter"
+            active_harmonics.add((family, repr(harmonic_id)))
+        return int(len(active_harmonics))
+    counts = _resolved_harmonic_count_limits(model_config.harmonics_config)
+    return int(sum(max(0, int(counts.get(kind, 0))) for kind in ("intra", "inter")))
+
+
+def _automatic_term_group_keep_sets(
+    ranked_importance: Sequence[tuple[Any, float]],
+    *,
+    keep_fractions: Sequence[float],
+) -> tuple[tuple[Any, ...], ...]:
+    """Build a deterministic compact-model ladder from closed term groups."""
+
+    ranked = list(ranked_importance)
+    if not ranked:
+        return ()
+    ordered = sorted(
+        ranked,
+        key=lambda item: (float(item[1]), repr(item[0])),
+    )
+    count = len(ordered)
+    keep_counts = sorted(
+        {
+            max(1, min(count - 1, int(math.ceil(float(fraction) * count))))
+            for fraction in keep_fractions
+            if count > 1
+        }
+    )
+    return tuple(
+        tuple(key for key, _importance in ordered[-keep_count:])
+        for keep_count in keep_counts
+    )
+
+
+def _adjoint_closed_term_importance_groups(
+    ranked_importance: Sequence[tuple[Any, float]],
+) -> tuple[tuple[tuple[Any, ...], float], ...]:
+    """Combine raw term keys into Hermitian-adjoint-closed pruning groups."""
+
+    ranked = list(ranked_importance)
+    importance_by_key = {key: float(importance) for key, importance in ranked}
+    visited: set[Any] = set()
+    groups: list[tuple[tuple[Any, ...], float]] = []
+    for key, importance in ranked:
+        if key in visited:
+            continue
+        required = (
+            "Mz",
+            "Mz_star",
+            "layer_from",
+            "layer_to",
+            "orbital_from",
+            "orbital_to",
+            "p",
+        )
+        if all(hasattr(key, attribute) for attribute in required):
+            partner = type(key)(
+                int(key.Mz_star),
+                int(key.Mz),
+                int(key.layer_to),
+                int(key.layer_from),
+                int(key.orbital_to),
+                int(key.orbital_from),
+                tuple(-float(value) for value in key.p),
+            )
+        else:
+            partner = key
+        members = (key,)
+        group_importance = float(importance)
+        if partner != key and partner in importance_by_key:
+            members = (key, partner)
+            group_importance = max(
+                group_importance,
+                float(importance_by_key[partner]),
+            )
+        visited.update(members)
+        groups.append((members, group_importance))
+    return tuple(
+        sorted(groups, key=lambda item: (float(item[1]), repr(item[0])))
+    )
+
+
+def _select_nonlinear_frontier_scores(
+    candidates: Sequence[CandidateScore],
+    *,
+    profiles: Any,
+    maximum_candidates: int,
+    maximum_variables: int = 3000,
+    maximum_orders: FamilyOrders | None = None,
+) -> tuple[CandidateScore, ...]:
+    """Choose a bounded linear complexity frontier for nonlinear refinement."""
+
+    limit = max(1, int(maximum_candidates))
+    variable_limit = max(1, int(maximum_variables))
+    eligible = sorted(
+        (
+            candidate
+            for candidate in candidates
+            if candidate.solver_family == "linear"
+            and candidate.independent_real_parameters <= variable_limit
+            and (
+                maximum_orders is None
+                or (
+                    candidate.orders.kinetic <= maximum_orders.kinetic
+                    and candidate.orders.intra <= maximum_orders.intra
+                    and candidate.orders.inter <= maximum_orders.inter
+                )
+            )
+            and candidate.certified
+            and candidate.guards_passed
+        ),
+        key=lambda candidate: (
+            candidate.independent_real_parameters,
+            candidate.weighted_rms_mev,
+            candidate.name,
+        ),
+    )
+    frontier: list[CandidateScore] = []
+    best_rms = float("inf")
+    for candidate in eligible:
+        if float(candidate.weighted_rms_mev) < best_rms:
+            frontier.append(candidate)
+            best_rms = float(candidate.weighted_rms_mev)
+
+    required_names = {
+        decision.selected.name
+        for decision in (profiles.high, profiles.low)
+        if decision.selected is not None
+        and decision.selected.independent_real_parameters <= variable_limit
+    }
+    if maximum_orders is not None:
+        endpoint = [
+            candidate
+            for candidate in eligible
+            if candidate.orders == maximum_orders
+        ]
+        if endpoint:
+            required_names.add(
+                min(
+                    endpoint,
+                    key=lambda candidate: (
+                        candidate.weighted_rms_mev,
+                        candidate.weighted_max_mev,
+                        candidate.independent_real_parameters,
+                        candidate.name,
+                    ),
+                ).name
+            )
+    selected_by_name = {candidate.name: candidate for candidate in frontier}
+    selected_by_name.update(
+        {
+            candidate.name: candidate
+            for candidate in eligible
+            if candidate.name in required_names
+        }
+    )
+    selected = sorted(
+        selected_by_name.values(),
+        key=lambda candidate: (
+            candidate.independent_real_parameters,
+            candidate.weighted_rms_mev,
+            candidate.name,
+        ),
+    )
+    if len(selected) <= limit:
+        return tuple(selected)
+
+    required = [candidate for candidate in selected if candidate.name in required_names]
+    optional = [candidate for candidate in selected if candidate.name not in required_names]
+    kept = list(required[:limit])
+    remaining = limit - len(kept)
+    if remaining > 0:
+        if remaining >= len(optional):
+            kept.extend(optional)
+        else:
+            positions = np.linspace(0, len(optional) - 1, remaining, dtype=int)
+            kept.extend(optional[int(index)] for index in positions)
+    return tuple(
+        sorted(
+            {candidate.name: candidate for candidate in kept}.values(),
+            key=lambda candidate: (
+                candidate.independent_real_parameters,
+                candidate.weighted_rms_mev,
+                candidate.name,
+            ),
+        )
+    )
+
+
+def _complete_optional_profile_pair(profiles: Any) -> Any | None:
+    """Return an optional solver profile only when both user profiles exist."""
+
+    if profiles is None:
+        return None
+    high = getattr(profiles, "high", None)
+    low = getattr(profiles, "low", None)
+    if getattr(high, "selected", None) is None or getattr(low, "selected", None) is None:
+        return None
+    return profiles
+
+
+@dataclass(frozen=True)
+class AutomaticProfileBandWindows:
+    """Resolved compact and broad edge-band windows."""
+
+    low_band_count: int
+    high_band_count: int
+    layer_q_counts: tuple[int, int]
+
+
+def _automatic_profile_band_windows(
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    *,
+    n_orb: tuple[int, int],
+    total_bands: int,
+    q_shell_count: int = 2,
+    tol: float = 1.0e-8,
+) -> AutomaticProfileBandWindows:
+    """Resolve low=2x central manifold and high=complete radial Q shells."""
+
+    dimension = int(total_bands)
+    if dimension <= 0:
+        raise ValueError("total_bands must be positive")
+    if int(q_shell_count) <= 0:
+        raise ValueError("q_shell_count must be positive")
+    orbitals = tuple(int(value) for value in n_orb)
+    if len(orbitals) != 2 or any(value < 0 for value in orbitals):
+        raise ValueError("n_orb must contain two non-negative layer dimensions")
+
+    layer_q_counts: list[int] = []
+    for qset, norb in zip((qset1, qset2), orbitals):
+        points = np.asarray(qset, dtype=float)
+        if points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError(f"Q set must have shape (N, 2), got {points.shape}")
+        if norb == 0 or len(points) == 0:
+            layer_q_counts.append(0)
+            continue
+        norms = np.linalg.norm(points, axis=1)
+        shells = _unique_nonnegative_norms(norms, tol=float(tol))
+        retained = shells[: int(q_shell_count)]
+        if not retained:
+            layer_q_counts.append(0)
+            continue
+        cutoff = float(retained[-1])
+        layer_q_counts.append(
+            int(
+                np.count_nonzero(
+                    norms <= cutoff + float(tol) * max(1.0, abs(cutoff))
+                )
+            )
+        )
+
+    low = min(dimension, max(1, 2 * sum(orbitals)))
+    high = min(
+        dimension,
+        max(low, sum(norb * count for norb, count in zip(orbitals, layer_q_counts))),
+    )
+    return AutomaticProfileBandWindows(
+        low_band_count=int(low),
+        high_band_count=int(high),
+        layer_q_counts=(int(layer_q_counts[0]), int(layer_q_counts[1])),
+    )
+
+
+def _linear_profile_fit_objective(
+    *,
+    target_bands: str,
+    band_count: int,
+    two_sided_projector_weight: float = 300.0,
+    floor: float = 0.05,
+    alpha: float = 1.0,
+) -> dict[str, Any]:
+    """Build the complete-response spectral objective for one profile window."""
+
+    edge = str(target_bands).strip().lower()
+    if edge not in {"top", "bottom"}:
+        raise ValueError("target_bands must be 'top' or 'bottom'")
+    count = int(band_count)
+    if count <= 0:
+        raise ValueError("band_count must be positive")
+    projector_weight = float(two_sided_projector_weight)
+    if not np.isfinite(projector_weight) or projector_weight <= 0.0:
+        raise ValueError("two_sided_projector_weight must be positive and finite")
+    return {
+        "mode": "target_spectral_linear",
+        "target_reference": "current_heff_support_mask",
+        "edge": edge,
+        "window": {
+            "mode": "fixed_count_degeneracy_safe",
+            "bands": count,
+            "degeneracy_tol_mev": 0.1,
+        },
+        "floor": float(floor),
+        "alpha": float(alpha),
+        "normalization": "mean_trace_per_dimension_v1",
+        "two_sided_projector": {
+            "enabled": True,
+            "weight": projector_weight,
+        },
+    }
+
+
+def _automatic_selection_primary_band_count(
+    model_config: ConfiguredModel,
+    *,
+    total_bands: int,
+) -> int:
+    """Resolve the edge-band window used by automatic model selection.
+
+    ``model.band_slice`` is a broad comparison/export window and must not be
+    interpreted as the primary low-energy target.  Prefer the fitting
+    objective, then an explicitly weighted refinement window, then the user
+    facing plot window.  The projected orbital count is the final fallback.
+    """
+
+    count: int | None = None
+    objective = getattr(model_config, "response_fit_objective", {}) or {}
+    if (
+        isinstance(objective, Mapping)
+        and str(objective.get("mode", "")).strip().lower()
+        == "target_spectral_linear"
+    ):
+        window = objective.get("window", {})
+        if isinstance(window, Mapping) and str(window.get("mode", "")).strip().lower() == (
+            "fixed_count_degeneracy_safe"
+        ):
+            count = int(window.get("bands", 0))
+
+    refinement = getattr(model_config, "band_refinement_config", {}) or {}
+    if count is None and isinstance(refinement, Mapping) and bool(
+        refinement.get("enabled", False)
+    ):
+        weighted = refinement.get("weighted_band_loss", {})
+        if isinstance(weighted, Mapping) and bool(weighted.get("enabled", False)):
+            count = int(weighted.get("primary_bands", 0))
+
+    plot = getattr(model_config, "band_plot_config", {}) or {}
+    if count is None and isinstance(plot, Mapping) and "top_bands" in plot:
+        count = int(plot["top_bands"])
+
+    if count is None or count <= 0:
+        count = max(1, int(sum(model_config.n_orb)))
+    return min(int(total_bands), int(count))
+
+
+def _automatic_low_profile_band_count(
+    model_config: ConfiguredModel,
+    *,
+    total_bands: int,
+) -> int:
+    """Use twice the physical projected manifold for compact profiles."""
+
+    return min(int(total_bands), max(1, 2 * int(sum(model_config.n_orb))))
+
+
+def _balanced_family_order_candidates(
+    order_candidates: Mapping[str, Sequence[int]],
+) -> tuple[FamilyOrders, ...]:
+    """Pair non-maximal family orders into a compact joint-model ladder."""
+
+    values = {
+        family: tuple(sorted({int(value) for value in order_candidates[family]}))
+        for family in ("kinetic", "intra", "inter")
+    }
+    count = min(len(items) for items in values.values())
+    if count <= 1:
+        return ()
+    return tuple(
+        FamilyOrders(
+            values["kinetic"][index],
+            values["intra"][index],
+            values["inter"][index],
+        )
+        for index in range(count - 1)
+    )
+
+
+def _rank_closed_term_groups_for_edge(
+    *,
+    model: Any,
+    moire_config: MoireConfig,
+    target_hamiltonians: np.ndarray,
+    model_config: ConfiguredModel,
+    kpoints: np.ndarray,
+) -> tuple[tuple[tuple[Any, ...], float], ...]:
+    """Rank Hermitian-adjoint-closed term groups by edge contribution."""
+
+    terms = list(getattr(model, "terms", {}).values())
+    if not terms:
+        return ()
+
+    def coefficient_importance(term: Any) -> float:
+        return float(
+            np.hypot(
+                float(getattr(term, "r_value_real", 0.0)),
+                float(getattr(term, "r_value_imag", 0.0)),
+            )
+        )
+
+    try:
+        state = _prepare_band_state(moire_config, model)
+        _target_eigvals, target_eigvecs = np.linalg.eigh(
+            np.asarray(target_hamiltonians, dtype=np.complex128)
+        )
+        target_bands = str(
+            model_config.raw.get("model", {}).get("target_bands", "top")
+        ).strip().lower()
+        primary_count = _automatic_selection_primary_band_count(
+            model_config,
+            total_bands=target_eigvecs.shape[2],
+        )
+        primary_slice = _auto_low_energy_band_slice(
+            target_eigvecs.shape[2],
+            min(primary_count, target_eigvecs.shape[2]),
+            target_bands,
+        )
+        target_basis = target_eigvecs[
+            :,
+            :,
+            primary_slice[0] : primary_slice[1],
+        ]
+        ranked = []
+        for term in terms:
+            try:
+                real_response, imag_response = (
+                    _term_response_pair_hamiltonians_for_kpoints(
+                        state,
+                        term,
+                        kpoints,
+                    )
+                )
+                contribution = (
+                    float(getattr(term, "r_value_real", 0.0)) * real_response
+                    + float(getattr(term, "r_value_imag", 0.0)) * imag_response
+                )
+                projected = np.einsum(
+                    "kdi,kde,kej->kij",
+                    target_basis.conj(),
+                    contribution,
+                    target_basis,
+                    optimize=True,
+                )
+                importance = float(np.sqrt(np.mean(np.abs(projected) ** 2)))
+            except Exception:
+                importance = coefficient_importance(term)
+            ranked.append((getattr(term, "key"), importance))
+    except Exception:
+        ranked = [
+            (getattr(term, "key"), coefficient_importance(term)) for term in terms
+        ]
+    ranked = tuple(sorted(ranked, key=lambda item: (item[1], repr(item[0]))))
+    return _adjoint_closed_term_importance_groups(ranked)
+
+
+def _blocked_standard_error(
+    per_k_squared_error: np.ndarray,
+    kpoints: np.ndarray,
+    *,
+    n_folds: int,
+) -> float:
+    squared = np.asarray(per_k_squared_error, dtype=float)
+    points = np.asarray(kpoints, dtype=float)
+    if squared.ndim != 1 or len(squared) != len(points) or len(points) < 2:
+        return 0.0
+    try:
+        folds = blocked_kpath_folds(
+            points,
+            n_folds=min(int(n_folds), len(points)),
+        )
+    except ValueError:
+        return 0.0
+    fold_rms_mev = np.asarray(
+        [
+            np.sqrt(np.mean(squared[fold.validation_indices])) * 1000.0
+            for fold in folds
+        ],
+        dtype=float,
+    )
+    if len(fold_rms_mev) < 2:
+        return 0.0
+    return float(np.std(fold_rms_mev, ddof=1) / np.sqrt(len(fold_rms_mev)))
+
+
+def _stage_matrix_candidate_metrics(
+    *,
+    stage: str,
+    model_hamiltonians: np.ndarray,
+    target_hamiltonians: np.ndarray,
+    qset1_dim: int,
+    kpoints: np.ndarray,
+    n_folds: int,
+) -> tuple[float, float, float]:
+    model = np.asarray(model_hamiltonians, dtype=np.complex128)
+    target = np.asarray(target_hamiltonians, dtype=np.complex128)
+    if model.shape != target.shape or model.ndim != 3:
+        raise ValueError("candidate and target Hamiltonians must have matching 3D shape")
+    residual = model - target
+    if stage == "kinetic":
+        reference = int(np.argmin(np.linalg.norm(np.asarray(kpoints), axis=1)))
+        diagonal = np.diagonal(residual, axis1=1, axis2=2)
+        selected = diagonal - diagonal[reference : reference + 1]
+    elif stage == "intra":
+        left = residual[:, :qset1_dim, :qset1_dim].reshape(len(residual), -1)
+        right = residual[:, qset1_dim:, qset1_dim:].reshape(len(residual), -1)
+        selected = np.concatenate((left, right), axis=1)
+    else:
+        raise ValueError(f"matrix stage metrics do not support stage {stage!r}")
+    per_k_squared = np.mean(np.abs(selected) ** 2, axis=1)
+    return (
+        float(np.sqrt(np.mean(per_k_squared)) * 1000.0),
+        _blocked_standard_error(per_k_squared, kpoints, n_folds=n_folds),
+        float(np.max(np.abs(selected)) * 1000.0),
+    )
+
+
+def _align_model_eigenvalues_for_selection(
+    model_eigenvalues: Any,
+    target_eigenvalues: Any,
+    *,
+    align: str,
+) -> np.ndarray:
+    """Apply the same global edge alignment used by band-plot metrics."""
+
+    model = np.asarray(model_eigenvalues, dtype=float)
+    target = np.asarray(target_eigenvalues, dtype=float)
+    if model.shape != target.shape or model.ndim != 2:
+        raise ValueError("model and target eigenvalues must have matching 2D shape")
+    mode = str(align).strip().lower()
+    if mode in {"top", "top_band", "top-band"}:
+        return model - float(np.max(model[:, -1])) + float(np.max(target[:, -1]))
+    if mode in {"bottom", "bottom_band", "bottom-band"}:
+        return model - float(np.min(model[:, 0])) + float(np.min(target[:, 0]))
+    if mode in {"none", "false", "0", ""}:
+        return model.copy()
+    raise ValueError(f"unsupported automatic-selection alignment {align!r}")
+
+
+def _band_refinement_result_is_selectable(result: Mapping[str, Any]) -> bool:
+    guard = (result.get("band_refinement") or {}).get("acceptance_guard", {})
+    return (
+        not bool(guard.get("enabled"))
+        or bool(guard.get("accepted", True))
+        or bool(guard.get("reverted", False))
+    )
+
+
+def _complete_candidate_score(
+    *,
+    name: str,
+    orders: FamilyOrders,
+    result: Mapping[str, Any],
+    target_hamiltonians: np.ndarray,
+    model_config: ConfiguredModel,
+    kpoints: np.ndarray,
+    n_folds: int,
+    solver_family: str = "linear",
+    selection_scope: str = "both",
+    primary_band_count: int | None = None,
+    low_band_count: int | None = None,
+    high_band_count: int | None = None,
+) -> CandidateScore:
+    model_hamiltonians = np.asarray(result["band_hamiltonians"], dtype=np.complex128)
+    target_eigvals, target_eigvecs = np.linalg.eigh(target_hamiltonians)
+    model_eigvals, model_eigvecs = np.linalg.eigh(model_hamiltonians)
+    model_eigvals = _align_model_eigenvalues_for_selection(
+        model_eigvals,
+        target_eigvals,
+        align=str(model_config.band_plot_config.get("align", "none")),
+    )
+    target_bands = str(
+        model_config.raw.get("model", {}).get("target_bands", "top")
+    ).strip().lower()
+
+    def measure_window(count: int | None) -> BandWindowMetrics | None:
+        if count is None:
+            return None
+        resolved = min(int(target_eigvals.shape[1]), max(1, int(count)))
+        window_weights = build_fixed_band_weights(
+            target_eigvals,
+            band_edge=target_bands,
+            n_bands=resolved,
+            floor=0.0,
+        )
+        band_metrics = weighted_band_error(
+            model_eigvals,
+            target_eigvals,
+            window_weights,
+        )
+        start, stop = _auto_low_energy_band_slice(
+            int(target_eigvals.shape[1]),
+            resolved,
+            target_bands,
+        )
+        overlap_metrics = subspace_overlap_metrics(
+            model_eigvecs[:, :, start:stop],
+            target_eigvecs[:, :, start:stop],
+        )
+        return BandWindowMetrics(
+            band_count=resolved,
+            weighted_rms_mev=band_metrics.weighted_rms_mev,
+            weighted_max_mev=band_metrics.maximum_abs_error_mev,
+            mean_subspace_overlap=overlap_metrics.mean_overlap,
+            minimum_singular_value=overlap_metrics.minimum_singular_value,
+        )
+
+    low_window_metrics = measure_window(low_band_count)
+    high_window_metrics = measure_window(high_band_count)
+    primary_count = (
+        (
+            int(low_window_metrics.band_count)
+            if str(selection_scope).strip().lower() == "low"
+            and low_window_metrics is not None
+            else int(high_window_metrics.band_count)
+            if high_window_metrics is not None
+            else _automatic_selection_primary_band_count(
+                model_config,
+                total_bands=target_eigvals.shape[1],
+            )
+        )
+        if primary_band_count is None
+        else min(int(target_eigvals.shape[1]), max(1, int(primary_band_count)))
+    )
+    weights = build_fixed_band_weights(
+        target_eigvals,
+        band_edge=target_bands,
+        n_bands=primary_count,
+        floor=0.0,
+    )
+    metrics = weighted_band_error(model_eigvals, target_eigvals, weights)
+    normalization_by_k = np.sum(weights, axis=1)
+    squared_by_k = np.divide(
+        np.sum(weights * (model_eigvals - target_eigvals) ** 2, axis=1),
+        normalization_by_k,
+        out=np.zeros_like(normalization_by_k),
+        where=normalization_by_k > 0.0,
+    )
+    band_slice = _auto_low_energy_band_slice(
+        target_eigvals.shape[1],
+        primary_count,
+        target_bands,
+    )
+    overlap = subspace_overlap_metrics(
+        model_eigvecs[:, :, band_slice[0] : band_slice[1]],
+        target_eigvecs[:, :, band_slice[0] : band_slice[1]],
+    )
+    expanded = compare_bands(model_eigvals, target_eigvals, band_slice=None)
+    model = result.get("model")
+    return CandidateScore(
+        name=name,
+        orders=orders,
+        independent_real_parameters=_active_independent_real_parameter_count(
+            model,
+            tolerance=model_config.coeff_tol,
+        ),
+        weighted_rms_mev=metrics.weighted_rms_mev,
+        weighted_rms_se_mev=_blocked_standard_error(
+            squared_by_k,
+            kpoints,
+            n_folds=n_folds,
+        ),
+        weighted_max_mev=metrics.maximum_abs_error_mev,
+        mean_subspace_overlap=overlap.mean_overlap,
+        expanded_weighted_rms_mev=float(expanded["rms_error_mev"]),
+        certified=True,
+        guards_passed=_band_refinement_result_is_selectable(result),
+        solver_family=solver_family,
+        active_group_count=_active_term_group_count(
+            model,
+            tolerance=model_config.coeff_tol,
+        ),
+        harmonic_support_size=_harmonic_support_size(
+            model_config,
+            model=model,
+            tolerance=model_config.coeff_tol,
+        ),
+        selection_scope=selection_scope,
+        primary_band_count=int(primary_count),
+        low_window_metrics=low_window_metrics,
+        high_window_metrics=high_window_metrics,
+    )
+
+
+def _complete_term_templates_for_profile_refit(
+    model_config: ConfiguredModel,
+    *,
+    moire_config: MoireConfig | None = None,
+) -> list[dict[str, Any]]:
+    """Return a symmetry-closed vocabulary for complete-response profile fits."""
+
+    current = [copy.deepcopy(row) for row in model_config.term_templates]
+    if current and all(row.get("term_space_policy") == "complete" for row in current):
+        return current
+
+    valley_type = str(model_config.valley_model.get("valley_type", ""))
+    if valley_type in _CASE_DERIVED_GENERATORS:
+        if moire_config is None:
+            raise ValueError(
+                f"{valley_type} complete-response profile refit requires resolved "
+                "Q sets, sectors, and harmonics"
+            )
+        templates, _diagnostics = _case_derived_term_templates(
+            valley_type=valley_type,
+            sectors=list(moire_config.sectors),
+            n_orb=(int(moire_config.n_orb1), int(moire_config.n_orb2)),
+            max_order=model_config.max_order,
+            Q_set1=np.asarray(moire_config.Q_set1, dtype=float),
+            Q_set2=np.asarray(moire_config.Q_set2, dtype=float),
+            intra_harmonics_map=dict(moire_config.intra_harmonics_map),
+            inter_harmonics_map=dict(moire_config.inter_harmonics_map),
+        )
+        return templates
+    exact: list[_TermTemplateProfile] = []
+    generic: list[_TermTemplateProfile] = []
+    for profile in _TERM_TEMPLATE_PROFILES:
+        if profile.valley_type != valley_type or profile.term_space_policy != "complete":
+            continue
+        if profile.n_orb == tuple(model_config.n_orb):
+            exact.append(profile)
+        elif profile.n_orb is None:
+            generic.append(profile)
+    profiles = exact or generic
+    if not profiles:
+        return current
+
+    harmonic_counts = _harmonic_count_limits(model_config.harmonics_config)
+    return [
+        _expand_term_template_profile(
+            template,
+            model_config.max_order,
+            harmonic_counts=harmonic_counts,
+        )
+        for profile in profiles
+        for template in profile.templates
+    ]
+
+
+def _refit_linear_profile_candidates(
+    *,
+    frontier_scores: Sequence[CandidateScore],
+    linear_runs: Mapping[str, Mapping[str, Any]],
+    target_hamiltonians: np.ndarray,
+    kpoints: np.ndarray,
+    n_folds: int,
+    low_primary_count: int,
+    high_primary_count: int,
+    candidate_dir: Path,
+    verbose: bool,
+    two_sided_projector_weight: float = 300.0,
+) -> dict[str, dict[str, Any]]:
+    """Refit shortlisted linear vocabularies for their physical profile window."""
+
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    refitted: dict[str, dict[str, Any]] = {}
+    for score in frontier_scores:
+        if score.selection_scope not in {"high", "low"}:
+            raise ValueError("linear profile refit requires a high or low selection scope")
+        base_run = linear_runs[score.name]
+        base_model_config = base_run["model_config"]
+        count = (
+            int(low_primary_count)
+            if score.selection_scope == "low"
+            else int(high_primary_count)
+        )
+        if base_model_config.fit_weighting == "uniform":
+            base_result = base_run.get("result")
+            if not isinstance(base_result, Mapping):
+                raise ValueError(
+                    "uniform linear profile selection requires the completed "
+                    f"equal-matrix candidate result for {score.name!r}"
+                )
+            name = f"{score.name}__linear_{score.selection_scope}_uniform"
+            candidate_model = replace(
+                base_model_config,
+                response_fit_objective={"mode": "equal_matrix_v1"},
+            )
+            refitted_score = _complete_candidate_score(
+                name=name,
+                orders=score.orders,
+                result=base_result,
+                target_hamiltonians=target_hamiltonians,
+                model_config=candidate_model,
+                kpoints=kpoints,
+                n_folds=n_folds,
+                solver_family="linear",
+                selection_scope=score.selection_scope,
+                primary_band_count=count,
+                low_band_count=int(low_primary_count),
+                high_band_count=int(high_primary_count),
+            )
+            refitted[name] = {
+                **base_run,
+                "score": refitted_score,
+                "result": base_result,
+                "model_config": candidate_model,
+                "stage": "linear_profile_uniform_reuse",
+                "linear_source": score.name,
+                "selection_scope": score.selection_scope,
+                "fit_objective": {"mode": "equal_matrix_v1"},
+            }
+            continue
+        target_bands = str(
+            base_model_config.raw.get("model", {}).get("target_bands", "top")
+        ).strip().lower()
+        objective = _linear_profile_fit_objective(
+            target_bands=target_bands,
+            band_count=count,
+            two_sided_projector_weight=two_sided_projector_weight,
+        )
+        complete_templates = _complete_term_templates_for_profile_refit(
+            base_model_config,
+            moire_config=base_run["moire_config"],
+        )
+        candidate_model = replace(
+            base_model_config,
+            response_semantics="complete_linear_v2",
+            response_fit_objective=objective,
+            term_templates=complete_templates,
+            model_selection_excluded_term_keys=(),
+            band_refinement_config={
+                "enabled": False,
+                "disabled_for": f"linear_{score.selection_scope}_weighted_refit",
+            },
+        )
+        candidate_moire = copy.copy(base_run["moire_config"])
+        candidate_moire.output_dir = None
+        candidate_moire.response_semantics = "complete_linear_v2"
+        candidate_moire.response_fit_objective = copy.deepcopy(objective)
+        candidate_moire.term_templates = [
+            copy.deepcopy(row) for row in complete_templates
+        ]
+        name = f"{score.name}__linear_{score.selection_scope}_weighted"
+        result = _run_model_pipeline(
+            candidate_moire,
+            candidate_model,
+            candidate_dir / f"{name}.log",
+            verbose=verbose,
+            progress=False,
+        )
+        refitted_score = _complete_candidate_score(
+            name=name,
+            orders=score.orders,
+            result=result,
+            target_hamiltonians=target_hamiltonians,
+            model_config=candidate_model,
+            kpoints=kpoints,
+            n_folds=n_folds,
+            solver_family="linear",
+            selection_scope=score.selection_scope,
+            primary_band_count=count,
+            low_band_count=int(low_primary_count),
+            high_band_count=int(high_primary_count),
+        )
+        refitted[name] = {
+            "score": refitted_score,
+            "result": result,
+            "moire_config": candidate_moire,
+            "model_config": candidate_model,
+            "specification": base_run.get("specification"),
+            "stage": "linear_profile_weighted_refit",
+            "linear_source": score.name,
+            "selection_scope": score.selection_scope,
+            "fit_objective": objective,
+        }
+    return refitted
+
+
+def _refine_nonlinear_frontier_candidates(
+    *,
+    frontier_scores: Sequence[CandidateScore],
+    linear_runs: Mapping[str, Mapping[str, Any]],
+    model_config: ConfiguredModel,
+    target_hamiltonians: np.ndarray,
+    kpoints: np.ndarray,
+    n_folds: int,
+    low_primary_count: int,
+    high_primary_count: int,
+    candidate_dir: Path,
+    verbose: bool,
+) -> dict[str, dict[str, Any]]:
+    """Nonlinearly refine each selected linear vocabulary independently."""
+
+    refinement = dict(model_config.band_refinement_config or {})
+    if not bool(refinement.get("enabled", False)):
+        return {}
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    refined_runs: dict[str, dict[str, Any]] = {}
+    target_bands = str(
+        model_config.raw.get("model", {}).get("target_bands", "top")
+    ).strip().lower()
+    primary_slice = _auto_low_energy_band_slice(
+        int(np.asarray(target_hamiltonians).shape[-1]),
+        low_primary_count,
+        target_bands,
+    )
+    high_slice = _auto_low_energy_band_slice(
+        int(np.asarray(target_hamiltonians).shape[-1]),
+        int(high_primary_count),
+        target_bands,
+    )
+    high_refinement = copy.deepcopy(refinement)
+    high_refinement["band_slice"] = list(high_slice)
+    high_weighted = dict(high_refinement.get("weighted_band_loss", {}))
+    high_weighted.update(
+        {
+            "enabled": model_config.fit_weighting != "uniform",
+            "primary_bands": int(high_primary_count),
+        }
+    )
+    high_refinement["weighted_band_loss"] = high_weighted
+    high_guard = dict(high_refinement.get("acceptance_guard", {}))
+    high_guard.update(
+        {
+            "enabled": True,
+            "band_slice": list(high_slice),
+            "align": target_bands,
+            "guard_primary_window": True,
+        }
+    )
+    high_refinement["acceptance_guard"] = high_guard
+    for score in frontier_scores:
+        base_run = linear_runs[score.name]
+        low_refinement = copy.deepcopy(refinement)
+        low_refinement["matrix_weight"] = 0.0
+        low_refinement["optimizer"] = "auto"
+        low_refinement["band_slice"] = list(primary_slice)
+        low_weighted = dict(low_refinement.get("weighted_band_loss", {}))
+        low_weighted.update(
+            {
+                "enabled": model_config.fit_weighting != "uniform",
+                "primary_bands": int(low_primary_count),
+                "floor": 0.0,
+            }
+        )
+        low_refinement["weighted_band_loss"] = low_weighted
+        low_guard = dict(low_refinement.get("acceptance_guard", {}))
+        low_guard.update(
+            {
+                "enabled": True,
+                "band_slice": list(primary_slice),
+                "align": target_bands,
+                "guard_primary_window": True,
+                "guard_all_bands": False,
+            }
+        )
+        low_refinement["acceptance_guard"] = low_guard
+        scoped_refinements = {
+            "high": high_refinement,
+            "low": low_refinement,
+        }
+        requested_scopes = (
+            ("high", "low")
+            if score.selection_scope == "both"
+            else (score.selection_scope,)
+        )
+        for selection_scope in requested_scopes:
+            scoped_refinement = scoped_refinements[selection_scope]
+            candidate_model = replace(
+                base_run["model_config"],
+                band_refinement_config=copy.deepcopy(scoped_refinement),
+            )
+            candidate_moire = copy.copy(base_run["moire_config"])
+            candidate_moire.output_dir = None
+            name = f"{score.name}__nonlinear_{selection_scope}"
+            result = _run_model_pipeline(
+                candidate_moire,
+                candidate_model,
+                candidate_dir / f"{name}.log",
+                verbose=verbose,
+                progress=False,
+            )
+            refined_score = _complete_candidate_score(
+                name=name,
+                orders=score.orders,
+                result=result,
+                target_hamiltonians=target_hamiltonians,
+                model_config=candidate_model,
+                kpoints=kpoints,
+                n_folds=n_folds,
+                solver_family="nonlinear",
+                selection_scope=selection_scope,
+                primary_band_count=(
+                    int(low_primary_count)
+                    if selection_scope == "low"
+                    else int(high_primary_count)
+                ),
+                low_band_count=int(low_primary_count),
+                high_band_count=int(high_primary_count),
+            )
+            refined_runs[name] = {
+                "score": refined_score,
+                "result": result,
+                "moire_config": candidate_moire,
+                "model_config": candidate_model,
+                "specification": base_run.get("specification"),
+                "stage": "nonlinear_frontier",
+                "linear_source": score.name,
+                "selection_scope": selection_scope,
+            }
+    return refined_runs
+
+
+def _run_automatic_family_order_scan(
+    *,
+    moire_config: MoireConfig,
+    model_config: ConfiguredModel,
+    output_dir: Path,
+    verbose: bool,
+    progress: bool,
+) -> dict[str, Any]:
+    selection_config = model_config.model_selection_config
+    if selection_config is None or not bool(selection_config.enabled):
+        raise ValueError("automatic family order scan requires enabled model selection")
+    original_heff = np.load(model_config.heff_file, mmap_mode="r")
+    try:
+        target_all = _current_heff_support_hamiltonians(
+            original_heff,
+            qset1=np.asarray(moire_config.Q_set1, dtype=float),
+            qset2=np.asarray(moire_config.Q_set2, dtype=float),
+            n_orb=model_config.n_orb,
+            harmonics_config=model_config.harmonics_config,
+        )
+    except Exception as exc:
+        raise ValueError(
+            "current Heff support mask is required as the primary "
+            "model-comparison reference"
+        ) from exc
+    target = np.asarray(_select_rows(target_all, model_config.band_indices))
+    kpoints = np.asarray(moire_config.kpoints, dtype=float)
+    if target.shape[0] != len(kpoints):
+        raise ValueError(
+            "automatic model selection target and band k-point counts differ"
+        )
+    profile_windows = _automatic_profile_band_windows(
+        np.asarray(moire_config.Q_set1, dtype=float),
+        np.asarray(moire_config.Q_set2, dtype=float),
+        n_orb=tuple(int(value) for value in model_config.n_orb),
+        total_bands=int(target.shape[-1]),
+    )
+    low_primary_count = int(profile_windows.low_band_count)
+    high_primary_count = int(profile_windows.high_band_count)
+    candidate_dir = output_dir / "candidate_logs"
+    candidate_dir.mkdir(parents=True, exist_ok=True)
+    runs: dict[str, dict[str, Any]] = {}
+
+    def evaluator(
+        stage: str,
+        orders: FamilyOrders,
+        active_families: tuple[str, ...],
+    ) -> CandidateScore:
+        candidate_moire, candidate_model, specification = (
+            _model_and_moire_for_order_candidate(
+                moire_config=moire_config,
+                model_config=model_config,
+                orders=orders,
+                active_families=active_families,
+            )
+        )
+        cached = runs.get(specification.name)
+        if cached is not None:
+            return cached["score"]
+        result = _run_model_pipeline(
+            candidate_moire,
+            candidate_model,
+            candidate_dir / f"{specification.name}.log",
+            verbose=verbose,
+            progress=False,
+        )
+        if stage == "inter":
+            score = _complete_candidate_score(
+                name=specification.name,
+                orders=orders,
+                result=result,
+                target_hamiltonians=target,
+                model_config=model_config,
+                kpoints=kpoints,
+                n_folds=selection_config.n_folds,
+                low_band_count=low_primary_count,
+                high_band_count=high_primary_count,
+            )
+        else:
+            rms_mev, se_mev, maximum_mev = _stage_matrix_candidate_metrics(
+                stage=stage,
+                model_hamiltonians=np.asarray(result["band_hamiltonians"]),
+                target_hamiltonians=target,
+                qset1_dim=int(len(moire_config.Q_set1) * moire_config.n_orb1),
+                kpoints=kpoints,
+                n_folds=selection_config.n_folds,
+            )
+            score = CandidateScore(
+                name=specification.name,
+                orders=orders,
+                independent_real_parameters=_active_independent_real_parameter_count(
+                    result.get("model"),
+                    tolerance=model_config.coeff_tol,
+                ),
+                weighted_rms_mev=rms_mev,
+                weighted_rms_se_mev=se_mev,
+                weighted_max_mev=maximum_mev,
+                mean_subspace_overlap=1.0,
+            )
+        runs[specification.name] = {
+            "score": score,
+            "result": result,
+            "moire_config": candidate_moire,
+            "model_config": candidate_model,
+            "specification": specification,
+            "stage": stage,
+        }
+        return score
+
+    staged = run_staged_family_selection(selection_config, evaluator)
+    staged_complete_scores = tuple(
+        stage.candidates
+        for stage in staged.stages
+        if stage.stage == "inter"
+    )
+    candidates_by_name = {
+        candidate.name: candidate
+        for candidates in staged_complete_scores
+        for candidate in candidates
+    }
+    correction = None
+    if staged.selected_orders is not None:
+        correction = run_local_order_correction_sweep(
+            staged.selected_orders,
+            maximum_orders=FamilyOrders(
+                kinetic=max(selection_config.order_candidates["kinetic"]),
+                intra=max(selection_config.order_candidates["intra"]),
+                inter=max(selection_config.order_candidates["inter"]),
+            ),
+            evaluator=lambda orders: evaluator(
+                "inter",
+                orders,
+                ("kinetic", "intra", "inter"),
+            ),
+            overlap_target=selection_config.overlap_target,
+            overlap_safety_floor=selection_config.overlap_safety_floor,
+        )
+        candidates_by_name.update(
+            {candidate.name: candidate for candidate in correction.candidates}
+        )
+    balanced_candidates = tuple(
+        evaluator("inter", orders, ("kinetic", "intra", "inter"))
+        for orders in _balanced_family_order_candidates(
+            selection_config.order_candidates
+        )
+    )
+    candidates_by_name.update(
+        {candidate.name: candidate for candidate in balanced_candidates}
+    )
+    candidates = tuple(candidates_by_name.values())
+    profiles = select_high_low_profiles(
+        candidates,
+        overlap_target=selection_config.overlap_target,
+        overlap_safety_floor=selection_config.overlap_safety_floor,
+        low_se_multiplier=selection_config.low_se_multiplier,
+        low_relative_rms_tolerance=selection_config.low_relative_rms_tolerance,
+        low_minimum_tolerance_mev=selection_config.low_minimum_tolerance_mev,
+    )
+    term_group_pruning: dict[str, Any] = {
+        "enabled": bool(selection_config.pruning_keep_fractions),
+        "candidates": [],
+    }
+    if (
+        selection_config.pruning_keep_fractions
+        and profiles.high.selected is not None
+    ):
+        base_score = profiles.high.selected
+        base_run = runs[base_score.name]
+        ranked_groups = _rank_closed_term_groups_for_edge(
+            model=base_run["result"].get("model"),
+            moire_config=base_run["moire_config"],
+            target_hamiltonians=target,
+            model_config=base_run["model_config"],
+            kpoints=kpoints,
+        )
+        all_groups = tuple(group for group, _importance in ranked_groups)
+        all_keys = tuple(key for group in all_groups for key in group)
+        keep_sets = _automatic_term_group_keep_sets(
+            ranked_groups,
+            keep_fractions=selection_config.pruning_keep_fractions,
+        )
+        for keep_groups in keep_sets:
+            keep_key_set = {
+                key for group in keep_groups for key in group
+            }
+            excluded_keys = tuple(
+                key for key in all_keys if key not in keep_key_set
+            )
+            name = f"{base_score.name}__groups{len(keep_groups)}"
+            pruned_model_config = replace(
+                base_run["model_config"],
+                model_selection_excluded_term_keys=excluded_keys,
+            )
+            pruned_moire_config = copy.copy(base_run["moire_config"])
+            pruned_moire_config.output_dir = None
+            result = _run_model_pipeline(
+                pruned_moire_config,
+                pruned_model_config,
+                candidate_dir / f"{name}.log",
+                verbose=verbose,
+                progress=False,
+            )
+            score = _complete_candidate_score(
+                name=name,
+                orders=base_score.orders,
+                result=result,
+                target_hamiltonians=target,
+                model_config=pruned_model_config,
+                kpoints=kpoints,
+                n_folds=selection_config.n_folds,
+                low_band_count=low_primary_count,
+                high_band_count=high_primary_count,
+            )
+            result["term_group_pruning"] = {
+                "enabled": True,
+                "base_candidate": base_score.name,
+                "kept_groups": int(len(keep_groups)),
+                "excluded_groups": int(len(all_groups) - len(keep_groups)),
+                "total_groups": int(len(all_groups)),
+            }
+            runs[name] = {
+                "score": score,
+                "result": result,
+                "moire_config": pruned_moire_config,
+                "model_config": pruned_model_config,
+                "specification": None,
+                "stage": "term_group_pruning",
+            }
+            candidates_by_name[name] = score
+            term_group_pruning["candidates"].append(
+                {
+                    "name": name,
+                    "kept_groups": int(len(keep_groups)),
+                    "excluded_groups": int(len(all_groups) - len(keep_groups)),
+                    "score": _model_selection_candidate_record(score),
+                }
+            )
+        candidates = tuple(candidates_by_name.values())
+        profiles = select_high_low_profiles(
+            candidates,
+            overlap_target=selection_config.overlap_target,
+            overlap_safety_floor=selection_config.overlap_safety_floor,
+            low_se_multiplier=selection_config.low_se_multiplier,
+            low_relative_rms_tolerance=selection_config.low_relative_rms_tolerance,
+            low_minimum_tolerance_mev=selection_config.low_minimum_tolerance_mev,
+        )
+        term_group_pruning["base_candidate"] = base_score.name
+        term_group_pruning["total_groups"] = int(len(all_groups))
+    nonlinear_frontier: dict[str, Any] = {
+        "enabled": False,
+        "linear_sources": [],
+        "candidates": [],
+    }
+    nonlinear_profiles = None
+    refinement_config = dict(model_config.band_refinement_config or {})
+    if bool(refinement_config.get("enabled", False)):
+        linear_high_scores = tuple(
+            replace(score, selection_scope="high") for score in candidates
+        )
+        linear_low_scores: list[CandidateScore] = []
+        for score in candidates:
+            source_run = runs[score.name]
+            low_name = f"{score.name}__linear_low"
+            low_score = _complete_candidate_score(
+                name=low_name,
+                orders=score.orders,
+                result=source_run["result"],
+                target_hamiltonians=target,
+                model_config=source_run["model_config"],
+                kpoints=kpoints,
+                n_folds=selection_config.n_folds,
+                solver_family="linear",
+                selection_scope="low",
+                primary_band_count=low_primary_count,
+                low_band_count=low_primary_count,
+                high_band_count=high_primary_count,
+            )
+            runs[low_name] = {
+                **source_run,
+                "score": low_score,
+                "stage": "linear_low_profile",
+                "linear_source": score.name,
+                "selection_scope": "low",
+            }
+            linear_low_scores.append(low_score)
+        linear_low_profiles = select_high_low_profiles(
+            tuple(linear_low_scores),
+            overlap_target=selection_config.overlap_target,
+            overlap_safety_floor=selection_config.overlap_safety_floor,
+            low_se_multiplier=selection_config.low_se_multiplier,
+            low_relative_rms_tolerance=selection_config.low_relative_rms_tolerance,
+            low_minimum_tolerance_mev=selection_config.low_minimum_tolerance_mev,
+        )
+        maximum_variables = min(
+            3000,
+            int(refinement_config.get("max_variables", 3000)),
+        )
+        high_frontier_scores = _select_nonlinear_frontier_scores(
+            candidates,
+            profiles=profiles,
+            maximum_candidates=int(
+                refinement_config.get("frontier_max_candidates", 4)
+            ),
+            maximum_variables=maximum_variables,
+            maximum_orders=FamilyOrders(6, 4, 4),
+        )
+        high_frontier_scores = tuple(
+            replace(score, selection_scope="high")
+            for score in high_frontier_scores
+        )
+        low_frontier_scores = _select_nonlinear_frontier_scores(
+            tuple(linear_low_scores),
+            profiles=linear_low_profiles,
+            maximum_candidates=int(
+                refinement_config.get("frontier_max_candidates", 4)
+            ),
+            maximum_variables=maximum_variables,
+            maximum_orders=FamilyOrders(4, 2, 2),
+        )
+        frontier_scores = tuple(
+            {
+                score.name: score
+                for score in (*high_frontier_scores, *low_frontier_scores)
+            }.values()
+        )
+        linear_profile_runs = _refit_linear_profile_candidates(
+            frontier_scores=frontier_scores,
+            linear_runs=runs,
+            target_hamiltonians=target,
+            kpoints=kpoints,
+            n_folds=selection_config.n_folds,
+            low_primary_count=low_primary_count,
+            high_primary_count=high_primary_count,
+            candidate_dir=candidate_dir,
+            verbose=verbose,
+        )
+        runs.update(linear_profile_runs)
+        linear_profile_scores = tuple(
+            run["score"] for run in linear_profile_runs.values()
+        )
+        nonlinear_runs = _refine_nonlinear_frontier_candidates(
+            frontier_scores=linear_profile_scores,
+            linear_runs=runs,
+            model_config=model_config,
+            target_hamiltonians=target,
+            kpoints=kpoints,
+            n_folds=selection_config.n_folds,
+            low_primary_count=low_primary_count,
+            high_primary_count=high_primary_count,
+            candidate_dir=candidate_dir,
+            verbose=verbose,
+        )
+        runs.update(nonlinear_runs)
+        nonlinear_score_list = [
+            run["score"] for run in nonlinear_runs.values()
+        ]
+        for name, nonlinear_run in nonlinear_runs.items():
+            score = nonlinear_run["score"]
+            if score.selection_scope != "high":
+                continue
+            low_name = f"{name}__low_score"
+            low_score = _complete_candidate_score(
+                name=low_name,
+                orders=score.orders,
+                result=nonlinear_run["result"],
+                target_hamiltonians=target,
+                model_config=nonlinear_run["model_config"],
+                kpoints=kpoints,
+                n_folds=selection_config.n_folds,
+                solver_family="nonlinear",
+                selection_scope="low",
+                primary_band_count=low_primary_count,
+                low_band_count=low_primary_count,
+                high_band_count=high_primary_count,
+            )
+            runs[low_name] = {
+                **nonlinear_run,
+                "score": low_score,
+                "stage": "nonlinear_high_low_rescore",
+                "nonlinear_source": name,
+                "selection_scope": "low",
+            }
+            nonlinear_score_list.append(low_score)
+        nonlinear_scores = tuple(nonlinear_score_list)
+        if nonlinear_scores:
+            four_profiles = select_four_model_profiles(
+                (*linear_profile_scores, *nonlinear_scores),
+                overlap_target=selection_config.overlap_target,
+                overlap_safety_floor=selection_config.overlap_safety_floor,
+                low_se_multiplier=selection_config.low_se_multiplier,
+                low_relative_rms_tolerance=selection_config.low_relative_rms_tolerance,
+                low_minimum_tolerance_mev=selection_config.low_minimum_tolerance_mev,
+            )
+            profiles = four_profiles.linear
+            nonlinear_profiles = _complete_optional_profile_pair(
+                four_profiles.nonlinear
+            )
+        nonlinear_frontier = {
+            "enabled": True,
+            "maximum_candidates": int(
+                refinement_config.get("frontier_max_candidates", 4)
+            ),
+            "maximum_variables": maximum_variables,
+            "linear_sources": [score.name for score in frontier_scores],
+            "weighted_linear_candidates": [
+                score.name for score in linear_profile_scores
+            ],
+            "linear_high_sources": [
+                score.name for score in high_frontier_scores
+            ],
+            "linear_low_sources": [
+                score.name for score in low_frontier_scores
+            ],
+            "candidates": [
+                _model_selection_candidate_record(score)
+                for score in nonlinear_scores
+            ],
+        }
+    if progress:
+        selected = staged.selected_orders
+        _progress_line(
+            f"automatic family-order scan selected staged orders: {selected}",
+            enabled=True,
+        )
+    return {
+        "staged_selection": staged,
+        "profiles": profiles,
+        "profile_families": {
+            "linear": profiles,
+            "nonlinear": nonlinear_profiles,
+        },
+        "nonlinear_frontier": nonlinear_frontier,
+        "correction_sweep": correction,
+        "term_group_pruning": term_group_pruning,
+        "profile_band_windows": {
+            "low_band_count": int(profile_windows.low_band_count),
+            "high_band_count": int(profile_windows.high_band_count),
+            "q_shell_count": 2,
+            "layer_q_counts": [int(value) for value in profile_windows.layer_q_counts],
+        },
+        "runs": runs,
+        "target_hamiltonians": target,
+    }
 
 
 def _run_auto_low_energy_fit_candidate_scan(
@@ -10377,12 +15004,22 @@ def _run_auto_low_energy_fit_candidate_scan(
         return None
 
     kpoints_all = _load_kpoints(model_config)
-    heff_list = np.load(model_config.heff_file, mmap_mode="r")
+    original_heff_list = np.load(model_config.heff_file, mmap_mode="r")
+    heff_list = _current_heff_support_hamiltonians(
+        original_heff_list,
+        qset1=np.asarray(moire_config.Q_set1, dtype=float),
+        qset2=np.asarray(moire_config.Q_set2, dtype=float),
+        n_orb=model_config.n_orb,
+        harmonics_config=model_config.harmonics_config,
+    )
+    heff_selected = np.linalg.eigvalsh(_select_rows(heff_list, model_config.band_indices))
     if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
-        heff_eig = np.load(model_config.heff_eig_file)
+        original_heff_eig = np.load(model_config.heff_eig_file)
+        original_heff_selected = _select_rows(original_heff_eig, model_config.band_indices)
     else:
-        heff_eig = np.linalg.eigvalsh(heff_list)
-    heff_selected = _select_rows(heff_eig, model_config.band_indices)
+        original_heff_selected = np.linalg.eigvalsh(
+            _select_rows(original_heff_list, model_config.band_indices)
+        )
     output_dir.mkdir(parents=True, exist_ok=True)
     candidate_log_dir = output_dir / "candidate_logs"
     candidate_log_dir.mkdir(parents=True, exist_ok=True)
@@ -10430,13 +15067,25 @@ def _run_auto_low_energy_fit_candidate_scan(
                 band_slice=model_config.band_slice,
                 plot_config=model_config.band_plot_config,
             )
+            secondary_plot_comparison = compare_bands_for_plot(
+                eigvals,
+                original_heff_selected,
+                band_slice=model_config.band_slice,
+                plot_config=model_config.band_plot_config,
+            )
             record.update(
                 {
                     "status": "ok",
+                    "reference": "current_heff_support_mask",
                     "all_rms_mev": float(comparison["rms_error_mev"]),
                     "all_max_mev": float(comparison["max_abs_error_mev"]),
                     "plot_rms_mev": float(plot_comparison["rms_error_mev"]),
                     "plot_max_mev": float(plot_comparison["max_abs_error_mev"]),
+                    "secondary_original_heff": {
+                        "reference": "original_heff",
+                        "plot_rms_mev": float(secondary_plot_comparison["rms_error_mev"]),
+                        "plot_max_mev": float(secondary_plot_comparison["max_abs_error_mev"]),
+                    },
                     "log": str(candidate_log.resolve()),
                 }
             )
@@ -10525,13 +15174,25 @@ def _run_auto_low_energy_fit_candidate_scan(
                         band_slice=model_config.band_slice,
                         plot_config=model_config.band_plot_config,
                     )
+                    secondary_plot_comparison = compare_bands_for_plot(
+                        eigvals,
+                        original_heff_selected,
+                        band_slice=model_config.band_slice,
+                        plot_config=model_config.band_plot_config,
+                    )
                     record.update(
                         {
                             "status": "ok",
+                            "reference": "current_heff_support_mask",
                             "all_rms_mev": float(comparison["rms_error_mev"]),
                             "all_max_mev": float(comparison["max_abs_error_mev"]),
                             "plot_rms_mev": float(plot_comparison["rms_error_mev"]),
                             "plot_max_mev": float(plot_comparison["max_abs_error_mev"]),
+                            "secondary_original_heff": {
+                                "reference": "original_heff",
+                                "plot_rms_mev": float(secondary_plot_comparison["rms_error_mev"]),
+                                "plot_max_mev": float(secondary_plot_comparison["max_abs_error_mev"]),
+                            },
                             "log": str(candidate_log.resolve()),
                         }
                     )
@@ -10548,6 +15209,8 @@ def _run_auto_low_energy_fit_candidate_scan(
         **report,
         "enabled": True,
         "mode": "prefit_full_model_scan",
+        "reference": "current_heff_support_mask",
+        "secondary_reference": "original_heff",
         "candidates": records,
     }
     selected_name = str(selected_record["name"])
@@ -10577,8 +15240,30 @@ def _run_auto_low_energy_fit_candidate_scan(
     return selected_results, selected_moire, selected_model
 
 
+def _selected_profile_pipeline_result(
+    *,
+    selected_run: Mapping[str, Any],
+    selected_moire: Any,
+    selected_model: ConfiguredModel,
+    profile_log: Path,
+    verbose: bool,
+    progress: bool,
+) -> dict[str, Any]:
+    cached = selected_run.get("result")
+    if isinstance(cached, dict):
+        return cached
+    return _run_model_pipeline(
+        selected_moire,
+        selected_model,
+        profile_log,
+        verbose=verbose,
+        progress=progress,
+    )
+
+
 def run_configured_model(path: str | Path) -> dict[str, Any]:
     started = time.perf_counter()
+    reporter = KpReporter("kp model")
     _progress_line("loading configuration ...", enabled=True, style="start")
     moire_config, model_config = build_moire_config_from_file(path)
     output_dir = model_config.output_dir
@@ -10586,10 +15271,57 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     canonical_output = isinstance(model_config.raw.get("case"), Mapping) and bool(model_config.raw["case"].get("profile")) and bool(model_config.raw["case"].get("q_shell"))
     diagnostics_dir = _model_diagnostics_dir(output_dir) if output_profile == "debug" else None
     output_dir.mkdir(parents=True, exist_ok=True)
-    _progress_line(f"output directory: {output_dir}", enabled=True, style="path")
+    n_orb_meta = model_config.orbital_count_metadata.get("n_orb", {})
+    n_orb_source = str(n_orb_meta.get("source", "model_config")) if isinstance(n_orb_meta, Mapping) else "model_config"
+    n_orb_source_label = {
+        "projection_basis": "inferred from projection/basis.npz",
+        "source_project": "inferred from project.nlow_state_list",
+        "model_config": "explicit model.n_orb assertion",
+        "legacy_dimension_inference": "legacy dimension inference",
+    }.get(n_orb_source, n_orb_source)
+    public_fit = dict(model_config.fit_method_config or {})
+    setup_rows: list[tuple[str, object]] = [
+        ("basis", f"n_orb={list(model_config.n_orb)} · {n_orb_source_label}"),
+    ]
+    if public_fit:
+        setup_rows.extend(
+            [
+                ("method", public_fit["method"]),
+                (
+                    "target",
+                    f"{model_config.raw.get('model', {}).get('target_bands', 'top')} "
+                    f"{public_fit['requested_bands']} bands",
+                ),
+                (
+                    "fit k rows",
+                    f"{public_fit['hamiltonian_kpoints']} · projected Heff row indices",
+                ),
+                (
+                    "H weights",
+                    f"full=1 · one-sided={public_fit['one_sided_weight']:g} · "
+                    f"two-sided={public_fit['two_sided_weight']:g}",
+                ),
+            ]
+        )
+        if public_fit["method"] == "nonlinear":
+            setup_rows.extend(
+                [
+                    ("band rows", public_fit["band_kpoints"]),
+                    ("band loss", public_fit["band_loss_weight"]),
+                    ("max steps", public_fit["max_steps"]),
+                ]
+            )
+    setup_rows.append(("output", output_dir))
+    reporter.section("Model setup")
+    reporter.fields(setup_rows)
     _cleanup_stale_band_outputs(output_dir)
     _cleanup_stale_model_debug_outputs(output_dir)
-    _run_model_harmonic_recommendation_once(model_config=model_config, output_dir=output_dir)
+    _cleanup_stale_hamiltonian_element_outputs(output_dir)
+    _run_model_harmonic_recommendation_once(
+        model_config=model_config,
+        output_dir=output_dir,
+        reporter=reporter,
+    )
     if diagnostics_dir is not None:
         save_bM_diagnostics(model_config=model_config, output_dir=diagnostics_dir)
         save_harmonics_diagnostics(moire_config=moire_config, model_config=model_config, output_dir=diagnostics_dir)
@@ -10598,8 +15330,10 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     log_name = str(model_config.output_config.get("log_file", "model_run.log"))
     log_path = output_dir / log_name
     moire_config.output_dir = None
+    automatic_order_scan: dict[str, Any] | None = None
+    profile_results: dict[str, dict[str, Any]] = {}
     try:
-        scan_result = _run_auto_low_energy_fit_candidate_scan(
+        fit_scan_result = _run_auto_low_energy_fit_candidate_scan(
             moire_config=moire_config,
             model_config=model_config,
             output_dir=output_dir,
@@ -10607,12 +15341,176 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             verbose=verbose,
             progress=progress,
         )
-        if scan_result is None:
-            results = _run_model_pipeline(moire_config, model_config, log_path, verbose=verbose, progress=progress)
+        if fit_scan_result is None:
+            prefitted_results = None
         else:
-            results, moire_config, model_config = scan_result
+            prefitted_results, moire_config, model_config = fit_scan_result
+        selection_config = model_config.model_selection_config
+        if selection_config is not None and bool(selection_config.enabled):
+            automatic_order_scan = _run_automatic_family_order_scan(
+                moire_config=moire_config,
+                model_config=model_config,
+                output_dir=output_dir,
+                verbose=verbose,
+                progress=progress,
+            )
+            profile_families = automatic_order_scan.get("profile_families") or {
+                "linear": automatic_order_scan["profiles"],
+                "nonlinear": None,
+            }
+            nonlinear_profiles = profile_families.get("nonlinear")
+            requested_profiles = tuple(model_config.requested_profiles)
+            if requested_profiles:
+                automatic_order_scan["requested_profiles"] = list(requested_profiles)
+                nested_results: dict[str, dict[str, dict[str, Any]]] = {}
+                for profile_name in requested_profiles:
+                    solver_family, quality = profile_name.split("/", maxsplit=1)
+                    profiles = profile_families.get(solver_family)
+                    if profiles is None:
+                        raise RuntimeError(
+                            f"requested model profile {profile_name!r} is unavailable"
+                        )
+                    decision = getattr(profiles, quality)
+                    if decision.selected is None:
+                        raise RuntimeError(
+                            f"automatic {profile_name} model selection failed: "
+                            f"{decision.unmet_targets}"
+                        )
+                    selected_run = automatic_order_scan["runs"][decision.selected.name]
+                    selected_model = replace(
+                        selected_run["model_config"],
+                        output_dir=output_dir / solver_family / quality,
+                    )
+                    selected_moire = copy.copy(selected_run["moire_config"])
+                    selected_moire.output_dir = None
+                    profile_log = selected_model.output_dir / log_name
+                    profile_log.parent.mkdir(parents=True, exist_ok=True)
+                    selected_results = _selected_profile_pipeline_result(
+                        selected_run=selected_run,
+                        selected_moire=selected_moire,
+                        selected_model=selected_model,
+                        profile_log=profile_log,
+                        verbose=verbose,
+                        progress=progress,
+                    )
+                    nested_results.setdefault(solver_family, {})[quality] = {
+                        "results": selected_results,
+                        "moire_config": selected_moire,
+                        "model_config": selected_model,
+                        "score": decision.selected,
+                        "status": decision.status,
+                    }
+                profile_results = nested_results
+                primary_name = next(
+                    name
+                    for name in (
+                        "nonlinear/high",
+                        "linear/high",
+                        "nonlinear/low",
+                        "linear/low",
+                    )
+                    if name in requested_profiles
+                )
+                primary_family, primary_quality = primary_name.split("/", maxsplit=1)
+                primary_profile = profile_results[primary_family][primary_quality]
+            elif nonlinear_profiles is None:
+                profiles = profile_families["linear"]
+                for profile_name, decision in (
+                    ("high", profiles.high),
+                    ("low", profiles.low),
+                ):
+                    if decision.selected is None:
+                        raise RuntimeError(
+                            f"automatic {profile_name} model selection failed: "
+                            f"{decision.unmet_targets}"
+                        )
+                    selected_run = automatic_order_scan["runs"][decision.selected.name]
+                    selected_model = replace(
+                        selected_run["model_config"],
+                        output_dir=(
+                            output_dir
+                            if profile_name == "high"
+                            else output_dir / "low"
+                        ),
+                    )
+                    selected_moire = copy.copy(selected_run["moire_config"])
+                    selected_moire.output_dir = None
+                    profile_log = selected_model.output_dir / log_name
+                    profile_log.parent.mkdir(parents=True, exist_ok=True)
+                    selected_results = _selected_profile_pipeline_result(
+                        selected_run=selected_run,
+                        selected_moire=selected_moire,
+                        selected_model=selected_model,
+                        profile_log=profile_log,
+                        verbose=verbose,
+                        progress=progress,
+                    )
+                    profile_results[profile_name] = {
+                        "results": selected_results,
+                        "moire_config": selected_moire,
+                        "model_config": selected_model,
+                        "score": decision.selected,
+                        "status": decision.status,
+                    }
+                primary_profile = profile_results["high"]
+            else:
+                nested_results: dict[str, dict[str, dict[str, Any]]] = {}
+                for solver_family in ("linear", "nonlinear"):
+                    profiles = profile_families[solver_family]
+                    nested_results[solver_family] = {}
+                    for quality, decision in (
+                        ("high", profiles.high),
+                        ("low", profiles.low),
+                    ):
+                        if decision.selected is None:
+                            raise RuntimeError(
+                                f"automatic {solver_family}/{quality} model selection failed: "
+                                f"{decision.unmet_targets}"
+                            )
+                        selected_run = automatic_order_scan["runs"][decision.selected.name]
+                        selected_model = replace(
+                            selected_run["model_config"],
+                            output_dir=output_dir / solver_family / quality,
+                        )
+                        selected_moire = copy.copy(selected_run["moire_config"])
+                        selected_moire.output_dir = None
+                        profile_log = selected_model.output_dir / log_name
+                        profile_log.parent.mkdir(parents=True, exist_ok=True)
+                        selected_results = _selected_profile_pipeline_result(
+                            selected_run=selected_run,
+                            selected_moire=selected_moire,
+                            selected_model=selected_model,
+                            profile_log=profile_log,
+                            verbose=verbose,
+                            progress=progress,
+                        )
+                        nested_results[solver_family][quality] = {
+                            "results": selected_results,
+                            "moire_config": selected_moire,
+                            "model_config": selected_model,
+                            "score": decision.selected,
+                            "status": decision.status,
+                        }
+                profile_results = nested_results
+                primary_profile = profile_results["nonlinear"]["high"]
+            results = primary_profile["results"]
+            moire_config = primary_profile["moire_config"]
+            model_config = primary_profile["model_config"]
+        elif prefitted_results is None:
+            results = _run_model_pipeline(
+                moire_config,
+                model_config,
+                log_path,
+                verbose=verbose,
+                progress=progress,
+            )
+        else:
+            results = prefitted_results
     finally:
         moire_config.output_dir = output_dir
+    if automatic_order_scan is not None:
+        results["automatic_family_order_scan"] = automatic_order_scan
+        results["profile_results"] = profile_results
     eigvals = results["eigvals"]
     model_eigvecs = None
     if isinstance(eigvals, tuple):
@@ -10628,8 +15526,12 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     comparison = None
     plot_comparison = None
     all_band_plot_comparison = None
+    comparison_vs_full_heff = None
+    plot_comparison_vs_full_heff = None
+    all_band_plot_comparison_vs_full_heff = None
     band_plot_path = None
     all_band_plot_path = None
+    full_heff_band_plot_path = None
     hamiltonian_element_plot_path = None
     q_lattice_plot_path = save_q_lattice_harmonics_plot(
         Q_set1=np.asarray(moire_config.Q_set1, dtype=float),
@@ -10649,55 +15551,93 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         ],
     )
     if model_config.compare_to_heff:
-        heff_eigvecs = None
         heff_matrix_all = np.load(model_config.heff_file, mmap_mode="r")
+        heff_matrix_selected = _select_rows(heff_matrix_all, model_config.band_indices)
         if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
             heff_eig = np.load(model_config.heff_eig_file)
+            heff_selected = _select_rows(heff_eig, model_config.band_indices)
         else:
-            heff_eig = np.linalg.eigvalsh(heff_matrix_all)
-        if model_eigvecs is not None and model_config.heff_file is not None and model_config.heff_file.exists():
-            _, heff_eigvecs = np.linalg.eigh(heff_matrix_all)
-        heff_selected = _select_rows(heff_eig, model_config.band_indices)
-        heff_matrix_selected = _select_rows(heff_matrix_all, model_config.band_indices)
+            heff_selected = np.linalg.eigvalsh(heff_matrix_selected)
+        try:
+            harmonic_mask = _selected_harmonic_support_mask(
+                np.asarray(moire_config.Q_set1, dtype=float),
+                np.asarray(moire_config.Q_set2, dtype=float),
+                n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
+                current_counts=_resolved_harmonic_count_limits(model_config.harmonics_config),
+            )
+            current_support_heff = _current_heff_support_hamiltonians(
+                heff_matrix_selected,
+                qset1=np.asarray(moire_config.Q_set1, dtype=float),
+                qset2=np.asarray(moire_config.Q_set2, dtype=float),
+                n_orb=model_config.n_orb,
+                harmonics_config=model_config.harmonics_config,
+            )
+            current_support_eigvals, current_support_eigvecs = np.linalg.eigh(current_support_heff)
+            np.save(output_dir / "current_heff_support_eigvals.npy", current_support_eigvals)
+        except Exception as exc:
+            raise ValueError(
+                "current Heff support mask is required as the primary model-comparison reference"
+            ) from exc
         overlap_weights = None
-        if model_eigvecs is not None and heff_eigvecs is not None:
-            model_eigvecs_selected = _select_rows(np.asarray(model_eigvecs), model_config.band_indices)
-            heff_eigvecs_selected = _select_rows(heff_eigvecs, model_config.band_indices)
-            if model_eigvecs_selected.shape == heff_eigvecs_selected.shape:
-                overlap_weights = _band_overlap_weights(
-                    model_eigvecs_selected,
-                    heff_eigvecs_selected,
-                    model_eigvals=np.asarray(eigvals_array, dtype=float),
-                    reference_eigvals=np.asarray(heff_selected, dtype=float),
-                    degeneracy_tol=float(model_config.band_plot_config.get("overlap_degeneracy_tol", 3.0e-3)),
+        if model_eigvecs is not None:
+            model_eigvecs_selected = np.asarray(model_eigvecs)
+            if model_eigvecs_selected.shape != current_support_eigvecs.shape:
+                raise ValueError(
+                    "model/current-support eigenvector shape mismatch after band-path selection: "
+                    f"{model_eigvecs_selected.shape} != {current_support_eigvecs.shape}"
                 )
-        comparison = compare_bands(eigvals_array, heff_selected, band_slice=model_config.band_slice)
+            overlap_weights = _band_overlap_weights(
+                model_eigvecs_selected,
+                current_support_eigvecs,
+                model_eigvals=np.asarray(eigvals_array, dtype=float),
+                reference_eigvals=np.asarray(current_support_eigvals, dtype=float),
+                degeneracy_tol=float(model_config.band_plot_config.get("overlap_degeneracy_tol", 3.0e-3)),
+            )
+        comparison = {
+            **compare_bands(eigvals_array, current_support_eigvals, band_slice=model_config.band_slice),
+            "reference": "current_heff_support_mask",
+        }
+        comparison_vs_full_heff = {
+            **compare_bands(eigvals_array, heff_selected, band_slice=model_config.band_slice),
+            "reference": "original_heff",
+        }
         if diagnostics_dir is not None:
             diagnostics_dir.mkdir(parents=True, exist_ok=True)
             with (diagnostics_dir / "comparison.json").open("w", encoding="utf-8") as handle:
                 json.dump(comparison, handle, indent=2)
+            with (diagnostics_dir / "comparison_vs_full_heff.json").open("w", encoding="utf-8") as handle:
+                json.dump(comparison_vs_full_heff, handle, indent=2)
         target_bands = str(model_config.raw.get("model", {}).get("target_bands", "top")).strip().lower()
         window_plot_config = _window_band_plot_config(model_config.band_plot_config, target_bands=target_bands)
         band_plot_config = dict(window_plot_config)
         if overlap_weights is not None:
-            band_plot_config["top_bands"] = 6
             band_plot_config["plot_all_bands"] = True
         plot_comparison = compare_bands_for_plot(
+            eigvals_array,
+            current_support_eigvals,
+            band_slice=model_config.band_slice,
+            plot_config=band_plot_config,
+        )
+        plot_comparison["reference"] = "current_heff_support_mask"
+        plot_comparison_vs_full_heff = compare_bands_for_plot(
             eigvals_array,
             heff_selected,
             band_slice=model_config.band_slice,
             plot_config=band_plot_config,
         )
+        plot_comparison_vs_full_heff["reference"] = "original_heff"
         plot_comparison_name = _plot_comparison_filename(band_plot_config)
         if diagnostics_dir is not None:
             with (diagnostics_dir / "comparison_plot.json").open("w", encoding="utf-8") as handle:
                 json.dump(plot_comparison, handle, indent=2)
             with (diagnostics_dir / plot_comparison_name).open("w", encoding="utf-8") as handle:
                 json.dump(plot_comparison, handle, indent=2)
+            with (diagnostics_dir / "comparison_plot_vs_full_heff.json").open("w", encoding="utf-8") as handle:
+                json.dump(plot_comparison_vs_full_heff, handle, indent=2)
         x_values, x_ticks, x_ticklabels = _plot_axis_from_kpath(model_config, np.asarray(eigvals_array).shape[0])
         band_plot_path = save_band_comparison_plot(
             eigvals_array,
-            heff_selected,
+            current_support_eigvals,
             output_dir / "band_comparison.pdf",
             band_slice=model_config.band_slice,
             plot_config=band_plot_config,
@@ -10706,20 +15646,43 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             x_ticklabels=x_ticklabels,
             title=_band_plot_title(model_config),
             overlap_weights=overlap_weights,
+            reference_label="Current Heff support mask",
+        )
+        full_heff_band_plot_path = save_band_comparison_plot(
+            eigvals_array,
+            heff_selected,
+            output_dir / "band_comparison_vs_full_heff.pdf",
+            band_slice=model_config.band_slice,
+            plot_config=band_plot_config,
+            x=x_values,
+            x_ticks=x_ticks,
+            x_ticklabels=x_ticklabels,
+            title=f"{_band_plot_title(model_config)} (vs original Heff)",
+            reference_label="Original Heff",
         )
         all_band_config = _all_band_plot_config(model_config.band_plot_config)
         all_band_plot_comparison = compare_bands_for_plot(
+            eigvals_array,
+            current_support_eigvals,
+            band_slice=None,
+            plot_config=all_band_config,
+        )
+        all_band_plot_comparison["reference"] = "current_heff_support_mask"
+        all_band_plot_comparison_vs_full_heff = compare_bands_for_plot(
             eigvals_array,
             heff_selected,
             band_slice=None,
             plot_config=all_band_config,
         )
+        all_band_plot_comparison_vs_full_heff["reference"] = "original_heff"
         if diagnostics_dir is not None:
             with (diagnostics_dir / "comparison_all_bands.json").open("w", encoding="utf-8") as handle:
                 json.dump(all_band_plot_comparison, handle, indent=2)
+            with (diagnostics_dir / "comparison_all_bands_vs_full_heff.json").open("w", encoding="utf-8") as handle:
+                json.dump(all_band_plot_comparison_vs_full_heff, handle, indent=2)
         all_band_plot_path = save_band_comparison_plot(
             eigvals_array,
-            heff_selected,
+            current_support_eigvals,
             output_dir / "band_comparison_all.pdf",
             band_slice=None,
             plot_config=all_band_config,
@@ -10727,22 +15690,20 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
             x_ticks=x_ticks,
             x_ticklabels=x_ticklabels,
             title=f"{_band_plot_title(model_config)} (all bands)",
+            reference_label="Current Heff support mask",
         )
         try:
             model_hamiltonians = np.asarray(results.get("band_hamiltonians"), dtype=np.complex128)
             fit_positions, _holdout_positions = _selected_index_positions(model_config, int(heff_matrix_selected.shape[0]))
             selected_indices = list(model_config.band_indices or list(range(int(heff_matrix_selected.shape[0]))))
             fit_k_indices = [int(selected_indices[pos]) for pos in fit_positions]
-            harmonic_mask = _selected_harmonic_support_mask(
-                np.asarray(moire_config.Q_set1, dtype=float),
-                np.asarray(moire_config.Q_set2, dtype=float),
-                n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
-                current_counts=_resolved_harmonic_count_limits(model_config.harmonics_config),
-            )
+            if harmonic_mask is None:
+                raise ValueError("current harmonic support mask is unavailable")
+            qnorm_plot_dir = output_dir / "hamiltonian_element_comparisons"
             hamiltonian_element_plot_path = save_hamiltonian_element_comparison_plot(
                 model_hamiltonians,
                 heff_matrix_selected,
-                output_dir / "hamiltonian_element_comparison.png",
+                qnorm_plot_dir / "native_full.png",
                 harmonic_mask=harmonic_mask,
                 positions=fit_positions,
                 k_indices=fit_k_indices,
@@ -10752,6 +15713,49 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
                 n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
                 subtract_layer_diagonal_mean=True,
             )
+            save_hamiltonian_element_comparison_plot(
+                model_hamiltonians,
+                heff_matrix_selected,
+                qnorm_plot_dir / "native_selected_support.png",
+                harmonic_mask=harmonic_mask,
+                positions=fit_positions,
+                k_indices=fit_k_indices,
+                title=f"{_band_plot_title(model_config)} Hamiltonian elements",
+                qset1=np.asarray(moire_config.Q_set1, dtype=float),
+                qset2=np.asarray(moire_config.Q_set2, dtype=float),
+                n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
+                subtract_layer_diagonal_mean=True,
+                view="selected_support",
+            )
+            save_hamiltonian_element_comparison_plot(
+                model_hamiltonians,
+                heff_matrix_selected,
+                qnorm_plot_dir / "qnorm_full.png",
+                harmonic_mask=harmonic_mask,
+                positions=fit_positions,
+                k_indices=fit_k_indices,
+                title=f"{_band_plot_title(model_config)} Hamiltonian elements",
+                qset1=np.asarray(moire_config.Q_set1, dtype=float),
+                qset2=np.asarray(moire_config.Q_set2, dtype=float),
+                n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
+                subtract_layer_diagonal_mean=True,
+                q_order="norm_shell",
+            )
+            save_hamiltonian_element_comparison_plot(
+                model_hamiltonians,
+                heff_matrix_selected,
+                qnorm_plot_dir / "qnorm_selected_support.png",
+                harmonic_mask=harmonic_mask,
+                positions=fit_positions,
+                k_indices=fit_k_indices,
+                title=f"{_band_plot_title(model_config)} Hamiltonian elements",
+                qset1=np.asarray(moire_config.Q_set1, dtype=float),
+                qset2=np.asarray(moire_config.Q_set2, dtype=float),
+                n_orb=(int(model_config.n_orb[0]), int(model_config.n_orb[1])),
+                subtract_layer_diagonal_mean=True,
+                view="selected_support",
+                q_order="norm_shell",
+            )
         except Exception as exc:
             _progress_line(f"Hamiltonian element comparison skipped: {exc}", enabled=progress, style="warning")
     results["configured_model"] = model_config
@@ -10759,11 +15763,16 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     results["comparison"] = comparison
     results["plot_comparison"] = plot_comparison
     results["all_band_plot_comparison"] = all_band_plot_comparison
+    results["comparison_vs_full_heff"] = comparison_vs_full_heff
+    results["plot_comparison_vs_full_heff"] = plot_comparison_vs_full_heff
+    results["all_band_plot_comparison_vs_full_heff"] = all_band_plot_comparison_vs_full_heff
     results["q_lattice_plot"] = str(q_lattice_plot_path.resolve())
     if band_plot_path is not None:
         results["band_plot"] = str(band_plot_path.resolve())
     if all_band_plot_path is not None:
         results["all_band_plot"] = str(all_band_plot_path.resolve())
+    if full_heff_band_plot_path is not None:
+        results["full_heff_band_plot"] = str(full_heff_band_plot_path.resolve())
     if hamiltonian_element_plot_path is not None:
         results["hamiltonian_element_plot"] = str(hamiltonian_element_plot_path.resolve())
         results["hamiltonian_element_plot_pdf"] = str(hamiltonian_element_plot_path.with_suffix(".pdf").resolve())
@@ -10780,12 +15789,19 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
     )
     results["validations"] = validations
     results["validation_summary"] = validation_summary
-    results["auto_model_selection"] = _write_auto_model_selection_outputs(
-        results=results,
-        output_dir=output_dir,
-        model_config=model_config,
-        moire_config=moire_config,
-    )
+    if automatic_order_scan is None:
+        auto_model_selection = _write_auto_model_selection_outputs(
+            results=results,
+            output_dir=output_dir,
+            model_config=model_config,
+            moire_config=moire_config,
+        )
+    else:
+        auto_model_selection = _write_high_low_model_selection_outputs(
+            scan=automatic_order_scan,
+            output_dir=output_dir,
+        )
+    results["auto_model_selection"] = auto_model_selection
     _write_model_registry_outputs(
         results=results,
         output_dir=output_dir,
@@ -10794,6 +15810,32 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         validation_summary=validation_summary,
         diagnostics_dir=diagnostics_dir,
     )
-    results["model_log"] = str(log_path)
+    if automatic_order_scan is not None:
+        if any(family in profile_results for family in ("linear", "nonlinear")):
+            for solver_family, family_results in profile_results.items():
+                for quality, profile in family_results.items():
+                    profile["results"] = _materialize_automatic_profile_output(
+                        profile_name=f"{solver_family}/{quality}",
+                        profile=profile,
+                        target_hamiltonians=np.asarray(
+                            automatic_order_scan["target_hamiltonians"]
+                        ),
+                        root_output_dir=output_dir,
+                    )
+        else:
+            for profile_name in ("high", "low"):
+                profile_results[profile_name]["results"] = (
+                    _materialize_automatic_profile_output(
+                        profile_name=profile_name,
+                        profile=profile_results[profile_name],
+                        target_hamiltonians=np.asarray(
+                            automatic_order_scan["target_hamiltonians"]
+                        ),
+                        root_output_dir=output_dir,
+                    )
+                )
+        results["profile_results"] = profile_results
+        results["auto_model_selection"] = auto_model_selection
+    results["model_log"] = str(results.get("model_log") or log_path)
     results["runtime_s"] = float(time.perf_counter() - started)
     return results

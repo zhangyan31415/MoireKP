@@ -6,6 +6,7 @@ import numpy as np
 import pytest
 
 from kp.model.model_selection import (
+    BandWindowMetrics,
     CandidateScore,
     FamilyOrders,
     ParameterGroup,
@@ -42,6 +43,9 @@ def _candidate(
     solver_family: str = "linear",
     active_groups: int | None = None,
     harmonic_support_size: int = 0,
+    low_window: BandWindowMetrics | None = None,
+    high_window: BandWindowMetrics | None = None,
+    selection_scope: str = "both",
 ) -> CandidateScore:
     return CandidateScore(
         name=name,
@@ -56,6 +60,9 @@ def _candidate(
         solver_family=solver_family,
         active_group_count=(parameters if active_groups is None else active_groups),
         harmonic_support_size=harmonic_support_size,
+        low_window_metrics=low_window,
+        high_window_metrics=high_window,
+        selection_scope=selection_scope,
     )
 
 
@@ -118,7 +125,7 @@ def test_warn_best_available_does_not_hide_unmet_overlap_target() -> None:
     assert decision.unmet_targets == ("mean_subspace_overlap>=0.95",)
 
 
-def test_candidates_below_overlap_safety_floor_fail_closed() -> None:
+def test_candidates_below_overlap_safety_floor_continue_with_auditable_warning() -> None:
     candidates = [
         _candidate("bad-a", loss=1.0, loss_se=0.1, parameters=3, overlap=0.88),
         _candidate("bad-b", loss=0.8, loss_se=0.1, parameters=8, overlap=0.89),
@@ -130,8 +137,8 @@ def test_candidates_below_overlap_safety_floor_fail_closed() -> None:
         overlap_safety_floor=0.90,
     )
 
-    assert decision.status == "FAIL"
-    assert decision.selected is None
+    assert decision.status == "WARN_BEST_AVAILABLE"
+    assert decision.selected.name == "bad-b"
     assert decision.unmet_targets == ("mean_subspace_overlap>=0.90",)
 
 
@@ -173,6 +180,43 @@ def test_invalid_candidates_are_rejected_before_plateau_selection() -> None:
 def test_candidate_validation_rejects_negative_parameter_count() -> None:
     with pytest.raises(ValueError, match="independent_real_parameters"):
         _candidate("invalid", loss=1.0, loss_se=0.1, parameters=-1)
+
+
+def test_selection_report_serializes_both_physical_band_windows() -> None:
+    low_window = BandWindowMetrics(
+        band_count=8,
+        weighted_rms_mev=0.20,
+        weighted_max_mev=0.70,
+        mean_subspace_overlap=0.99,
+        minimum_singular_value=0.96,
+    )
+    high_window = BandWindowMetrics(
+        band_count=28,
+        weighted_rms_mev=0.55,
+        weighted_max_mev=1.40,
+        mean_subspace_overlap=0.97,
+        minimum_singular_value=0.88,
+    )
+    candidate = _candidate(
+        "dual-window",
+        loss=0.20,
+        loss_se=0.01,
+        parameters=12,
+        low_window=low_window,
+        high_window=high_window,
+    )
+
+    record = high_low_selection_record(select_high_low_profiles([candidate]))
+
+    selected = record["profiles"]["low"]["selected"]
+    assert selected["low_window"] == {
+        "band_count": 8,
+        "weighted_rms_mev": pytest.approx(0.20),
+        "weighted_max_mev": pytest.approx(0.70),
+        "mean_subspace_overlap": pytest.approx(0.99),
+        "minimum_singular_value": pytest.approx(0.96),
+    }
+    assert selected["high_window"]["band_count"] == 28
 
 
 def test_ties_use_family_order_then_maximum_error_then_name() -> None:
@@ -553,9 +597,13 @@ def test_staged_selection_applies_overlap_floor_only_to_complete_model() -> None
 
     result = run_staged_family_selection(config, evaluator)
 
-    assert [stage.decision.status for stage in result.stages] == ["PASS", "PASS", "FAIL"]
-    assert result.status == "FAIL"
-    assert result.selected_orders is None
+    assert [stage.decision.status for stage in result.stages] == [
+        "PASS",
+        "PASS",
+        "WARN_BEST_AVAILABLE",
+    ]
+    assert result.status == "WARN_BEST_AVAILABLE"
+    assert result.selected_orders == FamilyOrders(1, 0, 0)
 
 
 def test_group_ablation_removes_symmetry_linked_parameters_atomically_and_refits() -> None:
@@ -674,8 +722,85 @@ def test_high_selects_best_edge_accuracy_while_low_uses_adaptive_compact_plateau
     assert profiles.high.selected.name == "high-accuracy"
     assert profiles.high.one_se_threshold_mev == pytest.approx(1.0)
     assert profiles.low.selected.name == "compact-edge-model"
-    assert profiles.low.one_se_threshold_mev == pytest.approx(2.0)
+    assert profiles.low.one_se_threshold_mev == pytest.approx(1.4)
     assert profiles.low_se_multiplier == pytest.approx(2.0)
+
+
+def test_high_and_low_rank_their_own_physical_windows() -> None:
+    edge_model = _candidate(
+        "edge-model",
+        loss=5.0,
+        loss_se=0.01,
+        parameters=8,
+        low_window=BandWindowMetrics(8, 0.20, 0.60, 0.99, 0.96),
+        high_window=BandWindowMetrics(28, 1.20, 3.00, 0.97, 0.85),
+    )
+    broad_model = _candidate(
+        "broad-model",
+        loss=0.1,
+        loss_se=0.01,
+        parameters=20,
+        low_window=BandWindowMetrics(8, 0.18, 0.55, 0.995, 0.97),
+        high_window=BandWindowMetrics(28, 0.45, 1.30, 0.98, 0.90),
+    )
+
+    profiles = select_high_low_profiles(
+        [edge_model, broad_model],
+        low_relative_rms_tolerance=0.0,
+        low_minimum_tolerance_mev=0.05,
+    )
+
+    assert profiles.low.selected.name == "edge-model"
+    assert profiles.low.selected.primary_band_count == 8
+    assert profiles.low.selected.weighted_rms_mev == pytest.approx(0.20)
+    assert profiles.high.selected.name == "broad-model"
+    assert profiles.high.selected.primary_band_count == 28
+    assert profiles.high.selected.weighted_rms_mev == pytest.approx(0.45)
+
+
+def test_low_complexity_ties_use_groups_harmonics_then_derivative_order() -> None:
+    candidates = [
+        _candidate(
+            "many-groups",
+            loss=0.20,
+            loss_se=0.0,
+            parameters=10,
+            active_groups=8,
+            harmonic_support_size=2,
+            orders=(2, 1, 1),
+        ),
+        _candidate(
+            "many-harmonics",
+            loss=0.20,
+            loss_se=0.0,
+            parameters=10,
+            active_groups=6,
+            harmonic_support_size=4,
+            orders=(2, 1, 1),
+        ),
+        _candidate(
+            "high-order",
+            loss=0.20,
+            loss_se=0.0,
+            parameters=10,
+            active_groups=6,
+            harmonic_support_size=2,
+            orders=(4, 2, 2),
+        ),
+        _candidate(
+            "minimal",
+            loss=0.20,
+            loss_se=0.0,
+            parameters=10,
+            active_groups=6,
+            harmonic_support_size=2,
+            orders=(2, 1, 1),
+        ),
+    ]
+
+    profiles = select_high_low_profiles(candidates)
+
+    assert profiles.low.selected.name == "minimal"
 
 
 def test_low_selection_ignores_expanded_window_error_as_a_gate() -> None:
@@ -754,22 +879,198 @@ def test_four_profile_selection_keeps_nonlinear_low_primary_only_and_compact() -
     )
 
     assert profiles.linear.high.selected.name == "linear-high"
-    assert profiles.linear.low.selected.name == "linear-low"
+    assert profiles.linear.low.selected.name == "linear-high"
     assert profiles.nonlinear.high.selected.name == "nonlinear-high"
     assert profiles.nonlinear.low.selected.name == "nonlinear-low"
 
 
-def test_high_low_profiles_fail_together_below_overlap_safety_floor() -> None:
+def test_four_profile_selection_keeps_nonlinear_quality_scopes_separate() -> None:
+    linear = _candidate("linear", loss=0.5, loss_se=0.1, parameters=20)
+    nonlinear_high = CandidateScore(
+        **{
+            **_candidate(
+                "nonlinear-high-only",
+                loss=0.10,
+                loss_se=0.01,
+                parameters=50,
+                solver_family="nonlinear",
+            ).__dict__,
+            "selection_scope": "high",
+        }
+    )
+    nonlinear_low = CandidateScore(
+        **{
+            **_candidate(
+                "nonlinear-low-only",
+                loss=0.01,
+                loss_se=0.01,
+                parameters=5,
+                solver_family="nonlinear",
+            ).__dict__,
+            "selection_scope": "low",
+        }
+    )
+
+    profiles = select_four_model_profiles((linear, nonlinear_low, nonlinear_high))
+
+    assert profiles.nonlinear.high.selected.name == "nonlinear-high-only"
+    assert profiles.nonlinear.low.selected.name == "nonlinear-low-only"
+
+
+def test_four_profile_selection_keeps_linear_quality_scopes_separate() -> None:
+    linear_high = CandidateScore(
+        **{
+            **_candidate(
+                "linear-high-only",
+                loss=0.10,
+                loss_se=0.01,
+                parameters=50,
+            ).__dict__,
+            "selection_scope": "high",
+        }
+    )
+    linear_low = CandidateScore(
+        **{
+            **_candidate(
+                "linear-low-only",
+                loss=0.01,
+                loss_se=0.01,
+                parameters=5,
+            ).__dict__,
+            "selection_scope": "low",
+        }
+    )
+    nonlinear = _candidate(
+        "nonlinear",
+        loss=0.1,
+        loss_se=0.01,
+        parameters=10,
+        solver_family="nonlinear",
+    )
+
+    profiles = select_four_model_profiles((linear_low, nonlinear, linear_high))
+
+    assert profiles.linear.high.selected.name == "linear-high-only"
+    assert profiles.linear.low.selected.name == "linear-low-only"
+
+
+def test_high_rejects_broad_candidate_that_degrades_selected_low_window() -> None:
+    low = _candidate(
+        "low",
+        loss=0.20,
+        loss_se=0.01,
+        parameters=10,
+        selection_scope="low",
+        low_window=BandWindowMetrics(8, 0.20, 0.60, 0.990, 0.960),
+        high_window=BandWindowMetrics(28, 1.20, 3.00, 0.970, 0.850),
+    )
+    broad_but_degraded = _candidate(
+        "broad-but-degraded",
+        loss=0.10,
+        loss_se=0.01,
+        parameters=20,
+        selection_scope="high",
+        low_window=BandWindowMetrics(8, 0.21, 0.61, 0.991, 0.961),
+        high_window=BandWindowMetrics(28, 0.30, 0.90, 0.980, 0.910),
+    )
+    dominating = _candidate(
+        "dominating",
+        loss=0.15,
+        loss_se=0.01,
+        parameters=30,
+        selection_scope="high",
+        low_window=BandWindowMetrics(8, 0.18, 0.55, 0.992, 0.965),
+        high_window=BandWindowMetrics(28, 0.40, 1.00, 0.982, 0.920),
+    )
+
+    profiles = select_four_model_profiles([low, broad_but_degraded, dominating])
+
+    assert profiles.linear.low.selected.name == "low"
+    assert profiles.linear.high.selected.name == "dominating"
+    assert profiles.linear.high.status == "PASS"
+    assert profiles.linear.high.rejected_reasons["broad-but-degraded"] == (
+        "low_window_rms_degraded;low_window_max_degraded"
+    )
+
+
+def test_high_warns_and_exports_best_broad_candidate_when_none_dominates_low() -> None:
+    low = _candidate(
+        "low",
+        loss=0.20,
+        loss_se=0.01,
+        parameters=10,
+        selection_scope="low",
+        low_window=BandWindowMetrics(8, 0.20, 0.60, 0.990, 0.960),
+        high_window=BandWindowMetrics(28, 1.20, 3.00, 0.970, 0.850),
+    )
+    broad = _candidate(
+        "broad",
+        loss=0.10,
+        loss_se=0.01,
+        parameters=20,
+        selection_scope="high",
+        low_window=BandWindowMetrics(8, 0.19, 0.58, 0.980, 0.940),
+        high_window=BandWindowMetrics(28, 0.30, 0.90, 0.980, 0.910),
+    )
+
+    profiles = select_four_model_profiles([low, broad])
+
+    assert profiles.linear.high.selected.name == "broad"
+    assert profiles.linear.high.status == "WARN_BEST_AVAILABLE"
+    assert "high_dominates_low_window" in profiles.linear.high.unmet_targets
+    assert profiles.linear.high.rejected_reasons["broad"] == (
+        "low_window_mean_overlap_degraded;low_window_minimum_singular_value_degraded"
+    )
+
+
+def test_guard_failed_dominating_candidate_cannot_hide_valid_high_fallback() -> None:
+    low = _candidate(
+        "low",
+        loss=0.20,
+        loss_se=0.01,
+        parameters=10,
+        selection_scope="low",
+        low_window=BandWindowMetrics(8, 0.20, 0.60, 0.990, 0.960),
+        high_window=BandWindowMetrics(28, 1.20, 3.00, 0.970, 0.850),
+    )
+    valid_fallback = _candidate(
+        "valid-fallback",
+        loss=0.10,
+        loss_se=0.01,
+        parameters=20,
+        selection_scope="high",
+        low_window=BandWindowMetrics(8, 0.30, 0.80, 0.980, 0.940),
+        high_window=BandWindowMetrics(28, 0.30, 0.90, 0.980, 0.910),
+    )
+    rejected_dominator = _candidate(
+        "rejected-dominator",
+        loss=0.05,
+        loss_se=0.01,
+        parameters=30,
+        guards_passed=False,
+        selection_scope="high",
+        low_window=BandWindowMetrics(8, 0.10, 0.40, 0.995, 0.970),
+        high_window=BandWindowMetrics(28, 0.20, 0.70, 0.990, 0.950),
+    )
+
+    profiles = select_four_model_profiles([low, valid_fallback, rejected_dominator])
+
+    assert profiles.linear.high.selected.name == "valid-fallback"
+    assert profiles.linear.high.status == "WARN_BEST_AVAILABLE"
+    assert profiles.linear.high.rejected_reasons["rejected-dominator"] == "guard_failure"
+
+
+def test_high_low_profiles_warn_and_continue_below_overlap_safety_floor() -> None:
     candidates = [
         _candidate("unsafe", loss=0.1, loss_se=0.1, parameters=2, overlap=0.89)
     ]
 
     profiles = select_high_low_profiles(candidates)
 
-    assert profiles.high.status == "FAIL"
-    assert profiles.low.status == "FAIL"
-    assert profiles.high.selected is None
-    assert profiles.low.selected is None
+    assert profiles.high.status == "WARN_BEST_AVAILABLE"
+    assert profiles.low.status == "WARN_BEST_AVAILABLE"
+    assert profiles.high.selected.name == "unsafe"
+    assert profiles.low.selected.name == "unsafe"
 
 
 def test_model_selection_is_default_on_with_explicit_false_opt_out() -> None:
@@ -779,6 +1080,7 @@ def test_model_selection_is_default_on_with_explicit_false_opt_out() -> None:
     manual = parse_model_selection_config(False, maximum_orders=maximum)
 
     assert automatic.enabled is True
+    assert automatic.low_relative_rms_tolerance == pytest.approx(0.25)
     assert manual.enabled is False
 
 

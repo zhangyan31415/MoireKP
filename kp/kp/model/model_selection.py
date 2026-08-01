@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Callable, Mapping, Sequence
 
@@ -51,6 +51,10 @@ class CandidateScore:
     solver_family: str = "linear"
     active_group_count: int = 0
     harmonic_support_size: int = 0
+    selection_scope: str = "both"
+    primary_band_count: int = 0
+    low_window_metrics: BandWindowMetrics | None = None
+    high_window_metrics: BandWindowMetrics | None = None
 
     def __post_init__(self) -> None:
         if not str(self.name):
@@ -66,9 +70,52 @@ class CandidateScore:
                 "solver_family must be 'linear' or 'nonlinear', got "
                 f"{self.solver_family!r}"
             )
-        if int(self.active_group_count) < 0 or int(self.harmonic_support_size) < 0:
+        if (
+            int(self.active_group_count) < 0
+            or int(self.harmonic_support_size) < 0
+            or int(self.primary_band_count) < 0
+        ):
             raise ValueError("candidate complexity counts must be non-negative")
+        selection_scope = str(self.selection_scope).strip().lower()
+        if selection_scope not in {"both", "high", "low"}:
+            raise ValueError(
+                "selection_scope must be 'both', 'high', or 'low', got "
+                f"{self.selection_scope!r}"
+            )
         object.__setattr__(self, "solver_family", solver_family)
+        object.__setattr__(self, "selection_scope", selection_scope)
+
+
+@dataclass(frozen=True)
+class BandWindowMetrics:
+    """Band and subspace fidelity measured on one edge window."""
+
+    band_count: int
+    weighted_rms_mev: float
+    weighted_max_mev: float
+    mean_subspace_overlap: float
+    minimum_singular_value: float
+
+    def __post_init__(self) -> None:
+        if int(self.band_count) <= 0:
+            raise ValueError("band_count must be positive")
+        values = np.asarray(
+            (
+                self.weighted_rms_mev,
+                self.weighted_max_mev,
+                self.mean_subspace_overlap,
+                self.minimum_singular_value,
+            ),
+            dtype=float,
+        )
+        if not np.all(np.isfinite(values)):
+            raise ValueError("band-window metrics must be finite")
+        if self.weighted_rms_mev < 0.0 or self.weighted_max_mev < 0.0:
+            raise ValueError("band-window errors must be non-negative")
+        if not 0.0 <= self.mean_subspace_overlap <= 1.0:
+            raise ValueError("mean_subspace_overlap must be in [0, 1]")
+        if not 0.0 <= self.minimum_singular_value <= 1.0:
+            raise ValueError("minimum_singular_value must be in [0, 1]")
 
 
 @dataclass(frozen=True)
@@ -91,7 +138,7 @@ class HighLowSelectionResult:
     high: SelectionDecision
     low: SelectionDecision
     low_se_multiplier: float
-    low_relative_rms_tolerance: float = 1.0
+    low_relative_rms_tolerance: float = 0.25
     low_minimum_tolerance_mev: float = 0.10
 
 
@@ -230,7 +277,7 @@ class ModelSelectionConfig:
     overlap_target: float = 0.95
     overlap_safety_floor: float = 0.90
     low_se_multiplier: float = 2.0
-    low_relative_rms_tolerance: float = 1.0
+    low_relative_rms_tolerance: float = 0.25
     low_minimum_tolerance_mev: float = 0.10
     pruning_keep_fractions: tuple[float, ...] = (0.25, 0.40, 0.55, 0.70, 0.85)
 
@@ -284,6 +331,15 @@ def _candidate_nonfinite(candidate: CandidateScore) -> bool:
     )
     if candidate.expanded_weighted_rms_mev is not None:
         values = (*values, candidate.expanded_weighted_rms_mev)
+    for window in (candidate.low_window_metrics, candidate.high_window_metrics):
+        if window is not None:
+            values = (
+                *values,
+                window.weighted_rms_mev,
+                window.weighted_max_mev,
+                window.mean_subspace_overlap,
+                window.minimum_singular_value,
+            )
     return not bool(np.all(np.isfinite(np.asarray(values, dtype=float))))
 
 
@@ -475,7 +531,7 @@ def parse_model_selection_config(
             "low profile standard_error_multiplier must be finite and non-negative"
         )
     low_relative_rms_tolerance = float(
-        low_profile.get("relative_rms_tolerance", 1.0)
+        low_profile.get("relative_rms_tolerance", 0.25)
     )
     low_minimum_tolerance_mev = float(
         low_profile.get("minimum_tolerance_mev", 0.10)
@@ -900,7 +956,9 @@ def select_simplest_near_best(
     Candidates that fail numerical certification, global guards, or metric
     finiteness never define the quality plateau.  The overlap target controls a
     normal ``PASS``.  If it is unreachable, candidates above the explicit
-    safety floor may still produce an auditable ``WARN_BEST_AVAILABLE``.
+    safety floor produces an auditable ``WARN_BEST_AVAILABLE``; if every valid
+    candidate is below it, the best valid candidate is still exported with the
+    failed floor recorded instead of aborting the workflow.
     """
 
     target = float(overlap_target)
@@ -959,16 +1017,12 @@ def select_simplest_near_best(
                 if float(candidate.mean_subspace_overlap) >= floor
             ]
             if not pool:
-                return SelectionDecision(
-                    status="FAIL",
-                    selected=None,
-                    best_weighted_rms_mev=None,
-                    one_se_threshold_mev=None,
-                    unmet_targets=(f"mean_subspace_overlap>={floor:.2f}",),
-                    rejected_reasons=rejected,
-                )
-            status = "WARN_BEST_AVAILABLE"
-            unmet_targets = (f"mean_subspace_overlap>={target:.2f}",)
+                pool = valid
+                status = "WARN_BEST_AVAILABLE"
+                unmet_targets = (f"mean_subspace_overlap>={floor:.2f}",)
+            else:
+                status = "WARN_BEST_AVAILABLE"
+                unmet_targets = (f"mean_subspace_overlap>={target:.2f}",)
 
     if not pool:
         return SelectionDecision(
@@ -1011,7 +1065,7 @@ def select_high_low_profiles(
     overlap_target: float = 0.95,
     overlap_safety_floor: float = 0.90,
     low_se_multiplier: float = 2.0,
-    low_relative_rms_tolerance: float = 1.0,
+    low_relative_rms_tolerance: float = 0.25,
     low_minimum_tolerance_mev: float = 0.10,
 ) -> HighLowSelectionResult:
     """Select accurate ``high`` and compact edge-preserving ``low`` models.
@@ -1021,22 +1075,25 @@ def select_high_low_profiles(
     high and remains a diagnostic for low; it is never a low-profile gate.
     """
 
-    multiplier = float(low_se_multiplier)
-    high = select_simplest_near_best(
-        candidates,
-        overlap_target=overlap_target,
-        overlap_safety_floor=overlap_safety_floor,
-        standard_error_multiplier=0.0,
-        prefer_simplest=False,
+    low_candidates = tuple(
+        _candidate_window_view(candidate, candidate.low_window_metrics)
+        for candidate in candidates
     )
+    multiplier = float(low_se_multiplier)
     low = select_simplest_near_best(
-        candidates,
+        low_candidates,
         overlap_target=overlap_target,
         overlap_safety_floor=overlap_safety_floor,
         standard_error_multiplier=multiplier,
         prefer_simplest=True,
         relative_rms_tolerance=low_relative_rms_tolerance,
         minimum_tolerance_mev=low_minimum_tolerance_mev,
+    )
+    high = _select_high_dominating_low(
+        candidates,
+        low_reference=low.selected,
+        overlap_target=overlap_target,
+        overlap_safety_floor=overlap_safety_floor,
     )
     return HighLowSelectionResult(
         high=high,
@@ -1047,13 +1104,103 @@ def select_high_low_profiles(
     )
 
 
+def _candidate_window_view(
+    candidate: CandidateScore,
+    metrics: BandWindowMetrics | None,
+) -> CandidateScore:
+    if metrics is None:
+        return candidate
+    return replace(
+        candidate,
+        weighted_rms_mev=float(metrics.weighted_rms_mev),
+        weighted_max_mev=float(metrics.weighted_max_mev),
+        mean_subspace_overlap=float(metrics.mean_subspace_overlap),
+        primary_band_count=int(metrics.band_count),
+    )
+
+
+def _select_high_dominating_low(
+    high_candidates: Sequence[CandidateScore],
+    *,
+    low_reference: CandidateScore | None,
+    overlap_target: float,
+    overlap_safety_floor: float,
+    numerical_tolerance: float = 1.0e-12,
+) -> SelectionDecision:
+    high_views = tuple(
+        _candidate_window_view(candidate, candidate.high_window_metrics)
+        for candidate in high_candidates
+    )
+    baseline = select_simplest_near_best(
+        high_views,
+        overlap_target=overlap_target,
+        overlap_safety_floor=overlap_safety_floor,
+        standard_error_multiplier=0.0,
+        prefer_simplest=False,
+    )
+    if low_reference is None or low_reference.low_window_metrics is None:
+        return baseline
+
+    reference = low_reference.low_window_metrics
+    eligible: list[CandidateScore] = []
+    dominance_rejected: dict[str, str] = {}
+    tolerance = float(numerical_tolerance)
+    for original, view in zip(high_candidates, high_views):
+        metrics = original.low_window_metrics
+        reasons: list[str] = []
+        if metrics is None:
+            reasons.append("low_window_metrics_missing")
+        else:
+            if metrics.weighted_rms_mev > reference.weighted_rms_mev + tolerance:
+                reasons.append("low_window_rms_degraded")
+            if metrics.weighted_max_mev > reference.weighted_max_mev + tolerance:
+                reasons.append("low_window_max_degraded")
+            if metrics.mean_subspace_overlap + tolerance < reference.mean_subspace_overlap:
+                reasons.append("low_window_mean_overlap_degraded")
+            if metrics.minimum_singular_value + tolerance < reference.minimum_singular_value:
+                reasons.append("low_window_minimum_singular_value_degraded")
+        if reasons:
+            dominance_rejected[original.name] = ";".join(reasons)
+        else:
+            eligible.append(view)
+
+    if eligible:
+        decision = select_simplest_near_best(
+            eligible,
+            overlap_target=overlap_target,
+            overlap_safety_floor=overlap_safety_floor,
+            standard_error_multiplier=0.0,
+            prefer_simplest=False,
+        )
+        if decision.selected is not None:
+            return replace(
+                decision,
+                rejected_reasons={
+                    **dict(decision.rejected_reasons),
+                    **dominance_rejected,
+                },
+            )
+
+    return replace(
+        baseline,
+        status=("FAIL" if baseline.selected is None else "WARN_BEST_AVAILABLE"),
+        unmet_targets=tuple(
+            dict.fromkeys((*baseline.unmet_targets, "high_dominates_low_window"))
+        ),
+        rejected_reasons={
+            **dict(baseline.rejected_reasons),
+            **dominance_rejected,
+        },
+    )
+
+
 def select_four_model_profiles(
     candidates: Sequence[CandidateScore],
     *,
     overlap_target: float = 0.95,
     overlap_safety_floor: float = 0.90,
     low_se_multiplier: float = 2.0,
-    low_relative_rms_tolerance: float = 1.0,
+    low_relative_rms_tolerance: float = 0.25,
     low_minimum_tolerance_mev: float = 0.10,
 ) -> FourProfileSelectionResult:
     """Select high/low models independently for linear and nonlinear solvers."""
@@ -1073,15 +1220,51 @@ def select_four_model_profiles(
         "low_relative_rms_tolerance": low_relative_rms_tolerance,
         "low_minimum_tolerance_mev": low_minimum_tolerance_mev,
     }
-    return FourProfileSelectionResult(
-        linear=select_high_low_profiles(groups["linear"], **options),
-        nonlinear=select_high_low_profiles(groups["nonlinear"], **options),
-    )
+    def select_scoped(family_candidates: Sequence[CandidateScore]) -> HighLowSelectionResult:
+        high_pool = tuple(
+            candidate
+            for candidate in family_candidates
+            if candidate.selection_scope in {"both", "high"}
+        )
+        low_pool = tuple(
+            candidate
+            for candidate in family_candidates
+            if candidate.selection_scope in {"both", "low"}
+        )
+        low_decision = select_high_low_profiles(low_pool, **options).low
+        high_decision = _select_high_dominating_low(
+            high_pool,
+            low_reference=low_decision.selected,
+            overlap_target=overlap_target,
+            overlap_safety_floor=overlap_safety_floor,
+        )
+        return HighLowSelectionResult(
+            high=high_decision,
+            low=low_decision,
+            low_se_multiplier=float(low_se_multiplier),
+            low_relative_rms_tolerance=float(low_relative_rms_tolerance),
+            low_minimum_tolerance_mev=float(low_minimum_tolerance_mev),
+        )
+
+    linear = select_scoped(groups["linear"])
+    nonlinear = select_scoped(groups["nonlinear"])
+    return FourProfileSelectionResult(linear=linear, nonlinear=nonlinear)
 
 
 def _candidate_score_record(candidate: CandidateScore | None) -> dict[str, object] | None:
     if candidate is None:
         return None
+    def window_record(metrics: BandWindowMetrics | None) -> dict[str, object] | None:
+        if metrics is None:
+            return None
+        return {
+            "band_count": int(metrics.band_count),
+            "weighted_rms_mev": float(metrics.weighted_rms_mev),
+            "weighted_max_mev": float(metrics.weighted_max_mev),
+            "mean_subspace_overlap": float(metrics.mean_subspace_overlap),
+            "minimum_singular_value": float(metrics.minimum_singular_value),
+        }
+
     return {
         "name": str(candidate.name),
         "orders": list(candidate.orders.as_tuple()),
@@ -1100,6 +1283,10 @@ def _candidate_score_record(candidate: CandidateScore | None) -> dict[str, objec
         "solver_family": str(candidate.solver_family),
         "active_group_count": int(candidate.active_group_count),
         "harmonic_support_size": int(candidate.harmonic_support_size),
+        "selection_scope": str(candidate.selection_scope),
+        "primary_band_count": int(candidate.primary_band_count),
+        "low_window": window_record(candidate.low_window_metrics),
+        "high_window": window_record(candidate.high_window_metrics),
     }
 
 
