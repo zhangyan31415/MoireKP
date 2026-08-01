@@ -921,6 +921,122 @@ def gamma_certified_action_route_contract(
     }
 
 
+def infer_gamma_raw_action_q_permutations(
+    *,
+    full_action: Any,
+    layout: GammaRowLayout,
+    sector_map: Sequence[int],
+    thresholds: GammaRoutingThresholds,
+) -> tuple[tuple[int, ...], tuple[int, ...]]:
+    """Infer the unique factorized Gamma Q route from raw matrix support.
+
+    The manifest-derived ``sector_map`` remains authoritative.  For each
+    source-Q/source-group column space, a target Q is admissible only when the
+    mapped-sector block is locally isometric and every row outside that block
+    is below the explicit routing leakage gate.  No symmetry-operation name or
+    conventional TR/C3/C2 route is consulted.
+    """
+
+    _validate_layout_identity(layout)
+    _validate_layout_thresholds(layout, thresholds)
+    if len(sector_map) != 2 or any(
+        not _strict_integral(value) for value in sector_map
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "Gamma sector_map must contain two strict integer indices",
+        )
+    sector = tuple(int(value) for value in sector_map)
+    if tuple(sorted(sector)) != (0, 1):
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "Gamma sector_map must be a permutation of two source groups",
+        )
+    if scipy.sparse.issparse(full_action):
+        try:
+            action = _canonical_sparse_csr(full_action)
+        except ValueError as error:
+            raise GammaRoutingError(
+                CandidateRejectionReason.LOCAL_ACTION_ISOMETRY,
+                "raw-H sparse action cannot be canonicalized safely",
+            ) from error
+    else:
+        try:
+            action = np.asarray(full_action, dtype=np.complex128)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise GammaRoutingError(
+                CandidateRejectionReason.LOCAL_ACTION_ISOMETRY,
+                "raw-H action cannot be represented on the Gamma row space",
+            ) from error
+    valid_shape = action.shape == (layout.full_dimension, layout.full_dimension)
+    if not valid_shape or not _matrix_is_finite(action):
+        raise GammaRoutingError(
+            CandidateRejectionReason.LOCAL_ACTION_ISOMETRY,
+            "raw-H action must be a finite square matrix on the Gamma full row space",
+        )
+
+    all_rows = np.arange(layout.full_dimension, dtype=np.intp)
+    routes_by_group: list[tuple[int, ...]] = []
+    for source_group in range(2):
+        target_group = sector[source_group]
+        group_route: list[int] = []
+        for source_q in range(layout.q_count):
+            source_rows = np.asarray(
+                [
+                    address.full_row
+                    for address in layout.rows_by_q[source_q]
+                    if address.source_group == source_group
+                ],
+                dtype=np.intp,
+            )
+            admissible: list[int] = []
+            for target_q in range(layout.q_count):
+                target_rows = np.asarray(
+                    [
+                        address.full_row
+                        for address in layout.rows_by_q[target_q]
+                        if address.source_group == target_group
+                    ],
+                    dtype=np.intp,
+                )
+                outside = np.setdiff1d(all_rows, target_rows, assume_unique=True)
+                leakage = _matrix_block_frobenius(action, outside, source_rows)
+                leakage /= np.sqrt(source_rows.size)
+                local = _dense_matrix_block(action, target_rows, source_rows)
+                isometry = float(
+                    np.linalg.norm(
+                        local.conj().T @ local - np.eye(source_rows.size),
+                        ord="fro",
+                    )
+                    / np.sqrt(source_rows.size)
+                )
+                if (
+                    leakage <= thresholds.off_route_leakage
+                    and isometry <= thresholds.local_action_isometry
+                ):
+                    admissible.append(target_q)
+            if len(admissible) != 1:
+                raise GammaRoutingError(
+                    CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+                    "raw-H action does not determine a unique mapped-sector Q route "
+                    f"for source group {source_group}, q {source_q}: {admissible}",
+                )
+            group_route.append(admissible[0])
+        route = tuple(group_route)
+        if tuple(sorted(route)) != tuple(range(layout.q_count)):
+            raise GammaRoutingError(
+                CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+                f"inferred source-group {source_group} Q route is not a permutation",
+            )
+        routes_by_group.append(route)
+    if routes_by_group[0] != routes_by_group[1]:
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "inferred Gamma Q routes disagree between source groups",
+        )
+    return routes_by_group[0], routes_by_group[1]
+
+
 def certify_gamma_raw_action(
     *,
     name: str,

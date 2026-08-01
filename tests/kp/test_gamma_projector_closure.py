@@ -20,6 +20,7 @@ from kp.blocks.gamma_layout import (
     certify_routed_covariance,
     close_gamma_projector_clusters,
     cluster_gamma_eigensystem,
+    infer_gamma_raw_action_q_permutations,
 )
 from kp.symmetry.candidate_certificate import (
     CandidateOperationInput,
@@ -107,6 +108,215 @@ def _equal_group_layout() -> GammaRowLayout:
         spin_convention="all",
         source_basis_hash="equal-groups",
     )
+
+
+def _route_inference_layout(q_count: int = 3) -> GammaRowLayout:
+    return GammaRowLayout.build(
+        qsets=(np.zeros((q_count, 2)), np.ones((q_count, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash="route-inference",
+    )
+
+
+def _sector_routed_local_action(
+    layout: GammaRowLayout, sector_map: tuple[int, int]
+) -> np.ndarray:
+    local = np.zeros(
+        (layout.same_q_dimension, layout.same_q_dimension), dtype=np.complex128
+    )
+    for source_group, target_group in enumerate(sector_map):
+        source_rows = layout.source_group_local_rows(source_group)
+        target_rows = layout.source_group_local_rows(target_group)
+        local[np.ix_(target_rows, source_rows)] = np.eye(source_rows.size)
+    return local
+
+
+def test_infer_raw_action_q_routes_finds_nontrivial_three_q_permutation() -> None:
+    layout = _route_inference_layout()
+    thresholds = replace(_thresholds(), max_rank=layout.same_q_dimension)
+    route = (2, 0, 1)
+    local = _sector_routed_local_action(layout, (0, 1))
+    full_action = _full_action_from_local_routes(
+        layout, (local,) * layout.q_count, route
+    )
+
+    inferred = infer_gamma_raw_action_q_permutations(
+        full_action=full_action,
+        layout=layout,
+        sector_map=(0, 1),
+        thresholds=thresholds,
+    )
+
+    assert inferred == (route, route)
+    certified = certify_gamma_raw_action(
+        name="inferred-three-q-route",
+        full_action=full_action,
+        layout=layout,
+        q_permutations=inferred,
+        sector_map=(0, 1),
+        antiunitary=False,
+        thresholds=thresholds,
+        tapw_source_basis_hash=layout.tapw_source_basis_hash,
+    )
+    assert certified.q_permutation == route
+
+
+def test_infer_raw_action_q_routes_supports_manifest_sector_swap() -> None:
+    layout = _route_inference_layout(q_count=2)
+    thresholds = replace(_thresholds(), max_rank=layout.same_q_dimension)
+    route = (1, 0)
+    local = _sector_routed_local_action(layout, (1, 0))
+    full_action = _full_action_from_local_routes(
+        layout, (local,) * layout.q_count, route
+    )
+
+    inferred = infer_gamma_raw_action_q_permutations(
+        full_action=full_action,
+        layout=layout,
+        sector_map=(1, 0),
+        thresholds=thresholds,
+    )
+
+    assert inferred == (route, route)
+    certified = certify_gamma_raw_action(
+        name="inferred-sector-swap",
+        full_action=full_action,
+        layout=layout,
+        q_permutations=inferred,
+        sector_map=(1, 0),
+        antiunitary=False,
+        thresholds=thresholds,
+        tapw_source_basis_hash=layout.tapw_source_basis_hash,
+    )
+    assert certified.sector_map == (1, 0)
+
+
+def test_infer_raw_action_q_routes_rejects_ambiguous_off_route_support() -> None:
+    layout = _route_inference_layout(q_count=2)
+    thresholds = replace(_thresholds(), max_rank=layout.same_q_dimension)
+    local = _sector_routed_local_action(layout, (0, 1)) / np.sqrt(2.0)
+    ambiguous = np.zeros(
+        (layout.full_dimension, layout.full_dimension), dtype=np.complex128
+    )
+    for source_q in range(layout.q_count):
+        source_rows = layout.same_q_full_rows(source_q)
+        for target_q in range(layout.q_count):
+            target_rows = layout.same_q_full_rows(target_q)
+            ambiguous[np.ix_(target_rows, source_rows)] = local
+
+    with pytest.raises(GammaRoutingError, match="unique mapped-sector Q route") as error:
+        infer_gamma_raw_action_q_permutations(
+            full_action=ambiguous,
+            layout=layout,
+            sector_map=(0, 1),
+            thresholds=thresholds,
+        )
+    assert error.value.reason is CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH
+
+
+def test_infer_raw_action_q_routes_rejects_nonbijective_support() -> None:
+    layout = _route_inference_layout(q_count=3)
+    thresholds = replace(_thresholds(), max_rank=layout.same_q_dimension)
+    local = _sector_routed_local_action(layout, (0, 1))
+    nonbijective = _full_action_from_local_routes(
+        layout, (local,) * layout.q_count, (0, 0, 2)
+    )
+
+    with pytest.raises(GammaRoutingError, match="not a permutation") as error:
+        infer_gamma_raw_action_q_permutations(
+            full_action=nonbijective,
+            layout=layout,
+            sector_map=(0, 1),
+            thresholds=thresholds,
+        )
+    assert error.value.reason is CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH
+
+
+def test_infer_raw_action_q_routes_rejects_source_group_route_disagreement() -> None:
+    layout = _route_inference_layout(q_count=2)
+    thresholds = replace(_thresholds(), max_rank=layout.same_q_dimension)
+    full_action = np.zeros(
+        (layout.full_dimension, layout.full_dimension), dtype=np.complex128
+    )
+    group_routes = ((0, 1), (1, 0))
+    for source_group, route in enumerate(group_routes):
+        local_rows = layout.source_group_local_rows(source_group)
+        for source_q, target_q in enumerate(route):
+            source_rows = np.asarray(
+                [
+                    layout.rows_by_q[source_q][row].full_row
+                    for row in local_rows
+                ],
+                dtype=np.intp,
+            )
+            target_rows = np.asarray(
+                [
+                    layout.rows_by_q[target_q][row].full_row
+                    for row in local_rows
+                ],
+                dtype=np.intp,
+            )
+            full_action[np.ix_(target_rows, source_rows)] = np.eye(source_rows.size)
+
+    with pytest.raises(GammaRoutingError, match="disagree between source groups"):
+        infer_gamma_raw_action_q_permutations(
+            full_action=full_action,
+            layout=layout,
+            sector_map=(0, 1),
+            thresholds=thresholds,
+        )
+
+
+def test_infer_raw_action_q_routes_rejects_wrong_manifest_sector_map() -> None:
+    layout = _route_inference_layout(q_count=2)
+    thresholds = replace(_thresholds(), max_rank=layout.same_q_dimension)
+    identity = np.eye(layout.full_dimension, dtype=np.complex128)
+
+    with pytest.raises(GammaRoutingError, match="unique mapped-sector Q route"):
+        infer_gamma_raw_action_q_permutations(
+            full_action=identity,
+            layout=layout,
+            sector_map=(1, 0),
+            thresholds=thresholds,
+        )
+
+
+def test_infer_raw_action_q_routes_dense_and_sparse_are_canonically_equal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    layout = _route_inference_layout(q_count=3)
+    thresholds = replace(_thresholds(), max_rank=layout.same_q_dimension)
+    route = (1, 2, 0)
+    local = _sector_routed_local_action(layout, (0, 1))
+    dense = _full_action_from_local_routes(
+        layout, (local,) * layout.q_count, route
+    )
+
+    original_toarray = sparse.csr_matrix.toarray
+
+    def guarded_toarray(matrix, *args, **kwargs):
+        if matrix.shape == (layout.full_dimension, layout.full_dimension):
+            raise AssertionError("full raw-H action was densified")
+        return original_toarray(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(sparse.csr_matrix, "toarray", guarded_toarray)
+    sparse_action = sparse.csr_matrix(dense)
+    common = dict(
+        layout=layout,
+        sector_map=(0, 1),
+        thresholds=thresholds,
+    )
+
+    dense_route = infer_gamma_raw_action_q_permutations(
+        full_action=dense, **common
+    )
+    sparse_route = infer_gamma_raw_action_q_permutations(
+        full_action=sparse_action, **common
+    )
+
+    assert dense_route == sparse_route == (route, route)
 
 
 def test_gamma_row_layout_has_real_1_plus_2_spinful_rows_and_bijection() -> None:
