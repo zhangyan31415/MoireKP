@@ -1779,7 +1779,6 @@ def cmd_project_from_config(
         selection_input=request.selection_input,
         transaction_id=uuid.uuid4().hex,
     )
-    owns_session = True
     try:
         materialized = _cmd_project_from_config_impl(cfg_path, overrides)
         if request.selection_input.selection_mode != "explicit":
@@ -1805,14 +1804,12 @@ def cmd_project_from_config(
             resolved_candidate=resolved,
             diagnostic=diagnostic,
         )
-        owns_session = False
         return resolve_case_selection(
             final_inputs,
             session=session,
         )
     finally:
-        if owns_session:
-            session.close()
+        session.close()
 
 
 def _cmd_project_from_config_impl(

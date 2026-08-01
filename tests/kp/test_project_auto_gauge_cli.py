@@ -218,6 +218,46 @@ def test_keyboard_interrupt_releases_pending_selection_lock(
         fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
 
 
+def test_interrupt_at_resolver_handoff_releases_pending_selection_lock(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_tiny_project_config(tmp_path, _explicit_project_config())
+    real_begin = cli.begin_case_selection
+    retained_sessions = []
+
+    def retain_session(**kwargs):
+        session = real_begin(**kwargs)
+        retained_sessions.append(session)
+        return session
+
+    monkeypatch.setattr(cli, "begin_case_selection", retain_session)
+    monkeypatch.setattr(
+        cli,
+        "_cmd_project_from_config_impl",
+        lambda *_args, **_kwargs: cli._ExplicitProjectSelectionMaterialization(
+            candidate_id="explicit-resolver-interrupt",
+            candidate_dimension=2,
+            basis_handoff_hash="1" * 64,
+            authoritative_heff_hash="2" * 64,
+            heff_k_indices_hash="3" * 64,
+        ),
+    )
+
+    def interrupt_resolver(*_args, **_kwargs):
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(cli, "resolve_case_selection", interrupt_resolver)
+    with pytest.raises(KeyboardInterrupt):
+        cli.cmd_project_from_config(str(cfg_path))
+
+    project_dir = tmp_path / "project"
+    assert retained_sessions
+    with (project_dir / ".selection-artifact.lock").open("a+b") as lock:
+        fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(lock.fileno(), fcntl.LOCK_UN)
+
+
 def test_project_auto_requires_source_symmetry(tmp_path: Path) -> None:
     cfg_path = _write_tiny_project_config(
         tmp_path,
