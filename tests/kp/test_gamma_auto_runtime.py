@@ -143,6 +143,8 @@ def _write_packed_gamma_runtime_case(
     tmp_path: Path,
     *,
     include_basis_hash: bool = True,
+    top_level_basis_hash: object = "a" * 64,
+    operation_basis_hashes: tuple[object | None, object | None] | None = None,
 ) -> Path:
     source = np.diag([-2.0, -1.0, -2.0, -1.0]).astype(np.complex128)
     np.save(tmp_path / "hamk.npy", source[None, :, :])
@@ -158,34 +160,46 @@ def _write_packed_gamma_runtime_case(
     )
     phase = np.exp(1j * np.pi / 3.0)
     c3z = np.diag([phase, phase, phase.conjugate(), phase.conjugate()])
+    matrix_entries = [
+        {
+            "key": "TR",
+            "operation": "TR",
+            "source_valley": "Gamma",
+            "target_valley": "Gamma",
+            "antiunitary": True,
+            "k_map": {"type": "negation"},
+            "q_map": {"type": "negation"},
+            "sector_map": "identity",
+        },
+        {
+            "key": "C3z",
+            "operation": "C3z",
+            "source_valley": "Gamma",
+            "target_valley": "Gamma",
+            "antiunitary": False,
+            "k_map": {"type": "rotation", "angle_deg": 120.0},
+            "q_map": {"type": "rotation", "angle_deg": 120.0},
+            "sector_map": "identity",
+        },
+    ]
+    if operation_basis_hashes is None:
+        operation_basis_hashes = (
+            ("a" * 64, "a" * 64)
+            if include_basis_hash
+            else (None, None)
+        )
+    for entry, basis_hash in zip(
+        matrix_entries, operation_basis_hashes, strict=True
+    ):
+        if basis_hash is not None:
+            entry["basis_hash"] = basis_hash
     metadata = {
         "schema": "test-packed-gamma-runtime.v1",
         "basis_order": "spin->group->q->layer->orbital",
-        "matrices": [
-            {
-                "key": "TR",
-                "operation": "TR",
-                "source_valley": "Gamma",
-                "target_valley": "Gamma",
-                "antiunitary": True,
-                "k_map": {"type": "negation"},
-                "q_map": {"type": "negation"},
-                "sector_map": "identity",
-            },
-            {
-                "key": "C3z",
-                "operation": "C3z",
-                "source_valley": "Gamma",
-                "target_valley": "Gamma",
-                "antiunitary": False,
-                "k_map": {"type": "rotation", "angle_deg": 120.0},
-                "q_map": {"type": "rotation", "angle_deg": 120.0},
-                "sector_map": "identity",
-            },
-        ],
+        "matrices": matrix_entries,
     }
     if include_basis_hash:
-        metadata["basis_hash"] = "a" * 64
+        metadata["basis_hash"] = top_level_basis_hash
     symmetry_dir = tmp_path / "tapw_symmetry"
     symmetry_dir.mkdir()
     import json
@@ -425,6 +439,79 @@ def test_gamma_runtime_requires_manifest_source_basis_identity(
     )
 
     with pytest.raises(ValueError, match="basis_hash"):
+        runtime.prepare_gamma_automatic_runtime(cfg_path)
+
+
+def test_gamma_runtime_accepts_common_selected_operation_basis_identity(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    operation_basis_hash = "b" * 64
+    cfg_path = _write_packed_gamma_runtime_case(
+        tmp_path,
+        include_basis_hash=False,
+        operation_basis_hashes=(operation_basis_hash, operation_basis_hash),
+    )
+    captured: dict[str, object] = {}
+
+    def prepare(inputs, _config):
+        captured["inputs"] = inputs
+        return object()
+
+    monkeypatch.setattr(runtime, "prepare_gamma_automatic_selection", prepare)
+
+    runtime.prepare_gamma_automatic_runtime(cfg_path)
+
+    assert captured["inputs"].tapw_source_basis_hash == operation_basis_hash
+
+
+@pytest.mark.parametrize(
+    ("operation_basis_hashes", "message"),
+    (
+        (("b" * 64, None), "basis_hash"),
+        (("b" * 64, "c" * 64), "common basis_hash"),
+        (("0" * 64, "0" * 64), "non-placeholder"),
+        ((int("1" * 64), int("1" * 64)), "lowercase SHA-256 string"),
+    ),
+)
+def test_gamma_runtime_rejects_invalid_selected_operation_basis_identity(
+    tmp_path: Path,
+    operation_basis_hashes: tuple[object | None, object | None],
+    message: str,
+) -> None:
+    cfg_path = _write_packed_gamma_runtime_case(
+        tmp_path,
+        include_basis_hash=False,
+        operation_basis_hashes=operation_basis_hashes,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        runtime.prepare_gamma_automatic_runtime(cfg_path)
+
+
+def test_gamma_runtime_rejects_top_level_and_operation_basis_identity_mismatch(
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_packed_gamma_runtime_case(
+        tmp_path,
+        operation_basis_hashes=("b" * 64, "b" * 64),
+    )
+
+    with pytest.raises(ValueError, match="top-level.*basis_hash"):
+        runtime.prepare_gamma_automatic_runtime(cfg_path)
+
+
+def test_gamma_runtime_rejects_non_string_top_level_basis_identity(
+    tmp_path: Path,
+) -> None:
+    numeric_hash = int("1" * 64)
+    cfg_path = _write_packed_gamma_runtime_case(
+        tmp_path,
+        top_level_basis_hash=numeric_hash,
+        operation_basis_hashes=("1" * 64, "1" * 64),
+    )
+
+    with pytest.raises(ValueError, match="lowercase SHA-256 string"):
         runtime.prepare_gamma_automatic_runtime(cfg_path)
 
 

@@ -59,14 +59,66 @@ def _load_strict_gamma_auto_config(value: Any) -> GammaAutomaticSelectionConfig:
 
 
 def _strict_sha256(value: Any, *, field: str) -> str:
-    text = str(value)
+    if not isinstance(value, str):
+        raise ValueError(
+            f"{field} must be a non-placeholder lowercase SHA-256 string"
+        )
+    text = value
     if (
         len(text) != 64
         or text == "0" * 64
         or any(character not in "0123456789abcdef" for character in text)
     ):
-        raise ValueError(f"{field} must be a non-placeholder lowercase SHA-256")
+        raise ValueError(
+            f"{field} must be a non-placeholder lowercase SHA-256 string"
+        )
     return text
+
+
+def _selected_manifest_basis_hash(ctx: Any) -> str:
+    """Resolve one certified source basis from the selected operation entries."""
+
+    selected_hashes: list[str] = []
+    for request in ctx.operation_requests:
+        output_name = str(request.get("output", ""))
+        payload = ctx.operation_payloads.get(output_name)
+        if not isinstance(payload, Mapping):
+            raise ValueError(
+                f"selected TAPW symmetry operation {output_name!r} lacks a payload"
+            )
+        entry = payload.get("entry")
+        if not isinstance(entry, Mapping):
+            raise ValueError(
+                f"selected TAPW symmetry operation {output_name!r} lacks a manifest entry"
+            )
+        selected_hashes.append(
+            _strict_sha256(
+                entry.get("basis_hash"),
+                field=(
+                    f"selected TAPW symmetry operation {output_name!r} basis_hash"
+                ),
+            )
+        )
+    if not selected_hashes:
+        raise ValueError("automatic Gamma requires selected TAPW symmetry operations")
+    unique_hashes = set(selected_hashes)
+    if len(unique_hashes) != 1:
+        raise ValueError(
+            "selected TAPW symmetry operations must share one common basis_hash"
+        )
+    source_basis_hash = selected_hashes[0]
+
+    if "basis_hash" in ctx.manifest:
+        top_level_hash = _strict_sha256(
+            ctx.manifest["basis_hash"],
+            field="TAPW symmetry top-level manifest basis_hash",
+        )
+        if top_level_hash != source_basis_hash:
+            raise ValueError(
+                "TAPW symmetry top-level manifest basis_hash disagrees with "
+                "the selected operation basis_hash"
+            )
+    return source_basis_hash
 
 
 def _manifest_sector_map(value: Any, projection: Any) -> tuple[int, int]:
@@ -352,10 +404,7 @@ def prepare_gamma_automatic_runtime(
     if len(ctx.num_layer_list) != 2 or len(ctx.num_orb_per_layer_list) != 2:
         raise ValueError("automatic Gamma v1 requires exactly two source groups")
 
-    source_basis_hash = _strict_sha256(
-        ctx.manifest.get("basis_hash"),
-        field="TAPW symmetry manifest basis_hash",
-    )
+    source_basis_hash = _selected_manifest_basis_hash(ctx)
     layout = GammaRowLayout.build(
         qsets=(ctx.q1, ctx.q2),
         num_layer_list=ctx.num_layer_list,
