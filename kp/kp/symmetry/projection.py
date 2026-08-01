@@ -6594,7 +6594,13 @@ def run_symmetry_projection_from_config(
             raise ValueError(
                 "project.out_dir is required before kp symm can consume the projection basis"
             )
-        persisted_handoff = _load_persisted_projection_basis_handoff(project_dir)
+        deferred_missing_handoff: GammaRoutingError | None = None
+        try:
+            persisted_handoff = _load_persisted_projection_basis_handoff(project_dir)
+        except GammaRoutingError as error:
+            if not isinstance(error.__cause__, FileNotFoundError):
+                raise
+            deferred_missing_handoff = error
         if isinstance(persisted_handoff, GammaRoutedBasisSpec):
             selection_identity_hash = _load_current_gamma_selection_identity_hash(
                 project_dir,
@@ -6614,6 +6620,8 @@ def run_symmetry_projection_from_config(
                 else None
             ),
         )
+        if deferred_missing_handoff is not None:
+            raise deferred_missing_handoff
         _invalidate_stale_canonical_symmetry_outputs(configured_output_dir)
         _invalidate_stale_canonical_symmetry_outputs(ctx.output_dir)
         ctx.output_dir.mkdir(parents=True, exist_ok=True)
