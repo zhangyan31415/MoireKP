@@ -3,6 +3,9 @@ import re
 from collections import defaultdict
 import os
 import tempfile
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
 
 
 import pandas as pd
@@ -15,6 +18,7 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 from ..reporting import ensure_reporter
+from ..identity import hash_file, hash_mapping
 
 # Plotting is optional for non-plot workflows; keep matplotlib import failure from breaking core logic.
 try:
@@ -50,8 +54,255 @@ def reciprocal_from_Tmat(Tmat: np.ndarray) -> np.ndarray:
     return B_row
 
 
+def parse_compact_orbital_spec(value: str) -> int:
+    """Return the number of scalar orbitals in a compact ``s/p/d/f`` specification."""
+    text = str(value).strip()
+    match = re.fullmatch(r"(?:s(?P<s>\d+))?(?:p(?P<p>\d+))?(?:d(?P<d>\d+))?(?:f(?P<f>\d+))?", text)
+    if match is None or not any(match.group(name) for name in ("s", "p", "d", "f")):
+        raise ValueError(
+            f"Invalid compact orbital specification {value!r}; use forms such as s3p2d1."
+        )
+    degeneracy = {"s": 1, "p": 3, "d": 5, "f": 7}
+    count = sum(int(match.group(name) or 0) * weight for name, weight in degeneracy.items())
+    if count <= 0:
+        raise ValueError(f"Compact orbital specification {value!r} defines no orbitals.")
+    return int(count)
+
+
+def infer_2d_bravais(
+    cell: np.ndarray,
+    *,
+    length_rtol: float = 1.0e-3,
+    angle_atol: float = 1.0e-3,
+) -> str:
+    """Infer a supported in-plane Bravais family without consulting global state."""
+    lattice = np.asarray(cell, dtype=np.float64)
+    if lattice.shape != (3, 3):
+        raise ValueError(f"cell must have shape (3, 3), got {lattice.shape}")
+    a1 = lattice[0, :2]
+    a2 = lattice[1, :2]
+    n1 = float(np.linalg.norm(a1))
+    n2 = float(np.linalg.norm(a2))
+    if n1 == 0.0 or n2 == 0.0:
+        raise ValueError("Cannot infer supported 2D Bravais family from zero-length in-plane vectors.")
+    cosine = float(np.dot(a1, a2) / (n1 * n2))
+    equal_lengths = bool(np.isclose(n1, n2, rtol=length_rtol, atol=0.0))
+    if abs(cosine) <= angle_atol:
+        return "square" if equal_lengths else "rect"
+    if equal_lengths and abs(abs(cosine) - 0.5) <= angle_atol:
+        return "hex"
+    raise ValueError(
+        "Cannot infer supported 2D Bravais family from in-plane lattice metric: "
+        f"lengths=({n1:.12g}, {n2:.12g}), cosine={cosine:.12g}."
+    )
+
+
+def _source_matrix_basis_dimension(path: str | Path) -> int:
+    source = Path(path)
+    if not source.is_file():
+        raise FileNotFoundError(f"TAPW source matrix does not exist: {source}")
+    suffix = source.suffix.lower()
+    if suffix == ".dat":
+        with source.open("r", encoding="utf-8") as handle:
+            handle.readline()
+            handle.readline()
+            dimension_line = handle.readline().strip().split()
+        if not dimension_line:
+            raise ValueError(f"Cannot read source basis dimension from {source}")
+        dimension = int(dimension_line[0])
+        if dimension <= 0:
+            raise ValueError(f"Invalid source basis dimension {dimension} in {source}")
+        return dimension
+    if suffix != ".npz":
+        raise ValueError(f"H/S file suffix must be .npz or .dat, got {source}")
+    maximum = -1
+    with np.load(source, allow_pickle=False) as payload:
+        for key in payload.files:
+            if not (key.endswith("_row") or key.endswith("_col")):
+                continue
+            indices = np.asarray(payload[key], dtype=np.int64)
+            if indices.size:
+                if int(indices.min()) < 0:
+                    raise ValueError(f"Negative sparse basis index in {source}: {key}")
+                maximum = max(maximum, int(indices.max()))
+    if maximum < 0:
+        raise ValueError(f"Cannot infer source basis dimension from sparse NPZ {source}")
+    return maximum + 1
+
+
+class AseStructureFile:
+    """ASE-backed structure adapter exposing the legacy TAPW structure interface."""
+
+    def __init__(
+        self,
+        file_path: str | Path,
+        *,
+        orbitals: dict[str, str],
+        twist_index: int,
+        spin: bool,
+    ) -> None:
+        try:
+            from ase.io import read
+        except Exception as exc:  # pragma: no cover - dependency declared by the package
+            raise ImportError("ASE is required for system.structure inputs.") from exc
+
+        self.file_path = str(Path(file_path))
+        atoms = read(self.file_path, index=0)
+        self.Tmat = np.asarray(atoms.cell.array, dtype=np.float64)
+        if self.Tmat.shape != (3, 3) or abs(float(np.linalg.det(self.Tmat))) <= 1.0e-12:
+            raise ValueError("system.structure must contain a non-degenerate three-dimensional cell.")
+        periodic = np.asarray(atoms.pbc, dtype=bool)
+        if periodic.shape != (3,) or not bool(periodic[0] and periodic[1]):
+            raise ValueError("system.structure must be periodic along both in-plane lattice vectors.")
+        self.bravais = infer_2d_bravais(self.Tmat)
+        self.reciprocal_Tmat = reciprocal_from_Tmat(self.Tmat)
+        self.twist_index = int(twist_index)
+        self.spin = bool(spin)
+        self.atom_basis = {str(key): str(value) for key, value in orbitals.items()}
+        symbols = [str(value) for value in atoms.get_chemical_symbols()]
+        configured = set(self.atom_basis)
+        present = set(symbols)
+        missing = sorted(present - configured)
+        extra = sorted(configured - present)
+        if missing or extra:
+            raise ValueError(
+                "system.orbitals species mismatch: "
+                f"missing={missing}, extra={extra}"
+            )
+        self.orbitals_count = {
+            species: parse_compact_orbital_spec(specification)
+            for species, specification in self.atom_basis.items()
+        }
+        self.species_coordinates_unit = "Ang"
+        self.atoms_number = len(symbols)
+        self.species_count = dict(defaultdict(int))
+        self.species_coordinates = []
+        global_orbital_counter = 0
+        for original_index, (species, position) in enumerate(
+            zip(symbols, np.asarray(atoms.positions, dtype=np.float64)),
+            start=1,
+        ):
+            orbital_count = self.orbitals_count[species]
+            self.species_count[species] = self.species_count.get(species, 0) + 1
+            self.species_coordinates.append(
+                {
+                    "original_index": original_index,
+                    "species": species,
+                    "x": float(position[0]),
+                    "y": float(position[1]),
+                    "z": float(position[2]),
+                    "orb_num": orbital_count,
+                    "orb_name": self.atom_basis[species],
+                    "orb_global_index": list(
+                        range(global_orbital_counter, global_orbital_counter + orbital_count)
+                    ),
+                }
+            )
+            global_orbital_counter += orbital_count
+        self.sorted_species_coordinates = sorted(
+            self.species_coordinates,
+            key=lambda atom: atom["z"],
+        )
+        self.df = pd.DataFrame(self.species_coordinates)
+        self.twist_angle_deg = self._twist_angle_deg()
+        self.twist_angle = self.twist_angle_deg
+        self.num_unit_cell = self._moire_cell_count()
+
+    def _twist_angle_deg(self) -> float:
+        m = self.twist_index
+        if m < 1:
+            raise ValueError(f"twist_index must be >= 1, got {m}")
+        if self.bravais in {"square", "rect"}:
+            return float(np.degrees(2.0 * np.arctan(1.0 / (2.0 * m + 1.0))))
+        cosine = (3 * m**2 + 3 * m + 0.5) / (3 * m**2 + 3 * m + 1)
+        return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
+
+    def _moire_cell_count(self) -> int:
+        m = self.twist_index
+        if self.bravais in {"square", "rect"}:
+            return int((2 * m + 1) ** 2 + 1)
+        return int(3 * m**2 + 3 * m + 1)
+
+    def display_properties(self, reporter=None) -> None:
+        reporter = ensure_reporter(reporter)
+        reporter.stage("Structure overview", "Parsed moire supercell and source orbital metadata.")
+        reporter.kv("Bravais (moire supercell)", self.bravais)
+        reporter.kv("Twist angle from twist_index_m (deg)", self.twist_angle)
+        reporter.array("Moire lattice vectors (Angstrom)", self.Tmat)
+        reporter.array("Moire reciprocal vectors (1/Angstrom)", self.reciprocal_Tmat)
+        reporter.kv("Atom count", self.atoms_number)
+        reporter.kv("Species counts", self.species_count)
+        reporter.kv("Orbital counts", self.orbitals_count)
+        reporter.kv("Atomic basis", self.atom_basis)
+
+
+@dataclass(frozen=True)
+class ResolvedStructureInput:
+    structure: Any
+    bravais: str
+    expected_basis_dimension: int
+    hamiltonian_basis_dimension: int
+    overlap_basis_dimension: int
+    source_identity: str
+    identity_components: dict[str, Any]
+
+
+def resolve_structure_input(config) -> ResolvedStructureInput:
+    """Resolve and certify one canonical ``system.structure`` source input."""
+    system = getattr(config, "system", None)
+    if system is None:
+        raise ValueError("resolve_structure_input requires a canonical system section.")
+    structure = AseStructureFile(
+        system.structure,
+        orbitals=system.orbitals,
+        twist_index=system.twist_index,
+        spin=system.spin,
+    )
+    scalar_orbitals = sum(
+        structure.orbitals_count[atom["species"]]
+        for atom in structure.species_coordinates
+    )
+    expected = scalar_orbitals * (2 if system.spin else 1)
+    h_dimension = _source_matrix_basis_dimension(system.hamiltonian)
+    s_dimension = _source_matrix_basis_dimension(system.overlap)
+    if h_dimension != s_dimension:
+        raise ValueError(
+            f"H/S basis dimension mismatch: H={h_dimension}, S={s_dimension}."
+        )
+    if h_dimension != expected:
+        raise ValueError(
+            f"TAPW source basis dimension {h_dimension} does not match expected basis dimension {expected} "
+            "from system.structure, system.orbitals, and system.spin."
+        )
+    components = {
+        "schema": "tapw.resolved-structure-input.v1",
+        "structure_hash": hash_file(system.structure),
+        "hamiltonian_hash": hash_file(system.hamiltonian),
+        "overlap_hash": hash_file(system.overlap),
+        "site_order": [atom["species"] for atom in structure.species_coordinates],
+        "lattice": np.asarray(structure.Tmat).tolist(),
+        "coordinates": [
+            [atom["x"], atom["y"], atom["z"]]
+            for atom in structure.species_coordinates
+        ],
+        "orbitals": dict(sorted(system.orbitals.items())),
+        "spin": bool(system.spin),
+        "bravais": structure.bravais,
+        "basis_dimension": expected,
+    }
+    return ResolvedStructureInput(
+        structure=structure,
+        bravais=structure.bravais,
+        expected_basis_dimension=expected,
+        hamiltonian_basis_dimension=h_dimension,
+        overlap_basis_dimension=s_dimension,
+        source_identity=hash_mapping(components),
+        identity_components=components,
+    )
+
+
 class OpenMXFile:
-    def __init__(self, file_path, twist_index, spin):
+    def __init__(self, file_path, twist_index, spin, bravais=None):
         self.file_path = file_path
         self.twist_index = twist_index
         # Bravais lattice of the moiré supercell. Default is "hex" to preserve legacy behaviour.
@@ -78,10 +329,8 @@ class OpenMXFile:
         self.unit_cell_atom_orb = {} # 
         self.df = None
 
-        # Optional override from env var (cannot rely on main.py passing parameters).
-        bravais_env = os.environ.get("TAPW_BRAVAIS")
-        if bravais_env:
-            self.set_bravais(bravais_env)
+        if bravais is not None:
+            self.set_bravais(bravais)
 
         self.calc_twist_angle()
         self.calc_num_unit_cell()
@@ -93,10 +342,6 @@ class OpenMXFile:
         if self.bravais != prev_bravais:
             self.calc_twist_angle()
             self.calc_num_unit_cell()
-
-        # Propagate detected bravais for other components (e.g. LayeredLatticeAnalyzer) without
-        # changing main.py call signatures.
-        os.environ.setdefault("TAPW_BRAVAIS", self.bravais)
 
         self.sort_atoms_by_z()
         # self.compute_permutation_matrix()
@@ -433,7 +678,7 @@ class OpenMXFile:
 
 
 class LayeredLatticeAnalyzer:
-    def __init__(self, input_data, num_layers, type_structure, twist_layer):
+    def __init__(self, input_data, num_layers, type_structure, twist_layer, bravais="hex"):
         """
         Initializes the LayeredLatticeAnalyzer with input data and number of layers.
 
@@ -452,9 +697,7 @@ class LayeredLatticeAnalyzer:
         self.twist_layer = twist_layer
         self.layer_nearest_vectors = {}  # {layer: [nearest_vectors]}
         self.layer_all_basis_vectors = {}  # {layer: [a1,a2,a3,...]}
-        # Bravais lattice type hook (read from env var to avoid changing main.py signatures).
-        bravais_env = os.environ.get("TAPW_BRAVAIS", "hex")
-        bravais_norm = str(bravais_env).strip().lower()
+        bravais_norm = str(bravais).strip().lower()
         self.bravais = "square" if bravais_norm in {"square", "sq"} else "hex"
         
 
