@@ -53,6 +53,11 @@ from ..projection_handoff import (
     load_gamma_routed_basis_spec,
 )
 from ..projection_selection import CandidateRejectionReason
+from ..selection_artifact import (
+    SelectionArtifactStore,
+    SelectionBindingError,
+    verify_certified_gamma_selection_artifact,
+)
 from .candidate_certificate import evaluate_projected_pair
 from .exactify_representation import exactify_loaded_symmetry_source
 from .canonical_target import (
@@ -5106,6 +5111,59 @@ def _gauge_report_from_gamma_routed_handoff(
     )
 
 
+def _load_current_gamma_selection_identity_hash(
+    project_dir: str | Path,
+    handoff: GammaRoutedBasisSpec,
+) -> str:
+    """Load and verify the current certified selection without rebuilding it."""
+
+    try:
+        artifact = SelectionArtifactStore(project_dir).load_current(
+            require_certified=True
+        )
+        verified = verify_certified_gamma_selection_artifact(artifact, handoff)
+    except SelectionBindingError:
+        raise
+    except (OSError, TypeError, ValueError) as error:
+        raise SelectionBindingError(
+            "kp symm requires a valid current CERTIFIED Gamma selection artifact"
+        ) from error
+    if verified.identity is None:  # pragma: no cover - verifier is fail-closed
+        raise SelectionBindingError(
+            "kp symm certified Gamma selection has no identity"
+        )
+    return verified.identity.selection_identity_hash
+
+
+def _bind_selection_identity_to_summary(
+    summary: dict[str, Any],
+    selection_identity_hash: str,
+) -> None:
+    """Bind one verified selection identity to the package and every operation."""
+
+    identity_hash = str(selection_identity_hash)
+    if len(identity_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in identity_hash
+    ):
+        raise SelectionBindingError("selection identity hash is invalid")
+    previous = summary.get("selection_identity_hash")
+    if previous not in (None, identity_hash):
+        raise SelectionBindingError("symmetry summary selection identity changed")
+    operations = summary.get("operations")
+    if not isinstance(operations, list):
+        raise SelectionBindingError("symmetry summary operations are invalid")
+    for operation in operations:
+        if not isinstance(operation, dict):
+            raise SelectionBindingError("symmetry summary operation is invalid")
+        previous = operation.get("selection_identity_hash")
+        if previous not in (None, identity_hash):
+            raise SelectionBindingError(
+                "symmetry operation selection identity changed"
+            )
+        operation["selection_identity_hash"] = identity_hash
+    summary["selection_identity_hash"] = identity_hash
+
+
 def _states_from_gamma_routed_handoff(
     ctx: _ProjectionRunContext,
     handoff: GammaRoutedBasisSpec,
@@ -6471,6 +6529,7 @@ def run_symmetry_projection_from_config(
     project_preparation: ProjectSymmetryPreparation | None = None,
 ) -> dict[str, Any]:
     persisted_handoff: ProjectionBasisSpec | None = None
+    selection_identity_hash: str | None = None
     persisted_states: tuple[
         dict[int, ProjectionState],
         dict[int, ProjectionState],
@@ -6512,6 +6571,10 @@ def run_symmetry_projection_from_config(
             )
             norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
         elif isinstance(persisted_handoff, GammaRoutedBasisSpec):
+            selection_identity_hash = _load_current_gamma_selection_identity_hash(
+                project_dir,
+                persisted_handoff,
+            )
             persisted_states = _states_from_gamma_routed_handoff(
                 ctx,
                 persisted_handoff,
@@ -6643,6 +6706,8 @@ def run_symmetry_projection_from_config(
         n_orb_for_exactification=n_orb_for_exactification,
         compute_heff_covariance=validate_full_space_covariance,
     )
+    if selection_identity_hash is not None:
+        _bind_selection_identity_to_summary(summary, selection_identity_hash)
     return _exactify_and_write_projection_summary(
         ctx,
         summary=summary,

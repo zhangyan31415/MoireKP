@@ -199,6 +199,27 @@ def _selection_metrics(spec: GammaRoutedBasisSpec) -> CandidateMetrics:
     )
 
 
+def _selection_artifact(spec: GammaRoutedBasisSpec) -> SelectionArtifact:
+    identity = build_certified_gamma_selection_identity(
+        selection_input=_selection_input(spec),
+        handoff=spec,
+        metrics=_selection_metrics(spec),
+    )
+    return SelectionArtifact.certified(
+        transaction_id="gamma-selection",
+        identity=identity,
+        payload_manifest_hash="e" * 64,
+        projection_handoff=spec,
+    )
+
+
+def _write_selection_marker(project_dir: Path, artifact: SelectionArtifact) -> None:
+    (project_dir / "selection_artifact.json").write_text(
+        json.dumps(artifact.to_dict(), sort_keys=True),
+        encoding="utf-8",
+    )
+
+
 def _rewrite_npz(
     path: Path,
     *,
@@ -847,6 +868,90 @@ def test_certified_selection_identity_is_built_from_real_gamma_handoff() -> None
     )
     assert artifact.identity is identity
     assert verify_certified_gamma_selection_artifact(artifact, spec) is artifact
+
+
+def test_kp_symm_loads_current_certified_gamma_selection_identity(
+    tmp_path: Path,
+) -> None:
+    spec = _spec()
+    project_dir = tmp_path / "projection"
+    project_dir.mkdir()
+    artifact = _selection_artifact(spec)
+    _write_selection_marker(project_dir, artifact)
+
+    selection_identity_hash = (
+        projection_mod._load_current_gamma_selection_identity_hash(
+            project_dir,
+            spec,
+        )
+    )
+
+    assert artifact.identity is not None
+    assert selection_identity_hash == artifact.identity.selection_identity_hash
+
+
+@pytest.mark.parametrize("invalid_marker", ["missing", "malformed", "pending"])
+def test_kp_symm_rejects_invalid_current_gamma_selection(
+    tmp_path: Path,
+    invalid_marker: str,
+) -> None:
+    spec = _spec()
+    project_dir = tmp_path / "projection"
+    project_dir.mkdir()
+    marker = project_dir / "selection_artifact.json"
+    if invalid_marker == "malformed":
+        marker.write_text("{not-json", encoding="utf-8")
+    elif invalid_marker == "pending":
+        pending = SelectionArtifact.pending(
+            transaction_id="gamma-selection",
+            selection_input_identity_hash="f" * 64,
+        )
+        marker.write_text(json.dumps(pending.to_dict()), encoding="utf-8")
+
+    with pytest.raises(SelectionBindingError):
+        projection_mod._load_current_gamma_selection_identity_hash(
+            project_dir,
+            spec,
+        )
+
+
+def test_canonical_symmetry_metadata_binds_one_selection_identity_per_operation(
+    tmp_path: Path,
+) -> None:
+    selection_identity_hash = "f" * 64
+    matrix_path = tmp_path / "exactified_E.npy"
+    np.save(matrix_path, np.eye(2, dtype=np.complex128))
+    summary = {
+        "artifact_identity": {},
+        "valley": "G",
+        "spin": "all",
+        "tolerance": 1.0e-10,
+        "full_dim": 2,
+        "low_dim": 2,
+        "operations": [
+            {
+                "name": "E",
+                "operation": "E",
+                "antiunitary": False,
+                "pairs": [],
+                "status": "certified",
+                "matrix_file": str(matrix_path),
+            }
+        ],
+    }
+
+    projection_mod._bind_selection_identity_to_summary(
+        summary,
+        selection_identity_hash,
+    )
+    projection_mod._write_canonical_symmetry_outputs(tmp_path, summary)
+
+    with np.load(tmp_path / "representations.npz", allow_pickle=False) as payload:
+        metadata = json.loads(str(payload["__metadata_json__"].item()))
+    assert metadata["selection_identity_hash"] == selection_identity_hash
+    assert metadata["operations"][0]["selection_identity_hash"] == (
+        selection_identity_hash
+    )
 
 
 @pytest.mark.parametrize(
