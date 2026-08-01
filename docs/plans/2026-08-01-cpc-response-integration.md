@@ -171,6 +171,7 @@ review batch; do not weaken tests.
 - Create: `kp/kp/symmetry/factorized_action.py`
 - Create: `kp/kp/symmetry/structure_certificate.py`
 - Create: `kp/kp/symmetry/structure_recovery.py`
+- Modify: `kp/kp/basis/symmetry_gauge.py`
 - Modify: `kp/kp/identity.py`
 - Modify: `kp/kp/model/symmetry.py`
 - Modify: `kp/kp/symmetry/exactify_representation.py`
@@ -182,6 +183,8 @@ review batch; do not weaken tests.
 
 Include canonical-target, factorized-action, structure-certificate,
 structure-recovery, joint-exactification, and projection artifact tests.
+The high-dimensional joint exactification regression also covers the required
+symmetry-gauge stabilizer matching behavior.
 
 **Step 2: Verify expected missing-artifact failures**
 
