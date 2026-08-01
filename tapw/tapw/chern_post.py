@@ -19,8 +19,9 @@ from .artifacts import (
     canonical_topology_grid_name,
     chern_summary_output_filename,
 )
-from .config import format_chern_grid_suffix, resolve_chern_grid_shape
+from .config import Config, format_chern_grid_suffix, resolve_chern_grid_shape
 from .identity import IDENTITY_SCHEMA, hash_file, hash_mapping
+from .io.structure import OpenMXFile, load_structure_from_config
 from .symmetry.periodic_gauge import (
     BOUNDARY_SEWING_SCHEMA,
     BOUNDARY_SEWING_SCHEMA_VERSION,
@@ -72,6 +73,28 @@ class BoundarySewing:
     dim: int
     matched_blocks: int
     missing_blocks: int
+
+
+@dataclass(frozen=True)
+class ChernPostRuntimeInput:
+    config: Config
+    structure: object
+    reciprocal_basis_2d: np.ndarray
+
+
+def resolve_chern_post_runtime_input(config_path) -> ChernPostRuntimeInput:
+    """Load topology geometry through the same typed structure boundary as ``tapw topo``."""
+    config = Config.from_yaml(str(config_path))
+    config.apply_workflow_section("chern")
+    structure = load_structure_from_config(config, legacy_factory=OpenMXFile)
+    reciprocal_basis = np.asarray(structure.reciprocal_Tmat, dtype=float)[:2, :2]
+    if reciprocal_basis.shape != (2, 2) or abs(float(np.linalg.det(reciprocal_basis))) <= 1.0e-14:
+        raise ValueError("Topology post-processing requires a nonsingular physical 2D reciprocal basis.")
+    return ChernPostRuntimeInput(
+        config=config,
+        structure=structure,
+        reciprocal_basis_2d=reciprocal_basis,
+    )
 
 
 def load_config(config_path):
@@ -1820,6 +1843,7 @@ def main(argv=None, *, prog=None):
     args = parser.parse_args(argv)
 
     config = load_config(args.config)
+    runtime_input = resolve_chern_post_runtime_input(args.config)
     args.valley = _resolve_cli_valley(args.valley, config)
     valley_str = VALLEY_MAP.get(args.valley, "valley{0}".format(args.valley))
     _reject_generalized_eigenvectors(config)
@@ -1851,19 +1875,8 @@ def main(argv=None, *, prog=None):
         except ValueError:
             generated_files[key] = str(Path(path).resolve())
 
-    input_file = config["paths"].get("input_file", "openmx.dat")
-    openmx_path = _resolve_path_like_config(args.config, input_file)
-    if not os.path.exists(openmx_path):
-        print("[ERROR] openmx.dat 文件未找到: {0}".format(openmx_path))
-        raise SystemExit(1)
-
-    try:
-        b_phys = parse_lattice_vectors_from_openmx(openmx_path)
-        b_phys_2d = np.asarray(b_phys[:2, :2], dtype=float)
-        b_plot = build_plot_basis(b_phys_2d)
-    except Exception as exc:
-        print("[ERROR] 解析 openmx.dat 失败: {0}".format(exc))
-        raise SystemExit(1)
+    b_phys_2d = runtime_input.reciprocal_basis_2d
+    b_plot = build_plot_basis(b_phys_2d)
 
     vec_file = _locate_wavefunction_file(output_dir, band_type, valley_str, num_k1, num_k2, num_chern)
     if vec_file is None:
@@ -2233,7 +2246,7 @@ def main(argv=None, *, prog=None):
                     boundary_shift,
                     dim_h=band_vec_grid.shape[-2],
                     atol=float(args.wcc_sewing_atol),
-                    spin_blocks=2 if bool(config.get("twist", {}).get("spin", False)) else 1,
+                    spin_blocks=2 if runtime_input.config.system_input.spin else 1,
                 )
                 print(
                     "[INFO] WCC boundary sewing enabled: direction={0}, loop={1}, shift={2}, "

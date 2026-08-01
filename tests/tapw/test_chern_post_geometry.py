@@ -2,10 +2,60 @@ import numpy as np
 import pytest
 import scipy.sparse
 from types import SimpleNamespace
+import yaml
+from ase import Atoms
+from ase.io import write
 
 from tapw.workflows.band import BandStructureCalculator
 from tapw import chern_post
 from tapw.config import resolve_chern_grid_shape
+
+
+def _write_canonical_topology_config(config_dir, *, topology=None, spin=False):
+    atoms = Atoms(
+        symbols=["Te"],
+        positions=[[0.0, 0.0, 0.0]],
+        cell=np.diag([1.0, 1.0, 12.0]),
+        pbc=[True, True, False],
+    )
+    write(config_dir / "POSCAR", atoms, format="vasp")
+    dimension = 4 if spin else 2
+    diagonal = np.arange(dimension, dtype=np.int32)
+    for name in ("H.npz", "S.npz"):
+        np.savez(
+            config_dir / name,
+            **{
+                "(0, 0, 0)_row": diagonal,
+                "(0, 0, 0)_col": diagonal,
+                "(0, 0, 0)_val": np.ones(dimension, dtype=np.complex128),
+            },
+        )
+    payload = {
+        "system": {
+            "output": "outputs",
+            "structure": "POSCAR",
+            "hamiltonian": "H.npz",
+            "overlap": "S.npz",
+            "orbitals": {"Te": "s2"},
+            "twist_index": 1,
+            "layers": [1, 1],
+            "spin": spin,
+        },
+        "topology": topology
+        or {
+            "valley": "Gamma",
+            "q_shell": 1,
+            "mesh": {
+                "n_b1": 2,
+                "n_b2": 2,
+                "range_b1": [-0.5, 0.5],
+                "range_b2": [-0.5, 0.5],
+            },
+        },
+    }
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return config_path
 
 
 def _expected_flattened_pairs(values1, values2):
@@ -332,45 +382,24 @@ def test_rotation_helpers_raise_value_error_instead_of_successful_system_exit():
         rotations.get_orb_map_p(rotations.x, rotations.y, rotations.z, ndim=2, orbi=1)
 
 
-def test_chern_post_resolves_relative_input_file_like_tapw_run(tmp_path, monkeypatch):
+def test_chern_post_canonical_runtime_uses_shared_physical_reciprocal_basis(tmp_path, monkeypatch):
     config_dir = tmp_path / "case"
     config_dir.mkdir()
-    input_file = config_dir / "openmx.dat"
-    input_file.write_text(
-        "Atoms.UnitVectors.Unit Ang\n<Atoms.UnitVectors\n1 0 0\n0 1 0\n0 0 1\nAtoms.UnitVectors>\n",
-        encoding="utf-8",
-    )
-    output_dir = tmp_path / "run-output"
-    output_dir.mkdir()
-    config_path = config_dir / "config.yaml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "paths:",
-                "  input_file: openmx.dat",
-                f"  output_dir: {output_dir}",
-                "compute:",
-                "  num_chern: 2",
-            ]
-        ),
-        encoding="utf-8",
-    )
+    config_path = _write_canonical_topology_config(config_dir)
 
-    seen = {}
+    def fail_parse_lattice(_path):
+        raise AssertionError("canonical topology must not parse an OpenMX path")
 
-    def fake_parse_lattice(path):
-        seen["openmx_path"] = path
-        raise RuntimeError("stop after path resolution")
+    monkeypatch.setattr(chern_post, "parse_lattice_vectors_from_openmx", fail_parse_lattice)
 
-    monkeypatch.setattr(chern_post, "parse_lattice_vectors_from_openmx", fake_parse_lattice)
+    runtime = chern_post.resolve_chern_post_runtime_input(config_path)
 
-    with pytest.raises(SystemExit):
-        chern_post.main(["--config", str(config_path), "--output-dir", str(output_dir), "-b", "0"])
-
-    assert seen["openmx_path"] == str(input_file.resolve())
+    assert runtime.config.system_input.structure == (config_dir / "POSCAR").resolve()
+    assert runtime.config.resolved_structure_input.structure is runtime.structure
+    assert np.allclose(runtime.reciprocal_basis_2d, 2.0 * np.pi * np.eye(2))
 
 
-def test_chern_post_rejects_generalized_eigenvectors_before_file_lookup(tmp_path, monkeypatch):
+def test_chern_post_rejects_nonrelease_compute_config_before_geometry(tmp_path, monkeypatch):
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "\n".join(
@@ -390,20 +419,13 @@ def test_chern_post_rejects_generalized_eigenvectors_before_file_lookup(tmp_path
 
     monkeypatch.setattr(chern_post, "parse_lattice_vectors_from_openmx", fail_if_called)
 
-    with pytest.raises(SystemExit) as excinfo:
+    with pytest.raises(ValueError, match="Top-level compute is not supported"):
         chern_post.main(["--config", str(config_path), "--output-dir", str(tmp_path), "-b", "0"])
-
-    assert excinfo.value.code == 1
 
 
 def test_chern_post_config_tasks_write_canonical_topology_artifact_names(tmp_path):
     config_dir = tmp_path / "case"
     config_dir.mkdir()
-    input_file = config_dir / "openmx.dat"
-    input_file.write_text(
-        "Atoms.UnitVectors.Unit Ang\n<Atoms.UnitVectors\n1 0 0\n0 1 0\n0 0 1\nAtoms.UnitVectors>\n",
-        encoding="utf-8",
-    )
     output_root = tmp_path / "outputs"
     grid_dir = output_root / "grid4x4_b1_m0p5_0p5_b2_m0p5_0p5"
     grid_dir.mkdir(parents=True)
@@ -442,34 +464,22 @@ def test_chern_post_config_tasks_write_canonical_topology_artifact_names(tmp_pat
         },
     )
 
-    config_path = config_dir / "config.yaml"
-    config_path.write_text(
-        "\n".join(
-            [
-                "paths:",
-                "  input_file: openmx.dat",
-                "twist:",
-                "  spin: false",
-                "topology:",
-                "  mesh:",
-                "    n_b1: 4",
-                "    n_b2: 4",
-                "    range_b1: [-0.5, 0.5]",
-                "    range_b2: [-0.5, 0.5]",
-                "  bands:",
-                "    vbm2:",
-                "      sector: valence",
-                "      indices: [-1, -2]",
-                "  berry_curvature:",
-                "    - bands: vbm2",
-                "  quantum_geometry:",
-                "    - bands: vbm2",
-                "  wcc:",
-                "    - bands: vbm2",
-                "      loop: b2",
-            ]
-        ),
-        encoding="utf-8",
+    config_path = _write_canonical_topology_config(
+        config_dir,
+        topology={
+            "valley": "Gamma",
+            "q_shell": 1,
+            "mesh": {
+                "n_b1": 4,
+                "n_b2": 4,
+                "range_b1": [-0.5, 0.5],
+                "range_b2": [-0.5, 0.5],
+            },
+            "bands": {"vbm2": {"sector": "valence", "indices": [-1, -2]}},
+            "berry_curvature": [{"bands": "vbm2"}],
+            "quantum_geometry": [{"bands": "vbm2"}],
+            "wcc": [{"bands": "vbm2", "loop": "b2"}],
+        },
     )
 
     chern_post.main(["--config", str(config_path), "--output-dir", str(output_root)])
