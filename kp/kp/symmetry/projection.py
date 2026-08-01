@@ -44,6 +44,7 @@ from ..identity import (
     require_matching_identity,
 )
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
+from .candidate_certificate import evaluate_projected_pair
 from .exactify_representation import exactify_loaded_symmetry_source
 from .canonical_target import (
     CanonicalTargetError,
@@ -2283,11 +2284,6 @@ def _fro_relative(lhs: Any, rhs: Any, denominator: Any) -> float:
     return float(_matrix_norm(lhs - rhs) / denom)
 
 
-def _unitarity_error(matrix: np.ndarray) -> float:
-    ident = np.eye(matrix.shape[1], dtype=np.complex128)
-    return _fro_relative(matrix.conj().T @ matrix, ident, ident)
-
-
 def _load_matrix(path: Path) -> np.ndarray:
     path, matrix_key = _split_packed_matrix_selector(path)
     if not path.exists():
@@ -3564,24 +3560,36 @@ def _project_operation(
     for target_idx, source_idx in pairs:
         target = target_states[target_idx]
         source = source_states[source_idx]
-        u_source = source.u_low.conj() if antiunitary else source.u_low
-        h_source = source.heff.conj() if antiunitary else source.heff
-        image = d_full @ u_source
-        if _is_sparse(image):
-            image = image.toarray()
-        image = np.asarray(image, dtype=np.complex128)
-        d_raw = target.u_low.conj().T @ image
+        raw_evaluation = evaluate_projected_pair(
+            d_full=d_full,
+            target_u_low=target.u_low,
+            source_u_low=source.u_low,
+            target_heff=target.heff,
+            source_heff=source.heff,
+            antiunitary=antiunitary,
+            compute_heff_covariance=compute_heff_covariance,
+        )
+        d_raw = raw_evaluation.action
 
         def metrics(d_matrix: np.ndarray) -> dict[str, Any]:
-            leakage = float(np.linalg.norm(image - target.u_low @ d_matrix) / np.sqrt(d_matrix.shape[0]))
-            heff_covariance_residual = None
-            if compute_heff_covariance:
-                h_cov = d_matrix @ h_source @ d_matrix.conj().T
-                heff_covariance_residual = _fro_relative(target.heff, h_cov, target.heff)
+            evaluation = (
+                raw_evaluation
+                if d_matrix is d_raw
+                else evaluate_projected_pair(
+                    d_full=d_full,
+                    target_u_low=target.u_low,
+                    source_u_low=source.u_low,
+                    target_heff=target.heff,
+                    source_heff=source.heff,
+                    antiunitary=antiunitary,
+                    action=d_matrix,
+                    compute_heff_covariance=compute_heff_covariance,
+                )
+            )
             return {
-                "d_unitarity_error": _unitarity_error(d_matrix),
-                "subspace_leakage": leakage,
-                "heff_covariance_residual": heff_covariance_residual,
+                "d_unitarity_error": evaluation.action_unitarity_residual,
+                "subspace_leakage": evaluation.subspace_residual,
+                "heff_covariance_residual": evaluation.heff_covariance_residual,
             }
 
         raw_metrics = metrics(d_raw)
