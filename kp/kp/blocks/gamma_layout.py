@@ -692,12 +692,15 @@ class GammaEnergyCluster:
         )
 
 
-def cluster_gamma_eigensystem(
+def _partition_gamma_eigensystem(
     eigenvalues: Any,
     eigenvectors: Any,
     *,
     thresholds: GammaRoutingThresholds,
-) -> tuple[GammaEnergyCluster, ...]:
+) -> tuple[
+    tuple[GammaEnergyCluster, ...],
+    tuple[tuple[int, int, int, float], ...],
+]:
     values = np.asarray(eigenvalues, dtype=float)
     vectors = np.asarray(eigenvectors, dtype=np.complex128)
     if (
@@ -726,16 +729,13 @@ def cluster_gamma_eigensystem(
             f"Gamma eigenvectors are not orthonormal ({unitary_residual:.3e})",
         )
     boundaries = [0]
+    gray_boundaries: list[tuple[int, float]] = []
     for index, gap in enumerate(np.diff(values), start=1):
         if float(gap) <= thresholds.energy_same_ev:
             continue
-        if float(gap) >= thresholds.energy_different_ev:
-            boundaries.append(index)
-            continue
-        raise GammaRoutingError(
-            CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
-            f"energy-cluster gray zone at bands {index - 1}/{index}: gap={gap:.6g}",
-        )
+        boundaries.append(index)
+        if float(gap) < thresholds.energy_different_ev:
+            gray_boundaries.append((index, float(gap)))
     boundaries.append(values.size)
     clusters: list[GammaEnergyCluster] = []
     for start, stop in zip(boundaries[:-1], boundaries[1:], strict=True):
@@ -749,7 +749,54 @@ def cluster_gamma_eigensystem(
                 projector=frame @ frame.conj().T,
             )
         )
-    return tuple(clusters)
+    cluster_index_by_band = {
+        band: cluster_index
+        for cluster_index, cluster in enumerate(clusters)
+        for band in cluster.band_indices
+    }
+    gray_edges = tuple(
+        (
+            cluster_index_by_band[index - 1],
+            cluster_index_by_band[index],
+            index,
+            gap,
+        )
+        for index, gap in gray_boundaries
+    )
+    return tuple(clusters), gray_edges
+
+
+def _reject_relevant_gray_boundaries(
+    gray_edges: Sequence[tuple[int, int, int, float]],
+    selected_clusters: set[int],
+    *,
+    q_index: int | None = None,
+) -> None:
+    for left_cluster, right_cluster, band_index, gap in gray_edges:
+        if (left_cluster in selected_clusters) == (right_cluster in selected_clusters):
+            continue
+        prefix = "" if q_index is None else f"q={q_index} "
+        raise GammaRoutingError(
+            CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
+            f"{prefix}energy-cluster gray zone at bands "
+            f"{band_index - 1}/{band_index}: gap={gap:.6g}",
+        )
+
+
+def cluster_gamma_eigensystem(
+    eigenvalues: Any,
+    eigenvectors: Any,
+    *,
+    thresholds: GammaRoutingThresholds,
+) -> tuple[GammaEnergyCluster, ...]:
+    clusters, gray_edges = _partition_gamma_eigensystem(
+        eigenvalues,
+        eigenvectors,
+        thresholds=thresholds,
+    )
+    if gray_edges:
+        _reject_relevant_gray_boundaries(gray_edges, {gray_edges[0][0]})
+    return clusters
 
 
 @dataclass(frozen=True)
@@ -1234,10 +1281,12 @@ def close_gamma_projector_clusters(
             CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
             "Gamma closure requires matching eigenvalue/vector/seed Q counts",
         )
-    clusters_by_q = tuple(
-        cluster_gamma_eigensystem(values, vectors, thresholds=thresholds)
+    partitions_by_q = tuple(
+        _partition_gamma_eigensystem(values, vectors, thresholds=thresholds)
         for values, vectors in zip(eigenvalues_by_q, eigenvectors_by_q, strict=True)
     )
+    clusters_by_q = tuple(partition[0] for partition in partitions_by_q)
+    gray_edges_by_q = tuple(partition[1] for partition in partitions_by_q)
     for action in actions:
         _validate_action_certificate(action, layout=layout, thresholds=thresholds)
 
@@ -1281,6 +1330,11 @@ def close_gamma_projector_clusters(
                     CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
                     f"joint bands are not represented at q={q_index}",
                 )
+            _reject_relevant_gray_boundaries(
+                gray_edges_by_q[q_index],
+                selected_q,
+                q_index=q_index,
+            )
             selected_by_q.append(selected_q)
         return selected_by_q
 
@@ -1659,15 +1713,27 @@ def build_gamma_routed_frames(
                 f"joint band index is outside q={q_index} eigensystem",
             )
         if require_complete_clusters:
-            clusters = cluster_gamma_eigensystem(values, vectors, thresholds=thresholds)
+            clusters, gray_edges = _partition_gamma_eigensystem(
+                values,
+                vectors,
+                thresholds=thresholds,
+            )
             selected = set(joint)
-            for cluster in clusters:
+            selected_clusters: set[int] = set()
+            for cluster_index, cluster in enumerate(clusters):
                 overlap = selected.intersection(cluster.band_indices)
                 if overlap and overlap != set(cluster.band_indices):
                     raise GammaRoutingError(
                         CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
                         f"joint bands split q={q_index} cluster {cluster.band_indices}",
                     )
+                if overlap:
+                    selected_clusters.add(cluster_index)
+            _reject_relevant_gray_boundaries(
+                gray_edges,
+                selected_clusters,
+                q_index=q_index,
+            )
         frame = np.ascontiguousarray(vectors[:, np.asarray(joint, dtype=np.intp)])
         orthonormality = _residual(
             frame.conj().T @ frame - np.eye(len(joint)), rank=len(joint)

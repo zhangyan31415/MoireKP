@@ -319,6 +319,42 @@ def test_infer_raw_action_q_routes_dense_and_sparse_are_canonically_equal(
     assert dense_route == sparse_route == (route, route)
 
 
+def _mgi2_like_gray_zone_case() -> tuple[
+    GammaRowLayout,
+    GammaRoutingThresholds,
+    tuple[np.ndarray, ...],
+    tuple[np.ndarray, ...],
+]:
+    layout = GammaRowLayout.build(
+        qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((12,), (12,)),
+        spin_convention="all",
+        source_basis_hash="mgi2-like-gray-zone",
+    )
+    thresholds = replace(_thresholds(), energy_different_ev=1.0e-4)
+    values = np.r_[
+        0.0,
+        2.85251e-5,
+        np.arange(1, layout.same_q_dimension - 1),
+    ]
+    permutation = np.arange(layout.same_q_dimension)
+    candidate_rows = tuple(layout.source_group_local_rows(0)[:2]) + tuple(
+        layout.source_group_local_rows(1)[:2]
+    )
+    for candidate_row, candidate_band in zip(
+        candidate_rows,
+        (40, 41, 42, 43),
+        strict=True,
+    ):
+        permutation[candidate_row], permutation[candidate_band] = (
+            permutation[candidate_band],
+            permutation[candidate_row],
+        )
+    vectors = np.eye(layout.same_q_dimension, dtype=np.complex128)[:, permutation]
+    return layout, thresholds, (values,), (vectors,)
+
+
 def test_gamma_row_layout_has_real_1_plus_2_spinful_rows_and_bijection() -> None:
     layout = _layout()
 
@@ -484,6 +520,46 @@ def test_energy_clusters_use_two_thresholds_and_reject_gray_zone() -> None:
             np.eye(2, dtype=np.complex128),
             thresholds=_thresholds(),
         )
+
+
+def test_cluster_closure_ignores_gray_zone_outside_candidate_support() -> None:
+    layout, thresholds, values, vectors = _mgi2_like_gray_zone_case()
+    candidate = (40, 41, 42, 43)
+
+    closed = close_gamma_projector_clusters(
+        values,
+        vectors,
+        layout=layout,
+        seed_band_indices=(candidate,),
+        actions=(_identity_action(layout, thresholds=thresholds),),
+        thresholds=thresholds,
+    )
+
+    assert closed.band_indices_by_q == (candidate,)
+    routed = build_gamma_routed_frames(
+        values,
+        vectors,
+        joint_band_indices=candidate,
+        layout=layout,
+        thresholds=thresholds,
+    )
+    assert routed.joint_band_indices == candidate
+
+
+def test_cluster_closure_rejects_gray_zone_touching_candidate_support() -> None:
+    layout, thresholds, values, vectors = _mgi2_like_gray_zone_case()
+
+    with pytest.raises(GammaRoutingError, match="energy-cluster gray zone") as rejected:
+        close_gamma_projector_clusters(
+            values,
+            vectors,
+            layout=layout,
+            seed_band_indices=((1,),),
+            actions=(_identity_action(layout, thresholds=thresholds),),
+            thresholds=thresholds,
+        )
+
+    assert rejected.value.reason is CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER
 
 
 def test_routing_thresholds_are_explicit_identity_bound_and_domain_checked() -> None:
