@@ -4,7 +4,11 @@ from types import SimpleNamespace
 from pathlib import Path
 
 import tapw.workflows.band as band_workflow
-from tapw.io.hr import HrSparseHandler
+from tapw.io.hr import (
+    HrSparseHandler,
+    SPARSE_NPZ_METADATA_KEY,
+    SPARSE_NPZ_SCHEMA,
+)
 
 
 def test_realspace_block_cache_reuses_preprocessed_metadata():
@@ -279,3 +283,58 @@ def test_hr_sparse_handler_keeps_legacy_npz_path_for_plain_h_npz(tmp_path):
         np.asarray(npz_hr[(0, 0, 0)]["val"]),
         np.array([1.0 + 0.5j, -0.25 + 0.75j], dtype=np.complex128),
     )
+
+
+def test_hr_sparse_writer_records_versioned_exact_basis_dimension(tmp_path):
+    import json
+
+    npz_path = tmp_path / "H.npz"
+    handler = HrSparseHandler()
+    handler.nwann = 4
+    handler.hr_sparse = {
+        (0, 0, 0): {
+            "row": np.array([0], dtype=np.int32),
+            "col": np.array([0], dtype=np.int32),
+            "val": np.array([1.0 + 0.0j], dtype=np.complex128),
+        }
+    }
+
+    handler.save_to_npz(npz_path)
+
+    with np.load(npz_path, allow_pickle=False) as payload:
+        metadata = json.loads(str(np.asarray(payload[SPARSE_NPZ_METADATA_KEY]).item()))
+    assert metadata == {
+        "basis_dimension": 4,
+        "schema": SPARSE_NPZ_SCHEMA,
+        "schema_version": 1,
+    }
+    loaded = HrSparseHandler(
+        file_name="",
+        npz_file_name=str(npz_path),
+        read_from_npz=True,
+    ).get_hr_sparse()
+    assert set(loaded) == {(0, 0, 0)}
+
+
+def test_symm_npz_legacy_zero_tail_uses_transform_input_dimension(tmp_path):
+    npz_path = tmp_path / "H_symm.npz"
+    np.savez(
+        npz_path,
+        **{
+            "(0, 0, 0)_row": np.array([0], dtype=np.int32),
+            "(0, 0, 0)_col": np.array([0], dtype=np.int32),
+            "(0, 0, 0)_val": np.array([2.0 + 0.0j], dtype=np.complex128),
+        },
+    )
+    transform = scipy.sparse.identity(4, dtype=np.complex128, format="csr")
+
+    loaded = HrSparseHandler(
+        file_name="",
+        npz_file_name=str(npz_path),
+        A=transform,
+        read_from_npz=True,
+    ).get_hr_sparse()
+
+    assert np.array_equal(loaded[(0, 0, 0)]["row"], np.array([0]))
+    assert np.array_equal(loaded[(0, 0, 0)]["col"], np.array([0]))
+    assert np.allclose(loaded[(0, 0, 0)]["val"], np.array([2.0 + 0.0j]))

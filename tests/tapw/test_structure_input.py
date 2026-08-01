@@ -1,5 +1,7 @@
 from pathlib import Path
 import os
+import json
+from dataclasses import replace
 
 import numpy as np
 import pytest
@@ -8,6 +10,7 @@ from ase import Atoms
 from ase.io import write
 
 from tapw.config import Config
+from tapw.io.hr import SPARSE_NPZ_METADATA_KEY, SPARSE_NPZ_SCHEMA
 from tapw.io.structure import (
     OpenMXFile,
     infer_2d_bravais,
@@ -16,16 +19,50 @@ from tapw.io.structure import (
 )
 
 
-def _write_sparse_source(path: Path, dimension: int) -> None:
-    diagonal = np.arange(dimension, dtype=np.int64)
-    np.savez(
-        path,
-        **{
-            "(0, 0, 0)_row": diagonal,
-            "(0, 0, 0)_col": diagonal,
-            "(0, 0, 0)_val": np.ones(dimension, dtype=np.complex128),
-        },
+def _write_sparse_source(
+    path: Path,
+    dimension: int,
+    *,
+    metadata_dimension=None,
+    coordinate_indices=None,
+) -> None:
+    diagonal = np.asarray(
+        np.arange(dimension, dtype=np.int64) if coordinate_indices is None else coordinate_indices,
+        dtype=np.int64,
     )
+    payload = {
+        "(0, 0, 0)_row": diagonal,
+        "(0, 0, 0)_col": diagonal,
+        "(0, 0, 0)_val": np.ones(len(diagonal), dtype=np.complex128),
+    }
+    if metadata_dimension is not None:
+        payload[SPARSE_NPZ_METADATA_KEY] = np.asarray(
+            json.dumps(
+                {
+                    "schema": SPARSE_NPZ_SCHEMA,
+                    "schema_version": 1,
+                    "basis_dimension": int(metadata_dimension),
+                },
+                sort_keys=True,
+            ),
+            dtype=str,
+        )
+    np.savez(path, **payload)
+
+
+def _write_sparse_dat(path: Path, dimension: int, coordinate_indices=None) -> None:
+    indices = list(range(dimension)) if coordinate_indices is None else list(coordinate_indices)
+    lines = [
+        "! sparse source",
+        f"{len(indices)} ! nonzero",
+        f"{dimension} ! basis dimension",
+        "1 ! R points",
+    ]
+    lines.extend(
+        f"0 0 0 {index + 1} {index + 1} 1.0 0.0"
+        for index in indices
+    )
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write_system_case(
@@ -36,24 +73,26 @@ def _write_system_case(
     spin=False,
     matrix_dimension=4,
     structure_format="vasp",
+    cell=None,
+    overlap=True,
 ) -> Path:
     orbitals = orbitals or {"Mo": "s1", "Te": "p1"}
     atoms = Atoms(
         symbols=list(symbols),
         positions=[[0.0, 0.0, 1.0], [1.0, 1.0, 2.0]],
-        cell=[[3.0, 0.0, 0.0], [1.5, 2.598076211, 0.0], [0.0, 0.0, 20.0]],
+        cell=cell or [[3.0, 0.0, 0.0], [1.5, 2.598076211, 0.0], [0.0, 0.0, 20.0]],
         pbc=[True, True, False],
     )
     structure_path = tmp_path / ("POSCAR" if structure_format == "vasp" else "structure.cif")
     write(structure_path, atoms, format=structure_format)
     _write_sparse_source(tmp_path / "H.npz", matrix_dimension)
-    _write_sparse_source(tmp_path / "S.npz", matrix_dimension)
+    if overlap:
+        _write_sparse_source(tmp_path / "S.npz", matrix_dimension)
     payload = {
         "system": {
             "output": "outputs",
             "structure": structure_path.name,
             "hamiltonian": "H.npz",
-            "overlap": "S.npz",
             "orbitals": orbitals,
             "twist_index": 1,
             "layers": [1, 1],
@@ -61,6 +100,8 @@ def _write_system_case(
         },
         "symmetry": {"valley": "Gamma", "q_shell": 1},
     }
+    if overlap:
+        payload["system"]["overlap"] = "S.npz"
     config_path = tmp_path / "config.yaml"
     config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
     return config_path
@@ -89,6 +130,128 @@ def test_resolved_structure_counts_spin_in_hs_basis_validation(tmp_path):
     assert resolved.expected_basis_dimension == 8
 
 
+def test_canonical_structure_rejects_rectangular_bravais_metric(tmp_path):
+    config = Config.from_yaml(
+        str(
+            _write_system_case(
+                tmp_path,
+                cell=[[3.0, 0.0, 0.0], [0.0, 4.0, 0.0], [0.0, 0.0, 20.0]],
+            )
+        )
+    )
+
+    with pytest.raises(ValueError, match="Cannot infer supported 2D Bravais"):
+        resolve_structure_input(config)
+
+
+def test_infer_2d_bravais_uses_full_3d_vectors_for_tilted_cells():
+    tilted_hex = np.array(
+        [
+            [3.0, 0.0, 0.0],
+            [1.5, 2.25, 1.2990381057],
+            [0.0, -10.0, 17.3205080767],
+        ]
+    )
+    tilted_square = np.array(
+        [
+            [3.0, 0.0, 1.0],
+            [-1.0 / 3.0, 4.0 * np.sqrt(5.0) / 3.0, 1.0],
+            [-6.0, 0.0, 18.0],
+        ]
+    )
+
+    assert infer_2d_bravais(tilted_hex) == "hex"
+    assert infer_2d_bravais(tilted_square) == "square"
+
+
+def test_metadata_less_npz_allows_structurally_zero_tail_with_expected_dimension(tmp_path):
+    config_path = _write_system_case(tmp_path, matrix_dimension=4)
+    _write_sparse_source(tmp_path / "H.npz", 4, coordinate_indices=[0])
+    _write_sparse_source(tmp_path / "S.npz", 4, coordinate_indices=[0])
+    config = Config.from_yaml(str(config_path))
+
+    resolved = resolve_structure_input(config)
+
+    assert resolved.hamiltonian_basis_dimension == 4
+    assert resolved.overlap_basis_dimension == 4
+    assert resolved.hamiltonian_dimension_provenance == "expected_with_legacy_coordinate_bounds"
+    assert resolved.overlap_dimension_provenance == "expected_with_legacy_coordinate_bounds"
+
+
+@pytest.mark.parametrize("bad_index", [-1, 4])
+def test_metadata_less_npz_rejects_coordinates_outside_expected_dimension(tmp_path, bad_index):
+    config_path = _write_system_case(tmp_path, matrix_dimension=4)
+    _write_sparse_source(tmp_path / "H.npz", 4, coordinate_indices=[bad_index])
+
+    with pytest.raises(ValueError, match=r"index outside \[0, 4\)"):
+        resolve_structure_input(Config.from_yaml(str(config_path)))
+
+
+def test_versioned_npz_basis_dimension_is_exact_and_must_match_expected(tmp_path):
+    config_path = _write_system_case(tmp_path, matrix_dimension=4)
+    _write_sparse_source(tmp_path / "H.npz", 4, metadata_dimension=5, coordinate_indices=[0])
+    _write_sparse_source(tmp_path / "S.npz", 4, metadata_dimension=5, coordinate_indices=[0])
+    config = Config.from_yaml(str(config_path))
+
+    with pytest.raises(ValueError, match=r"source basis dimension.*5.*expected.*4"):
+        resolve_structure_input(config)
+
+
+def test_dat_header_basis_dimension_is_exact(tmp_path):
+    config_path = _write_system_case(tmp_path, matrix_dimension=4)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["system"]["hamiltonian"] = "H.dat"
+    payload["system"]["overlap"] = "S.dat"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    _write_sparse_dat(tmp_path / "H.dat", 4, coordinate_indices=[0])
+    _write_sparse_dat(tmp_path / "S.dat", 4, coordinate_indices=[0])
+
+    resolved = resolve_structure_input(Config.from_yaml(str(config_path)))
+
+    assert resolved.hamiltonian_basis_dimension == 4
+    assert resolved.overlap_basis_dimension == 4
+    assert resolved.hamiltonian_dimension_provenance == "dat_header"
+    assert resolved.overlap_dimension_provenance == "dat_header"
+
+
+def test_dat_headers_reject_hamiltonian_overlap_dimension_mismatch(tmp_path):
+    config_path = _write_system_case(tmp_path, matrix_dimension=4)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["system"]["hamiltonian"] = "H.dat"
+    payload["system"]["overlap"] = "S.dat"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    _write_sparse_dat(tmp_path / "H.dat", 4, coordinate_indices=[0])
+    _write_sparse_dat(tmp_path / "S.dat", 5, coordinate_indices=[0])
+
+    with pytest.raises(ValueError, match=r"H/S basis dimension mismatch.*4.*5"):
+        resolve_structure_input(Config.from_yaml(str(config_path)))
+
+
+def test_source_identity_records_exact_dimension_provenance(tmp_path):
+    config_path = _write_system_case(tmp_path, matrix_dimension=4)
+    _write_sparse_source(tmp_path / "H.npz", 4, metadata_dimension=4, coordinate_indices=[0])
+    _write_sparse_source(tmp_path / "S.npz", 4, metadata_dimension=4, coordinate_indices=[0])
+
+    resolved = resolve_structure_input(Config.from_yaml(str(config_path)))
+
+    assert resolved.hamiltonian_dimension_provenance == "versioned_npz_metadata"
+    assert resolved.overlap_dimension_provenance == "versioned_npz_metadata"
+    assert resolved.identity_components["hamiltonian_basis_dimension"] == 4
+    assert resolved.identity_components["hamiltonian_dimension_provenance"] == "versioned_npz_metadata"
+
+
+def test_resolved_structure_optional_overlap_has_none_dimension_hash_and_provenance(tmp_path):
+    config = Config.from_yaml(str(_write_system_case(tmp_path, overlap=False)))
+
+    resolved = resolve_structure_input(config)
+
+    assert resolved.overlap_basis_dimension is None
+    assert resolved.overlap_dimension_provenance is None
+    assert resolved.identity_components["overlap_hash"] is None
+    assert resolved.identity_components["overlap_basis_dimension"] is None
+    assert resolved.identity_components["overlap_dimension_provenance"] is None
+
+
 def test_resolved_structure_rejects_missing_or_extra_orbital_species(tmp_path):
     config_path = _write_system_case(tmp_path, orbitals={"Mo": "s1", "I": "p1"})
     config = Config.from_yaml(str(config_path))
@@ -99,7 +262,8 @@ def test_resolved_structure_rejects_missing_or_extra_orbital_species(tmp_path):
 
 def test_resolved_structure_rejects_hamiltonian_and_overlap_dimension_mismatch(tmp_path):
     config_path = _write_system_case(tmp_path, matrix_dimension=4)
-    _write_sparse_source(tmp_path / "S.npz", 5)
+    _write_sparse_source(tmp_path / "H.npz", 4, metadata_dimension=4, coordinate_indices=[0])
+    _write_sparse_source(tmp_path / "S.npz", 5, metadata_dimension=5, coordinate_indices=[0])
     config = Config.from_yaml(str(config_path))
 
     with pytest.raises(ValueError, match=r"H/S basis dimension mismatch.*4.*5"):
@@ -107,7 +271,10 @@ def test_resolved_structure_rejects_hamiltonian_and_overlap_dimension_mismatch(t
 
 
 def test_resolved_structure_rejects_source_dimension_incompatible_with_orbitals(tmp_path):
-    config = Config.from_yaml(str(_write_system_case(tmp_path, matrix_dimension=5)))
+    config_path = _write_system_case(tmp_path, matrix_dimension=5)
+    _write_sparse_source(tmp_path / "H.npz", 5, metadata_dimension=5, coordinate_indices=[0])
+    _write_sparse_source(tmp_path / "S.npz", 5, metadata_dimension=5, coordinate_indices=[0])
+    config = Config.from_yaml(str(config_path))
 
     with pytest.raises(ValueError, match=r"source basis dimension.*5.*expected.*4"):
         resolve_structure_input(config)
@@ -145,7 +312,10 @@ def test_raw_h_input_identity_includes_canonical_orbitals_and_resolved_structure
     config_path = _write_system_case(tmp_path)
     first = Config.from_yaml(str(config_path))
     second = Config.from_yaml(str(config_path))
-    second.system.orbitals = {"Mo": "p1", "Te": "s1"}
+    second.system_input = replace(
+        second.system_input,
+        orbitals=(("Mo", "p1"), ("Te", "s1")),
+    )
 
     assert _source_input_hash(first) != _source_input_hash(second)
 
@@ -157,7 +327,8 @@ def test_infer_2d_bravais_is_pure_and_fail_closed(monkeypatch):
 
     assert infer_2d_bravais(hex_cell) == "hex"
     assert infer_2d_bravais(square_cell) == "square"
-    assert infer_2d_bravais(np.diag([3.0, 4.0, 20.0])) == "rect"
+    with pytest.raises(ValueError, match="Cannot infer supported 2D Bravais"):
+        infer_2d_bravais(np.diag([3.0, 4.0, 20.0]))
     assert os.environ["TAPW_BRAVAIS"] == "square"
     with pytest.raises(ValueError, match="Cannot infer supported 2D Bravais"):
         infer_2d_bravais(np.array([[3.0, 0.0, 0.0], [0.7, 3.4, 0.0], [0.0, 0.0, 20.0]]))
@@ -256,7 +427,7 @@ def test_shared_structure_loader_passes_explicit_bravais_to_legacy_factory(tmp_p
     assert structure.bravais == bravais
     assert calls == [
         {
-            "file_path": config.paths.input_file,
+            "file_path": config.system_input.structure,
             "twist_index": 2,
             "spin": False,
             "bravais": bravais,

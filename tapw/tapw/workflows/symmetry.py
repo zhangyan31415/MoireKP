@@ -107,7 +107,8 @@ def _identity_config_value(value: Any) -> Any:
 
 
 def _source_input_hash(config: Any) -> str:
-    if getattr(config, "system", None) is not None:
+    system_input = getattr(config, "system_input", None)
+    if system_input is not None and system_input.source_kind == "canonical_structure":
         resolved = getattr(config, "resolved_structure_input", None)
         if resolved is None:
             from ..io.structure import resolve_structure_input

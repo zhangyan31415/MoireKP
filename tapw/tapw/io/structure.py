@@ -19,6 +19,7 @@ from scipy.spatial import cKDTree
 
 from ..reporting import ensure_reporter
 from ..identity import hash_file, hash_mapping
+from .hr import read_sparse_npz_metadata
 
 # Plotting is optional for non-plot workflows; keep matplotlib import failure from breaking core logic.
 try:
@@ -79,8 +80,8 @@ def infer_2d_bravais(
     lattice = np.asarray(cell, dtype=np.float64)
     if lattice.shape != (3, 3):
         raise ValueError(f"cell must have shape (3, 3), got {lattice.shape}")
-    a1 = lattice[0, :2]
-    a2 = lattice[1, :2]
+    a1 = lattice[0]
+    a2 = lattice[1]
     n1 = float(np.linalg.norm(a1))
     n2 = float(np.linalg.norm(a2))
     if n1 == 0.0 or n2 == 0.0:
@@ -88,7 +89,12 @@ def infer_2d_bravais(
     cosine = float(np.dot(a1, a2) / (n1 * n2))
     equal_lengths = bool(np.isclose(n1, n2, rtol=length_rtol, atol=0.0))
     if abs(cosine) <= angle_atol:
-        return "square" if equal_lengths else "rect"
+        if equal_lengths:
+            return "square"
+        raise ValueError(
+            "Cannot infer supported 2D Bravais family from in-plane lattice metric: "
+            f"lengths=({n1:.12g}, {n2:.12g}), cosine={cosine:.12g}."
+        )
     if equal_lengths and abs(abs(cosine) - 0.5) <= angle_atol:
         return "hex"
     raise ValueError(
@@ -97,7 +103,25 @@ def infer_2d_bravais(
     )
 
 
-def _source_matrix_basis_dimension(path: str | Path) -> int:
+@dataclass(frozen=True)
+class SourceMatrixDimension:
+    dimension: int
+    provenance: str
+
+
+def _validate_source_indices(indices: np.ndarray, *, dimension: int, source: Path, label: str) -> None:
+    values = np.asarray(indices, dtype=np.int64)
+    if values.size and (int(values.min()) < 0 or int(values.max()) >= dimension):
+        raise ValueError(
+            f"Sparse {label} index outside [0, {dimension}) in {source}."
+        )
+
+
+def _source_matrix_basis_dimension(
+    path: str | Path,
+    *,
+    expected_dimension: int,
+) -> SourceMatrixDimension:
     source = Path(path)
     if not source.is_file():
         raise FileNotFoundError(f"TAPW source matrix does not exist: {source}")
@@ -112,22 +136,45 @@ def _source_matrix_basis_dimension(path: str | Path) -> int:
         dimension = int(dimension_line[0])
         if dimension <= 0:
             raise ValueError(f"Invalid source basis dimension {dimension} in {source}")
-        return dimension
+        with source.open("r", encoding="utf-8") as handle:
+            lines = list(handle)[4:]
+        for line_number, line in enumerate(lines, start=5):
+            fields = line.strip().split()
+            if len(fields) != 7:
+                continue
+            try:
+                row = int(fields[3]) - 1
+                col = int(fields[4]) - 1
+            except ValueError as exc:
+                raise ValueError(f"Invalid sparse coordinate on line {line_number} in {source}.") from exc
+            _validate_source_indices(
+                np.asarray([row, col]),
+                dimension=dimension,
+                source=source,
+                label="DAT",
+            )
+        return SourceMatrixDimension(dimension=dimension, provenance="dat_header")
     if suffix != ".npz":
         raise ValueError(f"H/S file suffix must be .npz or .dat, got {source}")
-    maximum = -1
     with np.load(source, allow_pickle=False) as payload:
+        metadata = read_sparse_npz_metadata(payload, source=source)
+        dimension = expected_dimension if metadata is None else int(metadata["basis_dimension"])
         for key in payload.files:
             if not (key.endswith("_row") or key.endswith("_col")):
                 continue
             indices = np.asarray(payload[key], dtype=np.int64)
-            if indices.size:
-                if int(indices.min()) < 0:
-                    raise ValueError(f"Negative sparse basis index in {source}: {key}")
-                maximum = max(maximum, int(indices.max()))
-    if maximum < 0:
-        raise ValueError(f"Cannot infer source basis dimension from sparse NPZ {source}")
-    return maximum + 1
+            _validate_source_indices(
+                indices,
+                dimension=dimension,
+                source=source,
+                label=key,
+            )
+    provenance = (
+        "expected_with_legacy_coordinate_bounds"
+        if metadata is None
+        else "versioned_npz_metadata"
+    )
+    return SourceMatrixDimension(dimension=dimension, provenance=provenance)
 
 
 class AseStructureFile:
@@ -212,14 +259,14 @@ class AseStructureFile:
         m = self.twist_index
         if m < 1:
             raise ValueError(f"twist_index must be >= 1, got {m}")
-        if self.bravais in {"square", "rect"}:
+        if self.bravais == "square":
             return float(np.degrees(2.0 * np.arctan(1.0 / (2.0 * m + 1.0))))
         cosine = (3 * m**2 + 3 * m + 0.5) / (3 * m**2 + 3 * m + 1)
         return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
     def _moire_cell_count(self) -> int:
         m = self.twist_index
-        if self.bravais in {"square", "rect"}:
+        if self.bravais == "square":
             return int((2 * m + 1) ** 2 + 1)
         return int(3 * m**2 + 3 * m + 1)
 
@@ -242,19 +289,24 @@ class ResolvedStructureInput:
     bravais: str
     expected_basis_dimension: int
     hamiltonian_basis_dimension: int
-    overlap_basis_dimension: int
+    overlap_basis_dimension: int | None
+    hamiltonian_dimension_provenance: str
+    overlap_dimension_provenance: str | None
     source_identity: str
     identity_components: dict[str, Any]
 
 
 def resolve_structure_input(config) -> ResolvedStructureInput:
     """Resolve and certify one canonical ``system.structure`` source input."""
-    system = getattr(config, "system", None)
-    if system is None:
+    system = config.system_input
+    if system.source_kind != "canonical_structure":
         raise ValueError("resolve_structure_input requires a canonical system section.")
+    orbitals = system.orbital_mapping
+    if orbitals is None:
+        raise ValueError("Canonical system input is missing orbital metadata.")
     structure = AseStructureFile(
         system.structure,
-        orbitals=system.orbitals,
+        orbitals=orbitals,
         twist_index=system.twist_index,
         spin=system.spin,
     )
@@ -263,39 +315,57 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
         for atom in structure.species_coordinates
     )
     expected = scalar_orbitals * (2 if system.spin else 1)
-    h_dimension = _source_matrix_basis_dimension(system.hamiltonian)
-    s_dimension = _source_matrix_basis_dimension(system.overlap)
-    if h_dimension != s_dimension:
+    h_source = _source_matrix_basis_dimension(
+        system.hamiltonian,
+        expected_dimension=expected,
+    )
+    s_source = (
+        None
+        if system.overlap is None
+        else _source_matrix_basis_dimension(system.overlap, expected_dimension=expected)
+    )
+    if s_source is not None and h_source.dimension != s_source.dimension:
         raise ValueError(
-            f"H/S basis dimension mismatch: H={h_dimension}, S={s_dimension}."
+            f"H/S basis dimension mismatch: H={h_source.dimension}, S={s_source.dimension}."
         )
-    if h_dimension != expected:
+    if h_source.dimension != expected:
         raise ValueError(
-            f"TAPW source basis dimension {h_dimension} does not match expected basis dimension {expected} "
+            f"TAPW source basis dimension {h_source.dimension} does not match expected basis dimension {expected} "
+            "from system.structure, system.orbitals, and system.spin."
+        )
+    if s_source is not None and s_source.dimension != expected:
+        raise ValueError(
+            f"TAPW source basis dimension {s_source.dimension} does not match expected basis dimension {expected} "
             "from system.structure, system.orbitals, and system.spin."
         )
     components = {
         "schema": "tapw.resolved-structure-input.v1",
         "structure_hash": hash_file(system.structure),
         "hamiltonian_hash": hash_file(system.hamiltonian),
-        "overlap_hash": hash_file(system.overlap),
+        "overlap_hash": None if system.overlap is None else hash_file(system.overlap),
         "site_order": [atom["species"] for atom in structure.species_coordinates],
         "lattice": np.asarray(structure.Tmat).tolist(),
         "coordinates": [
             [atom["x"], atom["y"], atom["z"]]
             for atom in structure.species_coordinates
         ],
-        "orbitals": dict(sorted(system.orbitals.items())),
+        "orbitals": dict(sorted(orbitals.items())),
         "spin": bool(system.spin),
         "bravais": structure.bravais,
         "basis_dimension": expected,
+        "hamiltonian_basis_dimension": h_source.dimension,
+        "hamiltonian_dimension_provenance": h_source.provenance,
+        "overlap_basis_dimension": None if s_source is None else s_source.dimension,
+        "overlap_dimension_provenance": None if s_source is None else s_source.provenance,
     }
     return ResolvedStructureInput(
         structure=structure,
         bravais=structure.bravais,
         expected_basis_dimension=expected,
-        hamiltonian_basis_dimension=h_dimension,
-        overlap_basis_dimension=s_dimension,
+        hamiltonian_basis_dimension=h_source.dimension,
+        overlap_basis_dimension=None if s_source is None else s_source.dimension,
+        hamiltonian_dimension_provenance=h_source.provenance,
+        overlap_dimension_provenance=None if s_source is None else s_source.provenance,
         source_identity=hash_mapping(components),
         identity_components=components,
     )
@@ -303,18 +373,18 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
 
 def load_structure_from_config(config, *, legacy_factory=None):
     """Load canonical and legacy structures through one explicit workflow boundary."""
-    if getattr(config, "system", None) is not None:
+    system = config.system_input
+    if system.source_kind == "canonical_structure":
         resolved = resolve_structure_input(config)
         config.resolved_structure_input = resolved
         structure = resolved.structure
     else:
         factory = OpenMXFile if legacy_factory is None else legacy_factory
-        bravais = str(getattr(config.twist, "bravais", "hex"))
         structure = factory(
-            file_path=config.paths.input_file,
-            twist_index=config.twist.twist_index_m,
-            spin=config.twist.spin,
-            bravais=bravais,
+            file_path=system.structure,
+            twist_index=system.twist_index,
+            spin=system.spin,
+            bravais=system.explicit_bravais,
         )
     resolved_bravais = str(getattr(structure, "bravais", getattr(config.twist, "bravais", "hex")))
     config.twist.bravais = resolved_bravais

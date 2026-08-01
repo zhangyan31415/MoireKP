@@ -9,10 +9,41 @@ import scipy
 from tqdm import tqdm
 import time
 import psutil
+import json
 from datetime import datetime
 from functools import wraps
 Hartree = 27.21138602435532
 _INTERNAL_OPENMX_TAPW_BAND_TAG = "A.tapw_band_from_" + "li" + "jh"
+SPARSE_NPZ_SCHEMA = "tapw.sparse-realspace.v1"
+SPARSE_NPZ_SCHEMA_VERSION = 1
+SPARSE_NPZ_METADATA_KEY = "__tapw_sparse_metadata_json__"
+
+
+def read_sparse_npz_metadata(payload, *, source="<npz>"):
+    """Return validated versioned sparse metadata, or ``None`` for legacy NPZ files."""
+    if SPARSE_NPZ_METADATA_KEY not in payload.files:
+        return None
+    raw = np.asarray(payload[SPARSE_NPZ_METADATA_KEY])
+    if raw.size != 1:
+        raise ValueError(f"Invalid sparse NPZ metadata payload in {source}.")
+    try:
+        metadata = json.loads(str(raw.item()))
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise ValueError(f"Invalid sparse NPZ metadata JSON in {source}.") from exc
+    if not isinstance(metadata, dict):
+        raise ValueError(f"Sparse NPZ metadata must be a mapping in {source}.")
+    if metadata.get("schema") != SPARSE_NPZ_SCHEMA:
+        raise ValueError(
+            f"Unsupported sparse NPZ schema {metadata.get('schema')!r} in {source}."
+        )
+    if metadata.get("schema_version") != SPARSE_NPZ_SCHEMA_VERSION:
+        raise ValueError(
+            f"Unsupported sparse NPZ schema version {metadata.get('schema_version')!r} in {source}."
+        )
+    dimension = metadata.get("basis_dimension")
+    if not isinstance(dimension, int) or isinstance(dimension, bool) or dimension <= 0:
+        raise ValueError(f"Invalid sparse NPZ basis_dimension={dimension!r} in {source}.")
+    return metadata
 
 
 def _timing_enabled() -> bool:
@@ -110,8 +141,26 @@ class HrSparseHandler:
         npz_file_name = self.file_name.replace('.dat', '.npz')
         self.save_to_npz(npz_file_name)
 
-    def save_to_npz(self, file_path):
-        storable_data = {}
+    def save_to_npz(self, file_path, *, basis_dimension=None):
+        dimension = getattr(self, "nwann", None) if basis_dimension is None else basis_dimension
+        if not isinstance(dimension, (int, np.integer)) or isinstance(dimension, bool) or int(dimension) <= 0:
+            raise ValueError(
+                "Writing a sparse NPZ requires an exact positive basis dimension; "
+                "set handler.nwann or pass basis_dimension."
+            )
+        storable_data = {
+            SPARSE_NPZ_METADATA_KEY: np.asarray(
+                json.dumps(
+                    {
+                        "basis_dimension": int(dimension),
+                        "schema": SPARSE_NPZ_SCHEMA,
+                        "schema_version": SPARSE_NPZ_SCHEMA_VERSION,
+                    },
+                    sort_keys=True,
+                ),
+                dtype=str,
+            )
+        }
         for key, value in self.hr_sparse.items():
             storable_data[f"{key}_row"] = value['row']
             storable_data[f"{key}_col"] = value['col']
@@ -143,18 +192,32 @@ class HrSparseHandler:
         name = os.path.basename(str(file_path))
         return name in {"H_symm.npz", "S_symm.npz"}
 
-    def _apply_basis_transform(self, hr_sparse_chunk):
-        if self.A is None:
-            return hr_sparse_chunk
-
-        nwann = 0
-        for item in hr_sparse_chunk.values():
+    @staticmethod
+    def _validate_sparse_indices(hr_sparse_chunk, basis_dimension, *, source):
+        if basis_dimension is None:
+            return
+        for key, item in hr_sparse_chunk.items():
             row = np.asarray(item["row"], dtype=np.int64)
             col = np.asarray(item["col"], dtype=np.int64)
-            if row.size:
-                nwann = max(nwann, int(row.max()) + 1)
-            if col.size:
-                nwann = max(nwann, int(col.max()) + 1)
+            for attribute, indices in (("row", row), ("col", col)):
+                if indices.size and (int(indices.min()) < 0 or int(indices.max()) >= basis_dimension):
+                    raise ValueError(
+                        f"Sparse {attribute} index outside [0, {basis_dimension}) for rvec={key} in {source}."
+                    )
+
+    def _apply_basis_transform(self, hr_sparse_chunk, *, basis_dimension=None, source="<npz>"):
+        if self.A is None:
+            self._validate_sparse_indices(hr_sparse_chunk, basis_dimension, source=source)
+            return hr_sparse_chunk
+
+        transform_input_dimension = int(self.A.shape[1])
+        if basis_dimension is not None and int(basis_dimension) != transform_input_dimension:
+            raise ValueError(
+                f"Sparse basis dimension {basis_dimension} does not match transform input dimension "
+                f"{transform_input_dimension} in {source}."
+            )
+        nwann = transform_input_dimension
+        self._validate_sparse_indices(hr_sparse_chunk, nwann, source=source)
 
         transformed = {}
         for key in sorted(hr_sparse_chunk.keys()):
@@ -172,47 +235,62 @@ class HrSparseHandler:
         return transformed
 
     def _load_npz_common(self, file_path):
-        loaded_data = np.load(file_path, allow_pickle=True)
         data = {}
-        for key in loaded_data.files:
-            key_tuple_str, attribute = key.rsplit('_', 1)
-            key_tuple = self._parse_npz_rvec_key(key_tuple_str)
-            if key_tuple not in data:
-                data[key_tuple] = {'row': None, 'col': None, 'val': None}
-            if attribute == 'row':
-                data[key_tuple]['row'] = np.asarray(loaded_data[key], dtype=np.int64)
-            elif attribute == 'col':
-                data[key_tuple]['col'] = np.asarray(loaded_data[key], dtype=np.int64)
-            elif attribute == 'val':
-                data[key_tuple]['val'] = np.asarray(
-                    self._scale_npz_values(file_path, loaded_data[key]),
-                    dtype=np.complex128,
-                )
+        with np.load(file_path, allow_pickle=False) as loaded_data:
+            metadata = read_sparse_npz_metadata(loaded_data, source=file_path)
+            for key in loaded_data.files:
+                if key == SPARSE_NPZ_METADATA_KEY:
+                    continue
+                key_tuple_str, attribute = key.rsplit('_', 1)
+                key_tuple = self._parse_npz_rvec_key(key_tuple_str)
+                if key_tuple not in data:
+                    data[key_tuple] = {'row': None, 'col': None, 'val': None}
+                if attribute == 'row':
+                    data[key_tuple]['row'] = np.asarray(loaded_data[key], dtype=np.int64)
+                elif attribute == 'col':
+                    data[key_tuple]['col'] = np.asarray(loaded_data[key], dtype=np.int64)
+                elif attribute == 'val':
+                    data[key_tuple]['val'] = np.asarray(
+                        self._scale_npz_values(file_path, loaded_data[key]),
+                        dtype=np.complex128,
+                    )
 
         for key in data:
             if data[key]['row'] is None or data[key]['col'] is None or data[key]['val'] is None:
                 raise ValueError(f"Incomplete NPZ sparse block for rvec={key} in {file_path}")
 
-        self.hr_sparse = self._apply_basis_transform(data)
+        basis_dimension = None if metadata is None else int(metadata["basis_dimension"])
+        self.basis_dimension = basis_dimension
+        self.hr_sparse = self._apply_basis_transform(
+            data,
+            basis_dimension=basis_dimension,
+            source=file_path,
+        )
 
     @timing_decorator_factory(0)
     def load_from_npz(self, file_path):
-        loaded_data = np.load(file_path, allow_pickle=True)
         data = {}
-        for key in loaded_data.files:
-            key_tuple_str, attribute = key.rsplit('_', 1)
-            key_tuple = self._parse_npz_rvec_key(key_tuple_str)
-            if key_tuple not in data:
-                data[key_tuple] = {'row': None, 'col': None, 'val': None}
-            if attribute == 'row':
-                data[key_tuple]['row'] = loaded_data[key]
-            elif attribute == 'col':
-                data[key_tuple]['col'] = loaded_data[key]
-            elif attribute == 'val':
-                if ('deeph-pack' in str(file_path) or 'DeepH-pack' in str(file_path)) and 'H.npz' in str(file_path):
-                    data[key_tuple]['val'] = loaded_data[key] * Hartree
-                else:
-                    data[key_tuple]['val'] = loaded_data[key]
+        with np.load(file_path, allow_pickle=False) as loaded_data:
+            metadata = read_sparse_npz_metadata(loaded_data, source=file_path)
+            for key in loaded_data.files:
+                if key == SPARSE_NPZ_METADATA_KEY:
+                    continue
+                key_tuple_str, attribute = key.rsplit('_', 1)
+                key_tuple = self._parse_npz_rvec_key(key_tuple_str)
+                if key_tuple not in data:
+                    data[key_tuple] = {'row': None, 'col': None, 'val': None}
+                if attribute == 'row':
+                    data[key_tuple]['row'] = loaded_data[key]
+                elif attribute == 'col':
+                    data[key_tuple]['col'] = loaded_data[key]
+                elif attribute == 'val':
+                    if ('deeph-pack' in str(file_path) or 'DeepH-pack' in str(file_path)) and 'H.npz' in str(file_path):
+                        data[key_tuple]['val'] = loaded_data[key] * Hartree
+                    else:
+                        data[key_tuple]['val'] = loaded_data[key]
+        basis_dimension = None if metadata is None else int(metadata["basis_dimension"])
+        self._validate_sparse_indices(data, basis_dimension, source=file_path)
+        self.basis_dimension = basis_dimension
         self.hr_sparse = data
     
     @timing_decorator_factory(0)
