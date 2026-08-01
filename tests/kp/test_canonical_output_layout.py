@@ -46,6 +46,18 @@ def _canonical_case_config() -> dict:
     }
 
 
+def _write_case_source_arrays(
+    cfg_path: Path,
+    *,
+    hamk: np.ndarray,
+    q1: np.ndarray,
+    q2: np.ndarray,
+) -> None:
+    np.save(cfg_path.parent / "hamk.npy", hamk)
+    np.save(cfg_path.parent / "q1.npy", q1)
+    np.save(cfg_path.parent / "q2.npy", q2)
+
+
 def test_canonical_case_defaults_point_all_workflows_to_one_case_directory(tmp_path: Path) -> None:
     cfg_dir = tmp_path / "kp" / "configs"
     cfg_dir.mkdir(parents=True)
@@ -103,6 +115,7 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path,
     cfg = _canonical_case_config()
     cfg["material"]["efermi"] = 0.0
     cfg["plot"] = {"mode": "gamma", "report_below": 1, "report_above": 1}
+    _write_case_source_arrays(cfg_path, hamk=hamk, q1=q, q2=q.copy())
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["inspect", "-c", str(cfg_path)])
@@ -160,6 +173,7 @@ def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp
     cfg["material"]["band_file"] = "bands.txt"
     cfg["material"]["efermi"] = -0.15
     cfg["plot"] = {"mode": "K1", "target": "valence", "ref_q_index": 0}
+    _write_case_source_arrays(cfg_path, hamk=hamk, q1=q, q2=q.copy())
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["inspect", "-c", str(cfg_path)])
@@ -211,6 +225,7 @@ def test_inspect_qsort_uses_each_qset_center(monkeypatch, tmp_path: Path) -> Non
     cfg["material"]["band_file"] = "bands.txt"
     cfg["material"]["efermi"] = -0.15
     cfg["plot"] = {"mode": "K1", "target": "valence", "sort_by_qnorm": True}
+    _write_case_source_arrays(cfg_path, hamk=hamk, q1=q1, q2=q2)
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["inspect", "-c", str(cfg_path)])
@@ -255,6 +270,7 @@ def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Pa
     cfg["kpath"] = {"tmat": np.eye(3).tolist()}
     (cfg_path.parent / "bands.txt").write_text("0.0 1.0\n", encoding="utf-8")
     np.save(cfg_path.parent / "kpoints.npy", np.zeros((1, 3), dtype=float))
+    _write_case_source_arrays(cfg_path, hamk=hamk, q1=q, q2=q.copy())
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["project", "-c", str(cfg_path)])

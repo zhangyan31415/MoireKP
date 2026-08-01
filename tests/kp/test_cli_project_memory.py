@@ -47,6 +47,25 @@ def _canonical_case_cfg(
         material.setdefault("band_file", "bands.txt")
         material.setdefault("kpoints_file", "kpoints.npy")
         out.setdefault("kpath", {"tmat": np.eye(3).tolist()})
+
+        def source_path(field: str, default: str) -> Path:
+            raw = Path(str(material.get(field, default)))
+            resolved = raw if raw.is_absolute() else tmp_path / raw
+            resolved.parent.mkdir(parents=True, exist_ok=True)
+            return resolved
+
+        np.save(
+            source_path("hamk_file", "hamk.npy"),
+            np.zeros((nk, 4, 4), dtype=np.complex128),
+        )
+        np.save(
+            source_path("qset1_file", "q1.npy"),
+            np.zeros((1, 2), dtype=float),
+        )
+        np.save(
+            source_path("qset2_file", "q2.npy"),
+            np.zeros((1, 2), dtype=float),
+        )
         (tmp_path / "bands.txt").write_text(
             "".join("0.0 1.0\n" for _ in range(nk)),
             encoding="utf-8",
@@ -112,6 +131,8 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
         encoding="utf-8",
     )
 
+    cli._prepare_cli_selection_request(str(cfg_path))
+    assert guarded.accessed == []
     cli.cmd_project_from_config(str(cfg_path))
 
     assert guarded.accessed == [0, 1]
@@ -285,6 +306,9 @@ def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path)
     )
     hamk = np.zeros((1, 4, 4), dtype=np.complex128)
     q = np.zeros((1, 2), dtype=float)
+    np.save(band_dir / "hamiltonian_k.npy", hamk)
+    np.save(band_dir / "g_vectors_group1.npy", q)
+    np.save(band_dir / "g_vectors_group2.npy", q)
     np.save(band_dir / "kpoints.npy", np.zeros((1, 3), dtype=float))
     (band_dir / "energies_vbm.txt").write_text("0.0 1.0\n", encoding="utf-8")
     seen: dict[str, object] = {}
@@ -333,7 +357,10 @@ def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path)
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=1)),
+        encoding="utf-8",
+    )
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -391,7 +418,10 @@ def test_plot_spin_down_uses_single_spin_block_indexing(monkeypatch, tmp_path: P
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=1)),
+        encoding="utf-8",
+    )
 
     cli.cmd_plot_from_config(str(cfg_path))
 

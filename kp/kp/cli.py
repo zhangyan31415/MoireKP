@@ -962,15 +962,22 @@ def _prepare_cli_selection_request(
         return candidate if candidate.is_absolute() else (path.parent / candidate).resolve()
 
     hamk_path = resolved_file(material["hamk_file"])
-    if hamk_path.is_file():
-        source_hamiltonian_hash = hash_file(hamk_path)
-        hamk_shape = np.load(hamk_path, mmap_mode="r").shape
-    else:
-        loaded_hamk = _load_hamk_with_energy_unit(
-            str(hamk_path), material, mmap_mode="r"
+    if not hamk_path.is_file():
+        raise FileNotFoundError(
+            "selection identity requires the complete source Hamiltonian file: "
+            f"{hamk_path}"
         )
-        source_hamiltonian_hash = hash_array(loaded_hamk)
-        hamk_shape = loaded_hamk.shape
+    source_hamiltonian_hash = hash_file(hamk_path)
+    try:
+        hamk_shape = np.load(
+            hamk_path,
+            mmap_mode="r",
+            allow_pickle=False,
+        ).shape
+    except (OSError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"source Hamiltonian must be a numeric .npy array: {hamk_path}"
+        ) from error
     nk = int(hamk_shape[0]) if len(hamk_shape) == 3 else 1
 
     q1, q2 = load_Q_sets(
