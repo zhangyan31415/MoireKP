@@ -946,6 +946,12 @@ then binds that metric evidence to both candidate-certificate hashes. This
 replaces reliance on the older freely constructible scalar-only
 `CandidateMetrics` as an identity boundary.
 
+The artifact's top-level `metrics`, when present, is a serialization view of
+`CertificationEvidence.metric_evidence.metrics`, not a second source of truth;
+strict loading requires exact equality. `CERTIFIED` requires non-null identity,
+evidence, and metrics with empty failure codes. Every other status remains
+release-blocking.
+
 **Step 3: Implement fail-closed selection**
 
 Only candidates passing every finite hard metric enter lexicographic selection.
@@ -1031,7 +1037,7 @@ Mock only external I/O, not the projector/symmetry evaluator. Assert:
 
 **Step 2: Verify failures**
 
-Run the three targeted files.
+Run the targeted files below.
 
 **Step 3: Replace dirty-style CLI physics with orchestration**
 
@@ -1085,10 +1091,10 @@ Expected: PASS.
 git add kp/kp/selection_orchestration.py kp/kp/cli.py kp/kp/config/case.py \
   tests/kp/test_project_auto_gauge_cli.py \
   tests/kp/test_canonical_output_layout.py \
-  tests/kp/test_kp_artifact_identity.py
+  tests/kp/test_kp_artifact_identity.py tests/kp/test_symm_projection.py
 git commit -m "feat(kp): share selection across inspect and project"
 git add kp/kp/model/pipeline.py tests/kp/test_configured_model.py \
-  tests/kp/test_kp_artifact_identity.py tests/kp/test_symm_projection.py
+  tests/kp/test_kp_artifact_identity.py
 git commit -m "fix(kp): gate model publication on certified selection"
 ```
 
