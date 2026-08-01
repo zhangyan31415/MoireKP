@@ -20,6 +20,7 @@ from ..blocks.blocks import (
     ProjectGaugeAnchorCandidate,
     resolve_project_gauge_anchor_candidates,
 )
+from ..blocks.gamma_layout import GammaRoutingError
 from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..basis.selection import (
     GaugeAnchorReport,
@@ -44,6 +45,13 @@ from ..identity import (
     require_matching_identity,
 )
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
+from ..projection_handoff import (
+    ExplicitLegacyBasisSpec,
+    GammaRoutedBasisSpec,
+    ProjectionBasisSpec,
+    load_gamma_routed_basis_spec,
+)
+from ..projection_selection import CandidateRejectionReason
 from .candidate_certificate import evaluate_projected_pair
 from .exactify_representation import exactify_loaded_symmetry_source
 from .canonical_target import (
@@ -129,25 +137,6 @@ class ActionRepresentation:
 
 class ProjectionTransactionIntegrityError(RuntimeError):
     """A certified handoff is internally inconsistent and must not roll back."""
-
-
-@dataclass(frozen=True)
-class PersistedProjectionBasisHandoff:
-    """Project-owned basis data consumed verbatim by ``kp symm``.
-
-    The final unitary in this handoff has already been applied to Heff,
-    wavefunctions, and every other basis-dependent projection artifact.  A
-    later symmetry run may re-compute diagnostic targets, but it must never
-    replace this basis choice.
-    """
-
-    artifact_identity: Mapping[str, Any]
-    nlow_state_list: list[Any]
-    resolved_norb_fix_list: list[Any]
-    gauge_mode: str
-    frame_artifact: Mapping[str, Any] | None
-    frame: SymmetryAdaptedBasisFrame | None
-    model_dim: int
 
 
 def _select_validated_auto_gauge_candidate(
@@ -1574,7 +1563,7 @@ def _required_scalar_text(
 
 def _load_persisted_projection_basis_handoff(
     project_dir: str | Path,
-) -> PersistedProjectionBasisHandoff | None:
+) -> ProjectionBasisSpec | None:
     """Load the authoritative project basis without running gauge selection.
 
     The basis and wavefunction packages carry duplicate frame metadata.  Both
@@ -1583,10 +1572,60 @@ def _load_persisted_projection_basis_handoff(
     """
 
     project_path = Path(project_dir)
-    artifact_identity = _load_project_artifact_identity(project_path)
     basis_path = project_path / "basis.npz"
     wavefunctions_path = project_path / "wavefunctions.npz"
     heff_path = project_path / "heff.npy"
+    with np.load(basis_path, allow_pickle=False) as discriminator_payload:
+        basis_kind = (
+            _required_scalar_text(
+                discriminator_payload,
+                "projection_basis_kind",
+                context=f"KP projection basis handoff {basis_path}",
+            )
+            if "projection_basis_kind" in discriminator_payload.files
+            else "explicit_legacy"
+    )
+    if basis_kind == GammaRoutedBasisSpec.projection_basis_kind:
+        try:
+            routed = load_gamma_routed_basis_spec(basis_path)
+            artifact_identity = _load_project_artifact_identity(project_path)
+            require_matching_identity(
+                routed.artifact_identity,
+                artifact_identity,
+                PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+                "routed Gamma project basis handoff",
+            )
+        except GammaRoutingError:
+            raise
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                f"routed Gamma projection artifact identity failed: {error}",
+            ) from error
+        companion_heff = np.load(heff_path, allow_pickle=False)
+        if not np.array_equal(companion_heff, routed.authoritative_heff):
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "projection/heff.npy differs from routed authoritative_heff",
+            )
+        with np.load(wavefunctions_path, allow_pickle=False) as wave_payload:
+            if "k_indices" not in wave_payload.files:
+                raise GammaRoutingError(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    "routed Gamma wavefunctions package is missing k_indices",
+                )
+            wave_k_indices = tuple(
+                int(item) for item in np.asarray(wave_payload["k_indices"]).tolist()
+            )
+        if wave_k_indices != routed.k_indices:
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "routed Gamma wavefunction k mapping differs from basis handoff",
+            )
+        return routed
+    if basis_kind != ExplicitLegacyBasisSpec.projection_basis_kind:
+        raise ValueError(f"unsupported projection_basis_kind: {basis_kind!r}")
+    artifact_identity = _load_project_artifact_identity(project_path)
     with np.load(basis_path, allow_pickle=True) as basis_payload:
         basis_context = f"KP projection basis handoff {basis_path}"
         if "projection_basis_handoff_version" not in basis_payload.files:
@@ -1723,7 +1762,7 @@ def _load_persisted_projection_basis_handoff(
             "persisted project frame/model dimension mismatch: "
             f"{frame.full_unitary.shape} != {(model_dim, model_dim)}"
         )
-    return PersistedProjectionBasisHandoff(
+    return ExplicitLegacyBasisSpec(
         artifact_identity=dict(artifact_identity),
         nlow_state_list=list(nlow_state_list),
         resolved_norb_fix_list=list(resolved_norb_fix_list),
@@ -4982,7 +5021,7 @@ def load_project_prepared_symmetry_package(
 
 
 def _gauge_report_from_persisted_handoff(
-    handoff: PersistedProjectionBasisHandoff,
+    handoff: ExplicitLegacyBasisSpec,
 ) -> GaugeAnchorReport:
     """Build diagnostic summary data without re-running gauge selection."""
 
@@ -5016,16 +5055,93 @@ def _gauge_report_from_persisted_handoff(
     )
 
 
+def _gauge_report_from_gamma_routed_handoff(
+    handoff: GammaRoutedBasisSpec,
+) -> GaugeAnchorReport:
+    """Describe a routed frame without inventing explicit orbital anchors."""
+
+    return GaugeAnchorReport(
+        gauge_mode="gamma_routed",
+        resolved_norb_fix_list=[],
+        selections=[],
+        metric={
+            "type": "persisted_gamma_routed_basis_handoff",
+            "basis_is_orthonormal": True,
+            "handoff_identity_hash": handoff.handoff_identity_hash,
+        },
+        state_selection_quality={
+            "status": "persisted_gamma_routed_basis",
+            "selection_policy": "consume_project_artifact",
+        },
+        gauge_anchor_quality={
+            "status": "not_applicable",
+            "reason": "routed_frames_are_authoritative",
+        },
+        symmetry_closure_quality={
+            "status": "persisted_gamma_routed_basis",
+            "selection_policy": "consume_then_recertify",
+            "symmetry_adapted_frame": None,
+        },
+        warnings=[],
+    )
+
+
+def _states_from_gamma_routed_handoff(
+    ctx: _ProjectionRunContext,
+    handoff: GammaRoutedBasisSpec,
+) -> tuple[
+    dict[int, ProjectionState],
+    dict[int, ProjectionState],
+    dict[int, ProjectionState],
+    ProjectionState,
+]:
+    """Materialize persisted routed frames without diagonalization/downfolding."""
+
+    handoff.require_k_indices(ctx.required_k)
+    if handoff.layout.q_count != ctx.q_count or handoff.layout.full_dimension != ctx.full_dim:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "routed Gamma layout does not match the active symmetry row space",
+        )
+    states: dict[int, ProjectionState] = {}
+    for k_index in ctx.required_k:
+        u_low, _u_high = handoff.assemble_for_k(k_index, include_high=False)
+        # Keep the persisted numeric values exact.  No polar alignment, anchor
+        # fallback, diagonalization, or Heff reconstruction is permitted here.
+        states[int(k_index)] = ProjectionState(
+            hamk=np.asarray(ctx.hamk_source_by_k[int(k_index)], dtype=np.complex128),
+            heff=handoff.authoritative_heff_for_k(int(k_index)),
+            u_low=u_low,
+        )
+    first = states[int(ctx.required_k[0])]
+    return states, states, states, first
+
+
 def _resolve_symmetry_project_identity(
     ctx: _ProjectionRunContext,
     *,
-    handoff: PersistedProjectionBasisHandoff | None = None,
+    handoff: ProjectionBasisSpec | None = None,
     gauge_report: Any | None = None,
     resolved_norb_fix_list: Any | None = None,
     low_dim: int | None = None,
 ) -> dict[str, Any]:
     run_cfg = ctx.config
     if handoff is not None:
+        if isinstance(handoff, GammaRoutedBasisSpec):
+            handoff.require_k_indices(ctx.required_k)
+            layout_qsets = tuple(
+                np.asarray(qset, dtype=np.float64)
+                for qset in handoff.layout.ordered_qsets
+            )
+            if not (
+                np.array_equal(layout_qsets[0], np.asarray(ctx.q1, dtype=np.float64))
+                and np.array_equal(layout_qsets[1], np.asarray(ctx.q2, dtype=np.float64))
+            ):
+                raise GammaRoutingError(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    "routed Gamma ordered-Q identity differs from the active config",
+                )
+            return dict(handoff.artifact_identity)
         hamk_file = _resolve(run_cfg.material.get("hamk_file"), run_cfg.cfg_dir)
         if hamk_file is None:
             raise ValueError(
@@ -6334,7 +6450,13 @@ def run_symmetry_projection_from_config(
     package_owner: str = "kp_symm",
     project_preparation: ProjectSymmetryPreparation | None = None,
 ) -> dict[str, Any]:
-    persisted_handoff: PersistedProjectionBasisHandoff | None = None
+    persisted_handoff: ProjectionBasisSpec | None = None
+    persisted_states: tuple[
+        dict[int, ProjectionState],
+        dict[int, ProjectionState],
+        dict[int, ProjectionState],
+        ProjectionState,
+    ] | None = None
     consume_persisted_project = (
         project_preparation is None
         and project_config is None
@@ -6369,6 +6491,16 @@ def run_symmetry_projection_from_config(
                 gauge_report=None,
             )
             norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
+        elif isinstance(persisted_handoff, GammaRoutedBasisSpec):
+            persisted_states = _states_from_gamma_routed_handoff(
+                ctx,
+                persisted_handoff,
+            )
+            norb_fix_list = []
+            gauge_report = _gauge_report_from_gamma_routed_handoff(
+                persisted_handoff
+            )
+            project_gauge_reused = True
         else:
             if persisted_handoff.nlow_state_list != ctx.nlow_state_list:
                 raise ValueError(
@@ -6409,7 +6541,11 @@ def run_symmetry_projection_from_config(
         gauge_report = prepared_report
         project_gauge_reused = True
         norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
-    selected_states = ctx.selected_gauge_states
+    selected_states = (
+        persisted_states
+        if persisted_states is not None
+        else ctx.selected_gauge_states
+    )
     if selected_states is None:
         selected_states = _states_for_resolved_anchors(
             ctx,
@@ -6439,12 +6575,16 @@ def run_symmetry_projection_from_config(
     np.save(ctx.output_dir / "q_model_layer1.npy", ctx.q_model1)
     np.save(ctx.output_dir / "q_model_layer2.npy", ctx.q_model2)
 
-    n_orb_for_exactification = _sector_orbital_counts(
-        ctx.q_model1,
-        ctx.q_model2,
-        ctx.nlow_state_list,
-        low_dim=low_dim,
-        num_layer_list=ctx.num_layer_list,
+    n_orb_for_exactification = (
+        persisted_handoff.group_ranks
+        if isinstance(persisted_handoff, GammaRoutedBasisSpec)
+        else _sector_orbital_counts(
+            ctx.q_model1,
+            ctx.q_model2,
+            ctx.nlow_state_list,
+            low_dim=low_dim,
+            num_layer_list=ctx.num_layer_list,
+        )
     )
     summary = _initial_projection_summary(
         ctx,
@@ -6453,6 +6593,23 @@ def run_symmetry_projection_from_config(
         n_orb_for_exactification=n_orb_for_exactification,
         artifact_identity=artifact_identity,
     )
+    if isinstance(persisted_handoff, GammaRoutedBasisSpec):
+        summary["project_basis"].update(
+            {
+                "projection_basis_kind": persisted_handoff.projection_basis_kind,
+                "nlow_state_list_layout": "not_applicable_gamma_routed",
+                "layout_hash": persisted_handoff.layout.layout_hash,
+                "frame_hash": persisted_handoff.frame_hash,
+                "reference_frame_hash": persisted_handoff.reference_frame_hash,
+                "heff_hash": persisted_handoff.heff_hash,
+                "candidate_certificate_hash": (
+                    persisted_handoff.candidate_certificate_hash
+                ),
+                "candidate_input_identity_hash": (
+                    persisted_handoff.candidate_input_identity_hash
+                ),
+            }
+        )
     summary["package_preparation"] = {
         "owner": str(package_owner),
         "status": "prepared",

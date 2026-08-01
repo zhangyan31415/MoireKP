@@ -13,7 +13,12 @@ from typing import Any, Dict, List, Mapping, Sequence
 import yaml
 import numpy as np
 
-from .identity import build_projection_basis_identity, hash_array
+from .identity import (
+    PROJECTION_BASIS_HANDOFF_VERSION,
+    build_projection_basis_identity,
+    hash_array,
+)
+from .projection_handoff import EXPLICIT_LEGACY_BASIS_KIND
 from .io.tapw_loader import load_hamk, load_Q_sets
 from .orbitals import (
     expand_orbital_order_by_sector,
@@ -1952,22 +1957,36 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
         "heff_hash": np.asarray(heff_hash),
         "kpoints_hash": np.asarray(kpoints_hash),
     }
+    frame_json = "" if frame_artifact is None else json.dumps(frame_artifact, sort_keys=True)
+    wavefunctions_hash = hash_array(hvec_arr)
+    spin_operator_hash = (
+        hash_array(spin_operator_arr)
+        if spin_operator_arr is not None and spin_operator_arr.dtype != object
+        else "absent"
+    )
+    legacy_handoff_payload = {
+        "projection_basis_kind": np.asarray(EXPLICIT_LEGACY_BASIS_KIND),
+        "projection_basis_handoff_version": np.asarray(
+            PROJECTION_BASIS_HANDOFF_VERSION
+        ),
+        "gauge_mode": np.asarray(gauge_report.gauge_mode),
+        "wavefunctions_hash": np.asarray(wavefunctions_hash),
+        "spin_operator_hash": np.asarray(spin_operator_hash),
+    }
     np.savez(
         Path(out_dir) / "basis.npz",
         nlow_state_list=np.asarray(nlow_state_list, dtype=object),
         norb_fix_list=np.asarray(norb_fix_list, dtype=object),
-        symmetry_adapted_frame_json=np.asarray(
-            "" if frame_artifact is None else json.dumps(frame_artifact, sort_keys=True)
-        ),
+        symmetry_adapted_frame_json=np.asarray(frame_json),
+        **legacy_handoff_payload,
         **identity_payload,
     )
     wavefunction_payload = {
         "wavefunctions": hvec_arr,
         "k_indices": np.asarray(project_indices, dtype=int),
         "spin_convention": np.asarray(str(spin).lower()),
-        "symmetry_adapted_frame_json": np.asarray(
-            "" if frame_artifact is None else json.dumps(frame_artifact, sort_keys=True)
-        ),
+        "symmetry_adapted_frame_json": np.asarray(frame_json),
+        **legacy_handoff_payload,
         **identity_payload,
     }
     if str(spin).lower() == "all" and spin_operator_arr is not None:

@@ -260,7 +260,17 @@ def load_projection_artifact_identity(
     for path in (basis_path, wavefunctions_path, heff_path):
         if not path.is_file():
             raise FileNotFoundError(f"KP projection artifact is missing: {path}")
-    with np.load(basis_path, allow_pickle=True) as basis_payload:
+    # Routed Gamma archives are a strict numeric-only contract.  Sniff the
+    # scalar discriminator without pickle and retain pickle solely for the
+    # versioned legacy archive whose explicit band lists are object arrays.
+    with np.load(basis_path, allow_pickle=False) as discriminator_payload:
+        basis_kind = (
+            str(np.asarray(discriminator_payload["projection_basis_kind"]).item())
+            if "projection_basis_kind" in discriminator_payload.files
+            else "explicit_legacy"
+        )
+    basis_allow_pickle = basis_kind == "explicit_legacy"
+    with np.load(basis_path, allow_pickle=basis_allow_pickle) as basis_payload:
         basis_identity = require_identity_fields(
             basis_payload,
             PROJECTION_ARTIFACT_IDENTITY_FIELDS,
