@@ -17,6 +17,10 @@ README_PATHS = [
     ROOT / "tapw" / "README.md",
     ROOT / "examples" / "README.md",
 ]
+LICENSE_README_PATHS = [
+    ROOT / "README.md",
+    ROOT / "README.zh.md",
+]
 
 FORBIDDEN_README_TERMS = [
     "coming soon",
@@ -64,6 +68,9 @@ REQUIRED_SOURCE_MANIFEST_LINES = {
     "recursive-include tests *.py *.yaml *.yml *.json *.txt",
     "recursive-include tests/fixtures *.txt *.yaml *.yml *.json *.npy *.npz",
     "include .gitignore",
+    "include COPYING",
+    "include COPYING.LESSER",
+    "include COPYRIGHT",
     "include RELEASE_VALIDATION.md",
     "include pytest.ini",
     "include kp/README.md",
@@ -326,6 +333,29 @@ def test_pyproject_declares_release_python_and_cli_contract() -> None:
     assert "templates/*.in" in pyproject["tool"]["setuptools"]["package-data"]["tapw"]
 
 
+def test_project_declares_authoritative_lgpl_license() -> None:
+    pyproject = _pyproject()
+    project = pyproject["project"]
+
+    assert project["license"] == "LGPL-3.0-or-later"
+    assert project["license-files"] == ["COPYING", "COPYING.LESSER", "COPYRIGHT"]
+    assert "setuptools>=77" in pyproject["build-system"]["requires"]
+
+    copying = _read(ROOT / "COPYING")
+    copying_lesser = _read(ROOT / "COPYING.LESSER")
+    copyright_notice = _read(ROOT / "COPYRIGHT")
+
+    assert "GNU GENERAL PUBLIC LICENSE" in copying
+    assert "Version 3, 29 June 2007" in copying
+    assert "GNU LESSER GENERAL PUBLIC LICENSE" in copying_lesser
+    assert "Version 3, 29 June 2007" in copying_lesser
+    assert (
+        "Copyright (C) 2026 Yan Zhang, Jiabin Yu, and Quansheng Wu"
+        in copyright_notice
+    )
+    assert "SPDX-License-Identifier: LGPL-3.0-or-later" in copyright_notice
+
+
 def test_source_manifest_declares_release_archive_boundary() -> None:
     manifest_path = ROOT / "MANIFEST.in"
     assert manifest_path.exists(), "MANIFEST.in is required for source archive boundary"
@@ -488,16 +518,11 @@ def test_release_readmes_are_public_facing() -> None:
             assert term.lower() not in lower_text, f"{path.relative_to(ROOT)} contains {term!r}"
 
 
-def test_readmes_do_not_claim_unconfirmed_mit_license() -> None:
-    license_files = list(ROOT.glob("LICENSE*")) + list(ROOT.glob("COPYING*"))
-    project_metadata = _read(ROOT / "pyproject.toml").lower()
-    license_declared = bool(license_files) or "license =" in project_metadata
-
-    if not license_declared:
-        for path in README_PATHS:
-            assert "mit license" not in _read(path).lower(), (
-                f"{path.relative_to(ROOT)} claims MIT without release license metadata"
-            )
+def test_readmes_do_not_claim_mit_license() -> None:
+    for path in README_PATHS + LICENSE_README_PATHS:
+        assert "mit license" not in _read(path).lower(), (
+            f"{path.relative_to(ROOT)} incorrectly claims the MIT license"
+        )
 
 
 def test_environment_yml_release_contract() -> None:
