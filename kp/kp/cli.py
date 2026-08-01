@@ -187,6 +187,8 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "band_comparison_all.pdf",
         "q_lattice_harmonics.pdf",
         "harmonic_recommendation_bands.png",
+        "hamiltonian_element_comparison.png",
+        "hamiltonian_element_comparison.pdf",
     }
     root = Path(model_output_dir)
     if not root.exists():
