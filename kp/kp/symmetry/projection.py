@@ -1632,7 +1632,10 @@ def _load_persisted_projection_basis_handoff(
             )
         return routed
     if basis_kind != ExplicitLegacyBasisSpec.projection_basis_kind:
-        raise ValueError(f"unsupported projection_basis_kind: {basis_kind!r}")
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"unsupported projection_basis_kind: {basis_kind!r}",
+        )
     forbidden_routed_fields = sorted(
         basis_files.intersection(GAMMA_ROUTED_ONLY_BASIS_FIELDS)
     )

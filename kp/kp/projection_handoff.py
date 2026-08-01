@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
+from numbers import Integral
 from pathlib import Path
 from typing import Any, ClassVar, Mapping, Sequence, TypeAlias
 
@@ -178,6 +179,25 @@ def _strict_index_tuple(value: Any, *, name: str) -> tuple[int, ...]:
     return indices
 
 
+def _strict_integral_tuple(value: Any, *, name: str) -> tuple[int, ...]:
+    try:
+        items = tuple(value)
+    except TypeError as error:
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"routed Gamma {name} must contain strict integers (bool excluded)",
+        ) from error
+    if any(
+        isinstance(item, (bool, np.bool_)) or not isinstance(item, Integral)
+        for item in items
+    ):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"routed Gamma {name} must contain strict integers (bool excluded)",
+        )
+    return tuple(int(item) for item in items)
+
+
 def _strict_hash_tuple(value: Any, *, name: str, length: int) -> tuple[str, ...]:
     array = np.asarray(value)
     if (
@@ -216,10 +236,19 @@ def _require_exact_archive_keys(files: Sequence[str]) -> None:
 
 def _require_disk_dtypes(payload: Mapping[str, np.ndarray]) -> None:
     for name in _INT64_FIELDS:
-        if np.asarray(payload[name]).dtype != np.dtype(np.int64):
+        value = np.asarray(payload[name])
+        expected_shape = {
+            "group_ranks": (2,),
+            "group_offsets": (3,),
+        }.get(name)
+        if (
+            value.dtype != np.dtype(np.int64)
+            or value.ndim != 1
+            or (expected_shape is not None and value.shape != expected_shape)
+        ):
             raise _reject(
                 CandidateRejectionReason.HANDOFF_IDENTITY,
-                f"routed Gamma archive field {name} must have dtype int64",
+                f"routed Gamma archive field {name} must be a canonical int64 vector",
             )
     for name in _COMPLEX128_FIELDS:
         if np.asarray(payload[name]).dtype != np.dtype(np.complex128):
@@ -366,17 +395,20 @@ class GammaRoutedBasisSpec:
     handoff_version: ClassVar[str] = GAMMA_ROUTED_BASIS_HANDOFF_VERSION
 
     def __post_init__(self) -> None:
-        try:
-            k_indices = tuple(int(item) for item in self.k_indices)
-            heff_k_indices = tuple(int(item) for item in self.heff_k_indices)
-            joint = tuple(int(item) for item in self.joint_band_indices)
-            ranks = tuple(int(item) for item in self.group_ranks)
-            offsets = tuple(int(item) for item in self.group_offsets)
-        except (TypeError, ValueError) as error:
-            raise _reject(
-                CandidateRejectionReason.HANDOFF_IDENTITY,
-                "routed Gamma integer metadata is invalid",
-            ) from error
+        k_indices = _strict_integral_tuple(self.k_indices, name="k_indices")
+        heff_k_indices = _strict_integral_tuple(
+            self.heff_k_indices, name="heff_k_indices"
+        )
+        joint = _strict_integral_tuple(
+            self.joint_band_indices, name="joint_band_indices"
+        )
+        ranks = _strict_integral_tuple(self.group_ranks, name="group_ranks")
+        offsets = _strict_integral_tuple(self.group_offsets, name="group_offsets")
+        object.__setattr__(self, "k_indices", k_indices)
+        object.__setattr__(self, "heff_k_indices", heff_k_indices)
+        object.__setattr__(self, "joint_band_indices", joint)
+        object.__setattr__(self, "group_ranks", ranks)
+        object.__setattr__(self, "group_offsets", offsets)
         if (
             not k_indices
             or any(item < 0 for item in k_indices)
@@ -644,7 +676,10 @@ class GammaRoutedBasisSpec:
         candidate_id: str = "",
         candidate_certificate_envelope_json: str = "",
     ) -> "GammaRoutedBasisSpec":
-        indices = tuple(int(item) for item in k_indices)
+        indices = _strict_integral_tuple(k_indices, name="k_indices")
+        heff_indices = _strict_integral_tuple(
+            heff_k_indices, name="heff_k_indices"
+        )
         routed = tuple(routed_frames)
         if len(routed) != len(indices) or not routed:
             raise _reject(
@@ -732,7 +767,7 @@ class GammaRoutedBasisSpec:
             frame_hash=hash_array(frames),
             reference_frame_hash=hash_array(references),
             route_gaps=route_gaps,
-            heff_k_indices=tuple(int(item) for item in heff_k_indices),
+            heff_k_indices=heff_indices,
             authoritative_heff=heff,
             heff_hash=hash_array(heff),
             closure_certificate_hashes=tuple(

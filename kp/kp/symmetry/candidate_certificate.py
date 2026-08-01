@@ -671,6 +671,551 @@ def candidate_action_package_hash(
     )
 
 
+def _strict_mapping(
+    value: object,
+    *,
+    keys: set[str],
+    context: str,
+) -> Mapping[str, object]:
+    if not isinstance(value, Mapping) or set(value) != keys:
+        raise ValueError(f"{context} key set mismatch")
+    return value
+
+
+def _strict_string_list(value: object, *, context: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not item for item in value
+    ):
+        raise TypeError(f"{context} must be a list of nonempty strings")
+    items = tuple(value)
+    if items != tuple(sorted(set(items))):
+        raise ValueError(f"{context} must be sorted and unique")
+    return items
+
+
+def _strict_pair_list(
+    value: object,
+    *,
+    context: str,
+) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, list):
+        raise TypeError(f"{context} must be a list")
+    pairs: list[tuple[int, int]] = []
+    for pair in value:
+        if (
+            not isinstance(pair, list)
+            or len(pair) != 2
+            or any(type(index) is not int for index in pair)
+        ):
+            raise TypeError(f"{context} entries must be integer pairs")
+        pairs.append((pair[0], pair[1]))
+    result = tuple(pairs)
+    if result != tuple(sorted(set(result))):
+        raise ValueError(f"{context} must be sorted and unique")
+    return result
+
+
+def _strict_sha256(value: object, *, context: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{context} must be a SHA-256 hash")
+    return value
+
+
+def _verify_quantized_scalar_payload(value: object, *, context: str) -> None:
+    payload = _strict_mapping(
+        value,
+        keys={"kind", "quantum", "bucket"},
+        context=context,
+    )
+    kind = payload["kind"]
+    quantum = payload["quantum"]
+    bucket = payload["bucket"]
+    if kind not in {"zero", "quantized"}:
+        raise ValueError(f"{context} kind is invalid")
+    if not isinstance(quantum, str) or not isinstance(bucket, str):
+        raise TypeError(f"{context} quantum and bucket must be strings")
+    try:
+        quantum_value = Decimal(quantum)
+        bucket_value = int(bucket)
+    except (ArithmeticError, ValueError) as error:
+        raise ValueError(f"{context} quantization is invalid") from error
+    if (
+        not quantum_value.is_finite()
+        or quantum_value <= 0
+        or str(bucket_value) != bucket
+        or (kind == "zero") != (bucket_value == 0)
+    ):
+        raise ValueError(f"{context} quantization is noncanonical")
+
+
+def _verify_metric_payload(
+    value: object,
+    *,
+    threshold_field: str,
+    context: str,
+    allow_missing: bool = False,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{context} must be a mapping")
+    kind = value.get("kind")
+    if kind == "missing":
+        if not allow_missing:
+            raise ValueError(f"{context} cannot be missing from a certified payload")
+        payload = _strict_mapping(
+            value,
+            keys={"version", "kind", "threshold_field"},
+            context=context,
+        )
+    else:
+        payload = _strict_mapping(
+            value,
+            keys={
+                "version",
+                "gate",
+                "kind",
+                "quantum",
+                "bucket",
+                "threshold_field",
+            },
+            context=context,
+        )
+        if payload["gate"] != "within":
+            raise ValueError(f"{context} is outside its certified threshold")
+        _verify_quantized_scalar_payload(
+            {
+                "kind": payload["kind"],
+                "quantum": payload["quantum"],
+                "bucket": payload["bucket"],
+            },
+            context=context,
+        )
+    if (
+        payload["version"] != CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION
+        or payload["threshold_field"] != threshold_field
+    ):
+        raise ValueError(f"{context} schema or threshold field mismatch")
+
+
+def _verify_phase_payload(
+    value: object,
+    *,
+    context: str,
+    allow_missing: bool,
+) -> None:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{context} must be a mapping")
+    if value.get("kind") == "missing":
+        if not allow_missing:
+            raise ValueError(f"{context} cannot be missing from a certified payload")
+        payload = _strict_mapping(
+            value,
+            keys={"version", "kind"},
+            context=context,
+        )
+    else:
+        payload = _strict_mapping(
+            value,
+            keys={"version", "kind", "real", "imaginary"},
+            context=context,
+        )
+        if payload["kind"] != "quantized_components":
+            raise ValueError(f"{context} kind is invalid")
+        _verify_quantized_scalar_payload(payload["real"], context=f"{context}.real")
+        _verify_quantized_scalar_payload(
+            payload["imaginary"], context=f"{context}.imaginary"
+        )
+    if payload["version"] != CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION:
+        raise ValueError(f"{context} version mismatch")
+
+
+def _verify_certified_candidate_payload(
+    certificate: Mapping[str, object],
+    input_payload: Mapping[str, object],
+    presentation: Mapping[str, object],
+) -> str:
+    certificate = _strict_mapping(
+        certificate,
+        keys={
+            "version",
+            "candidate_id",
+            "status",
+            "required_operations",
+            "observed_operations",
+            "operation_coverage_complete",
+            "pair_coverage_complete",
+            "thresholds",
+            "presentation_hash",
+            "input_identity_hash",
+            "states",
+            "operations",
+            "relations",
+            "relation_residual_max",
+            "joint_certification_status",
+            "joint_certification_failure",
+            "failures",
+        },
+        context="certificate payload",
+    )
+    input_payload = _strict_mapping(
+        input_payload,
+        keys={"version", "presentation_hash", "required_pairs", "operations", "states"},
+        context="input identity payload",
+    )
+    presentation = _strict_mapping(
+        presentation,
+        keys={
+            "version",
+            "source_identity_bound",
+            "generators",
+            "relations",
+            "central_phases",
+        },
+        context="presentation payload",
+    )
+    candidate_id = certificate["candidate_id"]
+    if not isinstance(candidate_id, str) or not candidate_id.strip():
+        raise ValueError("candidate_id is empty")
+    if (
+        certificate["version"] != CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION
+        or certificate["status"] != CandidateSymmetryStatus.CERTIFIED.value
+        or certificate["joint_certification_status"]
+        != CandidateJointCertificationStatus.CERTIFIED.value
+        or certificate["joint_certification_failure"] is not None
+        or certificate["operation_coverage_complete"] is not True
+        or certificate["pair_coverage_complete"] is not True
+        or certificate["failures"] != []
+    ):
+        raise ValueError("certificate is not internally CERTIFIED")
+    required = _strict_string_list(
+        certificate["required_operations"], context="required_operations"
+    )
+    observed = _strict_string_list(
+        certificate["observed_operations"], context="observed_operations"
+    )
+    if required != observed:
+        raise ValueError("required and observed operations differ")
+
+    thresholds = _strict_mapping(
+        certificate["thresholds"],
+        keys={item.name for item in fields(CandidateSymmetryThresholds)},
+        context="certificate thresholds",
+    )
+    if any(
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not np.isfinite(value)
+        or value < 0
+        for value in thresholds.values()
+    ):
+        raise ValueError("certificate thresholds are invalid")
+
+    if input_payload["version"] != "kp.candidate-symmetry-input.v1":
+        raise ValueError("input identity payload version mismatch")
+    required_pair_payload = input_payload["required_pairs"]
+    if not isinstance(required_pair_payload, Mapping) or set(required_pair_payload) != set(required):
+        raise ValueError("input required-pair operation coverage mismatch")
+    input_pairs = {
+        name: _strict_pair_list(
+            required_pair_payload[name], context=f"input required_pairs.{name}"
+        )
+        for name in required
+    }
+
+    input_operations_raw = input_payload["operations"]
+    if not isinstance(input_operations_raw, list):
+        raise TypeError("input operations must be a list")
+    input_operations: dict[str, Mapping[str, object]] = {}
+    for index, raw in enumerate(input_operations_raw):
+        operation = _strict_mapping(
+            raw,
+            keys={
+                "key",
+                "name",
+                "antiunitary",
+                "pairs",
+                "raw_action_hash",
+                "exact_action_hash",
+            },
+            context=f"input operation[{index}]",
+        )
+        name = operation["name"]
+        if (
+            not isinstance(name, str)
+            or operation["key"] != name
+            or type(operation["antiunitary"]) is not bool
+            or name in input_operations
+        ):
+            raise ValueError("input operation identity is invalid")
+        _strict_sha256(operation["raw_action_hash"], context=f"{name} raw action")
+        _strict_sha256(operation["exact_action_hash"], context=f"{name} exact action")
+        if _strict_pair_list(operation["pairs"], context=f"input operation {name} pairs") != input_pairs.get(name):
+            raise ValueError(f"input operation {name} pair coverage mismatch")
+        input_operations[name] = operation
+    if tuple(input_operations) != required:
+        raise ValueError("input operation coverage mismatch")
+
+    input_states_raw = input_payload["states"]
+    if not isinstance(input_states_raw, list):
+        raise TypeError("input states must be a list")
+    input_state_keys: list[tuple[str, int]] = []
+    for index, raw in enumerate(input_states_raw):
+        state = _strict_mapping(
+            raw,
+            keys={"role", "k_index", "present", "u_low_hash", "heff_hash"},
+            context=f"input state[{index}]",
+        )
+        if (
+            state["role"] not in {"source", "target"}
+            or type(state["k_index"]) is not int
+            or state["present"] is not True
+        ):
+            raise ValueError("input state identity is invalid")
+        _strict_sha256(state["u_low_hash"], context="input state u_low")
+        _strict_sha256(state["heff_hash"], context="input state Heff")
+        input_state_keys.append((state["role"], state["k_index"]))
+    if tuple(input_state_keys) != tuple(sorted(set(input_state_keys))):
+        raise ValueError("input states must be sorted and unique")
+
+    states_raw = certificate["states"]
+    if not isinstance(states_raw, list):
+        raise TypeError("certificate states must be a list")
+    certificate_state_keys: list[tuple[str, int]] = []
+    for index, raw in enumerate(states_raw):
+        state = _strict_mapping(
+            raw,
+            keys={
+                "role",
+                "k_index",
+                "projection_orthonormality_residual",
+                "heff_hermiticity_residual",
+                "failures",
+            },
+            context=f"certificate state[{index}]",
+        )
+        if (
+            state["role"] not in {"source", "target"}
+            or type(state["k_index"]) is not int
+            or state["failures"] != []
+        ):
+            raise ValueError("certified state is invalid")
+        _verify_metric_payload(
+            state["projection_orthonormality_residual"],
+            threshold_field="projection_orthonormality_residual",
+            context="state projection orthonormality",
+        )
+        _verify_metric_payload(
+            state["heff_hermiticity_residual"],
+            threshold_field="heff_hermiticity_residual",
+            context="state Heff Hermiticity",
+        )
+        certificate_state_keys.append((state["role"], state["k_index"]))
+    if tuple(certificate_state_keys) != tuple(input_state_keys):
+        raise ValueError("certificate/input state coverage mismatch")
+
+    operations_raw = certificate["operations"]
+    if not isinstance(operations_raw, list):
+        raise TypeError("certificate operations must be a list")
+    operation_names: list[str] = []
+    pair_metric_fields = {
+        "raw_h_leakage": "raw_h_leakage",
+        "raw_action_unitarity_residual": "raw_h_action_unitarity_residual",
+        "exactification_distance": "exactification_distance",
+        "intertwining_residual": "intertwining_residual",
+        "heff_covariance_residual": "heff_covariance_residual",
+    }
+    for index, raw in enumerate(operations_raw):
+        operation = _strict_mapping(
+            raw,
+            keys={
+                "name",
+                "antiunitary",
+                "required_pairs",
+                "observed_pairs",
+                "coverage_complete",
+                "raw_h_action_unitarity_residual",
+                "exact_action_finite",
+                "exact_action_unitarity_residual",
+                "pairs",
+                "antiunitary_square_phase",
+                "antiunitary_square_residual",
+                "failures",
+            },
+            context=f"certificate operation[{index}]",
+        )
+        name = operation["name"]
+        if (
+            not isinstance(name, str)
+            or name not in input_operations
+            or type(operation["antiunitary"]) is not bool
+            or operation["antiunitary"] != input_operations[name]["antiunitary"]
+            or operation["coverage_complete"] is not True
+            or operation["exact_action_finite"] is not True
+            or operation["failures"] != []
+        ):
+            raise ValueError("certified operation is invalid")
+        required_pairs = _strict_pair_list(
+            operation["required_pairs"], context=f"{name} required pairs"
+        )
+        observed_pairs = _strict_pair_list(
+            operation["observed_pairs"], context=f"{name} observed pairs"
+        )
+        if required_pairs != observed_pairs or required_pairs != input_pairs[name]:
+            raise ValueError(f"{name} pair coverage is inconsistent")
+        _verify_metric_payload(
+            operation["raw_h_action_unitarity_residual"],
+            threshold_field="raw_h_action_unitarity_residual",
+            context=f"{name} raw action unitarity",
+        )
+        _verify_metric_payload(
+            operation["exact_action_unitarity_residual"],
+            threshold_field="exact_action_unitarity_residual",
+            context=f"{name} exact action unitarity",
+        )
+        _verify_phase_payload(
+            operation["antiunitary_square_phase"],
+            context=f"{name} square phase",
+            allow_missing=not operation["antiunitary"],
+        )
+        _verify_metric_payload(
+            operation["antiunitary_square_residual"],
+            threshold_field="antiunitary_square_residual",
+            context=f"{name} square residual",
+            allow_missing=not operation["antiunitary"],
+        )
+        pair_rows = operation["pairs"]
+        if not isinstance(pair_rows, list):
+            raise TypeError(f"{name} pair certificates must be a list")
+        certified_pairs: list[tuple[int, int]] = []
+        for pair_index, raw_pair in enumerate(pair_rows):
+            pair = _strict_mapping(
+                raw_pair,
+                keys={
+                    "operation",
+                    "target_k_index",
+                    "source_k_index",
+                    *pair_metric_fields,
+                    "failures",
+                },
+                context=f"{name} pair[{pair_index}]",
+            )
+            if (
+                pair["operation"] != name
+                or type(pair["target_k_index"]) is not int
+                or type(pair["source_k_index"]) is not int
+                or pair["failures"] != []
+            ):
+                raise ValueError(f"{name} pair certificate is invalid")
+            for metric_name, threshold_field in pair_metric_fields.items():
+                _verify_metric_payload(
+                    pair[metric_name],
+                    threshold_field=threshold_field,
+                    context=f"{name} pair {metric_name}",
+                )
+            certified_pairs.append(
+                (pair["target_k_index"], pair["source_k_index"])
+            )
+        if tuple(certified_pairs) != required_pairs:
+            raise ValueError(f"{name} pair certificate coverage mismatch")
+        operation_names.append(name)
+    if tuple(operation_names) != required:
+        raise ValueError("certificate operation coverage mismatch")
+
+    relations_raw = certificate["relations"]
+    if not isinstance(relations_raw, list):
+        raise TypeError("certificate relations must be a list")
+    relation_names: list[str] = []
+    for index, raw in enumerate(relations_raw):
+        relation = _strict_mapping(
+            raw,
+            keys={"name", "residual", "maximum_entry", "failures"},
+            context=f"certificate relation[{index}]",
+        )
+        if not isinstance(relation["name"], str) or not relation["name"] or relation["failures"] != []:
+            raise ValueError("certified relation is invalid")
+        _verify_metric_payload(
+            relation["residual"],
+            threshold_field="relation_residual",
+            context="relation residual",
+        )
+        _verify_metric_payload(
+            relation["maximum_entry"],
+            threshold_field="relation_residual",
+            context="relation maximum entry",
+        )
+        relation_names.append(relation["name"])
+    if tuple(relation_names) != tuple(sorted(set(relation_names))):
+        raise ValueError("certificate relations must be sorted and unique")
+    _verify_metric_payload(
+        certificate["relation_residual_max"],
+        threshold_field="relation_residual",
+        context="maximum relation residual",
+        allow_missing=not relation_names,
+    )
+
+    generators = presentation["generators"]
+    relations = presentation["relations"]
+    if not isinstance(generators, list) or not isinstance(relations, list):
+        raise TypeError("presentation generators and relations must be lists")
+    generator_names: list[str] = []
+    for index, raw in enumerate(generators):
+        generator = _strict_mapping(
+            raw,
+            keys={"name", "antiunitary"},
+            context=f"presentation generator[{index}]",
+        )
+        if not isinstance(generator["name"], str) or type(generator["antiunitary"]) is not bool:
+            raise TypeError("presentation generator is invalid")
+        generator_names.append(generator["name"])
+    presentation_relation_names: list[str] = []
+    for index, raw in enumerate(relations):
+        relation = _strict_mapping(
+            raw,
+            keys={"name", "lhs", "rhs", "central_phase"},
+            context=f"presentation relation[{index}]",
+        )
+        if (
+            not isinstance(relation["name"], str)
+            or not isinstance(relation["lhs"], list)
+            or not isinstance(relation["rhs"], list)
+            or any(not isinstance(item, str) for item in relation["lhs"] + relation["rhs"])
+        ):
+            raise TypeError("presentation relation is invalid")
+        presentation_relation_names.append(relation["name"])
+    if (
+        tuple(sorted(set(generator_names))) != required
+        or len(generator_names) != len(required)
+        or tuple(sorted(set(presentation_relation_names))) != tuple(relation_names)
+        or len(presentation_relation_names) != len(relation_names)
+    ):
+        raise ValueError("certificate/presentation coverage mismatch")
+    if presentation["version"] != "kp.candidate-symmetry-presentation.v1" or presentation["source_identity_bound"] is not False:
+        raise ValueError("presentation payload metadata mismatch")
+    central_phases = presentation["central_phases"]
+    if not isinstance(central_phases, list):
+        raise TypeError("presentation central phases must be a list")
+    phase_components = [
+        relation["central_phase"]
+        for relation in relations
+    ] + list(central_phases)
+    if any(
+        not isinstance(phase, list)
+        or len(phase) != 2
+        or any(
+            isinstance(component, bool)
+            or not isinstance(component, (int, float))
+            or not np.isfinite(component)
+            for component in phase
+        )
+        for phase in phase_components
+    ):
+        raise TypeError("presentation phase components are invalid")
+    return candidate_id.strip()
+
+
 def verify_candidate_certificate_envelope(
     envelope: Mapping[str, object],
 ) -> dict[str, object]:
@@ -703,8 +1248,6 @@ def verify_candidate_certificate_envelope(
         presentation_payload = json.loads(_canonical_payload_json(presentation_payload))
         certificate_hash = str(envelope["certificate_hash"])
         input_identity_hash = str(envelope["input_identity_hash"])
-        if certificate_payload.get("version") != CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION:
-            raise ValueError("certificate payload version mismatch")
         if _candidate_certificate_payload_hash(certificate_payload) != certificate_hash:
             raise ValueError("certificate hash mismatch")
         if hash_mapping(input_payload) != input_identity_hash:
@@ -716,18 +1259,11 @@ def verify_candidate_certificate_envelope(
             raise ValueError("presentation identity mismatch")
         if input_payload.get("presentation_hash") != presentation_hash:
             raise ValueError("input/presentation identity mismatch")
-        if (
-            certificate_payload.get("status") != CandidateSymmetryStatus.CERTIFIED.value
-            or certificate_payload.get("joint_certification_status")
-            != CandidateJointCertificationStatus.CERTIFIED.value
-            or certificate_payload.get("failures") != []
-            or not bool(certificate_payload.get("operation_coverage_complete"))
-            or not bool(certificate_payload.get("pair_coverage_complete"))
-        ):
-            raise ValueError("certificate is not CERTIFIED")
-        candidate_id = str(certificate_payload.get("candidate_id", "")).strip()
-        if not candidate_id:
-            raise ValueError("candidate_id is empty")
+        candidate_id = _verify_certified_candidate_payload(
+            certificate_payload,
+            input_payload,
+            presentation_payload,
+        )
     except (KeyError, TypeError, ValueError) as error:
         raise ValueError(f"{context} is invalid: {error}") from error
     return {

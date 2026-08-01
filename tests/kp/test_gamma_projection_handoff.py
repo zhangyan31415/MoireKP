@@ -9,6 +9,7 @@ from unittest.mock import patch
 import numpy as np
 import pytest
 
+from kp import projection_handoff as handoff_mod
 from kp.blocks import (
     GammaRoutingError,
     GammaRoutingThresholds,
@@ -25,6 +26,7 @@ from kp.projection_handoff import (
 )
 from kp.projection_selection import CandidateRejectionReason
 from kp.identity import PROJECTION_BASIS_HANDOFF_VERSION, hash_array
+from kp.symmetry import candidate_certificate as candidate_certificate_mod
 from kp.symmetry import projection as projection_mod
 from kp.symmetry.candidate_certificate import (
     CandidateOperationInput,
@@ -321,6 +323,31 @@ def test_gamma_routed_schema_rejects_noncanonical_disk_dtype(
 
 
 @pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("joint_band_indices", np.asarray([[0, 1]], dtype=np.int64)),
+        ("group_ranks", np.asarray([[1, 1]], dtype=np.int64)),
+        ("group_offsets", np.asarray([[0, 1, 2]], dtype=np.int64)),
+        ("k_indices", np.asarray([[4, 7]], dtype=np.int64)),
+        ("heff_k_indices", np.asarray([[4, 7]], dtype=np.int64)),
+    ],
+)
+def test_gamma_routed_schema_rejects_noncanonical_integer_shape(
+    tmp_path: Path,
+    field: str,
+    replacement: np.ndarray,
+) -> None:
+    path = tmp_path / "basis.npz"
+    save_gamma_routed_basis_spec(path, _spec())
+    _rewrite_npz(path, **{field: replacement})
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        load_gamma_routed_basis_spec(path)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
     "legacy_field",
     [
         "nlow_state_list",
@@ -416,6 +443,51 @@ def test_gamma_routed_handoff_rejects_tampered_candidate_certificate(
     assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
+@pytest.mark.parametrize("missing_field", ["operations", "states"])
+def test_gamma_routed_handoff_rejects_rehashed_incomplete_certificate_payload(
+    tmp_path: Path,
+    missing_field: str,
+) -> None:
+    path = tmp_path / "basis.npz"
+    original = _spec()
+    envelope = original.candidate_certificate_envelope
+    del envelope["certificate_payload"][missing_field]
+    certificate_hash = candidate_certificate_mod._candidate_certificate_payload_hash(
+        envelope["certificate_payload"]
+    )
+    envelope["certificate_hash"] = certificate_hash
+    envelope_json = json.dumps(envelope, separators=(",", ":"), sort_keys=True)
+    identity = dict(original.artifact_identity)
+    identity["basis_hash"] = handoff_mod._bound_routed_basis_hash(
+        base_basis_hash=original.base_basis_hash,
+        layout_hash=original.layout.layout_hash,
+        thresholds_hash=original.thresholds.identity_hash,
+        k_indices_hash=str(identity["k_indices_hash"]),
+        frame_hash=original.frame_hash,
+        reference_frame_hash=original.reference_frame_hash,
+        heff_hash=original.heff_hash,
+        closure_certificate_hashes=original.closure_certificate_hashes,
+        routing_certificate_hashes=original.routing_certificate_hashes,
+        source_hamiltonian_hash=original.source_hamiltonian_hash,
+        ordered_q_hashes=original.ordered_q_hashes,
+        raw_action_package_hash=original.raw_action_package_hash,
+        candidate_certificate_hash=certificate_hash,
+        candidate_input_identity_hash=original.candidate_input_identity_hash,
+    )
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        tampered = replace(
+            original,
+            artifact_identity=identity,
+            candidate_certificate_envelope_json=envelope_json,
+            candidate_certificate_hash=certificate_hash,
+        )
+        save_gamma_routed_basis_spec(path, tampered)
+        load_gamma_routed_basis_spec(path)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
 def test_gamma_routed_handoff_rejects_missing_required_k() -> None:
     spec = _spec()
 
@@ -470,6 +542,26 @@ def test_gamma_routed_spec_detects_in_memory_heff_replacement() -> None:
         replace(spec, authoritative_heff=changed)
 
     assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"k_indices": (4.5, 7.5), "heff_k_indices": (4.5, 7.5)},
+        {"heff_k_indices": (4.0, 7.0)},
+        {"joint_band_indices": (0.0, 1.0)},
+        {"group_ranks": (True, 1)},
+        {"group_offsets": (0, 1.0, 2)},
+    ],
+)
+def test_gamma_routed_spec_rejects_non_integral_in_memory_metadata(
+    updates: dict[str, tuple[object, ...]],
+) -> None:
+    with pytest.raises(GammaRoutingError) as rejected:
+        replace(_spec(), **updates)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+    assert "strict integers" in str(rejected.value)
 
 
 def test_gamma_routed_factory_binds_task7_candidate_certificate() -> None:
@@ -637,6 +729,23 @@ def test_project_handoff_loader_retains_versioned_explicit_legacy_compatibility(
     assert isinstance(loaded, ExplicitLegacyBasisSpec)
     assert loaded.projection_basis_kind == "explicit_legacy"
     assert loaded.nlow_state_list == [[0], [1]]
+
+
+def test_project_handoff_loader_rejects_unknown_discriminator_with_typed_reason(
+    tmp_path: Path,
+) -> None:
+    project_dir = tmp_path / "projection"
+    _write_legacy_project_artifacts(project_dir)
+    basis_path = project_dir / "basis.npz"
+    with np.load(basis_path, allow_pickle=True) as payload:
+        copied = {name: np.array(payload[name], copy=True) for name in payload.files}
+    copied["projection_basis_kind"] = np.asarray("future_projection_kind")
+    np.savez(basis_path, **copied)
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        projection_mod._load_persisted_projection_basis_handoff(project_dir)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
 @pytest.mark.parametrize(
