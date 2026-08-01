@@ -49,6 +49,97 @@ def _copy_section(value) -> dict[str, Any]:
     return dict(value or {})
 
 
+_CANONICAL_SYSTEM_KEYS = {
+    "output",
+    "structure",
+    "hamiltonian",
+    "overlap",
+    "orbitals",
+    "twist_index",
+    "layers",
+    "spin",
+}
+_RELEASE_TOP_LEVEL_KEYS = {
+    "system",
+    "case",
+    "twist",
+    "paths",
+    "bands",
+    "symmetry",
+    "topology",
+    "field",
+    "cluster",
+    "symmetry_analysis",
+    # Kept here so existing targeted error messages remain stable.
+    "compute",
+    "output_layout",
+    "slab",
+}
+
+
+@dataclass
+class SystemConfig:
+    """Canonical release-facing source-system input."""
+
+    output: str
+    structure: str
+    hamiltonian: str
+    overlap: str
+    orbitals: Dict[str, str]
+    twist_index: int
+    layers: List[int]
+    spin: bool
+
+    def __post_init__(self) -> None:
+        for key in ("output", "structure", "hamiltonian", "overlap"):
+            if getattr(self, key) in (None, ""):
+                raise ValueError(f"system.{key} is required.")
+        if not isinstance(self.orbitals, dict) or not self.orbitals:
+            raise ValueError("system.orbitals must be a non-empty species-to-orbitals mapping.")
+        self.orbitals = {str(species): str(spec) for species, spec in self.orbitals.items()}
+        if int(self.twist_index) < 1:
+            raise ValueError("system.twist_index must be a positive integer.")
+        self.twist_index = int(self.twist_index)
+        if not isinstance(self.layers, list) or not self.layers or any(int(value) < 1 for value in self.layers):
+            raise ValueError("system.layers must be a non-empty list of positive integers.")
+        self.layers = [int(value) for value in self.layers]
+        if not isinstance(self.spin, bool):
+            raise ValueError("system.spin must be true or false.")
+
+    def normalize(self, base_dir: Path) -> None:
+        self.output = PathConfig._resolve_path(self.output, base_dir)
+        self.structure = PathConfig._resolve_path(self.structure, base_dir)
+        self.hamiltonian = PathConfig._resolve_path(self.hamiltonian, base_dir)
+        self.overlap = PathConfig._resolve_path(self.overlap, base_dir)
+
+
+def _normalize_canonical_system(
+    config_dict: dict[str, Any],
+    *,
+    config_dir: Path,
+) -> SystemConfig | None:
+    if "system" not in config_dict:
+        return None
+    conflicting = [name for name in ("case", "twist", "paths") if name in config_dict]
+    if conflicting:
+        raise ValueError(
+            "Canonical system input cannot be mixed with legacy section(s): "
+            f"{conflicting}"
+        )
+    raw = config_dict.get("system")
+    if not isinstance(raw, dict):
+        raise ValueError("system must be a mapping.")
+    unknown = sorted(set(raw) - _CANONICAL_SYSTEM_KEYS)
+    if unknown:
+        raise ValueError(f"system contains unknown field(s): {unknown}")
+    missing = sorted(_CANONICAL_SYSTEM_KEYS - set(raw))
+    if missing:
+        raise ValueError(f"system is missing required field(s): {missing}")
+    system = SystemConfig(**raw)
+    system.normalize(config_dir)
+    return system
+
+
 def _reject_keys(section: dict[str, Any], keys: set[str], *, section_name: str) -> None:
     present = sorted(keys & set(section))
     if present:
@@ -575,6 +666,7 @@ class Config:
     topology: Dict[str, Any] = field(default_factory=dict)
     kpath: Optional[Dict[str, Any]] = None
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
+    system: Optional[SystemConfig] = None
 
     def apply_workflow_section(self, mode: Optional[str] = None) -> None:
         """Apply release-facing workflow section fields to the internal runtime config."""
@@ -627,6 +719,12 @@ class Config:
 
         with open(config_path, 'r') as f:
             config_dict = yaml.safe_load(f) or {}
+        if not isinstance(config_dict, dict):
+            raise ValueError("TAPW configuration root must be a mapping.")
+        unknown_top_level = sorted(set(config_dict) - _RELEASE_TOP_LEVEL_KEYS)
+        if unknown_top_level:
+            raise ValueError(f"TAPW config contains unknown top-level section(s): {unknown_top_level}")
+        system_config = _normalize_canonical_system(config_dict, config_dir=config_dir)
         if 'slab' in config_dict:
             raise ValueError("The release TAPW package does not support slab configuration.")
         if config_dict.get("output_layout") is not None:
@@ -634,6 +732,8 @@ class Config:
         if config_dict.get("compute") not in (None, {}):
             raise ValueError("Top-level compute is not supported in release-only TAPW configs; use bands/symmetry/topology.")
         case_raw = _copy_section(config_dict.get("case"))
+        if system_config is not None:
+            case_raw = {"output_root": system_config.output}
         bands_raw = _copy_section(config_dict.get("bands"))
         symmetry_raw = _copy_section(config_dict.get("symmetry"))
         field_raw = _copy_section(config_dict.get("field"))
@@ -702,6 +802,12 @@ class Config:
             )
 
         twist_raw = dict(config_dict.get('twist', {}) or {})
+        if system_config is not None:
+            twist_raw = {
+                "twist_index_m": system_config.twist_index,
+                "twist_layer": list(system_config.layers),
+                "spin": system_config.spin,
+            }
         if "num_layers" in twist_raw:
             raise ValueError("twist.num_layers is not supported in release-only TAPW configs; use twist.twist_layer.")
         if "num_layers" not in twist_raw and "twist_layer" in twist_raw:
@@ -709,6 +815,13 @@ class Config:
         twist_config = TwistConfig(**twist_raw)
 
         paths_raw = dict(config_dict.get('paths', {}) or {})
+        if system_config is not None:
+            paths_raw = {
+                "H_file": system_config.hamiltonian,
+                "S_file": system_config.overlap,
+                "input_file": system_config.structure,
+                "output_dir": system_config.output,
+            }
         if paths_raw.get("kpath_out") not in (None, ""):
             raise ValueError("paths.kpath_out is not supported in release-only TAPW configs; it is inferred from case/output.")
         if "output_dir" not in paths_raw and case_raw.get("output_root") not in (None, ""):
@@ -749,6 +862,7 @@ class Config:
             topology=topology_config,
             kpath=kpath_config,
             cluster=cluster_config,
+            system=system_config,
         )
         # Propagate twist bravais to compute for downstream logic
         config_obj.compute.bravais = config_obj.twist.bravais

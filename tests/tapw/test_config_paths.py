@@ -75,6 +75,95 @@ def _write_release_path_config(config_dir: Path) -> Path:
     return config_path
 
 
+def _write_canonical_system_config(config_dir: Path) -> Path:
+    for name in ("POSCAR", "H.npz", "S.npz"):
+        (config_dir / name).write_text("placeholder\n", encoding="utf-8")
+    payload = {
+        "system": {
+            "output": "results",
+            "structure": "POSCAR",
+            "hamiltonian": "H.npz",
+            "overlap": "S.npz",
+            "orbitals": {"Mo": "s3p2d1", "Te": "s3p2d2"},
+            "twist_index": 6,
+            "layers": [1, 2],
+            "spin": True,
+        },
+        "bands": {
+            "valley": "Gamma",
+            "q_shell": 4,
+            "kpath": {
+                "labels": ["G", "M"],
+                "points_per_segment": 2,
+                "coordinates": {"G": [0.0, 0.0], "M": [0.5, 0.0]},
+            },
+        },
+    }
+    config_path = config_dir / "config.yaml"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    return config_path
+
+
+def test_canonical_system_normalizes_to_runtime_sections_relative_to_yaml(tmp_path, monkeypatch):
+    config_dir = tmp_path / "case" / "tapw" / "configs"
+    config_dir.mkdir(parents=True)
+    other_cwd = tmp_path / "other"
+    other_cwd.mkdir()
+    config_path = _write_canonical_system_config(config_dir)
+    monkeypatch.chdir(other_cwd)
+
+    config = Config.from_yaml(str(config_path))
+
+    assert config.system is not None
+    assert Path(config.paths.input_file) == config_dir / "POSCAR"
+    assert Path(config.paths.H_file) == config_dir / "H.npz"
+    assert Path(config.paths.S_file) == config_dir / "S.npz"
+    assert Path(config.paths.output_dir) == config_dir / "results"
+    assert config.twist.twist_index_m == 6
+    assert config.twist.twist_layer == [1, 2]
+    assert config.twist.num_layers == 3
+    assert config.twist.spin is True
+    assert config.system.orbitals == {"Mo": "s3p2d1", "Te": "s3p2d2"}
+
+
+@pytest.mark.parametrize("unknown_key", ["node", "python", "validation_dir"])
+def test_canonical_system_rejects_unknown_fields(tmp_path, unknown_key):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config_path = _write_canonical_system_config(config_dir)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["system"][unknown_key] = "private-value"
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"system.*unknown.*{unknown_key}"):
+        Config.from_yaml(str(config_path))
+
+
+@pytest.mark.parametrize("legacy_section", ["case", "twist", "paths"])
+def test_canonical_system_rejects_legacy_input_sections(tmp_path, legacy_section):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config_path = _write_canonical_system_config(config_dir)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload[legacy_section] = {}
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=rf"system.*{legacy_section}"):
+        Config.from_yaml(str(config_path))
+
+
+def test_canonical_system_rejects_unknown_top_level_sections(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    config_path = _write_canonical_system_config(config_dir)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["campaign"] = {"enable": True}
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"unknown top-level.*campaign"):
+        Config.from_yaml(str(config_path))
+
+
 def test_top_level_compute_config_is_rejected_for_release_only_configs(tmp_path):
     config_dir = tmp_path / "case"
     config_dir.mkdir()
