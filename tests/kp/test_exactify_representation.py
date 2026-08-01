@@ -2239,6 +2239,90 @@ def test_loaded_m_valley_generators_use_joint_exactification(tmp_path: Path) -> 
     )
 
 
+def test_joint_exactification_preserves_raw_spinful_tr_c2_common_phase_frame() -> None:
+    q = np.zeros((1, 2), dtype=float)
+    b1, b2 = _hex_bm()
+    tr_block = np.array([[0.0, 1.0], [-1.0, 0.0]], dtype=np.complex128)
+    c2_forward = np.diag(
+        [np.exp(1.0j * np.pi / 3.0), np.exp(2.0j * np.pi / 3.0)]
+    ).astype(np.complex128)
+    c2_backward = -c2_forward.conjugate().T
+    tr = np.block(
+        [
+            [tr_block, np.zeros((2, 2), dtype=np.complex128)],
+            [np.zeros((2, 2), dtype=np.complex128), -tr_block],
+        ]
+    )
+    c2 = np.block(
+        [
+            [np.zeros((2, 2), dtype=np.complex128), c2_backward],
+            [c2_forward, np.zeros((2, 2), dtype=np.complex128)],
+        ]
+    )
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "TR",
+                    "operation": "TR",
+                    "antiunitary": True,
+                    "k_map": {"type": "negation", "in_model_frame": True},
+                    "q_map": {"type": "negation", "in_model_frame": True},
+                    "sector_map": "identity",
+                    "orbital_map": {"*": {0: 1, 1: 0}},
+                    "group_relations": [
+                        {"type": "power", "operation": "TR", "power": 2, "phase": -1.0}
+                    ],
+                },
+                {
+                    **_source_meta(),
+                    "name": "C2",
+                    "operation": "C2",
+                    "antiunitary": False,
+                    "k_map": {
+                        "type": "reflection",
+                        "axis_deg": 0.0,
+                        "in_model_frame": True,
+                    },
+                    "q_map": {
+                        "type": "reflection",
+                        "axis_deg": 0.0,
+                        "in_model_frame": True,
+                    },
+                    "sector_map": "layer_exchange",
+                    "group_relations": [
+                        {"type": "power", "operation": "C2", "power": 2, "phase": -1.0}
+                    ],
+                },
+            ]
+        },
+        matrices={"TR": tr, "C2": c2},
+        Q_set1=q,
+        Q_set2=q,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 2},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 2},
+        ],
+        n_orb=(2, 2),
+        bM1=b1,
+        bM2=b2,
+        raw_config={"exactification": {}},
+    )
+
+    np.testing.assert_allclose(exactified["TR"], tr, atol=1.0e-14, rtol=0.0)
+    np.testing.assert_allclose(exactified["C2"], c2, atol=1.0e-14, rtol=0.0)
+    for name in ("TR", "C2"):
+        assert np.isfinite(
+            reports[name]["report"]["distance_mod_global_phase"]
+        )
+    joint = reports["__joint_exactification__"]
+    assert joint["phase_preserving_source"]["status"] == "certified"
+    assert joint["report"]["post_relation_residual_max"] < 1.0e-14
+    assert joint["report"]["route_correction_max"] < 1.0e-14
+
+
 def test_required_joint_exactification_rejects_unsupported_presentation() -> None:
     q = np.zeros((1, 2), dtype=float)
     b1, b2 = _hex_bm()

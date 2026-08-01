@@ -11,11 +11,13 @@ import numpy as np
 
 from .joint_exactification import (
     JointExactificationConfig,
+    JointExactificationBranchError,
     JointExactificationError,
     compile_continuum_magnetic_presentation,
     extract_block_route_action,
     joint_exactify_block_actions,
     materialize_block_route_action,
+    phase_preserving_joint_source,
 )
 
 @dataclass(frozen=True)
@@ -929,7 +931,7 @@ def exactify_1d_monomial_phases(
             f"{operation_name} exactification failed: group power residual {power_residual:.3e} exceeds 1.000e-08"
         )
     alpha = np.vdot(exact, arr) / np.vdot(exact, exact)
-    alpha = alpha / abs(alpha)
+    alpha = 1.0 + 0.0j if abs(alpha) == 0.0 else alpha / abs(alpha)
     distance = float(np.linalg.norm(arr - alpha * exact) / max(np.linalg.norm(exact), 1.0))
     final_report = analyze_monomial_support(exact, perm_arr)
     report = ExactificationReport(
@@ -1933,7 +1935,7 @@ def exactify_loaded_symmetry_source(
                     f"presentation is incomplete or unsupported: {exc}"
                 ) from exc
         else:
-            actions = {
+            reference_actions = {
                 generator.name: extract_block_route_action(
                     out[generator.name],
                     name=generator.name,
@@ -1944,11 +1946,26 @@ def exactify_loaded_symmetry_source(
                 )
                 for generator in presentation.generators
             }
-            result = joint_exactify_block_actions(
-                actions,
-                presentation,
-                config=joint_config,
-            )
+            phase_source_report: dict[str, Any] | None = None
+            try:
+                result = joint_exactify_block_actions(
+                    reference_actions,
+                    presentation,
+                    config=joint_config,
+                )
+            except JointExactificationBranchError as canonical_error:
+                result, phase_source_report = phase_preserving_joint_source(
+                    {
+                        generator.name: matrices[generator.name]
+                        for generator in presentation.generators
+                    },
+                    reference_actions,
+                    presentation,
+                    config=joint_config,
+                )
+                phase_source_report["canonical_source_rejection"] = str(
+                    canonical_error
+                )
             artifact_hash = str(result.artifact_metadata["artifact_hash"])
             for generator in presentation.generators:
                 name = generator.name
@@ -1990,6 +2007,10 @@ def exactify_loaded_symmetry_source(
                 "arrays": dict(result.artifact_arrays),
                 "report": dict(result.report),
             }
+            if phase_source_report is not None:
+                reports["__joint_exactification__"][
+                    "phase_preserving_source"
+                ] = phase_source_report
             if output_dir is not None:
                 for generator in presentation.generators:
                     name = generator.name

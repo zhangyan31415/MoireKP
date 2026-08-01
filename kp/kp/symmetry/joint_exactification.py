@@ -25,6 +25,10 @@ class JointExactificationError(ValueError):
     """Input data cannot define a certified joint symmetry action."""
 
 
+class JointExactificationBranchError(JointExactificationError):
+    """A relation logarithm is not separated from its branch boundary."""
+
+
 def _readonly_complex(value: np.ndarray) -> np.ndarray:
     array = np.array(value, dtype=np.complex128, order="C", copy=True)
     array.setflags(write=False)
@@ -1252,7 +1256,7 @@ def project_u1_relations(
         )
     )
     if branch_margin <= branch_certification_bound:
-        raise JointExactificationError(
+        raise JointExactificationBranchError(
             "U(1) relation phase is too close to the principal-branch boundary: "
             f"margin={branch_margin:.6e}, certification_bound="
             f"{branch_certification_bound:.6e}"
@@ -4725,7 +4729,7 @@ def exactify_stabilized_orbit(
         with_jacobian=True,
     )
     if minimum_margin <= config.central_branch_margin:
-        raise JointExactificationError(
+        raise JointExactificationBranchError(
             "stabilized relation-log branch is not safely separated from pi: "
             f"margin={minimum_margin:.6e}, required="
             f"{config.central_branch_margin:.6e}"
@@ -6271,11 +6275,149 @@ def load_joint_exactification_artifact(
     )
 
 
+def phase_preserving_joint_source(
+    raw_matrices: Mapping[str, np.ndarray],
+    reference_actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    config: JointExactificationConfig,
+) -> tuple[JointExactificationResult, dict[str, Any]]:
+    """Polarize raw route blocks without changing their shared gauge phases."""
+
+    names = tuple(generator.name for generator in presentation.generators)
+    if set(raw_matrices) != set(names) or set(reference_actions) != set(names):
+        raise JointExactificationError(
+            "raw phase-preserving source must match the complete presentation"
+        )
+    polar_rms_by_operation: dict[str, float] = {}
+    polar_max_by_operation: dict[str, float] = {}
+    off_route_absolute_by_operation: dict[str, float] = {}
+    off_route_relative_by_operation: dict[str, float] = {}
+    off_route_max_entry_by_operation: dict[str, float] = {}
+    raw_hashes: dict[str, str] = {}
+    polar_actions: dict[str, BlockRouteAction] = {}
+    all_polar_corrections: list[float] = []
+    epsilon = float(np.finfo(np.float64).eps)
+    for generator in presentation.generators:
+        name = generator.name
+        reference = reference_actions[name]
+        raw = np.asarray(raw_matrices[name], dtype=np.complex128)
+        dimension = int(sum(reference.fiber_dimensions))
+        if raw.shape != (dimension, dimension) or not np.all(np.isfinite(raw)):
+            raise JointExactificationError(
+                f"raw phase-preserving source {name!r} has invalid shape or values"
+            )
+        route_mask = np.zeros(raw.shape, dtype=bool)
+        blocks: list[np.ndarray] = []
+        corrections: list[float] = []
+        unitarity_bounds: list[float] = []
+        for source, target in enumerate(reference.fiber_permutation):
+            rows = reference.fiber_indices[target]
+            columns = reference.fiber_indices[source]
+            route_mask[np.ix_(rows, columns)] = True
+            block = np.asarray(raw[np.ix_(rows, columns)], dtype=np.complex128)
+            left, _singular_values, right = np.linalg.svd(block)
+            unitary = np.asarray(left @ right, dtype=np.complex128)
+            correction = float(
+                np.linalg.norm(block - unitary, ord="fro")
+                / np.sqrt(max(1, unitary.shape[1]))
+            )
+            residual = float(
+                np.linalg.norm(
+                    unitary.conjugate().T @ unitary
+                    - np.eye(unitary.shape[1], dtype=np.complex128),
+                    ord="fro",
+                )
+            )
+            bound = float(
+                residual
+                + 512.0
+                * epsilon
+                * max(1, unitary.shape[0] ** 2)
+                * max(1.0, float(np.linalg.norm(unitary, ord="fro") ** 2))
+            )
+            blocks.append(unitary)
+            corrections.append(correction)
+            unitarity_bounds.append(bound)
+        values = np.asarray(corrections, dtype=np.float64)
+        polar_rms = float(np.sqrt(np.mean(np.square(values))))
+        polar_max = float(np.max(values))
+        polar_rms_by_operation[name] = polar_rms
+        polar_max_by_operation[name] = polar_max
+        all_polar_corrections.extend(float(value) for value in values)
+        off_route = np.where(route_mask, 0.0, raw)
+        off_absolute = float(np.linalg.norm(off_route, ord="fro"))
+        off_relative = float(
+            off_absolute
+            / max(float(np.linalg.norm(raw, ord="fro")), np.finfo(np.float64).tiny)
+        )
+        off_max = float(np.max(np.abs(off_route)))
+        off_route_absolute_by_operation[name] = off_absolute
+        off_route_relative_by_operation[name] = off_relative
+        off_route_max_entry_by_operation[name] = off_max
+        if off_relative > config.max_rms_correction or off_max > config.max_route_correction:
+            raise JointExactificationError(
+                f"raw phase-preserving source {name!r} has excessive off-route support: "
+                f"relative={off_relative:.6e}, max_entry={off_max:.6e}"
+            )
+        raw_hashes[name] = hash_array(raw)
+        polar_actions[name] = BlockRouteAction(
+            name,
+            generator.antiunitary,
+            reference.fiber_permutation,
+            reference.fiber_dimensions,
+            tuple(blocks),
+            fiber_indices=reference.fiber_indices,
+            unitarity_certification_bound=max(unitarity_bounds),
+        )
+    combined = np.asarray(all_polar_corrections, dtype=np.float64)
+    polar_rms = float(np.sqrt(np.mean(np.square(combined))))
+    polar_max = float(np.max(combined))
+    if polar_rms > config.max_rms_correction:
+        raise JointExactificationError(
+            "phase-preserving polar RMS correction exceeds the joint budget: "
+            f"{polar_rms:.6e} > {config.max_rms_correction:.6e}"
+        )
+    if polar_max > config.max_route_correction:
+        raise JointExactificationError(
+            "phase-preserving polar route correction exceeds the joint budget: "
+            f"{polar_max:.6e} > {config.max_route_correction:.6e}"
+        )
+    result = joint_exactify_block_actions(
+        polar_actions,
+        presentation,
+        config=config,
+    )
+    return result, {
+        "version": "phase_preserving_joint_source_v1",
+        "status": "certified",
+        "policy": "route_polar_then_minimum_joint_relation_correction",
+        "raw_matrix_hashes": raw_hashes,
+        "polar_correction_rms_by_operation": polar_rms_by_operation,
+        "polar_correction_max_by_operation": polar_max_by_operation,
+        "polar_correction_rms": polar_rms,
+        "polar_correction_max": polar_max,
+        "off_route_absolute_fro_by_operation": off_route_absolute_by_operation,
+        "off_route_relative_fro_by_operation": off_route_relative_by_operation,
+        "off_route_max_entry_by_operation": off_route_max_entry_by_operation,
+        "joint_relation_correction_rms": float(result.report["route_correction_rms"]),
+        "joint_relation_correction_max": float(result.report["route_correction_max"]),
+        "joint_relation_correction_rms_by_operation": dict(
+            result.report["route_correction_rms_by_operation"]
+        ),
+        "joint_relation_correction_max_by_operation": dict(
+            result.report["route_correction_max_by_operation"]
+        ),
+        "joint_artifact_hash": str(result.artifact_metadata["artifact_hash"]),
+    }
+
+
 __all__ = [
     "ActionOrbit",
     "BlockRouteAction",
     "FreeOrbitReport",
     "JOINT_BLOCK_REPRESENTATION_V1",
+    "JointExactificationBranchError",
     "JointExactificationError",
     "JointExactificationConfig",
     "JointExactificationResult",
@@ -6300,6 +6442,7 @@ __all__ = [
     "magnetic_presentation_from_artifact",
     "materialize_block_route_action",
     "pack_skew_hermitian",
+    "phase_preserving_joint_source",
     "project_u1_relations",
     "reframe_joint_exactification_result",
     "semilinear_kappa",
