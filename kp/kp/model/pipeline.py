@@ -52,7 +52,10 @@ from ..plot_style import (
     kp_font_family,
     relative_energy_ylabel,
 )
-from ..projection_handoff import load_gamma_routed_basis_spec
+from ..projection_handoff import (
+    GAMMA_ROUTED_ONLY_BASIS_FIELDS,
+    load_gamma_routed_basis_spec,
+)
 from ..reporting import KpReporter
 from ..selection_artifact import (
     CertificationStatus,
@@ -497,6 +500,33 @@ def _resolve_layerwise_counts(
     return resolved_model_sectors, metadata
 
 
+def _resolve_projection_qset_counts(
+    values: Sequence[int],
+    *,
+    num_layer_list: Sequence[int],
+) -> tuple[list[int], dict[str, Any]]:
+    """Resolve routed projection ranks that already belong to source qsets."""
+
+    raw_values = [int(value) for value in values]
+    if len(num_layer_list) != 2 or len(raw_values) != 2:
+        raise ValueError(
+            "projection Gamma group_ranks must contain one count for each of "
+            f"qset1/qset2; got ranks={raw_values}, num_layer_list={list(num_layer_list)}"
+        )
+    if any(value <= 0 for value in raw_values):
+        raise ValueError(
+            f"projection Gamma group_ranks must be positive, got {raw_values}"
+        )
+    return raw_values, {
+        "raw": list(raw_values),
+        "num_layer_list": [int(value) for value in num_layer_list],
+        "total_layers": int(sum(int(value) for value in num_layer_list)),
+        "input_kind": "projection_qset",
+        "resolved_qset": list(raw_values),
+        "resolved_model_sectors": list(raw_values),
+    }
+
+
 def _infer_k_sectors_from_layerwise_counts(
     n_orb_resolution: Mapping[str, Any],
     *,
@@ -685,19 +715,29 @@ def _projection_layerwise_orbital_counts(
     source: str | None = None
     basis_file = heff_file.parent / "basis.npz"
     if basis_file.is_file():
-        with np.load(basis_file, allow_pickle=True) as basis:
-            basis_kind = None
-            if "projection_basis_kind" in basis.files:
-                basis_kind_raw = np.asarray(basis["projection_basis_kind"])
+        with np.load(basis_file, allow_pickle=False) as discriminator:
+            basis_files = frozenset(discriminator.files)
+            basis_kind = "explicit_legacy"
+            if "projection_basis_kind" in discriminator.files:
+                basis_kind_raw = np.asarray(discriminator["projection_basis_kind"])
                 if basis_kind_raw.shape != ():
                     raise ValueError("projection basis kind must be a scalar")
                 basis_kind = str(basis_kind_raw.item())
-            if "nlow_state_list" in basis.files:
-                rows = basis["nlow_state_list"].tolist()
-                source = "projection_basis"
         if basis_kind == "gamma_routed":
             handoff = load_gamma_routed_basis_spec(basis_file)
             return [int(rank) for rank in handoff.group_ranks], "projection_gamma_routed"
+        if basis_kind != "explicit_legacy":
+            raise ValueError(f"unsupported projection_basis_kind: {basis_kind!r}")
+        routed_fields = sorted(basis_files.intersection(GAMMA_ROUTED_ONLY_BASIS_FIELDS))
+        if routed_fields:
+            raise ValueError(
+                "explicit legacy basis contains routed-only fields: "
+                + ", ".join(routed_fields)
+            )
+        with np.load(basis_file, allow_pickle=True) as basis:
+            if "nlow_state_list" in basis.files:
+                rows = basis["nlow_state_list"].tolist()
+                source = "projection_basis"
     if rows is None:
         project_rows = project.get("nlow_state_list")
         if project_rows not in (None, []):
@@ -1828,27 +1868,37 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             "for a legacy projection artifact"
         )
     n_orb_input = _as_int_list(n_orb_raw, name="model.n_orb")
-    n_orb_values, n_orb_resolution = _resolve_layerwise_counts(
-        n_orb_input,
-        name="model.n_orb",
-        num_layer_list=num_layer_list,
-        prefer_active_layer_sectors=prefer_active_layer_sectors,
-    )
-    if projection_n_orb_input is not None:
-        projection_count_name = (
-            "projection Gamma group_ranks"
-            if projection_n_orb_source == "projection_gamma_routed"
-            else "projection nlow_state_list"
+    if not explicit_n_orb and projection_n_orb_source == "projection_gamma_routed":
+        n_orb_values, n_orb_resolution = _resolve_projection_qset_counts(
+            n_orb_input,
+            num_layer_list=num_layer_list,
         )
-        projection_n_orb_values, _ = _resolve_layerwise_counts(
-            projection_n_orb_input,
-            name=projection_count_name,
+    else:
+        n_orb_values, n_orb_resolution = _resolve_layerwise_counts(
+            n_orb_input,
+            name="model.n_orb",
             num_layer_list=num_layer_list,
             prefer_active_layer_sectors=prefer_active_layer_sectors,
         )
-        if explicit_n_orb and (
-            n_orb_input != projection_n_orb_input or n_orb_values != projection_n_orb_values
-        ):
+    if projection_n_orb_input is not None:
+        if projection_n_orb_source == "projection_gamma_routed":
+            projection_n_orb_values, _ = _resolve_projection_qset_counts(
+                projection_n_orb_input,
+                num_layer_list=num_layer_list,
+            )
+            projection_conflict = n_orb_values != projection_n_orb_values
+        else:
+            projection_n_orb_values, _ = _resolve_layerwise_counts(
+                projection_n_orb_input,
+                name="projection nlow_state_list",
+                num_layer_list=num_layer_list,
+                prefer_active_layer_sectors=prefer_active_layer_sectors,
+            )
+            projection_conflict = (
+                n_orb_input != projection_n_orb_input
+                or n_orb_values != projection_n_orb_values
+            )
+        if explicit_n_orb and projection_conflict:
             raise ValueError(
                 "model.n_orb conflicts with projection orbital counts: "
                 f"configured {n_orb_input}, projection {projection_n_orb_input}"

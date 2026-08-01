@@ -115,10 +115,8 @@ def test_model_infers_n_orb_from_gamma_routed_group_ranks(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[1, 1, 0])
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[2, 1, 1])
     raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    raw["material"]["num_layers"] = 2
-    raw["material"]["num_layer_list"] = [1, 1]
     raw["model"].pop("n_orb")
     raw["model"].pop("nlow_state")
     cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
@@ -138,6 +136,89 @@ def test_model_infers_n_orb_from_gamma_routed_group_ranks(
     assert cfg.n_orb == (2, 2)
     assert cfg.nlow_state == [2, 2]
     assert cfg.raw["model"]["n_orb_resolution"]["source"] == "projection_gamma_routed"
+    assert cfg.raw["model"]["n_orb_resolution"]["input_kind"] == "projection_qset"
+
+
+def test_model_accepts_matching_layerwise_n_orb_for_gamma_routed_basis(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[2, 1, 1])
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_routed"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_routed_basis_spec",
+        lambda path: SimpleNamespace(group_ranks=(2, 2)),
+    )
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (2, 2)
+    assert cfg.raw["model"]["n_orb_layerwise"] == [2, 1, 1]
+
+
+def test_model_rejects_gamma_routed_qset_count_mismatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[2, 1, 1])
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_routed"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_routed_basis_spec",
+        lambda path: SimpleNamespace(group_ranks=(2, 3)),
+    )
+
+    with pytest.raises(ValueError, match="model.n_orb.*projection"):
+        load_model_config(cfg_path)
+
+
+def test_model_rejects_object_projection_basis_discriminator_without_pickle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[1, 1, 0])
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_routed", dtype=object),
+    )
+    called = False
+
+    def fail_if_called(path: Path) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("strict routed loader must not see an object discriminator")
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_routed_basis_spec",
+        fail_if_called,
+    )
+
+    with pytest.raises(ValueError, match="Object arrays cannot be loaded"):
+        load_model_config(cfg_path)
+    assert called is False
+
+
+def test_model_rejects_unknown_projection_basis_kind(tmp_path: Path) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[1, 1, 0])
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("future_basis"),
+    )
+
+    with pytest.raises(ValueError, match="unsupported projection_basis_kind"):
+        load_model_config(cfg_path)
 
 
 def test_model_rejects_n_orb_that_conflicts_with_projection_basis(tmp_path: Path) -> None:
