@@ -32,7 +32,7 @@ from .identity import (
 from .projection_selection import CandidateRejectionReason
 
 
-GAMMA_ROUTED_BASIS_HANDOFF_VERSION = "kp_project_gamma_routed_handoff_v1"
+GAMMA_ROUTED_BASIS_HANDOFF_VERSION = "kp_project_gamma_routed_handoff_v2"
 EXPLICIT_LEGACY_BASIS_KIND = "explicit_legacy"
 GAMMA_ROUTED_BASIS_KIND = "gamma_routed"
 
@@ -49,6 +49,8 @@ _GAMMA_ROUTED_ARCHIVE_KEYS = frozenset(
         "group_ranks",
         "group_offsets",
         "k_indices",
+        "kpoints",
+        "kpoints_hash",
         "frames",
         "reference_frames",
         "routed_frame_hashes",
@@ -96,7 +98,7 @@ _INT64_FIELDS = frozenset(
 _COMPLEX128_FIELDS = frozenset(
     {"frames", "reference_frames", "authoritative_heff"}
 )
-_FLOAT64_FIELDS = frozenset({"route_gaps"})
+_FLOAT64_FIELDS = frozenset({"route_gaps", "kpoints"})
 _SHA256_SCALAR_FIELDS = frozenset(
     {
         "base_basis_hash",
@@ -114,6 +116,7 @@ _SHA256_SCALAR_FIELDS = frozenset(
         "config_hash",
         "basis_hash",
         "k_indices_hash",
+        "kpoints_hash",
     }
 )
 _SHA256_VECTOR_FIELDS = frozenset(
@@ -314,6 +317,7 @@ def _bound_routed_basis_hash(
     layout_hash: str,
     thresholds_hash: str,
     k_indices_hash: str,
+    kpoints_hash: str,
     frame_hash: str,
     reference_frame_hash: str,
     heff_hash: str,
@@ -327,11 +331,12 @@ def _bound_routed_basis_hash(
 ) -> str:
     return hash_mapping(
         {
-            "schema": "kp.gamma-routed-projection-basis.v1",
+            "schema": "kp.gamma-routed-projection-basis.v2",
             "base_basis_hash": str(base_basis_hash),
             "layout_hash": str(layout_hash),
             "thresholds_hash": str(thresholds_hash),
             "k_indices_hash": str(k_indices_hash),
+            "kpoints_hash": str(kpoints_hash),
             "frame_hash": str(frame_hash),
             "reference_frame_hash": str(reference_frame_hash),
             "heff_hash": str(heff_hash),
@@ -373,6 +378,8 @@ class GammaRoutedBasisSpec:
     group_ranks: tuple[int, int]
     group_offsets: tuple[int, int, int]
     k_indices: tuple[int, ...]
+    kpoints: np.ndarray
+    kpoints_hash: str
     frames: np.ndarray
     reference_frames: np.ndarray
     routed_frame_hashes: tuple[str, ...]
@@ -434,6 +441,7 @@ class GammaRoutedBasisSpec:
                 "routed Gamma joint-band ranks or offsets are invalid",
             )
         frames = _freeze(self.frames, dtype=np.complex128, name="frames")
+        kpoints = _freeze(self.kpoints, dtype=np.float64, name="kpoints")
         references = _freeze(
             self.reference_frames,
             dtype=np.complex128,
@@ -452,6 +460,11 @@ class GammaRoutedBasisSpec:
             sum(ranks),
         )
         model_dim = self.layout.q_count * sum(ranks)
+        if kpoints.shape != (len(k_indices), 2):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "routed Gamma kpoints must have shape (Nk, 2) in routed-k order",
+            )
         if frames.shape != expected_frame_shape or references.shape != expected_frame_shape:
             raise _reject(
                 CandidateRejectionReason.HANDOFF_IDENTITY,
@@ -474,6 +487,7 @@ class GammaRoutedBasisSpec:
             )
         scalar_identities = (
             self.source_hamiltonian_hash,
+            self.kpoints_hash,
             self.raw_action_package_hash,
             self.candidate_certificate_hash,
             self.candidate_input_identity_hash,
@@ -598,6 +612,11 @@ class GammaRoutedBasisSpec:
                 CandidateRejectionReason.HANDOFF_IDENTITY,
                 "routed Gamma authoritative Heff hash mismatch",
             )
+        if self.kpoints_hash != hash_array(kpoints):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "routed Gamma kpoints hash mismatch",
+            )
         artifact_identity = dict(self.artifact_identity)
         if artifact_identity.get("heff_hash") != self.heff_hash:
             raise _reject(
@@ -611,6 +630,11 @@ class GammaRoutedBasisSpec:
                 CandidateRejectionReason.HANDOFF_IDENTITY,
                 "projection identity does not bind the routed k mapping",
             )
+        if artifact_identity.get("kpoints_hash") != self.kpoints_hash:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "projection identity does not bind the routed kpoints",
+            )
         if artifact_identity.get("source_hamiltonian_hash") != self.source_hamiltonian_hash:
             raise _reject(
                 CandidateRejectionReason.HANDOFF_IDENTITY,
@@ -621,6 +645,7 @@ class GammaRoutedBasisSpec:
             layout_hash=self.layout.layout_hash,
             thresholds_hash=self.thresholds.identity_hash,
             k_indices_hash=str(artifact_identity["k_indices_hash"]),
+            kpoints_hash=self.kpoints_hash,
             frame_hash=self.frame_hash,
             reference_frame_hash=self.reference_frame_hash,
             heff_hash=self.heff_hash,
@@ -643,6 +668,7 @@ class GammaRoutedBasisSpec:
         object.__setattr__(self, "joint_band_indices", joint)
         object.__setattr__(self, "group_ranks", ranks)
         object.__setattr__(self, "group_offsets", offsets)
+        object.__setattr__(self, "kpoints", kpoints)
         object.__setattr__(self, "frames", frames)
         object.__setattr__(self, "reference_frames", references)
         object.__setattr__(self, "route_gaps", route_gaps)
@@ -665,6 +691,7 @@ class GammaRoutedBasisSpec:
         layout: GammaRowLayout,
         thresholds: GammaRoutingThresholds,
         k_indices: Sequence[int],
+        kpoints: Any,
         routed_frames: Sequence[GammaRoutedFrames],
         authoritative_heff: Any,
         heff_k_indices: Sequence[int],
@@ -725,6 +752,12 @@ class GammaRoutedBasisSpec:
                 "routed Gamma per-k frames cannot form fixed numeric tensors",
             ) from error
         heff = np.asarray(authoritative_heff, dtype=np.complex128)
+        frozen_kpoints = _freeze(kpoints, dtype=np.float64, name="kpoints")
+        if frozen_kpoints.shape != (len(indices), 2):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "routed Gamma kpoints must have shape (Nk, 2) in routed-k order",
+            )
         identity = dict(artifact_identity)
         base_basis_hash = str(identity.get("basis_hash", ""))
         if not base_basis_hash:
@@ -733,6 +766,7 @@ class GammaRoutedBasisSpec:
                 "routed Gamma handoff requires a base projection basis hash",
             )
         identity["k_indices_hash"] = hash_array(np.asarray(indices, dtype=np.int64))
+        identity["kpoints_hash"] = hash_array(frozen_kpoints)
         identity["heff_hash"] = hash_array(heff)
         identity["source_hamiltonian_hash"] = str(source_hamiltonian_hash)
         identity["basis_hash"] = _bound_routed_basis_hash(
@@ -740,6 +774,7 @@ class GammaRoutedBasisSpec:
             layout_hash=layout.layout_hash,
             thresholds_hash=thresholds.identity_hash,
             k_indices_hash=str(identity["k_indices_hash"]),
+            kpoints_hash=str(identity["kpoints_hash"]),
             frame_hash=hash_array(frames),
             reference_frame_hash=hash_array(references),
             heff_hash=str(identity["heff_hash"]),
@@ -760,6 +795,8 @@ class GammaRoutedBasisSpec:
             group_ranks=first.group_dimensions,
             group_offsets=first.group_offsets,
             k_indices=indices,
+            kpoints=frozen_kpoints,
+            kpoints_hash=str(identity["kpoints_hash"]),
             frames=frames,
             reference_frames=references,
             routed_frame_hashes=tuple(item.frame_hash for item in routed),
@@ -806,6 +843,7 @@ class GammaRoutedBasisSpec:
                 "group_ranks": self.group_ranks,
                 "group_offsets": self.group_offsets,
                 "k_indices_hash": hash_array(np.asarray(self.k_indices, dtype=np.int64)),
+                "kpoints_hash": self.kpoints_hash,
                 "frame_hash": self.frame_hash,
                 "reference_frame_hash": self.reference_frame_hash,
                 "routed_frame_hashes": self.routed_frame_hashes,
@@ -905,6 +943,7 @@ def certify_gamma_routed_basis_spec(
     layout: GammaRowLayout,
     thresholds: GammaRoutingThresholds,
     k_indices: Sequence[int],
+    kpoints: Any,
     routed_frames: Sequence[GammaRoutedFrames],
     authoritative_heff: Any,
     heff_k_indices: Sequence[int],
@@ -988,6 +1027,7 @@ def certify_gamma_routed_basis_spec(
         layout=layout,
         thresholds=thresholds,
         k_indices=k_indices,
+        kpoints=kpoints,
         routed_frames=routed_frames,
         authoritative_heff=authoritative_heff,
         heff_k_indices=heff_k_indices,
@@ -1048,6 +1088,7 @@ def certify_gamma_routed_basis_spec(
         layout_hash=provisional.layout.layout_hash,
         thresholds_hash=provisional.thresholds.identity_hash,
         k_indices_hash=str(certified_identity["k_indices_hash"]),
+        kpoints_hash=provisional.kpoints_hash,
         frame_hash=provisional.frame_hash,
         reference_frame_hash=provisional.reference_frame_hash,
         heff_hash=provisional.heff_hash,
@@ -1094,6 +1135,8 @@ def save_gamma_routed_basis_spec(
         "group_ranks": np.asarray(spec.group_ranks, dtype=np.int64),
         "group_offsets": np.asarray(spec.group_offsets, dtype=np.int64),
         "k_indices": np.asarray(spec.k_indices, dtype=np.int64),
+        "kpoints": spec.kpoints,
+        "kpoints_hash": np.asarray(spec.kpoints_hash),
         "frames": spec.frames,
         "reference_frames": spec.reference_frames,
         "routed_frame_hashes": np.asarray(spec.routed_frame_hashes),
@@ -1241,6 +1284,7 @@ def load_gamma_routed_basis_spec(path: str | Path) -> GammaRoutedBasisSpec:
     artifact_identity["source_hamiltonian_hash"] = _required_text(
         payload, "source_hamiltonian_hash"
     )
+    artifact_identity["kpoints_hash"] = _required_text(payload, "kpoints_hash")
     spec = GammaRoutedBasisSpec(
         artifact_identity=artifact_identity,
         base_basis_hash=_required_text(payload, "base_basis_hash"),
@@ -1256,6 +1300,8 @@ def load_gamma_routed_basis_spec(path: str | Path) -> GammaRoutedBasisSpec:
             int(item) for item in payload["group_offsets"].tolist()
         ),  # type: ignore[arg-type]
         k_indices=k_indices,
+        kpoints=payload["kpoints"],
+        kpoints_hash=_required_text(payload, "kpoints_hash"),
         frames=payload["frames"],
         reference_frames=payload["reference_frames"],
         routed_frame_hashes=_strict_hash_tuple(

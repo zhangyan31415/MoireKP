@@ -100,6 +100,7 @@ def _gamma_handoff() -> GammaRoutedBasisSpec:
         layout=layout,
         thresholds=thresholds,
         k_indices=k_indices,
+        kpoints=np.asarray([[0.0, 0.0], [0.25, 0.0]], dtype=np.float64),
         routed_frames=(routed, routed),
         authoritative_heff=heff,
         heff_k_indices=k_indices,

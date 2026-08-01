@@ -88,7 +88,11 @@ def _layout() -> GammaRowLayout:
     )
 
 
-def _uncertified_spec() -> GammaRoutedBasisSpec:
+def _kpoints() -> np.ndarray:
+    return np.asarray([[0.0, 0.0], [0.25, -0.125]], dtype=np.float64)
+
+
+def _uncertified_spec(*, kpoints: np.ndarray | None = None) -> GammaRoutedBasisSpec:
     layout = _layout()
     routed = build_gamma_routed_frames(
         (np.arange(4, dtype=float),),
@@ -116,6 +120,7 @@ def _uncertified_spec() -> GammaRoutedBasisSpec:
         layout=layout,
         thresholds=_thresholds(),
         k_indices=(4, 7),
+        kpoints=_kpoints() if kpoints is None else kpoints,
         routed_frames=(routed, routed),
         authoritative_heff=heff,
         heff_k_indices=(4, 7),
@@ -150,6 +155,7 @@ def _spec() -> GammaRoutedBasisSpec:
         layout=base.layout,
         thresholds=base.thresholds,
         k_indices=base.k_indices,
+        kpoints=base.kpoints,
         routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
         authoritative_heff=base.authoritative_heff,
         heff_k_indices=base.heff_k_indices,
@@ -209,6 +215,7 @@ def test_exact_action_drift_keeps_raw_package_but_changes_candidate_and_handoff(
             layout=base.layout,
             thresholds=base.thresholds,
             k_indices=base.k_indices,
+            kpoints=base.kpoints,
             routed_frames=tuple(
                 base.routed_frames_for_k(k) for k in base.k_indices
             ),
@@ -286,6 +293,7 @@ def test_gamma_handoff_recomputes_and_binds_factorized_route_contract() -> None:
             layout=base.layout,
             thresholds=base.thresholds,
             k_indices=base.k_indices,
+            kpoints=base.kpoints,
             routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
             authoritative_heff=base.authoritative_heff,
             heff_k_indices=base.heff_k_indices,
@@ -453,6 +461,9 @@ def test_gamma_routed_handoff_roundtrip_is_numeric_and_assembles_identically(
     assert restored.projection_basis_kind == "gamma_routed"
     assert restored.k_indices == (4, 7)
     assert restored.heff_k_indices == (4, 7)
+    np.testing.assert_array_equal(restored.kpoints, original.kpoints)
+    assert restored.kpoints_hash == hash_array(original.kpoints)
+    assert restored.artifact_identity["kpoints_hash"] == restored.kpoints_hash
     np.testing.assert_array_equal(restored.frames, original.frames)
     np.testing.assert_array_equal(restored.authoritative_heff, original.authoritative_heff)
     for k_index in original.k_indices:
@@ -474,6 +485,7 @@ def test_gamma_routed_handoff_roundtrip_is_numeric_and_assembles_identically(
         ("object_discriminator", "projection_basis_kind"),
         ("extra_object", "attacker_object"),
         ("missing", "k_indices"),
+        ("missing", "kpoints"),
     ],
 )
 def test_gamma_routed_schema_boundary_rejects_as_typed_identity_error(
@@ -511,6 +523,7 @@ def test_gamma_routed_schema_boundary_rejects_as_typed_identity_error(
         ("reference_frames", None),
         ("authoritative_heff", None),
         ("route_gaps", None),
+        ("kpoints", None),
     ],
 )
 def test_gamma_routed_schema_rejects_noncanonical_disk_dtype(
@@ -524,7 +537,7 @@ def test_gamma_routed_schema_rejects_noncanonical_disk_dtype(
         with np.load(path, allow_pickle=False) as payload:
             original = np.array(payload[field], copy=True)
         replacement = original.astype(
-            np.float32 if field == "route_gaps" else np.complex64
+            np.float32 if field in {"route_gaps", "kpoints"} else np.complex64
         )
     _rewrite_npz(path, **{field: replacement})
 
@@ -597,6 +610,8 @@ def test_gamma_routed_archive_rejects_legacy_variant_fields(
         "ordered_q_hashes",
         "raw_action_package_hash",
         "candidate_certificate_hash",
+        "kpoints",
+        "kpoints_hash",
     ],
 )
 def test_gamma_routed_handoff_rejects_tampered_identity(
@@ -607,8 +622,10 @@ def test_gamma_routed_handoff_rejects_tampered_identity(
     save_gamma_routed_basis_spec(path, _spec())
     with np.load(path, allow_pickle=False) as payload:
         value = np.array(payload[field], copy=True)
-    if field == "frames":
+    if field in {"frames", "kpoints"}:
         value.flat[0] += 0.125
+    elif field == "kpoints_hash":
+        value = np.asarray("f" * 64)
     elif value.shape == ():
         value = np.asarray(str(value.item()) + "-tampered")
     else:
@@ -618,6 +635,36 @@ def test_gamma_routed_handoff_rejects_tampered_identity(
     with pytest.raises(GammaRoutingError) as rejected:
         load_gamma_routed_basis_spec(path)
     assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_gamma_routed_kpoints_order_binds_basis_and_handoff_identity() -> None:
+    original = _uncertified_spec()
+    reordered = _uncertified_spec(kpoints=_kpoints()[::-1])
+
+    assert original.kpoints_hash == hash_array(_kpoints())
+    assert reordered.kpoints_hash == hash_array(_kpoints()[::-1])
+    assert reordered.kpoints_hash != original.kpoints_hash
+    assert reordered.artifact_identity["basis_hash"] != original.artifact_identity["basis_hash"]
+    assert reordered.handoff_identity_hash != original.handoff_identity_hash
+
+
+@pytest.mark.parametrize(
+    "bad_kpoints",
+    [
+        np.asarray([0.0, 0.25], dtype=np.float64),
+        np.zeros((1, 2), dtype=np.float64),
+        np.zeros((2, 3), dtype=np.float64),
+        np.asarray([[0.0, 0.0], [np.nan, 0.0]], dtype=np.float64),
+    ],
+)
+def test_gamma_routed_create_rejects_invalid_kpoints_shape_or_values(
+    bad_kpoints: np.ndarray,
+) -> None:
+    with pytest.raises(GammaRoutingError) as rejected:
+        _uncertified_spec(kpoints=bad_kpoints)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+    assert "kpoints" in str(rejected.value)
 
 
 @pytest.mark.parametrize(
@@ -675,6 +722,7 @@ def test_gamma_routed_handoff_rejects_rehashed_incomplete_certificate_payload(
         layout_hash=original.layout.layout_hash,
         thresholds_hash=original.thresholds.identity_hash,
         k_indices_hash=str(identity["k_indices_hash"]),
+        kpoints_hash=original.kpoints_hash,
         frame_hash=original.frame_hash,
         reference_frame_hash=original.reference_frame_hash,
         heff_hash=original.heff_hash,
@@ -794,6 +842,7 @@ def test_gamma_routed_factory_binds_task7_candidate_certificate() -> None:
         layout=base.layout,
         thresholds=base.thresholds,
         k_indices=base.k_indices,
+        kpoints=base.kpoints,
         routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
         authoritative_heff=base.authoritative_heff,
         heff_k_indices=base.heff_k_indices,
@@ -856,6 +905,7 @@ def test_gamma_routed_factory_rejects_failed_task7_candidate() -> None:
             layout=base.layout,
             thresholds=base.thresholds,
             k_indices=base.k_indices,
+            kpoints=base.kpoints,
             routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
             authoritative_heff=base.authoritative_heff,
             heff_k_indices=base.heff_k_indices,

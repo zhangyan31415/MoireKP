@@ -501,6 +501,7 @@ class GammaRawOperationSpec:
 class GammaAutomaticProducerInputs:
     source_hamiltonians: np.ndarray
     k_indices: tuple[int, ...]
+    kpoints: np.ndarray
     qsets: tuple[np.ndarray, np.ndarray]
     num_layer_list: tuple[int, int]
     num_orb_per_layer_list: tuple[tuple[int, ...], tuple[int, ...]]
@@ -525,6 +526,12 @@ class GammaAutomaticProducerInputs:
         k_indices = _strict_indices(self.k_indices, field="production k_indices")
         if len(k_indices) != hamiltonians.shape[0]:
             raise ValueError("production k_indices do not match source_hamiltonians")
+        kpoints = np.array(self.kpoints, dtype=np.float64, copy=True, order="C")
+        if (
+            kpoints.shape != (len(k_indices), 2)
+            or not np.all(np.isfinite(kpoints))
+        ):
+            raise ValueError("production kpoints must be finite (Nk,2) in k_indices order")
         qsets = tuple(
             np.array(qset, dtype=np.float64, copy=True, order="C")
             for qset in self.qsets
@@ -553,10 +560,12 @@ class GammaAutomaticProducerInputs:
         if set(names) != set(presentation_names):
             raise ValueError("Gamma raw operations must match the magnetic presentation")
         hamiltonians.setflags(write=False)
+        kpoints.setflags(write=False)
         for qset in qsets:
             qset.setflags(write=False)
         object.__setattr__(self, "source_hamiltonians", hamiltonians)
         object.__setattr__(self, "k_indices", k_indices)
+        object.__setattr__(self, "kpoints", kpoints)
         object.__setattr__(self, "qsets", qsets)
         object.__setattr__(self, "tapw_source_basis_hash", basis_hash)
         object.__setattr__(self, "operations", operations)
@@ -1036,6 +1045,7 @@ def _evaluate_candidate(
         layout=layout,
         thresholds=config.routing_thresholds,
         k_indices=inputs.k_indices,
+        kpoints=inputs.kpoints,
         routed_frames=tuple(routed_by_position),
         authoritative_heff=heff_tensor,
         heff_k_indices=inputs.k_indices,

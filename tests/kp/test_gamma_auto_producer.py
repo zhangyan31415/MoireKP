@@ -157,6 +157,7 @@ def _producer_inputs(*, action: np.ndarray | None = None) -> GammaAutomaticProdu
     return GammaAutomaticProducerInputs(
         source_hamiltonians=source,
         k_indices=(0, 1),
+        kpoints=np.asarray([[0.0, 0.0], [0.25, 0.0]], dtype=np.float64),
         qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
         num_layer_list=(1, 1),
         num_orb_per_layer_list=((1,), (1,)),
@@ -185,6 +186,8 @@ def test_real_gamma_auto_producer_builds_all_k_handoff_and_certified_identity() 
     assert result.rejected_candidates == ()
     assert result.handoff.k_indices == (0, 1)
     assert result.handoff.heff_k_indices == (0, 1)
+    np.testing.assert_array_equal(result.handoff.kpoints, inputs.kpoints)
+    assert result.handoff.kpoints_hash == hash_array(inputs.kpoints)
     assert result.handoff.joint_band_indices == (0, 1)
     assert result.handoff.candidate_id == result.decision.selected.candidate_id
     assert result.handoff.source_hamiltonian_hash == hash_array(
@@ -348,6 +351,7 @@ def test_gamma_auto_nq2_spinful_tr_keeps_complete_kramers_clusters() -> None:
     inputs = GammaAutomaticProducerInputs(
         source_hamiltonians=np.stack(hamiltonians, axis=0),
         k_indices=(0, 1),
+        kpoints=np.asarray([[0.0, 0.0], [0.25, 0.0]], dtype=np.float64),
         qsets=qsets,
         num_layer_list=(1, 1),
         num_orb_per_layer_list=((1,), (1,)),
