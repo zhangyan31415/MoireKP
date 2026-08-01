@@ -69,4 +69,3 @@
 2. Run `python -m pytest -q -p no:cacheprovider -m "not slow and not external_data"` and distinguish unrelated dirty-worktree failures.
 3. Run `git diff --check` and confirm no generated outputs are tracked.
 4. Report all ten selections, status, orbital composition summary, node assignment, and reproducible commands.
-

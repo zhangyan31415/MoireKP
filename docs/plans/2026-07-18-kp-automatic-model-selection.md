@@ -120,4 +120,3 @@
 3. Run `git diff --check` and compile modified Python files.
 4. Confirm no validation output, cache, egg-info, review material, machine path, or node name is staged.
 5. Report remaining performance or quality limitations before proposing merge or PR integration.
-

@@ -277,4 +277,3 @@ tracebacks.
 Because `pipeline.py` and its tests had pre-existing overlapping changes, leave
 the implementation diff for explicit user review unless a clean patch boundary
 can be proven.  Never stage the whole dirty files merely to create a commit.
-

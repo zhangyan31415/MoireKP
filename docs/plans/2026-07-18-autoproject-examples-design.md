@@ -56,4 +56,3 @@ Runs are distributed across bigmem001--003 without modifying the example configs
 - Contract-test that all ten configs use automatic selection and contain no explicit `nlow_state_list`.
 - Contract-test portable paths and expected selections.
 - Run all ten projects on bigmem and compare JSON reports with the expected manifest.
-

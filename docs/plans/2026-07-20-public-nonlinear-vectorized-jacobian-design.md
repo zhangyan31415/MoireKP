@@ -94,4 +94,3 @@ Loss-evaluation progress remains `1/max_steps` through `max_steps/max_steps`.
 5. The PtSe2 19Q, three-k-point, 38-band configuration is rerun on gpuh204.
    Residuals and final band errors must remain numerically equivalent, and the
    nonlinear stage must improve by at least 3x, with a target of 17--30 seconds.
-

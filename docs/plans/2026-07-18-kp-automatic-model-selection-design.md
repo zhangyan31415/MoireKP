@@ -162,4 +162,3 @@ intermediate models, and external-data plots remain under `validation_runs/`.
 2. Bilayer MoTe2 K-valley examples under `examples/mote2_3.89/`.
 3. MgI2 M-valley examples under `examples/mgi2_3.89/`.
 4. Focused configured-model tests followed by the default release test suite.
-
