@@ -372,6 +372,47 @@ def test_strict_json_roundtrip_rejects_tampering_and_nonfinite_values(tmp_path: 
         load_selection_artifact(path)
 
 
+def test_selection_artifact_loader_rejects_symlink_marker(tmp_path: Path) -> None:
+    external = tmp_path / "external-selection.json"
+    external.write_text(
+        json.dumps(_certified().to_dict(), sort_keys=True),
+        encoding="utf-8",
+    )
+    marker = tmp_path / "selection_artifact.json"
+    marker.symlink_to(external)
+
+    with pytest.raises(ValueError, match="regular|symlink"):
+        load_selection_artifact(marker)
+
+
+def test_selection_artifact_loader_rejects_symlink_swap_before_open(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoded = json.dumps(_certified().to_dict(), sort_keys=True)
+    marker = tmp_path / "selection_artifact.json"
+    marker.write_text(encoded, encoding="utf-8")
+    external = tmp_path / "external-selection.json"
+    external.write_text(encoded, encoding="utf-8")
+    original_lstat = Path.lstat
+    swapped = False
+
+    def swap_after_lstat(path: Path):
+        nonlocal swapped
+        status = original_lstat(path)
+        if path == marker and not swapped:
+            marker.unlink()
+            marker.symlink_to(external)
+            swapped = True
+        return status
+
+    monkeypatch.setattr(Path, "lstat", swap_after_lstat)
+
+    with pytest.raises(ValueError, match="regular|symlink"):
+        load_selection_artifact(marker)
+    assert swapped
+
+
 def test_loader_rejects_top_level_metric_as_a_second_source_of_truth(tmp_path: Path) -> None:
     payload = _certified().to_dict()
     payload["metrics"]["band_rms_mev"] = 0.5

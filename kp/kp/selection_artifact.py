@@ -1356,11 +1356,19 @@ def _strict_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 def load_selection_artifact(path: str | Path) -> SelectionArtifact:
     artifact_path = Path(path)
     try:
+        encoded = _read_regular_file(
+            artifact_path,
+            "selection artifact marker",
+        ).decode("utf-8")
         payload = json.loads(
-            artifact_path.read_text(encoding="utf-8"),
+            encoded,
             parse_constant=_reject_json_constant,
             object_pairs_hook=_strict_json_object,
         )
+    except UnicodeDecodeError as exc:
+        raise ValueError(
+            f"selection artifact marker is not valid UTF-8: {artifact_path}"
+        ) from exc
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid selection artifact JSON: {artifact_path}") from exc
     if not isinstance(payload, Mapping):
