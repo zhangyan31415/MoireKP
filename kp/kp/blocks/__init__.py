@@ -9,6 +9,23 @@ from .blocks import (
     resolve_project_gauge_anchors,
     set_projector_blas_threads,
 )
+from .gamma_layout import (
+    GammaCertifiedRawAction,
+    GammaClusterClosure,
+    GammaEnergyCluster,
+    GammaLayoutError,
+    GammaRoutedFrames,
+    GammaRoutingError,
+    GammaRoutingThresholds,
+    GammaRowAddress,
+    GammaRowLayout,
+    assemble_gamma_routed_projectors,
+    build_gamma_routed_frames,
+    certify_gamma_raw_action,
+    certify_routed_covariance,
+    close_gamma_projector_clusters,
+    cluster_gamma_eigensystem,
+)
 
 __all__ = [
     "get_H_block",
@@ -19,4 +36,19 @@ __all__ = [
     "resolve_project_gauge_anchor_candidates",
     "resolve_project_gauge_anchors",
     "set_projector_blas_threads",
+    "GammaCertifiedRawAction",
+    "GammaClusterClosure",
+    "GammaEnergyCluster",
+    "GammaLayoutError",
+    "GammaRoutedFrames",
+    "GammaRoutingError",
+    "GammaRoutingThresholds",
+    "GammaRowAddress",
+    "GammaRowLayout",
+    "assemble_gamma_routed_projectors",
+    "build_gamma_routed_frames",
+    "certify_gamma_raw_action",
+    "certify_routed_covariance",
+    "close_gamma_projector_clusters",
+    "cluster_gamma_eigensystem",
 ]
