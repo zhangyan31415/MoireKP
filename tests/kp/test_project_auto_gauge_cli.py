@@ -10,6 +10,7 @@ import yaml
 import kp.cli as cli
 from kp.symmetry.projection import resolve_symmetry_validated_project_gauge
 from kp.basis.selection import GaugeAnchorReport
+from kp.selection_artifact import CertificationStatus, load_selection_artifact
 
 
 def _write_tiny_project_config(tmp_path: Path, project: dict) -> Path:
@@ -89,6 +90,101 @@ def _write_tiny_tapw_c3_source(symm_dir: Path) -> None:
         json.dumps(manifest),
         encoding="utf-8",
     )
+
+
+def _explicit_project_config() -> dict:
+    return {
+        "mode": "K1",
+        "workers": 1,
+        "downfold_method": "first_order",
+        "out_dir": "project",
+        "nlow_state_list": [[0], [0]],
+        "norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+    }
+
+
+def test_inspect_and_explicit_project_share_input_but_only_project_finalizes(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "plot_eigs_scatter",
+        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
+    )
+    monkeypatch.setattr(
+        cli,
+        "plot_inspect_band_and_qblock",
+        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
+    )
+    cfg_path = _write_tiny_project_config(tmp_path, _explicit_project_config())
+
+    inspect = cli.cmd_plot_from_config(str(cfg_path))
+    project = cli.cmd_project_from_config(str(cfg_path))
+
+    assert inspect.status is CertificationStatus.PENDING
+    assert inspect.identity is None
+    assert project.status is CertificationStatus.UNVERIFIED_OVERRIDE
+    assert project.identity is not None
+    assert (
+        inspect.selection_input.selection_input_identity_hash
+        == project.selection_input.selection_input_identity_hash
+    )
+    marker = load_selection_artifact(tmp_path / "project" / "selection_artifact.json")
+    assert marker == project.artifact
+
+
+def test_active_indices_is_recorded_as_explicit_unverified_override(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "plot_eigs_scatter",
+        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
+    )
+    cfg_path = _write_tiny_project_config(tmp_path, _explicit_project_config())
+    monkeypatch.setattr(
+        cli,
+        "_cmd_project_from_config_impl",
+        lambda *_args, **_kwargs: cli._ExplicitProjectSelectionMaterialization(
+            candidate_id="active-indices-0-1",
+            candidate_dimension=2,
+            basis_handoff_hash="1" * 64,
+            authoritative_heff_hash="2" * 64,
+            heff_k_indices_hash="3" * 64,
+        ),
+    )
+
+    result = cli.cmd_project_from_config(str(cfg_path), {"active_indices": "0,1"})
+
+    assert result.status is CertificationStatus.UNVERIFIED_OVERRIDE
+    assert result.selection_input.selection_mode == "explicit"
+    assert result.identity is not None
+    assert result.identity.certification_evidence is None
+
+
+def test_later_project_failure_leaves_pending_instead_of_previous_final(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "plot_eigs_scatter",
+        lambda *_args, out, **_kwargs: Path(out).write_text("plot", encoding="utf-8"),
+    )
+    cfg_path = _write_tiny_project_config(tmp_path, _explicit_project_config())
+    cli.cmd_project_from_config(str(cfg_path))
+
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("injected projection failure")
+
+    monkeypatch.setattr(cli, "project_heff_full", fail_projection)
+    with pytest.raises(RuntimeError, match="injected projection failure"):
+        cli.cmd_project_from_config(str(cfg_path))
+
+    marker = load_selection_artifact(tmp_path / "project" / "selection_artifact.json")
+    assert marker.certification_status is CertificationStatus.PENDING
 
 
 def test_project_auto_requires_source_symmetry(tmp_path: Path) -> None:

@@ -7,6 +7,7 @@ import os
 import sys
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Sequence
 
@@ -17,8 +18,22 @@ from .identity import (
     PROJECTION_BASIS_HANDOFF_VERSION,
     build_projection_basis_identity,
     hash_array,
+    hash_file,
+    hash_mapping,
 )
 from .projection_handoff import EXPLICIT_LEGACY_BASIS_KIND
+from .selection_artifact import (
+    ResolvedCandidateIdentity,
+    SelectionArtifactStore,
+    SelectionInputIdentity,
+    build_selection_policy_hash,
+)
+from .selection_orchestration import (
+    CaseSelectionInputs,
+    ResolvedProjectionSelection,
+    begin_case_selection,
+    resolve_case_selection,
+)
 from .io.tapw_loader import load_hamk, load_Q_sets
 from .orbitals import (
     expand_orbital_order_by_sector,
@@ -897,6 +912,176 @@ def _apply_project_overrides(project_cfg: dict[str, Any], overrides: dict[str, A
     return cfg
 
 
+@dataclass(frozen=True)
+class _CliSelectionRequest:
+    selection_input: SelectionInputIdentity
+    output_directory: Path
+    project_config: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class _ExplicitProjectSelectionMaterialization:
+    candidate_id: str
+    candidate_dimension: int
+    basis_handoff_hash: str
+    authoritative_heff_hash: str
+    heff_k_indices_hash: str
+
+
+def _selection_mode_from_project_config(project_cfg: Mapping[str, Any]) -> str:
+    if project_cfg.get("active_indices") is not None:
+        return "explicit"
+    if project_cfg.get("nlow_state_list") not in (None, []):
+        return "explicit"
+    selection = project_cfg.get("selection", {})
+    if isinstance(selection, Mapping):
+        return str(selection.get("mode", "auto")).strip().lower()
+    return str(selection or "auto").strip().lower()
+
+
+def _prepare_cli_selection_request(
+    cfg_path: str,
+    overrides: Mapping[str, Any] | None = None,
+) -> _CliSelectionRequest:
+    """Build the command/output-independent identity shared by both commands."""
+
+    path = Path(cfg_path).expanduser().resolve()
+    with path.open("r", encoding="utf-8") as handle:
+        cfg = normalize_case_config(yaml.safe_load(handle), config_path=path)
+    material = dict(cfg.get("material", {}))
+    project_cfg = _apply_project_overrides(
+        dict(cfg.get("project", {})),
+        None if overrides is None else dict(overrides),
+    )
+    mode = _selection_mode_from_project_config(project_cfg)
+    if mode not in {"auto", "explicit"}:
+        raise ValueError("project.selection.mode must be 'auto' or 'explicit'")
+
+    def resolved_file(value: Any) -> Path:
+        candidate = Path(str(value)).expanduser()
+        return candidate if candidate.is_absolute() else (path.parent / candidate).resolve()
+
+    hamk_path = resolved_file(material["hamk_file"])
+    if hamk_path.is_file():
+        source_hamiltonian_hash = hash_file(hamk_path)
+        hamk_shape = np.load(hamk_path, mmap_mode="r").shape
+    else:
+        loaded_hamk = _load_hamk_with_energy_unit(
+            str(hamk_path), material, mmap_mode="r"
+        )
+        source_hamiltonian_hash = hash_array(loaded_hamk)
+        hamk_shape = loaded_hamk.shape
+    nk = int(hamk_shape[0]) if len(hamk_shape) == 3 else 1
+
+    q1, q2 = load_Q_sets(
+        str(resolved_file(material["qset1_file"])),
+        str(resolved_file(material["qset2_file"])),
+    )
+    q1_hash = hash_array(np.asarray(q1, dtype=float))
+    q2_hash = hash_array(np.asarray(q2, dtype=float))
+    ordered_q_hash = hash_mapping(
+        {
+            "schema": "kp.cli-ordered-q.v1",
+            "qset1_hash": q1_hash,
+            "qset2_hash": q2_hash,
+        }
+    )
+
+    raw_selection = project_cfg.get("selection", {})
+    selection_cfg = (
+        dict(raw_selection)
+        if isinstance(raw_selection, Mapping)
+        else {"mode": raw_selection}
+    )
+    raw_thresholds = selection_cfg.get("thresholds", {})
+    hard_thresholds = (
+        dict(raw_thresholds) if isinstance(raw_thresholds, Mapping) else {}
+    )
+    policy_hash = build_selection_policy_hash(
+        hard_thresholds=hard_thresholds,
+        candidate_envelope_config={
+            "selection": selection_cfg,
+            "nlow_state_list": project_cfg.get("nlow_state_list"),
+            "active_indices": project_cfg.get("active_indices"),
+        },
+        candidate_generator_version="kp.cli-selection.v1",
+        candidate_schema_version="kp.projection-candidate.v1",
+        metric_schema_version="kp.candidate-metrics.v1",
+        ordering_rule_version="dimension-error-overlap-symmetry-v1",
+    )
+
+    configured_indices = project_cfg.get("k_indices")
+    validation_indices = (
+        parse_int_list(configured_indices)
+        if configured_indices is not None
+        else list(range(nk))
+    )
+    validation_k_indices_hash = hash_array(
+        np.asarray(validation_indices, dtype=np.int64)
+    )
+    band_file = material.get("band_file")
+    band_path = None if not band_file else resolved_file(band_file)
+    band_hash = (
+        hash_file(band_path)
+        if band_path is not None and band_path.is_file()
+        else hash_mapping({"band_file": "absent"})
+    )
+    frozen_target_window_hash = hash_mapping(
+        {
+            "schema": "kp.cli-target-preview.v1",
+            "edge": project_cfg.get(
+                "target", cfg.get("plot", {}).get("target", "valence")
+            ),
+            "energy_reference_ev": project_cfg.get(
+                "efermi", material.get("efermi")
+            ),
+            "band_file_hash": band_hash,
+            "validation_k_indices_hash": validation_k_indices_hash,
+        }
+    )
+    action_package_hash = hash_mapping(
+        {
+            "schema": "kp.cli-action-input.v1",
+            "selection_mode": mode,
+            "symm": cfg.get("symm", {}),
+        }
+    )
+    row_layout_hash = hash_mapping(
+        {
+            "schema": "kp.cli-row-layout.v1",
+            "mode": str(
+                project_cfg.get("mode", cfg.get("plot", {}).get("mode", "gamma"))
+            ).lower(),
+            "spin": str(material.get("spin", "all")).lower(),
+            "num_layer_list": _num_layer_list_from_material(material),
+            "num_orb_per_layer": material.get("num_orb_per_layer"),
+            "qset1_hash": q1_hash,
+            "qset2_hash": q2_hash,
+        }
+    )
+    selection_input = SelectionInputIdentity.create(
+        selection_mode=mode,
+        frozen_target_window_hash=frozen_target_window_hash,
+        validation_k_indices_hash=validation_k_indices_hash,
+        ordered_q_hash=ordered_q_hash,
+        source_hamiltonian_hash=source_hamiltonian_hash,
+        action_package_hash=action_package_hash,
+        row_layout_hash=row_layout_hash,
+        selection_policy_hash=policy_hash,
+    )
+    raw_output = Path(str(project_cfg.get("out_dir", "plots"))).expanduser()
+    output_directory = (
+        raw_output
+        if raw_output.is_absolute()
+        else (path.parent / raw_output).resolve()
+    )
+    return _CliSelectionRequest(
+        selection_input=selection_input,
+        output_directory=output_directory,
+        project_config=project_cfg,
+    )
+
+
 def _project_heff_full_kwargs_supports(name: str) -> bool:
     try:
         sig = inspect.signature(project_heff_full)
@@ -1128,7 +1313,7 @@ def _print_project_diagnostics(
         reporter.check("Hermiticity", passed=True, detail=f"max residual={max(herm_vals):.3e}")
 
 
-def cmd_plot_from_config(cfg_path: str) -> None:
+def cmd_plot_from_config(cfg_path: str) -> ResolvedProjectionSelection:
     started = time.perf_counter()
     reporter = KpReporter("kp inspect")
     cfg_path = os.path.abspath(cfg_path)
@@ -1137,6 +1322,11 @@ def cmd_plot_from_config(cfg_path: str) -> None:
     reporter.fields([("config", cfg_path)])
     with open(cfg_path, "r") as f:
         cfg = normalize_case_config(yaml.safe_load(f), config_path=cfg_path)
+    selection_preview = resolve_case_selection(
+        CaseSelectionInputs.preview(
+            _prepare_cli_selection_request(cfg_path).selection_input
+        )
+    )
 
     material = cfg.get("material", {})
     plot_cfg = cfg.get("plot", {})
@@ -1576,9 +1766,56 @@ def cmd_plot_from_config(cfg_path: str) -> None:
         reporter.warning(f"analysis step: {ex}")
 
     reporter.complete(elapsed=time.perf_counter() - started)
+    return selection_preview
 
 
-def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:
+def cmd_project_from_config(
+    cfg_path: str,
+    overrides: dict[str, Any] | None = None,
+) -> ResolvedProjectionSelection:
+    request = _prepare_cli_selection_request(cfg_path, overrides)
+    session = begin_case_selection(
+        store=SelectionArtifactStore(request.output_directory),
+        selection_input=request.selection_input,
+        transaction_id=uuid.uuid4().hex,
+    )
+    try:
+        materialized = _cmd_project_from_config_impl(cfg_path, overrides)
+        if request.selection_input.selection_mode != "explicit":
+            raise ValueError(
+                "automatic projection cannot certify without a routed Gamma handoff producer"
+            )
+        resolved = ResolvedCandidateIdentity.create(
+            selection_mode="explicit",
+            candidate_id=materialized.candidate_id,
+            candidate_dimension=materialized.candidate_dimension,
+            projection_basis_kind=EXPLICIT_LEGACY_BASIS_KIND,
+            basis_handoff_hash=materialized.basis_handoff_hash,
+            authoritative_heff_hash=materialized.authoritative_heff_hash,
+            heff_k_indices_hash=materialized.heff_k_indices_hash,
+        )
+        diagnostic = (
+            "user supplied --active-indices"
+            if request.project_config.get("active_indices") is not None
+            else "user supplied explicit project.nlow_state_list"
+        )
+        return resolve_case_selection(
+            CaseSelectionInputs.explicit(
+                selection_input=request.selection_input,
+                resolved_candidate=resolved,
+                diagnostic=diagnostic,
+            ),
+            session=session,
+        )
+    except Exception:
+        session.close()
+        raise
+
+
+def _cmd_project_from_config_impl(
+    cfg_path: str,
+    overrides: dict[str, Any] | None = None,
+) -> _ExplicitProjectSelectionMaterialization:
     """Project selected bands into an effective Hamiltonian (Heff) across Q blocks.
 
     Reads the same material/plot settings for data and Q ordering, and the
@@ -2074,6 +2311,21 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     save_spectrum_txt(heig_list, data_out)
     _write_case_summary(cfg, out_dir, "projection")
     reporter.complete(elapsed=time.perf_counter() - started)
+    candidate_hash = hash_mapping(
+        {
+            "schema": "kp.explicit-candidate.v1",
+            "nlow_state_list": nlow_state_list,
+            "active_indices": active_indices,
+            "basis_hash": basis_identity["basis_hash"],
+        }
+    )
+    return _ExplicitProjectSelectionMaterialization(
+        candidate_id=f"explicit-{candidate_hash[:16]}",
+        candidate_dimension=int(heff_arr.shape[-1]),
+        basis_handoff_hash=str(basis_identity["basis_hash"]),
+        authoritative_heff_hash=heff_hash,
+        heff_k_indices_hash=str(basis_identity["k_indices_hash"]),
+    )
 
 
 def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None) -> None:

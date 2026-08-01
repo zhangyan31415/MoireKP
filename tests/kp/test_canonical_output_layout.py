@@ -12,6 +12,7 @@ import kp.cli as cli
 from kp.config.case import normalize_case_config
 from kp.model.pipeline import _rotation_deg_from_symmetry_manifest
 from kp.model.symmetry import load_symmetry_source
+from kp.selection_artifact import CertificationStatus, load_selection_artifact
 from kp.symmetry import projection as projection_mod
 
 
@@ -276,7 +277,14 @@ def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Pa
         "kpoints.npy",
         "band_comparison.pdf",
         "wavefunctions.npz",
+        "selection_artifact.json",
+        "selection_generations",
+        ".selection-artifact.lock",
     }
+    assert (
+        load_selection_artifact(projection_dir / "selection_artifact.json").certification_status
+        is CertificationStatus.UNVERIFIED_OVERRIDE
+    )
     assert not (projection_dir / "heff_list.npy").exists()
     assert not (projection_dir / "heff_eig.npy").exists()
     assert not (projection_dir / "heff_vec.npy").exists()
