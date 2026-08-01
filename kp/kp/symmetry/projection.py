@@ -2830,14 +2830,19 @@ def _model_basis_labels(
     *,
     low_dim: int | None = None,
     num_layer_list: Sequence[int] | None = None,
+    sector_orbital_counts: tuple[int, int] | None = None,
 ) -> list[dict[str, Any]]:
     labels: list[dict[str, Any]] = []
-    n_orb1, n_orb2 = _sector_orbital_counts(
-        q_model1,
-        q_model2,
-        nlow_state_list,
-        low_dim=low_dim,
-        num_layer_list=num_layer_list,
+    n_orb1, n_orb2 = (
+        sector_orbital_counts
+        if sector_orbital_counts is not None
+        else _sector_orbital_counts(
+            q_model1,
+            q_model2,
+            nlow_state_list,
+            low_dim=low_dim,
+            num_layer_list=num_layer_list,
+        )
     )
     for sector, qset, bands in (
         ("L1", np.asarray(q_model1, dtype=float), range(n_orb1)),
@@ -2864,6 +2869,7 @@ def _basis_action_for_candidate(
     nlow_state_list: list[list[int]],
     low_dim: int | None,
     num_layer_list: Sequence[int] | None = None,
+    sector_orbital_counts: tuple[int, int] | None = None,
     tol: float,
 ) -> dict[str, Any]:
     qsets = {"L1": np.asarray(q_model1, dtype=float), "L2": np.asarray(q_model2, dtype=float)}
@@ -2873,6 +2879,7 @@ def _basis_action_for_candidate(
         nlow_state_list,
         low_dim=low_dim,
         num_layer_list=num_layer_list,
+        sector_orbital_counts=sector_orbital_counts,
     )
     target_index = {
         (str(label["sector"]), int(label["q_index"]), int(label["orbital"])): idx
@@ -2977,6 +2984,7 @@ def _resolve_projected_model_action(
     q_model2: np.ndarray,
     nlow_state_list: list[list[int]],
     num_layer_list: Sequence[int] | None = None,
+    sector_orbital_counts: tuple[int, int] | None = None,
     tol: float,
     discover_action_candidates: bool = False,
     accept_support_resolved_action: bool = False,
@@ -2992,6 +3000,7 @@ def _resolve_projected_model_action(
         nlow_state_list,
         low_dim=low_dim,
         num_layer_list=num_layer_list,
+        sector_orbital_counts=sector_orbital_counts,
     )
     declared_basis_action = _basis_action_for_candidate(
         action=model_action,
@@ -3000,6 +3009,7 @@ def _resolve_projected_model_action(
         nlow_state_list=nlow_state_list,
         low_dim=low_dim,
         num_layer_list=num_layer_list,
+        sector_orbital_counts=sector_orbital_counts,
         tol=tol,
     )
     declared_residuals: list[dict[str, Any]] = []
@@ -3018,6 +3028,7 @@ def _resolve_projected_model_action(
             nlow_state_list=nlow_state_list,
             low_dim=low_dim,
             num_layer_list=num_layer_list,
+            sector_orbital_counts=sector_orbital_counts,
             tol=tol,
         )
         residuals: list[dict[str, Any]] = []
@@ -5559,6 +5570,9 @@ def _append_projected_operation_summaries(
             q_model2=ctx.q_model2,
             nlow_state_list=ctx.nlow_state_list,
             num_layer_list=ctx.num_layer_list,
+            sector_orbital_counts=(
+                n_orb_for_exactification if not ctx.nlow_state_list else None
+            ),
             tol=max(float(run_cfg.tolerance), 1.0e-8),
             discover_action_candidates=True,
             accept_support_resolved_action=True,
