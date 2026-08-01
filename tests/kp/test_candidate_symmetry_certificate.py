@@ -20,8 +20,10 @@ from kp.symmetry.candidate_certificate import (
     CandidateStateFailureCode,
     CandidateSymmetryStatus,
     CandidateSymmetryThresholds,
+    candidate_certificate_envelope,
     certify_candidate_symmetries,
     evaluate_projected_pair,
+    verify_candidate_certificate_envelope,
 )
 from kp.symmetry.joint_exactification import (
     MagneticGenerator,
@@ -508,6 +510,48 @@ def test_presentation_payload_property_is_a_defensive_serializable_copy() -> Non
     assert restored == certificate
     assert restored.presentation_payload == original_payload
     assert restored.certificate_hash == original_hash
+
+
+def test_candidate_certificate_envelope_roundtrips_full_canonical_input() -> None:
+    certificate = _certify(
+        name="E",
+        state=_state(np.eye(2)),
+        d_full=np.eye(2),
+        exact=np.eye(2),
+    )
+
+    envelope = candidate_certificate_envelope(certificate)
+    verified = verify_candidate_certificate_envelope(envelope)
+
+    assert verified["candidate_id"] == certificate.candidate_id
+    assert verified["status"] == "certified"
+    assert verified["certificate_hash"] == certificate.certificate_hash
+    assert verified["input_identity_hash"] == certificate.input_identity_hash
+    assert verified["input_identity_payload"]["states"][0]["u_low_hash"]
+    assert verified["input_identity_payload"]["operations"][0]["raw_action_hash"]
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    ["status", "certificate_hash", "input_identity_payload"],
+)
+def test_candidate_certificate_envelope_rejects_tamper(tamper: str) -> None:
+    certificate = _certify(
+        name="E",
+        state=_state(np.eye(2)),
+        d_full=np.eye(2),
+        exact=np.eye(2),
+    )
+    envelope = candidate_certificate_envelope(certificate)
+    if tamper == "status":
+        envelope["certificate_payload"]["status"] = "failed"
+    elif tamper == "certificate_hash":
+        envelope["certificate_hash"] = "0" * 64
+    else:
+        envelope["input_identity_payload"]["states"][0]["u_low_hash"] = "0" * 64
+
+    with pytest.raises(ValueError, match="candidate symmetry certificate envelope"):
+        verify_candidate_certificate_envelope(envelope)
 
 
 def test_certificate_hash_binds_metrics_and_thresholds() -> None:

@@ -41,6 +41,9 @@ CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION = (
 CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION = (
     "candidate_symmetry_phase_hash_v1"
 )
+CANDIDATE_SYMMETRY_ENVELOPE_SCHEMA_VERSION = (
+    "candidate_symmetry_certificate_envelope_v1"
+)
 _METRIC_HASH_ABSOLUTE_QUANTUM = 1.0e-14
 _METRIC_HASH_THRESHOLD_QUANTUM_RATIO = 1.0e-9
 
@@ -265,6 +268,7 @@ class CandidateSymmetryCertificate:
     thresholds: CandidateSymmetryThresholds
     _presentation_payload_json: str = field(repr=False)
     presentation_hash: str
+    _input_identity_payload_json: str = field(repr=False)
     input_identity_hash: str
     states: tuple[CandidateStateCertificate, ...]
     operations: tuple[CandidateOperationCertificate, ...]
@@ -293,6 +297,26 @@ class CandidateSymmetryCertificate:
         )
         if hash_mapping(presentation_payload) != self.presentation_hash:
             raise ValueError("candidate symmetry presentation hash mismatch")
+        try:
+            input_identity_payload = json.loads(
+                str(self._input_identity_payload_json)
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "candidate symmetry input identity payload JSON is invalid"
+            ) from exc
+        if not isinstance(input_identity_payload, dict):
+            raise TypeError(
+                "candidate symmetry input identity payload must be a mapping"
+            )
+        canonical_input_json = _canonical_payload_json(input_identity_payload)
+        object.__setattr__(
+            self,
+            "_input_identity_payload_json",
+            canonical_input_json,
+        )
+        if hash_mapping(input_identity_payload) != self.input_identity_hash:
+            raise ValueError("candidate symmetry input identity hash mismatch")
         object.__setattr__(
             self,
             "certificate_hash",
@@ -317,6 +341,16 @@ class CandidateSymmetryCertificate:
         """Return the immutable canonical JSON stored by the certificate."""
 
         return self._presentation_payload_json
+
+    @property
+    def input_identity_payload(self) -> dict[str, object]:
+        payload = json.loads(self._input_identity_payload_json)
+        assert isinstance(payload, dict)
+        return payload
+
+    @property
+    def input_identity_payload_json(self) -> str:
+        return self._input_identity_payload_json
 
 
 def _canonical_metric(value: float | None) -> float | None:
@@ -582,7 +616,12 @@ def _candidate_certificate_payload(
 def _candidate_certificate_hash(
     certificate: CandidateSymmetryCertificate,
 ) -> str:
-    payload = _candidate_certificate_payload(certificate)
+    return _candidate_certificate_payload_hash(
+        _candidate_certificate_payload(certificate)
+    )
+
+
+def _candidate_certificate_payload_hash(payload: Mapping[str, object]) -> str:
     encoded = json.dumps(
         payload,
         allow_nan=False,
@@ -591,6 +630,115 @@ def _candidate_certificate_hash(
         sort_keys=True,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def candidate_certificate_envelope(
+    certificate: CandidateSymmetryCertificate,
+) -> dict[str, object]:
+    """Return the complete canonical, strictly verifiable certificate envelope."""
+
+    return {
+        "version": CANDIDATE_SYMMETRY_ENVELOPE_SCHEMA_VERSION,
+        "certificate_hash": certificate.certificate_hash,
+        "certificate_payload": _candidate_certificate_payload(certificate),
+        "input_identity_hash": certificate.input_identity_hash,
+        "input_identity_payload": certificate.input_identity_payload,
+        "presentation_payload": certificate.presentation_payload,
+    }
+
+
+def candidate_action_package_hash(
+    input_identity_payload: Mapping[str, object],
+) -> str:
+    """Hash the exact presentation, pair coverage, and actions of one input."""
+
+    expected_keys = {
+        "version",
+        "presentation_hash",
+        "required_pairs",
+        "operations",
+        "states",
+    }
+    if set(input_identity_payload) != expected_keys:
+        raise ValueError("candidate symmetry input identity key set mismatch")
+    return hash_mapping(
+        {
+            "version": "kp.candidate-action-package.v1",
+            "presentation_hash": input_identity_payload["presentation_hash"],
+            "required_pairs": input_identity_payload["required_pairs"],
+            "operations": input_identity_payload["operations"],
+        }
+    )
+
+
+def verify_candidate_certificate_envelope(
+    envelope: Mapping[str, object],
+) -> dict[str, object]:
+    """Fail closed on any non-canonical, failed, or internally stale envelope."""
+
+    context = "candidate symmetry certificate envelope"
+    expected_keys = {
+        "version",
+        "certificate_hash",
+        "certificate_payload",
+        "input_identity_hash",
+        "input_identity_payload",
+        "presentation_payload",
+    }
+    try:
+        if not isinstance(envelope, Mapping) or set(envelope) != expected_keys:
+            raise ValueError("key set mismatch")
+        if str(envelope["version"]) != CANDIDATE_SYMMETRY_ENVELOPE_SCHEMA_VERSION:
+            raise ValueError("unsupported version")
+        certificate_payload = envelope["certificate_payload"]
+        input_payload = envelope["input_identity_payload"]
+        presentation_payload = envelope["presentation_payload"]
+        if not all(
+            isinstance(value, Mapping)
+            for value in (certificate_payload, input_payload, presentation_payload)
+        ):
+            raise TypeError("payloads must be mappings")
+        certificate_payload = json.loads(_canonical_payload_json(certificate_payload))
+        input_payload = json.loads(_canonical_payload_json(input_payload))
+        presentation_payload = json.loads(_canonical_payload_json(presentation_payload))
+        certificate_hash = str(envelope["certificate_hash"])
+        input_identity_hash = str(envelope["input_identity_hash"])
+        if certificate_payload.get("version") != CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION:
+            raise ValueError("certificate payload version mismatch")
+        if _candidate_certificate_payload_hash(certificate_payload) != certificate_hash:
+            raise ValueError("certificate hash mismatch")
+        if hash_mapping(input_payload) != input_identity_hash:
+            raise ValueError("input identity hash mismatch")
+        if certificate_payload.get("input_identity_hash") != input_identity_hash:
+            raise ValueError("certificate/input identity mismatch")
+        presentation_hash = hash_mapping(presentation_payload)
+        if certificate_payload.get("presentation_hash") != presentation_hash:
+            raise ValueError("presentation identity mismatch")
+        if input_payload.get("presentation_hash") != presentation_hash:
+            raise ValueError("input/presentation identity mismatch")
+        if (
+            certificate_payload.get("status") != CandidateSymmetryStatus.CERTIFIED.value
+            or certificate_payload.get("joint_certification_status")
+            != CandidateJointCertificationStatus.CERTIFIED.value
+            or certificate_payload.get("failures") != []
+            or not bool(certificate_payload.get("operation_coverage_complete"))
+            or not bool(certificate_payload.get("pair_coverage_complete"))
+        ):
+            raise ValueError("certificate is not CERTIFIED")
+        candidate_id = str(certificate_payload.get("candidate_id", "")).strip()
+        if not candidate_id:
+            raise ValueError("candidate_id is empty")
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError(f"{context} is invalid: {error}") from error
+    return {
+        "candidate_id": candidate_id,
+        "status": CandidateSymmetryStatus.CERTIFIED.value,
+        "certificate_hash": certificate_hash,
+        "input_identity_hash": input_identity_hash,
+        "certificate_payload": certificate_payload,
+        "input_identity_payload": input_payload,
+        "presentation_payload": presentation_payload,
+    }
 
 
 def _phase_payload(value: complex) -> list[float]:
@@ -720,7 +868,7 @@ def _referenced_state_keys(
     return references
 
 
-def _candidate_input_identity_hash(
+def _candidate_input_identity_payload(
     *,
     presentation_hash: str,
     target_states: Mapping[int, CandidateProjectionState],
@@ -728,7 +876,7 @@ def _candidate_input_identity_hash(
     operations: Mapping[str, CandidateOperationInput],
     exactified_actions: Mapping[str, np.ndarray | None],
     required_pairs: Mapping[str, Sequence[tuple[int, int]]],
-) -> str:
+) -> dict[str, object]:
     operation_records: list[dict[str, object]] = []
     for key in sorted(set(operations) | set(exactified_actions)):
         operation = operations.get(key)
@@ -780,15 +928,19 @@ def _candidate_input_identity_hash(
         ]
         for name, pairs in sorted(required_pairs.items())
     }
-    return hash_mapping(
-        {
-            "version": "kp.candidate-symmetry-input.v1",
-            "presentation_hash": presentation_hash,
-            "required_pairs": required_pair_records,
-            "operations": operation_records,
-            "states": state_records,
-        }
-    )
+    return {
+        "version": "kp.candidate-symmetry-input.v1",
+        "presentation_hash": presentation_hash,
+        "required_pairs": required_pair_records,
+        "operations": operation_records,
+        "states": state_records,
+    }
+
+
+def _candidate_input_identity_hash(
+    **kwargs: object,
+) -> str:
+    return hash_mapping(_candidate_input_identity_payload(**kwargs))
 
 
 @dataclass(frozen=True)
@@ -1103,7 +1255,7 @@ def certify_candidate_symmetries(
     presentation_payload = _canonical_presentation_payload(presentation)
     presentation_payload_json = _canonical_payload_json(presentation_payload)
     presentation_hash = hash_mapping(presentation_payload)
-    input_identity_hash = _candidate_input_identity_hash(
+    input_identity_payload = _candidate_input_identity_payload(
         presentation_hash=presentation_hash,
         target_states=target,
         source_states=source,
@@ -1111,6 +1263,8 @@ def certify_candidate_symmetries(
         exactified_actions=exactified_actions,
         required_pairs=required_pairs,
     )
+    input_identity_payload_json = _canonical_payload_json(input_identity_payload)
+    input_identity_hash = hash_mapping(input_identity_payload)
     state_certificate_by_role_and_k: dict[
         tuple[str, int], CandidateStateCertificate
     ] = {}
@@ -1528,6 +1682,7 @@ def certify_candidate_symmetries(
         thresholds=thresholds,
         _presentation_payload_json=presentation_payload_json,
         presentation_hash=presentation_hash,
+        _input_identity_payload_json=input_identity_payload_json,
         input_identity_hash=input_identity_hash,
         states=tuple(
             state_certificate_by_role_and_k[key]
@@ -1548,6 +1703,7 @@ __all__ = [
     "CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION",
     "CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS",
     "CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION",
+    "CANDIDATE_SYMMETRY_ENVELOPE_SCHEMA_VERSION",
     "CandidateJointCertificationStatus",
     "CandidateJointFailureCode",
     "CandidateOperationCertificate",
@@ -1561,6 +1717,9 @@ __all__ = [
     "CandidateSymmetryStatus",
     "CandidateSymmetryThresholds",
     "ProjectedPairEvaluation",
+    "candidate_action_package_hash",
+    "candidate_certificate_envelope",
     "certify_candidate_symmetries",
     "evaluate_projected_pair",
+    "verify_candidate_certificate_envelope",
 ]

@@ -47,6 +47,7 @@ from ..identity import (
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
 from ..projection_handoff import (
     ExplicitLegacyBasisSpec,
+    GAMMA_ROUTED_ONLY_BASIS_FIELDS,
     GammaRoutedBasisSpec,
     ProjectionBasisSpec,
     load_gamma_routed_basis_spec,
@@ -1575,16 +1576,23 @@ def _load_persisted_projection_basis_handoff(
     basis_path = project_path / "basis.npz"
     wavefunctions_path = project_path / "wavefunctions.npz"
     heff_path = project_path / "heff.npy"
-    with np.load(basis_path, allow_pickle=False) as discriminator_payload:
-        basis_kind = (
-            _required_scalar_text(
-                discriminator_payload,
-                "projection_basis_kind",
-                context=f"KP projection basis handoff {basis_path}",
+    try:
+        with np.load(basis_path, allow_pickle=False) as discriminator_payload:
+            basis_files = frozenset(discriminator_payload.files)
+            basis_kind = (
+                _required_scalar_text(
+                    discriminator_payload,
+                    "projection_basis_kind",
+                    context=f"KP projection basis handoff {basis_path}",
+                )
+                if "projection_basis_kind" in discriminator_payload.files
+                else "explicit_legacy"
             )
-            if "projection_basis_kind" in discriminator_payload.files
-            else "explicit_legacy"
-    )
+    except (KeyError, OSError, TypeError, ValueError) as error:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"projection basis discriminator is invalid: {error}",
+        ) from error
     if basis_kind == GammaRoutedBasisSpec.projection_basis_kind:
         try:
             routed = load_gamma_routed_basis_spec(basis_path)
@@ -1625,6 +1633,15 @@ def _load_persisted_projection_basis_handoff(
         return routed
     if basis_kind != ExplicitLegacyBasisSpec.projection_basis_kind:
         raise ValueError(f"unsupported projection_basis_kind: {basis_kind!r}")
+    forbidden_routed_fields = sorted(
+        basis_files.intersection(GAMMA_ROUTED_ONLY_BASIS_FIELDS)
+    )
+    if forbidden_routed_fields:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "explicit legacy basis contains routed-only fields: "
+            + ", ".join(forbidden_routed_fields),
+        )
     artifact_identity = _load_project_artifact_identity(project_path)
     with np.load(basis_path, allow_pickle=True) as basis_payload:
         basis_context = f"KP projection basis handoff {basis_path}"

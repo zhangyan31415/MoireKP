@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,6 +29,7 @@ from kp.symmetry import projection as projection_mod
 from kp.symmetry.candidate_certificate import (
     CandidateOperationInput,
     CandidateSymmetryThresholds,
+    verify_candidate_certificate_envelope,
 )
 from kp.symmetry.joint_exactification import (
     MagneticGenerator,
@@ -64,7 +66,7 @@ def _layout() -> GammaRowLayout:
     )
 
 
-def _spec() -> GammaRoutedBasisSpec:
+def _uncertified_spec() -> GammaRoutedBasisSpec:
     layout = _layout()
     routed = build_gamma_routed_frames(
         (np.arange(4, dtype=float),),
@@ -81,9 +83,9 @@ def _spec() -> GammaRoutedBasisSpec:
     return GammaRoutedBasisSpec.create(
         artifact_identity={
             "identity_schema": "moirekp.artifact-identity.v1",
-            "input_hash": "input-a",
-            "config_hash": "config-a",
-            "basis_hash": "basis-a",
+            "input_hash": "1" * 64,
+            "config_hash": "2" * 64,
+            "basis_hash": "3" * 64,
             "package_version": "0.1.0",
             "schema_version": 2,
             "k_indices_hash": "replaced-by-writer",
@@ -99,15 +101,65 @@ def _spec() -> GammaRoutedBasisSpec:
         routing_certificate_hashes=("5" * 64, "8" * 64),
         source_hamiltonian_hash="a" * 64,
         ordered_q_hashes=layout.ordered_qset_hashes,
-        raw_action_package_hash="b" * 64,
-        candidate_certificate_hash="c" * 64,
-        candidate_input_identity_hash="d" * 64,
+        raw_action_package_hash="0" * 64,
+        candidate_certificate_hash="0" * 64,
+        candidate_input_identity_hash="0" * 64,
     )
 
 
-def _rewrite_npz(path: Path, **updates: np.ndarray) -> None:
+def _spec() -> GammaRoutedBasisSpec:
+    base = _uncertified_spec()
+    pairs = ((4, 4), (7, 7))
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("E", False),),
+        relations=(
+            MagneticRelation("E^2", lhs=("E", "E"), rhs=(), central_phase=1.0),
+        ),
+        central_phases=(1.0,),
+        source="gamma_handoff_test",
+    )
+    return certify_gamma_routed_basis_spec(
+        candidate_id="gamma-routed-test",
+        artifact_identity={
+            **base.artifact_identity,
+            "basis_hash": base.base_basis_hash,
+        },
+        layout=base.layout,
+        thresholds=base.thresholds,
+        k_indices=base.k_indices,
+        routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
+        authoritative_heff=base.authoritative_heff,
+        heff_k_indices=base.heff_k_indices,
+        closure_certificate_hashes=base.closure_certificate_hashes,
+        routing_certificate_hashes=base.routing_certificate_hashes,
+        source_hamiltonian_hash=base.source_hamiltonian_hash,
+        ordered_q_hashes=base.ordered_q_hashes,
+        raw_action_package_hash=base.raw_action_package_hash,
+        operations={
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=np.eye(base.layout.full_dimension, dtype=np.complex128),
+                pairs=pairs,
+            )
+        },
+        exactified_actions={"E": np.eye(base.model_dim, dtype=np.complex128)},
+        presentation=presentation,
+        required_pairs={"E": pairs},
+        candidate_thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+
+def _rewrite_npz(
+    path: Path,
+    *,
+    remove: tuple[str, ...] = (),
+    **updates: np.ndarray,
+) -> None:
     with np.load(path, allow_pickle=False) as payload:
         copied = {name: np.array(payload[name], copy=True) for name in payload.files}
+    for name in remove:
+        copied.pop(name)
     copied.update(updates)
     np.savez(path, **copied)
 
@@ -128,6 +180,47 @@ def _write_routed_project_artifacts(project_dir: Path, spec: GammaRoutedBasisSpe
             name: np.asarray(value)
             for name, value in spec.artifact_identity.items()
         },
+    )
+
+
+def _write_legacy_project_artifacts(project_dir: Path) -> None:
+    project_dir.mkdir()
+    heff = np.eye(2, dtype=np.complex128)[None, :, :]
+    wavefunctions = np.eye(2, dtype=np.complex128)[None, :, :]
+    k_indices = np.asarray([0], dtype=np.int64)
+    identity = {
+        "identity_schema": "moirekp.artifact-identity.v1",
+        "input_hash": "input-legacy",
+        "config_hash": "config-legacy",
+        "basis_hash": "basis-legacy",
+        "package_version": "0.1.0",
+        "schema_version": 2,
+        "k_indices_hash": hash_array(k_indices),
+        "heff_hash": hash_array(heff),
+    }
+    common = {
+        "projection_basis_kind": np.asarray("explicit_legacy"),
+        "projection_basis_handoff_version": np.asarray(
+            PROJECTION_BASIS_HANDOFF_VERSION
+        ),
+        "gauge_mode": np.asarray("manual"),
+        "symmetry_adapted_frame_json": np.asarray(""),
+        "wavefunctions_hash": np.asarray(hash_array(wavefunctions)),
+        "spin_operator_hash": np.asarray("absent"),
+        **{name: np.asarray(value) for name, value in identity.items()},
+    }
+    np.save(project_dir / "heff.npy", heff)
+    np.savez(
+        project_dir / "basis.npz",
+        nlow_state_list=np.asarray([[0], [1]], dtype=object),
+        norb_fix_list=np.asarray([[[[0, 1.0]]], [[[1, 1.0]]]], dtype=object),
+        **common,
+    )
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        wavefunctions=wavefunctions,
+        k_indices=k_indices,
+        **common,
     )
 
 
@@ -162,6 +255,100 @@ def test_gamma_routed_handoff_roundtrip_is_numeric_and_assembles_identically(
 
 
 @pytest.mark.parametrize(
+    ("mutation", "field"),
+    [
+        ("object_discriminator", "projection_basis_kind"),
+        ("extra_object", "attacker_object"),
+        ("missing", "k_indices"),
+    ],
+)
+def test_gamma_routed_schema_boundary_rejects_as_typed_identity_error(
+    tmp_path: Path,
+    mutation: str,
+    field: str,
+) -> None:
+    path = tmp_path / "basis.npz"
+    save_gamma_routed_basis_spec(path, _spec())
+    if mutation == "object_discriminator":
+        _rewrite_npz(
+            path,
+            **{field: np.asarray(["gamma_routed"], dtype=object)},
+        )
+    elif mutation == "extra_object":
+        _rewrite_npz(path, **{field: np.asarray([{"payload": 1}], dtype=object)})
+    else:
+        _rewrite_npz(path, remove=(field,))
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        load_gamma_routed_basis_spec(path)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("joint_band_indices", np.asarray([0.5, 1.5], dtype=np.float64)),
+        ("group_ranks", np.asarray([1, 1], dtype=np.int32)),
+        ("group_offsets", np.asarray([0, 1, 2], dtype=np.float64)),
+        ("k_indices", np.asarray([4, 7], dtype=np.int32)),
+        ("heff_k_indices", np.asarray([4, 7], dtype=np.int32)),
+        ("frames", None),
+        ("reference_frames", None),
+        ("authoritative_heff", None),
+        ("route_gaps", None),
+    ],
+)
+def test_gamma_routed_schema_rejects_noncanonical_disk_dtype(
+    tmp_path: Path,
+    field: str,
+    replacement: np.ndarray | None,
+) -> None:
+    path = tmp_path / "basis.npz"
+    save_gamma_routed_basis_spec(path, _spec())
+    if replacement is None:
+        with np.load(path, allow_pickle=False) as payload:
+            original = np.array(payload[field], copy=True)
+        replacement = original.astype(
+            np.float32 if field == "route_gaps" else np.complex64
+        )
+    _rewrite_npz(path, **{field: replacement})
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        load_gamma_routed_basis_spec(path)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "legacy_field",
+    [
+        "nlow_state_list",
+        "norb_fix_list",
+        "gauge_mode",
+        "symmetry_adapted_frame_json",
+    ],
+)
+def test_gamma_routed_archive_rejects_legacy_variant_fields(
+    tmp_path: Path,
+    legacy_field: str,
+) -> None:
+    path = tmp_path / "basis.npz"
+    save_gamma_routed_basis_spec(path, _spec())
+    value = (
+        np.asarray([[0]], dtype=object)
+        if legacy_field in {"nlow_state_list", "norb_fix_list"}
+        else np.asarray("legacy")
+    )
+    _rewrite_npz(path, **{legacy_field: value})
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        load_gamma_routed_basis_spec(path)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
     "field",
     [
         "frames",
@@ -191,6 +378,41 @@ def test_gamma_routed_handoff_rejects_tampered_identity(
 
     with pytest.raises(GammaRoutingError) as rejected:
         load_gamma_routed_basis_spec(path)
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ["status", "certificate_hash", "state_hash", "action_hash"],
+)
+def test_gamma_routed_handoff_rejects_tampered_candidate_certificate(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    path = tmp_path / "basis.npz"
+    save_gamma_routed_basis_spec(path, _spec())
+    with np.load(path, allow_pickle=False) as payload:
+        envelope = json.loads(str(payload["candidate_certificate_envelope_json"].item()))
+    if mutation == "status":
+        envelope["certificate_payload"]["status"] = "failed"
+    elif mutation == "certificate_hash":
+        envelope["certificate_hash"] = "0" * 64
+    elif mutation == "state_hash":
+        envelope["input_identity_payload"]["states"][0]["u_low_hash"] = "0" * 64
+    else:
+        envelope["input_identity_payload"]["operations"][0]["raw_action_hash"] = (
+            "0" * 64
+        )
+    _rewrite_npz(
+        path,
+        candidate_certificate_envelope_json=np.asarray(
+            json.dumps(envelope, separators=(",", ":"), sort_keys=True)
+        ),
+    )
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        load_gamma_routed_basis_spec(path)
+
     assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
@@ -292,6 +514,24 @@ def test_gamma_routed_factory_binds_task7_candidate_certificate() -> None:
 
     assert len(certified.candidate_certificate_hash) == 64
     assert len(certified.candidate_input_identity_hash) == 64
+    envelope = verify_candidate_certificate_envelope(
+        certified.candidate_certificate_envelope
+    )
+    assert envelope["candidate_id"] == certified.candidate_id
+    assert set(
+        record["k_index"]
+        for record in envelope["input_identity_payload"]["states"]
+    ) == set(certified.k_indices)
+
+
+def test_gamma_routed_save_rejects_arbitrary_candidate_hashes(tmp_path: Path) -> None:
+    with pytest.raises(GammaRoutingError) as rejected:
+        save_gamma_routed_basis_spec(
+            tmp_path / "basis.npz",
+            _uncertified_spec(),
+        )
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
 def test_gamma_routed_factory_rejects_failed_task7_candidate() -> None:
@@ -390,47 +630,32 @@ def test_project_handoff_loader_retains_versioned_explicit_legacy_compatibility(
     tmp_path: Path,
 ) -> None:
     project_dir = tmp_path / "projection"
-    project_dir.mkdir()
-    heff = np.eye(2, dtype=np.complex128)[None, :, :]
-    wavefunctions = np.eye(2, dtype=np.complex128)[None, :, :]
-    k_indices = np.asarray([0], dtype=np.int64)
-    identity = {
-        "identity_schema": "moirekp.artifact-identity.v1",
-        "input_hash": "input-legacy",
-        "config_hash": "config-legacy",
-        "basis_hash": "basis-legacy",
-        "package_version": "0.1.0",
-        "schema_version": 2,
-        "k_indices_hash": hash_array(k_indices),
-        "heff_hash": hash_array(heff),
-    }
-    common = {
-        "projection_basis_kind": np.asarray("explicit_legacy"),
-        "projection_basis_handoff_version": np.asarray(
-            PROJECTION_BASIS_HANDOFF_VERSION
-        ),
-        "gauge_mode": np.asarray("manual"),
-        "symmetry_adapted_frame_json": np.asarray(""),
-        "wavefunctions_hash": np.asarray(hash_array(wavefunctions)),
-        "spin_operator_hash": np.asarray("absent"),
-        **{name: np.asarray(value) for name, value in identity.items()},
-    }
-    np.save(project_dir / "heff.npy", heff)
-    np.savez(
-        project_dir / "basis.npz",
-        nlow_state_list=np.asarray([[0], [1]], dtype=object),
-        norb_fix_list=np.asarray([[[[0, 1.0]]], [[[1, 1.0]]]], dtype=object),
-        **common,
-    )
-    np.savez(
-        project_dir / "wavefunctions.npz",
-        wavefunctions=wavefunctions,
-        k_indices=k_indices,
-        **common,
-    )
+    _write_legacy_project_artifacts(project_dir)
 
     loaded = projection_mod._load_persisted_projection_basis_handoff(project_dir)
 
     assert isinstance(loaded, ExplicitLegacyBasisSpec)
     assert loaded.projection_basis_kind == "explicit_legacy"
     assert loaded.nlow_state_list == [[0], [1]]
+
+
+@pytest.mark.parametrize(
+    "routed_field",
+    ["frames", "layout_payload", "authoritative_heff", "joint_band_indices"],
+)
+def test_explicit_legacy_archive_rejects_routed_variant_fields(
+    tmp_path: Path,
+    routed_field: str,
+) -> None:
+    project_dir = tmp_path / "projection"
+    _write_legacy_project_artifacts(project_dir)
+    basis_path = project_dir / "basis.npz"
+    with np.load(basis_path, allow_pickle=True) as payload:
+        copied = {name: np.array(payload[name], copy=True) for name in payload.files}
+    copied[routed_field] = np.asarray([0], dtype=np.int64)
+    np.savez(basis_path, **copied)
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        projection_mod._load_persisted_projection_basis_handoff(project_dir)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
