@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 import scipy.sparse
 from types import SimpleNamespace
 from pathlib import Path
@@ -314,6 +315,14 @@ def test_hr_sparse_writer_records_versioned_exact_basis_dimension(tmp_path):
         read_from_npz=True,
     ).get_hr_sparse()
     assert set(loaded) == {(0, 0, 0)}
+
+
+def test_hr_sparse_writer_fails_closed_without_exact_basis_dimension(tmp_path):
+    handler = HrSparseHandler()
+    handler.hr_sparse = {}
+
+    with pytest.raises(ValueError, match="exact positive basis dimension"):
+        handler.save_to_npz(tmp_path / "H.npz")
 
 
 def test_symm_npz_legacy_zero_tail_uses_transform_input_dimension(tmp_path):
