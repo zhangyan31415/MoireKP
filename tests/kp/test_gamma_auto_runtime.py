@@ -49,6 +49,7 @@ def _write_dispatch_config(
                 "project": {
                     "mode": mode,
                     "out_dir": "projection",
+                    "workers": 1,
                     "selection": {"mode": "auto"},
                 },
                 "symm": {"valley": valley, "spin": spin},
@@ -238,6 +239,7 @@ def _write_packed_gamma_runtime_case(
                 "project": {
                     "mode": "Gamma",
                     "out_dir": "projection",
+                    "workers": 3,
                     "selection": _strict_auto_selection_payload(),
                 },
                 "symm": {
@@ -473,9 +475,10 @@ def test_gamma_runtime_materializes_real_packed_actions_routes_and_presentation(
     sentinel = object()
     captured: dict[str, object] = {}
 
-    def prepare(inputs, config):
+    def prepare(inputs, config, *, workers):
         captured["inputs"] = inputs
         captured["config"] = config
+        captured["workers"] = workers
         return sentinel
 
     monkeypatch.setattr(runtime, "prepare_gamma_automatic_selection", prepare)
@@ -483,6 +486,7 @@ def test_gamma_runtime_materializes_real_packed_actions_routes_and_presentation(
     prepared = runtime.prepare_gamma_automatic_runtime(cfg_path)
 
     assert prepared.selection_preparation is sentinel
+    assert captured["workers"] == 3
     inputs = captured["inputs"]
     assert inputs.k_indices == (0,)
     np.testing.assert_array_equal(inputs.kpoints, np.zeros((1, 2)))
@@ -495,6 +499,23 @@ def test_gamma_runtime_materializes_real_packed_actions_routes_and_presentation(
         "TR",
         "C3z",
     )
+
+
+@pytest.mark.parametrize("workers", [None, 0, -1, True, 1.5])
+def test_gamma_runtime_requires_explicit_positive_integer_project_workers(
+    tmp_path: Path,
+    workers: object,
+) -> None:
+    cfg_path = _write_packed_gamma_runtime_case(tmp_path)
+    payload = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    if workers is None:
+        del payload["project"]["workers"]
+    else:
+        payload["project"]["workers"] = workers
+    cfg_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="project.workers.*strict positive integer"):
+        runtime.prepare_gamma_automatic_runtime(cfg_path)
 
 
 def test_gamma_runtime_requires_manifest_source_basis_identity(
@@ -521,8 +542,9 @@ def test_gamma_runtime_accepts_common_selected_operation_basis_identity(
     )
     captured: dict[str, object] = {}
 
-    def prepare(inputs, _config):
+    def prepare(inputs, _config, *, workers):
         captured["inputs"] = inputs
+        captured["workers"] = workers
         return object()
 
     monkeypatch.setattr(runtime, "prepare_gamma_automatic_selection", prepare)
@@ -530,6 +552,7 @@ def test_gamma_runtime_accepts_common_selected_operation_basis_identity(
     runtime.prepare_gamma_automatic_runtime(cfg_path)
 
     assert captured["inputs"].tapw_source_basis_hash == operation_basis_hash
+    assert captured["workers"] == 3
 
 
 @pytest.mark.parametrize(

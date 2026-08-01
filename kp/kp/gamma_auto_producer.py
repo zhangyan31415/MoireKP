@@ -8,6 +8,7 @@ before the smallest passing candidate is returned.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, fields
 from numbers import Integral, Real
 from types import MappingProxyType
@@ -651,13 +652,26 @@ def _local_eigensystems(
 
 def _target_eigensystems(
     hamiltonians: np.ndarray,
+    *,
+    workers: int,
 ) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
-    values: list[np.ndarray] = []
-    vectors: list[np.ndarray] = []
-    for hamiltonian in hamiltonians:
-        eigvals, eigvecs = np.linalg.eigh(hamiltonian)
-        values.append(eigvals)
-        vectors.append(eigvecs)
+    from threadpoolctl import threadpool_limits
+
+    requested_workers = _strict_positive_integer(
+        workers,
+        field="target eigensystem workers",
+    )
+    effective_workers = min(requested_workers, len(hamiltonians))
+    with threadpool_limits(limits=1, user_api="blas"):
+        if effective_workers == 1:
+            eigensystems = tuple(
+                np.linalg.eigh(hamiltonian) for hamiltonian in hamiltonians
+            )
+        else:
+            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
+                eigensystems = tuple(executor.map(np.linalg.eigh, hamiltonians))
+    values = [eigensystem[0] for eigensystem in eigensystems]
+    vectors = [eigensystem[1] for eigensystem in eigensystems]
     return np.stack(values, axis=0), tuple(vectors)
 
 
@@ -1118,6 +1132,8 @@ def _evaluate_candidate(
 def prepare_gamma_automatic_selection(
     inputs: GammaAutomaticProducerInputs,
     config: GammaAutomaticSelectionConfig,
+    *,
+    workers: int = 1,
 ) -> GammaAutomaticSelectionPreparation:
     """Freeze candidate-independent physics and the final PENDING identity."""
 
@@ -1125,6 +1141,10 @@ def prepare_gamma_automatic_selection(
         raise TypeError("inputs must be GammaAutomaticProducerInputs")
     if not isinstance(config, GammaAutomaticSelectionConfig):
         raise TypeError("config must be GammaAutomaticSelectionConfig")
+    target_workers = _strict_positive_integer(
+        workers,
+        field="target eigensystem workers",
+    )
     expected_k_indices = tuple(range(len(inputs.k_indices)))
     if inputs.k_indices != expected_k_indices:
         raise ValueError(
@@ -1200,7 +1220,10 @@ def prepare_gamma_automatic_selection(
         layout,
         hermiticity_tolerance=config.candidate_symmetry_thresholds.heff_hermiticity_residual,
     )
-    target_values, target_vectors = _target_eigensystems(inputs.source_hamiltonians)
+    target_values, target_vectors = _target_eigensystems(
+        inputs.source_hamiltonians,
+        workers=target_workers,
+    )
     frozen_target = resolve_target_window(target_values, config.target_window_spec)
     source_hamiltonian_hash = hash_array(inputs.source_hamiltonians)
 
@@ -1361,11 +1384,13 @@ def evaluate_gamma_automatic_selection(
 def produce_gamma_automatic_selection(
     inputs: GammaAutomaticProducerInputs,
     config: GammaAutomaticSelectionConfig,
+    *,
+    workers: int = 1,
 ) -> GammaAutomaticSelectionResult:
     """Prepare and evaluate one pure automatic Gamma selection."""
 
     return evaluate_gamma_automatic_selection(
-        prepare_gamma_automatic_selection(inputs, config)
+        prepare_gamma_automatic_selection(inputs, config, workers=workers)
     )
 
 

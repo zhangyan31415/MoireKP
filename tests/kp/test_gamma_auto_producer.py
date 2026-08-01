@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from copy import deepcopy
+import threading
 
 import numpy as np
 import pytest
@@ -261,6 +263,101 @@ def test_gamma_auto_preselection_identity_binds_sampled_kpoints_and_pairs() -> N
     assert contract is not None
     assert contract["sampled_k_route"]["pairs"] == [[0, 0], [1, 1]]
     assert original.selection_input.action_package_hash != shifted.selection_input.action_package_hash
+
+
+def test_gamma_target_eigensystems_parallelize_with_one_outer_blas_limit_and_keep_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    hamiltonians = np.stack(
+        tuple(
+            np.diag([10.0 + k_position, -1.0 - k_position]).astype(np.complex128)
+            for k_position in range(3)
+        ),
+        axis=0,
+    )
+    original_eigh = np.linalg.eigh
+    rendezvous = threading.Barrier(3, timeout=5.0)
+    worker_threads: set[int] = set()
+    executor_workers: list[int] = []
+    scope_events: list[tuple[object, ...]] = []
+    scope_active = False
+    original_executor = producer_mod.ThreadPoolExecutor
+
+    class RecordingThreadPoolExecutor(original_executor):
+        def __init__(self, max_workers: int):
+            executor_workers.append(max_workers)
+            super().__init__(max_workers=max_workers)
+
+    @contextmanager
+    def fake_threadpool_limits(*, limits, user_api):
+        nonlocal scope_active
+        scope_events.append(("enter", limits, user_api))
+        scope_active = True
+        try:
+            yield
+        finally:
+            scope_active = False
+            scope_events.append(("exit",))
+
+    def synchronized_eigh(matrix: np.ndarray):
+        assert scope_active
+        assert np.shares_memory(matrix, hamiltonians)
+        worker_threads.add(threading.get_ident())
+        rendezvous.wait()
+        return original_eigh(matrix)
+
+    import threadpoolctl
+
+    monkeypatch.setattr(threadpoolctl, "threadpool_limits", fake_threadpool_limits)
+    monkeypatch.setattr(producer_mod.np.linalg, "eigh", synchronized_eigh)
+    monkeypatch.setattr(producer_mod, "ThreadPoolExecutor", RecordingThreadPoolExecutor)
+
+    values, vectors = producer_mod._target_eigensystems(
+        hamiltonians,
+        workers=99,
+    )
+
+    assert scope_events == [("enter", 1, "blas"), ("exit",)]
+    assert executor_workers == [len(hamiltonians)]
+    assert len(worker_threads) == len(hamiltonians)
+    np.testing.assert_allclose(
+        values,
+        np.asarray([[-1.0, 10.0], [-2.0, 11.0], [-3.0, 12.0]]),
+    )
+    for k_position, eigvecs in enumerate(vectors):
+        expected_values, expected_vectors = original_eigh(hamiltonians[k_position])
+        np.testing.assert_allclose(values[k_position], expected_values)
+        np.testing.assert_allclose(eigvecs, expected_vectors)
+
+
+def test_gamma_preselection_identity_is_invariant_to_target_worker_count() -> None:
+    inputs = _producer_inputs()
+    config = GammaAutomaticSelectionConfig.from_normalized_config(_config_payload())
+
+    serial = prepare_gamma_automatic_selection(inputs, config, workers=1)
+    parallel = prepare_gamma_automatic_selection(inputs, config, workers=2)
+
+    assert serial.selection_input == parallel.selection_input
+    assert serial.source_hamiltonian_hash == parallel.source_hamiltonian_hash
+    np.testing.assert_array_equal(serial.target_values, parallel.target_values)
+    for serial_vectors, parallel_vectors in zip(
+        serial.target_vectors,
+        parallel.target_vectors,
+        strict=True,
+    ):
+        np.testing.assert_array_equal(serial_vectors, parallel_vectors)
+
+
+@pytest.mark.parametrize("workers", [0, -1, True, 1.5])
+def test_gamma_preselection_rejects_non_positive_strict_integer_workers(
+    workers: object,
+) -> None:
+    with pytest.raises(ValueError, match="workers.*strict positive integer"):
+        prepare_gamma_automatic_selection(
+            _producer_inputs(),
+            GammaAutomaticSelectionConfig.from_normalized_config(_config_payload()),
+            workers=workers,  # type: ignore[arg-type]
+        )
 
 
 def test_real_gamma_auto_producer_fails_closed_when_raw_action_breaks_source_route() -> None:

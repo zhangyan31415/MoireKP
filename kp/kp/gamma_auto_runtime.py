@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import io
-from numbers import Real
+from numbers import Integral, Real
 import os
 from pathlib import Path
 import tempfile
@@ -59,6 +59,24 @@ def _load_strict_gamma_auto_config(value: Any) -> GammaAutomaticSelectionConfig:
     """Parse the complete hard policy without inserting runtime defaults."""
 
     return GammaAutomaticSelectionConfig.from_normalized_config(value)
+
+
+def _strict_project_workers(project_cfg: Mapping[str, Any]) -> int:
+    if "workers" not in project_cfg:
+        raise ValueError(
+            "automatic Gamma project.workers must be an explicit strict positive integer"
+        )
+    value = project_cfg["workers"]
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Integral):
+        raise ValueError(
+            "automatic Gamma project.workers must be an explicit strict positive integer"
+        )
+    workers = int(value)
+    if workers <= 0:
+        raise ValueError(
+            "automatic Gamma project.workers must be an explicit strict positive integer"
+        )
+    return workers
 
 
 def _strict_sha256(value: Any, *, field: str) -> str:
@@ -454,6 +472,7 @@ def prepare_gamma_automatic_runtime(
         dict(cfg.get("project", {})),
         None if overrides is None else dict(overrides),
     )
+    workers = _strict_project_workers(project_cfg)
     if str(material.get("spin", "all")).strip().lower() != "all":
         raise ValueError("automatic Gamma v1 requires material.spin='all'")
     symm = cfg.get("symm", {})
@@ -684,6 +703,7 @@ def prepare_gamma_automatic_runtime(
         selection_preparation=prepare_gamma_automatic_selection(
             inputs,
             selection_config,
+            workers=workers,
         ),
         output_directory=output_directory,
     )
