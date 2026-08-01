@@ -17,6 +17,10 @@ from kp.blocks import (
     assemble_gamma_routed_projectors,
     build_gamma_routed_frames,
 )
+from kp.blocks.gamma_layout import (
+    certify_gamma_raw_action,
+    gamma_certified_action_route_contract,
+)
 from kp.projection_handoff import (
     ExplicitLegacyBasisSpec,
     GammaRoutedBasisSpec,
@@ -46,6 +50,7 @@ from kp.symmetry import projection as projection_mod
 from kp.symmetry.candidate_certificate import (
     CandidateOperationInput,
     CandidateSymmetryThresholds,
+    candidate_raw_action_package_hash,
     verify_candidate_certificate_envelope,
 )
 from kp.symmetry.joint_exactification import (
@@ -166,6 +171,145 @@ def _spec() -> GammaRoutedBasisSpec:
         required_pairs={"E": pairs},
         candidate_thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
     )
+
+
+def test_exact_action_drift_keeps_raw_package_but_changes_candidate_and_handoff() -> None:
+    base = _uncertified_spec()
+    pairs = ((4, 4), (7, 7))
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("E", False),),
+        relations=(
+            MagneticRelation("E^2", lhs=("E", "E"), rhs=(), central_phase=1.0),
+        ),
+        central_phases=(1.0,),
+        source="gamma_handoff_exact_action_identity_test",
+    )
+    operations = {
+        "E": CandidateOperationInput(
+            name="E",
+            antiunitary=False,
+            d_full=np.eye(base.layout.full_dimension, dtype=np.complex128),
+            pairs=pairs,
+        )
+    }
+    required_pairs = {"E": pairs}
+    raw_package_hash = candidate_raw_action_package_hash(
+        operations=operations,
+        presentation=presentation,
+        required_pairs=required_pairs,
+    )
+
+    def certify(exact: np.ndarray) -> GammaRoutedBasisSpec:
+        return certify_gamma_routed_basis_spec(
+            candidate_id="gamma-routed-exact-drift",
+            artifact_identity={
+                **base.artifact_identity,
+                "basis_hash": base.base_basis_hash,
+            },
+            layout=base.layout,
+            thresholds=base.thresholds,
+            k_indices=base.k_indices,
+            routed_frames=tuple(
+                base.routed_frames_for_k(k) for k in base.k_indices
+            ),
+            authoritative_heff=base.authoritative_heff,
+            heff_k_indices=base.heff_k_indices,
+            closure_certificate_hashes=base.closure_certificate_hashes,
+            routing_certificate_hashes=base.routing_certificate_hashes,
+            source_hamiltonian_hash=base.source_hamiltonian_hash,
+            ordered_q_hashes=base.ordered_q_hashes,
+            raw_action_package_hash=raw_package_hash,
+            operations=operations,
+            exactified_actions={"E": exact},
+            presentation=presentation,
+            required_pairs=required_pairs,
+            candidate_thresholds=CandidateSymmetryThresholds.uniform(3.0),
+        )
+
+    positive = certify(np.eye(base.model_dim, dtype=np.complex128))
+    negative = certify(-np.eye(base.model_dim, dtype=np.complex128))
+
+    assert positive.raw_action_package_hash == negative.raw_action_package_hash
+    assert positive.raw_action_package_hash == raw_package_hash
+    assert positive.candidate_input_identity_hash != negative.candidate_input_identity_hash
+    assert positive.candidate_certificate_hash != negative.candidate_certificate_hash
+    assert positive.handoff_identity_hash != negative.handoff_identity_hash
+
+
+def test_gamma_handoff_recomputes_and_binds_factorized_route_contract() -> None:
+    base = _uncertified_spec()
+    pairs = ((4, 4), (7, 7))
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("E", False),),
+        relations=(
+            MagneticRelation("E^2", lhs=("E", "E"), rhs=(), central_phase=1.0),
+        ),
+        central_phases=(1.0,),
+        source="gamma_handoff_route_identity_test",
+    )
+    full_action = np.eye(base.layout.full_dimension, dtype=np.complex128)
+    certified_action = certify_gamma_raw_action(
+        name="E",
+        full_action=full_action,
+        layout=base.layout,
+        q_permutations=((0,), (0,)),
+        sector_map=(0, 1),
+        antiunitary=False,
+        thresholds=base.thresholds,
+        tapw_source_basis_hash=base.layout.tapw_source_basis_hash,
+    )
+    route_contract = gamma_certified_action_route_contract(
+        certified_action,
+        layout=base.layout,
+        thresholds=base.thresholds,
+        full_action=full_action,
+    )
+
+    def certify(route: dict[str, object]) -> GammaRoutedBasisSpec:
+        operations = {
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=full_action,
+                pairs=pairs,
+                route_contract=route,
+            )
+        }
+        raw_hash = candidate_raw_action_package_hash(
+            operations=operations,
+            presentation=presentation,
+            required_pairs={"E": pairs},
+        )
+        return certify_gamma_routed_basis_spec(
+            candidate_id="gamma-routed-route-contract",
+            artifact_identity={**base.artifact_identity, "basis_hash": base.base_basis_hash},
+            layout=base.layout,
+            thresholds=base.thresholds,
+            k_indices=base.k_indices,
+            routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
+            authoritative_heff=base.authoritative_heff,
+            heff_k_indices=base.heff_k_indices,
+            closure_certificate_hashes=base.closure_certificate_hashes,
+            routing_certificate_hashes=base.routing_certificate_hashes,
+            source_hamiltonian_hash=base.source_hamiltonian_hash,
+            ordered_q_hashes=base.ordered_q_hashes,
+            raw_action_package_hash=raw_hash,
+            operations=operations,
+            exactified_actions={"E": np.eye(base.model_dim, dtype=np.complex128)},
+            presentation=presentation,
+            required_pairs={"E": pairs},
+            candidate_thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+            certified_gamma_actions=(certified_action,),
+        )
+
+    certified = certify(route_contract)
+    assert certified.raw_action_package_hash != "0" * 64
+
+    drifted = dict(route_contract)
+    drifted["sector_map"] = [1, 0]
+    with pytest.raises(GammaRoutingError, match="route contract differs") as rejected:
+        certify(drifted)
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
 def _selection_input(

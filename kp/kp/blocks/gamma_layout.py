@@ -875,6 +875,52 @@ def _validate_action_certificate(
         )
 
 
+def gamma_certified_action_route_contract(
+    action: GammaCertifiedRawAction,
+    *,
+    layout: GammaRowLayout,
+    thresholds: GammaRoutingThresholds,
+    full_action: Any | None = None,
+) -> dict[str, Any]:
+    """Return the canonical, independently verified Gamma route contract.
+
+    The contract is suitable for ``CandidateOperationInput.route_contract``.
+    It binds the factorized Q/sector route as well as the exact full matrix
+    consumed by candidate certification.  Supplying ``full_action`` closes the
+    handoff boundary: callers cannot pair a valid route certificate with a
+    different raw action matrix.
+    """
+
+    if not isinstance(action, GammaCertifiedRawAction):
+        raise TypeError("Gamma route contract requires a certified raw action")
+    _validate_action_certificate(action, layout=layout, thresholds=thresholds)
+    if full_action is not None:
+        try:
+            full_matrix_hash = _canonical_matrix_hash(full_action)
+        except (IndexError, OverflowError, TypeError, ValueError) as error:
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                f"action {action.name!r} full matrix cannot be canonicalized",
+            ) from error
+        if full_matrix_hash != action.full_matrix_hash:
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                f"action {action.name!r} certified route does not match its raw full matrix",
+            )
+    return {
+        "schema": "kp.gamma-certified-action-route.v1",
+        "name": action.name,
+        "antiunitary": action.antiunitary,
+        "sector_map": list(action.sector_map),
+        "q_permutation": list(action.q_permutation),
+        "tapw_source_basis_hash": action.tapw_source_basis_hash,
+        "layout_hash": action.layout_hash,
+        "thresholds_hash": action.thresholds_hash,
+        "full_matrix_hash": action.full_matrix_hash,
+        "action_hash": action.action_hash,
+    }
+
+
 def certify_gamma_raw_action(
     *,
     name: str,

@@ -146,13 +146,33 @@ class CandidateOperationInput:
     antiunitary: bool
     d_full: object
     pairs: tuple[tuple[int, int], ...]
+    route_contract: Mapping[str, object] | None = None
 
     def __post_init__(self) -> None:
         name = str(self.name).strip()
         pairs = tuple((int(target), int(source)) for target, source in self.pairs)
+        route_contract = self.route_contract
+        if route_contract is not None:
+            if not isinstance(route_contract, Mapping):
+                raise ValueError("candidate operation route_contract must be a mapping")
+            route_contract = dict(route_contract)
+            if not route_contract or not str(route_contract.get("schema", "")).strip():
+                raise ValueError(
+                    "candidate operation route_contract requires a schema"
+                )
+            # Canonical hashing is also the strict JSON/finiteness validator.
+            hash_mapping(route_contract)
+            route_contract = MappingProxyType(route_contract)
         object.__setattr__(self, "name", name)
         object.__setattr__(self, "antiunitary", bool(self.antiunitary))
         object.__setattr__(self, "pairs", pairs)
+        object.__setattr__(self, "route_contract", route_contract)
+
+    @property
+    def route_identity_hash(self) -> str | None:
+        if self.route_contract is None:
+            return None
+        return hash_mapping(self.route_contract)
 
 
 @dataclass(frozen=True)
@@ -647,10 +667,31 @@ def candidate_certificate_envelope(
     }
 
 
+def _raw_action_package_hash_from_records(
+    *,
+    presentation_hash: object,
+    required_pairs: object,
+    operation_records: Sequence[Mapping[str, object]],
+) -> str:
+    return hash_mapping(
+        {
+            "version": "kp.candidate-raw-action-package.v1",
+            "presentation_hash": presentation_hash,
+            "required_pairs": required_pairs,
+            "operations": list(operation_records),
+        }
+    )
+
+
 def candidate_action_package_hash(
     input_identity_payload: Mapping[str, object],
 ) -> str:
-    """Hash the exact presentation, pair coverage, and actions of one input."""
+    """Hash the candidate-independent raw-action contract of one input.
+
+    Exactified actions are deliberately excluded.  Their hashes remain bound
+    by ``input_identity_hash`` and ``certificate_hash``; excluding them here
+    makes this package identity available before candidate selection.
+    """
 
     expected_keys = {
         "version",
@@ -661,13 +702,81 @@ def candidate_action_package_hash(
     }
     if set(input_identity_payload) != expected_keys:
         raise ValueError("candidate symmetry input identity key set mismatch")
-    return hash_mapping(
-        {
-            "version": "kp.candidate-action-package.v1",
-            "presentation_hash": input_identity_payload["presentation_hash"],
-            "required_pairs": input_identity_payload["required_pairs"],
-            "operations": input_identity_payload["operations"],
-        }
+    operation_records = input_identity_payload["operations"]
+    if not isinstance(operation_records, list):
+        raise ValueError("candidate symmetry operation records must be a list")
+    raw_operation_records: list[dict[str, object]] = []
+    expected_operation_keys = {
+        "key",
+        "name",
+        "antiunitary",
+        "pairs",
+        "raw_action_hash",
+        "route_identity_hash",
+        "exact_action_hash",
+    }
+    for index, raw_record in enumerate(operation_records):
+        if not isinstance(raw_record, Mapping) or set(raw_record) != expected_operation_keys:
+            raise ValueError(
+                f"candidate symmetry operation record {index} key set mismatch"
+            )
+        raw_operation_records.append(
+            {
+                "key": raw_record["key"],
+                "name": raw_record["name"],
+                "antiunitary": raw_record["antiunitary"],
+                "pairs": raw_record["pairs"],
+                "raw_action_hash": raw_record["raw_action_hash"],
+                "route_identity_hash": raw_record["route_identity_hash"],
+            }
+        )
+    return _raw_action_package_hash_from_records(
+        presentation_hash=input_identity_payload["presentation_hash"],
+        required_pairs=input_identity_payload["required_pairs"],
+        operation_records=raw_operation_records,
+    )
+
+
+def candidate_raw_action_package_hash(
+    *,
+    operations: Mapping[str, CandidateOperationInput],
+    presentation: MagneticPresentation,
+    required_pairs: Mapping[str, Sequence[tuple[int, int]]],
+) -> str:
+    """Build the same raw-action package hash before any candidate exists."""
+
+    generator_names = {generator.name for generator in presentation.generators}
+    if set(operations) != generator_names or set(required_pairs) != generator_names:
+        raise ValueError(
+            "raw-action package operations/pairs must match the magnetic presentation"
+        )
+    presentation_hash = hash_mapping(_canonical_presentation_payload(presentation))
+    operation_records: list[dict[str, object]] = []
+    for key in sorted(operations):
+        operation = operations[key]
+        if not isinstance(operation, CandidateOperationInput):
+            raise TypeError("raw-action package operations must be CandidateOperationInput")
+        operation_records.append(
+            {
+                "key": str(key),
+                "name": operation.name,
+                "antiunitary": bool(operation.antiunitary),
+                "pairs": [list(pair) for pair in sorted(operation.pairs)],
+                "raw_action_hash": _raw_action_identity_hash(operation.d_full),
+                "route_identity_hash": operation.route_identity_hash,
+            }
+        )
+    required_pair_records = {
+            str(name): [
+                [int(target_index), int(source_index)]
+                for target_index, source_index in sorted(pairs)
+            ]
+            for name, pairs in sorted(required_pairs.items())
+    }
+    return _raw_action_package_hash_from_records(
+        presentation_hash=presentation_hash,
+        required_pairs=required_pair_records,
+        operation_records=operation_records,
     )
 
 
@@ -938,6 +1047,7 @@ def _verify_certified_candidate_payload(
                 "antiunitary",
                 "pairs",
                 "raw_action_hash",
+                "route_identity_hash",
                 "exact_action_hash",
             },
             context=f"input operation[{index}]",
@@ -951,6 +1061,12 @@ def _verify_certified_candidate_payload(
         ):
             raise ValueError("input operation identity is invalid")
         _strict_sha256(operation["raw_action_hash"], context=f"{name} raw action")
+        route_identity_hash = operation["route_identity_hash"]
+        if route_identity_hash is not None:
+            _strict_sha256(
+                route_identity_hash,
+                context=f"{name} route identity",
+            )
         _strict_sha256(operation["exact_action_hash"], context=f"{name} exact action")
         if _strict_pair_list(operation["pairs"], context=f"input operation {name} pairs") != input_pairs.get(name):
             raise ValueError(f"input operation {name} pair coverage mismatch")
@@ -1391,6 +1507,7 @@ def _referenced_state_keys(
     *,
     operations: Mapping[str, CandidateOperationInput],
     required_pairs: Mapping[str, Sequence[tuple[int, int]]],
+    required_state_k_indices: Sequence[int] = (),
 ) -> set[tuple[str, int]]:
     """Return every target/source state named by observed or required coverage."""
 
@@ -1401,6 +1518,18 @@ def _referenced_state_keys(
         for target_index, source_index in pairs:
             references.add(("target", int(target_index)))
             references.add(("source", int(source_index)))
+    for raw_index in required_state_k_indices:
+        if (
+            isinstance(raw_index, (bool, np.bool_))
+            or not isinstance(raw_index, (int, np.integer))
+            or int(raw_index) < 0
+        ):
+            raise ValueError(
+                "required_state_k_indices must contain nonnegative strict integers"
+            )
+        index = int(raw_index)
+        references.add(("target", index))
+        references.add(("source", index))
     return references
 
 
@@ -1412,6 +1541,7 @@ def _candidate_input_identity_payload(
     operations: Mapping[str, CandidateOperationInput],
     exactified_actions: Mapping[str, np.ndarray | None],
     required_pairs: Mapping[str, Sequence[tuple[int, int]]],
+    required_state_k_indices: Sequence[int] = (),
 ) -> dict[str, object]:
     operation_records: list[dict[str, object]] = []
     for key in sorted(set(operations) | set(exactified_actions)):
@@ -1431,6 +1561,9 @@ def _candidate_input_identity_payload(
                 "raw_action_hash": _raw_action_identity_hash(
                     None if operation is None else operation.d_full
                 ),
+                "route_identity_hash": (
+                    None if operation is None else operation.route_identity_hash
+                ),
                 "exact_action_hash": _complex_array_identity_hash(
                     exactified_actions.get(key)
                 ),
@@ -1439,6 +1572,7 @@ def _candidate_input_identity_payload(
     state_references = _referenced_state_keys(
         operations=operations,
         required_pairs=required_pairs,
+        required_state_k_indices=required_state_k_indices,
     )
     state_records: list[dict[str, object]] = []
     for role, index in sorted(state_references):
@@ -1783,6 +1917,7 @@ def certify_candidate_symmetries(
     thresholds: CandidateSymmetryThresholds,
     target_states: Mapping[int, CandidateProjectionState] | None = None,
     source_states: Mapping[int, CandidateProjectionState] | None = None,
+    required_state_k_indices: Sequence[int] = (),
 ) -> CandidateSymmetryCertificate:
     """Certify one candidate directly from explicit in-memory physics inputs."""
 
@@ -1798,6 +1933,7 @@ def certify_candidate_symmetries(
         operations=operations,
         exactified_actions=exactified_actions,
         required_pairs=required_pairs,
+        required_state_k_indices=required_state_k_indices,
     )
     input_identity_payload_json = _canonical_payload_json(input_identity_payload)
     input_identity_hash = hash_mapping(input_identity_payload)
@@ -1808,6 +1944,7 @@ def certify_candidate_symmetries(
         _referenced_state_keys(
             operations=operations,
             required_pairs=required_pairs,
+            required_state_k_indices=required_state_k_indices,
         )
     ):
         mapping = target if role == "target" else source
@@ -1823,6 +1960,13 @@ def certify_candidate_symmetries(
     operation_set = set(operations)
     exact_set = set(exactified_actions)
     failures: list[str] = []
+    failures.extend(
+        f"invalid_state:{role}:{index}"
+        for (role, index), certificate in sorted(
+            state_certificate_by_role_and_k.items()
+        )
+        if not certificate.passed
+    )
     for name in sorted(required_set - operation_set):
         failures.append(f"missing_operation:{name}")
     for name in sorted(operation_set - required_set):
@@ -2254,6 +2398,7 @@ __all__ = [
     "CandidateSymmetryThresholds",
     "ProjectedPairEvaluation",
     "candidate_action_package_hash",
+    "candidate_raw_action_package_hash",
     "candidate_certificate_envelope",
     "certify_candidate_symmetries",
     "evaluate_projected_pair",

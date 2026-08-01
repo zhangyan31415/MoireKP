@@ -20,6 +20,8 @@ from kp.symmetry.candidate_certificate import (
     CandidateStateFailureCode,
     CandidateSymmetryStatus,
     CandidateSymmetryThresholds,
+    candidate_action_package_hash,
+    candidate_raw_action_package_hash,
     candidate_certificate_envelope,
     certify_candidate_symmetries,
     evaluate_projected_pair,
@@ -122,6 +124,140 @@ def test_certifies_identity_action_and_records_every_metric() -> None:
     assert operation.exact_action_unitarity_residual == pytest.approx(0.0)
     assert result.joint_certification_status == "certified"
     assert result.joint_certification_failure is None
+
+
+def test_raw_action_package_is_preselection_stable_but_candidate_identity_binds_exact_action() -> None:
+    operation = CandidateOperationInput(
+        name="E",
+        antiunitary=False,
+        d_full=np.eye(2),
+        pairs=((0, 0),),
+    )
+    presentation = _presentation("E")
+    exact_identity = _certify(
+        name="E",
+        state=_state(np.eye(2)),
+        d_full=np.eye(2),
+        exact=np.eye(2),
+    )
+    exact_negative = _certify(
+        name="E",
+        state=_state(np.eye(2)),
+        d_full=np.eye(2),
+        exact=-np.eye(2),
+    )
+
+    preselection_hash = candidate_raw_action_package_hash(
+        operations={"E": operation},
+        presentation=presentation,
+        required_pairs={"E": ((0, 0),)},
+    )
+
+    assert candidate_action_package_hash(
+        exact_identity.input_identity_payload
+    ) == preselection_hash
+    assert candidate_action_package_hash(
+        exact_negative.input_identity_payload
+    ) == preselection_hash
+    assert exact_identity.input_identity_hash != exact_negative.input_identity_hash
+    assert exact_identity.certificate_hash != exact_negative.certificate_hash
+
+
+def test_raw_action_package_changes_with_raw_action_or_pair_contract() -> None:
+    presentation = _presentation("E")
+
+    def package(action: np.ndarray, pairs: tuple[tuple[int, int], ...]) -> str:
+        return candidate_raw_action_package_hash(
+            operations={
+                "E": CandidateOperationInput(
+                    name="E",
+                    antiunitary=False,
+                    d_full=action,
+                    pairs=pairs,
+                )
+            },
+            presentation=presentation,
+            required_pairs={"E": pairs},
+        )
+
+    baseline = package(np.eye(2), ((0, 0),))
+    assert package(np.diag([1.0, -1.0]), ((0, 0),)) != baseline
+    assert package(np.eye(2), ((1, 1),)) != baseline
+
+    routed_a = candidate_raw_action_package_hash(
+        operations={
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=np.eye(2),
+                pairs=((0, 0),),
+                route_contract={
+                    "schema": "kp.gamma-certified-raw-action-route.v1",
+                    "q_permutations": ((0, 1), (0, 1)),
+                    "sector_map": (0, 1),
+                },
+            )
+        },
+        presentation=presentation,
+        required_pairs={"E": ((0, 0),)},
+    )
+    routed_b = candidate_raw_action_package_hash(
+        operations={
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=np.eye(2),
+                pairs=((0, 0),),
+                route_contract={
+                    "schema": "kp.gamma-certified-raw-action-route.v1",
+                    "q_permutations": ((1, 0), (1, 0)),
+                    "sector_map": (0, 1),
+                },
+            )
+        },
+        presentation=presentation,
+        required_pairs={"E": ((0, 0),)},
+    )
+    assert routed_a != routed_b
+
+
+def test_required_state_k_coverage_binds_unpaired_production_states() -> None:
+    presentation = _presentation("E")
+    operation = CandidateOperationInput(
+        name="E",
+        antiunitary=False,
+        d_full=np.eye(1),
+        pairs=((0, 0),),
+    )
+    common = dict(
+        candidate_id="all-k-state-coverage",
+        operations={"E": operation},
+        exactified_actions={"E": np.eye(1)},
+        presentation=presentation,
+        required_pairs={"E": ((0, 0),)},
+        required_state_k_indices=(0, 1),
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+    certified = certify_candidate_symmetries(
+        states={0: _state(np.eye(1)), 1: _state(np.eye(1))},
+        **common,
+    )
+    missing = certify_candidate_symmetries(
+        states={0: _state(np.eye(1))},
+        **common,
+    )
+
+    assert certified.status is CandidateSymmetryStatus.CERTIFIED
+    assert {(state.role, state.k_index) for state in certified.states} == {
+        ("source", 0),
+        ("source", 1),
+        ("target", 0),
+        ("target", 1),
+    }
+    assert missing.status is CandidateSymmetryStatus.FAILED
+    assert "invalid_state:source:1" in missing.failures
+    assert "invalid_state:target:1" in missing.failures
 
 
 def test_rejects_candidate_with_raw_h_subspace_leakage() -> None:

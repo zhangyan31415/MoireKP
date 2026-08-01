@@ -16,11 +16,13 @@ from typing import Any, ClassVar, Mapping, Sequence, TypeAlias
 import numpy as np
 
 from .blocks.gamma_layout import (
+    GammaCertifiedRawAction,
     GammaRoutedFrames,
     GammaRoutingError,
     GammaRoutingThresholds,
     GammaRowLayout,
     assemble_gamma_routed_projectors,
+    gamma_certified_action_route_contract,
 )
 from .identity import (
     PROJECTION_ARTIFACT_IDENTITY_FIELDS,
@@ -916,6 +918,7 @@ def certify_gamma_routed_basis_spec(
     presentation: Any,
     required_pairs: Mapping[str, Sequence[tuple[int, int]]],
     candidate_thresholds: Any,
+    certified_gamma_actions: Sequence[GammaCertifiedRawAction] | None = None,
 ) -> GammaRoutedBasisSpec:
     """Create a routed handoff only after Task-7 candidate certification.
 
@@ -924,12 +927,61 @@ def certify_gamma_routed_basis_spec(
     """
 
     from .symmetry.candidate_certificate import (
+        CandidateOperationInput,
         CandidateProjectionState,
         CandidateSymmetryStatus,
         candidate_action_package_hash,
         candidate_certificate_envelope,
         certify_candidate_symmetries,
     )
+
+    if certified_gamma_actions is None:
+        if any(
+            isinstance(operation, CandidateOperationInput)
+            and operation.route_contract is not None
+            for operation in operations.values()
+        ):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "routed Gamma route contracts require certified Gamma actions",
+            )
+    else:
+        certified_by_name: dict[str, GammaCertifiedRawAction] = {}
+        for action in certified_gamma_actions:
+            if action.name in certified_by_name:
+                raise _reject(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    f"duplicate certified Gamma action {action.name!r}",
+                )
+            certified_by_name[action.name] = action
+        if set(certified_by_name) != set(operations):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "certified Gamma actions do not cover the candidate operations",
+            )
+        for name, action in certified_by_name.items():
+            operation = operations[name]
+            if not isinstance(operation, CandidateOperationInput):
+                raise _reject(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    f"operation {name!r} is not a candidate operation input",
+                )
+            if operation.name != action.name or operation.antiunitary != action.antiunitary:
+                raise _reject(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    f"operation {name!r} metadata differs from its certified Gamma action",
+                )
+            expected_contract = gamma_certified_action_route_contract(
+                action,
+                layout=layout,
+                thresholds=thresholds,
+                full_action=operation.d_full,
+            )
+            if operation.route_contract != expected_contract:
+                raise _reject(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    f"operation {name!r} route contract differs from its certified Gamma action",
+                )
 
     provisional = GammaRoutedBasisSpec.create(
         artifact_identity=artifact_identity,
@@ -961,7 +1013,7 @@ def certify_gamma_routed_basis_spec(
             u_low=provisional.assemble_for_k(k_index, include_high=False)[0],
             heff=provisional.authoritative_heff_for_k(k_index),
         )
-        for k_index in referenced_k
+        for k_index in provisional.k_indices
     }
     certificate = certify_candidate_symmetries(
         candidate_id=str(candidate_id),
@@ -971,6 +1023,7 @@ def certify_gamma_routed_basis_spec(
         presentation=presentation,
         required_pairs=required_pairs,
         thresholds=candidate_thresholds,
+        required_state_k_indices=k_indices,
     )
     if certificate.status is not CandidateSymmetryStatus.CERTIFIED:
         raise _reject(
