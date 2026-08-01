@@ -7,11 +7,18 @@ no artifact I/O and never searches nested diagnostic payloads for metrics.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, field, fields
 from enum import Enum
+import hashlib
+import json
 from typing import Mapping, Sequence
 
 import numpy as np
+
+try:
+    from scipy import sparse as _sparse
+except Exception:  # pragma: no cover - dense inputs remain supported
+    _sparse = None
 
 from .joint_exactification import (
     BlockRouteAction,
@@ -26,6 +33,14 @@ class CandidateSymmetryStatus(str, Enum):
 
     CERTIFIED = "certified"
     FAILED = "failed"
+
+
+class CandidateJointCertificationStatus(str, Enum):
+    """Whether strict joint exact-action certification ran and succeeded."""
+
+    CERTIFIED = "certified"
+    FAILED = "failed"
+    NOT_RUN = "not_run"
 
 
 @dataclass(frozen=True)
@@ -63,6 +78,7 @@ class CandidateSymmetryThresholds:
     heff_covariance_residual: float
     relation_residual: float
     antiunitary_square_residual: float
+    exact_action_unitarity_residual: float
 
     def __post_init__(self) -> None:
         for item in fields(self):
@@ -86,11 +102,11 @@ class CandidatePairCertificate:
     operation: str
     target_k_index: int
     source_k_index: int
-    raw_h_leakage: float
-    raw_action_unitarity_residual: float
-    exactification_distance: float
-    intertwining_residual: float
-    heff_covariance_residual: float
+    raw_h_leakage: float | None
+    raw_action_unitarity_residual: float | None
+    exactification_distance: float | None
+    intertwining_residual: float | None
+    heff_covariance_residual: float | None
     failures: tuple[str, ...]
 
     @property
@@ -108,6 +124,7 @@ class CandidateOperationCertificate:
     observed_pairs: tuple[tuple[int, int], ...]
     coverage_complete: bool
     exact_action_finite: bool
+    exact_action_unitarity_residual: float | None
     pairs: tuple[CandidatePairCertificate, ...]
     antiunitary_square_phase: complex | None
     antiunitary_square_residual: float | None
@@ -123,8 +140,8 @@ class CandidateRelationCertificate:
     """Residual for one declared magnetic group relation."""
 
     name: str
-    residual: float
-    maximum_entry: float
+    residual: float | None
+    maximum_entry: float | None
     failures: tuple[str, ...]
 
     @property
@@ -142,10 +159,151 @@ class CandidateSymmetryCertificate:
     observed_operations: tuple[str, ...]
     operation_coverage_complete: bool
     pair_coverage_complete: bool
+    thresholds: CandidateSymmetryThresholds
     operations: tuple[CandidateOperationCertificate, ...]
     relations: tuple[CandidateRelationCertificate, ...]
     relation_residual_max: float | None
+    joint_certification_status: CandidateJointCertificationStatus
+    joint_certification_failure: str | None
     failures: tuple[str, ...]
+    certificate_hash: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "certificate_hash",
+            _candidate_certificate_hash(self),
+        )
+
+
+def _canonical_metric(value: float | None) -> float | None:
+    if value is None:
+        return None
+    metric = float(value)
+    if not np.isfinite(metric):
+        raise ValueError("candidate symmetry certificates cannot contain NaN or Inf")
+    return 0.0 if metric == 0.0 else metric
+
+
+def _finite_metric_or_none(value: float | None) -> float | None:
+    if value is None:
+        return None
+    metric = float(value)
+    return metric if np.isfinite(metric) else None
+
+
+def _canonical_phase(value: complex | None) -> list[float] | None:
+    if value is None:
+        return None
+    phase = complex(value)
+    return [
+        _canonical_metric(float(phase.real)),
+        _canonical_metric(float(phase.imag)),
+    ]
+
+
+def _candidate_certificate_payload(
+    certificate: CandidateSymmetryCertificate,
+) -> dict[str, object]:
+    threshold_payload = {
+        item.name: _canonical_metric(getattr(certificate.thresholds, item.name))
+        for item in fields(certificate.thresholds)
+    }
+    operation_payloads: list[dict[str, object]] = []
+    for operation in sorted(certificate.operations, key=lambda item: item.name):
+        pair_payloads = [
+            {
+                "operation": pair.operation,
+                "target_k_index": int(pair.target_k_index),
+                "source_k_index": int(pair.source_k_index),
+                "raw_h_leakage": _canonical_metric(pair.raw_h_leakage),
+                "raw_action_unitarity_residual": _canonical_metric(
+                    pair.raw_action_unitarity_residual
+                ),
+                "exactification_distance": _canonical_metric(
+                    pair.exactification_distance
+                ),
+                "intertwining_residual": _canonical_metric(
+                    pair.intertwining_residual
+                ),
+                "heff_covariance_residual": _canonical_metric(
+                    pair.heff_covariance_residual
+                ),
+                "failures": sorted(pair.failures),
+            }
+            for pair in sorted(
+                operation.pairs,
+                key=lambda item: (
+                    item.operation,
+                    item.target_k_index,
+                    item.source_k_index,
+                ),
+            )
+        ]
+        operation_payloads.append(
+            {
+                "name": operation.name,
+                "antiunitary": bool(operation.antiunitary),
+                "required_pairs": [list(pair) for pair in sorted(operation.required_pairs)],
+                "observed_pairs": [list(pair) for pair in sorted(operation.observed_pairs)],
+                "coverage_complete": bool(operation.coverage_complete),
+                "exact_action_finite": bool(operation.exact_action_finite),
+                "exact_action_unitarity_residual": _canonical_metric(
+                    operation.exact_action_unitarity_residual
+                ),
+                "pairs": pair_payloads,
+                "antiunitary_square_phase": _canonical_phase(
+                    operation.antiunitary_square_phase
+                ),
+                "antiunitary_square_residual": _canonical_metric(
+                    operation.antiunitary_square_residual
+                ),
+                "failures": sorted(operation.failures),
+            }
+        )
+    relation_payloads = [
+        {
+            "name": relation.name,
+            "residual": _canonical_metric(relation.residual),
+            "maximum_entry": _canonical_metric(relation.maximum_entry),
+            "failures": sorted(relation.failures),
+        }
+        for relation in sorted(certificate.relations, key=lambda item: item.name)
+    ]
+    return {
+        "version": "candidate_symmetry_certificate_v1",
+        "candidate_id": certificate.candidate_id,
+        "status": certificate.status.value,
+        "required_operations": sorted(certificate.required_operations),
+        "observed_operations": sorted(certificate.observed_operations),
+        "operation_coverage_complete": bool(
+            certificate.operation_coverage_complete
+        ),
+        "pair_coverage_complete": bool(certificate.pair_coverage_complete),
+        "thresholds": threshold_payload,
+        "operations": operation_payloads,
+        "relations": relation_payloads,
+        "relation_residual_max": _canonical_metric(
+            certificate.relation_residual_max
+        ),
+        "joint_certification_status": certificate.joint_certification_status.value,
+        "joint_certification_failure": certificate.joint_certification_failure,
+        "failures": sorted(certificate.failures),
+    }
+
+
+def _candidate_certificate_hash(
+    certificate: CandidateSymmetryCertificate,
+) -> str:
+    payload = _candidate_certificate_payload(certificate)
+    encoded = json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -173,21 +331,37 @@ def _finite_complex_matrix(value: object) -> np.ndarray | None:
     return matrix
 
 
+def _finite_raw_h_action(value: object) -> object | None:
+    """Validate a raw-H action without materializing a sparse full matrix."""
+
+    if value is None:
+        return None
+    if _sparse is not None and _sparse.issparse(value):
+        if len(value.shape) != 2 or not np.all(np.isfinite(value.data)):
+            return None
+        return value
+    return _finite_complex_matrix(value)
+
+
 def _fro_relative(lhs: np.ndarray, rhs: np.ndarray, denominator: np.ndarray) -> float:
-    norm = float(np.linalg.norm(denominator, ord="fro"))
+    with np.errstate(over="ignore", invalid="ignore"):
+        norm = float(np.linalg.norm(denominator, ord="fro"))
     if norm == 0.0:
         norm = 1.0
-    return float(np.linalg.norm(lhs - rhs, ord="fro") / norm)
+    with np.errstate(over="ignore", invalid="ignore"):
+        return float(np.linalg.norm(lhs - rhs, ord="fro") / norm)
 
 
 def _unitarity_residual(matrix: np.ndarray) -> float:
     identity = np.eye(matrix.shape[1], dtype=np.complex128)
-    return _fro_relative(matrix.conj().T @ matrix, identity, identity)
+    with np.errstate(over="ignore", invalid="ignore"):
+        product = matrix.conj().T @ matrix
+    return _fro_relative(product, identity, identity)
 
 
 def evaluate_projected_pair(
     *,
-    d_full: np.ndarray,
+    d_full: object,
     target_u_low: np.ndarray,
     source_u_low: np.ndarray,
     target_heff: np.ndarray | None,
@@ -199,20 +373,30 @@ def evaluate_projected_pair(
     """Project one source action and evaluate one chosen low-space action."""
 
     source_basis = source_u_low.conj() if antiunitary else source_u_low
-    source_image = np.asarray(d_full @ source_basis, dtype=np.complex128)
-    projected = np.asarray(target_u_low.conj().T @ source_image, dtype=np.complex128)
+    with np.errstate(over="ignore", invalid="ignore"):
+        source_image_raw = d_full @ source_basis
+    if _sparse is not None and _sparse.issparse(source_image_raw):
+        source_image_raw = source_image_raw.toarray()
+    source_image = np.asarray(source_image_raw, dtype=np.complex128)
+    with np.errstate(over="ignore", invalid="ignore"):
+        projected = np.asarray(
+            target_u_low.conj().T @ source_image,
+            dtype=np.complex128,
+        )
     evaluated = projected if action is None else np.asarray(action, dtype=np.complex128)
     dimension = int(evaluated.shape[0])
-    subspace_residual = float(
-        np.linalg.norm(source_image - target_u_low @ evaluated, ord="fro")
-        / np.sqrt(max(1, dimension))
-    )
+    with np.errstate(over="ignore", invalid="ignore"):
+        subspace_residual = float(
+            np.linalg.norm(source_image - target_u_low @ evaluated, ord="fro")
+            / np.sqrt(max(1, dimension))
+        )
     heff_covariance: float | None = None
     if compute_heff_covariance:
         if target_heff is None or source_heff is None:
             raise ValueError("Heff covariance was requested without both effective Hamiltonians")
         source_hamiltonian = source_heff.conj() if antiunitary else source_heff
-        transformed = evaluated @ source_hamiltonian @ evaluated.conj().T
+        with np.errstate(over="ignore", invalid="ignore"):
+            transformed = evaluated @ source_hamiltonian @ evaluated.conj().T
         heff_covariance = _fro_relative(target_heff, transformed, target_heff)
     return ProjectedPairEvaluation(
         action=projected,
@@ -255,9 +439,13 @@ def _relation_certificates(
         if lhs_parity != rhs_parity:
             relation_failures.append("semilinear_parity")
         difference = lhs - relation.central_phase * rhs
-        residual = float(np.linalg.norm(difference, ord="fro") / np.sqrt(lhs.shape[0]))
-        maximum_entry = float(np.max(np.abs(difference)))
-        if not np.isfinite(residual) or not np.isfinite(maximum_entry):
+        residual_raw = float(
+            np.linalg.norm(difference, ord="fro") / np.sqrt(lhs.shape[0])
+        )
+        maximum_entry_raw = float(np.max(np.abs(difference)))
+        residual = _finite_metric_or_none(residual_raw)
+        maximum_entry = _finite_metric_or_none(maximum_entry_raw)
+        if residual is None or maximum_entry is None:
             relation_failures.append("nonfinite")
         elif residual > threshold:
             relation_failures.append("residual")
@@ -301,6 +489,7 @@ def _empty_operation_certificate(
         observed_pairs=operation.pairs,
         coverage_complete=set(required_pairs) == set(operation.pairs),
         exact_action_finite=False,
+        exact_action_unitarity_residual=None,
         pairs=(),
         antiunitary_square_phase=None,
         antiunitary_square_residual=None,
@@ -397,7 +586,7 @@ def certify_candidate_symmetries(
             operation_failures.append("name_mismatch")
         if operation.antiunitary != generator.antiunitary:
             operation_failures.append("antiunitary_parity_mismatch")
-        d_full = _finite_complex_matrix(operation.d_full)
+        d_full = _finite_raw_h_action(operation.d_full)
         exact = _finite_complex_matrix(exactified_actions.get(name))
         if d_full is None:
             operation_failures.append("nonfinite_raw_h_action")
@@ -421,6 +610,16 @@ def certify_candidate_symmetries(
 
         finite_exact_actions[name] = exact
         parity[name] = bool(operation.antiunitary)
+        exact_action_unitarity = _unitarity_residual(exact)
+        if not np.isfinite(exact_action_unitarity):
+            exact_action_unitarity = None
+            operation_failures.append("nonfinite_exact_action_unitarity_residual")
+            failures.append(f"nonfinite_exact_action_unitarity_residual:{name}")
+        elif (
+            exact_action_unitarity
+            > thresholds.exact_action_unitarity_residual
+        ):
+            operation_failures.append("exact_action_unitarity_residual")
         pair_certificates: list[CandidatePairCertificate] = []
         for target_index, source_index in observed_pairs:
             pair_failures: list[str] = []
@@ -474,10 +673,11 @@ def certify_candidate_symmetries(
                 action=exact,
             )
             dimension = int(exact.shape[1])
-            exactification_distance = float(
-                np.linalg.norm(raw.action - exact, ord="fro")
-                / np.sqrt(max(1, dimension))
-            )
+            with np.errstate(over="ignore", invalid="ignore"):
+                exactification_distance = float(
+                    np.linalg.norm(raw.action - exact, ord="fro")
+                    / np.sqrt(max(1, dimension))
+                )
             values = {
                 "raw_h_leakage": raw.subspace_residual,
                 "exactification_distance": exactification_distance,
@@ -488,17 +688,32 @@ def certify_candidate_symmetries(
                 threshold = float(getattr(thresholds, metric_name))
                 if value is None or not np.isfinite(float(value)) or float(value) > threshold:
                     pair_failures.append(metric_name)
+            raw_action_unitarity = _finite_metric_or_none(
+                raw.action_unitarity_residual
+            )
+            if raw_action_unitarity is None:
+                pair_failures.append("nonfinite_raw_action_unitarity_residual")
+            finite_values = {
+                metric_name: _finite_metric_or_none(value)
+                for metric_name, value in values.items()
+            }
             pair_certificates.append(
                 CandidatePairCertificate(
                     operation=name,
                     target_k_index=target_index,
                     source_k_index=source_index,
-                    raw_h_leakage=raw.subspace_residual,
-                    raw_action_unitarity_residual=raw.action_unitarity_residual,
-                    exactification_distance=exactification_distance,
-                    intertwining_residual=exact_metrics.subspace_residual,
-                    heff_covariance_residual=float(exact_metrics.heff_covariance_residual),
-                    failures=tuple(pair_failures),
+                    raw_h_leakage=finite_values["raw_h_leakage"],
+                    raw_action_unitarity_residual=raw_action_unitarity,
+                    exactification_distance=finite_values[
+                        "exactification_distance"
+                    ],
+                    intertwining_residual=finite_values[
+                        "intertwining_residual"
+                    ],
+                    heff_covariance_residual=finite_values[
+                        "heff_covariance_residual"
+                    ],
+                    failures=tuple(dict.fromkeys(pair_failures)),
                 )
             )
 
@@ -511,12 +726,17 @@ def certify_candidate_symmetries(
                 failures.append(f"missing_antiunitary_square_relation:{name}")
             else:
                 identity = np.eye(exact.shape[0], dtype=np.complex128)
-                square_residual = float(
-                    np.linalg.norm(exact @ exact.conj() - square_phase * identity, ord="fro")
-                    / np.sqrt(exact.shape[0])
-                )
+                with np.errstate(over="ignore", invalid="ignore"):
+                    square_residual_raw = float(
+                        np.linalg.norm(
+                            exact @ exact.conj() - square_phase * identity,
+                            ord="fro",
+                        )
+                        / np.sqrt(exact.shape[0])
+                    )
+                square_residual = _finite_metric_or_none(square_residual_raw)
                 if (
-                    not np.isfinite(square_residual)
+                    square_residual is None
                     or square_residual > thresholds.antiunitary_square_residual
                 ):
                     operation_failures.append("antiunitary_square_residual")
@@ -533,6 +753,7 @@ def certify_candidate_symmetries(
                 observed_pairs=observed_pairs,
                 coverage_complete=coverage_complete,
                 exact_action_finite=True,
+                exact_action_unitarity_residual=exact_action_unitarity,
                 pairs=tuple(pair_certificates),
                 antiunitary_square_phase=square_phase,
                 antiunitary_square_residual=square_residual,
@@ -541,10 +762,16 @@ def certify_candidate_symmetries(
         )
 
     relation_certificates: tuple[CandidateRelationCertificate, ...] = ()
+    joint_certification_status = CandidateJointCertificationStatus.NOT_RUN
+    joint_certification_failure: str | None = (
+        "incomplete_exactified_action_coverage"
+    )
     if set(finite_exact_actions) == required_set and set(parity) == required_set:
         dimensions = {matrix.shape for matrix in finite_exact_actions.values()}
         if len(dimensions) != 1:
             failures.append("joint_action_dimension_mismatch")
+            joint_certification_status = CandidateJointCertificationStatus.FAILED
+            joint_certification_failure = "joint_action_dimension_mismatch"
         else:
             relation_certificates, relation_failures = _relation_certificates(
                 actions=finite_exact_actions,
@@ -566,7 +793,13 @@ def certify_candidate_symmetries(
                     for name, matrix in finite_exact_actions.items()
                 }
                 certify_joint_block_actions(joint_actions, presentation)
+                joint_certification_status = (
+                    CandidateJointCertificationStatus.CERTIFIED
+                )
+                joint_certification_failure = None
             except (JointExactificationError, ValueError) as exc:
+                joint_certification_status = CandidateJointCertificationStatus.FAILED
+                joint_certification_failure = str(exc)
                 failures.append(f"joint_relation_certification:{exc}")
 
     failures.extend(
@@ -575,16 +808,21 @@ def certify_candidate_symmetries(
         if not operation.passed
     )
     failures = list(dict.fromkeys(failures))
+    finite_relation_residuals = tuple(
+        relation.residual
+        for relation in relation_certificates
+        if relation.residual is not None
+    )
     relation_residual_max = (
-        max(relation.residual for relation in relation_certificates)
-        if relation_certificates
-        else None
+        max(finite_relation_residuals) if finite_relation_residuals else None
     )
     status = (
         CandidateSymmetryStatus.CERTIFIED
         if not failures
         and operation_coverage_complete
         and pair_coverage_complete
+        and joint_certification_status
+        is CandidateJointCertificationStatus.CERTIFIED
         and len(operation_certificates) == len(required_names)
         and len(relation_certificates) == len(presentation.relations)
         else CandidateSymmetryStatus.FAILED
@@ -596,14 +834,18 @@ def certify_candidate_symmetries(
         observed_operations=observed_names,
         operation_coverage_complete=operation_coverage_complete,
         pair_coverage_complete=pair_coverage_complete,
+        thresholds=thresholds,
         operations=tuple(operation_certificates),
         relations=relation_certificates,
         relation_residual_max=relation_residual_max,
+        joint_certification_status=joint_certification_status,
+        joint_certification_failure=joint_certification_failure,
         failures=tuple(failures),
     )
 
 
 __all__ = [
+    "CandidateJointCertificationStatus",
     "CandidateOperationCertificate",
     "CandidateOperationInput",
     "CandidatePairCertificate",
