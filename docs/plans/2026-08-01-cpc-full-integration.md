@@ -511,10 +511,11 @@ git commit -m "feat(kp): certify candidate source symmetries"
 
 Automatic Gamma v1 supports exactly two source groups, equal ordered Q counts,
 the current release convention of equal orbital count per physical layer, and
-either spinful `all` or an explicitly identified single-spin slice. Reject all
-other layouts before indexing or diagonalization. Do not claim support for
-unequal Q or orbital widths while production still uses one `q_count` and one
-`orb_per_layer0`.
+`spinful_all` only. Single-spin and cross-spin sewing inputs remain
+`ExplicitLegacyBasisSpec` in v1 and reject automatic routing with
+`UNSUPPORTED_SPIN_ROUTE`. Reject all other layouts before indexing or
+diagonalization. Do not claim support for unequal Q or orbital widths while
+production still uses one `q_count` and one `orb_per_layer0`.
 
 The canonical layout hash must bind ordered Q arrays, TAPW source basis
 identity, source-group/layer/orbital dimensions, full-row order, and spin-slice
@@ -523,9 +524,8 @@ this one layout.
 
 Use the following exact v1 coordinates. Let
 `num_layer_list=(L0,L1)`, `Nq=len(Q0)=len(Q1)>0`, every physical layer have
-`o>0` orbitals, `O_g=L_g*o`, and `Ns=2` for `spinful_all` or `Ns=1` for an
-explicit `sliced_up`/`sliced_down` input. Sliced row coordinates always start at
-zero; their semantic spin label remains in metadata. Define:
+`o>0` orbitals, `O_g=L_g*o`, `Ns=2`, and `s in {0,1}` label the persisted
+spin-up/spin-down rows. Define:
 
 ```text
 N_sigma = Nq * (O0 + O1)
@@ -620,11 +620,15 @@ anchor_sigma_min, max_rank, max_iterations
 ```
 
 All scalar thresholds are finite. Require
-`0 <= energy_same_ev < energy_different_ev` and
-`0 <= capture_zero_fraction < 1-capture_loss_max <= 1`; rank and iteration
-limits are positive integers. Thresholds must come from the normalized
-automatic-selection config; v1 does not invent missing thresholds. Thresholds
-and their schema are identity-bound.
+`0 <= energy_same_ev < energy_different_ev`,
+`0 <= capture_zero_fraction < 1-capture_loss_max <= 1`,
+`0 <= route_zero_gap <= 1`, and `0 < anchor_sigma_min <= 1`.
+The residual tolerances `local_action_isometry`, `off_route_leakage`,
+`closure_residual`, `route_covariance`, and `projector_residual` are all
+nonnegative. Rank and iteration limits are positive integers, and the
+materialized `max_rank` must not exceed the validated `local_dim`. Thresholds
+must come from the normalized automatic-selection config; v1 does not invent
+missing thresholds. Thresholds and their schema are identity-bound.
 
 For a local action of dimension `d`, certify
 `||D_local^dagger D_local-I||_F/sqrt(d) <= local_action_isometry`. Its off-route
@@ -636,8 +640,14 @@ For adjacent sorted energies, a gap `<=energy_same_ev` joins one cluster, a gap
 For a rank-`r` source cluster and image projector, define
 `eta_C = Re Tr(P_C P_image) / r`. Exactly one target cluster must satisfy
 `1-eta_C <= capture_loss_max`; every other target cluster must satisfy
-`eta_C <= capture_zero_fraction`. Any intermediate capture, multiple full
-captures, or excessive total off-cluster capture rejects as
+`eta_C <= capture_zero_fraction`, and the sum of all other target-cluster
+captures must satisfy `sum(other eta_C) <= capture_loss_max`. Target clusters
+must cover the complete validated local eigenspace; if a backend represents
+that partition indirectly, it must instead certify
+`abs(sum_C eta_C - 1) <= capture_loss_max`. An `eta_C` outside `[0,1]` by more
+than the applicable numerical residual tolerance rejects; it is never clipped.
+Any intermediate capture, multiple full captures, incomplete cluster coverage,
+or excessive total off-cluster capture rejects as
 `AMBIGUOUS_CLUSTER_CAPTURE`. The final closure residual is
 `||(I-P_target)P_image||_F/sqrt(r)`.
 
@@ -705,6 +715,9 @@ group_ranks and group_offsets
 ordered k_indices
 frames: complex numeric tensor (Nk,Nq,local_dim,r0+r1), never object/pickle
 frame_hash and reference_frame_hash
+heff_k_indices
+authoritative_heff: complex numeric tensor (Nk,model_dim,model_dim)
+heff_hash
 routing thresholds and closure/routing certificate hashes
 source-H, ordered-Q, raw-action package identities
 candidate symmetry certificate_hash and input_identity_hash
@@ -718,20 +731,53 @@ k pairs present in the persisted handoff; a missing required k rejects with
 frames used by symmetry are the persisted frames byte-for-byte. A high
 complement may be rebuilt from the same frozen joint band set.
 
+The persisted `authoritative_heff` is the sole projected Hamiltonian accepted
+by `kp symm` for this routed handoff. Its ordered k mapping and byte/content hash
+are mandatory. `kp symm` loads it directly; it must not recompute Heff from the
+source Hamiltonian. If a storage backend requires a separate Heff payload, the
+handoff binds that payload by exact content hash and ordered k mapping, and the
+loader verifies byte/hash equality before use. A mismatch rejects with
+`HANDOFF_IDENTITY`.
+
 Automatic Gamma also has a hard Task 7 dependency. For every required k, wrap
-the routed `U_low` and Heff as `CandidateProjectionState` and call
+the exact persisted routed `U_low` and the same authoritative persisted Heff as
+`CandidateProjectionState` and call
 `certify_candidate_symmetries` with the same raw-H actions, required pairs,
 exactified actions, and magnetic presentation. A routed automatic candidate is
 eligible only when the certificate is `CERTIFIED` and its input identity binds
-the persisted frames and actions. Both certificate hashes enter the handoff.
+the persisted frames, authoritative Heff hash/k mapping, and actions. Both
+certificate hashes enter the handoff. No unconstrained Heff recomputation may
+be used to create or verify the candidate certificate.
 Until Task 9 adds the final selection transaction, no incomplete routed
 artifact may claim PASS.
 
-Use stable typed rejection codes for unsupported group/Q/orbital/spin layouts,
-layout identity/bijection, Q-route mismatch, action isometry/off-route leakage,
-energy/capture gray zones, closure/max-rank failure, route zero/empty/rank
-change/covariance, anchor rank, handoff coverage/identity, and candidate
-symmetry failure.
+Use the following stable `CandidateRejectionReason` enum values exactly; tests,
+artifacts, and CLI reporting consume these strings:
+
+```text
+UNSUPPORTED_GAMMA_LAYOUT
+UNSUPPORTED_SPIN_ROUTE
+INVALID_GAMMA_ROW_LAYOUT
+GAMMA_Q_ROUTE_MISMATCH
+LOCAL_ACTION_ISOMETRY
+RAW_ACTION_ROUTE_LEAKAGE
+AMBIGUOUS_ENERGY_CLUSTER
+AMBIGUOUS_CLUSTER_CAPTURE
+SYMMETRY_CLOSURE_FAILURE
+AMBIGUOUS_SOURCE_GROUP_ROUTING
+EMPTY_SOURCE_GROUP
+SOURCE_GROUP_RANK_CHANGE
+SOURCE_GROUP_ROUTE_COVARIANCE
+PROJECTOR_FRAME_RANK
+HANDOFF_K_COVERAGE
+HANDOFF_IDENTITY
+CANDIDATE_SYMMETRY_FAILED
+```
+
+Unsupported group/Q/orbital layouts use `UNSUPPORTED_GAMMA_LAYOUT`; invalid
+canonical row identity/bijection uses `INVALID_GAMMA_ROW_LAYOUT`. Closure
+iteration or max-rank failure uses `SYMMETRY_CLOSURE_FAILURE`. Do not create
+backend-specific aliases for the same failure.
 
 Automatic Gamma must remain disabled until layout, per-k/q routing,
 groupwise alignment, assembler, persisted identity, and `kp symm` consumption
