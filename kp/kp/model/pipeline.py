@@ -56,7 +56,7 @@ from ..projection_handoff import load_gamma_routed_basis_spec
 from ..reporting import KpReporter
 from ..selection_artifact import (
     CertificationStatus,
-    load_selection_artifact,
+    SelectionArtifactStore,
     verify_certified_gamma_selection_artifact,
 )
 from ..symmetry.action_schema import SOURCE_MATRIX_SEMANTICS, allows_inferred_action_metadata
@@ -1492,11 +1492,15 @@ def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
 
     project_dir = Path(config.heff_file).resolve().parent
     marker_path = project_dir / "selection_artifact.json"
+    if marker_path.is_symlink():
+        raise ValueError("kp model projection selection marker must not be a symlink")
     if not marker_path.is_file():
         raise FileNotFoundError(
             f"kp model requires certified projection selection marker: {marker_path}"
         )
-    artifact = load_selection_artifact(marker_path)
+    artifact = SelectionArtifactStore(project_dir).load_current(
+        require_certified=True
+    )
     if artifact.certification_status is not CertificationStatus.CERTIFIED:
         raise ValueError(
             "kp model projection selection is not CERTIFIED: "
@@ -1520,6 +1524,8 @@ def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
     if not symmetry_dir.is_absolute():
         symmetry_dir = (Path(config.path).resolve().parent / symmetry_dir).resolve()
     representations = symmetry_dir / "representations.npz"
+    if representations.is_symlink():
+        raise ValueError("kp model symmetry package must not be a symlink")
     if not representations.is_file():
         raise FileNotFoundError(
             f"kp model requires canonical kp symm output: {representations}"

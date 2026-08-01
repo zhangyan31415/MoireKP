@@ -262,6 +262,29 @@ def _selection_gate_config(
     )
 
 
+def _patch_selection_store(
+    monkeypatch: pytest.MonkeyPatch,
+    artifact: object,
+    *,
+    seen: dict[str, object] | None = None,
+) -> None:
+    class FakeSelectionArtifactStore:
+        def __init__(self, output_directory: Path) -> None:
+            if seen is not None:
+                seen["store"] = Path(output_directory)
+
+        def load_current(self, *, require_certified: bool = False) -> object:
+            if seen is not None:
+                seen["require_certified"] = require_certified
+            return artifact
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "SelectionArtifactStore",
+        FakeSelectionArtifactStore,
+    )
+
+
 def test_model_selection_preflight_requires_current_certified_marker(
     tmp_path: Path,
 ) -> None:
@@ -273,6 +296,24 @@ def test_model_selection_preflight_requires_current_certified_marker(
     (Path(config.heff_file).parent / "selection_artifact.json").unlink()
 
     with pytest.raises(FileNotFoundError, match="certified projection selection marker"):
+        _preflight_certified_model_selection(config)
+
+
+def test_model_selection_preflight_rejects_symlinked_current_marker(
+    tmp_path: Path,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    marker = Path(config.heff_file).parent / "selection_artifact.json"
+    external = tmp_path / "external-selection-artifact.json"
+    external.write_text(marker.read_text(encoding="utf-8"), encoding="utf-8")
+    marker.unlink()
+    marker.symlink_to(external)
+
+    with pytest.raises(ValueError, match="selection marker must not be a symlink"):
         _preflight_certified_model_selection(config)
 
 
@@ -298,7 +339,7 @@ def test_model_selection_preflight_rejects_every_noncertified_status(
         certification_status=status,
         identity=SimpleNamespace(selection_identity_hash=selection_hash),
     )
-    monkeypatch.setattr(pipeline_module, "load_selection_artifact", lambda _path: artifact)
+    _patch_selection_store(monkeypatch, artifact)
 
     with pytest.raises(ValueError, match=f"not CERTIFIED: {status.value}"):
         _preflight_certified_model_selection(config)
@@ -322,7 +363,7 @@ def test_model_selection_preflight_rejects_cross_artifact_identity_drift(
         certification_status=CertificationStatus.CERTIFIED,
         identity=SimpleNamespace(selection_identity_hash=certified_hash),
     )
-    monkeypatch.setattr(pipeline_module, "load_selection_artifact", lambda _path: artifact)
+    _patch_selection_store(monkeypatch, artifact)
 
     with pytest.raises(ValueError, match="selection_identity_hash"):
         _preflight_certified_model_selection(config)
@@ -344,10 +385,6 @@ def test_model_selection_preflight_calls_routed_gamma_handoff_verifier(
     handoff = object()
     seen: dict[str, object] = {}
 
-    def fake_load_selection(path: Path) -> object:
-        seen["marker"] = Path(path)
-        return artifact
-
     def fake_load_handoff(path: Path) -> object:
         seen["handoff_path"] = Path(path)
         return handoff
@@ -356,7 +393,7 @@ def test_model_selection_preflight_calls_routed_gamma_handoff_verifier(
         seen["verified"] = (actual_artifact, actual_handoff)
         return actual_artifact
 
-    monkeypatch.setattr(pipeline_module, "load_selection_artifact", fake_load_selection)
+    _patch_selection_store(monkeypatch, artifact, seen=seen)
     monkeypatch.setattr(
         pipeline_module,
         "load_gamma_routed_basis_spec",
@@ -371,10 +408,46 @@ def test_model_selection_preflight_calls_routed_gamma_handoff_verifier(
     assert _preflight_certified_model_selection(config) is artifact
     project_dir = Path(config.heff_file).parent
     assert seen == {
-        "marker": project_dir / "selection_artifact.json",
+        "store": project_dir,
+        "require_certified": True,
         "handoff_path": project_dir / "basis.npz",
         "verified": (artifact, handoff),
     }
+
+
+def test_model_selection_preflight_rejects_symlinked_symmetry_package(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    artifact = SimpleNamespace(
+        certification_status=CertificationStatus.CERTIFIED,
+        identity=SimpleNamespace(selection_identity_hash=selection_hash),
+    )
+    representations = (
+        Path(config.symmetry_source_config["path"]) / "representations.npz"
+    )
+    external = tmp_path / "external-representations.npz"
+    representations.rename(external)
+    representations.symlink_to(external)
+    _patch_selection_store(monkeypatch, artifact)
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_routed_basis_spec",
+        lambda _path: object(),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_certified_gamma_selection_artifact",
+        lambda actual, _handoff: actual,
+    )
+
+    with pytest.raises(ValueError, match="symmetry package must not be a symlink"):
+        _preflight_certified_model_selection(config)
 
 
 def test_run_configured_model_preflight_fails_before_output_directory_creation(
