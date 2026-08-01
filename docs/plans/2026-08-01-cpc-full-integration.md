@@ -816,19 +816,28 @@ Gamma. The second commit must close production assembly, identity, and the
 **Files:**
 - Modify: `kp/kp/low_energy_selection.py`
 - Modify: `kp/kp/projection_selection.py`
+- Modify: `kp/kp/identity.py`
+- Create: `kp/kp/selection_artifact.py`
 - Modify: `tests/kp/test_auto_low_energy_selection.py`
 - Create: `tests/kp/test_selection_artifact.py`
+- Modify: `tests/kp/test_kp_artifact_identity.py`
 
 **Step 1: Add failing status and transaction tests**
 
 Test:
 
 - automatic selection returns failure when no candidate passes;
-- explicit selection begins `PENDING/UNVERIFIED` with null metrics;
-- certification upgrades it to PASS;
-- a crash before atomic replace cannot leave PASS;
+- duplicate candidate IDs and any nonfinite metric fail closed;
+- explicit selection begins `PENDING` and resolves to `UNVERIFIED_OVERRIDE`
+  with null metrics plus a typed reason;
+- only complete automatic certification upgrades `PENDING` to `CERTIFIED`;
+- a crash before the final atomic marker cannot leave a current certified
+  generation;
 - artifact hashes change with Q, target window, source action, or layout;
-- `inspect` and `project` inputs produce the same artifact hash.
+- frame, authoritative-Heff, k-map, metrics, or certificate tampering rejects;
+- `inspect` and `project` inputs produce the same
+  `selection_identity_hash`; transaction-specific artifact hashes need not be
+  equal.
 
 **Step 2: Define status and artifact types**
 
@@ -841,37 +850,99 @@ class CertificationStatus(str, Enum):
 
 
 @dataclass(frozen=True)
-class SelectionArtifact:
-    target_window: TargetWindowSpec
-    q_identity: str
+class SelectionIdentity:
+    selection_mode: str
+    frozen_target_window_hash: str
+    ordered_q_identity_hash: str
     row_layout_hash: str
-    source_identity: str
-    source_action_hash: str
+    source_hamiltonian_hash: str
+    action_package_hash: str
     candidate_id: str
+    candidate_dimension: int
+    projection_basis_kind: str
+    basis_handoff_hash: str
+    authoritative_heff_hash: str
+    heff_k_indices_hash: str
+    metrics_hash: str
+    symmetry_certificate_hash: str
+    symmetry_input_identity_hash: str
+    selection_identity_hash: str
+
+
+@dataclass(frozen=True)
+class SelectionArtifact:
+    schema_version: str
+    transaction_id: str
+    selection_input_identity_hash: str
+    identity: SelectionIdentity | None
     metrics: CandidateMetrics | None
-    symmetry_certificate_hash: str | None
     certification_status: CertificationStatus
+    status_reason: str
+    failure_codes: tuple[str, ...]
     artifact_hash: str
 ```
+
+`FrozenTargetWindow`, not only the unresolved `TargetWindowSpec`, supplies the
+target hash: ordered band IDs, energies, validation k mapping, edge, reference,
+and degeneracy threshold are all bound. The action package hash includes raw
+and exactified actions, antiunitary flags, required k pairs, presentation, and
+their source identity. The Gamma `basis_handoff_hash` covers its full Task 8
+payload, including routed frames, joint bands, layout, group ranks/offsets,
+thresholds, authoritative Heff/k mapping, and closure/candidate certificates.
+
+`selection_identity_hash` is deterministic and command/output independent.
+`artifact_hash` additionally binds schema, transaction, status, status reason,
+failure codes, and the optional final identity. A FAILED/no-candidate artifact
+has `identity=None`; it must not invent a candidate ID. `PASS` is only a display
+word for `CERTIFIED`, never a separate persisted status.
 
 **Step 3: Implement fail-closed selection**
 
 Only candidates passing every finite hard metric enter lexicographic selection.
 Use dimension first, then band error, overlap deficit, and symmetry residual.
-Do not choose a WARN fallback for automatic release output.
+Candidate IDs are unique and dimensions positive. Do not choose a WARN fallback
+for automatic release output. Automatic state transitions are only
+`PENDING -> CERTIFIED|FAILED`. Explicit state transitions are
+`PENDING -> UNVERIFIED_OVERRIDE`; explicit output can become `CERTIFIED` only by
+running the same complete automatic hard gates and writing a new certified
+transaction. Every state other than `CERTIFIED` is release-blocking.
+
+To create `CERTIFIED`, require the candidate certificate itself to be
+`CERTIFIED`; its candidate ID and input identity must bind the exact handoff
+frames, same authoritative Heff/k mapping, and action package. Metrics must bind
+the same frozen target, validation k mapping, and candidate. Recompute and
+cross-check every hash after persistence.
 
 **Step 4: Implement strict report serialization and atomic replace**
 
-Serialize missing values as JSON null plus a reason. Write to a sibling
-temporary file, fsync/close as appropriate, then use `Path.replace()`.
+Serialize missing values as JSON null plus a typed reason. Use a generation
+transaction:
+
+1. atomically publish a new transaction's `PENDING` marker first, invalidating
+   any older certified generation;
+2. write projection, handoff, authoritative Heff, and certificate payloads to
+   temporary files, flush/fsync, then replace their generation targets;
+3. reload them with strict loaders and recompute all hashes;
+4. atomically publish `CERTIFIED` last and fsync the parent directory;
+5. on error, leave at most `PENDING`, or atomically replace it with `FAILED`.
+
+Consumers accept payloads only when their generation/transaction and hashes
+match the current `CERTIFIED` marker. A single atomic JSON write without this
+commit-last protocol is insufficient because projection output spans multiple
+files.
 
 **Step 5: Run tests and commit**
 
+Split this into three reviewable commits:
+
 ```bash
-git add kp/kp/low_energy_selection.py kp/kp/projection_selection.py \
-  tests/kp/test_auto_low_energy_selection.py tests/kp/test_selection_artifact.py
-git commit -m "feat(kp): freeze certified low-energy selections"
+git commit -m "fix(kp): make projection selection fail closed"
+git commit -m "feat(kp): add immutable selection artifacts"
+git commit -m "feat(kp): bind certified selections to projection handoffs"
 ```
+
+The third commit begins only after both Task 8 commits are integrated. Keep CLI
+orchestration out of these pure selector/artifact commits.
 
 ### Task 10: Integrate Selection Into `kp inspect` And `kp project`
 
@@ -889,10 +960,15 @@ git commit -m "feat(kp): freeze certified low-energy selections"
 Mock only external I/O, not the projector/symmetry evaluator. Assert:
 
 - `inspect` and `project` call the same selector;
-- selected artifact identity is preserved;
+- selected `selection_identity_hash` is command-independent and preserved;
 - missing symmetry input fails before model output;
 - explicit unverified projection is allowed but release status is BLOCKED;
-- no stale PASS survives a later failure.
+- `--active-indices` becomes an explicit `UNVERIFIED_OVERRIDE`, never a hidden
+  automatic selection;
+- no stale certified generation survives a later failure;
+- `kp symm` never reconstructs a routed projector/Heff when the certified
+  handoff is missing or invalid;
+- `kp model` rejects every non-`CERTIFIED` generation before creating output.
 
 **Step 2: Verify failures**
 
@@ -900,9 +976,29 @@ Run the three targeted files.
 
 **Step 3: Replace dirty-style CLI physics with orchestration**
 
-Load canonical inputs, call the shared selector, freeze the artifact, run
+Add a CLI-independent shared entry such as
+`resolve_case_selection(canonical_inputs) -> ResolvedProjectionSelection`.
+Load canonical inputs, call it from both commands, freeze the identity, run
 production projection with the same resolved candidate, validate identity, and
-write the final report. Do not port the preserved 1700-line CLI block.
+write the final report. Command name, output directory, and plot choices do not
+enter `selection_identity_hash`. `plot.nlow_state_list` must not remain a second
+automatic physics input. Do not port the preserved 1700-line CLI block.
+
+For `projection_basis_kind=gamma_routed`, `kp symm` uses an exclusive strict
+path: load the routed frame tensor with `allow_pickle=False`, verify ordered k
+coverage/layout/group/frame hashes, assemble `U_low` from those exact persisted
+frames, and load the authoritative persisted Heff with its exact k mapping and
+hash. It must not call legacy anchor/state resolution or re-downfold on failure.
+Legacy explicit inputs remain diagnostic and cannot create a certified symmetry
+package.
+
+Before creating or cleaning a model output directory, `kp model` requires the
+projection marker to be `CERTIFIED` and verifies the same
+`selection_identity_hash` across projection, symmetry package, and every
+operation. It also cross-checks basis/layout/frame, authoritative Heff/k map,
+and candidate certificate identities. `PENDING`, `FAILED`, and
+`UNVERIFIED_OVERRIDE` all reject; there is no release `--allow-unverified`
+bypass.
 
 **Step 4: Run KP targeted tests**
 
@@ -924,7 +1020,9 @@ Expected: PASS.
 
 ```bash
 git add kp/kp/cli.py kp/kp/config/case.py tests/kp
-git commit -m "feat(kp): orchestrate certified automatic projection"
+git commit -m "feat(kp): share selection across inspect and project"
+git commit -m "fix(kp): consume certified routed projection in kp symm"
+git commit -m "fix(kp): gate model publication on certified selection"
 ```
 
 Review staging and exclude unrelated test files.
