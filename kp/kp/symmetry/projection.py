@@ -5453,9 +5453,13 @@ def _initial_projection_summary(
                 "L1": int(n_orb_for_exactification[0]),
                 "L2": int(n_orb_for_exactification[1]),
             },
-            "resolved_source_group_nlow_state_list": _source_group_nlow_state_list(
-                ctx.nlow_state_list,
-                ctx.num_layer_list,
+            "resolved_source_group_nlow_state_list": (
+                []
+                if gauge_report.gauge_mode == "gamma_routed"
+                else _source_group_nlow_state_list(
+                    ctx.nlow_state_list,
+                    ctx.num_layer_list,
+                )
             ),
         },
     }
