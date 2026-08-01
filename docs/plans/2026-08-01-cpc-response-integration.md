@@ -222,8 +222,12 @@ dependency graph permits; otherwise use one documented atomic commit.
 - Modify: `kp/kp/model/pipeline.py`
 - Modify: `kp/kp/config/case.py`
 - Modify: `kp/kp/identity.py`
+- Modify: `kp/kp/reporting.py`
+- Modify: `kp/kp/cli.py` (model-command handoff and cleanup allowlist only)
 - Test: `tests/kp/test_complete_response_basis.py`
 - Test: `tests/kp/test_configured_model.py`
+- Test: `tests/kp/test_model_selection.py`
+- Test: `tests/kp/test_reporting.py`
 - Test: `tests/kp/test_standalone_export.py`
 
 **Step 1: Migrate complete-response integration tests first**
@@ -239,7 +243,9 @@ Run the three focused files. Confirm failures identify absent
 
 Integrate compilation, fitting, refit, cache identity, and standalone export.
 Preserve CPC release CLI and output contracts unless a test demonstrates a
-required response integration.
+required response integration. Add only the reporter primitives and
+model-command result handoff needed by configured model selection; keep the
+existing Hamiltonian-comparison diagnostics in the cleanup allowlist.
 
 **Step 4: Run focused configured/response/export tests**
 
