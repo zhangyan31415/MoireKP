@@ -172,6 +172,7 @@ review batch; do not weaken tests.
 - Create: `kp/kp/symmetry/structure_certificate.py`
 - Create: `kp/kp/symmetry/structure_recovery.py`
 - Modify: `kp/kp/basis/symmetry_gauge.py`
+- Modify: `kp/kp/blocks/blocks.py`
 - Modify: `kp/kp/identity.py`
 - Modify: `kp/kp/model/symmetry.py`
 - Modify: `kp/kp/symmetry/exactify_representation.py`
@@ -188,6 +189,9 @@ The high-dimensional joint exactification regression also covers the required
 symmetry-gauge stabilizer matching behavior.
 Projection identity and active-sector Q-canonicalization regressions cover the
 additional handoff metadata used by the exact target artifact.
+The projection-context eigensystem cache regression covers the required
+`projection.py` to `blocks.py` call contract without migrating unrelated
+automatic low-energy-selection behavior.
 
 **Step 2: Verify expected missing-artifact failures**
 
