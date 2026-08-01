@@ -401,6 +401,40 @@ def test_raw_action_route_metadata_requires_strict_integral_values(
     assert exc_info.value.reason is CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH
 
 
+def test_raw_action_rejects_non_bool_antiunitary_instead_of_coercion() -> None:
+    layout = _layout()
+    for invalid in ("false", 1):
+        with pytest.raises(GammaRoutingError) as exc_info:
+            certify_gamma_raw_action(
+                name="invalid-antiunitary",
+                full_action=np.eye(layout.full_dimension, dtype=np.complex128),
+                layout=layout,
+                q_permutations=((0, 1), (0, 1)),
+                sector_map=(0, 1),
+                antiunitary=invalid,
+                thresholds=_thresholds(),
+                tapw_source_basis_hash=layout.tapw_source_basis_hash,
+            )
+        assert exc_info.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_raw_action_rejects_threshold_rank_above_layout_local_dimension() -> None:
+    layout = _layout()
+    oversized = replace(_thresholds(), max_rank=13)
+    with pytest.raises(GammaRoutingError) as exc_info:
+        certify_gamma_raw_action(
+            name="oversized-threshold-rank",
+            full_action=np.eye(layout.full_dimension, dtype=np.complex128),
+            layout=layout,
+            q_permutations=((0, 1), (0, 1)),
+            sector_map=(0, 1),
+            antiunitary=False,
+            thresholds=oversized,
+            tapw_source_basis_hash=layout.tapw_source_basis_hash,
+        )
+    assert exc_info.value.reason is CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE
+
+
 def test_dense_and_csr_raw_actions_have_equal_identity_without_full_densification() -> None:
     layout = _layout()
     dense = np.eye(layout.full_dimension, dtype=np.complex128)
@@ -980,6 +1014,42 @@ def test_assembler_uses_exact_c_g_alpha_q_order_and_revalidates_frame_hash() -> 
         )
     assert stale.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
+    duplicate_joint = replace(
+        routed,
+        joint_band_indices=(0, 0, 2, 8),
+    )
+    with pytest.raises(GammaRoutingError) as duplicate:
+        assemble_gamma_routed_projectors(
+            duplicate_joint,
+            layout=layout,
+            thresholds=_thresholds(),
+            include_high=False,
+        )
+    assert duplicate.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_routed_frame_route_gaps_require_strict_finite_numeric_values() -> None:
+    layout = _layout()
+    evals, vecs, joint = _routed_eigensystems(layout)
+    routed = build_gamma_routed_frames(
+        evals,
+        vecs,
+        joint_band_indices=joint,
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    with pytest.raises(ValueError, match="strict finite numeric"):
+        replace(routed, route_gaps=("1.0", 1.0))
+    with pytest.raises(ValueError, match="strict finite numeric"):
+        replace(routed, route_gaps=())
+    for invalid in (np.nan, True):
+        with pytest.raises(ValueError, match="strict finite numeric"):
+            replace(routed, route_gaps=(invalid, 1.0))
+    normalized = replace(routed, route_gaps=(np.float32(1.0), np.int64(1)))
+    assert normalized.route_gaps == (1.0, 1.0)
+    assert all(type(gap) is float for gap in normalized.route_gaps)
+
 
 def test_assembler_certifies_high_frame_orthogonality_and_completeness(monkeypatch) -> None:
     layout = _layout()
@@ -1112,23 +1182,20 @@ def test_whole_frame_mix_is_rejected_while_groupwise_routing_preserves_projector
         )
     assert stale.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
-    # Re-routing a joint frame before groupwise alignment recovers the certified slices.
-    rebuilt = build_gamma_routed_frames(
-        evals,
-        vecs,
-        joint_band_indices=joint,
-        layout=layout,
-        thresholds=_thresholds(),
-        anchor_frames=anchor.local_frames_by_q,
-        require_complete_clusters=False,
+    with pytest.raises(GammaRoutingError) as cross_group_anchor:
+        build_gamma_routed_frames(
+            evals,
+            vecs,
+            joint_band_indices=joint,
+            layout=layout,
+            thresholds=_thresholds(),
+            anchor_frames=whole_mixed,
+            require_complete_clusters=False,
+        )
+    assert (
+        cross_group_anchor.value.reason
+        is CandidateRejectionReason.PROJECTOR_FRAME_RANK
     )
-    for expected, actual in zip(
-        anchor.routed_projectors_by_q,
-        rebuilt.routed_projectors_by_q,
-        strict=True,
-    ):
-        np.testing.assert_allclose(actual[0], expected[0], atol=1.0e-12)
-        np.testing.assert_allclose(actual[1], expected[1], atol=1.0e-12)
 
 
 def test_routed_covariance_checks_every_required_route() -> None:
@@ -1231,7 +1298,7 @@ def test_exchange_covariance_requires_equal_routed_group_rank() -> None:
         p0[group0[0], group0[0]] = 1.0
         p1[group1[:2], group1[:2]] = 1.0
         routed.append((p0, p1))
-    loose = replace(_thresholds(), route_covariance=10.0)
+    loose = replace(_thresholds(), route_covariance=10.0, max_rank=8)
     loose_exchange = certify_gamma_raw_action(
         name="exchange",
         full_action=_full_action_from_local_routes(layout, (local, local), (0, 1)),
