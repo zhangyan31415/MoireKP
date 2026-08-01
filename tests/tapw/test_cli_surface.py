@@ -207,7 +207,7 @@ def test_tapw_run_help_is_single_config_surface(capsys):
     assert "--num_chern" not in out
 
 
-def test_tapw_symm_rep_help_lists_postprocess_inputs(capsys):
+def test_tapw_symm_rep_help_lists_release_config_inputs(capsys):
     from tapw import cli
 
     with pytest.raises(SystemExit) as excinfo:
@@ -216,8 +216,8 @@ def test_tapw_symm_rep_help_lists_postprocess_inputs(capsys):
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert "-c CONFIG" in out
-    assert "--valence-count" in out
-    assert "--conduction-count" in out
+    assert "--valence-count" not in out
+    assert "--conduction-count" not in out
     assert "--degeneracy-tol" in out
     assert "--band-dir" not in out
     assert "--symmetry-dir" not in out

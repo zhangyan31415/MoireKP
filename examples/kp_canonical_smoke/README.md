@@ -25,14 +25,15 @@ Expected outputs:
 examples/kp_canonical_smoke/kp/outputs/K1/q01/
   inspect/
     spectrum.txt
-    scatter.pdf
+    bands_and_qblocks.pdf
     wavefunctions.npz
   projection/
     heff.npy
+    kpoints.npy
     eigvals.txt
     basis.md
     basis.npz
-    scatter.pdf
+    band_comparison.pdf
     wavefunctions.npz
 ```
 
@@ -49,13 +50,14 @@ Expected outputs:
 examples/kp_canonical_smoke/kp/outputs/Gamma/q01/
   inspect/
     spectrum.txt
-    scatter.pdf
+    bands_and_qblocks.pdf
     wavefunctions.npz
   projection/
     heff.npy
+    kpoints.npy
     eigvals.txt
     basis.md
     basis.npz
-    scatter.pdf
+    band_comparison.pdf
     wavefunctions.npz
 ```

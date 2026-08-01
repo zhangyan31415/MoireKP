@@ -32,9 +32,26 @@ class _GuardedHamk:
         return np.eye(4, dtype=np.complex128) * float(key + 1)
 
 
-def _canonical_case_cfg(cfg: dict) -> dict:
+def _canonical_case_cfg(
+    cfg: dict,
+    *,
+    tmp_path: Path | None = None,
+    nk: int | None = None,
+) -> dict:
     out = copy.deepcopy(cfg)
     out.setdefault("case", {"profile": "K1", "q_shell": "q06", "output_root": "outputs"})
+    if tmp_path is not None:
+        if nk is None:
+            raise ValueError("nk is required when creating project reference artifacts")
+        material = out.setdefault("material", {})
+        material.setdefault("band_file", "bands.txt")
+        material.setdefault("kpoints_file", "kpoints.npy")
+        out.setdefault("kpath", {"tmat": np.eye(3).tolist()})
+        (tmp_path / "bands.txt").write_text(
+            "".join("0.0 1.0\n" for _ in range(nk)),
+            encoding="utf-8",
+        )
+        np.save(tmp_path / "kpoints.npy", np.zeros((nk, 3), dtype=float))
     return out
 
 
@@ -90,7 +107,10 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=3)),
+        encoding="utf-8",
+    )
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -163,7 +183,10 @@ def test_project_records_fixed_spin_without_saving_operator(monkeypatch, tmp_pat
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=1)),
+        encoding="utf-8",
+    )
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -226,7 +249,10 @@ def test_project_embeds_mixed_spin_operator_in_wavefunctions_archive(monkeypatch
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=1)),
+        encoding="utf-8",
+    )
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -250,6 +276,7 @@ def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path)
                     "hamiltonian_k": "hamiltonian_k.npy",
                     "g_vectors_group1": "g_vectors_group1.npy",
                     "g_vectors_group2": "g_vectors_group2.npy",
+                    "kpoints": "kpoints.npy",
                     "energies_vbm": "energies_vbm.txt",
                 },
             }
@@ -258,6 +285,8 @@ def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path)
     )
     hamk = np.zeros((1, 4, 4), dtype=np.complex128)
     q = np.zeros((1, 2), dtype=float)
+    np.save(band_dir / "kpoints.npy", np.zeros((1, 3), dtype=float))
+    (band_dir / "energies_vbm.txt").write_text("0.0 1.0\n", encoding="utf-8")
     seen: dict[str, object] = {}
 
     def fake_load_hamk(path, *_args, **_kwargs):
@@ -292,6 +321,7 @@ def test_project_resolves_tapw_band_manifest_inputs(monkeypatch, tmp_path: Path)
             "num_orb_per_layer": [1],
         },
         "plot": {"hamk_index": 0},
+        "kpath": {"tmat": np.eye(3).tolist()},
         "project": {
             "mode": "K1",
             "workers": 1,
@@ -415,7 +445,10 @@ def test_project_full_path_does_not_emit_k_indices_selection_file(monkeypatch, t
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=2)),
+        encoding="utf-8",
+    )
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -519,7 +552,10 @@ def test_parallel_project_uses_worker_initializer_without_hamk_payload(monkeypat
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=9)),
+        encoding="utf-8",
+    )
 
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -651,20 +687,29 @@ def test_project_passes_downfold_diagnostic_options_when_supported(monkeypatch, 
         },
     }
     cfg_path = tmp_path / "source.yaml"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=1)),
+        encoding="utf-8",
+    )
     cli.cmd_project_from_config(str(cfg_path))
 
     cfg["project"]["compute_pole_diagnostics"] = True
     cfg["project"]["compute_condition_number"] = True
     cfg["project"]["out_dir"] = "project-enabled"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=1)),
+        encoding="utf-8",
+    )
     cli.cmd_project_from_config(str(cfg_path))
 
     cfg["project"]["compute_pole_diagnostics"] = False
     cfg["project"]["compute_condition_number"] = False
     cfg["project"]["fail_on_near_pole"] = True
     cfg["project"]["out_dir"] = "project-fail-on-near-pole"
-    cfg_path.write_text(yaml.safe_dump(_canonical_case_cfg(cfg)), encoding="utf-8")
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=1)),
+        encoding="utf-8",
+    )
     cli.cmd_project_from_config(str(cfg_path))
 
     assert seen == [(False, False, False), (True, True, False), (False, False, True)]

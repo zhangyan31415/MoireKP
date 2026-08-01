@@ -19,6 +19,8 @@ def _write_tiny_project_config(tmp_path: Path, project: dict) -> Path:
     np.save(tmp_path / "hamk.npy", hamk[np.newaxis, :, :])
     np.save(tmp_path / "q1.npy", np.array([[0.0, 0.0]], dtype=float))
     np.save(tmp_path / "q2.npy", np.array([[0.0, 0.0]], dtype=float))
+    np.save(tmp_path / "kpoints.npy", np.zeros((1, 3), dtype=float))
+    (tmp_path / "bands.txt").write_text("0.0 1.0\n", encoding="utf-8")
 
     cfg = {
         "case": {"profile": "K1", "q_shell": "q06", "output_root": "outputs"},
@@ -27,6 +29,8 @@ def _write_tiny_project_config(tmp_path: Path, project: dict) -> Path:
             "hamk_file": "hamk.npy",
             "qset1_file": "q1.npy",
             "qset2_file": "q2.npy",
+            "kpoints_file": "kpoints.npy",
+            "band_file": "bands.txt",
             "spin": "up",
             "energy_unit": "eV",
             "num_layers": 2,
@@ -34,6 +38,7 @@ def _write_tiny_project_config(tmp_path: Path, project: dict) -> Path:
             "num_orb_per_layer": [2],
         },
         "plot": {"hamk_index": 0},
+        "kpath": {"tmat": np.eye(3).tolist()},
         "project": project,
     }
     cfg_path = tmp_path / "source.yaml"
@@ -354,5 +359,5 @@ def test_project_requires_auto_gauge_or_manual_norb_fix_list(tmp_path: Path) -> 
         },
     )
 
-    with pytest.raises(ValueError, match="gauge: auto|manual norb_fix_list"):
+    with pytest.raises(ValueError, match="auto gauge.*symm.tapw_symmetry_dir"):
         cli.cmd_project_from_config(str(cfg_path))

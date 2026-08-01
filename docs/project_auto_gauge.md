@@ -95,11 +95,12 @@ the symmetry representations are produced in the same resolved gauge.
 `kp project` writes these canonical files in `projection/`:
 
 - `heff.npy`
+- `kpoints.npy`
 - `eigvals.txt`
 - `wavefunctions.npz`
 - `basis.npz`
 - `basis.md`
-- `scatter.pdf`
+- `band_comparison.pdf`
 
 The JSON report separates:
 

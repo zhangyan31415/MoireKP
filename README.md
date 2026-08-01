@@ -272,15 +272,16 @@ outputs/
     q06/
       inspect/
         spectrum.txt
-        scatter.pdf
+        bands_and_qblocks.pdf
         wavefunctions.npz
       projection/
         heff.npy
+        kpoints.npy
         eigvals.txt
         wavefunctions.npz
         basis.npz
         basis.md
-        scatter.pdf
+        band_comparison.pdf
       symmetry/
         representations.npz
         residuals.csv

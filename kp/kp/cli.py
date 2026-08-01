@@ -1930,8 +1930,6 @@ def cmd_project_from_config(cfg_path: str, overrides: dict[str, Any] | None = No
     if out_eig is not None:
         np.save(out_eig, heig_arr)
     basis_identity = build_projection_basis_identity(
-        hamk_file=hamk_file,
-        hamk_fallback=np.asarray(hamk2d),
         qset1=q1,
         qset2=q2_for_projection,
         spin=str(spin),

@@ -53,7 +53,7 @@ def test_canonical_case_defaults_point_all_workflows_to_one_case_directory(tmp_p
     cfg = normalize_case_config(_canonical_case_config(), config_path=cfg_path)
 
     assert cfg["project"]["out_dir"] == "../outputs/K1/q06/projection"
-    assert cfg["plot"]["out"] == "../outputs/K1/q06/inspect/scatter.pdf"
+    assert cfg["plot"]["out"] == "../outputs/K1/q06/inspect/bands_and_qblocks.pdf"
     assert cfg["plot"]["data_out"] == "../outputs/K1/q06/inspect/spectrum.txt"
     assert cfg["symm"]["output_dir"] == "../outputs/K1/q06/symmetry"
     assert cfg["output"]["dir"] == "../outputs/K1/q06/model"
@@ -109,7 +109,7 @@ def test_inspect_canonical_writes_user_facing_files(monkeypatch, tmp_path: Path,
 
     inspect_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "inspect"
     assert (inspect_dir / "spectrum.txt").exists()
-    assert (inspect_dir / "scatter.pdf").read_text(encoding="utf-8") == "plot"
+    assert (inspect_dir / "bands_and_qblocks.pdf").read_text(encoding="utf-8") == "plot"
     wavefunctions = np.load(inspect_dir / "wavefunctions.npz")
     np.testing.assert_allclose(wavefunctions["eigenvalues"], np.array([[-0.2, 0.1]]))
     np.testing.assert_allclose(wavefunctions["eigenvectors"], np.eye(2, dtype=np.complex128)[None, :, :])
@@ -164,7 +164,7 @@ def test_inspect_with_band_file_uses_combined_kpath_qblock_plot(monkeypatch, tmp
     cli.main(["inspect", "-c", str(cfg_path)])
 
     inspect_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "inspect"
-    assert (inspect_dir / "scatter.pdf").read_text(encoding="utf-8") == "combined"
+    assert (inspect_dir / "bands_and_qblocks.pdf").read_text(encoding="utf-8") == "combined"
     assert captured == {
         "band_rows": 2,
         "qblock_rows": 2,
@@ -249,6 +249,11 @@ def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Pa
     cfg_path.parent.mkdir(parents=True)
     cfg = _canonical_case_config()
     cfg["material"]["efermi"] = 0.0
+    cfg["material"]["band_file"] = "bands.txt"
+    cfg["material"]["kpoints_file"] = "kpoints.npy"
+    cfg["kpath"] = {"tmat": np.eye(3).tolist()}
+    (cfg_path.parent / "bands.txt").write_text("0.0 1.0\n", encoding="utf-8")
+    np.save(cfg_path.parent / "kpoints.npy", np.zeros((1, 3), dtype=float))
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
 
     cli.main(["project", "-c", str(cfg_path)])
@@ -262,13 +267,14 @@ def test_project_canonical_writes_only_release_outputs(monkeypatch, tmp_path: Pa
     assert (projection_dir / "eigvals.txt").exists()
     assert (projection_dir / "basis.md").exists()
     assert (projection_dir / "basis.npz").exists()
-    assert (projection_dir / "scatter.pdf").read_text(encoding="utf-8") == "plot"
+    assert (projection_dir / "band_comparison.pdf").read_text(encoding="utf-8") == "plot"
     assert set(path.name for path in projection_dir.iterdir()) == {
         "basis.md",
         "basis.npz",
         "eigvals.txt",
         "heff.npy",
-        "scatter.pdf",
+        "kpoints.npy",
+        "band_comparison.pdf",
         "wavefunctions.npz",
     }
     assert not (projection_dir / "heff_list.npy").exists()
@@ -308,9 +314,12 @@ def test_model_canonical_defaults_read_project_heff(tmp_path: Path) -> None:
         "path": "../outputs/K1/q06/symmetry",
     }
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False), encoding="utf-8")
+    np.save(cfg_path.parent / "q1.npy", np.zeros((1, 2), dtype=float))
+    np.save(cfg_path.parent / "q2.npy", np.zeros((1, 2), dtype=float))
     project_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "projection"
     project_dir.mkdir(parents=True)
     np.save(project_dir / "heff.npy", np.zeros((1, 2, 2), dtype=np.complex128))
+    np.save(project_dir / "kpoints.npy", np.zeros((1, 2), dtype=float))
     symmetry_dir = tmp_path / "kp" / "outputs" / "K1" / "q06" / "symmetry"
     symmetry_dir.mkdir(parents=True)
     np.savez(
@@ -502,8 +511,16 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
 
     monkeypatch.setattr(pipeline, "run_configured_model", lambda _config: {"configured_model": model_cfg, "moire_config": moire_cfg})
 
-    def fake_export(model_output_dir, output_dir, *, force=False, debug_files=False):
+    def fake_export(
+        model_output_dir,
+        output_dir,
+        *,
+        force=False,
+        debug_files=False,
+        operator_data=None,
+    ):
         seen["export"] = (Path(model_output_dir), Path(output_dir), bool(force), bool(debug_files))
+        seen["operator_data"] = operator_data
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         for name in ("README.md", "MODEL.md", "evaluate.py", "model_data.npz", "eigvals.npy", "band_comparison.pdf", "band_comparison_all.pdf", "q_lattice_harmonics.pdf"):
             (Path(output_dir) / name).write_text("x", encoding="utf-8")
@@ -516,6 +533,7 @@ def test_model_canonical_exports_standalone_in_model_directory(monkeypatch, tmp_
     cli.main(["model", "-c", str(cfg_path)])
 
     assert seen["export"] == (model_output, model_output, True, False)
+    assert seen["operator_data"] is None
     assert not (model_output / "standalone").exists()
     assert set(path.name for path in model_output.iterdir()) == {
         "MODEL.md",
