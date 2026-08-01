@@ -967,17 +967,23 @@ def _prepare_cli_selection_request(
             "selection identity requires the complete source Hamiltonian file: "
             f"{hamk_path}"
         )
-    source_hamiltonian_hash = hash_file(hamk_path)
     try:
-        hamk_shape = np.load(
+        source_hamiltonian = np.load(
             hamk_path,
             mmap_mode="r",
             allow_pickle=False,
-        ).shape
+        )
     except (OSError, TypeError, ValueError) as error:
         raise ValueError(
             f"source Hamiltonian must be a numeric .npy array: {hamk_path}"
         ) from error
+    if not source_hamiltonian.flags.c_contiguous:
+        raise ValueError(
+            "selection identity requires a C-contiguous source Hamiltonian .npy "
+            f"array: {hamk_path}"
+        )
+    hamk_shape = source_hamiltonian.shape
+    source_hamiltonian_hash = hash_array(source_hamiltonian)
     nk = int(hamk_shape[0]) if len(hamk_shape) == 3 else 1
 
     q1, q2 = load_Q_sets(

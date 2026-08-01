@@ -8,6 +8,7 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import numpy as np
+import pytest
 import yaml
 
 import kp.cli as cli
@@ -131,7 +132,9 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
         encoding="utf-8",
     )
 
-    cli._prepare_cli_selection_request(str(cfg_path))
+    request = cli._prepare_cli_selection_request(str(cfg_path))
+    source = np.load(tmp_path / "unused.npy", mmap_mode="r", allow_pickle=False)
+    assert request.selection_input.source_hamiltonian_hash == cli.hash_array(source)
     assert guarded.accessed == []
     cli.cmd_project_from_config(str(cfg_path))
 
@@ -153,6 +156,40 @@ def test_project_spin_slice_honors_k_indices_before_materializing(monkeypatch, t
             assert field in basis.files
             assert field in wavefunctions.files
             assert np.asarray(basis[field]).item() == np.asarray(wavefunctions[field]).item()
+
+
+def test_selection_identity_rejects_fortran_order_source(tmp_path: Path) -> None:
+    cfg = {
+        "material": {
+            "hamk_file": "hamk.npy",
+            "qset1_file": "q1.npy",
+            "qset2_file": "q2.npy",
+            "spin": "up",
+            "energy_unit": "eV",
+            "num_layers": 2,
+            "num_orb_per_layer": [1],
+        },
+        "project": {
+            "mode": "K1",
+            "workers": 1,
+            "downfold_method": "first_order",
+            "out_dir": "project",
+            "nlow_state_list": [[0], [0]],
+            "norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+        },
+    }
+    cfg_path = tmp_path / "source.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=2)),
+        encoding="utf-8",
+    )
+    np.save(
+        tmp_path / "hamk.npy",
+        np.asfortranarray(np.zeros((2, 4, 4), dtype=np.complex128)),
+    )
+
+    with pytest.raises(ValueError, match="C-contiguous"):
+        cli._prepare_cli_selection_request(str(cfg_path))
 
 
 def test_project_records_fixed_spin_without_saving_operator(monkeypatch, tmp_path: Path) -> None:
