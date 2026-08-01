@@ -12,6 +12,7 @@ from decimal import Decimal, ROUND_HALF_EVEN
 from enum import Enum
 import hashlib
 import json
+from types import MappingProxyType
 from typing import Mapping, Sequence
 
 import numpy as np
@@ -44,33 +45,7 @@ _METRIC_HASH_ABSOLUTE_QUANTUM = 1.0e-14
 _METRIC_HASH_THRESHOLD_QUANTUM_RATIO = 1.0e-9
 
 
-class _FrozenDict(dict[str, object]):
-    """A JSON/pickle-compatible dict whose public mutation API is disabled."""
-
-    @staticmethod
-    def _immutable(*_args: object, **_kwargs: object) -> None:
-        raise TypeError("candidate payload is immutable")
-
-    __setitem__ = _immutable
-    __delitem__ = _immutable
-    __ior__ = _immutable
-    clear = _immutable
-    pop = _immutable
-    popitem = _immutable
-    setdefault = _immutable
-    update = _immutable
-
-    def __copy__(self) -> _FrozenDict:
-        return self
-
-    def __deepcopy__(self, _memo: dict[int, object]) -> _FrozenDict:
-        return self
-
-    def __reduce__(self) -> tuple[object, tuple[dict[str, object]]]:
-        return (_FrozenDict, (dict(self),))
-
-
-CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS: Mapping[str, str] = _FrozenDict(
+CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS: Mapping[str, str] = MappingProxyType(
     {
         "certificate.relation_residual_max": "relation_residual",
         "operation.antiunitary_square_residual": "antiunitary_square_residual",
@@ -97,19 +72,16 @@ CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS: Mapping[str, str] = _FrozenDict(
 )
 
 
-def _deep_freeze_payload(value: object) -> object:
-    """Defensively copy a canonical payload into immutable containers."""
+def _canonical_payload_json(payload: Mapping[str, object]) -> str:
+    """Serialize a canonical payload into immutable deterministic storage."""
 
-    if isinstance(value, Mapping):
-        frozen: dict[str, object] = {}
-        for key, item in value.items():
-            if not isinstance(key, str):
-                raise TypeError("candidate payload mapping keys must be strings")
-            frozen[key] = _deep_freeze_payload(item)
-        return _FrozenDict(frozen)
-    if isinstance(value, (list, tuple)):
-        return tuple(_deep_freeze_payload(item) for item in value)
-    return value
+    return json.dumps(
+        payload,
+        allow_nan=False,
+        ensure_ascii=True,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
 
 
 class CandidateSymmetryStatus(str, Enum):
@@ -291,7 +263,7 @@ class CandidateSymmetryCertificate:
     operation_coverage_complete: bool
     pair_coverage_complete: bool
     thresholds: CandidateSymmetryThresholds
-    presentation_payload: Mapping[str, object]
+    _presentation_payload_json: str = field(repr=False)
     presentation_hash: str
     input_identity_hash: str
     states: tuple[CandidateStateCertificate, ...]
@@ -305,23 +277,46 @@ class CandidateSymmetryCertificate:
     certificate_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
-        frozen_presentation_payload = _deep_freeze_payload(
-            self.presentation_payload
-        )
-        if not isinstance(frozen_presentation_payload, Mapping):
+        try:
+            presentation_payload = json.loads(str(self._presentation_payload_json))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "candidate symmetry presentation payload JSON is invalid"
+            ) from exc
+        if not isinstance(presentation_payload, dict):
             raise TypeError("candidate symmetry presentation payload must be a mapping")
+        canonical_json = _canonical_payload_json(presentation_payload)
         object.__setattr__(
             self,
-            "presentation_payload",
-            frozen_presentation_payload,
+            "_presentation_payload_json",
+            canonical_json,
         )
-        if hash_mapping(frozen_presentation_payload) != self.presentation_hash:
+        if hash_mapping(presentation_payload) != self.presentation_hash:
             raise ValueError("candidate symmetry presentation hash mismatch")
         object.__setattr__(
             self,
             "certificate_hash",
             _candidate_certificate_hash(self),
         )
+
+    @property
+    def presentation_payload(self) -> dict[str, object]:
+        """Return a mutable copy; certificate integrity never depends on it."""
+
+        payload = json.loads(self._presentation_payload_json)
+        assert isinstance(payload, dict)
+        return payload
+
+    def presentation_payload_copy(self) -> dict[str, object]:
+        """Explicit copy API equivalent to :attr:`presentation_payload`."""
+
+        return self.presentation_payload
+
+    @property
+    def presentation_payload_json(self) -> str:
+        """Return the immutable canonical JSON stored by the certificate."""
+
+        return self._presentation_payload_json
 
 
 def _canonical_metric(value: float | None) -> float | None:
@@ -1106,6 +1101,7 @@ def certify_candidate_symmetries(
     target = states if target_states is None else target_states
     source = states if source_states is None else source_states
     presentation_payload = _canonical_presentation_payload(presentation)
+    presentation_payload_json = _canonical_payload_json(presentation_payload)
     presentation_hash = hash_mapping(presentation_payload)
     input_identity_hash = _candidate_input_identity_hash(
         presentation_hash=presentation_hash,
@@ -1530,7 +1526,7 @@ def certify_candidate_symmetries(
         operation_coverage_complete=operation_coverage_complete,
         pair_coverage_complete=pair_coverage_complete,
         thresholds=thresholds,
-        presentation_payload=presentation_payload,
+        _presentation_payload_json=presentation_payload_json,
         presentation_hash=presentation_hash,
         input_identity_hash=input_identity_hash,
         states=tuple(

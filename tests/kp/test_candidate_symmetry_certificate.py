@@ -1,14 +1,14 @@
 from __future__ import annotations
 
 import json
+import pickle
 import warnings
-from dataclasses import asdict, replace
+from dataclasses import replace
 
 import numpy as np
 import pytest
 from scipy import sparse
 
-from kp.identity import hash_mapping
 from kp.symmetry.candidate_certificate import (
     CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION,
     CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION,
@@ -481,39 +481,33 @@ def test_presentation_source_description_is_explicitly_not_identity_bound() -> N
     assert certify(first).presentation_hash == certify(second).presentation_hash
 
 
-def test_presentation_payload_is_defensively_copied_and_deeply_immutable() -> None:
-    baseline = _certify(
+def test_presentation_payload_property_is_a_defensive_serializable_copy() -> None:
+    certificate = _certify(
         name="E",
         state=_state(np.eye(1)),
         d_full=np.eye(1),
         exact=np.eye(1),
     )
-    external_payload = {
-        "version": "external-test-v1",
-        "nested": [{"value": 1}],
-    }
-    constructed = replace(
-        baseline,
-        presentation_payload=external_payload,
-        presentation_hash=hash_mapping(external_payload),
-    )
-    original_hash = constructed.certificate_hash
+    original_payload = certificate.presentation_payload
+    original_hash = certificate.certificate_hash
+    exposed = certificate.presentation_payload
 
-    external_payload["nested"][0]["value"] = 2
-    assert constructed.presentation_payload["nested"][0]["value"] == 1
-    assert constructed.certificate_hash == original_hash
-    with pytest.raises(TypeError):
-        constructed.presentation_payload["version"] = "mutated"
-    with pytest.raises(TypeError):
-        constructed.presentation_payload["nested"][0]["value"] = 3
-    with pytest.raises(AttributeError):
-        constructed.presentation_payload["nested"].append({"value": 4})
-    serialized = json.loads(json.dumps(constructed.presentation_payload))
-    assert serialized == {
-        "version": "external-test-v1",
-        "nested": [{"value": 1}],
-    }
-    assert asdict(constructed)["presentation_payload"] == constructed.presentation_payload
+    exposed["version"] = "ordinary-mutation"
+    exposed["relations"][0]["name"] = "nested-mutation"
+    exposed["relations"].append({"name": "extra"})
+    dict.__setitem__(exposed, "base-class-attack", True)
+    dict.__setitem__(exposed["generators"][0], "name", "base-class-nested")
+    dict.__init__(exposed, {"reinitialized": True})
+
+    assert certificate.presentation_payload == original_payload
+    assert certificate.presentation_payload is not certificate.presentation_payload
+    assert certificate.presentation_payload_copy() == original_payload
+    assert certificate.certificate_hash == original_hash
+    assert json.loads(json.dumps(certificate.presentation_payload)) == original_payload
+    restored = pickle.loads(pickle.dumps(certificate))
+    assert restored == certificate
+    assert restored.presentation_payload == original_payload
+    assert restored.certificate_hash == original_hash
 
 
 def test_certificate_hash_binds_metrics_and_thresholds() -> None:
