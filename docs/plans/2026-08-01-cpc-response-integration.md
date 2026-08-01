@@ -177,6 +177,7 @@ review batch; do not weaken tests.
 - Modify: `kp/kp/symmetry/exactify_representation.py`
 - Modify: `kp/kp/symmetry/joint_exactification.py`
 - Modify: `kp/kp/symmetry/projection.py`
+- Modify: `kp/kp/symmetry/q_canonicalization.py`
 - Create: corresponding focused tests under `tests/kp/`
 
 **Step 1: Migrate focused tests before production files**
@@ -185,6 +186,8 @@ Include canonical-target, factorized-action, structure-certificate,
 structure-recovery, joint-exactification, and projection artifact tests.
 The high-dimensional joint exactification regression also covers the required
 symmetry-gauge stabilizer matching behavior.
+Projection identity and active-sector Q-canonicalization regressions cover the
+additional handoff metadata used by the exact target artifact.
 
 **Step 2: Verify expected missing-artifact failures**
 
