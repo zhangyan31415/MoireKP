@@ -8,6 +8,7 @@ import json
 import math
 import os
 import re
+import stat
 import tempfile
 from dataclasses import dataclass
 from enum import Enum
@@ -299,6 +300,7 @@ def build_selection_policy_hash(
 class SelectionInputIdentity:
     selection_mode: str
     frozen_target_window_hash: str
+    validation_k_indices_hash: str
     ordered_q_hash: str
     source_hamiltonian_hash: str
     action_package_hash: str
@@ -310,6 +312,7 @@ class SelectionInputIdentity:
         object.__setattr__(self, "selection_mode", _require_selection_mode(self.selection_mode))
         for field in (
             "frozen_target_window_hash",
+            "validation_k_indices_hash",
             "ordered_q_hash",
             "source_hamiltonian_hash",
             "action_package_hash",
@@ -328,6 +331,7 @@ class SelectionInputIdentity:
             "schema": "kp.selection-input-identity.v1",
             "selection_mode": self.selection_mode,
             "frozen_target_window_hash": self.frozen_target_window_hash,
+            "validation_k_indices_hash": self.validation_k_indices_hash,
             "ordered_q_hash": self.ordered_q_hash,
             "source_hamiltonian_hash": self.source_hamiltonian_hash,
             "action_package_hash": self.action_package_hash,
@@ -344,6 +348,7 @@ class SelectionInputIdentity:
         *,
         selection_mode: str,
         frozen_target_window_hash: str,
+        validation_k_indices_hash: str,
         ordered_q_hash: str,
         source_hamiltonian_hash: str,
         action_package_hash: str,
@@ -354,6 +359,9 @@ class SelectionInputIdentity:
             "selection_mode": _require_selection_mode(selection_mode),
             "frozen_target_window_hash": _require_hash(
                 frozen_target_window_hash, "frozen_target_window_hash"
+            ),
+            "validation_k_indices_hash": _require_hash(
+                validation_k_indices_hash, "validation_k_indices_hash"
             ),
             "ordered_q_hash": _require_hash(ordered_q_hash, "ordered_q_hash"),
             "source_hamiltonian_hash": _require_hash(
@@ -383,6 +391,7 @@ class SelectionInputIdentity:
         fields = (
             "selection_mode",
             "frozen_target_window_hash",
+            "validation_k_indices_hash",
             "ordered_q_hash",
             "source_hamiltonian_hash",
             "action_package_hash",
@@ -398,6 +407,7 @@ def build_selection_input_identity_hash(
     *,
     selection_mode: str,
     frozen_target_window_hash: str,
+    validation_k_indices_hash: str,
     ordered_q_hash: str,
     source_hamiltonian_hash: str,
     action_package_hash: str,
@@ -407,6 +417,7 @@ def build_selection_input_identity_hash(
     return SelectionInputIdentity.create(
         selection_mode=selection_mode,
         frozen_target_window_hash=frozen_target_window_hash,
+        validation_k_indices_hash=validation_k_indices_hash,
         ordered_q_hash=ordered_q_hash,
         source_hamiltonian_hash=source_hamiltonian_hash,
         action_package_hash=action_package_hash,
@@ -724,6 +735,13 @@ class SelectionIdentity:
             ):
                 raise ValueError("certification evidence target does not match selection input")
             if (
+                evidence.metric_evidence.validation_k_indices_hash
+                != self.selection_input.validation_k_indices_hash
+            ):
+                raise ValueError(
+                    "certification evidence validation-k identity does not match selection input"
+                )
+            if (
                 evidence.metric_evidence.basis_handoff_hash
                 != self.resolved_candidate.basis_handoff_hash
             ):
@@ -826,6 +844,7 @@ class SelectionArtifact:
     schema_version: str
     transaction_id: str
     selection_input_identity_hash: str
+    payload_manifest_hash: str | None
     identity: SelectionIdentity | None
     metrics: CandidateMetrics | None
     certification_status: CertificationStatus
@@ -845,6 +864,12 @@ class SelectionArtifact:
             "selection_input_identity_hash",
             _require_hash(self.selection_input_identity_hash, "selection_input_identity_hash"),
         )
+        if self.payload_manifest_hash is not None:
+            object.__setattr__(
+                self,
+                "payload_manifest_hash",
+                _require_hash(self.payload_manifest_hash, "payload_manifest_hash"),
+            )
         try:
             status = CertificationStatus(self.certification_status)
         except (TypeError, ValueError) as exc:
@@ -888,11 +913,19 @@ class SelectionArtifact:
         if status is CertificationStatus.PENDING:
             if any(
                 value is not None
-                for value in (self.identity, self.metrics, self.status_reason, self.diagnostic)
+                for value in (
+                    self.payload_manifest_hash,
+                    self.identity,
+                    self.metrics,
+                    self.status_reason,
+                    self.diagnostic,
+                )
             ) or self.failure_codes:
                 raise ValueError("PENDING selection artifact cannot contain final identity or evidence")
             return
         if status is CertificationStatus.FAILED:
+            if self.payload_manifest_hash is not None:
+                raise ValueError("FAILED selection artifact cannot bind certified payloads")
             if self.identity is not None or self.metrics is not None:
                 raise ValueError("FAILED selection artifact cannot claim a resolved candidate")
             if self.status_reason is None or not self.failure_codes:
@@ -903,6 +936,8 @@ class SelectionArtifact:
                 raise ValueError("FAILED selection artifact requires a diagnostic")
             return
         if status is CertificationStatus.UNVERIFIED_OVERRIDE:
+            if self.payload_manifest_hash is not None:
+                raise ValueError("UNVERIFIED_OVERRIDE cannot bind certified payloads")
             if self.identity is None:
                 raise ValueError("UNVERIFIED_OVERRIDE requires a resolved candidate identity")
             if self.identity.resolved_candidate.selection_mode != "explicit":
@@ -917,6 +952,8 @@ class SelectionArtifact:
                 raise ValueError("UNVERIFIED_OVERRIDE requires a diagnostic")
             return
         assert status is CertificationStatus.CERTIFIED
+        if self.payload_manifest_hash is None:
+            raise ValueError("CERTIFIED selection artifact requires a payload manifest hash")
         if self.identity is None:
             raise ValueError("CERTIFIED selection artifact requires an identity")
         if self.identity.resolved_candidate.selection_mode != "auto":
@@ -936,6 +973,7 @@ class SelectionArtifact:
             "schema_version": self.schema_version,
             "transaction_id": self.transaction_id,
             "selection_input_identity_hash": self.selection_input_identity_hash,
+            "payload_manifest_hash": self.payload_manifest_hash,
             "identity": None if self.identity is None else self.identity.to_dict(),
             "metrics": None if self.metrics is None else _metrics_to_dict(self.metrics),
             "certification_status": self.certification_status.value,
@@ -966,6 +1004,7 @@ class SelectionArtifact:
             schema_version=SELECTION_ARTIFACT_SCHEMA_VERSION,
             transaction_id=transaction_id,
             selection_input_identity_hash=selection_input_identity_hash,
+            payload_manifest_hash=None,
             identity=None,
             metrics=None,
             certification_status=CertificationStatus.PENDING,
@@ -980,6 +1019,7 @@ class SelectionArtifact:
         *,
         transaction_id: str,
         identity: SelectionIdentity,
+        payload_manifest_hash: str,
     ) -> "SelectionArtifact":
         if not isinstance(identity, SelectionIdentity):
             raise TypeError("identity must be SelectionIdentity")
@@ -989,6 +1029,9 @@ class SelectionArtifact:
             schema_version=SELECTION_ARTIFACT_SCHEMA_VERSION,
             transaction_id=transaction_id,
             selection_input_identity_hash=identity.selection_input_identity_hash,
+            payload_manifest_hash=_require_hash(
+                payload_manifest_hash, "payload_manifest_hash"
+            ),
             identity=identity,
             metrics=identity.certification_evidence.metric_evidence.metrics,
             certification_status=CertificationStatus.CERTIFIED,
@@ -1011,6 +1054,7 @@ class SelectionArtifact:
             schema_version=SELECTION_ARTIFACT_SCHEMA_VERSION,
             transaction_id=transaction_id,
             selection_input_identity_hash=selection_input_identity_hash,
+            payload_manifest_hash=None,
             identity=None,
             metrics=None,
             certification_status=CertificationStatus.FAILED,
@@ -1033,6 +1077,7 @@ class SelectionArtifact:
             schema_version=SELECTION_ARTIFACT_SCHEMA_VERSION,
             transaction_id=transaction_id,
             selection_input_identity_hash=identity.selection_input_identity_hash,
+            payload_manifest_hash=None,
             identity=identity,
             metrics=None,
             certification_status=CertificationStatus.UNVERIFIED_OVERRIDE,
@@ -1050,6 +1095,7 @@ class SelectionArtifact:
             "schema_version",
             "transaction_id",
             "selection_input_identity_hash",
+            "payload_manifest_hash",
             "identity",
             "metrics",
             "certification_status",
@@ -1072,6 +1118,7 @@ class SelectionArtifact:
             schema_version=payload["schema_version"],
             transaction_id=payload["transaction_id"],
             selection_input_identity_hash=payload["selection_input_identity_hash"],
+            payload_manifest_hash=payload["payload_manifest_hash"],
             identity=(
                 None if identity_payload is None else SelectionIdentity.from_dict(identity_payload)
             ),
@@ -1143,6 +1190,62 @@ def _require_payload_name(value: Any) -> str:
     return name
 
 
+def _read_regular_file(path: Path, context: str) -> bytes:
+    try:
+        status = path.lstat()
+    except OSError as exc:
+        raise ValueError(f"{context} is not readable") from exc
+    if stat.S_ISLNK(status.st_mode):
+        raise ValueError(f"{context} must not be a symlink")
+    if not stat.S_ISREG(status.st_mode):
+        raise ValueError(f"{context} must be a regular file")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise ValueError(f"{context} must be a regular non-symlink file") from exc
+    try:
+        opened_status = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_status.st_mode):
+            raise ValueError(f"{context} must be a regular file")
+        with os.fdopen(descriptor, "rb") as handle:
+            descriptor = -1
+            return handle.read()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _regular_generation_files(generation: Path) -> set[str]:
+    try:
+        generation_status = generation.lstat()
+    except OSError as exc:
+        raise ValueError("selection generation directory is not readable") from exc
+    if stat.S_ISLNK(generation_status.st_mode) or not stat.S_ISDIR(
+        generation_status.st_mode
+    ):
+        raise ValueError("selection generation must be a real directory, not a symlink")
+    output: set[str] = set()
+    for root, directories, files in os.walk(generation, followlinks=False):
+        root_path = Path(root)
+        for directory in directories:
+            directory_path = root_path / directory
+            directory_status = directory_path.lstat()
+            if stat.S_ISLNK(directory_status.st_mode) or not stat.S_ISDIR(
+                directory_status.st_mode
+            ):
+                raise ValueError("selection payload path must not traverse a symlink")
+        for filename in files:
+            file_path = root_path / filename
+            file_status = file_path.lstat()
+            if stat.S_ISLNK(file_status.st_mode):
+                raise ValueError("selection payload file must not be a symlink")
+            if not stat.S_ISREG(file_status.st_mode):
+                raise ValueError("selection payload file must be a regular file")
+            output.add(file_path.relative_to(generation).as_posix())
+    return output
+
+
 class SelectionArtifactStore:
     """Crash-safe selection generation store with one exclusive directory lock."""
 
@@ -1208,9 +1311,24 @@ class SelectionArtifactStore:
         *,
         require_certified: bool = True,
     ) -> dict[str, bytes]:
-        artifact = self.load_current(require_certified=require_certified)
-        _, payloads = self._load_generation(artifact.transaction_id)
-        return payloads
+        lock_handle = self.lock_path.open("a+b")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_SH)
+            artifact = self.load_current(require_certified=require_certified)
+            manifest_hash, payloads = self._load_generation(artifact.transaction_id)
+            if (
+                artifact.certification_status is CertificationStatus.CERTIFIED
+                and artifact.payload_manifest_hash != manifest_hash
+            ):
+                raise ValueError(
+                    "selection payload manifest does not match the certified artifact"
+                )
+            if self.load_current(require_certified=require_certified) != artifact:
+                raise ValueError("current selection marker changed during payload snapshot")
+            return payloads
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            lock_handle.close()
 
     def _generation_directory(self, transaction_id: str) -> Path:
         return self.generations_directory / _require_transaction_id(transaction_id)
@@ -1254,13 +1372,18 @@ class SelectionArtifactStore:
     def _load_generation(self, transaction_id: str) -> tuple[str, dict[str, bytes]]:
         generation = self._generation_directory(transaction_id)
         manifest_path = generation / "payload_manifest.json"
+        actual_files = _regular_generation_files(generation)
+        if "payload_manifest.json" not in actual_files:
+            raise ValueError("selection generation is missing its regular payload manifest")
         try:
             payload = json.loads(
-                manifest_path.read_text(encoding="utf-8"),
+                _read_regular_file(
+                    manifest_path, "selection payload manifest"
+                ).decode("utf-8"),
                 parse_constant=_reject_json_constant,
                 object_pairs_hook=_strict_json_object,
             )
-        except json.JSONDecodeError as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise ValueError("invalid selection payload manifest JSON") from exc
         fields = ("schema_version", "transaction_id", "payloads", "manifest_hash")
         _require_exact_keys(payload, fields, "selection payload manifest")
@@ -1284,7 +1407,9 @@ class SelectionArtifactStore:
                 raise ValueError("selection payload names must be unique")
             content_hash = _require_hash(record["content_hash"], "content_hash")
             size = _require_nonnegative_integer(record["size"], "payload size")
-            content = (generation / name).read_bytes()
+            content = _read_regular_file(
+                generation / name, f"selection payload {name}"
+            )
             if len(content) != size or _payload_content_hash(content) != content_hash:
                 raise ValueError(f"selection payload hash mismatch for {name}")
             loaded[name] = content
@@ -1293,12 +1418,7 @@ class SelectionArtifactStore:
             )
         if [record["name"] for record in normalized_records] != sorted(loaded):
             raise ValueError("selection payload records must use canonical name order")
-        actual_files = {
-            path.relative_to(generation).as_posix()
-            for path in generation.rglob("*")
-            if path.is_file() and path != manifest_path
-        }
-        if actual_files != set(loaded):
+        if actual_files - {"payload_manifest.json"} != set(loaded):
             raise ValueError("selection generation contains unbound payload files")
         manifest_hash = _require_hash(payload["manifest_hash"], "manifest_hash")
         expected_hash = hash_mapping(
@@ -1337,6 +1457,7 @@ class SelectionArtifactTransaction:
         self._active = True
         self._published = False
         self._payload_manifest_hash: str | None = None
+        self._payload_count = 0
 
     @property
     def generation_directory(self) -> Path:
@@ -1421,6 +1542,7 @@ class SelectionArtifactTransaction:
                 "selection payload generation failed persistence validation",
             ) from exc
         self._payload_manifest_hash = manifest_hash
+        self._payload_count = len(normalized)
         return manifest_hash
 
     def publish(self, artifact: SelectionArtifact) -> None:
@@ -1441,7 +1563,7 @@ class SelectionArtifactTransaction:
         allowed = (
             {CertificationStatus.CERTIFIED, CertificationStatus.FAILED}
             if self._selection_mode == "auto"
-            else {CertificationStatus.UNVERIFIED_OVERRIDE, CertificationStatus.FAILED}
+            else {CertificationStatus.UNVERIFIED_OVERRIDE}
         )
         if artifact.certification_status not in allowed:
             raise SelectionTransactionError(
@@ -1455,6 +1577,13 @@ class SelectionArtifactTransaction:
             raise SelectionTransactionError(
                 SelectionFailureCode.IDENTITY_MISMATCH,
                 "final selection input identity does not match PENDING",
+            )
+        if artifact.certification_status is CertificationStatus.CERTIFIED and (
+            self._payload_manifest_hash is None or self._payload_count == 0
+        ):
+            raise SelectionTransactionError(
+                SelectionFailureCode.PERSISTENCE_FAILURE,
+                "CERTIFIED selection requires an explicit nonempty payload stage",
             )
         if self._payload_manifest_hash is None:
             self.stage_payloads({})
@@ -1477,6 +1606,14 @@ class SelectionArtifactTransaction:
             raise SelectionTransactionError(
                 SelectionFailureCode.PERSISTENCE_FAILURE,
                 "selection payload manifest changed before publication",
+            )
+        if (
+            artifact.certification_status is CertificationStatus.CERTIFIED
+            and artifact.payload_manifest_hash != manifest_hash
+        ):
+            raise SelectionTransactionError(
+                SelectionFailureCode.IDENTITY_MISMATCH,
+                "CERTIFIED selection artifact does not bind the staged payload manifest",
             )
         self._store._checkpoint("before_final_marker")
         try:

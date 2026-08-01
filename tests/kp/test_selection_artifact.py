@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import fcntl
+import hashlib
 import json
 import os
 import subprocess
 import sys
+import threading
 from dataclasses import FrozenInstanceError, replace
 from pathlib import Path
 
@@ -82,6 +85,7 @@ def _selection_input(**changes: str) -> SelectionInputIdentity:
     values = {
         "selection_mode": "auto",
         "frozen_target_window_hash": _digest("target"),
+        "validation_k_indices_hash": _digest("validation-k"),
         "ordered_q_hash": _digest("q"),
         "source_hamiltonian_hash": _digest("source-h"),
         "action_package_hash": _digest("actions"),
@@ -117,11 +121,20 @@ def _identity(
     )
 
 
-def _certified(transaction_id: str = "transaction-a") -> SelectionArtifact:
+def _certified(
+    transaction_id: str = "transaction-a",
+    *,
+    payload_manifest_hash: str | None = None,
+) -> SelectionArtifact:
     identity = _identity()
     return SelectionArtifact.certified(
         transaction_id=transaction_id,
         identity=identity,
+        payload_manifest_hash=(
+            _digest("payload-manifest")
+            if payload_manifest_hash is None
+            else payload_manifest_hash
+        ),
     )
 
 
@@ -168,6 +181,7 @@ def test_frozen_target_hash_binds_complete_resolved_window() -> None:
     ("field", "changed"),
     (
         ("frozen_target_window_hash", "different-target"),
+        ("validation_k_indices_hash", "different-validation-k"),
         ("ordered_q_hash", "different-q"),
         ("source_hamiltonian_hash", "different-source"),
         ("action_package_hash", "different-actions"),
@@ -284,6 +298,7 @@ def test_certified_artifact_requires_complete_evidence_and_single_metrics_source
         SelectionArtifact.certified(
             transaction_id="incomplete",
             identity=_identity(with_evidence=False),
+            payload_manifest_hash=_digest("payload-manifest"),
         )
 
 
@@ -292,6 +307,7 @@ def test_certified_artifact_rejects_explicit_mode_and_identity_mismatch() -> Non
         SelectionArtifact.certified(
             transaction_id="explicit-cannot-pass",
             identity=_identity(mode="explicit"),
+            payload_manifest_hash=_digest("payload-manifest"),
         )
 
     identity = _identity(
@@ -302,6 +318,7 @@ def test_certified_artifact_rejects_explicit_mode_and_identity_mismatch() -> Non
             schema_version="kp.selection-artifact.v1",
             transaction_id="bad-input",
             selection_input_identity_hash=_selection_input_hash(),
+            payload_manifest_hash=_digest("payload-manifest"),
             identity=identity,
             metrics=identity.certification_evidence.metric_evidence.metrics,
             certification_status=CertificationStatus.CERTIFIED,
@@ -481,7 +498,10 @@ def test_pending_first_invalidates_older_certified_generation(tmp_path: Path) ->
         selection_input_identity_hash=_selection_input_hash(),
     )
     with store.begin(first_pending) as transaction:
-        transaction.publish(_certified("first"))
+        manifest_hash = transaction.stage_payloads({"basis.bin": b"first"})
+        transaction.publish(
+            _certified("first", payload_manifest_hash=manifest_hash)
+        )
     assert store.load_current(require_certified=True).transaction_id == "first"
 
     second_pending = SelectionArtifact.pending(
@@ -550,6 +570,7 @@ def test_older_transaction_cannot_overwrite_newer_pending_generation(tmp_path: P
         selection_input_identity_hash=_selection_input_hash(),
     )
     transaction_a = store.begin(first_pending)
+    manifest_hash = transaction_a.stage_payloads({"basis.bin": b"transaction-a"})
     transaction_b = SelectionArtifact.pending(
         transaction_id="transaction-b",
         selection_input_identity_hash=_selection_input_hash(),
@@ -561,7 +582,9 @@ def test_older_transaction_cannot_overwrite_newer_pending_generation(tmp_path: P
 
     try:
         with pytest.raises(SelectionTransactionError) as exc_info:
-            transaction_a.publish(_certified("transaction-a"))
+            transaction_a.publish(
+                _certified("transaction-a", payload_manifest_hash=manifest_hash)
+            )
         assert exc_info.value.failure_code is SelectionFailureCode.TRANSACTION_SUPERSEDED
         assert store.load_current().transaction_id == "transaction-b"
     finally:
@@ -577,6 +600,7 @@ def test_same_id_replacement_marker_cannot_be_overwritten_by_old_transaction(
         selection_input_identity_hash=_selection_input_hash(),
     )
     transaction = store.begin(first_pending)
+    manifest_hash = transaction.stage_payloads({"basis.bin": b"reused-id"})
     replacement = SelectionArtifact.pending(
         transaction_id="reused-id",
         selection_input_identity_hash=_digest("replacement-input"),
@@ -588,7 +612,9 @@ def test_same_id_replacement_marker_cannot_be_overwritten_by_old_transaction(
 
     try:
         with pytest.raises(SelectionTransactionError) as exc_info:
-            transaction.publish(_certified("reused-id"))
+            transaction.publish(
+                _certified("reused-id", payload_manifest_hash=manifest_hash)
+            )
         assert exc_info.value.failure_code is SelectionFailureCode.TRANSACTION_SUPERSEDED
         assert store.load_current() == replacement
     finally:
@@ -623,6 +649,7 @@ def test_selection_input_identity_is_canonical_frozen_and_strict() -> None:
     assert identity.selection_input_identity_hash == build_selection_input_identity_hash(
         selection_mode="auto",
         frozen_target_window_hash=_digest("target"),
+        validation_k_indices_hash=_digest("validation-k"),
         ordered_q_hash=_digest("q"),
         source_hamiltonian_hash=_digest("source-h"),
         action_package_hash=_digest("actions"),
@@ -812,7 +839,9 @@ def test_transaction_stages_and_reloads_generation_payloads_before_certifying(
         assert len(manifest_hash) == 64
         assert transaction.payload_manifest_hash == manifest_hash
         assert store.load_current().certification_status is CertificationStatus.PENDING
-        transaction.publish(_certified("payload-generation"))
+        transaction.publish(
+            _certified("payload-generation", payload_manifest_hash=manifest_hash)
+        )
 
     assert store.load_current(require_certified=True).transaction_id == "payload-generation"
     assert store.load_current_payloads(require_certified=True) == payloads
@@ -854,10 +883,12 @@ def test_payload_tampering_blocks_final_marker_and_leaves_pending(tmp_path: Path
         selection_input_identity_hash=_selection_input_hash(),
     )
     with store.begin(pending) as transaction:
-        transaction.stage_payloads({"basis.bin": b"original"})
+        manifest_hash = transaction.stage_payloads({"basis.bin": b"original"})
         (transaction.generation_directory / "basis.bin").write_bytes(b"tampered")
         with pytest.raises(SelectionTransactionError) as exc_info:
-            transaction.publish(_certified("tampered-payload"))
+            transaction.publish(
+                _certified("tampered-payload", payload_manifest_hash=manifest_hash)
+            )
         assert exc_info.value.failure_code is SelectionFailureCode.PERSISTENCE_FAILURE
         assert store.load_current().certification_status is CertificationStatus.PENDING
 
@@ -874,8 +905,10 @@ def test_fault_before_final_marker_leaves_pending_and_releases_lock(tmp_path: Pa
     )
     with pytest.raises(RuntimeError, match="injected crash"):
         with store.begin(pending) as transaction:
-            transaction.stage_payloads({"basis.bin": b"basis"})
-            transaction.publish(_certified("faulted"))
+            manifest_hash = transaction.stage_payloads({"basis.bin": b"basis"})
+            transaction.publish(
+                _certified("faulted", payload_manifest_hash=manifest_hash)
+            )
 
     assert store.load_current().certification_status is CertificationStatus.PENDING
     replacement_store = SelectionArtifactStore(tmp_path)
@@ -918,3 +951,246 @@ os._exit(23)
     )
     transaction = store.begin(replacement)
     transaction.close()
+
+
+def test_explicit_transaction_rejects_failed_final_state(tmp_path: Path) -> None:
+    input_identity = _selection_input(selection_mode="explicit")
+    pending = SelectionArtifact.pending(
+        transaction_id="explicit-failed",
+        selection_input_identity_hash=input_identity.selection_input_identity_hash,
+    )
+    failed = SelectionArtifact.failed(
+        transaction_id="explicit-failed",
+        selection_input_identity_hash=input_identity.selection_input_identity_hash,
+        reason=SelectionFailureCode.HARD_METRIC_FAILED,
+        failure_codes=(SelectionFailureCode.HARD_METRIC_FAILED,),
+        diagnostic="explicit selection cannot publish FAILED",
+    )
+    store = SelectionArtifactStore(tmp_path)
+
+    with store.begin(pending, selection_mode="explicit") as transaction:
+        transaction.stage_payloads({"basis.bin": b"explicit-basis"})
+        with pytest.raises(SelectionTransactionError, match="transition"):
+            transaction.publish(failed)
+
+    assert store.load_current() == pending
+
+
+def test_payload_reader_holds_shared_lock_across_marker_snapshot(tmp_path: Path) -> None:
+    store = SelectionArtifactStore(tmp_path)
+    first_pending = SelectionArtifact.pending(
+        transaction_id="snapshot-a",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+    with store.begin(first_pending) as transaction:
+        manifest_hash = transaction.stage_payloads({"basis.bin": b"generation-a"})
+        transaction.publish(
+            _certified("snapshot-a", payload_manifest_hash=manifest_hash)
+        )
+
+    second_pending = SelectionArtifact.pending(
+        transaction_id="snapshot-b",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+    writer_lock = store.lock_path.open("a+b")
+    fcntl.flock(writer_lock.fileno(), fcntl.LOCK_EX)
+    store._atomic_write_artifact(second_pending)
+    outcomes: list[tuple[str, object]] = []
+
+    def read_snapshot() -> None:
+        try:
+            outcomes.append(("result", store.load_current_payloads(require_certified=True)))
+        except Exception as exc:  # noqa: BLE001 - capture reader outcome across thread
+            outcomes.append(("error", exc))
+
+    reader = threading.Thread(target=read_snapshot)
+    reader.start()
+    try:
+        reader.join(timeout=0.2)
+        assert reader.is_alive(), "payload reader did not wait for the active writer"
+    finally:
+        fcntl.flock(writer_lock.fileno(), fcntl.LOCK_UN)
+        writer_lock.close()
+        reader.join(timeout=2.0)
+
+    assert not reader.is_alive()
+    assert outcomes and outcomes[0][0] == "error"
+    assert "not certified" in str(outcomes[0][1])
+
+
+@pytest.mark.parametrize("explicit_empty_stage", (False, True))
+def test_auto_certified_requires_explicit_nonempty_payload_stage(
+    tmp_path: Path,
+    explicit_empty_stage: bool,
+) -> None:
+    output = tmp_path / str(explicit_empty_stage)
+    store = SelectionArtifactStore(output)
+    pending = SelectionArtifact.pending(
+        transaction_id="missing-payload",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+
+    with store.begin(pending) as transaction:
+        if explicit_empty_stage:
+            transaction.stage_payloads({})
+        with pytest.raises(SelectionTransactionError, match="nonempty"):
+            transaction.publish(_certified("missing-payload"))
+
+    assert store.load_current() == pending
+
+
+def test_selection_input_and_metric_evidence_bind_same_validation_k_identity() -> None:
+    input_identity = SelectionInputIdentity.create(
+        selection_mode="auto",
+        frozen_target_window_hash=_digest("target"),
+        validation_k_indices_hash=_digest("validation-k"),
+        ordered_q_hash=_digest("q"),
+        source_hamiltonian_hash=_digest("source-h"),
+        action_package_hash=_digest("actions"),
+        row_layout_hash=_digest("layout"),
+        selection_policy_hash=_digest("policy"),
+    )
+    assert input_identity.validation_k_indices_hash == _digest("validation-k")
+    with pytest.raises(ValueError, match="hash mismatch"):
+        replace(
+            input_identity,
+            validation_k_indices_hash=_digest("different-validation-k"),
+            selection_input_identity_hash=input_identity.selection_input_identity_hash,
+        )
+    mismatched_input = SelectionInputIdentity.create(
+        selection_mode="auto",
+        frozen_target_window_hash=_digest("target"),
+        validation_k_indices_hash=_digest("different-validation-k"),
+        ordered_q_hash=_digest("q"),
+        source_hamiltonian_hash=_digest("source-h"),
+        action_package_hash=_digest("actions"),
+        row_layout_hash=_digest("layout"),
+        selection_policy_hash=_digest("policy"),
+    )
+    with pytest.raises(ValueError, match="validation"):
+        SelectionIdentity.create(
+            selection_input=mismatched_input,
+            selection_policy_hash=_digest("policy"),
+            resolved_candidate=_resolved(),
+            certification_evidence=_certification_evidence(),
+        )
+
+
+def test_certified_artifact_binds_manifest_and_rejects_recomputed_replacement(
+    tmp_path: Path,
+) -> None:
+    store = SelectionArtifactStore(tmp_path)
+    pending = SelectionArtifact.pending(
+        transaction_id="manifest-bound",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+    with store.begin(pending) as transaction:
+        manifest_hash = transaction.stage_payloads({"basis.bin": b"original"})
+        wrong_manifest_artifact = SelectionArtifact.certified(
+            transaction_id="manifest-bound",
+            identity=_identity(),
+            payload_manifest_hash=_digest("different-manifest"),
+        )
+        with pytest.raises(SelectionTransactionError, match="bind.*manifest"):
+            transaction.publish(wrong_manifest_artifact)
+        assert store.load_current() == pending
+        artifact = SelectionArtifact.certified(
+            transaction_id="manifest-bound",
+            identity=_identity(),
+            payload_manifest_hash=manifest_hash,
+        )
+        transaction.publish(artifact)
+
+    assert artifact.payload_manifest_hash == manifest_hash
+    assert wrong_manifest_artifact.artifact_hash != artifact.artifact_hash
+
+    replacement = b"replacement"
+    generation = store.generations_directory / "manifest-bound"
+    (generation / "basis.bin").write_bytes(replacement)
+    manifest_path = generation / "payload_manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["payloads"][0]["content_hash"] = hashlib.sha256(
+        b"kp.selection-payload.v1\0" + replacement
+    ).hexdigest()
+    manifest["payloads"][0]["size"] = len(replacement)
+    manifest_body = dict(manifest)
+    manifest_body.pop("manifest_hash")
+    manifest["manifest_hash"] = hash_mapping(manifest_body)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="manifest.*artifact|artifact.*manifest"):
+        store.load_current_payloads(require_certified=True)
+
+    payload = artifact.to_dict()
+    payload["payload_manifest_hash"] = None
+    unhashed = dict(payload)
+    unhashed.pop("artifact_hash")
+    payload["artifact_hash"] = hash_mapping(unhashed)
+    marker = tmp_path / "missing-manifest-selection.json"
+    marker.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="payload manifest hash"):
+        load_selection_artifact(marker)
+
+
+@pytest.mark.parametrize("linked_name", ("basis.bin", "payload_manifest.json"))
+def test_generation_loader_rejects_symlink_even_with_identical_external_content(
+    tmp_path: Path,
+    linked_name: str,
+) -> None:
+    store = SelectionArtifactStore(tmp_path / "store")
+    pending = SelectionArtifact.pending(
+        transaction_id="symlink-generation",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+    with store.begin(pending) as transaction:
+        manifest_hash = transaction.stage_payloads({"basis.bin": b"same-content"})
+        transaction.publish(
+            _certified("symlink-generation", payload_manifest_hash=manifest_hash)
+        )
+
+    generation = store.generations_directory / "symlink-generation"
+    target = generation / linked_name
+    external = tmp_path / f"external-{linked_name}"
+    external.write_bytes(target.read_bytes())
+    target.unlink()
+    target.symlink_to(external)
+
+    with pytest.raises(ValueError, match="regular|symlink"):
+        store.load_current_payloads(require_certified=True)
+
+
+@pytest.mark.parametrize("unsafe_name", ("../outside", "/tmp/outside", "a/../../outside"))
+def test_payload_staging_rejects_path_traversal(
+    tmp_path: Path,
+    unsafe_name: str,
+) -> None:
+    store = SelectionArtifactStore(tmp_path)
+    pending = SelectionArtifact.pending(
+        transaction_id="unsafe-path",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+    with store.begin(pending) as transaction:
+        with pytest.raises(ValueError, match="unsafe"):
+            transaction.stage_payloads({unsafe_name: b"outside"})
+
+
+def test_generation_loader_rejects_nonregular_payload_file(tmp_path: Path) -> None:
+    store = SelectionArtifactStore(tmp_path)
+    pending = SelectionArtifact.pending(
+        transaction_id="nonregular-generation",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+    with store.begin(pending) as transaction:
+        manifest_hash = transaction.stage_payloads({"basis.bin": b"content"})
+        transaction.publish(
+            _certified(
+                "nonregular-generation",
+                payload_manifest_hash=manifest_hash,
+            )
+        )
+
+    payload_path = store.generations_directory / "nonregular-generation" / "basis.bin"
+    payload_path.unlink()
+    payload_path.mkdir()
+    with pytest.raises(ValueError, match="regular"):
+        store.load_current_payloads(require_certified=True)
