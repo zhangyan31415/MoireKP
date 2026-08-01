@@ -111,6 +111,7 @@ def canonicalize_q_geometry(
     q_by_sector: Mapping[str, np.ndarray],
     operations: Sequence[Mapping[str, Any]],
     *,
+    active_sectors: Sequence[str] | None = None,
     relative_cleanup_tolerance: float = 1.0e-8,
     absolute_cleanup_tolerance: float | None = None,
 ) -> CanonicalQResult:
@@ -120,6 +121,18 @@ def canonicalize_q_geometry(
         raise QCanonicalizationError("relative_cleanup_tolerance must be positive")
     raw = _readonly_q_mapping(q_by_sector)
     sector_order = tuple(raw)
+    active_sector_order = (
+        sector_order
+        if active_sectors is None
+        else tuple(str(sector) for sector in active_sectors)
+    )
+    unknown_active = sorted(set(active_sector_order) - set(sector_order))
+    if unknown_active:
+        raise QCanonicalizationError(
+            f"active Q sectors are not present in q_by_sector: {unknown_active}"
+        )
+    if not active_sector_order:
+        raise QCanonicalizationError("Q canonicalization requires at least one active sector")
     offsets: dict[str, int] = {}
     point_count = 0
     for sector in sector_order:
@@ -178,7 +191,7 @@ def canonicalize_q_geometry(
             targets_by_source[source_key] = target_key
         expected_sources = {
             (sector, q_index)
-            for sector in sector_order
+            for sector in active_sector_order
             for q_index in range(raw[sector].shape[0])
         }
         if set(targets_by_source) != expected_sources:
@@ -207,6 +220,7 @@ def canonicalize_q_geometry(
                 "version": CANONICAL_Q_VERSION,
                 "status": "not_needed",
                 "sector_order": list(sector_order),
+                "active_sectors": list(active_sector_order),
                 "ordering_changed": False,
                 "constraint_rank": 0,
                 "constraint_count": 0,
@@ -318,6 +332,7 @@ def canonicalize_q_geometry(
             "version": CANONICAL_Q_VERSION,
             "status": "certified",
             "sector_order": list(sector_order),
+            "active_sectors": list(active_sector_order),
             "ordering_changed": False,
             "constraint_rank": rank,
             "constraint_count": int(constraint.shape[0]),

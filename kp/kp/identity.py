@@ -15,7 +15,8 @@ IDENTITY_SCHEMA = "moirekp.artifact-identity.v1"
 _FILE_SCHEMA = b"moirekp:file:v1\0"
 _ARRAY_SCHEMA = b"moirekp:array:v1\0"
 _MAPPING_SCHEMA = b"moirekp:mapping:v1\0"
-PROJECTION_BASIS_SCHEMA_VERSION = 1
+PROJECTION_BASIS_SCHEMA_VERSION = 2
+PROJECTION_BASIS_HANDOFF_VERSION = "kp_project_basis_handoff_v2"
 PROJECTION_ARTIFACT_IDENTITY_FIELDS = (
     "identity_schema",
     "input_hash",
@@ -133,10 +134,9 @@ def exactified_operation_provenance_is_complete(record: Mapping[str, Any]) -> bo
 
 def build_projection_basis_identity(
     *,
-    hamk_file: str | Path,
-    hamk_fallback: Any,
     qset1: Any,
     qset2: Any,
+    source_hamiltonian_hash: str | None = None,
     spin: str,
     mode: str,
     energy_scale: float,
@@ -150,8 +150,9 @@ def build_projection_basis_identity(
     k_indices: Any,
     gauge_frame_hash: str | None = None,
 ) -> dict[str, Any]:
-    hamk_path = Path(hamk_file)
-    hamk_hash = hash_file(hamk_path) if hamk_path.is_file() else hash_array(hamk_fallback)
+    hamiltonian_hash = None if source_hamiltonian_hash is None else str(source_hamiltonian_hash).strip()
+    if source_hamiltonian_hash is not None and not hamiltonian_hash:
+        raise ValueError("source_hamiltonian_hash must be nonempty")
     qset1_hash = hash_array(np.asarray(qset1, dtype=float))
     qset2_hash = hash_array(np.asarray(qset2, dtype=float))
     k_indices_array = np.asarray(k_indices, dtype=np.int64)
@@ -160,7 +161,7 @@ def build_projection_basis_identity(
     k_indices_hash = hash_array(k_indices_array)
     input_hash = hash_mapping(
         {
-            "hamk_hash": hamk_hash,
+            "source_hamiltonian_hash": hamiltonian_hash,
             "qset1_hash": qset1_hash,
             "qset2_hash": qset2_hash,
         }
@@ -182,7 +183,7 @@ def build_projection_basis_identity(
     config_hash = hash_mapping(config_payload)
     basis_hash = hash_mapping(
         {
-            "schema": "kp.projection-basis.v1",
+            "schema": "kp.projection-basis.v2",
             "input_hash": input_hash,
             "config_hash": config_hash,
             "qset1_hash": qset1_hash,
@@ -196,7 +197,7 @@ def build_projection_basis_identity(
             },
         }
     )
-    return {
+    identity = {
         "identity_schema": IDENTITY_SCHEMA,
         "input_hash": input_hash,
         "config_hash": config_hash,
@@ -205,6 +206,9 @@ def build_projection_basis_identity(
         "schema_version": PROJECTION_BASIS_SCHEMA_VERSION,
         "k_indices_hash": k_indices_hash,
     }
+    if hamiltonian_hash is not None:
+        identity["source_hamiltonian_hash"] = hamiltonian_hash
+    return identity
 
 
 def load_projection_k_indices(heff_file: str | Path) -> list[int]:
@@ -271,6 +275,15 @@ def load_projection_artifact_identity(
             if "kpoints_hash" in basis_payload.files
             else None
         )
+        basis_hamiltonian_hash = (
+            require_identity_fields(
+                basis_payload,
+                ("source_hamiltonian_hash",),
+                f"KP projection artifacts {project_dir}",
+            )["source_hamiltonian_hash"]
+            if "source_hamiltonian_hash" in basis_payload.files
+            else None
+        )
     with np.load(wavefunctions_path, allow_pickle=False) as wavefunction_payload:
         wavefunction_identity = require_identity_fields(
             wavefunction_payload,
@@ -286,12 +299,38 @@ def load_projection_artifact_identity(
             if "kpoints_hash" in wavefunction_payload.files
             else None
         )
+        wavefunction_hamiltonian_hash = (
+            require_identity_fields(
+                wavefunction_payload,
+                ("source_hamiltonian_hash",),
+                f"KP projection artifacts {project_dir}",
+            )["source_hamiltonian_hash"]
+            if "source_hamiltonian_hash" in wavefunction_payload.files
+            else None
+        )
     require_matching_identity(
         basis_identity,
         wavefunction_identity,
         PROJECTION_ARTIFACT_IDENTITY_FIELDS,
         f"KP projection artifacts {project_dir}",
     )
+    if (basis_hamiltonian_hash is None) != (wavefunction_hamiltonian_hash is None):
+        raise KeyError(
+            f"KP projection artifacts {project_dir} are missing matching "
+            "source_hamiltonian_hash metadata"
+        )
+    if (
+        basis_hamiltonian_hash is not None
+        and wavefunction_hamiltonian_hash is not None
+        and basis_hamiltonian_hash != wavefunction_hamiltonian_hash
+    ):
+        raise ValueError(
+            f"KP projection artifacts {project_dir} identity mismatch "
+            "(source_hamiltonian_hash: "
+            f"{basis_hamiltonian_hash!r} != {wavefunction_hamiltonian_hash!r})"
+        )
+    if basis_hamiltonian_hash is not None:
+        basis_identity["source_hamiltonian_hash"] = basis_hamiltonian_hash
     if basis_identity["identity_schema"] != IDENTITY_SCHEMA:
         raise ValueError(f"Unsupported KP projection identity schema: {basis_identity['identity_schema']!r}")
     if basis_identity["package_version"] != KP_VERSION:

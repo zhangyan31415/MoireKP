@@ -69,27 +69,153 @@ class LoadedSymmetrySource:
     metadata: dict[str, Any]
 
 
+@dataclass(frozen=True)
+class _CertifiedPackedJoint:
+    matrices: Mapping[str, np.ndarray]
+    power_relations: Mapping[str, Mapping[str, Any]]
+
+
+def _canonical_structural_zero_copy(matrix: np.ndarray) -> np.ndarray:
+    """Copy a complex matrix while encoding exact structural zeros as +0+0j."""
+
+    result = np.array(
+        matrix,
+        dtype=np.complex128,
+        order="C",
+        copy=True,
+    )
+    structural_zero = result == 0.0
+    if np.any(structural_zero):
+        result.real[structural_zero] = 0.0
+        result.imag[structural_zero] = 0.0
+    return result
+
+
+def _exact_central_sign_copy(matrix: np.ndarray, sign: int) -> np.ndarray:
+    """Apply an exact central sign without changing structural-zero bits."""
+
+    result = _canonical_structural_zero_copy(matrix)
+    if int(sign) == -1:
+        nonzero = result != 0.0
+        result[nonzero] = np.negative(result[nonzero])
+    return result
+
+
 class MatrixSymmetryGenerator:
     """Low-energy symmetry representation loaded from kp symm/TAPW projection output."""
 
-    def __init__(self, matrices: Mapping[str, np.ndarray], metadata: Mapping[str, Any]):
+    def __init__(
+        self,
+        matrices: Mapping[str, np.ndarray],
+        metadata: Mapping[str, Any],
+        *,
+        factorized_actions: Mapping[str, Any] | None = None,
+        certified_power_relations: Mapping[str, Mapping[str, Any]] | None = None,
+    ):
         self.matrices = {str(key): np.asarray(value, dtype=complex) for key, value in matrices.items()}
         self.metadata = dict(metadata)
-        self.cached_operators: dict[str, np.ndarray] = {}
+        self.factorized_actions = {
+            str(key): value for key, value in (factorized_actions or {}).items()
+        }
+        self.certified_power_relations = {
+            str(key): dict(value)
+            for key, value in (certified_power_relations or {}).items()
+        }
+        unknown_relations = set(self.certified_power_relations) - set(self.matrices)
+        if unknown_relations:
+            raise ValueError(
+                "certified power relations lack loaded matrices: "
+                f"{sorted(unknown_relations)}"
+            )
+        c3_relation = self.certified_power_relations.get("C3z")
+        if c3_relation is not None:
+            power_raw = c3_relation.get("power")
+            sign_raw = c3_relation.get("central_sign")
+            artifact_hash = str(c3_relation.get("joint_artifact_hash", ""))
+            if (
+                isinstance(power_raw, (bool, np.bool_))
+                or not isinstance(power_raw, (int, np.integer))
+                or int(power_raw) != 3
+                or isinstance(sign_raw, (bool, np.bool_))
+                or not isinstance(sign_raw, (int, np.integer))
+                or int(sign_raw) not in {-1, 1}
+                or c3_relation.get("certification_source")
+                != "joint_block_representation.presentation"
+                or len(artifact_hash) != 64
+                or any(character not in "0123456789abcdef" for character in artifact_hash)
+            ):
+                raise ValueError("invalid certified C3z cubic power relation")
+        if "C3z" in self.matrices:
+            self.metadata["c3_power_derivation"] = (
+                {
+                    "status": "certified",
+                    "relation": dict(c3_relation),
+                    "formulas": {
+                        "-1": "D_dagger",
+                        "2": "central_sign_times_D_dagger",
+                        "-2": "central_sign_times_D",
+                    },
+                    "numeric_inverse_or_matrix_power_performed": False,
+                    "structural_zero_policy": "exact_positive_zero_v1",
+                }
+                if c3_relation is not None
+                else {
+                    "status": "legacy_numeric",
+                    "reason": "no_certified_joint_cubic_power_relation",
+                    "numeric_inverse_or_matrix_power_performed": True,
+                }
+            )
+        self.cached_operators: dict[tuple[str, Any], np.ndarray] = {}
+
+    def get_factorized_action(self, name: str) -> Any | None:
+        return self.factorized_actions.get(str(name))
 
     def get_operator(self, name: str, params: Any = None) -> np.ndarray:
         key = str(name)
         if key not in self.matrices:
             raise ValueError(f"Symmetry matrix for operation {name!r} is not loaded")
+        param_key = params
+        if key == "C3z":
+            if params in {2, "2"}:
+                param_key = 2
+            elif params in {-1, "-1"}:
+                param_key = -1
+            elif params in {-2, "-2"}:
+                param_key = -2
+        cache_key = (key, param_key)
+        if cache_key in self.cached_operators:
+            return self.cached_operators[cache_key]
         matrix = self.matrices[key]
-        if name == "C3z" and params in {2, "2"}:
-            return matrix @ matrix
-        if name == "C3z" and params in {-1, "-1"}:
-            return np.linalg.inv(matrix)
-        if name == "C3z" and params in {-2, "-2"}:
-            inv = np.linalg.inv(matrix)
-            return inv @ inv
-        return matrix
+        power_relation = self.certified_power_relations.get(key)
+        if key == "C3z" and param_key in {2, -1, -2} and power_relation is not None:
+            sign = int(power_relation["central_sign"])
+            if (
+                int(power_relation.get("power", 0)) != 3
+                or sign not in {-1, 1}
+            ):
+                raise ValueError("invalid certified C3z cubic power relation")
+            if param_key == -1:
+                operator = _canonical_structural_zero_copy(
+                    matrix.conjugate().T,
+                )
+            elif param_key == 2:
+                adjoint = _canonical_structural_zero_copy(
+                    matrix.conjugate().T,
+                )
+                operator = _exact_central_sign_copy(adjoint, sign)
+            else:
+                operator = _exact_central_sign_copy(matrix, sign)
+        elif key == "C3z" and param_key == 2:
+            operator = matrix @ matrix
+        elif key == "C3z" and param_key == -1:
+            operator = np.linalg.inv(matrix)
+        elif key == "C3z" and param_key == -2:
+            inverse = self.get_operator(key, -1)
+            operator = inverse @ inverse
+        else:
+            operator = matrix
+        self.cached_operators[cache_key] = operator
+        return operator
 
 
 def _load_manifest(path: Path) -> dict[str, Any]:
@@ -174,6 +300,212 @@ def _packed_manifest(path: Path, raw: Mapping[str, Any]) -> dict[str, Any]:
         "exactification_owner": "kp_symm",
         "kp_symm_exactification": {"status": "exactified", "matrix_source": "kp_symm_exactified_action"},
     }
+
+
+def _certified_joint_power_relations(
+    restored: Any,
+    joint_metadata: Mapping[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Extract only power identities certified by the loaded presentation."""
+
+    if "C3z" not in restored.actions:
+        return {}
+    generators = {
+        generator.name: generator
+        for generator in restored.presentation.generators
+    }
+    generator = generators.get("C3z")
+    if (
+        generator is None
+        or bool(generator.antiunitary)
+        or bool(restored.actions["C3z"].antiunitary)
+    ):
+        raise ValueError("C3z must be a certified unitary generator")
+    relations = [
+        relation
+        for relation in restored.presentation.relations
+        if relation.lhs == ("C3z", "C3z", "C3z")
+        and relation.rhs == ()
+    ]
+    if not relations:
+        raise ValueError("C3z lacks a certified cubic power relation")
+    phases = {complex(relation.central_phase) for relation in relations}
+    if len(phases) != 1 or next(iter(phases)) not in {1.0 + 0.0j, -1.0 + 0.0j}:
+        raise ValueError("C3z has an incompatible certified cubic power relation")
+    phase = next(iter(phases))
+    sign = 1 if phase == 1.0 + 0.0j else -1
+    return {
+        "C3z": {
+            "power": 3,
+            "central_sign": sign,
+            "central_phase": [float(sign), 0.0],
+            "relation_names": sorted(relation.name for relation in relations),
+            "certification_source": "joint_block_representation.presentation",
+            "joint_artifact_hash": str(joint_metadata.get("artifact_hash", "")),
+            "presentation_source": str(restored.presentation.source),
+        }
+    }
+
+
+def _certified_packed_joint_matrices(path: Path) -> _CertifiedPackedJoint | None:
+    """Reconstruct and bind packed production matrices to their joint routes."""
+
+    packed = path / "representations.npz"
+    if not packed.is_file():
+        return None
+    try:
+        with np.load(packed, allow_pickle=False) as payload:
+            if "__metadata_json__" not in payload.files:
+                return None
+            metadata = json.loads(str(payload["__metadata_json__"].item()))
+            if not isinstance(metadata, Mapping):
+                raise ValueError("packed symmetry metadata must be a mapping")
+            exactification = metadata.get("kp_symm_exactification")
+            if not isinstance(exactification, Mapping):
+                return None
+            joint_metadata = exactification.get("joint_block_representation")
+            if not isinstance(joint_metadata, Mapping):
+                return None
+            joint_status = str(joint_metadata.get("status", ""))
+            if joint_status == "not_applicable":
+                return None
+            if joint_status != "certified":
+                raise ValueError(
+                    "packed joint artifact must declare status='certified' or "
+                    "status='not_applicable'"
+                )
+            action_records = joint_metadata.get("actions")
+            if not isinstance(action_records, list):
+                raise ValueError("packed joint artifact lacks action records")
+            route_keys: set[str] = set()
+            for record in action_records:
+                if not isinstance(record, Mapping):
+                    raise ValueError("packed joint artifact has an invalid action record")
+                keys = record.get("route_array_keys")
+                if not isinstance(keys, list):
+                    raise ValueError("packed joint artifact lacks route array keys")
+                route_keys.update(str(key) for key in keys)
+            joint_arrays = {
+                key: np.array(payload[key], dtype=np.complex128, order="C", copy=True)
+                for key in route_keys
+            }
+
+            from ..symmetry.joint_exactification import (
+                JointExactificationConfig,
+                certify_fixed_target_joint_result,
+                load_joint_exactification_artifact,
+                materialize_block_route_action,
+            )
+
+            restored = load_joint_exactification_artifact(
+                joint_metadata,
+                joint_arrays,
+            )
+            certified: dict[str, np.ndarray] = {}
+            for name, action in restored.actions.items():
+                if name not in payload.files:
+                    raise ValueError(
+                        f"packed production matrix {name!r} is missing"
+                    )
+                actual = np.asarray(payload[name])
+                expected = materialize_block_route_action(action)
+                if (
+                    actual.dtype != np.dtype(np.complex128)
+                    or actual.shape != expected.shape
+                    or actual.tobytes(order="C") != expected.tobytes(order="C")
+                ):
+                    raise ValueError(
+                        "packed production matrix does not match its certified joint "
+                        f"routes for {name}"
+                    )
+                certified[name] = np.array(
+                    expected,
+                    dtype=np.complex128,
+                    order="C",
+                    copy=True,
+                )
+
+            if (
+                joint_metadata.get("production_action_source")
+                == "persisted_project_canonical_target"
+            ):
+                fixed_record = joint_metadata.get("fixed_target_exactification")
+                if not isinstance(fixed_record, Mapping):
+                    raise ValueError(
+                        "packed fixed-target joint artifact lacks exactification metadata"
+                    )
+                if fixed_record.get("additional_basis_gauge_applied") is not False:
+                    raise ValueError(
+                        "packed fixed-target joint artifact declares an additional basis gauge"
+                    )
+                certificate = fixed_record.get("certificate")
+                if not isinstance(certificate, Mapping):
+                    raise ValueError(
+                        "packed fixed-target joint artifact lacks its certificate"
+                    )
+                top_level_certificate = exactification.get(
+                    "fixed_target_exactification"
+                )
+                if (
+                    not isinstance(top_level_certificate, Mapping)
+                    or dict(top_level_certificate) != dict(certificate)
+                ):
+                    raise ValueError(
+                        "packed fixed-target top-level certificate does not match "
+                        "the certified joint artifact"
+                    )
+                joint_report = joint_metadata.get("report")
+                if (
+                    not isinstance(joint_report, Mapping)
+                    or joint_report.get("fixed_target_exactification")
+                    != certificate
+                ):
+                    raise ValueError(
+                        "packed fixed-target joint report does not match its certificate"
+                    )
+                joint_certification = exactification.get("joint_certification")
+                if (
+                    not isinstance(joint_certification, Mapping)
+                    or joint_certification.get("fixed_target_exactification")
+                    != certificate
+                ):
+                    raise ValueError(
+                        "packed fixed-target certification summary does not match "
+                        "the certified joint artifact"
+                    )
+                provenance = fixed_record.get("provenance")
+                if not isinstance(provenance, Mapping):
+                    raise ValueError(
+                        "packed fixed-target joint artifact lacks target provenance"
+                    )
+                config_record = joint_metadata.get("config")
+                if not isinstance(config_record, Mapping):
+                    raise ValueError(
+                        "packed fixed-target joint artifact lacks exactification config"
+                    )
+                try:
+                    certify_fixed_target_joint_result(
+                        restored.actions,
+                        restored.presentation,
+                        config=JointExactificationConfig(**dict(config_record)),
+                        provenance=provenance,
+                        fixed_target_certificate=certificate,
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise ValueError(
+                        "packed fixed-target certificate validation failed: "
+                        f"{exc}"
+                    ) from exc
+            power_relations = _certified_joint_power_relations(
+                restored,
+                joint_metadata,
+            )
+            return _CertifiedPackedJoint(
+                matrices=certified,
+                power_relations=power_relations,
+            )
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise ValueError(f"invalid packed joint symmetry artifact: {exc}") from exc
 
 
 def _load_matrix(path: Path) -> np.ndarray:
@@ -307,7 +639,10 @@ def _metric_from_pairs(record: Mapping[str, Any], use: str, key: str, matrix_kin
         return None
     use_block = first.get(use, {})
     if isinstance(use_block, Mapping) and key in use_block:
-        return float(use_block[key])
+        value = use_block[key]
+        if value is None:
+            return None
+        return float(value)
     return None
 
 
@@ -463,6 +798,7 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
     manifest = _load_manifest(path)
     if not manifest:
         manifest = _packed_manifest(path, raw)
+    certified_packed_joint = _certified_packed_joint_matrices(path)
     records = _operation_records(raw.get("operations"), manifest)
     matrices: dict[str, np.ndarray] = {}
     metadata_records: list[dict[str, Any]] = []
@@ -494,6 +830,25 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
         if not matrix_file.is_absolute():
             matrix_file = path / matrix_file
         matrix = _load_operation_matrix(matrix_file, record)
+        if (
+            str(record.get("matrix_kind", "")) == "continuum_internal_rep_exact"
+            and matrix_file == path / "representations.npz"
+            and certified_packed_joint is not None
+        ):
+            expected = certified_packed_joint.matrices.get(name)
+            if expected is None:
+                raise ValueError(
+                    f"packed exact symmetry matrix {name!r} lacks a certified joint action"
+                )
+            if (
+                matrix.dtype != np.dtype(np.complex128)
+                or matrix.shape != expected.shape
+                or matrix.tobytes(order="C") != expected.tobytes(order="C")
+            ):
+                raise ValueError(
+                    "packed exact symmetry matrix does not match its certified joint "
+                    f"action for {name}"
+                )
         if expected_dim is not None and matrix.shape != (expected_dim, expected_dim):
             raise ValueError(f"Symmetry matrix {matrix_file} has shape {matrix.shape}, expected {(expected_dim, expected_dim)}")
         matrices[name] = matrix
@@ -506,9 +861,37 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
         for key in _ARTIFACT_METADATA_KEYS
         if key in manifest
     }
-    metadata = {"operations": metadata_records, "path": str(path), "use": use, **artifact_metadata}
+    certified_power_relations = (
+        {}
+        if certified_packed_joint is None
+        else {
+            name: dict(record)
+            for name, record in certified_packed_joint.power_relations.items()
+            if name in matrices
+        }
+    )
+    metadata = {
+        "operations": metadata_records,
+        "path": str(path),
+        "use": use,
+        **artifact_metadata,
+    }
+    if certified_power_relations:
+        metadata["certified_power_relations"] = certified_power_relations
+    factorized_actions: dict[str, Any] = {}
+    packed_path = path / "representations.npz"
+    if packed_path.is_file():
+        from ..symmetry.factorized_action import load_factorized_actions_from_npz
+
+        factorized_actions = load_factorized_actions_from_npz(packed_path)
+    generator = MatrixSymmetryGenerator(
+        matrices,
+        metadata,
+        factorized_actions=factorized_actions,
+        certified_power_relations=certified_power_relations,
+    )
     return LoadedSymmetrySource(
         source_type="kp_symm_output",
-        generator=MatrixSymmetryGenerator(matrices, metadata),
-        metadata=metadata,
+        generator=generator,
+        metadata=dict(generator.metadata),
     )

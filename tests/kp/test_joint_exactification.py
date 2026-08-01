@@ -19,9 +19,13 @@ from kp.symmetry.joint_exactification import (
     StabilizedOrbitReport,
     JointExactificationResult,
     compile_action_orbits,
+    certify_joint_block_actions,
     compile_continuum_magnetic_presentation,
     compile_quotient_group_elements,
     compose_semilinear,
+    derive_closest_cyclotomic_u1_gauge,
+    derive_standard_generator_fiber_gauge,
+    derive_standard_generator_u1_gauge,
     exactify_stabilized_orbit,
     extract_block_route_action,
     inverse_semilinear,
@@ -30,6 +34,7 @@ from kp.symmetry.joint_exactification import (
     materialize_block_route_action,
     pack_skew_hermitian,
     project_u1_relations,
+    reframe_joint_exactification_result,
     synchronize_free_orbit,
     unpack_skew_hermitian,
     validate_presentation_action_relations,
@@ -826,6 +831,923 @@ def test_u1_projection_rejects_non_scalar_route_blocks() -> None:
         )
 
 
+def test_closest_cyclotomic_u1_gauge_recovers_nearest_exact_representation() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    canonical = _mote2_regular_d3_actions(repeats=1)
+    canonical = {
+        "C3z": BlockRouteAction(
+            "C3z",
+            False,
+            canonical["C3z"].fiber_permutation,
+            canonical["C3z"].fiber_dimensions,
+            tuple(np.asarray([[root]]) for _ in range(6)),
+        ),
+        "C2T": canonical["C2T"],
+    }
+    phases = np.asarray([1.2, -0.8, 0.3, -1.5, 0.6, -0.2]) * 1.0e-7
+    input_gauge = tuple(
+        np.asarray([[np.exp(1.0j * phase)]], dtype=np.complex128)
+        for phase in phases
+    )
+    gauged = _gauge_transform_actions(canonical, input_gauge)
+
+    result = derive_closest_cyclotomic_u1_gauge(gauged, presentation)
+
+    assert result.root_order == 6
+    assert result.root_exponents["C3z"] == (1, 1, 1, 1, 1, 1)
+    assert result.root_exponents["C2T"] == (0, 0, 0, 0, 0, 0)
+    assert result.report["selection_policy"] == "nearest_total_frobenius"
+    assert result.report["common_gauge_residual_max"] < 2.0e-15
+    assert result.report["relation_certification"]["post_relation_residual_max"] < 2.0e-15
+    reframed = _gauge_transform_actions(gauged, result.fiber_gauge)
+    for name in canonical:
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            result.actions[name].route_blocks,
+        ):
+            np.testing.assert_allclose(actual, expected, atol=2.0e-15, rtol=0.0)
+    for block in result.actions["C3z"].route_blocks:
+        assert block[0, 0] == root
+    for block in result.actions["C2T"].route_blocks:
+        assert block[0, 0] == complex(1.0, 0.0)
+
+
+def test_closest_cyclotomic_u1_gauge_rejects_root_branch_tie() -> None:
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("g", antiunitary=False),),
+        relations=(MagneticRelation("g^6", ("g",) * 6, (), 1.0),),
+        central_phases=(1.0,),
+        source="test",
+    )
+    actions = {
+        "g": BlockRouteAction(
+            "g",
+            False,
+            (0,),
+            (1,),
+            (np.asarray([[np.exp(1.0j * np.pi / 6.0)]]),),
+        )
+    }
+
+    with pytest.raises(JointExactificationError, match="nearest cyclotomic root.*unique"):
+        derive_closest_cyclotomic_u1_gauge(actions, presentation)
+
+
+def _ptse2_two_state_exact_actions() -> dict[str, BlockRouteAction]:
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    return {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            (1, 0),
+            (1, 1),
+            (np.asarray([[1.0]]), np.asarray([[-1.0]])),
+        ),
+        "C3z": BlockRouteAction(
+            "C3z",
+            False,
+            (0, 1),
+            (1, 1),
+            (np.asarray([[root]]), np.asarray([[root.conjugate()]])),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (1, 1),
+            (
+                np.asarray([[complex(-0.5, np.sqrt(3.0) / 2.0)]]),
+                np.asarray([[root]]),
+            ),
+        ),
+    }
+
+
+def test_standard_generator_u1_gauge_makes_ptse2_c2_uniform_positive_i() -> None:
+    actions = _ptse2_two_state_exact_actions()
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c3z(), _c2(phase=-1)]
+    )
+
+    result = derive_standard_generator_u1_gauge(actions, presentation)
+
+    assert result.report["status"] == "certified"
+    assert result.report["standardized_generators"] == ["C2"]
+    assert result.report["cycle_targets"]["C2"] == ["+i"]
+    np.testing.assert_allclose(
+        result.gauge_angles,
+        [-np.pi / 12.0, np.pi / 12.0],
+        atol=2.0e-15,
+        rtol=0.0,
+    )
+    for actual, expected in zip(
+        result.actions["C3z"].route_blocks,
+        actions["C3z"].route_blocks,
+    ):
+        np.testing.assert_array_equal(actual, expected)
+    for actual, expected in zip(
+        result.actions["TR"].route_blocks,
+        actions["TR"].route_blocks,
+    ):
+        np.testing.assert_array_equal(actual, expected)
+    for block in result.actions["C2"].route_blocks:
+        assert block[0, 0] == complex(0.0, 1.0)
+
+
+def test_standard_generator_u1_gauge_chooses_nearest_negative_i_branch() -> None:
+    actions = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            (1, 0),
+            (1, 1),
+            (np.asarray([[1.0]]), np.asarray([[-1.0]])),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (1, 1),
+            (
+                np.asarray([[np.exp(4.0j * np.pi / 3.0)]]),
+                np.asarray([[np.exp(5.0j * np.pi / 3.0)]]),
+            ),
+        ),
+    }
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c2(phase=-1)]
+    )
+
+    result = derive_standard_generator_u1_gauge(actions, presentation)
+
+    assert result.report["cycle_targets"]["C2"] == ["-i"]
+    np.testing.assert_allclose(
+        result.gauge_angles,
+        [np.pi / 12.0, -np.pi / 12.0],
+        atol=2.0e-15,
+        rtol=0.0,
+    )
+    for block in result.actions["C2"].route_blocks:
+        assert block[0, 0] == complex(0.0, -1.0)
+
+
+def test_standard_generator_u1_gauge_is_not_applicable_without_unitary_c2() -> None:
+    actions = _mote2_regular_d3_actions(repeats=1)
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+
+    result = derive_standard_generator_u1_gauge(actions, presentation)
+
+    assert result.report == {
+        "status": "not_applicable",
+        "reason": "no_unitary_C2_generator",
+        "standardized_generators": [],
+    }
+    assert all(angle == 0.0 for angle in result.gauge_angles)
+
+
+def test_standard_generator_u1_gauge_does_not_touch_ud_route_blocks() -> None:
+    actions = {
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (2, 2),
+            (1.0j * np.eye(2), 1.0j * np.eye(2)),
+        )
+    }
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("C2", antiunitary=False),),
+        relations=(MagneticRelation("C2^2", ("C2", "C2"), (), -1.0),),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+
+    result = derive_standard_generator_u1_gauge(actions, presentation)
+
+    assert result.report == {
+        "status": "not_applicable",
+        "reason": "non_scalar_fibers",
+        "standardized_generators": [],
+    }
+    for actual, expected in zip(
+        result.actions["C2"].route_blocks,
+        actions["C2"].route_blocks,
+    ):
+        np.testing.assert_array_equal(actual, expected)
+
+
+def test_standard_generator_fiber_gauge_canonicalizes_dense_free_u2_orbit() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c2(phase=-1)]
+    )
+    identity = np.eye(2, dtype=np.complex128)
+    canonical = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            (1, 0, 3, 2),
+            (2, 2, 2, 2),
+            (identity, -identity, -identity, identity),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (2, 3, 0, 1),
+            (2, 2, 2, 2),
+            tuple(-1.0j * identity for _ in range(4)),
+        ),
+    }
+    generators = (
+        np.asarray([[0.0j, 0.17], [-0.17, 0.0j]]),
+        np.asarray([[0.11j, 0.08j], [0.08j, -0.11j]]),
+        np.asarray([[-0.07j, 0.13], [-0.13, 0.07j]]),
+        np.asarray([[0.05j, -0.09j], [-0.09j, -0.05j]]),
+    )
+    input_gauge = tuple(expm(value) for value in generators)
+    gauged = _gauge_transform_actions(canonical, input_gauge)
+
+    result = derive_standard_generator_fiber_gauge(gauged, presentation)
+
+    assert result.report["status"] == "certified"
+    assert result.report["fiber_mode"] == "free_orbit_Ud"
+    assert result.report["cycle_targets"]["C2"] == ["-i*I", "-i*I"]
+    for block in result.actions["C2"].route_blocks:
+        np.testing.assert_array_equal(block, -1.0j * identity)
+    for block in result.actions["TR"].route_blocks:
+        assert np.count_nonzero(block - np.diag(np.diag(block))) == 0
+        assert set(np.diag(block)).issubset(
+            {
+                complex(1.0),
+                complex(-1.0),
+                complex(0.0, 1.0),
+                complex(0.0, -1.0),
+            }
+        )
+    reframed = _gauge_transform_actions(gauged, result.fiber_gauge)
+    for name in canonical:
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            result.actions[name].route_blocks,
+        ):
+            np.testing.assert_allclose(actual, expected, atol=5.0e-14, rtol=0.0)
+    assert result.report["common_gauge_residual_max"] < 5.0e-14
+    assert result.report["relation_certification"]["status"] == "certified"
+
+
+def test_standard_generator_fiber_gauge_preserves_nearest_negative_i_swap() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c2(phase=-1)]
+    )
+    identity = np.eye(2, dtype=np.complex128)
+    swap = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    canonical = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            (1, 0, 3, 2),
+            (2, 2, 2, 2),
+            (identity, -identity, -identity, identity),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (2, 3, 0, 1),
+            (2, 2, 2, 2),
+            tuple(-1.0j * swap for _ in range(4)),
+        ),
+    }
+    input_gauge = tuple(
+        expm(
+            np.asarray(
+                [[0.01j * (index + 1), 0.005], [-0.005, -0.01j * (index + 1)]]
+            )
+        )
+        for index in range(4)
+    )
+    gauged = _gauge_transform_actions(canonical, input_gauge)
+
+    result = derive_standard_generator_fiber_gauge(gauged, presentation)
+
+    assert result.report["cycle_targets"]["C2"] == [
+        "-i*P(1, 0)",
+        "-i*P(1, 0)",
+    ]
+    for block in result.actions["C2"].route_blocks:
+        np.testing.assert_array_equal(block, -1.0j * swap)
+
+
+def test_standard_generator_fiber_gauge_canonicalizes_stabilized_kramers_u2_orbit() -> None:
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=-1), _c3z(), _c2(phase=-1)]
+    )
+    identity = np.eye(2, dtype=np.complex128)
+    kramers = np.asarray([[0.0, -1.0], [1.0, 0.0]], dtype=np.complex128)
+    swap = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    canonical = {
+        "TR": BlockRouteAction("TR", True, (0, 1), (2, 2), (kramers, kramers)),
+        "C3z": BlockRouteAction("C3z", False, (0, 1), (2, 2), (-identity, -identity)),
+        "C2": BlockRouteAction("C2", False, (1, 0), (2, 2), (1.0j * swap, 1.0j * swap)),
+    }
+    input_gauge = (
+        expm(np.asarray([[0.09j, 0.14], [-0.14, -0.09j]])),
+        expm(np.asarray([[-0.06j, 0.11j], [0.11j, 0.06j]])),
+    )
+    gauged = _gauge_transform_actions(canonical, input_gauge)
+
+    result = derive_standard_generator_fiber_gauge(gauged, presentation)
+
+    assert result.report["status"] == "certified"
+    assert result.report["fiber_mode"] == "stabilized_orbit_Ud"
+    assert result.report["orbit_transport"][0]["root_frame"]["status"] in {
+        "finite_unitary_adapted",
+        "antiunitary_kramers_adapted",
+    }
+    for action in result.actions.values():
+        for block in action.route_blocks:
+            assert np.count_nonzero(block, axis=0).tolist() == [1, 1]
+            assert np.count_nonzero(block, axis=1).tolist() == [1, 1]
+            assert set(block[block != 0.0]).issubset(
+                {
+                    complex(1.0),
+                    complex(-1.0),
+                    complex(0.0, 1.0),
+                    complex(0.0, -1.0),
+                }
+            )
+    reframed = _gauge_transform_actions(gauged, result.fiber_gauge)
+    for name in canonical:
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            result.actions[name].route_blocks,
+        ):
+            np.testing.assert_allclose(actual, expected, atol=5.0e-14, rtol=0.0)
+    assert result.report["relation_certification"]["relation_residual_max"] == 0.0
+
+
+def test_standard_generator_fiber_gauge_keeps_q_uniform_c3_routes() -> None:
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    c3_diagonal = np.diag([root.conjugate(), -1.0, -1.0, root]).astype(
+        np.complex128
+    )
+    c2_diagonal_frame = 1.0j * np.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    tr_diagonal_frame = np.asarray(
+        [
+            [0.0, 0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    angle = 0.37
+    rotation = np.asarray(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0, 0.0],
+            [np.sin(angle), np.cos(angle), 0.0, 0.0],
+            [0.0, 0.0, np.cos(angle), -np.sin(angle)],
+            [0.0, 0.0, np.sin(angle), np.cos(angle)],
+        ],
+        dtype=np.complex128,
+    )
+    dense_c3 = rotation @ c3_diagonal @ rotation.conjugate().T
+    dense_c2 = rotation @ c2_diagonal_frame @ rotation.conjugate().T
+    dense_tr = rotation @ tr_diagonal_frame @ rotation.T
+    c3_permutation = (1, 2, 0, 4, 5, 3)
+    c2_permutation = (3, 5, 4, 0, 2, 1)
+    dimensions = (4,) * 6
+    actions = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            tuple(range(6)),
+            dimensions,
+            tuple(dense_tr for _ in range(6)),
+        ),
+        "C3z": BlockRouteAction(
+            "C3z",
+            False,
+            c3_permutation,
+            dimensions,
+            tuple(dense_c3 for _ in range(6)),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            c2_permutation,
+            dimensions,
+            tuple(dense_c2 for _ in range(6)),
+        ),
+    }
+    presentation = MagneticPresentation(
+        generators=(
+            MagneticGenerator("TR", True),
+            MagneticGenerator("C3z", False),
+            MagneticGenerator("C2", False),
+        ),
+        relations=(
+            MagneticRelation("TR^2", ("TR",) * 2, (), -1.0),
+            MagneticRelation("C3z^3", ("C3z",) * 3, (), -1.0),
+            MagneticRelation("C2^2", ("C2",) * 2, (), -1.0),
+            MagneticRelation(
+                "TR_C3z_commute",
+                ("TR", "C3z"),
+                ("C3z", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "TR_C2_commute",
+                ("TR", "C2"),
+                ("C2", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "C2_C3z_dihedral",
+                ("C2", "C3z", "C2"),
+                ("C3z", "C3z"),
+                1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+
+    result = derive_standard_generator_fiber_gauge(actions, presentation)
+
+    c3_blocks = result.actions["C3z"].route_blocks
+    for block in c3_blocks[1:]:
+        np.testing.assert_array_equal(block, c3_blocks[0])
+    np.testing.assert_array_equal(c3_blocks[0], np.diag(np.diag(c3_blocks[0])))
+    assert sorted(np.diag(c3_blocks[0]), key=lambda value: np.angle(value)) == sorted(
+        np.diag(c3_diagonal), key=lambda value: np.angle(value)
+    )
+    assert result.report["uniform_generator"]["name"] == "C3z"
+    assert result.report["uniform_generator"]["status"] == "certified"
+    closest = result.report["uniform_generator"]["closest_algebraic_stabilizer"]
+    assert closest["status"] == "certified"
+    assert closest["objective_after"] <= closest["objective_before"]
+    assert result.report["relation_certification"]["status"] == "certified"
+
+
+def test_q_uniform_c3_uses_fiber_stabilizers_to_standardize_c2() -> None:
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    c3_diagonal = np.diag(
+        [root.conjugate(), -1.0, -1.0, root]
+    ).astype(np.complex128)
+    internal_permutation = np.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    c2_canonical = 1.0j * internal_permutation
+    tr_canonical = np.asarray(
+        [
+            [0.0, 0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    c3_permutation = (1, 2, 0, 4, 5, 3)
+    c2_permutation = (3, 5, 4, 0, 2, 1)
+    dimensions = (4,) * 6
+    canonical = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            tuple(range(6)),
+            dimensions,
+            tuple(tr_canonical for _ in range(6)),
+        ),
+        "C3z": BlockRouteAction(
+            "C3z",
+            False,
+            c3_permutation,
+            dimensions,
+            tuple(c3_diagonal for _ in range(6)),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            c2_permutation,
+            dimensions,
+            tuple(c2_canonical for _ in range(6)),
+        ),
+    }
+    presentation = MagneticPresentation(
+        generators=(
+            MagneticGenerator("TR", True),
+            MagneticGenerator("C3z", False),
+            MagneticGenerator("C2", False),
+        ),
+        relations=(
+            MagneticRelation("TR^2", ("TR",) * 2, (), -1.0),
+            MagneticRelation("C3z^3", ("C3z",) * 3, (), -1.0),
+            MagneticRelation("C2^2", ("C2",) * 2, (), -1.0),
+            MagneticRelation(
+                "TR_C3z_commute",
+                ("TR", "C3z"),
+                ("C3z", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "TR_C2_commute",
+                ("TR", "C2"),
+                ("C2", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "C2_C3z_dihedral",
+                ("C2", "C3z", "C2"),
+                ("C3z", "C3z"),
+                1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    angle = np.pi / 6.0
+    phase_stabilizer = np.diag(
+        [
+            1.0,
+            np.exp(1.0j * angle),
+            np.exp(-1.0j * angle),
+            1.0,
+        ]
+    ).astype(np.complex128)
+    rotation_stabilizer = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, np.cos(angle), -np.sin(angle), 0.0],
+            [0.0, np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.complex128,
+    )
+    identity = np.eye(4, dtype=np.complex128)
+    for second_cycle_stabilizer in (phase_stabilizer, rotation_stabilizer):
+        actions = _gauge_transform_actions(
+            canonical,
+            (
+                identity,
+                identity,
+                identity,
+                second_cycle_stabilizer,
+                second_cycle_stabilizer,
+                second_cycle_stabilizer,
+            ),
+        )
+        for name in ("C3z", "TR"):
+            reference = actions[name].route_blocks[0]
+            for block in actions[name].route_blocks[1:]:
+                np.testing.assert_allclose(block, reference, atol=5.0e-16, rtol=0.0)
+        assert certify_joint_block_actions(actions, presentation)["status"] == "certified"
+
+        result = derive_standard_generator_fiber_gauge(actions, presentation)
+
+        assert result.report["status"] == "certified"
+        assert result.report["fiber_mode"] == "q_uniform_Ud"
+        assert result.report["uniform_generator"]["name"] == "C3z"
+        c3_blocks = result.actions["C3z"].route_blocks
+        for block in c3_blocks[1:]:
+            np.testing.assert_array_equal(block, c3_blocks[0])
+        np.testing.assert_array_equal(c3_blocks[0], np.diag(np.diag(c3_blocks[0])))
+        for left, right in ((0, 3), (1, 5), (2, 4)):
+            left_block = result.actions["C2"].route_blocks[left]
+            right_block = result.actions["C2"].route_blocks[right]
+            np.testing.assert_array_equal(left_block, right_block)
+            assert np.count_nonzero(left_block, axis=0).tolist() == [1, 1, 1, 1]
+            assert np.count_nonzero(left_block, axis=1).tolist() == [1, 1, 1, 1]
+            nonzero = left_block[left_block != 0.0]
+            np.testing.assert_array_equal(
+                nonzero,
+                np.full(nonzero.shape, nonzero[0]),
+            )
+        assert result.report["relation_certification"]["status"] == "certified"
+
+
+def test_q_uniform_c3_fixed_orbit_solves_commuting_c2_conjugacy() -> None:
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    c3 = np.diag([root.conjugate(), -1.0, -1.0, root]).astype(np.complex128)
+    c2 = 1.0j * np.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    tr = np.asarray(
+        [
+            [0.0, 0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    dimensions = (4,) * 3
+    canonical = {
+        "TR": BlockRouteAction(
+            "TR", True, (0, 1, 2), dimensions, (tr, tr, tr)
+        ),
+        "C3z": BlockRouteAction(
+            "C3z", False, (1, 2, 0), dimensions, (c3, c3, c3)
+        ),
+        "C2": BlockRouteAction(
+            "C2", False, (0, 2, 1), dimensions, (c2, c2, c2)
+        ),
+    }
+    presentation = MagneticPresentation(
+        generators=(
+            MagneticGenerator("TR", True),
+            MagneticGenerator("C3z", False),
+            MagneticGenerator("C2", False),
+        ),
+        relations=(
+            MagneticRelation("TR^2", ("TR",) * 2, (), -1.0),
+            MagneticRelation("C3z^3", ("C3z",) * 3, (), -1.0),
+            MagneticRelation("C2^2", ("C2",) * 2, (), -1.0),
+            MagneticRelation(
+                "TR_C3z_commute",
+                ("TR", "C3z"),
+                ("C3z", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "TR_C2_commute",
+                ("TR", "C2"),
+                ("C2", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "C2_C3z_dihedral",
+                ("C2", "C3z", "C2"),
+                ("C3z", "C3z"),
+                1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    angle = 0.31
+    stabilizer = np.asarray(
+        [
+            [1.0, 0.0, 0.0, 0.0],
+            [0.0, np.cos(angle), -np.sin(angle), 0.0],
+            [0.0, np.sin(angle), np.cos(angle), 0.0],
+            [0.0, 0.0, 0.0, 1.0],
+        ],
+        dtype=np.complex128,
+    )
+    actions = _gauge_transform_actions(
+        canonical,
+        (stabilizer, stabilizer, stabilizer),
+    )
+    assert certify_joint_block_actions(actions, presentation)["status"] == "certified"
+
+    result = derive_standard_generator_fiber_gauge(actions, presentation)
+
+    c3_blocks = result.actions["C3z"].route_blocks
+    for block in c3_blocks[1:]:
+        np.testing.assert_array_equal(block, c3_blocks[0])
+    np.testing.assert_array_equal(c3_blocks[0], np.diag(np.diag(c3_blocks[0])))
+    c2_blocks = result.actions["C2"].route_blocks
+    for block in c2_blocks[1:]:
+        np.testing.assert_array_equal(block, c2_blocks[0])
+    nonzero = c2_blocks[0][c2_blocks[0] != 0.0]
+    np.testing.assert_array_equal(nonzero, np.full(nonzero.shape, nonzero[0]))
+    assert result.report["uniform_generator"]["C2_orbit_stabilizer"]["status"] == "certified"
+    assert result.report["relation_certification"]["status"] == "certified"
+
+
+def test_q_uniform_c3_high_dim_uses_milp_c2_stabilizer_matching() -> None:
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    c3 = np.diag([root.conjugate(), root] + [-1.0] * 11).astype(np.complex128)
+    permutation = (1, 0, 3, 2, 5, 4, 7, 6, 9, 8, 11, 10, 12)
+    internal_permutation = np.zeros((13, 13), dtype=np.complex128)
+    for source, target in enumerate(permutation):
+        internal_permutation[target, source] = 1.0
+    c2 = 1.0j * internal_permutation
+    dimensions = (13,) * 3
+    canonical = {
+        "C3z": BlockRouteAction(
+            "C3z", False, (1, 2, 0), dimensions, (c3, c3, c3)
+        ),
+        "C2": BlockRouteAction(
+            "C2", False, (0, 2, 1), dimensions, (c2, c2, c2)
+        ),
+    }
+    presentation = MagneticPresentation(
+        generators=(
+            MagneticGenerator("C3z", False),
+            MagneticGenerator("C2", False),
+        ),
+        relations=(
+            MagneticRelation("C3z^3", ("C3z",) * 3, (), -1.0),
+            MagneticRelation("C2^2", ("C2",) * 2, (), -1.0),
+            MagneticRelation(
+                "C2_C3z_dihedral",
+                ("C2", "C3z", "C2"),
+                ("C3z", "C3z"),
+                1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    rng = np.random.default_rng(1)
+    dense = rng.normal(size=(11, 11)) + 1.0j * rng.normal(size=(11, 11))
+    unitary, triangular = np.linalg.qr(dense)
+    unitary @= np.diag(np.exp(-1.0j * np.angle(np.diag(triangular))))
+    stabilizer = np.eye(13, dtype=np.complex128)
+    stabilizer[2:, 2:] = unitary
+    actions = _gauge_transform_actions(
+        canonical,
+        (stabilizer, stabilizer, stabilizer),
+    )
+    assert certify_joint_block_actions(actions, presentation)["status"] == "certified"
+
+    result = derive_standard_generator_fiber_gauge(actions, presentation)
+
+    assert result.report["fiber_mode"] == "q_uniform_Ud"
+    cycle_reports = result.report["uniform_generator"]["C2_orbit_stabilizer"][
+        "C2_quotient_cycles"
+    ]
+    assert cycle_reports[0]["matching_solver"] == (
+        "milp_involution_with_eigenspace_constraints"
+    )
+    for block in result.actions["C3z"].route_blocks[1:]:
+        np.testing.assert_array_equal(block, result.actions["C3z"].route_blocks[0])
+    assert result.report["relation_certification"]["status"] == "certified"
+
+
+def test_standard_generator_fiber_gauge_canonicalizes_free_u2_without_c2() -> None:
+    presentation = compile_continuum_magnetic_presentation([_c3z(), _c2t()])
+    gauged = _mote2_free_ud_actions(2, perturbation=0.0, seed=9511)
+
+    result = derive_standard_generator_fiber_gauge(gauged, presentation)
+
+    assert result.report["status"] == "certified"
+    assert result.report["standardized_generators"] == []
+    assert result.report["cycle_targets"] == {}
+    assert result.report["selection_policy"].startswith("algebraic_monomial_orbit_frame")
+    for action in result.actions.values():
+        for block in action.route_blocks:
+            assert np.count_nonzero(block - np.diag(np.diag(block))) == 0
+            assert len(set(np.diag(block))) == 1
+    reframed = _gauge_transform_actions(gauged, result.fiber_gauge)
+    for name in gauged:
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            result.actions[name].route_blocks,
+        ):
+            np.testing.assert_allclose(actual, expected, atol=5.0e-14, rtol=0.0)
+
+
+def test_standard_generator_fiber_gauge_breaks_exact_ud_ties_deterministically() -> None:
+    dimension = 2
+    identity = np.eye(dimension, dtype=np.complex128)
+    z_matrix = np.diag([1.0, -1.0]).astype(np.complex128)
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("C2", antiunitary=False),),
+        relations=(MagneticRelation("C2^2", ("C2", "C2"), (), -1.0),),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    actions = {
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (dimension, dimension),
+            (1.0j * z_matrix, 1.0j * z_matrix),
+        )
+    }
+
+    result = derive_standard_generator_fiber_gauge(actions, presentation)
+
+    assert result.report["status"] == "certified"
+    assert result.report["cycles"]["C2"][0]["nearest_solution_count"] == 4
+    assert result.report["cycles"]["C2"][0]["tie_break"] == "algebraic_lexicographic"
+    for block in result.actions["C2"].route_blocks:
+        np.testing.assert_array_equal(block, 1.0j * identity)
+
+
+def test_standard_generator_fiber_gauge_supports_ud_above_twelve() -> None:
+    dimension = 13
+    identity = np.eye(dimension, dtype=np.complex128)
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("C2", antiunitary=False),),
+        relations=(MagneticRelation("C2^2", ("C2", "C2"), (), -1.0),),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    actions = {
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (dimension, dimension),
+            (1.0j * identity, 1.0j * identity),
+        )
+    }
+
+    result = derive_standard_generator_fiber_gauge(actions, presentation)
+
+    assert result.report["status"] == "certified"
+    assert result.report["cycles"]["C2"][0]["matching_solver"] == "milp_lexicographic"
+    for block in result.actions["C2"].route_blocks:
+        np.testing.assert_array_equal(block, 1.0j * identity)
+
+
+def test_ud_matching_does_not_promote_solver_feasibility_to_a_nearest_tie() -> None:
+    dimension = 13
+    angle = 1.0e-7
+    reflection = np.eye(dimension, dtype=np.complex128)
+    reflection[:2, :2] = np.asarray(
+        [
+            [np.cos(angle), np.sin(angle)],
+            [np.sin(angle), -np.cos(angle)],
+        ],
+        dtype=np.complex128,
+    )
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("C2", antiunitary=False),),
+        relations=(MagneticRelation("C2^2", ("C2", "C2"), (), 1.0),),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    actions = {
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (dimension, dimension),
+            (reflection, reflection),
+        )
+    }
+
+    result = derive_standard_generator_fiber_gauge(actions, presentation)
+
+    cycle = result.report["cycles"]["C2"][0]
+    assert cycle["matching_solver"] == "milp_lexicographic"
+    assert cycle["internal_permutation"] == [1, 0, *range(2, dimension)]
+    assert cycle["distance_squared"] < 8.0 - 1.0e-8
+
+
+def test_cyclotomic_rematerialization_reduces_root_fraction_exactly() -> None:
+    from kp.symmetry.joint_exactification import _cyclotomic_root
+
+    assert _cyclotomic_root(24, 4) == complex(0.5, np.sqrt(3.0) / 2.0)
+    assert _cyclotomic_root(24, 20) == complex(0.5, -np.sqrt(3.0) / 2.0)
+
+
+def test_rank_deficient_procrustes_uses_deterministic_algebraic_completion() -> None:
+    dimension = 2
+    identity = np.eye(dimension, dtype=np.complex128)
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("C2T", antiunitary=True),),
+        relations=(MagneticRelation("C2T^2", ("C2T", "C2T"), (), -1.0),),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    actions = {
+        "C2T": BlockRouteAction(
+            "C2T",
+            True,
+            (1, 0),
+            (dimension, dimension),
+            (-identity, identity),
+        )
+    }
+
+    first = derive_standard_generator_fiber_gauge(actions, presentation)
+    second = derive_standard_generator_fiber_gauge(actions, presentation)
+
+    report = first.report["procrustes"][0]
+    assert report["rank"] == 0
+    assert report["nullity"] == dimension
+    assert report["tie_break"] == "projected_coordinate_basis"
+    for actual, expected in zip(first.fiber_gauge, second.fiber_gauge):
+        np.testing.assert_array_equal(actual, expected)
+    assert "algebraic_route_encoding" in first.report
+
+
 def _random_unitary(rng: np.random.Generator, dimension: int) -> np.ndarray:
     raw = rng.normal(size=(dimension, dimension)) + 1.0j * rng.normal(
         size=(dimension, dimension)
@@ -1385,6 +2307,11 @@ def test_joint_orchestrator_exactifies_mgi2_and_builds_deterministic_artifact() 
         4.3625209915e-6,
         rel=2.0e-10,
     )
+    closest = first.report["closest_cyclotomic_u1_gauge"]
+    assert closest["selection_reference"] == "stage1_projected_routes"
+    assert closest["root_order"] == 2
+    assert set(closest["root_exponents"]) == {"TR", "C2"}
+    assert closest["common_gauge_residual_max"] < 5.0e-15
     assert first.artifact_metadata["status"] == "certified"
     assert first.artifact_metadata["artifact_hash"] == second.artifact_metadata[
         "artifact_hash"
@@ -1453,3 +2380,53 @@ def test_joint_artifact_loader_recertifies_and_rejects_changed_route_byte() -> N
             result.artifact_metadata,
             corrupted,
         )
+
+
+def test_joint_artifact_is_rebuilt_and_recertified_after_common_gauge() -> None:
+    actions = _mgi2_measured_u1_defect_actions()
+    presentation = compile_continuum_magnetic_presentation(
+        [_tr(phase=1), _c2(phase=1)]
+    )
+    result = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    gauge = tuple(
+        np.asarray([[np.exp(1j * phase)]], dtype=np.complex128)
+        for phase in np.linspace(
+            0.13,
+            0.91,
+            len(next(iter(result.actions.values())).fiber_dimensions),
+        )
+    )
+    gauged = _gauge_transform_actions(dict(result.actions), gauge)
+
+    certification = certify_joint_block_actions(gauged, presentation)
+    reframed = reframe_joint_exactification_result(
+        result,
+        gauged,
+        provenance={"kind": "test_common_fiber_gauge", "frame_hash": "fixture"},
+    )
+    loaded = load_joint_exactification_artifact(
+        reframed.artifact_metadata,
+        reframed.artifact_arrays,
+    )
+
+    assert certification["status"] == "certified"
+    assert certification["relation_residual_max"] <= certification[
+        "relation_certification_bound"
+    ]
+    assert reframed.artifact_metadata["pre_gauge_artifact_hash"] == result.artifact_metadata[
+        "artifact_hash"
+    ]
+    assert reframed.artifact_metadata["post_exactification_gauge"]["frame_hash"] == "fixture"
+    assert reframed.artifact_metadata["artifact_hash"] != result.artifact_metadata[
+        "artifact_hash"
+    ]
+    for name in gauged:
+        for actual, expected in zip(
+            loaded.actions[name].route_blocks,
+            gauged[name].route_blocks,
+        ):
+            np.testing.assert_array_equal(actual, expected)

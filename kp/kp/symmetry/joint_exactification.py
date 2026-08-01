@@ -9,12 +9,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import hashlib
 import json
+import math
 import operator
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 from scipy.linalg import expm
+from scipy.optimize import Bounds, LinearConstraint, linear_sum_assignment, milp
+
+from ..identity import hash_array
 
 
 class JointExactificationError(ValueError):
@@ -1368,6 +1372,2890 @@ def project_u1_relations(
 
 
 @dataclass(frozen=True)
+class ClosestCyclotomicU1GaugeResult:
+    """A certified scalar canonical representation and its common gauge."""
+
+    actions: Mapping[str, BlockRouteAction]
+    fiber_gauge: tuple[np.ndarray, ...]
+    root_order: int
+    root_exponents: Mapping[str, tuple[int, ...]]
+    report: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "actions", MappingProxyType(dict(self.actions)))
+        object.__setattr__(
+            self,
+            "fiber_gauge",
+            tuple(_readonly_complex(value) for value in self.fiber_gauge),
+        )
+        object.__setattr__(self, "root_order", int(self.root_order))
+        object.__setattr__(
+            self,
+            "root_exponents",
+            MappingProxyType(
+                {
+                    str(name): tuple(int(value) for value in values)
+                    for name, values in self.root_exponents.items()
+                }
+            ),
+        )
+        object.__setattr__(self, "report", MappingProxyType(dict(self.report)))
+
+
+@dataclass(frozen=True)
+class StandardGeneratorFiberGaugeResult:
+    """A certified scalar gauge with canonical unitary generator cycles."""
+
+    actions: Mapping[str, BlockRouteAction]
+    fiber_gauge: tuple[np.ndarray, ...]
+    gauge_angles: tuple[float, ...]
+    report: Mapping[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "actions", MappingProxyType(dict(self.actions)))
+        object.__setattr__(
+            self,
+            "fiber_gauge",
+            tuple(_readonly_complex(value) for value in self.fiber_gauge),
+        )
+        object.__setattr__(
+            self,
+            "gauge_angles",
+            tuple(float(value) for value in self.gauge_angles),
+        )
+        object.__setattr__(self, "report", MappingProxyType(dict(self.report)))
+
+
+def _cyclotomic_order_from_presentation(
+    presentation: MagneticPresentation,
+) -> int:
+    order = 1
+    power_generators: set[str] = set()
+    for relation in presentation.relations:
+        if relation.rhs or not relation.lhs:
+            continue
+        generator = relation.lhs[0]
+        if any(value != generator for value in relation.lhs):
+            continue
+        central_order = 1 if relation.central_phase == complex(1.0, 0.0) else 2
+        order = math.lcm(order, len(relation.lhs) * central_order)
+        power_generators.add(generator)
+    expected = {generator.name for generator in presentation.generators}
+    if power_generators != expected:
+        missing = sorted(expected - power_generators)
+        raise JointExactificationError(
+            "closest cyclotomic U(1) gauge requires one declared power "
+            f"relation for every generator; missing={missing}"
+        )
+    if order <= 1 or order > 4096:
+        raise JointExactificationError(
+            f"unsupported cyclotomic root order {order}; expected 2..4096"
+        )
+    return order
+
+
+def _reduced_cyclotomic_fraction(order: int, exponent: int) -> tuple[int, int]:
+    order = int(order)
+    if order <= 0:
+        raise JointExactificationError(f"cyclotomic order must be positive, got {order}")
+    exponent = int(exponent) % order
+    divisor = math.gcd(order, exponent)
+    return order // divisor, exponent // divisor
+
+
+def _cyclotomic_root(order: int, exponent: int) -> complex:
+    order, exponent = _reduced_cyclotomic_fraction(order, exponent)
+    if 12 % order == 0:
+        half_sqrt_three = float(np.sqrt(3.0) / 2.0)
+        roots_12 = (
+            complex(1.0, 0.0),
+            complex(half_sqrt_three, 0.5),
+            complex(0.5, half_sqrt_three),
+            complex(0.0, 1.0),
+            complex(-0.5, half_sqrt_three),
+            complex(-half_sqrt_three, 0.5),
+            complex(-1.0, 0.0),
+            complex(-half_sqrt_three, -0.5),
+            complex(-0.5, -half_sqrt_three),
+            complex(0.0, -1.0),
+            complex(0.5, -half_sqrt_three),
+            complex(half_sqrt_three, -0.5),
+        )
+        return roots_12[(exponent * (12 // order)) % 12]
+    angle = 2.0 * np.pi * float(exponent) / float(order)
+    value = complex(np.cos(angle), np.sin(angle))
+    quarter = 4 * exponent
+    if quarter % order == 0:
+        axis = (quarter // order) % 4
+        return (
+            complex(1.0, 0.0),
+            complex(0.0, 1.0),
+            complex(-1.0, 0.0),
+            complex(0.0, -1.0),
+        )[axis]
+    return value
+
+
+def _closest_cyclotomic_exponent(
+    value: complex,
+    *,
+    order: int,
+) -> tuple[int, float, float]:
+    roots = np.asarray(
+        [_cyclotomic_root(order, exponent) for exponent in range(order)],
+        dtype=np.complex128,
+    )
+    distances = np.abs(roots - complex(value))
+    indices = np.argsort(distances, kind="stable")
+    best = int(indices[0])
+    best_distance = float(distances[best])
+    margin = float(distances[int(indices[1])] - best_distance)
+    certification_bound = float(
+        256.0 * np.finfo(np.float64).eps * max(1, order)
+    )
+    if margin <= certification_bound:
+        raise JointExactificationError(
+            "nearest cyclotomic root is not unique: "
+            f"order={order}, margin={margin:.6e}, "
+            f"certification_bound={certification_bound:.6e}"
+        )
+    return best, best_distance, margin
+
+
+def _gauge_transform_fiber_actions(
+    actions: Mapping[str, BlockRouteAction],
+    gauge: Sequence[np.ndarray],
+) -> dict[str, BlockRouteAction]:
+    transformed: dict[str, BlockRouteAction] = {}
+    for name, action in actions.items():
+        blocks: list[np.ndarray] = []
+        propagated_bounds: list[float] = []
+        for source, target in enumerate(action.fiber_permutation):
+            source_gauge = (
+                gauge[source].conjugate() if action.antiunitary else gauge[source]
+            )
+            block = np.asarray(
+                gauge[target].conjugate().T
+                @ action.route_blocks[source]
+                @ source_gauge,
+                dtype=np.complex128,
+            )
+            blocks.append(block)
+            # A product of three already-certified unitary factors carries the
+            # input residuals in addition to the final GEMM roundoff.  The
+            # single-matrix default bound intentionally does not include that
+            # provenance, so propagate it explicitly instead of thresholding
+            # the transformed entries.
+            propagated_bounds.append(
+                float(
+                    action.unitarity_certification_bound
+                    + _unitarity_residual(np.asarray(gauge[target]))
+                    + _unitarity_residual(np.asarray(gauge[source]))
+                    + 8.0 * _roundoff_unitarity_bound(block)
+                )
+            )
+        transformed[name] = BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            route_blocks=tuple(blocks),
+            fiber_indices=action.fiber_indices,
+            unitarity_certification_bound=max(propagated_bounds),
+        )
+    return transformed
+
+
+def derive_closest_cyclotomic_u1_gauge(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    reference_actions: Mapping[str, BlockRouteAction] | None = None,
+) -> ClosestCyclotomicU1GaugeResult:
+    """Choose and certify the closest discrete scalar representation gauge.
+
+    The route roots minimize the separable total Frobenius distance. They are
+    accepted only when one common semilinear fiber gauge maps the supplied
+    jointly closed representation to that discrete candidate.
+    """
+
+    validate_presentation_action_relations(actions, presentation)
+    reference_actions = actions if reference_actions is None else reference_actions
+    validate_presentation_action_relations(reference_actions, presentation)
+    if any(
+        dimension != 1
+        for action in actions.values()
+        for dimension in action.fiber_dimensions
+    ):
+        raise JointExactificationError(
+            "closest cyclotomic gauge is defined only for U(1) route blocks"
+        )
+    names = tuple(generator.name for generator in presentation.generators)
+    reference = actions[names[0]]
+    fiber_count = len(reference.fiber_dimensions)
+    root_order = _cyclotomic_order_from_presentation(presentation)
+    root_exponents: dict[str, tuple[int, ...]] = {}
+    nearest_distances: dict[str, tuple[float, ...]] = {}
+    branch_margins: dict[str, tuple[float, ...]] = {}
+    canonical: dict[str, BlockRouteAction] = {}
+    for name in names:
+        action = actions[name]
+        reference_action = reference_actions[name]
+        if (
+            action.antiunitary != reference_action.antiunitary
+            or action.fiber_permutation != reference_action.fiber_permutation
+            or action.fiber_dimensions != reference_action.fiber_dimensions
+            or action.fiber_indices != reference_action.fiber_indices
+        ):
+            raise JointExactificationError(
+                f"cyclotomic reference action layout differs for {name!r}"
+            )
+        selected = tuple(
+            _closest_cyclotomic_exponent(
+                complex(block[0, 0]),
+                order=root_order,
+            )
+            for block in reference_action.route_blocks
+        )
+        exponents = tuple(value[0] for value in selected)
+        root_exponents[name] = exponents
+        nearest_distances[name] = tuple(value[1] for value in selected)
+        branch_margins[name] = tuple(value[2] for value in selected)
+        canonical[name] = BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            route_blocks=tuple(
+                np.asarray(
+                    [[_cyclotomic_root(root_order, exponent)]],
+                    dtype=np.complex128,
+                )
+                for exponent in exponents
+            ),
+            fiber_indices=action.fiber_indices,
+        )
+
+    relation_certification = certify_joint_block_actions(canonical, presentation)
+    rows: list[np.ndarray] = []
+    targets: list[float] = []
+    for generator in presentation.generators:
+        name = generator.name
+        action = actions[name]
+        for source, target in enumerate(action.fiber_permutation):
+            row = np.zeros(fiber_count, dtype=np.float64)
+            row[source] += -1.0 if action.antiunitary else 1.0
+            row[target] -= 1.0
+            rows.append(row)
+            ratio = complex(
+                canonical[name].route_blocks[source][0, 0]
+                / action.route_blocks[source][0, 0]
+            )
+            targets.append(float(np.angle(ratio)))
+    gauge_matrix = np.asarray(rows, dtype=np.float64)
+    gauge_target = np.asarray(targets, dtype=np.float64)
+    gauge_angles, _residuals, rank, singular_values = np.linalg.lstsq(
+        gauge_matrix,
+        gauge_target,
+        rcond=None,
+    )
+    linear_residual = gauge_matrix @ gauge_angles - gauge_target
+    linear_residual_max = float(np.max(np.abs(linear_residual)))
+    linear_bound = float(
+        1024.0
+        * np.finfo(np.float64).eps
+        * max(1, gauge_matrix.shape[0], gauge_matrix.shape[1])
+    )
+    if linear_residual_max > linear_bound:
+        raise JointExactificationError(
+            "nearest cyclotomic representation is not connected by one common "
+            "fiber gauge: "
+            f"residual={linear_residual_max:.6e}, bound={linear_bound:.6e}"
+        )
+    fiber_gauge = tuple(
+        np.asarray([[np.exp(1.0j * angle)]], dtype=np.complex128)
+        for angle in gauge_angles
+    )
+    reframed = _gauge_transform_fiber_actions(actions, fiber_gauge)
+    common_gauge_residual_max = max(
+        float(np.linalg.norm(actual - expected, ord="fro"))
+        for name in names
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            canonical[name].route_blocks,
+        )
+    )
+    matrix_bound = float(
+        2048.0 * np.finfo(np.float64).eps * max(1, fiber_count, len(names))
+    )
+    if common_gauge_residual_max > matrix_bound:
+        raise JointExactificationError(
+            "common fiber gauge did not reproduce the selected cyclotomic "
+            f"routes: residual={common_gauge_residual_max:.6e}, "
+            f"bound={matrix_bound:.6e}"
+        )
+    distance_values = np.asarray(
+        [
+            distance
+            for name in names
+            for distance in nearest_distances[name]
+        ],
+        dtype=np.float64,
+    )
+    report: dict[str, Any] = {
+        "status": "certified",
+        "selection_policy": "nearest_total_frobenius",
+        "selection_reference": (
+            "joint_closed_routes"
+            if reference_actions is actions
+            else "stage1_projected_routes"
+        ),
+        "tie_break_policy": "minimum_norm_common_fiber_gauge",
+        "root_order": root_order,
+        "root_exponents": {
+            name: list(root_exponents[name]) for name in names
+        },
+        "nearest_distance_rms": float(
+            np.sqrt(np.mean(np.square(distance_values)))
+        ),
+        "nearest_distance_max": float(np.max(distance_values)),
+        "minimum_root_branch_margin": float(
+            min(min(branch_margins[name]) for name in names)
+        ),
+        "gauge_angles": [float(value) for value in gauge_angles],
+        "gauge_angle_max": float(np.max(np.abs(gauge_angles))),
+        "gauge_linear_rank": int(rank),
+        "gauge_linear_singular_values": [
+            float(value) for value in singular_values
+        ],
+        "gauge_linear_residual_max": linear_residual_max,
+        "gauge_linear_certification_bound": linear_bound,
+        "common_gauge_residual_max": common_gauge_residual_max,
+        "common_gauge_certification_bound": matrix_bound,
+        "relation_certification": {
+            **dict(relation_certification),
+            "post_relation_residual_max": float(
+                relation_certification["relation_residual_max"]
+            ),
+        },
+    }
+    return ClosestCyclotomicU1GaugeResult(
+        actions=canonical,
+        fiber_gauge=fiber_gauge,
+        root_order=root_order,
+        root_exponents=root_exponents,
+        report=report,
+    )
+
+
+def _permutation_cycles(permutation: Sequence[int]) -> tuple[tuple[int, ...], ...]:
+    seen: set[int] = set()
+    cycles: list[tuple[int, ...]] = []
+    for root in range(len(permutation)):
+        if root in seen:
+            continue
+        cycle: list[int] = []
+        current = int(root)
+        while current not in seen:
+            seen.add(current)
+            cycle.append(current)
+            current = int(permutation[current])
+        if current != root:
+            raise JointExactificationError(
+                "fiber permutation traversal did not close at its cycle root"
+            )
+        cycles.append(tuple(cycle))
+    return tuple(cycles)
+
+
+def _standard_root_label(value: complex) -> str:
+    exact = complex(value)
+    labels = {
+        complex(1.0, 0.0): "+1",
+        complex(-1.0, 0.0): "-1",
+        complex(0.0, 1.0): "+i",
+        complex(0.0, -1.0): "-i",
+    }
+    return labels.get(exact, f"{exact.real:+.16g}{exact.imag:+.16g}i")
+
+
+def _identity_standard_generator_result(
+    actions: Mapping[str, BlockRouteAction],
+    *,
+    reason: str,
+) -> StandardGeneratorFiberGaugeResult:
+    reference = next(iter(actions.values()))
+    gauge = tuple(
+        np.eye(int(dimension), dtype=np.complex128)
+        for dimension in reference.fiber_dimensions
+    )
+    return StandardGeneratorFiberGaugeResult(
+        actions=actions,
+        fiber_gauge=gauge,
+        gauge_angles=tuple(0.0 for _ in reference.fiber_dimensions),
+        report={
+            "status": "not_applicable",
+            "reason": str(reason),
+            "standardized_generators": [],
+        },
+    )
+
+
+def derive_standard_generator_u1_gauge(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    reference_actions: Mapping[str, BlockRouteAction] | None = None,
+) -> StandardGeneratorFiberGaugeResult:
+    """Uniformize unitary ``C2`` cycles with one certified common U(1) gauge.
+
+    Every other generator is held fixed.  The selected uniform phase is the
+    cycle-holonomy root with minimum total chordal distance from the supplied
+    exact route phases.
+    """
+
+    validate_presentation_action_relations(actions, presentation)
+    selection_reference = actions if reference_actions is None else reference_actions
+    names = tuple(generator.name for generator in presentation.generators)
+    if not names:
+        raise JointExactificationError(
+            "standard generator gauge requires at least one declared generator"
+        )
+    reference = actions[names[0]]
+    if any(
+        dimension != 1
+        for action in actions.values()
+        for dimension in action.fiber_dimensions
+    ):
+        return _identity_standard_generator_result(
+            actions,
+            reason="non_scalar_fibers",
+        )
+    secondary_names = tuple(
+        generator.name
+        for generator in presentation.generators
+        if generator.name == "C2" and not generator.antiunitary
+    )
+    if not secondary_names:
+        return _identity_standard_generator_result(
+            actions,
+            reason="no_unitary_C2_generator",
+        )
+
+    root_order = _cyclotomic_order_from_presentation(presentation)
+    target_actions = dict(actions)
+    cycle_targets: dict[str, list[str]] = {}
+    cycle_reports: dict[str, list[dict[str, Any]]] = {}
+    for name in secondary_names:
+        action = actions[name]
+        reference_action = selection_reference[name]
+        if (
+            reference_action.antiunitary != action.antiunitary
+            or reference_action.fiber_permutation != action.fiber_permutation
+            or len(reference_action.route_blocks) != len(action.route_blocks)
+        ):
+            raise JointExactificationError(
+                f"standard generator selection reference layout differs for {name!r}"
+            )
+        target_blocks = [np.asarray(block) for block in action.route_blocks]
+        target_labels: list[str] = []
+        reports: list[dict[str, Any]] = []
+        for cycle in _permutation_cycles(action.fiber_permutation):
+            holonomy = complex(1.0, 0.0)
+            for source in cycle:
+                value = complex(action.route_blocks[source][0, 0])
+                holonomy *= value
+            holonomy_exponent, holonomy_distance, _margin = (
+                _closest_cyclotomic_exponent(holonomy, order=root_order)
+            )
+            holonomy_root = _cyclotomic_root(root_order, holonomy_exponent)
+            holonomy_bound = float(
+                2048.0
+                * np.finfo(np.float64).eps
+                * max(1, root_order, len(cycle))
+            )
+            if abs(holonomy - holonomy_root) > holonomy_bound:
+                raise JointExactificationError(
+                    f"{name} cycle holonomy is not a certified cyclotomic root: "
+                    f"cycle={cycle}, distance={holonomy_distance:.6e}, "
+                    f"bound={holonomy_bound:.6e}"
+                )
+            cycle_order = int(root_order * len(cycle))
+            candidates = tuple(
+                _cyclotomic_root(
+                    cycle_order,
+                    holonomy_exponent + branch * root_order,
+                )
+                for branch in range(len(cycle))
+            )
+            costs = np.asarray(
+                [
+                    sum(
+                        float(
+                            np.linalg.norm(
+                                candidate
+                                * np.eye(
+                                    reference_action.route_blocks[source].shape[0],
+                                    dtype=np.complex128,
+                                )
+                                - reference_action.route_blocks[source],
+                                ord="fro",
+                            )
+                            ** 2
+                        )
+                        for source in cycle
+                    )
+                    for candidate in candidates
+                ],
+                dtype=np.float64,
+            )
+            order = np.argsort(costs, kind="stable")
+            best_index = int(order[0])
+            if len(order) > 1:
+                cost_margin = float(costs[int(order[1])] - costs[best_index])
+                cost_bound = float(
+                    4096.0
+                    * np.finfo(np.float64).eps
+                    * max(1, len(cycle), root_order)
+                )
+                if cost_margin <= cost_bound:
+                    raise JointExactificationError(
+                        f"{name} standard cycle root is not uniquely nearest: "
+                        f"cycle={cycle}, margin={cost_margin:.6e}, "
+                        f"bound={cost_bound:.6e}"
+                    )
+            selected = candidates[best_index]
+            for source in cycle:
+                target_blocks[source] = np.asarray(
+                    [[selected]],
+                    dtype=np.complex128,
+                )
+            target_labels.append(_standard_root_label(selected))
+            reports.append(
+                {
+                    "fibers": [int(value) for value in cycle],
+                    "length": int(len(cycle)),
+                    "holonomy_root_order": int(root_order),
+                    "holonomy_root_exponent": int(holonomy_exponent),
+                    "uniform_root_order": int(cycle_order),
+                    "uniform_root_exponent": int(
+                        holonomy_exponent + best_index * root_order
+                    ),
+                    "uniform_root": _standard_root_label(selected),
+                    "distance_squared": float(costs[best_index]),
+                }
+            )
+        target_actions[name] = BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            route_blocks=tuple(target_blocks),
+            fiber_indices=action.fiber_indices,
+        )
+        cycle_targets[name] = target_labels
+        cycle_reports[name] = reports
+
+    relation_certification = certify_joint_block_actions(
+        target_actions,
+        presentation,
+    )
+    fiber_count = len(reference.fiber_dimensions)
+    rows: list[np.ndarray] = []
+    targets: list[float] = []
+    for generator in presentation.generators:
+        name = generator.name
+        action = actions[name]
+        target_action = target_actions[name]
+        for source, target in enumerate(action.fiber_permutation):
+            row = np.zeros(fiber_count, dtype=np.float64)
+            row[source] += -1.0 if action.antiunitary else 1.0
+            row[target] -= 1.0
+            rows.append(row)
+            ratio = complex(
+                target_action.route_blocks[source][0, 0]
+                / action.route_blocks[source][0, 0]
+            )
+            targets.append(float(np.angle(ratio)))
+    gauge_matrix = np.asarray(rows, dtype=np.float64)
+    gauge_target = np.asarray(targets, dtype=np.float64)
+    gauge_angles, _residuals, rank, singular_values = np.linalg.lstsq(
+        gauge_matrix,
+        gauge_target,
+        rcond=None,
+    )
+    linear_residual = gauge_matrix @ gauge_angles - gauge_target
+    linear_residual_max = float(np.max(np.abs(linear_residual)))
+    linear_bound = float(
+        2048.0
+        * np.finfo(np.float64).eps
+        * max(1, gauge_matrix.shape[0], gauge_matrix.shape[1])
+    )
+    if linear_residual_max > linear_bound:
+        raise JointExactificationError(
+            "standard generator targets are not connected by one common "
+            "semilinear fiber gauge: "
+            f"residual={linear_residual_max:.6e}, bound={linear_bound:.6e}"
+        )
+    fiber_gauge = tuple(
+        np.asarray([[np.exp(1.0j * angle)]], dtype=np.complex128)
+        for angle in gauge_angles
+    )
+    reframed = _gauge_transform_fiber_actions(actions, fiber_gauge)
+    common_gauge_residual_max = max(
+        float(np.linalg.norm(actual - expected, ord="fro"))
+        for name in names
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            target_actions[name].route_blocks,
+        )
+    )
+    matrix_bound = float(
+        4096.0 * np.finfo(np.float64).eps * max(1, fiber_count, len(names))
+    )
+    if common_gauge_residual_max > matrix_bound:
+        raise JointExactificationError(
+            "common fiber gauge did not reproduce the standard generator "
+            f"targets: residual={common_gauge_residual_max:.6e}, "
+            f"bound={matrix_bound:.6e}"
+        )
+    return StandardGeneratorFiberGaugeResult(
+        actions=target_actions,
+        fiber_gauge=fiber_gauge,
+        gauge_angles=tuple(float(value) for value in gauge_angles),
+        report={
+            "status": "certified",
+            "selection_policy": "nearest_uniform_cycle_root",
+            "selection_reference": (
+                "input_scalar_routes"
+                if reference_actions is None
+                else "supplied_route_blocks"
+            ),
+            "tie_break_policy": "minimum_norm_common_semilinear_fiber_gauge",
+            "preserved_generators": [
+                name for name in names if name not in secondary_names
+            ],
+            "standardized_generators": list(secondary_names),
+            "cycle_targets": cycle_targets,
+            "cycles": cycle_reports,
+            "gauge_angles": [float(value) for value in gauge_angles],
+            "gauge_angle_max": float(np.max(np.abs(gauge_angles))),
+            "gauge_linear_rank": int(rank),
+            "gauge_linear_singular_values": [
+                float(value) for value in singular_values
+            ],
+            "gauge_linear_residual_max": linear_residual_max,
+            "gauge_linear_certification_bound": linear_bound,
+            "common_gauge_residual_max": common_gauge_residual_max,
+            "common_gauge_certification_bound": matrix_bound,
+            "relation_certification": dict(relation_certification),
+        },
+    )
+
+
+def _transporter_antiunitary_parity(
+    word: Sequence[str],
+    presentation: MagneticPresentation,
+) -> bool:
+    parity_by_name = {
+        generator.name: bool(generator.antiunitary)
+        for generator in presentation.generators
+    }
+    parity = False
+    for name in word:
+        parity ^= parity_by_name[name]
+    return parity
+
+
+def _canonical_stabilizer_root_frame(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    orbit: ActionOrbit,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Choose a deterministic algebraic frame for one stabilized root fiber."""
+
+    from kp.basis.symmetry_gauge import (
+        SymmetryGaugeOperation,
+        derive_symmetry_adapted_internal_frame,
+    )
+
+    dimension = int(actions[presentation.generators[0].name].fiber_dimensions[orbit.root])
+    operations: list[SymmetryGaugeOperation] = []
+    evaluated: list[tuple[tuple[str, ...], np.ndarray, bool]] = []
+    for word in orbit.stabilizer_words:
+        if not word:
+            continue
+        block, target, antiunitary = _evaluate_route_word(actions, word, orbit.root)
+        if target != orbit.root:
+            raise JointExactificationError(
+                f"declared stabilizer word {word} leaves root {orbit.root}"
+            )
+        matrix = np.asarray(block, dtype=np.complex128)
+        evaluated.append((word, matrix, antiunitary))
+        operations.append(
+            SymmetryGaugeOperation(
+                name="*".join(word),
+                matrix=matrix,
+                antiunitary=antiunitary,
+                power=12,
+                can_resolve=not antiunitary,
+                can_pair=antiunitary,
+                can_anchor=True,
+            )
+        )
+    adapted = derive_symmetry_adapted_internal_frame(
+        operations,
+        tolerance=1.0e-10,
+    )
+    if adapted.status == "applied":
+        return np.asarray(adapted.unitary, dtype=np.complex128), {
+            "status": "finite_unitary_adapted",
+            "primary_operation": adapted.primary_operation,
+            "pairing_operation": adapted.pairing_operation,
+        }
+
+    identity = np.eye(dimension, dtype=np.complex128)
+    for word, matrix, antiunitary in evaluated:
+        if not antiunitary:
+            continue
+        square_residual = float(
+            np.linalg.norm(matrix @ matrix.conjugate() + identity, ord="fro")
+        )
+        bound = float(
+            4096.0 * np.finfo(np.float64).eps * max(1, dimension)
+        )
+        if square_residual > bound or dimension % 2:
+            continue
+        columns: list[np.ndarray] = []
+        for seed_index in range(dimension):
+            candidate = identity[:, seed_index].copy()
+            for previous in columns:
+                candidate -= previous * np.vdot(previous, candidate)
+            norm = float(np.linalg.norm(candidate))
+            if norm <= bound:
+                continue
+            candidate /= norm
+            pivot = int(np.argmax(np.abs(candidate)))
+            amplitude = candidate[pivot]
+            if abs(amplitude) > bound:
+                candidate *= np.conjugate(amplitude / abs(amplitude))
+            partner = matrix @ candidate.conjugate()
+            for previous in [*columns, candidate]:
+                partner -= previous * np.vdot(previous, partner)
+            partner_norm = float(np.linalg.norm(partner))
+            if partner_norm <= bound:
+                continue
+            partner /= partner_norm
+            columns.extend((candidate, partner))
+            if len(columns) == dimension:
+                break
+        if len(columns) == dimension:
+            frame = np.column_stack(columns)
+            canonical = frame.conjugate().T @ matrix @ frame.conjugate()
+            target = np.zeros_like(canonical)
+            for pair in range(0, dimension, 2):
+                target[pair, pair + 1] = complex(-1.0, 0.0)
+                target[pair + 1, pair] = complex(1.0, 0.0)
+            residual = float(np.linalg.norm(canonical - target, ord="fro"))
+            if residual <= 16.0 * bound:
+                return np.asarray(frame, dtype=np.complex128), {
+                    "status": "antiunitary_kramers_adapted",
+                    "pairing_operation": "*".join(word),
+                    "canonicalization_residual": residual,
+                }
+    return identity, {
+        "status": "identity",
+        "reason": "stabilizer_has_no_resolving_unitary_or_kramers_pairing",
+    }
+
+
+def _involutive_permutations(dimension: int) -> tuple[tuple[int, ...], ...]:
+    """Enumerate deterministic involutions without factorial brute force."""
+
+    def build(remaining: tuple[int, ...]) -> list[dict[int, int]]:
+        if not remaining:
+            return [{}]
+        first = remaining[0]
+        output: list[dict[int, int]] = []
+        for suffix in build(remaining[1:]):
+            output.append({first: first, **suffix})
+        for position, partner in enumerate(remaining[1:], start=1):
+            rest = remaining[1:position] + remaining[position + 1 :]
+            for suffix in build(rest):
+                output.append({first: partner, partner: first, **suffix})
+        return output
+
+    return tuple(
+        tuple(mapping[index] for index in range(dimension))
+        for mapping in build(tuple(range(dimension)))
+    )
+
+
+def _involution_edge_costs(
+    reference_blocks: Sequence[np.ndarray],
+    phase: complex,
+) -> tuple[tuple[tuple[int, int], ...], np.ndarray]:
+    dimension = int(reference_blocks[0].shape[0])
+    edges = tuple(
+        (left, right)
+        for left in range(dimension)
+        for right in range(left, dimension)
+    )
+    costs: list[float] = []
+    for left, right in edges:
+        columns = ((left, left),) if left == right else ((left, right), (right, left))
+        cost = 0.0
+        for block in reference_blocks:
+            for source, target in columns:
+                column = np.asarray(block[:, source], dtype=np.complex128)
+                residual = column.copy()
+                residual[target] -= phase
+                cost += float(np.vdot(residual, residual).real)
+        costs.append(cost)
+    return edges, np.asarray(costs, dtype=np.float64)
+
+
+def _milp_involution(
+    reference_blocks: Sequence[np.ndarray],
+    phase: complex,
+    *,
+    cost_bound: float | None = None,
+    roundoff_bound: float = 0.0,
+    allowed_edges: set[tuple[int, int]] | None = None,
+    required_transposition_counts: Sequence[
+        tuple[set[int], int]
+    ] = (),
+) -> tuple[tuple[int, ...], float]:
+    """Solve nearest involution as a matching, with an algebraic lexicographic tie break."""
+
+    dimension = int(reference_blocks[0].shape[0])
+    edges, edge_costs = _involution_edge_costs(reference_blocks, phase)
+    edge_index = {edge: index for index, edge in enumerate(edges)}
+    incidence = np.zeros((dimension, len(edges)), dtype=np.float64)
+    for index, (left, right) in enumerate(edges):
+        incidence[left, index] = 1.0
+        if right != left:
+            incidence[right, index] = 1.0
+    constraint_rows = [incidence]
+    constraint_lower = [np.ones(dimension, dtype=np.float64)]
+    constraint_upper = [np.ones(dimension, dtype=np.float64)]
+    for indices, required in required_transposition_counts:
+        row = np.asarray(
+            [
+                1.0
+                if left != right and left in indices and right in indices
+                else 0.0
+                for left, right in edges
+            ],
+            dtype=np.float64,
+        )[None, :]
+        constraint_rows.append(row)
+        constraint_lower.append(np.asarray([float(required)]))
+        constraint_upper.append(np.asarray([float(required)]))
+    degree_constraint = LinearConstraint(
+        np.vstack(constraint_rows),
+        np.concatenate(constraint_lower),
+        np.concatenate(constraint_upper),
+    )
+    integrality = np.ones(len(edges), dtype=np.int32)
+    lower_bounds = np.zeros(len(edges), dtype=np.float64)
+    upper_bounds = np.asarray(
+        [
+            1.0
+            if allowed_edges is None or edge in allowed_edges
+            else 0.0
+            for edge in edges
+        ],
+        dtype=np.float64,
+    )
+    unit_bounds = Bounds(lower_bounds, upper_bounds)
+    primary = milp(
+        edge_costs,
+        integrality=integrality,
+        bounds=unit_bounds,
+        constraints=degree_constraint,
+        options={"presolve": True},
+    )
+    if not primary.success or primary.fun is None:
+        raise JointExactificationError(
+            f"nearest involutive monomial matching failed: status={primary.message}"
+        )
+
+    def decode(solution: np.ndarray) -> tuple[tuple[int, ...], float]:
+        permutation = list(range(dimension))
+        assigned: set[int] = set()
+        for index in np.flatnonzero(np.asarray(solution) > 0.5):
+            left, right = edges[int(index)]
+            if left in assigned or right in assigned:
+                raise JointExactificationError(
+                    "MILP involution solution assigns a fiber more than once"
+                )
+            permutation[left] = right
+            permutation[right] = left
+            assigned.update((left, right))
+        if assigned != set(range(dimension)):
+            raise JointExactificationError(
+                "MILP involution solution does not assign every fiber"
+            )
+        matrix = phase * _permutation_matrix(permutation)
+        cost = sum(
+            float(np.linalg.norm(matrix - block, ord="fro") ** 2)
+            for block in reference_blocks
+        )
+        return tuple(permutation), cost
+
+    if primary.x is None:
+        raise JointExactificationError("nearest involutive monomial matching returned no solution")
+    primary_permutation, primary_cost = decode(primary.x)
+    if cost_bound is None:
+        return primary_permutation, primary_cost
+
+    maximum_cost = float(cost_bound + roundoff_bound)
+    lower = lower_bounds.copy()
+    upper = upper_bounds.copy()
+    selected_edges: list[tuple[int, int]] = []
+    assigned: set[int] = set()
+    for source in range(dimension):
+        if source in assigned:
+            continue
+        selected: tuple[int, int] | None = None
+        for target in range(source, dimension):
+            if target in assigned:
+                continue
+            edge = (source, target)
+            if allowed_edges is not None and edge not in allowed_edges:
+                continue
+            trial_lower = lower.copy()
+            trial_upper = upper.copy()
+            index = edge_index[edge]
+            trial_lower[index] = 1.0
+            trial_upper[index] = 1.0
+            feasible = milp(
+                edge_costs,
+                integrality=integrality,
+                bounds=Bounds(trial_lower, trial_upper),
+                constraints=degree_constraint,
+                options={"presolve": True},
+            )
+            if not feasible.success or feasible.x is None:
+                continue
+            _trial_permutation, trial_cost = decode(feasible.x)
+            if trial_cost <= maximum_cost:
+                selected = edge
+                lower = trial_lower
+                upper = trial_upper
+                break
+        if selected is None:
+            raise JointExactificationError(
+                "nearest involutive monomial matching has no deterministic tie-break completion"
+            )
+        selected_edges.append(selected)
+        assigned.update(selected)
+    permutation = list(range(dimension))
+    for left, right in selected_edges:
+        permutation[left] = right
+        permutation[right] = left
+    matrix = phase * _permutation_matrix(permutation)
+    cost = sum(
+        float(np.linalg.norm(matrix - block, ord="fro") ** 2)
+        for block in reference_blocks
+    )
+    if cost > maximum_cost:
+        raise JointExactificationError(
+            "lexicographic involution is outside the certified nearest set: "
+            f"cost={cost:.16e}, maximum={maximum_cost:.16e}"
+        )
+    return tuple(permutation), cost
+
+
+def _nearest_involutive_monomial(
+    reference_blocks: Sequence[np.ndarray],
+    phases: Sequence[tuple[int, complex]],
+    *,
+    roundoff_bound: float,
+) -> tuple[tuple[int, ...], int, complex, float, dict[str, Any]]:
+    dimension = int(reference_blocks[0].shape[0])
+    rows: list[tuple[float, tuple[int, ...], int, complex]] = []
+    if dimension <= 12:
+        for permutation in _involutive_permutations(dimension):
+            matrix = _permutation_matrix(permutation)
+            for phase_exponent, phase in phases:
+                candidate = phase * matrix
+                cost = sum(
+                    float(np.linalg.norm(candidate - block, ord="fro") ** 2)
+                    for block in reference_blocks
+                )
+                rows.append((cost, permutation, phase_exponent, phase))
+        best_cost = min(row[0] for row in rows)
+        nearest = [row for row in rows if row[0] <= best_cost + roundoff_bound]
+        selected = min(nearest, key=lambda row: (row[1], row[2]))
+        solver = "enumerated_involutions"
+        nearest_count: int | None = len(nearest)
+    else:
+        phase_optima: list[tuple[float, int, complex]] = []
+        for phase_exponent, phase in phases:
+            _permutation, cost = _milp_involution(reference_blocks, phase)
+            phase_optima.append((cost, phase_exponent, phase))
+        best_cost = min(row[0] for row in phase_optima)
+        rows = []
+        for cost, phase_exponent, phase in phase_optima:
+            if cost > best_cost + roundoff_bound:
+                continue
+            permutation, lex_cost = _milp_involution(
+                reference_blocks,
+                phase,
+                cost_bound=best_cost,
+                roundoff_bound=roundoff_bound,
+            )
+            rows.append((lex_cost, permutation, phase_exponent, phase))
+        selected = min(rows, key=lambda row: (row[1], row[2]))
+        solver = "milp_lexicographic"
+        nearest_count = None
+    cost, permutation, phase_exponent, phase = selected
+    return permutation, phase_exponent, phase, cost, {
+        "matching_solver": solver,
+        "nearest_solution_count": nearest_count,
+        "nearest_cost_bound": float(roundoff_bound),
+        "tie_break": "algebraic_lexicographic",
+    }
+
+
+def _permutation_matrix(permutation: Sequence[int]) -> np.ndarray:
+    dimension = len(permutation)
+    value = np.zeros((dimension, dimension), dtype=np.complex128)
+    for source, target in enumerate(permutation):
+        value[int(target), int(source)] = complex(1.0, 0.0)
+    return value
+
+
+def _standardize_ud_monomial_actions(
+    central_actions: Mapping[str, BlockRouteAction],
+    reference_actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> StandardGeneratorFiberGaugeResult:
+    """Gauge exact U(d) routes to nearest algebraic monomial C2 blocks."""
+
+    c2_names = tuple(
+        generator.name
+        for generator in presentation.generators
+        if generator.name == "C2" and not generator.antiunitary
+    )
+    if len(c2_names) != 1:
+        raise JointExactificationError(
+            "standard free-orbit U(d) gauge requires exactly one unitary C2"
+        )
+    name = c2_names[0]
+    action = central_actions[name]
+    reference = reference_actions[name]
+    root_order = _cyclotomic_order_from_presentation(presentation)
+    fiber_count = len(action.fiber_dimensions)
+    fiber_gauge: list[np.ndarray | None] = [None] * fiber_count
+    labels: list[str] = []
+    reports: list[dict[str, Any]] = []
+    maximum_cycle_length = 1
+    for cycle in _permutation_cycles(action.fiber_permutation):
+        maximum_cycle_length = max(maximum_cycle_length, len(cycle))
+        dimensions = {int(action.fiber_dimensions[source]) for source in cycle}
+        if len(dimensions) != 1:
+            raise JointExactificationError(
+                f"C2 cycle {cycle} changes U(d) block dimension"
+            )
+        dimension = dimensions.pop()
+        identity = np.eye(dimension, dtype=np.complex128)
+        matching_report: dict[str, Any] = {
+            "matching_solver": "fixed_cycle",
+            "nearest_solution_count": 1,
+            "nearest_cost_bound": 0.0,
+            "tie_break": "not_applicable",
+        }
+        if len(cycle) == 1:
+            selected = np.asarray(action.route_blocks[cycle[0]])
+            fiber_gauge[cycle[0]] = identity
+            label = "fixed_central_route"
+            distance_squared = float(
+                np.linalg.norm(
+                    selected - reference.route_blocks[cycle[0]],
+                    ord="fro",
+                )
+                ** 2
+            )
+            selected_permutation = tuple(range(dimension))
+            selected_phase = complex(selected[0, 0])
+        elif len(cycle) == 2:
+            holonomy_matrix = np.asarray(
+                action.route_blocks[cycle[1]] @ action.route_blocks[cycle[0]],
+                dtype=np.complex128,
+            )
+            root_distances = [
+                float(
+                    np.linalg.norm(
+                        holonomy_matrix
+                        - _cyclotomic_root(root_order, candidate) * identity,
+                        ord="fro",
+                    )
+                )
+                for candidate in range(root_order)
+            ]
+            exponent = int(np.argmin(root_distances))
+            distance = float(root_distances[exponent])
+            root = _cyclotomic_root(root_order, exponent)
+            holonomy_bound = float(
+                2048.0
+                * np.finfo(np.float64).eps
+                * max(1, root_order, dimension)
+            )
+            if distance > holonomy_bound:
+                raise JointExactificationError(
+                    "free U(d) C2 holonomy is not a certified root: "
+                    f"cycle={cycle}, distance={distance:.6e}"
+                )
+            cycle_order = int(root_order * len(cycle))
+            phases = tuple(
+                (
+                    exponent + branch * root_order,
+                    _cyclotomic_root(
+                        cycle_order,
+                        exponent + branch * root_order,
+                    ),
+                )
+                for branch in range(len(cycle))
+            )
+            uniqueness_bound = float(
+                4096.0
+                * np.finfo(np.float64).eps
+                * max(1, root_order, dimension, len(cycle))
+            )
+            (
+                selected_permutation,
+                _selected_phase_exponent,
+                selected_phase,
+                distance_squared,
+                matching_report,
+            ) = _nearest_involutive_monomial(
+                tuple(reference.route_blocks[source] for source in cycle),
+                phases,
+                roundoff_bound=uniqueness_bound,
+            )
+            selected = np.asarray(
+                selected_phase * _permutation_matrix(selected_permutation),
+                dtype=np.complex128,
+            )
+            source = cycle[0]
+            target = cycle[1]
+            fiber_gauge[source] = identity
+            fiber_gauge[target] = np.asarray(
+                action.route_blocks[source] @ selected.conjugate().T,
+                dtype=np.complex128,
+            )
+            label = (
+                f"{_standard_root_label(selected_phase)}*"
+                + ("I" if selected_permutation == tuple(range(dimension)) else f"P{selected_permutation}")
+            )
+        else:
+            raise JointExactificationError(
+                f"unitary C2 has unsupported fiber cycle length {len(cycle)}"
+            )
+        labels.append(label)
+        reports.append(
+            {
+                "fibers": [int(value) for value in cycle],
+                "length": int(len(cycle)),
+                "uniform_block": label,
+                "uniform_phase": _standard_root_label(selected_phase),
+                "internal_permutation": [int(value) for value in selected_permutation],
+                "distance_squared": float(distance_squared),
+                **matching_report,
+            }
+        )
+    if any(value is None for value in fiber_gauge):
+        raise JointExactificationError(
+            "standard C2 cycle construction did not assign every U(d) fiber"
+        )
+    preliminary_gauge = tuple(
+        np.asarray(value, dtype=np.complex128)
+        for value in fiber_gauge
+        if value is not None
+    )
+    transformed = _gauge_transform_fiber_actions(
+        central_actions,
+        preliminary_gauge,
+    )
+    snap_order = int(root_order * maximum_cycle_length)
+    structural_bound = float(
+        8192.0
+        * np.finfo(np.float64).eps
+        * max(1, fiber_count, snap_order, max(action.fiber_dimensions))
+    )
+    snapped: dict[str, BlockRouteAction] = {}
+    algebraic_route_encoding: dict[str, list[dict[str, Any]]] = {}
+    snap_distance_max = 0.0
+    for generator_name, transformed_action in transformed.items():
+        blocks: list[np.ndarray] = []
+        encoded_blocks: list[dict[str, Any]] = []
+        for block in transformed_action.route_blocks:
+            dimension = block.shape[0]
+            targets = tuple(int(np.argmax(np.abs(block[:, source]))) for source in range(dimension))
+            if sorted(targets) != list(range(dimension)):
+                raise JointExactificationError(
+                    f"{generator_name} transformed U(d) route lacks unique monomial support"
+                )
+            support = np.zeros_like(block)
+            for source, target in enumerate(targets):
+                support[target, source] = block[target, source]
+            off_support = float(np.linalg.norm(block - support, ord="fro"))
+            if off_support > structural_bound:
+                raise JointExactificationError(
+                    f"{generator_name} transformed U(d) route is not structurally monomial: "
+                    f"residual={off_support:.6e}, bound={structural_bound:.6e}"
+                )
+            exact = np.zeros_like(block)
+            root_fractions: list[list[int]] = []
+            for source, target in enumerate(targets):
+                exponent, distance, _margin = _closest_cyclotomic_exponent(
+                    complex(block[target, source]),
+                    order=snap_order,
+                )
+                snap_distance_max = max(snap_distance_max, distance)
+                exact[target, source] = _cyclotomic_root(snap_order, exponent)
+                reduced_order, reduced_exponent = _reduced_cyclotomic_fraction(
+                    snap_order,
+                    exponent,
+                )
+                root_fractions.append([reduced_exponent, reduced_order])
+            blocks.append(exact)
+            encoded_blocks.append(
+                {
+                    "support_target_by_source": [int(value) for value in targets],
+                    "root_exponent_over_order_by_source": root_fractions,
+                }
+            )
+        snapped[generator_name] = BlockRouteAction(
+            name=transformed_action.name,
+            antiunitary=transformed_action.antiunitary,
+            fiber_permutation=transformed_action.fiber_permutation,
+            fiber_dimensions=transformed_action.fiber_dimensions,
+            route_blocks=tuple(blocks),
+            fiber_indices=transformed_action.fiber_indices,
+        )
+        algebraic_route_encoding[generator_name] = encoded_blocks
+    certification = certify_joint_block_actions(snapped, presentation)
+    common_residual = max(
+        float(np.linalg.norm(actual - expected, ord="fro"))
+        for generator_name in snapped
+        for actual, expected in zip(
+            transformed[generator_name].route_blocks,
+            snapped[generator_name].route_blocks,
+        )
+    )
+    if common_residual > structural_bound:
+        raise JointExactificationError(
+            "standard U(d) monomial targets are not reproduced by their common gauge: "
+            f"residual={common_residual:.6e}, bound={structural_bound:.6e}"
+        )
+    return StandardGeneratorFiberGaugeResult(
+        actions=snapped,
+        fiber_gauge=preliminary_gauge,
+        gauge_angles=tuple(0.0 for _ in range(fiber_count)),
+        report={
+            "status": "certified",
+            "standardized_generators": [name],
+            "cycle_targets": {name: labels},
+            "cycles": {name: reports},
+            "selection_reference": "supplied_Ud_route_blocks",
+            "selection_policy": "nearest_uniform_cyclotomic_monomial_C2_block",
+            "cyclotomic_snap_order": snap_order,
+            "algebraic_route_encoding": algebraic_route_encoding,
+            "cyclotomic_snap_distance_max": snap_distance_max,
+            "structural_monomial_certification_bound": structural_bound,
+            "common_gauge_residual_max": common_residual,
+            "common_gauge_certification_bound": structural_bound,
+            "relation_certification": dict(certification),
+        },
+    )
+
+
+def _canonicalize_ud_monomial_actions_without_c2(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> StandardGeneratorFiberGaugeResult:
+    """Snap a certified orbit-frame representation to algebraic monomial blocks."""
+
+    reference = actions[presentation.generators[0].name]
+    fiber_count = len(reference.fiber_dimensions)
+    root_order = _cyclotomic_order_from_presentation(presentation)
+    structural_bound = float(
+        8192.0
+        * np.finfo(np.float64).eps
+        * max(1, fiber_count, root_order, max(reference.fiber_dimensions))
+    )
+    snapped: dict[str, BlockRouteAction] = {}
+    algebraic_route_encoding: dict[str, list[dict[str, Any]]] = {}
+    snap_distance_max = 0.0
+    for name, action in actions.items():
+        blocks: list[np.ndarray] = []
+        encoded_blocks: list[dict[str, Any]] = []
+        for block in action.route_blocks:
+            dimension = block.shape[0]
+            targets = tuple(
+                int(np.argmax(np.abs(block[:, source])))
+                for source in range(dimension)
+            )
+            if sorted(targets) != list(range(dimension)):
+                raise JointExactificationError(
+                    f"{name} orbit-frame U(d) route lacks unique monomial support"
+                )
+            support = np.zeros_like(block)
+            for source, target in enumerate(targets):
+                support[target, source] = block[target, source]
+            off_support = float(np.linalg.norm(block - support, ord="fro"))
+            if off_support > structural_bound:
+                raise JointExactificationError(
+                    f"{name} orbit-frame U(d) route is not structurally monomial: "
+                    f"residual={off_support:.6e}, bound={structural_bound:.6e}"
+                )
+            exact = np.zeros_like(block)
+            root_fractions: list[list[int]] = []
+            for source, target in enumerate(targets):
+                exponent, distance, _margin = _closest_cyclotomic_exponent(
+                    complex(block[target, source]),
+                    order=root_order,
+                )
+                snap_distance_max = max(snap_distance_max, distance)
+                exact[target, source] = _cyclotomic_root(root_order, exponent)
+                reduced_order, reduced_exponent = _reduced_cyclotomic_fraction(
+                    root_order,
+                    exponent,
+                )
+                root_fractions.append([reduced_exponent, reduced_order])
+            blocks.append(exact)
+            encoded_blocks.append(
+                {
+                    "support_target_by_source": [int(value) for value in targets],
+                    "root_exponent_over_order_by_source": root_fractions,
+                }
+            )
+        snapped[name] = BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            route_blocks=tuple(blocks),
+            fiber_indices=action.fiber_indices,
+        )
+        algebraic_route_encoding[name] = encoded_blocks
+    certification = certify_joint_block_actions(snapped, presentation)
+    common_residual = max(
+        float(np.linalg.norm(actual - expected, ord="fro"))
+        for name in snapped
+        for actual, expected in zip(
+            actions[name].route_blocks,
+            snapped[name].route_blocks,
+        )
+    )
+    if common_residual > structural_bound:
+        raise JointExactificationError(
+            "orbit-frame U(d) actions do not reproduce their algebraic monomial targets: "
+            f"residual={common_residual:.6e}, bound={structural_bound:.6e}"
+        )
+    gauge = tuple(
+        np.eye(int(dimension), dtype=np.complex128)
+        for dimension in reference.fiber_dimensions
+    )
+    return StandardGeneratorFiberGaugeResult(
+        actions=snapped,
+        fiber_gauge=gauge,
+        gauge_angles=tuple(0.0 for _ in range(fiber_count)),
+        report={
+            "status": "certified",
+            "standardized_generators": [],
+            "cycle_targets": {},
+            "selection_policy": "certified_algebraic_monomial_orbit_frame",
+            "cyclotomic_snap_order": root_order,
+            "algebraic_route_encoding": algebraic_route_encoding,
+            "cyclotomic_snap_distance_max": snap_distance_max,
+            "structural_monomial_certification_bound": structural_bound,
+            "common_gauge_residual_max": common_residual,
+            "common_gauge_certification_bound": structural_bound,
+            "relation_certification": dict(certification),
+        },
+    )
+
+
+def _canonical_projector_basis(
+    projector: np.ndarray,
+    rank: int,
+    *,
+    bound: float,
+) -> np.ndarray:
+    """Build a deterministic basis from projected coordinate vectors."""
+
+    dimension = int(projector.shape[0])
+    columns: list[np.ndarray] = []
+    hermitian_projector = 0.5 * (projector + projector.conjugate().T)
+    for coordinate in range(dimension):
+        candidate = np.asarray(
+            hermitian_projector[:, coordinate],
+            dtype=np.complex128,
+        ).copy()
+        for previous in columns:
+            candidate -= previous * np.vdot(previous, candidate)
+        norm = float(np.linalg.norm(candidate))
+        if norm <= bound:
+            continue
+        candidate /= norm
+        pivot = int(np.argmax(np.abs(candidate)))
+        amplitude = candidate[pivot]
+        if abs(amplitude) > bound:
+            candidate *= np.conjugate(amplitude / abs(amplitude))
+        columns.append(candidate)
+        if len(columns) == rank:
+            break
+    if len(columns) != rank:
+        raise JointExactificationError(
+            "rank-deficient Procrustes projector lacks a certified coordinate basis: "
+            f"expected={rank}, found={len(columns)}"
+        )
+    return np.column_stack(columns) if columns else np.zeros((dimension, 0), dtype=np.complex128)
+
+
+def _deterministic_procrustes_unitary(
+    coefficient: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, dict[str, Any]]:
+    """Return the polar Procrustes factor with a deterministic null-space extension."""
+
+    dimension = int(coefficient.shape[0])
+    left, singular_values, right_h = np.linalg.svd(
+        coefficient,
+        full_matrices=True,
+    )
+    scale = max(1.0, float(singular_values[0]) if singular_values.size else 0.0)
+    rank_bound = float(
+        4096.0 * np.finfo(np.float64).eps * max(1, dimension) * scale
+    )
+    rank = int(np.count_nonzero(singular_values > rank_bound))
+    right = right_h.conjugate().T
+    root_unitary = np.asarray(
+        right[:, :rank] @ left[:, :rank].conjugate().T,
+        dtype=np.complex128,
+    )
+    nullity = dimension - rank
+    tie_break = "not_applicable"
+    if nullity:
+        identity = np.eye(dimension, dtype=np.complex128)
+        left_projector = identity - left[:, :rank] @ left[:, :rank].conjugate().T
+        right_projector = identity - right[:, :rank] @ right[:, :rank].conjugate().T
+        left_null = _canonical_projector_basis(
+            left_projector,
+            nullity,
+            bound=rank_bound,
+        )
+        right_null = _canonical_projector_basis(
+            right_projector,
+            nullity,
+            bound=rank_bound,
+        )
+        root_unitary += right_null @ left_null.conjugate().T
+        tie_break = "projected_coordinate_basis"
+    unitarity = _unitarity_residual(root_unitary)
+    unitarity_bound = _roundoff_unitarity_bound(root_unitary)
+    if unitarity > 16.0 * unitarity_bound:
+        raise JointExactificationError(
+            "deterministic Procrustes completion is not unitary: "
+            f"residual={unitarity:.6e}, bound={16.0 * unitarity_bound:.6e}"
+        )
+    return root_unitary, singular_values, {
+        "rank": rank,
+        "nullity": nullity,
+        "rank_certification_bound": rank_bound,
+        "tie_break": tie_break,
+    }
+
+
+def _declared_generator_projective_power(
+    presentation: MagneticPresentation,
+    name: str,
+) -> int | None:
+    for relation in presentation.relations:
+        if relation.rhs or not relation.lhs:
+            continue
+        if any(value != name for value in relation.lhs):
+            continue
+        central_order = 1 if relation.central_phase == complex(1.0, 0.0) else 2
+        return int(len(relation.lhs) * central_order)
+    return None
+
+
+def _uniform_route_block(
+    action: BlockRouteAction,
+    *,
+    root_order: int,
+) -> tuple[np.ndarray, float, float] | None:
+    dimensions = {int(value) for value in action.fiber_dimensions}
+    if len(dimensions) != 1 or not action.route_blocks:
+        return None
+    dimension = dimensions.pop()
+    reference = np.asarray(action.route_blocks[0], dtype=np.complex128)
+    residual = max(
+        float(np.linalg.norm(np.asarray(block) - reference, ord="fro"))
+        for block in action.route_blocks
+    )
+    bound = float(
+        8192.0
+        * np.finfo(np.float64).eps
+        * max(1, len(action.route_blocks), dimension, root_order)
+    )
+    if residual > bound:
+        return None
+    return reference, residual, bound
+
+
+def _closest_algebraic_uniform_stabilizer(
+    frame: np.ndarray,
+    diagonal_action: np.ndarray,
+    *,
+    root_order: int,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fix a common eigenframe by the nearest cyclotomic monomial stabilizer."""
+
+    dimension = int(frame.shape[0])
+    diagonal = np.diag(diagonal_action)
+    exponents = tuple(
+        _closest_cyclotomic_exponent(complex(value), order=root_order)[0]
+        for value in diagonal
+    )
+    groups: dict[int, list[int]] = {}
+    for index, exponent in enumerate(exponents):
+        groups.setdefault(int(exponent), []).append(index)
+    roots = tuple(_cyclotomic_root(root_order, value) for value in range(root_order))
+    stabilizer = np.zeros((dimension, dimension), dtype=np.complex128)
+    assignments: list[dict[str, Any]] = []
+    objective_bound = float(
+        4096.0
+        * np.finfo(np.float64).eps
+        * max(1, dimension, root_order)
+    )
+    for eigen_exponent in sorted(groups):
+        indices = groups[eigen_exponent]
+        size = len(indices)
+        weights = np.empty((size, size), dtype=np.float64)
+        phase_exponents = np.empty((size, size), dtype=np.int64)
+        for row, target_index in enumerate(indices):
+            for column, source_index in enumerate(indices):
+                values = np.asarray(
+                    [
+                        float(
+                            np.real(
+                                frame[target_index, source_index] * root
+                            )
+                        )
+                        for root in roots
+                    ],
+                    dtype=np.float64,
+                )
+                maximum = float(np.max(values))
+                tied = np.flatnonzero(values >= maximum - objective_bound)
+                exponent = int(tied[0])
+                weights[row, column] = float(values[exponent])
+                phase_exponents[row, column] = exponent
+        rows, columns = linear_sum_assignment(weights, maximize=True)
+        optimum = float(np.sum(weights[rows, columns]))
+        assigned_columns: set[int] = set()
+        selected: list[tuple[int, int]] = []
+        accumulated = 0.0
+        for row in range(size):
+            chosen: int | None = None
+            for column in range(size):
+                if column in assigned_columns:
+                    continue
+                remaining_rows = list(range(row + 1, size))
+                remaining_columns = [
+                    value
+                    for value in range(size)
+                    if value not in assigned_columns and value != column
+                ]
+                remaining = 0.0
+                if remaining_rows:
+                    sub_rows, sub_columns = linear_sum_assignment(
+                        weights[np.ix_(remaining_rows, remaining_columns)],
+                        maximize=True,
+                    )
+                    remaining = float(
+                        np.sum(
+                            weights[
+                                np.asarray(remaining_rows)[sub_rows],
+                                np.asarray(remaining_columns)[sub_columns],
+                            ]
+                        )
+                    )
+                total = accumulated + float(weights[row, column]) + remaining
+                if total >= optimum - objective_bound:
+                    chosen = column
+                    break
+            if chosen is None:
+                raise JointExactificationError(
+                    "common eigenframe stabilizer has no certified lexicographic assignment"
+                )
+            selected.append((row, chosen))
+            assigned_columns.add(chosen)
+            accumulated += float(weights[row, chosen])
+        for row, column in selected:
+            target_index = indices[row]
+            source_index = indices[column]
+            phase_exponent = int(phase_exponents[row, column])
+            stabilizer[source_index, target_index] = roots[phase_exponent]
+            assignments.append(
+                {
+                    "target_index": int(target_index),
+                    "source_index": int(source_index),
+                    "phase_exponent": phase_exponent,
+                    "phase_order": int(root_order),
+                }
+            )
+    identity = np.eye(dimension, dtype=np.complex128)
+    unitarity = float(
+        np.linalg.norm(stabilizer.conjugate().T @ stabilizer - identity, ord="fro")
+    )
+    preservation_bound = float(
+        4096.0
+        * np.finfo(np.float64).eps
+        * max(1, dimension, root_order)
+    )
+    if unitarity > preservation_bound:
+        raise JointExactificationError(
+            "common eigenframe algebraic stabilizer is not certified unitary: "
+            f"residual={unitarity:.6e}, bound={preservation_bound:.6e}"
+        )
+    preservation = float(
+        np.linalg.norm(
+            stabilizer.conjugate().T @ diagonal_action @ stabilizer
+            - diagonal_action,
+            ord="fro",
+        )
+    )
+    if preservation > preservation_bound:
+        raise JointExactificationError(
+            "closest algebraic stabilizer does not preserve the uniform generator: "
+            f"residual={preservation:.6e}, bound={preservation_bound:.6e}"
+        )
+    result = np.asarray(frame @ stabilizer, dtype=np.complex128)
+    objective_before = float(np.linalg.norm(frame - identity, ord="fro") ** 2)
+    objective_after = float(np.linalg.norm(result - identity, ord="fro") ** 2)
+    if objective_after > objective_before + preservation_bound:
+        raise JointExactificationError(
+            "closest algebraic stabilizer increased common-frame distance: "
+            f"before={objective_before:.16e}, after={objective_after:.16e}"
+        )
+    return result, {
+        "status": "certified",
+        "root_order": int(root_order),
+        "eigenvalue_exponents": [int(value) for value in exponents],
+        "assignments": assignments,
+        "objective_before": objective_before,
+        "objective_after": objective_after,
+        "uniform_generator_preservation_residual": preservation,
+        "uniform_generator_preservation_bound": preservation_bound,
+        "tie_break": "lexicographic_assignment_then_smallest_root_exponent",
+    }
+
+
+def _diagonal_cyclotomic_groups(
+    diagonal_action: np.ndarray,
+    *,
+    root_order: int,
+) -> tuple[tuple[int, ...], ...]:
+    groups: dict[int, list[int]] = {}
+    for index, value in enumerate(np.diag(diagonal_action)):
+        exponent = _closest_cyclotomic_exponent(
+            complex(value),
+            order=root_order,
+        )[0]
+        groups.setdefault(int(exponent), []).append(int(index))
+    return tuple(tuple(groups[key]) for key in sorted(groups))
+
+
+def _eigenspace_group_mapping(
+    matrix: np.ndarray,
+    groups: Sequence[Sequence[int]],
+    *,
+    bound: float,
+) -> tuple[int, ...]:
+    mapping: list[int] = []
+    for source_indices in groups:
+        weights = np.asarray(
+            [
+                np.linalg.norm(
+                    matrix[np.ix_(target_indices, source_indices)],
+                    ord="fro",
+                )
+                ** 2
+                for target_indices in groups
+            ],
+            dtype=np.float64,
+        )
+        target = int(np.argmax(weights))
+        off_target = float(
+            max(0.0, float(np.sum(weights) - weights[target])) ** 0.5
+        )
+        if off_target > bound:
+            raise JointExactificationError(
+                "C2 mixes distinct uniform-generator eigenspaces: "
+                f"residual={off_target:.6e}, bound={bound:.6e}"
+            )
+        if len(groups[target]) != len(source_indices):
+            raise JointExactificationError(
+                "C2 changes a uniform-generator eigenspace dimension"
+            )
+        mapping.append(target)
+    if sorted(mapping) != list(range(len(groups))):
+        raise JointExactificationError(
+            "C2 uniform-generator eigenspace action is not bijective"
+        )
+    return tuple(mapping)
+
+
+def _allowed_involution_edges_for_mapping(
+    groups: Sequence[Sequence[int]],
+    mapping: Sequence[int],
+) -> set[tuple[int, int]]:
+    group_by_index = {
+        int(index): int(group_index)
+        for group_index, indices in enumerate(groups)
+        for index in indices
+    }
+    dimension = sum(len(indices) for indices in groups)
+    allowed: set[tuple[int, int]] = set()
+    for left in range(dimension):
+        for right in range(left, dimension):
+            left_group = group_by_index[left]
+            right_group = group_by_index[right]
+            if (
+                int(mapping[left_group]) == right_group
+                and int(mapping[right_group]) == left_group
+            ):
+                allowed.add((left, right))
+    return allowed
+
+
+def _required_fixed_group_transpositions(
+    matrix: np.ndarray,
+    groups: Sequence[Sequence[int]],
+    mapping: Sequence[int],
+    *,
+    phase: complex,
+    bound: float,
+) -> tuple[tuple[set[int], int], ...]:
+    requirements: list[tuple[set[int], int]] = []
+    for group_index, indices in enumerate(groups):
+        if int(mapping[group_index]) != group_index:
+            continue
+        internal = np.asarray(
+            matrix[np.ix_(indices, indices)],
+            dtype=np.complex128,
+        )
+        values = np.linalg.eigvals(internal)
+        negative_count = 0
+        for value in values:
+            positive_distance = abs(complex(value) - complex(phase))
+            negative_distance = abs(complex(value) + complex(phase))
+            if min(positive_distance, negative_distance) > bound:
+                raise JointExactificationError(
+                    "fixed C2 eigenspace has a non-projective-involution eigenvalue: "
+                    f"value={value}, phase={phase}, bound={bound:.6e}"
+                )
+            if negative_distance < positive_distance:
+                negative_count += 1
+        requirements.append((set(int(value) for value in indices), negative_count))
+    return tuple(requirements)
+
+
+def _block_commutant_procrustes(
+    coefficient: np.ndarray,
+    groups: Sequence[Sequence[int]],
+) -> np.ndarray:
+    result = np.zeros_like(coefficient, dtype=np.complex128)
+    for indices in groups:
+        block = np.asarray(
+            coefficient[np.ix_(indices, indices)],
+            dtype=np.complex128,
+        )
+        unitary, _singular_values, _report = _deterministic_procrustes_unitary(
+            block
+        )
+        result[np.ix_(indices, indices)] = unitary
+    return result
+
+
+def _cyclotomic_eigenspace_bases(
+    matrix: np.ndarray,
+    *,
+    root_order: int,
+    bound: float,
+) -> dict[int, np.ndarray]:
+    values, vectors = np.linalg.eig(np.asarray(matrix, dtype=np.complex128))
+    columns_by_exponent: dict[int, list[int]] = {}
+    for index, value in enumerate(values):
+        exponent = _closest_cyclotomic_exponent(
+            complex(value),
+            order=root_order,
+        )[0]
+        columns_by_exponent.setdefault(int(exponent), []).append(int(index))
+    result: dict[int, np.ndarray] = {}
+    for exponent in sorted(columns_by_exponent):
+        columns = columns_by_exponent[exponent]
+        basis, _ = np.linalg.qr(vectors[:, columns], mode="reduced")
+        projector = np.asarray(basis @ basis.conjugate().T, dtype=np.complex128)
+        result[exponent] = _canonical_projector_basis(
+            projector,
+            len(columns),
+            bound=bound,
+        )
+    return result
+
+
+def _closest_fixed_c2_commutant(
+    source_block: np.ndarray,
+    target_block: np.ndarray,
+    diagonal_action: np.ndarray,
+    common_frame: np.ndarray,
+    *,
+    root_order: int,
+    bound: float,
+) -> np.ndarray:
+    """Solve S^dagger B S=M inside the commutant of diagonal_action."""
+
+    groups = _diagonal_cyclotomic_groups(
+        diagonal_action,
+        root_order=root_order,
+    )
+    source_mapping = _eigenspace_group_mapping(
+        source_block,
+        groups,
+        bound=bound,
+    )
+    target_mapping = _eigenspace_group_mapping(
+        target_block,
+        groups,
+        bound=bound,
+    )
+    if source_mapping != target_mapping:
+        raise JointExactificationError(
+            "C2 monomial target has the wrong uniform-generator eigenspace action"
+        )
+    stabilizer = np.zeros_like(source_block, dtype=np.complex128)
+    for group_cycle in _permutation_cycles(source_mapping):
+        if len(group_cycle) == 2:
+            left_group, right_group = group_cycle
+            left = groups[left_group]
+            right = groups[right_group]
+            source_route = np.asarray(
+                source_block[np.ix_(right, left)],
+                dtype=np.complex128,
+            )
+            target_route = np.asarray(
+                target_block[np.ix_(right, left)],
+                dtype=np.complex128,
+            )
+            coefficient = np.asarray(
+                common_frame[np.ix_(left, left)]
+                + target_route.conjugate().T
+                @ common_frame[np.ix_(right, right)]
+                @ source_route,
+                dtype=np.complex128,
+            )
+            left_stabilizer, _singular_values, _report = (
+                _deterministic_procrustes_unitary(coefficient)
+            )
+            right_stabilizer = np.asarray(
+                source_route
+                @ left_stabilizer
+                @ target_route.conjugate().T,
+                dtype=np.complex128,
+            )
+            stabilizer[np.ix_(left, left)] = left_stabilizer
+            stabilizer[np.ix_(right, right)] = right_stabilizer
+        elif len(group_cycle) == 1:
+            group = groups[group_cycle[0]]
+            source_internal = np.asarray(
+                source_block[np.ix_(group, group)],
+                dtype=np.complex128,
+            )
+            target_internal = np.asarray(
+                target_block[np.ix_(group, group)],
+                dtype=np.complex128,
+            )
+            source_bases = _cyclotomic_eigenspace_bases(
+                source_internal,
+                root_order=2 * root_order,
+                bound=bound,
+            )
+            target_bases = _cyclotomic_eigenspace_bases(
+                target_internal,
+                root_order=2 * root_order,
+                bound=bound,
+            )
+            if source_bases.keys() != target_bases.keys():
+                raise JointExactificationError(
+                    "fixed C2 monomial target has the wrong internal spectrum"
+                )
+            frame_block = np.asarray(
+                common_frame[np.ix_(group, group)],
+                dtype=np.complex128,
+            )
+            internal_stabilizer = np.zeros_like(
+                source_internal,
+                dtype=np.complex128,
+            )
+            for exponent in source_bases:
+                source_basis = source_bases[exponent]
+                target_basis = target_bases[exponent]
+                if source_basis.shape[1] != target_basis.shape[1]:
+                    raise JointExactificationError(
+                        "fixed C2 eigenspace multiplicities do not match target"
+                    )
+                coefficient = np.asarray(
+                    target_basis.conjugate().T
+                    @ frame_block
+                    @ source_basis,
+                    dtype=np.complex128,
+                )
+                residual_unitary, _singular_values, _report = (
+                    _deterministic_procrustes_unitary(coefficient)
+                )
+                internal_stabilizer += (
+                    source_basis
+                    @ residual_unitary
+                    @ target_basis.conjugate().T
+                )
+            stabilizer[np.ix_(group, group)] = internal_stabilizer
+        else:
+            raise JointExactificationError(
+                "C2 has unsupported uniform-generator eigenspace cycle "
+                f"{group_cycle}"
+            )
+    identity = np.eye(source_block.shape[0], dtype=np.complex128)
+    checks = {
+        "unitarity": np.linalg.norm(
+            stabilizer.conjugate().T @ stabilizer - identity,
+            ord="fro",
+        ),
+        "primary_preservation": np.linalg.norm(
+            stabilizer.conjugate().T
+            @ diagonal_action
+            @ stabilizer
+            - diagonal_action,
+            ord="fro",
+        ),
+        "C2_intertwining": np.linalg.norm(
+            stabilizer.conjugate().T
+            @ source_block
+            @ stabilizer
+            - target_block,
+            ord="fro",
+        ),
+    }
+    failed = {name: float(value) for name, value in checks.items() if value > bound}
+    if failed:
+        raise JointExactificationError(
+            f"fixed C2 commutant solver failed certification: {failed}, "
+            f"bound={bound:.6e}"
+        )
+    return np.asarray(stabilizer, dtype=np.complex128)
+
+
+def _q_uniform_c2_orbit_stabilizer_gauge(
+    actions: Mapping[str, BlockRouteAction],
+    *,
+    primary_name: str,
+    common_frame: np.ndarray,
+    root_order: int,
+) -> tuple[tuple[np.ndarray, ...], dict[str, Any]]:
+    """Standardize C2 inside the orbit stabilizer of a uniform generator."""
+
+    primary = actions[primary_name]
+    c2 = actions["C2"]
+    dimension = int(primary.fiber_dimensions[0])
+    diagonal = np.asarray(primary.route_blocks[0], dtype=np.complex128)
+    primary_cycles = tuple(_permutation_cycles(primary.fiber_permutation))
+    cycle_by_fiber = {
+        int(fiber): int(cycle_index)
+        for cycle_index, cycle in enumerate(primary_cycles)
+        for fiber in cycle
+    }
+    induced: list[int] = []
+    for cycle in primary_cycles:
+        target_cycles = {
+            cycle_by_fiber[int(c2.fiber_permutation[source])]
+            for source in cycle
+        }
+        if len(target_cycles) != 1:
+            raise JointExactificationError(
+                "C2 does not induce a well-defined action on Q-uniform "
+                f"{primary_name} cycles: cycle={cycle}, targets={sorted(target_cycles)}"
+            )
+        induced.append(int(next(iter(target_cycles))))
+    if sorted(induced) != list(range(len(primary_cycles))):
+        raise JointExactificationError(
+            f"C2 action on {primary_name} cycles is not bijective"
+        )
+    fiber_gauge = [
+        np.eye(int(value), dtype=np.complex128)
+        for value in primary.fiber_dimensions
+    ]
+    identity = np.eye(dimension, dtype=np.complex128)
+    bound = float(
+        16384.0
+        * np.finfo(np.float64).eps
+        * max(
+            1,
+            len(primary.fiber_dimensions),
+            dimension,
+            root_order,
+        )
+    )
+    reports: list[dict[str, Any]] = []
+    for quotient_cycle in _permutation_cycles(induced):
+        if len(quotient_cycle) not in {1, 2}:
+            raise JointExactificationError(
+                "unitary C2 has unsupported Q-uniform-generator orbit cycle "
+                f"{quotient_cycle}"
+            )
+        involved_fibers = tuple(
+            source
+            for cycle_index in quotient_cycle
+            for source in primary_cycles[cycle_index]
+        )
+        reference_source = int(min(involved_fibers))
+        reference_target = int(c2.fiber_permutation[reference_source])
+        holonomy = np.asarray(
+            c2.route_blocks[reference_target]
+            @ c2.route_blocks[reference_source],
+            dtype=np.complex128,
+        )
+        root_distances = [
+            float(
+                np.linalg.norm(
+                    holonomy - _cyclotomic_root(root_order, exponent) * identity,
+                    ord="fro",
+                )
+            )
+            for exponent in range(root_order)
+        ]
+        holonomy_exponent = int(np.argmin(root_distances))
+        if root_distances[holonomy_exponent] > bound:
+            raise JointExactificationError(
+                "Q-uniform C2 orbit holonomy is not a certified central root: "
+                f"cycle={quotient_cycle}, residual="
+                f"{root_distances[holonomy_exponent]:.6e}, bound={bound:.6e}"
+            )
+        phase_order = int(2 * root_order)
+        phase_rows = tuple(
+            (
+                int(holonomy_exponent + branch * root_order),
+                _cyclotomic_root(
+                    phase_order,
+                    holonomy_exponent + branch * root_order,
+                ),
+            )
+            for branch in range(2)
+        )
+        candidate_rows: list[
+            tuple[
+                float,
+                float,
+                tuple[int, ...],
+                int,
+                int,
+                np.ndarray,
+                np.ndarray,
+                np.ndarray,
+                str,
+            ]
+        ] = []
+        orientations = (
+            ((quotient_cycle[0], quotient_cycle[1]),)
+            if len(quotient_cycle) == 2
+            else ((quotient_cycle[0], quotient_cycle[0]),)
+        )
+        if len(quotient_cycle) == 2:
+            orientations = (
+                (quotient_cycle[0], quotient_cycle[1]),
+                (quotient_cycle[1], quotient_cycle[0]),
+            )
+        for source_cycle, target_cycle in orientations:
+            source_fiber = int(min(primary_cycles[source_cycle]))
+            if cycle_by_fiber[int(c2.fiber_permutation[source_fiber])] != target_cycle:
+                continue
+            source_block = np.asarray(
+                c2.route_blocks[source_fiber],
+                dtype=np.complex128,
+            )
+            diagonal_groups = _diagonal_cyclotomic_groups(
+                diagonal,
+                root_order=root_order,
+            )
+            source_mapping = _eigenspace_group_mapping(
+                source_block,
+                diagonal_groups,
+                bound=bound,
+            )
+            allowed_edges = _allowed_involution_edges_for_mapping(
+                diagonal_groups,
+                source_mapping,
+            )
+            permutation_rows: list[
+                tuple[tuple[int, ...], int, complex, str]
+            ] = []
+            if dimension <= 12:
+                for permutation in _involutive_permutations(dimension):
+                    selected_edges = {
+                        (min(source, target), max(source, target))
+                        for source, target in enumerate(permutation)
+                    }
+                    if not selected_edges.issubset(allowed_edges):
+                        continue
+                    for phase_exponent, phase in phase_rows:
+                        permutation_rows.append(
+                            (
+                                tuple(int(value) for value in permutation),
+                                int(phase_exponent),
+                                complex(phase),
+                                "enumerated_involutions",
+                            )
+                        )
+            else:
+                for phase_exponent, phase in phase_rows:
+                    try:
+                        transposition_requirements = (
+                            _required_fixed_group_transpositions(
+                                source_block,
+                                diagonal_groups,
+                                source_mapping,
+                                phase=phase,
+                                bound=bound,
+                            )
+                            if len(quotient_cycle) == 1
+                            else ()
+                        )
+                        reference_blocks = tuple(
+                            np.asarray(c2.route_blocks[source])
+                            for source in involved_fibers
+                        )
+                        _permutation, optimal_cost = _milp_involution(
+                            reference_blocks,
+                            phase,
+                            allowed_edges=allowed_edges,
+                            required_transposition_counts=(
+                                transposition_requirements
+                            ),
+                        )
+                        permutation, _cost = _milp_involution(
+                            reference_blocks,
+                            phase,
+                            cost_bound=optimal_cost,
+                            roundoff_bound=bound,
+                            allowed_edges=allowed_edges,
+                            required_transposition_counts=(
+                                transposition_requirements
+                            ),
+                        )
+                    except JointExactificationError:
+                        continue
+                    permutation_rows.append(
+                        (
+                            tuple(int(value) for value in permutation),
+                            int(phase_exponent),
+                            complex(phase),
+                            "milp_involution_with_eigenspace_constraints",
+                        )
+                    )
+            for permutation, phase_exponent, phase, matching_solver in permutation_rows:
+                permutation_matrix = _permutation_matrix(permutation)
+                target_block = np.asarray(
+                    phase * permutation_matrix,
+                    dtype=np.complex128,
+                )
+                try:
+                    if len(quotient_cycle) == 1:
+                        source_stabilizer = _closest_fixed_c2_commutant(
+                            source_block,
+                            target_block,
+                            diagonal,
+                            common_frame,
+                            root_order=root_order,
+                            bound=bound,
+                        )
+                        target_stabilizer = source_stabilizer
+                    else:
+                        coefficient = np.asarray(
+                            len(primary_cycles[source_cycle]) * common_frame
+                            + len(primary_cycles[target_cycle])
+                            * target_block.conjugate().T
+                            @ common_frame
+                            @ source_block,
+                            dtype=np.complex128,
+                        )
+                        source_stabilizer = _block_commutant_procrustes(
+                            coefficient,
+                            diagonal_groups,
+                        )
+                        target_stabilizer = np.asarray(
+                            source_block
+                            @ source_stabilizer
+                            @ target_block.conjugate().T,
+                            dtype=np.complex128,
+                        )
+                except JointExactificationError:
+                    continue
+                trial_by_cycle = {
+                    int(source_cycle): source_stabilizer,
+                    int(target_cycle): target_stabilizer,
+                }
+                certification_failed = False
+                for value in trial_by_cycle.values():
+                    unitarity = float(
+                        np.linalg.norm(
+                            value.conjugate().T @ value - identity,
+                            ord="fro",
+                        )
+                    )
+                    preservation = float(
+                        np.linalg.norm(
+                            value.conjugate().T @ diagonal @ value - diagonal,
+                            ord="fro",
+                        )
+                    )
+                    if unitarity > bound or preservation > bound:
+                        certification_failed = True
+                        break
+                if certification_failed:
+                    continue
+                route_residual = 0.0
+                for source in involved_fibers:
+                    source_stabilizer = trial_by_cycle[cycle_by_fiber[source]]
+                    target_stabilizer = trial_by_cycle[
+                        cycle_by_fiber[int(c2.fiber_permutation[source])]
+                    ]
+                    actual = np.asarray(
+                        target_stabilizer.conjugate().T
+                        @ c2.route_blocks[source]
+                        @ source_stabilizer,
+                        dtype=np.complex128,
+                    )
+                    route_residual = max(
+                        route_residual,
+                        float(
+                            np.linalg.norm(
+                                actual - target_block,
+                                ord="fro",
+                            )
+                        ),
+                    )
+                if route_residual > bound:
+                    continue
+                objective = 0.0
+                for cycle_index in quotient_cycle:
+                    value = trial_by_cycle[int(cycle_index)]
+                    objective += len(primary_cycles[int(cycle_index)]) * float(
+                        np.linalg.norm(
+                            common_frame @ value - identity,
+                            ord="fro",
+                        )
+                        ** 2
+                    )
+                target_distance = sum(
+                    float(
+                        np.linalg.norm(
+                            target_block - c2.route_blocks[source],
+                            ord="fro",
+                        )
+                        ** 2
+                    )
+                    for source in involved_fibers
+                )
+                candidate_rows.append(
+                    (
+                        target_distance,
+                        objective,
+                        tuple(int(value) for value in permutation),
+                        int(phase_exponent),
+                        int(source_cycle),
+                        source_stabilizer,
+                        target_stabilizer,
+                        target_block,
+                        matching_solver,
+                    )
+                )
+        if not candidate_rows:
+            raise JointExactificationError(
+                "no C2 monomial target is reachable inside the Q-uniform "
+                f"{primary_name} orbit stabilizer for cycle {quotient_cycle}"
+            )
+        objective_bound = float(bound * max(1, len(involved_fibers)))
+        best_target_distance = min(row[0] for row in candidate_rows)
+        nearest_targets = [
+            row
+            for row in candidate_rows
+            if row[0] <= best_target_distance + objective_bound
+        ]
+        best_objective = min(row[1] for row in nearest_targets)
+        nearest = [
+            row
+            for row in nearest_targets
+            if row[1] <= best_objective + objective_bound
+        ]
+        selected = min(
+            nearest,
+            key=lambda row: (row[2], row[3], row[4]),
+        )
+        (
+            target_distance,
+            objective,
+            permutation,
+            phase_exponent,
+            source_cycle,
+            source_stabilizer,
+            target_stabilizer,
+            _target_block,
+            matching_solver,
+        ) = selected
+        target_cycle = int(induced[source_cycle])
+        if source_cycle == target_cycle:
+            assigned = {int(source_cycle): source_stabilizer}
+        else:
+            assigned = {
+                int(source_cycle): source_stabilizer,
+                int(target_cycle): target_stabilizer,
+            }
+        for cycle_index, value in assigned.items():
+            for fiber in primary_cycles[cycle_index]:
+                fiber_gauge[int(fiber)] = np.asarray(value, dtype=np.complex128)
+        reports.append(
+            {
+                "primary_cycles": [int(value) for value in quotient_cycle],
+                "source_cycle": int(source_cycle),
+                "target_cycle": int(target_cycle),
+                "internal_permutation": [int(value) for value in permutation],
+                "phase_exponent": int(phase_exponent),
+                "phase_order": int(phase_order),
+                "target_distance_squared": float(target_distance),
+                "proximity_objective": float(objective),
+                "nearest_candidate_count": int(len(nearest)),
+                "matching_solver": matching_solver,
+                "selection": "closest_continuous_q_uniform_orbit_stabilizer",
+            }
+        )
+    gauge = tuple(np.asarray(value, dtype=np.complex128) for value in fiber_gauge)
+    primary_reframed = _gauge_transform_fiber_actions(
+        {primary_name: primary},
+        gauge,
+    )[primary_name]
+    reference_block = np.asarray(primary_reframed.route_blocks[0])
+    primary_residual = max(
+        float(np.linalg.norm(block - reference_block, ord="fro"))
+        for block in primary_reframed.route_blocks
+    )
+    if primary_residual > bound:
+        raise JointExactificationError(
+            f"C2 orbit stabilizer broke Q-uniform {primary_name}: "
+            f"residual={primary_residual:.6e}, bound={bound:.6e}"
+        )
+    return gauge, {
+        "status": "certified",
+        "primary_cycle_count": int(len(primary_cycles)),
+        "C2_quotient_cycles": reports,
+        "primary_route_residual_max": primary_residual,
+        "certification_bound": bound,
+        "tie_break": "minimum_Frobenius_then_algebraic_lexicographic",
+    }
+
+
+def _derive_q_uniform_generator_result(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> StandardGeneratorFiberGaugeResult | None:
+    """Use one internal frame when a resolving finite generator is Q-uniform."""
+
+    from kp.basis.symmetry_gauge import (
+        SymmetryGaugeOperation,
+        derive_symmetry_adapted_internal_frame,
+    )
+
+    names = tuple(generator.name for generator in presentation.generators)
+    reference = actions[names[0]]
+    if max(reference.fiber_dimensions) <= 1:
+        return None
+    root_order = _cyclotomic_order_from_presentation(presentation)
+    uniform: dict[str, tuple[np.ndarray, float, float]] = {}
+    operation_rows: list[SymmetryGaugeOperation] = []
+    primary_candidates: set[str] = set()
+    for generator in presentation.generators:
+        action = actions[generator.name]
+        row = _uniform_route_block(action, root_order=root_order)
+        if row is None:
+            continue
+        block, _residual, _bound = row
+        power = _declared_generator_projective_power(
+            presentation,
+            generator.name,
+        )
+        uniform[generator.name] = row
+        operation_rows.append(
+            SymmetryGaugeOperation(
+                name=generator.name,
+                matrix=block,
+                antiunitary=generator.antiunitary,
+                power=power,
+                can_resolve=(
+                    not generator.antiunitary
+                    and generator.name != "C2"
+                    and power is not None
+                    and power >= 3
+                ),
+                can_pair=generator.antiunitary,
+                can_anchor=not generator.antiunitary,
+            )
+        )
+        if (
+            not generator.antiunitary
+            and generator.name != "C2"
+            and power is not None
+            and power >= 3
+        ):
+            primary_candidates.add(generator.name)
+    if not primary_candidates:
+        return None
+    adapted = derive_symmetry_adapted_internal_frame(
+        operation_rows,
+        tolerance=1.0e-10,
+    )
+    if (
+        adapted.status != "applied"
+        or adapted.primary_operation not in primary_candidates
+    ):
+        return None
+    primary_name = str(adapted.primary_operation)
+    adapted_frame = np.asarray(adapted.unitary, dtype=np.complex128)
+    primary_input = uniform[primary_name][0]
+    adapted_diagonal = np.asarray(
+        adapted_frame.conjugate().T @ primary_input @ adapted_frame,
+        dtype=np.complex128,
+    )
+    internal_frame, closest_stabilizer = _closest_algebraic_uniform_stabilizer(
+        adapted_frame,
+        adapted_diagonal,
+        root_order=root_order,
+    )
+    common_fiber_gauge = tuple(
+        internal_frame.copy() for _ in reference.fiber_dimensions
+    )
+    transformed = _gauge_transform_fiber_actions(actions, common_fiber_gauge)
+    primary_transformed = transformed[primary_name]
+    common_diagonal = np.asarray(
+        primary_transformed.route_blocks[0],
+        dtype=np.complex128,
+    )
+    off_diagonal = float(
+        np.linalg.norm(
+            common_diagonal - np.diag(np.diag(common_diagonal)),
+            ord="fro",
+        )
+    )
+    primary_uniform_residual = max(
+        float(np.linalg.norm(block - common_diagonal, ord="fro"))
+        for block in primary_transformed.route_blocks
+    )
+    primary_bound = uniform[primary_name][2]
+    if off_diagonal > primary_bound or primary_uniform_residual > primary_bound:
+        raise JointExactificationError(
+            f"Q-uniform {primary_name} frame did not produce one diagonal route: "
+            f"off_diagonal={off_diagonal:.6e}, "
+            f"uniform_residual={primary_uniform_residual:.6e}, "
+            f"bound={primary_bound:.6e}"
+        )
+    has_unitary_c2 = any(
+        generator.name == "C2" and not generator.antiunitary
+        for generator in presentation.generators
+    )
+    try:
+        if has_unitary_c2:
+            stabilizer_gauge, orbit_stabilizer_report = (
+                _q_uniform_c2_orbit_stabilizer_gauge(
+                    transformed,
+                    primary_name=primary_name,
+                    common_frame=internal_frame,
+                    root_order=root_order,
+                )
+            )
+            stabilized = _gauge_transform_fiber_actions(
+                transformed,
+                stabilizer_gauge,
+            )
+        else:
+            stabilizer_gauge = tuple(
+                np.eye(int(value), dtype=np.complex128)
+                for value in reference.fiber_dimensions
+            )
+            orbit_stabilizer_report = {
+                "status": "not_applicable",
+                "reason": "no_unitary_C2",
+            }
+            stabilized = transformed
+        algebraic = _canonicalize_ud_monomial_actions_without_c2(
+            stabilized,
+            presentation,
+        )
+    except JointExactificationError as exc:
+        raise JointExactificationError(
+            f"Q-uniform {primary_name} frame cannot be algebraically exactified "
+            f"without breaking its common route: {exc}"
+        ) from exc
+    target_actions = dict(algebraic.actions)
+    fiber_gauge = tuple(
+        np.asarray(common @ stabilizer, dtype=np.complex128)
+        for common, stabilizer in zip(
+            common_fiber_gauge,
+            stabilizer_gauge,
+        )
+    )
+    exact_primary = target_actions[primary_name]
+    exact_reference = np.asarray(exact_primary.route_blocks[0])
+    exact_uniform_residual = max(
+        float(np.linalg.norm(block - exact_reference, ord="fro"))
+        for block in exact_primary.route_blocks
+    )
+    if exact_uniform_residual != 0.0:
+        raise JointExactificationError(
+            f"algebraic {primary_name} routes are not bitwise Q-uniform: "
+            f"residual={exact_uniform_residual:.6e}"
+        )
+    relation_certification = certify_joint_block_actions(
+        target_actions,
+        presentation,
+    )
+    reframed = _gauge_transform_fiber_actions(actions, fiber_gauge)
+    common_gauge_residual = max(
+        float(np.linalg.norm(actual - expected, ord="fro"))
+        for name in names
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            target_actions[name].route_blocks,
+        )
+    )
+    matrix_bound = float(
+        8192.0
+        * np.finfo(np.float64).eps
+        * max(
+            1,
+            len(reference.fiber_dimensions),
+            len(names),
+            max(reference.fiber_dimensions),
+            root_order,
+        )
+    )
+    if common_gauge_residual > matrix_bound:
+        raise JointExactificationError(
+            "Q-uniform common internal frame does not reproduce its algebraic "
+            f"targets: residual={common_gauge_residual:.6e}, "
+            f"bound={matrix_bound:.6e}"
+        )
+    algebraic_report = dict(algebraic.report)
+    spectrum = [
+        [float(value.real), float(value.imag)]
+        for value in np.diag(exact_reference)
+    ]
+    return StandardGeneratorFiberGaugeResult(
+        actions=target_actions,
+        fiber_gauge=fiber_gauge,
+        gauge_angles=tuple(0.0 for _ in reference.fiber_dimensions),
+        report={
+            **algebraic_report,
+            "fiber_mode": "q_uniform_Ud",
+            "selection_policy": (
+                "one_common_internal_finite_generator_frame_then_"
+                "algebraic_monomial_exactification"
+            ),
+            "tie_break_policy": "deterministic_common_internal_eigenframe",
+            "uniform_generator": {
+                "name": primary_name,
+                "status": "certified",
+                "input_route_residual_max": uniform[primary_name][1],
+                "input_route_certification_bound": primary_bound,
+                "post_frame_off_diagonal_residual": off_diagonal,
+                "post_frame_route_residual_max": primary_uniform_residual,
+                "exact_route_residual_max": exact_uniform_residual,
+                "spectrum": spectrum,
+                "internal_frame": adapted.artifact(),
+                "closest_algebraic_stabilizer": closest_stabilizer,
+                "C2_orbit_stabilizer": orbit_stabilizer_report,
+            },
+            "C2_standardization_status": (
+                "certified_in_q_uniform_stabilizer_gauge"
+                if has_unitary_c2
+                else "not_applicable"
+            ),
+            "common_gauge_proximity_objective": float(
+                sum(
+                    np.linalg.norm(
+                        value - np.eye(value.shape[0]),
+                        ord="fro",
+                    )
+                    ** 2
+                    for value in fiber_gauge
+                )
+            ),
+            "common_gauge_residual_max": common_gauge_residual,
+            "common_gauge_certification_bound": matrix_bound,
+            "relation_certification": dict(relation_certification),
+        },
+    )
+
+
+def derive_standard_generator_fiber_gauge(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> StandardGeneratorFiberGaugeResult:
+    """Choose a certified standard generator gauge for scalar or free U(d) fibers.
+
+    Non-scalar free orbits are first parallel-transported to their exact central
+    cocycle.  The scalar cocycle then uses the same nearest uniform ``C2`` root
+    rule as U(1), while the remaining root-frame freedom is fixed by the global
+    minimum-Frobenius unitary Procrustes solution.
+    """
+
+    validate_presentation_action_relations(actions, presentation)
+    if all(
+        dimension == 1
+        for action in actions.values()
+        for dimension in action.fiber_dimensions
+    ):
+        scalar = derive_standard_generator_u1_gauge(actions, presentation)
+        report = dict(scalar.report)
+        if report.get("status") == "certified":
+            report["fiber_mode"] = "U1"
+        return StandardGeneratorFiberGaugeResult(
+            actions=scalar.actions,
+            fiber_gauge=scalar.fiber_gauge,
+            gauge_angles=scalar.gauge_angles,
+            report=report,
+        )
+
+    q_uniform = _derive_q_uniform_generator_result(actions, presentation)
+    if q_uniform is not None:
+        return q_uniform
+
+    names = tuple(generator.name for generator in presentation.generators)
+    has_unitary_c2 = any(
+        generator.name == "C2" and not generator.antiunitary
+        for generator in presentation.generators
+    )
+    reference = actions[names[0]]
+    orbits = compile_action_orbits(actions, presentation)
+
+    frames: dict[int, np.ndarray] = {}
+    parities: dict[int, bool] = {}
+    base_gauge: list[np.ndarray | None] = [None] * len(reference.fiber_dimensions)
+    free_roots: set[int] = set()
+    orbit_reports: list[dict[str, Any]] = []
+    for orbit in orbits:
+        orbit_frames = _canonical_transporter_frames(actions, orbit)
+        if orbit.stabilizer_words == ((),):
+            root_frame = np.eye(
+                int(reference.fiber_dimensions[orbit.root]),
+                dtype=np.complex128,
+            )
+            free_roots.add(orbit.root)
+            root_report: dict[str, Any] = {
+                "status": "free_orbit",
+                "transporter_policy": "canonical_shortest_words",
+            }
+        else:
+            root_frame, root_report = _canonical_stabilizer_root_frame(
+                actions,
+                presentation,
+                orbit,
+            )
+        for fiber, word in zip(orbit.fibers, orbit.transporter_words):
+            frames[fiber] = np.asarray(orbit_frames[fiber], dtype=np.complex128)
+            parities[fiber] = _transporter_antiunitary_parity(word, presentation)
+            base_gauge[fiber] = np.asarray(
+                orbit_frames[fiber]
+                @ semilinear_kappa(root_frame, parities[fiber]),
+                dtype=np.complex128,
+            )
+        orbit_reports.append(
+            {
+                "root": int(orbit.root),
+                "fibers": [int(value) for value in orbit.fibers],
+                "block_dimension": int(reference.fiber_dimensions[orbit.root]),
+                "stabilizer_size": int(len(orbit.stabilizer_words)),
+                "root_frame": root_report,
+            }
+        )
+
+    if any(value is None for value in base_gauge):
+        raise JointExactificationError(
+            "standard U(d) transporter construction did not assign every fiber"
+        )
+    certified_base_gauge = tuple(
+        np.asarray(value, dtype=np.complex128)
+        for value in base_gauge
+        if value is not None
+    )
+    base_actions = _gauge_transform_fiber_actions(actions, certified_base_gauge)
+    certify_joint_block_actions(base_actions, presentation)
+    fiber_count = len(reference.fiber_dimensions)
+    ud_standard = (
+        _standardize_ud_monomial_actions(
+            base_actions,
+            actions,
+            presentation,
+        )
+        if has_unitary_c2
+        else _canonicalize_ud_monomial_actions_without_c2(
+            base_actions,
+            presentation,
+        )
+    )
+    if ud_standard.report.get("status") != "certified":
+        return _identity_standard_generator_result(
+            actions,
+            reason=str(ud_standard.report.get("reason", "Ud_standardization_failed")),
+        )
+    target_actions = dict(ud_standard.actions)
+    relation_certification = certify_joint_block_actions(
+        target_actions,
+        presentation,
+    )
+
+    fiber_gauge: list[np.ndarray | None] = [None] * fiber_count
+    proximity_objective = 0.0
+    procrustes_reports: list[dict[str, Any]] = []
+    for orbit in orbits:
+        dimension = int(reference.fiber_dimensions[orbit.root])
+        if orbit.root not in free_roots:
+            for fiber in orbit.fibers:
+                value = np.asarray(
+                    certified_base_gauge[fiber]
+                    @ ud_standard.fiber_gauge[fiber],
+                    dtype=np.complex128,
+                )
+                fiber_gauge[fiber] = value
+                proximity_objective += float(
+                    np.linalg.norm(
+                        value - np.eye(dimension, dtype=np.complex128),
+                        ord="fro",
+                    )
+                    ** 2
+                )
+            procrustes_reports.append(
+                {
+                    "root": int(orbit.root),
+                    "status": "fixed_by_stabilizer_frame",
+                }
+            )
+            continue
+        coefficient = np.zeros((dimension, dimension), dtype=np.complex128)
+        for fiber in orbit.fibers:
+            frame = frames[fiber]
+            standard_gauge = ud_standard.fiber_gauge[fiber]
+            procrustes_factor = standard_gauge @ frame
+            coefficient += (
+                procrustes_factor
+                if not parities[fiber]
+                else procrustes_factor.conjugate()
+            )
+        root_unitary, singular_values, procrustes_certification = (
+            _deterministic_procrustes_unitary(coefficient)
+        )
+        for fiber in orbit.fibers:
+            residual_root = semilinear_kappa(root_unitary, parities[fiber])
+            value = np.asarray(
+                frames[fiber]
+                @ residual_root
+                @ ud_standard.fiber_gauge[fiber],
+                dtype=np.complex128,
+            )
+            fiber_gauge[fiber] = value
+            proximity_objective += float(
+                np.linalg.norm(
+                    value - np.eye(dimension, dtype=np.complex128),
+                    ord="fro",
+                )
+                ** 2
+            )
+        procrustes_reports.append(
+            {
+                "root": int(orbit.root),
+                "status": "minimum_frobenius_root_frame",
+                "singular_values": [float(value) for value in singular_values],
+                **procrustes_certification,
+            }
+        )
+    if any(value is None for value in fiber_gauge):
+        raise JointExactificationError(
+            "standard U(d) gauge did not assign every fiber"
+        )
+    certified_gauge = tuple(
+        np.asarray(value, dtype=np.complex128)
+        for value in fiber_gauge
+        if value is not None
+    )
+    reframed = _gauge_transform_fiber_actions(actions, certified_gauge)
+    common_gauge_residual_max = max(
+        float(np.linalg.norm(actual - expected, ord="fro"))
+        for name in names
+        for actual, expected in zip(
+            reframed[name].route_blocks,
+            target_actions[name].route_blocks,
+        )
+    )
+    matrix_bound = float(
+        8192.0
+        * np.finfo(np.float64).eps
+        * max(
+            1,
+            fiber_count,
+            len(names),
+            max(reference.fiber_dimensions),
+        )
+    )
+    if common_gauge_residual_max > matrix_bound:
+        raise JointExactificationError(
+            "common U(d) fiber gauge did not reproduce the standard "
+            f"generator targets: residual={common_gauge_residual_max:.6e}, "
+            f"bound={matrix_bound:.6e}"
+        )
+    standard_report = dict(ud_standard.report)
+    return StandardGeneratorFiberGaugeResult(
+        actions=target_actions,
+        fiber_gauge=certified_gauge,
+        gauge_angles=tuple(0.0 for _ in range(fiber_count)),
+        report={
+            **standard_report,
+            "fiber_mode": (
+                "free_orbit_Ud"
+                if len(free_roots) == len(orbits)
+                else "mixed_free_stabilized_Ud"
+                if free_roots
+                else "stabilized_orbit_Ud"
+            ),
+            "selection_policy": (
+                "nearest_uniform_monomial_C2_then_closest_common_Ud_gauge"
+                if has_unitary_c2
+                else "algebraic_monomial_orbit_frame_then_closest_common_Ud_gauge"
+            ),
+            "tie_break_policy": "global_unitary_procrustes_per_free_orbit",
+            "orbit_transport": orbit_reports,
+            "procrustes": procrustes_reports,
+            "common_gauge_proximity_objective": proximity_objective,
+            "common_gauge_residual_max": common_gauge_residual_max,
+            "common_gauge_certification_bound": matrix_bound,
+            "relation_certification": dict(relation_certification),
+        },
+    )
+
+
+@dataclass(frozen=True)
 class JointExactificationConfig:
     """Numerical safety gates shared by joint exactification stages."""
 
@@ -1397,6 +4285,52 @@ class JointExactificationConfig:
             _positive_limit(self.max_iterations, label="maximum iteration count"),
         )
         object.__setattr__(self, "enabled", bool(self.enabled))
+
+
+def condition_limited_svd_rank(
+    singular_values: Sequence[float],
+    *,
+    matrix_shape: Sequence[int],
+    condition_limit: float,
+) -> tuple[int, float, int, float]:
+    """Select the stable SVD subspace used by a minimum-norm Newton step.
+
+    Directions below the floating-point numerical-rank bound are null.  A
+    direction that is numerically nonzero but would make the retained system
+    more ill-conditioned than ``condition_limit`` is also left in the null
+    space.  This is a truncated-SVD solve: convergence and the final relation
+    certificate remain the authority, so a discarded direction can never
+    silently hide a required correction.
+    """
+
+    values = np.asarray(tuple(singular_values), dtype=np.float64)
+    if values.ndim != 1 or values.size == 0 or not np.all(np.isfinite(values)):
+        raise JointExactificationError(
+            "SVD singular values must be one nonempty finite vector"
+        )
+    largest = float(values[0])
+    if largest <= 0.0 or np.any(values < 0.0):
+        raise JointExactificationError("SVD system has zero rank")
+    limit = float(condition_limit)
+    if not np.isfinite(limit) or limit <= 1.0:
+        raise JointExactificationError(
+            "SVD condition limit must be finite and greater than one"
+        )
+    shape = tuple(int(value) for value in matrix_shape)
+    if not shape or any(value <= 0 for value in shape):
+        raise JointExactificationError("SVD matrix shape must be positive")
+    numerical_cutoff = float(
+        largest * max(shape) * np.finfo(np.float64).eps
+    )
+    numerical_rank = int(np.count_nonzero(values > numerical_cutoff))
+    stable_cutoff = float(max(numerical_cutoff, largest / limit))
+    rank = int(np.count_nonzero(values > stable_cutoff))
+    if rank == 0:
+        raise JointExactificationError(
+            "SVD system has no direction inside the configured condition limit"
+        )
+    condition_number = float(largest / values[rank - 1])
+    return rank, condition_number, numerical_rank, stable_cutoff
 
 
 @dataclass(frozen=True)
@@ -1506,7 +4440,10 @@ class StabilizedOrbitReport:
     iterations: int
     converged: bool
     rank: int
+    numerical_rank: int
     nullity: int
+    stable_svd_cutoff: float
+    truncated_direction_count: int
     condition_number: float
     relation_objective_initial: float
     relation_objective_final: float
@@ -1523,7 +4460,13 @@ class StabilizedOrbitReport:
         object.__setattr__(self, "iterations", int(self.iterations))
         object.__setattr__(self, "converged", bool(self.converged))
         object.__setattr__(self, "rank", int(self.rank))
+        object.__setattr__(self, "numerical_rank", int(self.numerical_rank))
         object.__setattr__(self, "nullity", int(self.nullity))
+        object.__setattr__(
+            self,
+            "truncated_direction_count",
+            int(self.truncated_direction_count),
+        )
 
 
 def _evaluate_route_word(
@@ -1805,6 +4748,8 @@ def exactify_stabilized_orbit(
     )
     condition_number = 1.0
     rank = 0
+    numerical_rank = 0
+    stable_svd_cutoff = 0.0
     iterations = 0
     converged = False
     for _ in range(config.max_iterations + 1):
@@ -1817,18 +4762,13 @@ def exactify_stabilized_orbit(
         left, singular_values, right_h = np.linalg.svd(jacobian, full_matrices=False)
         if singular_values.size == 0 or singular_values[0] == 0.0:
             raise JointExactificationError("stabilized-orbit Jacobian has zero rank")
-        rank_tolerance = float(
-            singular_values[0] * max(jacobian.shape) * epsilon
-        )
-        rank = int(np.count_nonzero(singular_values > rank_tolerance))
-        if rank == 0:
-            raise JointExactificationError("stabilized-orbit Jacobian has zero rank")
-        condition_number = float(singular_values[0] / singular_values[rank - 1])
-        if condition_number > config.condition_limit:
-            raise JointExactificationError(
-                "stabilized-orbit Jacobian exceeds condition limit: "
-                f"condition={condition_number:.6e}, limit={config.condition_limit:.6e}"
+        rank, condition_number, numerical_rank, stable_svd_cutoff = (
+            condition_limited_svd_rank(
+                singular_values,
+                matrix_shape=jacobian.shape,
+                condition_limit=config.condition_limit,
             )
+        )
         step = right_h[:rank, :].T @ (
             (left[:, :rank].T @ (-residual)) / singular_values[:rank]
         )
@@ -1906,7 +4846,10 @@ def exactify_stabilized_orbit(
         iterations=iterations,
         converged=True,
         rank=rank,
+        numerical_rank=numerical_rank,
         nullity=len(variables) * len(basis) - rank,
+        stable_svd_cutoff=stable_svd_cutoff,
+        truncated_direction_count=max(0, numerical_rank - rank),
         condition_number=condition_number,
         relation_objective_initial=objective_initial,
         relation_objective_final=float(np.dot(residual, residual)),
@@ -2353,18 +5296,13 @@ def synchronize_free_orbit(
                 raise JointExactificationError(
                     "free-orbit synchronization Jacobian has zero rank"
                 )
-            rank_tolerance = float(
-                singular_values[0] * max(jacobian.shape) * epsilon
-            )
-            rank = int(np.count_nonzero(singular_values > rank_tolerance))
-            smallest = float(singular_values[rank - 1])
-            condition_number = float(singular_values[0] / smallest)
-            if condition_number > config.condition_limit:
-                raise JointExactificationError(
-                    "free-orbit synchronization Jacobian exceeds condition limit: "
-                    f"condition={condition_number:.6e}, "
-                    f"limit={config.condition_limit:.6e}"
+            rank, condition_number, _numerical_rank, _stable_cutoff = (
+                condition_limited_svd_rank(
+                    singular_values,
+                    matrix_shape=jacobian.shape,
+                    condition_limit=config.condition_limit,
                 )
+            )
             gradient = jacobian.T @ residual
             gradient_bound = float(
                 256.0
@@ -2589,8 +5527,11 @@ def _joint_relation_certification_bound(
         for dimension in action.fiber_dimensions
     )
     maximum_word_length = max(
-        len(relation.lhs) + len(relation.rhs)
-        for relation in presentation.relations
+        (
+            len(relation.lhs) + len(relation.rhs)
+            for relation in presentation.relations
+        ),
+        default=1,
     )
     maximum_orbit_coordinate_count = max(
         len(presentation.generators)
@@ -2609,6 +5550,36 @@ def _joint_relation_certification_bound(
             maximum_orbit_coordinate_count,
         )
     )
+
+
+def certify_joint_block_actions(
+    actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+) -> dict[str, Any]:
+    """Certify every declared relation without changing any route block."""
+
+    validate_presentation_action_relations(actions, presentation)
+    orbits = compile_action_orbits(actions, presentation)
+    relation_table, relation_maximum = _relation_residual_summary(
+        actions,
+        presentation,
+    )
+    certification_bound = _joint_relation_certification_bound(
+        actions,
+        presentation,
+        orbits,
+    )
+    if relation_maximum > certification_bound:
+        raise JointExactificationError(
+            "joint relation certification failed: "
+            f"residual={relation_maximum:.6e}, bound={certification_bound:.6e}"
+        )
+    return {
+        "status": "certified",
+        "relation_residuals": relation_table,
+        "relation_residual_max": relation_maximum,
+        "relation_certification_bound": certification_bound,
+    }
 
 
 def _operation_correction_metrics(
@@ -2709,6 +5680,22 @@ def _presentation_from_metadata(metadata: Mapping[str, Any]) -> MagneticPresenta
     )
 
 
+def magnetic_presentation_artifact(
+    presentation: MagneticPresentation,
+) -> dict[str, Any]:
+    """Return the stable JSON representation of a magnetic presentation."""
+
+    return _presentation_metadata(presentation)
+
+
+def magnetic_presentation_from_artifact(
+    metadata: Mapping[str, Any],
+) -> MagneticPresentation:
+    """Reconstruct a magnetic presentation from its stable JSON artifact."""
+
+    return _presentation_from_metadata(metadata)
+
+
 def _free_orbit_report_metadata(report: FreeOrbitReport) -> dict[str, Any]:
     return {
         "kind": "free",
@@ -2741,7 +5728,10 @@ def _stabilized_orbit_report_metadata(
         "iterations": report.iterations,
         "converged": report.converged,
         "rank": report.rank,
+        "numerical_rank": report.numerical_rank,
         "nullity": report.nullity,
+        "stable_svd_cutoff": report.stable_svd_cutoff,
+        "truncated_direction_count": report.truncated_direction_count,
         "condition_number": report.condition_number,
         "relation_objective_initial": report.relation_objective_initial,
         "relation_objective_final": report.relation_objective_final,
@@ -2931,6 +5921,13 @@ def joint_exactify_block_actions(
         "route_correction_max": correction_max,
         "orbit_reports": orbit_reports,
     }
+    if dimensions == {1}:
+        closest = derive_closest_cyclotomic_u1_gauge(
+            working,
+            presentation,
+            reference_actions=before,
+        )
+        report["closest_cyclotomic_u1_gauge"] = dict(closest.report)
     metadata, arrays = _build_joint_artifact(
         before,
         working,
@@ -2941,6 +5938,264 @@ def joint_exactify_block_actions(
     )
     return JointExactificationResult(
         actions=working,
+        presentation=presentation,
+        report=report,
+        artifact_metadata=metadata,
+        artifact_arrays=arrays,
+    )
+
+
+def reframe_joint_exactification_result(
+    result: JointExactificationResult,
+    actions: Mapping[str, BlockRouteAction],
+    *,
+    provenance: Mapping[str, Any],
+) -> JointExactificationResult:
+    """Rebuild a certified artifact after one common continuum-basis gauge."""
+
+    expected_names = tuple(generator.name for generator in result.presentation.generators)
+    if set(actions) != set(expected_names):
+        raise JointExactificationError(
+            "reframed joint actions must contain exactly the declared generators"
+        )
+    for name in expected_names:
+        before = result.actions[name]
+        after = actions[name]
+        if (
+            before.antiunitary != after.antiunitary
+            or before.fiber_permutation != after.fiber_permutation
+            or before.fiber_dimensions != after.fiber_dimensions
+            or before.fiber_indices != after.fiber_indices
+        ):
+            raise JointExactificationError(
+                f"common gauge changed the discrete route layout for operation {name!r}"
+            )
+    certification = certify_joint_block_actions(actions, result.presentation)
+    report = dict(result.report)
+    report["post_gauge_certification"] = certification
+    raw_config = result.artifact_metadata.get("config", {})
+    if not isinstance(raw_config, Mapping):
+        raise JointExactificationError("joint artifact lacks its effective configuration")
+    config = JointExactificationConfig(
+        enabled=bool(raw_config.get("enabled", True)),
+        max_rms_correction=float(raw_config["max_rms_correction"]),
+        max_route_correction=float(raw_config["max_route_correction"]),
+        central_branch_margin=float(raw_config["central_branch_margin"]),
+        max_iterations=int(raw_config["max_iterations"]),
+        condition_limit=float(raw_config["condition_limit"]),
+    )
+    metadata, arrays = _build_joint_artifact(
+        result.actions,
+        actions,
+        result.presentation,
+        report,
+        config,
+        float(certification["relation_certification_bound"]),
+    )
+    metadata["stage1_action_hashes"] = dict(
+        result.artifact_metadata["stage1_action_hashes"]
+    )
+    metadata["pre_gauge_joint_action_hashes"] = dict(
+        result.artifact_metadata["joint_action_hashes"]
+    )
+    metadata["pre_gauge_artifact_hash"] = str(
+        result.artifact_metadata["artifact_hash"]
+    )
+    metadata["post_exactification_gauge"] = dict(provenance)
+    metadata_without_hash = dict(metadata)
+    metadata_without_hash.pop("artifact_hash", None)
+    metadata["artifact_hash"] = _joint_artifact_hash(metadata_without_hash, arrays)
+    return JointExactificationResult(
+        actions=actions,
+        presentation=result.presentation,
+        report=report,
+        artifact_metadata=metadata,
+        artifact_arrays=arrays,
+    )
+
+
+def certify_fixed_target_joint_result(
+    target_actions: Mapping[str, BlockRouteAction],
+    presentation: MagneticPresentation,
+    *,
+    config: JointExactificationConfig,
+    provenance: Mapping[str, Any],
+    fixed_target_certificate: Mapping[str, Any],
+    diagnostic_result: JointExactificationResult | None = None,
+) -> JointExactificationResult:
+    """Build production output directly from the project-owned target.
+
+    A free joint solver result is deliberately optional and diagnostic-only.
+    It can neither select the final gauge nor influence the final route blocks.
+    """
+
+    expected_names = tuple(generator.name for generator in presentation.generators)
+    if set(target_actions) != set(expected_names):
+        raise JointExactificationError(
+            "fixed target must contain exactly the declared generators"
+        )
+    for generator in presentation.generators:
+        action = target_actions[generator.name]
+        if bool(action.antiunitary) != bool(generator.antiunitary):
+            raise JointExactificationError(
+                f"fixed target antiunitary parity mismatch for {generator.name!r}"
+            )
+
+    expected_name_set = set(expected_names)
+    certificate_hashes = fixed_target_certificate.get("target_matrix_hashes")
+    if not isinstance(certificate_hashes, Mapping):
+        raise JointExactificationError(
+            "fixed target certificate lacks target matrix hashes"
+        )
+    if set(certificate_hashes) != expected_name_set:
+        raise JointExactificationError(
+            "fixed target certificate target matrix hash names do not match "
+            "the supplied target actions"
+        )
+    for name in expected_names:
+        actual_hash = hash_array(materialize_block_route_action(target_actions[name]))
+        if certificate_hashes[name] != actual_hash:
+            raise JointExactificationError(
+                f"fixed target certificate target matrix hash mismatch for {name!r}"
+            )
+
+    certificate_parity = fixed_target_certificate.get("operation_antiunitary")
+    if (
+        not isinstance(certificate_parity, Mapping)
+        or set(certificate_parity) != expected_name_set
+    ):
+        raise JointExactificationError(
+            "fixed target certificate antiunitary parity names do not match "
+            "the supplied target actions"
+        )
+    for name in expected_names:
+        declared_parity = certificate_parity[name]
+        if not isinstance(declared_parity, (bool, np.bool_)) or bool(
+            declared_parity
+        ) != bool(target_actions[name].antiunitary):
+            raise JointExactificationError(
+                f"fixed target certificate antiunitary parity mismatch for {name!r}"
+            )
+
+    certificate_layout = fixed_target_certificate.get("route_layout")
+    if (
+        not isinstance(certificate_layout, Mapping)
+        or set(certificate_layout) != expected_name_set
+    ):
+        raise JointExactificationError(
+            "fixed target certificate route layout names do not match "
+            "the supplied target actions"
+        )
+    for name in expected_names:
+        action = target_actions[name]
+        expected_layout = {
+            "fiber_permutation": list(action.fiber_permutation),
+            "fiber_dimensions": list(action.fiber_dimensions),
+            "fiber_indices": [list(group) for group in action.fiber_indices],
+        }
+        declared_layout = certificate_layout[name]
+        if not isinstance(declared_layout, Mapping) or any(
+            declared_layout.get(field) != value
+            for field, value in expected_layout.items()
+        ):
+            raise JointExactificationError(
+                f"fixed target certificate route layout mismatch for {name!r}"
+            )
+
+    cleanup = fixed_target_certificate.get(
+        "post_exactification_storage_cleanup", {}
+    )
+    expected_cleanup_version = "post_exactification_storage_cleanup_v1"
+    if (
+        fixed_target_certificate.get("status") != "certified"
+        or fixed_target_certificate.get("numeric_entries_modified") != 0
+        or fixed_target_certificate.get("numeric_entries_modified_scope")
+        != expected_cleanup_version
+        or not isinstance(cleanup, Mapping)
+        or cleanup.get("version") != expected_cleanup_version
+        or cleanup.get("numeric_entries_modified") != 0
+        or cleanup.get("threshold_cleanup_performed") is not False
+    ):
+        raise JointExactificationError(
+            "fixed target lacks a zero-mutation post-exactification storage certificate"
+        )
+    if fixed_target_certificate.get("additional_basis_gauge_applied") is not False:
+        raise JointExactificationError(
+            "fixed target certificate must prove that no additional basis gauge was applied"
+        )
+
+    relation_certification = certify_joint_block_actions(
+        target_actions,
+        presentation,
+    )
+    diagnostic_record: dict[str, Any]
+    if diagnostic_result is None:
+        diagnostic_record = {
+            "status": "not_run",
+            "production_used": False,
+            "reason": "project_owned_target_is_authoritative",
+        }
+    else:
+        diagnostic_record = {
+            "status": str(
+                diagnostic_result.artifact_metadata.get("status", "unknown")
+            ),
+            "production_used": False,
+            "artifact_hash": str(
+                diagnostic_result.artifact_metadata.get("artifact_hash", "")
+            ),
+            "joint_action_hashes": dict(
+                diagnostic_result.artifact_metadata.get("joint_action_hashes", {})
+            ),
+        }
+    residuals = dict(relation_certification["relation_residuals"])
+    residual_max = float(relation_certification["relation_residual_max"])
+    report: dict[str, Any] = {
+        "status": "certified",
+        "production_path": "persisted_project_owned_fixed_target",
+        "fixed_target_exactification": dict(fixed_target_certificate),
+        "project_target_relation_certification": relation_certification,
+        "relation_certification_bound": float(
+            relation_certification["relation_certification_bound"]
+        ),
+        "pre_relation_residuals": residuals,
+        "pre_relation_residual_max": residual_max,
+        "post_relation_residuals": residuals,
+        "post_relation_residual_max": residual_max,
+        "route_correction_rms_by_operation": dict(
+            fixed_target_certificate.get("correction_rms_by_operation", {})
+        ),
+        "route_correction_max_by_operation": dict(
+            fixed_target_certificate.get("correction_max_by_operation", {})
+        ),
+        "route_correction_rms": float(
+            fixed_target_certificate.get("correction_rms", 0.0)
+        ),
+        "route_correction_max": float(
+            fixed_target_certificate.get("correction_max", 0.0)
+        ),
+        "diagnostic_joint_result": diagnostic_record,
+    }
+    metadata, arrays = _build_joint_artifact(
+        target_actions,
+        target_actions,
+        presentation,
+        report,
+        config,
+        float(relation_certification["relation_certification_bound"]),
+    )
+    metadata["production_action_source"] = "persisted_project_canonical_target"
+    metadata["fixed_target_exactification"] = {
+        "provenance": dict(provenance),
+        "certificate": dict(fixed_target_certificate),
+        "additional_basis_gauge_applied": False,
+    }
+    metadata["diagnostic_joint_result"] = diagnostic_record
+    metadata_without_hash = dict(metadata)
+    metadata_without_hash.pop("artifact_hash", None)
+    metadata["artifact_hash"] = _joint_artifact_hash(metadata_without_hash, arrays)
+    return JointExactificationResult(
+        actions=target_actions,
         presentation=presentation,
         report=report,
         artifact_metadata=metadata,
@@ -3030,6 +6285,8 @@ __all__ = [
     "QuotientGroupElement",
     "SemilinearBlock",
     "StabilizedOrbitReport",
+    "certify_joint_block_actions",
+    "certify_fixed_target_joint_result",
     "compile_action_orbits",
     "compile_continuum_magnetic_presentation",
     "compile_quotient_group_elements",
@@ -3039,9 +6296,12 @@ __all__ = [
     "inverse_semilinear",
     "joint_exactify_block_actions",
     "load_joint_exactification_artifact",
+    "magnetic_presentation_artifact",
+    "magnetic_presentation_from_artifact",
     "materialize_block_route_action",
     "pack_skew_hermitian",
     "project_u1_relations",
+    "reframe_joint_exactification_result",
     "semilinear_kappa",
     "synchronize_free_orbit",
     "unpack_skew_hermitian",

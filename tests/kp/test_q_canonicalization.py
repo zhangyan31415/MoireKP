@@ -104,6 +104,25 @@ def test_identity_only_geometry_is_preserved_exactly() -> None:
     assert result.artifact["max_correction"] == 0.0
 
 
+def test_inactive_zero_orbital_sector_does_not_require_permutation_items() -> None:
+    inactive = np.array([[0.0, 0.0], [0.2, 0.0]], dtype=float)
+    active = np.array([[0.1, 0.0], [-0.1, 0.0]], dtype=float)
+    operation = _operation(
+        "twofold",
+        {"type": "negation"},
+        _items("L2", "L2", [1, 0]),
+    )
+
+    result = canonicalize_q_geometry(
+        {"L1": inactive, "L2": active},
+        [operation],
+        active_sectors=("L2",),
+    )
+
+    np.testing.assert_array_equal(result.canonical_q["L1"], inactive)
+    assert result.artifact["active_sectors"] == ["L2"]
+
+
 def test_rejects_conflicting_discrete_permutation() -> None:
     raw = np.array([[0.1, 0.0], [-0.1, 0.0]], dtype=float)
     items = _items("L1", "L1", [1, 0])

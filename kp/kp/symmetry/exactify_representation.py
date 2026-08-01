@@ -1,12 +1,22 @@
 from __future__ import annotations
 
 import copy
+import itertools
 import json
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 
 import numpy as np
+
+from .joint_exactification import (
+    JointExactificationConfig,
+    JointExactificationError,
+    compile_continuum_magnetic_presentation,
+    extract_block_route_action,
+    joint_exactify_block_actions,
+    materialize_block_route_action,
+)
 
 @dataclass(frozen=True)
 class OperationAction:
@@ -59,6 +69,7 @@ class ExactificationReport:
     distance_mod_global_phase: float = 0.0
     group_residuals: dict[str, float] = field(default_factory=dict)
     joint_group_residuals: dict[str, float] = field(default_factory=dict)
+    algebraic_canonicalization: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -1006,6 +1017,82 @@ def _snap_block_unitary(U: np.ndarray, *, power: int, central_phase: complex) ->
     return eigvecs @ np.diag(snapped) @ np.linalg.inv(eigvecs)
 
 
+def _gamma_spinful_c3_four_state_template() -> np.ndarray:
+    sqrt3 = np.sqrt(3.0)
+    return np.array(
+        [
+            [-0.25 - 0.25j * sqrt3, -0.25 * sqrt3 - 0.75j, 0.0, 0.0],
+            [0.25 * sqrt3 + 0.75j, -0.25 - 0.25j * sqrt3, 0.0, 0.0],
+            [0.0, 0.0, -0.25 + 0.25j * sqrt3, -0.25 * sqrt3 + 0.75j],
+            [0.0, 0.0, 0.25 * sqrt3 - 0.75j, -0.25 + 0.25j * sqrt3],
+        ],
+        dtype=np.complex128,
+    )
+
+
+def _canonicalize_gamma_spinful_c3_four_state(
+    matrix: np.ndarray,
+    *,
+    mode: str,
+    match_tol: float,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    arr = np.asarray(matrix, dtype=np.complex128)
+    required = mode == "gamma_spinful_c3_4"
+    if arr.shape != (4, 4):
+        if required:
+            raise ValueError(
+                "gamma_spinful_c3_4 algebraic exactification requires a 4x4 internal block"
+            )
+        return arr, {
+            "status": "not_applicable",
+            "template": "gamma_spinful_c3_4",
+            "shape": list(arr.shape),
+        }
+
+    base = _gamma_spinful_c3_four_state_template()
+    sqrt3 = np.sqrt(3.0)
+    roots = [
+        1.0 + 0.0j,
+        -0.5 + 0.5j * sqrt3,
+        -0.5 - 0.5j * sqrt3,
+    ]
+    best_matrix: np.ndarray | None = None
+    best_distance = float("inf")
+    best_branch: dict[str, Any] | None = None
+    for conjugated in (False, True):
+        branch_base = base.conj() if conjugated else base
+        for permutation in itertools.permutations(range(4)):
+            permuted = branch_base[np.ix_(permutation, permutation)]
+            for root_index, root in enumerate(roots):
+                candidate = complex(root) * permuted
+                distance = float(np.linalg.norm(arr - candidate) / max(np.linalg.norm(candidate), 1.0))
+                if distance < best_distance:
+                    best_matrix = candidate
+                    best_distance = distance
+                    best_branch = {
+                        "conjugated": bool(conjugated),
+                        "permutation": [int(value) for value in permutation],
+                        "global_root_power": int(root_index),
+                    }
+
+    assert best_matrix is not None and best_branch is not None
+    report = {
+        "status": "canonicalized" if best_distance <= float(match_tol) else "not_recognized",
+        "template": "gamma_spinful_c3_4",
+        "match_distance": float(best_distance),
+        "match_tolerance": float(match_tol),
+        "selected_branch": best_branch,
+    }
+    if best_distance <= float(match_tol):
+        return np.asarray(best_matrix, dtype=np.complex128), report
+    if required:
+        raise ValueError(
+            "C3z block does not match required gamma_spinful_c3_4 algebraic template: "
+            f"distance={best_distance:.3e}, tolerance={float(match_tol):.3e}"
+        )
+    return arr, report
+
+
 def exactify_block_monomial_representation(
     D_num: np.ndarray,
     groups: Sequence[tuple[np.ndarray, np.ndarray]],
@@ -1016,6 +1103,8 @@ def exactify_block_monomial_representation(
     antiunitary: bool,
     reject_if_off_support_rel_gt: float = 1.0e-6,
     reject_if_amplitude_deviation_gt: float = 2.0e-2,
+    algebraic_template: str | None = None,
+    algebraic_match_tol: float = 1.0e-5,
 ) -> tuple[np.ndarray, ExactificationReport]:
     arr = np.asarray(D_num, dtype=complex)
     input_report = analyze_block_support(arr, groups)
@@ -1042,13 +1131,29 @@ def exactify_block_monomial_representation(
         aligned_blocks.append(block * alpha)
     U_avg = _polar_unitary(sum(aligned_blocks))
     U_exact = _snap_block_unitary(U_avg, power=power, central_phase=central_phase)
+    algebraic_report: dict[str, Any] = {}
+    template_mode = str(algebraic_template or "none").strip().lower()
+    if template_mode not in {"none", "auto", "gamma_spinful_c3_4"}:
+        raise ValueError(f"Unsupported algebraic block template {algebraic_template!r}")
+    if template_mode in {"auto", "gamma_spinful_c3_4"} and operation_name == "C3z":
+        U_exact, algebraic_report = _canonicalize_gamma_spinful_c3_four_state(
+            U_exact,
+            mode=template_mode,
+            match_tol=float(algebraic_match_tol),
+        )
     exact = np.zeros_like(arr, dtype=complex)
     for rows, cols in groups:
         exact[np.ix_(rows, cols)] = U_exact
     if antiunitary:
         power_residual = antiunitary_square_residual(U_exact, central_phase)
     else:
-        power_residual = float(np.linalg.norm(np.linalg.matrix_power(U_exact, int(power)) - complex(central_phase) * np.eye(U_exact.shape[0])) / np.sqrt(U_exact.shape[0]))
+        power_residual = float(
+            np.linalg.norm(
+                np.linalg.matrix_power(U_exact, int(power))
+                - complex(central_phase) * np.eye(U_exact.shape[0])
+            )
+            / np.sqrt(U_exact.shape[0])
+        )
     if power_residual > 1.0e-8:
         raise ValueError(
             f"{operation_name} block exactification failed: group power residual {power_residual:.3e} exceeds 1.000e-08"
@@ -1072,7 +1177,11 @@ def exactify_block_monomial_representation(
             "input_off_support_rel": float(input_report.off_support_rel),
             "input_off_support_max": float(input_report.off_support_max),
         },
-        notes=["block_exactification"],
+        algebraic_canonicalization=algebraic_report,
+        notes=[
+            "block_exactification",
+            *(["algebraic_gamma_spinful_c3_4"] if algebraic_report.get("status") == "canonicalized" else []),
+        ],
     )
     return exact, exact_report
 
@@ -1263,6 +1372,132 @@ def _power_relation_for_exactification(
     return power, central_phase, "legacy_config_or_name", {"type": "power", "power": power, "phase": central_phase}, True
 
 
+def _joint_exactification_config(
+    exact_cfg: Mapping[str, Any],
+) -> tuple[JointExactificationConfig | None, bool]:
+    raw = exact_cfg.get("joint_exactification", {})
+    if isinstance(raw, bool):
+        enabled = bool(raw)
+        settings: Mapping[str, Any] = {}
+    elif raw is None:
+        enabled = True
+        settings = {}
+    elif isinstance(raw, Mapping):
+        enabled = bool(raw.get("enabled", True))
+        settings = raw
+    else:
+        raise ValueError("exactification.joint_exactification must be a mapping or boolean")
+    required = bool(settings.get("required", False))
+    if not enabled:
+        if required:
+            raise ValueError("joint exactification cannot be both disabled and required")
+        return None, False
+    allowed = {
+        "enabled",
+        "required",
+        "max_rms_correction",
+        "max_route_correction",
+        "central_branch_margin",
+        "max_iterations",
+        "condition_limit",
+    }
+    unknown = sorted(set(settings) - allowed)
+    if unknown:
+        raise ValueError(f"Unsupported joint exactification keys: {unknown}")
+    kwargs = {
+        key: settings[key]
+        for key in (
+            "max_rms_correction",
+            "max_route_correction",
+            "central_branch_margin",
+            "max_iterations",
+            "condition_limit",
+        )
+        if key in settings
+    }
+    return JointExactificationConfig(enabled=True, **kwargs), required
+
+
+def _joint_fiber_indices(labels: Sequence[BasisLabel]) -> tuple[tuple[int, ...], ...]:
+    fibers: dict[tuple[str, tuple[int, int]], list[BasisLabel]] = {}
+    for label in labels:
+        if label.q_integer is None:
+            raise JointExactificationError(
+                f"basis label {label.index} lacks exact integer Q coordinates"
+            )
+        key = (str(label.sector), tuple(int(value) for value in label.q_integer))
+        fibers.setdefault(key, []).append(label)
+    ordered: list[tuple[int, ...]] = []
+    for members in fibers.values():
+        members.sort(key=lambda item: (int(item.orbital), int(item.index)))
+        ordered.append(tuple(int(item.index) for item in members))
+    return tuple(ordered)
+
+
+def _joint_fiber_permutation(
+    label_action: LabelAction,
+    fiber_indices: Sequence[Sequence[int]],
+) -> tuple[int, ...]:
+    index_to_fiber = {
+        int(index): int(fiber)
+        for fiber, members in enumerate(fiber_indices)
+        for index in members
+    }
+    permutation: list[int] = []
+    for source, members in enumerate(fiber_indices):
+        targets = {
+            index_to_fiber[int(label_action.perm[int(index)])]
+            for index in members
+        }
+        if len(targets) != 1:
+            raise JointExactificationError(
+                "resolved operation does not map a complete continuum fiber to one "
+                f"target fiber: operation={label_action.operation.name!r}, "
+                f"source={source}, targets={sorted(targets)}"
+            )
+        target = next(iter(targets))
+        if len(tuple(fiber_indices[target])) != len(tuple(members)):
+            raise JointExactificationError(
+                "resolved operation changes a continuum fiber dimension: "
+                f"operation={label_action.operation.name!r}, source={source}, "
+                f"target={target}"
+            )
+        permutation.append(int(target))
+    return tuple(permutation)
+
+
+def _joint_presentation_record(
+    *,
+    name: str,
+    report: Mapping[str, Any],
+) -> dict[str, Any]:
+    resolved_action = report.get("resolved_action")
+    relation = report.get("group_relation")
+    if not isinstance(resolved_action, Mapping):
+        raise JointExactificationError(
+            f"operation {name!r} lacks a resolved model action"
+        )
+    if report.get("group_relation_source") != "manifest" or not isinstance(
+        relation, Mapping
+    ):
+        raise JointExactificationError(
+            f"operation {name!r} lacks an explicit manifest power relation"
+        )
+    power_relation = {
+        "type": "power",
+        "operation": str(name),
+        "power": int(relation["power"]),
+        "phase": relation["phase"],
+    }
+    return {
+        "name": str(name),
+        "operation": str(name),
+        "antiunitary": bool(resolved_action.get("antiunitary", False)),
+        "declared_model_action": copy.deepcopy(dict(resolved_action)),
+        "group_relations": [power_relation],
+    }
+
+
 def exactify_loaded_symmetry_source(
     *,
     loaded_metadata: Mapping[str, Any],
@@ -1328,6 +1563,10 @@ def exactify_loaded_symmetry_source(
     )
     out: dict[str, np.ndarray] = {}
     reports: dict[str, Any] = {}
+    joint_config, joint_required = _joint_exactification_config(exact_cfg)
+    joint_fiber_indices = _joint_fiber_indices(labels)
+    joint_fiber_permutations: dict[str, tuple[int, ...]] = {}
+    joint_antiunitary: dict[str, bool] = {}
     op_records = loaded_metadata.get("operations", [])
     if not isinstance(op_records, Sequence) or isinstance(op_records, (str, bytes)):
         raise ValueError("loaded_metadata.operations must be a list")
@@ -1477,7 +1716,12 @@ def exactify_loaded_symmetry_source(
             )
             provenance = {
                 "source": "support_exactification",
-                "accepted_by_user": True,
+                "accepted_by": (
+                    "explicit_action_candidates"
+                    if explicit_action_candidates is not None
+                    else "kp_projected_basis_inference"
+                ),
+                "accepted_by_user": explicit_action_candidates is not None,
                 "declared_model_action": manifest_action,
                 "selected_action_candidate": selected_action,
                 "declared_support_residual": declared_support_residual,
@@ -1489,6 +1733,11 @@ def exactify_loaded_symmetry_source(
                 f"{name} exactification selected a support action that differs from manifest model_action in strict mode"
             )
         label_action = candidate["label_action"]
+        joint_fiber_permutations[name] = _joint_fiber_permutation(
+            label_action,
+            joint_fiber_indices,
+        )
+        joint_antiunitary[name] = bool(op.antiunitary)
         support_mode = str(op_cfg.get("support_mode", "auto")).lower()
         if support_mode not in {"auto", "monomial", "block", "block_monomial"}:
             raise ValueError(f"Unsupported support_mode for {name}: {support_mode!r}")
@@ -1571,6 +1820,10 @@ def exactify_loaded_symmetry_source(
                 antiunitary=op.antiunitary,
                 reject_if_off_support_rel_gt=reject_off,
                 reject_if_amplitude_deviation_gt=reject_amp,
+                algebraic_template=op_cfg.get("algebraic_template", exact_cfg.get("algebraic_template")),
+                algebraic_match_tol=float(
+                    op_cfg.get("algebraic_match_tol", exact_cfg.get("algebraic_match_tol", 1.0e-5))
+                ),
             )
             D_exact, report = block_exact, block_report
             cleanup_required = preferred_mode == "block_monomial"
@@ -1663,4 +1916,86 @@ def exactify_loaded_symmetry_source(
             np.save(output_dir / f"exactified_{name}.npy", D_exact)
             with (output_dir / f"{name.lower()}_exactification_report.json").open("w", encoding="utf-8") as handle:
                 json.dump(_jsonable(reports[name]), handle, indent=2)
+
+    if joint_config is not None and out:
+        try:
+            presentation_records = [
+                _joint_presentation_record(name=name, report=reports[name])
+                for name in out
+            ]
+            presentation = compile_continuum_magnetic_presentation(
+                presentation_records
+            )
+        except JointExactificationError as exc:
+            if joint_required:
+                raise ValueError(
+                    "joint exactification is required but the continuum magnetic "
+                    f"presentation is incomplete or unsupported: {exc}"
+                ) from exc
+        else:
+            actions = {
+                generator.name: extract_block_route_action(
+                    out[generator.name],
+                    name=generator.name,
+                    antiunitary=joint_antiunitary[generator.name],
+                    fiber_indices=joint_fiber_indices,
+                    fiber_permutation=joint_fiber_permutations[generator.name],
+                    off_route_bound=0.0,
+                )
+                for generator in presentation.generators
+            }
+            result = joint_exactify_block_actions(
+                actions,
+                presentation,
+                config=joint_config,
+            )
+            artifact_hash = str(result.artifact_metadata["artifact_hash"])
+            for generator in presentation.generators:
+                name = generator.name
+                out[name] = materialize_block_route_action(result.actions[name])
+                operation_summary = {
+                    "status": "certified",
+                    "artifact_hash": artifact_hash,
+                    "presentation_source": result.presentation.source,
+                    "relation_certification_bound": float(
+                        result.report["relation_certification_bound"]
+                    ),
+                    "pre_relation_residual_max": float(
+                        result.report["pre_relation_residual_max"]
+                    ),
+                    "post_relation_residual_max": float(
+                        result.report["post_relation_residual_max"]
+                    ),
+                    "route_correction_rms": float(
+                        result.report["route_correction_rms_by_operation"][name]
+                    ),
+                    "route_correction_max": float(
+                        result.report["route_correction_max_by_operation"][name]
+                    ),
+                    "root_report": _jsonable(dict(result.report)),
+                }
+                reports[name]["joint_exactification"] = operation_summary
+                reports[name]["report"].setdefault(
+                    "joint_group_residuals", {}
+                ).update(
+                    {
+                        relation_name: float(values["max"])
+                        for relation_name, values in result.report[
+                            "post_relation_residuals"
+                        ].items()
+                    }
+                )
+            reports["__joint_exactification__"] = {
+                "metadata": dict(result.artifact_metadata),
+                "arrays": dict(result.artifact_arrays),
+                "report": dict(result.report),
+            }
+            if output_dir is not None:
+                for generator in presentation.generators:
+                    name = generator.name
+                    np.save(output_dir / f"exactified_{name}.npy", out[name])
+                    with (
+                        output_dir / f"{name.lower()}_exactification_report.json"
+                    ).open("w", encoding="utf-8") as handle:
+                        json.dump(_jsonable(reports[name]), handle, indent=2)
     return out, reports

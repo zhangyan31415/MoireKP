@@ -17,6 +17,7 @@ from kp.symmetry.exactify_representation import (
     build_label_action,
     compare_operation_convention,
     exactify_1d_monomial_phases,
+    exactify_block_monomial_representation,
     exactify_loaded_symmetry_source,
     nearest_root_of_unity,
     root_of_unity,
@@ -254,6 +255,311 @@ def _make_block_mixed_c3_case() -> tuple[
         expected[rows[0], cols[0]] = -1.0 + 0.0j
         expected[rows[1], cols[1]] = np.exp(-1j * np.pi / 3.0)
     return labels, q1, q2, b1, b2, raw, expected, cleanup_residual
+
+
+def _gamma_spinful_c3_four_state_template() -> np.ndarray:
+    sqrt3 = np.sqrt(3.0)
+    return np.array(
+        [
+            [-0.25 - 0.25j * sqrt3, -0.25 * sqrt3 - 0.75j, 0.0, 0.0],
+            [0.25 * sqrt3 + 0.75j, -0.25 - 0.25j * sqrt3, 0.0, 0.0],
+            [0.0, 0.0, -0.25 + 0.25j * sqrt3, -0.25 * sqrt3 + 0.75j],
+            [0.0, 0.0, 0.25 * sqrt3 - 0.75j, -0.25 + 0.25j * sqrt3],
+        ],
+        dtype=np.complex128,
+    )
+
+
+def test_block_exactification_canonicalizes_gamma_spinful_c3_four_state() -> None:
+    expected = _gamma_spinful_c3_four_state_template()
+    phase_gauge = np.diag(np.exp(1j * np.array([8.0e-8, -8.0e-8, 5.0e-8, -5.0e-8])))
+    mixing = np.eye(4, dtype=np.complex128)
+    angle = 3.0e-8
+    mixing[np.ix_([0, 2], [0, 2])] = np.array(
+        [[np.cos(angle), -np.sin(angle)], [np.sin(angle), np.cos(angle)]],
+        dtype=np.complex128,
+    )
+    gauge = mixing @ phase_gauge
+    raw = gauge @ expected @ gauge.conj().T
+
+    exact, report = exactify_block_monomial_representation(
+        raw,
+        [(np.arange(4, dtype=int), np.arange(4, dtype=int))],
+        operation_name="C3z",
+        power=3,
+        central_phase=-1.0 + 0.0j,
+        antiunitary=False,
+        algebraic_template="gamma_spinful_c3_4",
+        algebraic_match_tol=1.0e-5,
+    )
+
+    np.testing.assert_array_equal(exact, expected)
+    np.testing.assert_array_equal(exact[:2, 2:], np.zeros((2, 2), dtype=np.complex128))
+    np.testing.assert_array_equal(exact[2:, :2], np.zeros((2, 2), dtype=np.complex128))
+    assert report.algebraic_canonicalization["status"] == "canonicalized"
+    assert report.algebraic_canonicalization["template"] == "gamma_spinful_c3_4"
+    assert report.algebraic_canonicalization["match_distance"] < 1.0e-5
+
+
+def test_block_exactification_auto_does_not_snap_unrecognized_four_state_block() -> None:
+    rng = np.random.default_rng(17)
+    q, _r = np.linalg.qr(rng.normal(size=(4, 4)) + 1j * rng.normal(size=(4, 4)))
+    roots = np.diag(
+        [
+            -1.0 + 0.0j,
+            -1.0 + 0.0j,
+            np.exp(1j * np.pi / 3.0),
+            np.exp(-1j * np.pi / 3.0),
+        ]
+    )
+    raw = q @ roots @ q.conj().T
+
+    exact, report = exactify_block_monomial_representation(
+        raw,
+        [(np.arange(4, dtype=int), np.arange(4, dtype=int))],
+        operation_name="C3z",
+        power=3,
+        central_phase=-1.0 + 0.0j,
+        antiunitary=False,
+        algebraic_template="auto",
+        algebraic_match_tol=1.0e-5,
+    )
+
+    assert report.algebraic_canonicalization["status"] == "not_recognized"
+    assert report.algebraic_canonicalization["template"] == "gamma_spinful_c3_4"
+    assert report.algebraic_canonicalization["match_distance"] > 1.0e-5
+    assert not np.array_equal(exact, _gamma_spinful_c3_four_state_template())
+
+
+def test_block_exactification_uses_algebraic_global_c3_root() -> None:
+    template = _gamma_spinful_c3_four_state_template()
+    omega = -0.5 + 0.5j * np.sqrt(3.0)
+    raw = omega * template
+
+    exact, report = exactify_block_monomial_representation(
+        raw,
+        [(np.arange(4, dtype=int), np.arange(4, dtype=int))],
+        operation_name="C3z",
+        power=3,
+        central_phase=-1.0 + 0.0j,
+        antiunitary=False,
+        algebraic_template="gamma_spinful_c3_4",
+        algebraic_match_tol=1.0e-5,
+    )
+
+    np.testing.assert_array_equal(exact, omega * template)
+    assert report.algebraic_canonicalization["selected_branch"]["global_root_power"] == 1
+
+
+def test_loaded_gamma_c3_algebraic_exactification_validates_tr_and_c2_relations() -> None:
+    q1 = np.zeros((1, 2), dtype=float)
+    q2 = np.zeros((1, 2), dtype=float)
+    b1, b2 = _hex_bm()
+    internal_c3 = _gamma_spinful_c3_four_state_template()
+    phase_gauge = np.diag(np.exp(1j * np.array([8.0e-8, -8.0e-8, 5.0e-8, -5.0e-8])))
+    raw_internal_c3 = phase_gauge @ internal_c3 @ phase_gauge.conj().T
+    raw_c3 = np.block(
+        [
+            [raw_internal_c3, np.zeros((4, 4), dtype=np.complex128)],
+            [np.zeros((4, 4), dtype=np.complex128), raw_internal_c3],
+        ]
+    )
+    tr_internal = np.zeros((4, 4), dtype=np.complex128)
+    tr_internal[0, 2] = -1.0
+    tr_internal[1, 3] = -1.0
+    tr_internal[2, 0] = 1.0
+    tr_internal[3, 1] = 1.0
+    tr = np.block(
+        [
+            [tr_internal, np.zeros((4, 4), dtype=np.complex128)],
+            [np.zeros((4, 4), dtype=np.complex128), tr_internal],
+        ]
+    )
+    c2_internal = np.zeros((4, 4), dtype=np.complex128)
+    c2_internal[0, 2] = -1j
+    c2_internal[1, 3] = 1j
+    c2_internal[2, 0] = -1j
+    c2_internal[3, 1] = 1j
+    c2 = np.block(
+        [
+            [np.zeros((4, 4), dtype=np.complex128), c2_internal],
+            [c2_internal, np.zeros((4, 4), dtype=np.complex128)],
+        ]
+    )
+    orbital_exchange = {"*": {0: 2, 1: 3, 2: 0, 3: 1}}
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                    {
+                        **_source_meta(antiunitary=True),
+                        "name": "TR",
+                        "operation": "TR",
+                        "antiunitary": True,
+                        "k_map": {"type": "negation"},
+                        "q_map": {"type": "negation"},
+                        "sector_map": "identity",
+                        "orbital_map": orbital_exchange,
+                        "group_relations": [
+                            {"type": "power", "operation": "TR", "power": 2, "phase": -1.0}
+                        ],
+                    },
+                    {
+                        **_source_meta(),
+                        "name": "C3z",
+                        "operation": "C3z",
+                        "antiunitary": False,
+                        "k_map": {"type": "rotation", "angle_deg": 120.0},
+                        "q_map": {"type": "rotation", "angle_deg": 120.0},
+                        "sector_map": "identity",
+                        "group_relations": [
+                            {"type": "power", "operation": "C3z", "power": 3, "phase": -1.0}
+                        ],
+                    },
+                    {
+                        **_source_meta(),
+                        "name": "C2",
+                        "operation": "C2",
+                        "antiunitary": False,
+                        "k_map": {"type": "reflection", "axis_deg": 0.0},
+                        "q_map": {"type": "reflection", "axis_deg": 0.0},
+                        "sector_map": "layer_exchange",
+                        "orbital_map": orbital_exchange,
+                        "group_relations": [
+                            {"type": "power", "operation": "C2", "power": 2, "phase": -1.0}
+                        ],
+                    },
+            ]
+        },
+        matrices={"TR": tr, "C3z": raw_c3, "C2": c2},
+        Q_set1=q1,
+        Q_set2=q2,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 4},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 4},
+        ],
+        n_orb=(4, 4),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "operations": {
+                    "TR": {"support_mode": "monomial", "power": 2, "central_phase": -1.0},
+                    "C3z": {
+                        "support_mode": "block",
+                        "power": 3,
+                        "central_phase": -1.0,
+                        "algebraic_template": "auto",
+                    },
+                    "C2": {"support_mode": "monomial", "power": 2, "central_phase": -1.0},
+                }
+            }
+        },
+    )
+
+    expected_c3 = np.block(
+        [
+            [internal_c3, np.zeros((4, 4), dtype=np.complex128)],
+            [np.zeros((4, 4), dtype=np.complex128), internal_c3],
+        ]
+    )
+    np.testing.assert_array_equal(exactified["C3z"], expected_c3)
+    np.testing.assert_allclose(tr @ expected_c3.conj() @ tr.conj().T, expected_c3, atol=1.0e-14)
+    np.testing.assert_allclose(c2 @ expected_c3 @ c2.conj().T, np.linalg.inv(expected_c3), atol=1.0e-14)
+    joint = reports["C3z"]["report"]["joint_group_residuals"]
+    assert reports["C3z"]["joint_exactification"]["status"] == "certified"
+    assert joint["TR_C3z_commute"] < 1.0e-14
+    assert joint["C2_C3z_dihedral"] < 1.0e-14
+
+
+@pytest.mark.parametrize("block_dimension", [1, 2])
+def test_loaded_k_valley_generators_are_jointly_idempotent(
+    block_dimension: int,
+) -> None:
+    q = np.zeros((1, 2), dtype=float)
+    b1, b2 = _hex_bm()
+    root = np.exp(1j * np.pi / 3.0)
+    if block_dimension == 1:
+        c3_block = np.asarray([[root]], dtype=np.complex128)
+    else:
+        angle = 0.37
+        gauge = np.array(
+            [
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ],
+            dtype=np.complex128,
+        )
+        c3_block = gauge.T @ np.diag([root, np.conjugate(root)]) @ gauge
+    c2t_block = np.eye(block_dimension, dtype=np.complex128)
+    c3 = np.block(
+        [
+            [c3_block, np.zeros_like(c3_block)],
+            [np.zeros_like(c3_block), c3_block],
+        ]
+    )
+    c2t = np.block(
+        [
+            [c2t_block, np.zeros_like(c2t_block)],
+            [np.zeros_like(c2t_block), c2t_block],
+        ]
+    )
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(),
+                    "name": "C3z",
+                    "operation": "C3z",
+                    "antiunitary": False,
+                    "k_map": {"type": "rotation", "angle_deg": 120.0},
+                    "q_map": {"type": "rotation", "angle_deg": 120.0},
+                    "sector_map": "identity",
+                    "group_relations": [
+                        {"type": "power", "operation": "C3z", "power": 3, "phase": -1.0}
+                    ],
+                },
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "C2T",
+                    "operation": "C2T",
+                    "antiunitary": True,
+                    "k_map": {"type": "reflection", "axis_deg": 0.0},
+                    "q_map": {"type": "reflection", "axis_deg": 0.0},
+                    "sector_map": "identity",
+                    "group_relations": [
+                        {"type": "power", "operation": "C2T", "power": 2, "phase": 1.0}
+                    ],
+                },
+            ]
+        },
+        matrices={"C3z": c3, "C2T": c2t},
+        Q_set1=q,
+        Q_set2=q,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": block_dimension},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": block_dimension},
+        ],
+        n_orb=(block_dimension, block_dimension),
+        bM1=b1,
+        bM2=b2,
+        raw_config={
+            "exactification": {
+                "operations": {
+                    "C3z": {"support_mode": "block", "algebraic_template": "none"},
+                    "C2T": {"support_mode": "block"},
+                }
+            }
+        },
+    )
+
+    np.testing.assert_allclose(exactified["C3z"], c3, atol=2.0e-15)
+    np.testing.assert_allclose(exactified["C2T"], c2t, atol=2.0e-15)
+    joint = reports["__joint_exactification__"]["report"]
+    assert joint["status"] == "certified"
+    assert joint["post_relation_residual_max"] <= joint["relation_certification_bound"]
+    assert joint["route_correction_max"] < 2.0e-15
 
 
 def test_nearest_root_of_unity() -> None:
@@ -1826,6 +2132,155 @@ def test_exactify_report_contains_source_semantics_and_inference_flag() -> None:
     assert "distance_mod_global_phase" in report["report"]
 
 
+def test_loaded_m_valley_generators_use_joint_exactification(tmp_path: Path) -> None:
+    q = np.zeros((1, 2), dtype=float)
+    b1, b2 = _hex_bm()
+    phase_error = 8.5e-6
+    layer_exchange_phase = np.exp(1j * (np.pi - phase_error))
+    tr = np.eye(2, dtype=np.complex128)
+    c2 = np.array(
+        [
+            [0.0, np.conjugate(layer_exchange_phase)],
+            [layer_exchange_phase, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+
+    exactified, reports = exactify_loaded_symmetry_source(
+        loaded_metadata={
+            "operations": [
+                {
+                    **_source_meta(antiunitary=True),
+                    "name": "TR",
+                    "operation": "TR",
+                    "antiunitary": True,
+                    "k_map": {"type": "negation", "in_model_frame": True},
+                    "q_map": {"type": "negation", "in_model_frame": True},
+                    "sector_map": "identity",
+                    "group_relations": [
+                        {
+                            "type": "power",
+                            "operation": "TR",
+                            "power": 2,
+                            "phase": 1.0,
+                        }
+                    ],
+                },
+                {
+                    **_source_meta(),
+                    "name": "C2",
+                    "operation": "C2",
+                    "antiunitary": False,
+                    "k_map": {
+                        "type": "reflection",
+                        "axis_deg": 0.0,
+                        "in_model_frame": True,
+                    },
+                    "q_map": {
+                        "type": "reflection",
+                        "axis_deg": 0.0,
+                        "in_model_frame": True,
+                    },
+                    "sector_map": "layer_exchange",
+                    "group_relations": [
+                        {
+                            "type": "power",
+                            "operation": "C2",
+                            "power": 2,
+                            "phase": 1.0,
+                        }
+                    ],
+                },
+            ]
+        },
+        matrices={"TR": tr, "C2": c2},
+        Q_set1=q,
+        Q_set2=q,
+        sectors=[
+            {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+            {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+        ],
+        n_orb=(1, 1),
+        bM1=b1,
+        bM2=b2,
+        raw_config={"exactification": {}},
+        output_dir=tmp_path,
+    )
+
+    stage1_residual = float(
+        np.linalg.norm(tr @ c2.conj() - c2 @ tr) / np.sqrt(c2.shape[0])
+    )
+    final_residual = float(
+        np.linalg.norm(
+            exactified["TR"] @ exactified["C2"].conj()
+            - exactified["C2"] @ exactified["TR"]
+        )
+        / np.sqrt(c2.shape[0])
+    )
+    assert stage1_residual > 1.0e-6
+    assert final_residual < 5.0e-15
+    joint = reports["__joint_exactification__"]
+    assert joint["metadata"]["version"] == "joint_block_representation_v1"
+    assert joint["metadata"]["artifact_hash"]
+    assert reports["TR"]["joint_exactification"]["status"] == "certified"
+    assert reports["C2"]["joint_exactification"]["status"] == "certified"
+    assert reports["C2"]["joint_exactification"]["route_correction_rms"] > 1.0e-6
+    np.testing.assert_array_equal(
+        np.load(tmp_path / "exactified_C2.npy"),
+        exactified["C2"],
+    )
+    persisted_report = json.loads(
+        (tmp_path / "c2_exactification_report.json").read_text(encoding="utf-8")
+    )
+    assert persisted_report["joint_exactification"]["status"] == "certified"
+    assert (
+        persisted_report["joint_exactification"]["artifact_hash"]
+        == joint["metadata"]["artifact_hash"]
+    )
+
+
+def test_required_joint_exactification_rejects_unsupported_presentation() -> None:
+    q = np.zeros((1, 2), dtype=float)
+    b1, b2 = _hex_bm()
+    with pytest.raises(
+        ValueError,
+        match="joint exactification is required.*unsupported",
+    ):
+        exactify_loaded_symmetry_source(
+            loaded_metadata={
+                "operations": [
+                    {
+                        **_source_meta(),
+                        "name": "C2",
+                        "operation": "C2",
+                        "antiunitary": False,
+                        "k_map": {"type": "reflection", "axis_deg": 0.0},
+                        "q_map": {"type": "reflection", "axis_deg": 0.0},
+                        "sector_map": "identity",
+                        "group_relations": [
+                            {"type": "power", "operation": "C2", "power": 2, "phase": 1.0}
+                        ],
+                    }
+                ]
+            },
+            matrices={"C2": np.eye(2, dtype=np.complex128)},
+            Q_set1=q,
+            Q_set2=q,
+            sectors=[
+                {"name": "L1", "qset": "qset1", "q_offset": [0.0, 0.0], "n_orb": 1},
+                {"name": "L2", "qset": "qset2", "q_offset": [0.0, 0.0], "n_orb": 1},
+            ],
+            n_orb=(1, 1),
+            bM1=b1,
+            bM2=b2,
+            raw_config={
+                "exactification": {
+                    "joint_exactification": {"required": True}
+                }
+            },
+        )
+
+
 def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path: Path) -> None:
     q = np.array([[0.0, 0.0]], dtype=float)
     heff = np.array([[[1.0, 0.0], [0.0, 2.0]]], dtype=complex)
@@ -1841,7 +2296,7 @@ def test_model_rejects_raw_kp_symm_action_without_source_exactification(tmp_path
         "config_hash": "config-fixture",
         "basis_hash": "basis-fixture",
         "package_version": "0.1.0",
-        "schema_version": 1,
+        "schema_version": 2,
         "k_indices_hash": hash_array(np.asarray([0], dtype=np.int64)),
         "heff_hash": hash_array(heff),
     }

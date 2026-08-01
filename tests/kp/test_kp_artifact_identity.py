@@ -92,11 +92,7 @@ def test_kp_identity_metadata_is_strict() -> None:
 
 
 def test_projection_basis_identity_tracks_gauge_and_row_layout(tmp_path: Path) -> None:
-    hamk = tmp_path / "hamk.npy"
-    np.save(hamk, np.eye(4, dtype=np.complex128)[None, :, :])
     common = {
-        "hamk_file": hamk,
-        "hamk_fallback": np.eye(4, dtype=np.complex128),
         "qset1": np.array([[0.0, 0.0], [1.0, 0.0]]),
         "qset2": np.array([[0.0, 0.0], [0.0, 1.0]]),
         "spin": "up",
@@ -130,3 +126,30 @@ def test_projection_basis_identity_tracks_gauge_and_row_layout(tmp_path: Path) -
     assert changed_rows["basis_hash"] != first["basis_hash"]
     assert changed_k_mapping["k_indices_hash"] != first["k_indices_hash"]
     assert changed_k_mapping["basis_hash"] != first["basis_hash"]
+
+
+def test_projection_basis_identity_does_not_accept_or_read_hamiltonian() -> None:
+    common = {
+        "qset1": np.array([[0.0, 0.0], [1.0, 0.0]]),
+        "qset2": np.array([[0.0, 0.0], [0.0, 1.0]]),
+        "spin": "up",
+        "mode": "k1",
+        "energy_scale": 1.0,
+        "nlow_state_list": [[0], [0]],
+        "resolved_norb_fix_list": [[[[0, 1.0]]], [[[0, 1.0]]]],
+        "gauge_mode": "manual",
+        "num_layer_list": [1, 1],
+        "num_orb_per_layer_list": [1, 1],
+        "orbital_block_dim": 1,
+        "model_dim": 4,
+        "k_indices": [0, 2],
+    }
+
+    identity = build_projection_basis_identity(**common)
+    changed_qset = build_projection_basis_identity(
+        **{**common, "qset1": np.array([[0.0, 0.0], [2.0, 0.0]])}
+    )
+
+    assert identity["schema_version"] == 2
+    assert changed_qset["input_hash"] != identity["input_hash"]
+    assert changed_qset["basis_hash"] != identity["basis_hash"]

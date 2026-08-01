@@ -11,6 +11,99 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 class GetHBlockTests(unittest.TestCase):
+    def test_get_h_block_batches_blas_thread_limit_scope(self) -> None:
+        from threadpoolctl import threadpool_limits
+        from kp.blocks import blocks
+
+        ham = np.diag(np.arange(1.0, 9.0)).astype(np.complex128)
+        q = np.zeros((2, 2), dtype=float)
+        q_layers = [[q], [q]]
+
+        with patch("threadpoolctl.threadpool_limits", wraps=threadpool_limits) as limits:
+            blocks.get_H_block(
+                ham,
+                q_layers,
+                [1, 1],
+                [[2], [2]],
+                [[0], [0]],
+                [[[[0, 1.0]]], [[[0, 1.0]]]],
+                spin="up",
+                mode="M1",
+                selected_bands_by_layer=[[0], [0]],
+            )
+
+        self.assertEqual(limits.call_count, 1)
+
+    def test_eigensystem_cache_reuses_unaligned_blocks_across_anchor_candidates(self) -> None:
+        from kp.blocks import blocks
+
+        ham = np.zeros((4, 4), dtype=np.complex128)
+        q_layers = [[np.array([[0.0, 0.0]])], [np.array([[0.0, 0.0]])]]
+        nlow = [[0, 1], [0, 1]]
+        anchors_identity = [
+            [[[0, 1.0]], [[1, 1.0]]],
+            [[[0, 1.0]], [[1, 1.0]]],
+        ]
+        anchors_swapped = [
+            [[[1, 1.0]], [[0, 1.0]]],
+            [[[1, 1.0]], [[0, 1.0]]],
+        ]
+        cache = {}
+        original_eigh = blocks._hermitian_eigh_columns
+
+        with patch.object(
+            blocks,
+            "_hermitian_eigh_columns",
+            wraps=original_eigh,
+        ) as eigh:
+            blocks.get_H_block(
+                ham,
+                q_layers,
+                [1, 1],
+                [[2], [2]],
+                nlow,
+                anchors_identity,
+                spin="up",
+                mode="M1",
+                selected_bands_by_layer=nlow,
+                eigensystem_cache=cache,
+            )
+            first_call_count = eigh.call_count
+            _, cached_swapped, _, _ = blocks.get_H_block(
+                ham,
+                q_layers,
+                [1, 1],
+                [[2], [2]],
+                nlow,
+                anchors_swapped,
+                spin="up",
+                mode="M1",
+                selected_bands_by_layer=nlow,
+                eigensystem_cache=cache,
+            )
+
+        _, uncached_swapped, _, _ = blocks.get_H_block(
+            ham,
+            q_layers,
+            [1, 1],
+            [[2], [2]],
+            nlow,
+            anchors_swapped,
+            spin="up",
+            mode="M1",
+            selected_bands_by_layer=nlow,
+        )
+
+        self.assertEqual(first_call_count, 2)
+        self.assertEqual(eigh.call_count, first_call_count)
+        for cached, uncached in zip(cached_swapped, uncached_swapped):
+            np.testing.assert_allclose(
+                np.asarray(cached, dtype=np.complex128),
+                np.asarray(uncached, dtype=np.complex128),
+                atol=1.0e-14,
+                rtol=0.0,
+            )
+
     def test_sparse_eigen_column_request_preserves_original_column_positions(self) -> None:
         from kp.blocks.blocks import _hermitian_eigh_columns
 

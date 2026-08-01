@@ -19,7 +19,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import kp.cli as cli
 import kp.symmetry.projection as projection_mod
-from kp.basis.selection import GaugeCandidateSymmetryMetrics
+from kp.basis.selection import GaugeAnchorReport, GaugeCandidateSymmetryMetrics
 from kp.identity import hash_array
 from kp.model.symmetry import load_symmetry_source
 from kp.orbitals import expand_orbital_order_by_sector
@@ -41,7 +41,793 @@ from kp.symmetry.projection import (
     _validate_symmetry_project_identity,
     _source_manifest_operation_name,
     _validate_operation_label,
+    _derive_projection_basis_frame,
+    _basis_frame_raw_source_matrices,
+    _select_fixed_target_source_matrices,
 )
+from kp.symmetry.joint_exactification import (
+    BlockRouteAction,
+    MagneticGenerator,
+    MagneticPresentation,
+    MagneticRelation,
+    JointExactificationConfig,
+    joint_exactify_block_actions,
+    materialize_block_route_action,
+)
+from kp.symmetry.q_canonicalization import CanonicalQResult
+
+
+def test_spin_route_inference_keeps_same_spin_action_internal() -> None:
+    matrix = np.eye(4, dtype=np.complex128)
+
+    route, diagnostics = projection_mod._infer_spin_route_from_action_matrix(
+        matrix,
+        source_spin="up",
+    )
+
+    assert route is None
+    assert diagnostics["selected_target_spin"] == "up"
+    assert diagnostics["normalized_support"]["up<-up"] == pytest.approx(1.0)
+    assert diagnostics["normalized_support"]["down<-up"] == pytest.approx(0.0)
+
+
+def test_spin_route_endpoints_keep_full_spin_space_internal() -> None:
+    assert projection_mod._spin_route_endpoints("all", None) == ("all", "all")
+
+
+def test_spin_route_inference_detects_up_to_down_sewing() -> None:
+    matrix = np.zeros((4, 4), dtype=np.complex128)
+    matrix[:2, 2:] = np.eye(2)
+    matrix[2:, :2] = np.eye(2)
+
+    route, diagnostics = projection_mod._infer_spin_route_from_action_matrix(
+        matrix,
+        source_spin="up",
+    )
+
+    assert route == "up_to_down"
+    assert diagnostics["selected_target_spin"] == "down"
+    assert diagnostics["normalized_support"]["down<-up"] == pytest.approx(1.0)
+
+
+def test_spin_route_inference_detects_down_to_up_sewing() -> None:
+    matrix = np.zeros((4, 4), dtype=np.complex128)
+    matrix[:2, 2:] = np.eye(2)
+    matrix[2:, :2] = np.eye(2)
+
+    route, diagnostics = projection_mod._infer_spin_route_from_action_matrix(
+        matrix,
+        source_spin="down",
+    )
+
+    assert route == "down_to_up"
+    assert diagnostics["selected_target_spin"] == "up"
+    assert diagnostics["normalized_support"]["up<-down"] == pytest.approx(1.0)
+
+
+def test_spin_route_inference_rejects_ambiguous_target_support() -> None:
+    matrix = np.eye(4, dtype=np.complex128)
+    matrix[2:, :2] = np.eye(2)
+
+    with pytest.raises(ValueError, match="ambiguous spin target"):
+        projection_mod._infer_spin_route_from_action_matrix(
+            matrix,
+            source_spin="up",
+        )
+
+
+def test_spin_route_combination_rejects_mixed_operation_routes() -> None:
+    assert projection_mod._combine_spin_routes(
+        {"TR": "up_to_down", "C2": "up_to_down"}
+    ) == "up_to_down"
+
+    with pytest.raises(ValueError, match="incompatible spin routes"):
+        projection_mod._combine_spin_routes(
+            {"C3z": None, "C2": "up_to_down"}
+        )
+
+
+def test_projection_run_infers_cross_spin_sewing_from_raw_actions(tmp_path: Path) -> None:
+    matrix = np.zeros((4, 4), dtype=np.complex128)
+    matrix[:2, 2:] = np.eye(2)
+    matrix[2:, :2] = np.eye(2)
+    np.save(tmp_path / "TR.npy", matrix)
+    np.save(tmp_path / "C2.npy", matrix)
+
+    route, diagnostics = projection_mod._resolve_spin_sector_sewing(
+        spin="up",
+        rep_root=tmp_path,
+        operation_entries={
+            "TR": {"raw_h_operator_file": "TR.npy"},
+            "C2": {"raw_h_operator_file": "C2.npy"},
+        },
+        explicit_route=None,
+    )
+
+    assert route == "up_to_down"
+    assert diagnostics["source"] == "raw_h_action_support"
+    assert diagnostics["operations"]["TR"]["selected_target_spin"] == "down"
+    assert diagnostics["operations"]["C2"]["route"] == "up_to_down"
+
+
+def test_projection_run_rejects_explicit_spin_route_that_conflicts_with_raw_action(
+    tmp_path: Path,
+) -> None:
+    np.save(tmp_path / "C3z.npy", np.eye(4, dtype=np.complex128))
+
+    with pytest.raises(ValueError, match="conflicts with raw-H action support"):
+        projection_mod._resolve_spin_sector_sewing(
+            spin="up",
+            rep_root=tmp_path,
+            operation_entries={"C3z": {"raw_h_operator_file": "C3z.npy"}},
+            explicit_route="up_to_down",
+        )
+
+
+def test_spin_sliced_representation_supports_down_to_up_route(tmp_path: Path) -> None:
+    matrix = np.zeros((4, 4), dtype=np.complex128)
+    matrix[:2, 2:] = np.eye(2)
+    matrix[2:, :2] = 2.0 * np.eye(2)
+    np.save(tmp_path / "TR.npy", matrix)
+
+    representation = projection_mod._load_spin_sliced_representation(
+        path=tmp_path / "TR.npy",
+        spin="down",
+        full_dim=2,
+        spin_sector_sewing="down_to_up",
+    )
+
+    np.testing.assert_allclose(representation.matrix, np.eye(2))
+    assert representation.from_full_spinful is True
+    assert representation.spin_leakage is None
+
+
+def test_source_target_hamiltonians_follow_down_to_up_route() -> None:
+    hamk = np.asarray(
+        [np.diag([1.0, 2.0, 10.0, 20.0])],
+        dtype=np.complex128,
+    )
+
+    source, target = projection_mod._source_target_hamk_by_k(
+        hamk3d=hamk,
+        required_k=[0],
+        spin="down",
+        spin_sector_sewing="down_to_up",
+    )
+
+    np.testing.assert_allclose(source[0], np.diag([10.0, 20.0]))
+    np.testing.assert_allclose(target[0], np.diag([1.0, 2.0]))
+
+
+def test_projection_context_infers_spin_route_before_slicing(tmp_path: Path) -> None:
+    raw_action = np.zeros((4, 4), dtype=np.complex128)
+    raw_action[:2, 2:] = np.eye(2)
+    raw_action[2:, :2] = np.eye(2)
+    np.save(tmp_path / "TR.npy", raw_action)
+    hamk = np.asarray(
+        [np.diag([1.0, 2.0, 10.0, 20.0])],
+        dtype=np.complex128,
+    )
+    q = np.zeros((1, 2), dtype=float)
+    run_cfg = projection_mod._ProjectionRunConfig(
+        cfg_path=str(tmp_path / "config.yaml"),
+        cfg_dir=str(tmp_path),
+        material={},
+        plot_cfg={"hamk_index": 0},
+        project_cfg={},
+        symm_cfg={"output_dir": str(tmp_path / "symmetry")},
+        save_projection_diagnostics=False,
+        valley="M1",
+        spin="up",
+        spin_sector_sewing=None,
+        q_rotation_raw=0.0,
+        tolerance=1.0e-2,
+        canonical_layout=True,
+    )
+    entry = {
+        "raw_h_operator_file": "TR.npy",
+        "antiunitary": True,
+        "_pairs": [(0, 0)],
+    }
+    observed: dict[str, object] = {}
+
+    def fake_payloads(**kwargs):
+        observed["route"] = kwargs["run_cfg"].spin_sector_sewing
+        return {}
+
+    with (
+        patch.object(
+            projection_mod,
+            "_load_manifest_and_operation_requests",
+            return_value=(tmp_path, {}, [{"source": "TR", "output": "TR"}]),
+        ),
+        patch.object(
+            projection_mod,
+            "_load_projection_arrays_and_layout",
+            return_value=(hamk, q, q.copy(), "m1", "first_order", None, [[0], [0]], [1, 1], 1, [[1], [1]]),
+        ),
+        patch.object(
+            projection_mod,
+            "_resolve_operation_entries",
+            return_value=({"TR": entry}, {(0, 0)}),
+        ),
+        patch.object(projection_mod, "_build_operation_payloads", side_effect=fake_payloads),
+    ):
+        ctx = projection_mod._build_projection_run_context(
+            run_cfg,
+            create_output_dir=False,
+            validate_full_space_covariance=False,
+        )
+
+    assert ctx.config.spin_sector_sewing == "up_to_down"
+    assert observed["route"] == "up_to_down"
+    assert ctx.spin_route_inference["source"] == "raw_h_action_support"
+    np.testing.assert_allclose(ctx.hamk_source_by_k[0], np.diag([1.0, 2.0]))
+    np.testing.assert_allclose(ctx.hamk_target_by_k[0], np.diag([10.0, 20.0]))
+
+
+def test_cross_spin_sewing_does_not_reinterpret_raw_blocks_as_internal_actions() -> None:
+    raw = {"TR": np.eye(2, dtype=np.complex128)}
+    internal = {"TR": -np.eye(2, dtype=np.complex128)}
+
+    assert _basis_frame_raw_source_matrices(
+        raw,
+        spin_sector_sewing="up_to_down",
+    ) is None
+    assert _basis_frame_raw_source_matrices(
+        raw,
+        spin_sector_sewing=None,
+    ) is raw
+    selected, role = _select_fixed_target_source_matrices(
+        raw,
+        exactified_internal_matrices=internal,
+        spin_sector_sewing="up_to_down",
+    )
+    assert selected is internal
+    assert role == "joint_exactified_cross_sector_internal_action"
+    selected, role = _select_fixed_target_source_matrices(
+        raw,
+        exactified_internal_matrices=None,
+        spin_sector_sewing=None,
+    )
+    assert selected is raw
+    assert role == "raw_projected_internal_action"
+
+
+def test_projection_basis_frame_uses_certified_closest_u1_fiber_gauge() -> None:
+    permutations = {
+        "C3z": (1, 2, 0, 4, 5, 3),
+        "C2T": (3, 5, 4, 0, 2, 1),
+    }
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    phases = np.asarray([0.8, -1.1, 0.2, 1.4, -0.5, 0.3]) * 1.0e-7
+    gauge = np.exp(1.0j * phases)
+    actions = {}
+    for name, antiunitary, base in (
+        ("C3z", False, root),
+        ("C2T", True, complex(1.0, 0.0)),
+    ):
+        blocks = []
+        for source, target in enumerate(permutations[name]):
+            source_gauge = np.conjugate(gauge[source]) if antiunitary else gauge[source]
+            blocks.append(
+                np.asarray([[np.conjugate(gauge[target]) * base * source_gauge]])
+            )
+        actions[name] = BlockRouteAction(
+            name,
+            antiunitary,
+            permutations[name],
+            (1,) * 6,
+            tuple(blocks),
+        )
+    presentation = MagneticPresentation(
+        generators=(
+            MagneticGenerator("C3z", False),
+            MagneticGenerator("C2T", True),
+        ),
+        relations=(
+            MagneticRelation("C3z^3", ("C3z",) * 3, (), -1.0),
+            MagneticRelation("C2T^2", ("C2T",) * 2, (), 1.0),
+            MagneticRelation(
+                "C2T_C3z_dihedral",
+                ("C2T", "C3z", "C2T"),
+                ("C3z", "C3z"),
+                -1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    joint = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    matrices = {
+        name: materialize_block_route_action(action)
+        for name, action in joint.actions.items()
+    }
+    reports = {
+        "__joint_exactification__": {
+            "metadata": dict(joint.artifact_metadata),
+            "arrays": dict(joint.artifact_arrays),
+            "report": dict(joint.report),
+        }
+    }
+
+    frame, canonical = _derive_projection_basis_frame(
+        matrices,
+        reports,
+        operations=[
+            {"name": "C3z", "antiunitary": False},
+            {"name": "C2T", "antiunitary": True},
+        ],
+        sectors=[{"name": "only", "n_orb": 1, "n_q": 6}],
+        tolerance=1.0e-10,
+    )
+
+    assert frame.status == "applied"
+    assert canonical is not None
+    assert frame.components["closest_cyclotomic_u1_gauge"]["root_order"] == 6
+    assert not np.array_equal(frame.full_unitary, np.eye(6))
+    nonzero = canonical["C3z"][canonical["C3z"] != 0.0]
+    np.testing.assert_array_equal(nonzero, np.full(6, root))
+
+
+def test_project_owned_target_is_used_for_antiunitary_generator_without_name_bypass(
+    tmp_path: Path,
+) -> None:
+    swap = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    actions = {
+        "C2T": BlockRouteAction(
+            "C2T",
+            True,
+            (0, 1),
+            (2, 2),
+            (swap, swap),
+        )
+    }
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("C2T", True),),
+        relations=(
+            MagneticRelation("C2T^2", ("C2T", "C2T"), (), 1.0),
+        ),
+        central_phases=(1.0, -1.0),
+        source="antiunitary-fixed-target-test",
+    )
+    joint = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    raw = {
+        name: materialize_block_route_action(action)
+        for name, action in joint.actions.items()
+    }
+    reports = {
+        "__joint_exactification__": {
+            "metadata": dict(joint.artifact_metadata),
+            "arrays": dict(joint.artifact_arrays),
+            "report": dict(joint.report),
+        }
+    }
+    frame, _canonical = _derive_projection_basis_frame(
+        raw,
+        reports,
+        operations=[{"name": "C2T", "antiunitary": True}],
+        sectors=[
+            {"name": "L1", "n_orb": 2, "n_q": 1},
+            {"name": "L2", "n_orb": 2, "n_q": 1},
+        ],
+        tolerance=1.0e-10,
+        raw_source_matrices=raw,
+    )
+    assert (
+        frame.components["joint_structure_transaction"]["decision"]
+        == "fixed_target_raw_alignment_accepted"
+    )
+    operation = {
+        "name": "C2T",
+        "operation": "C2T",
+        "antiunitary": True,
+        "matrix_file": "C2T_low_raw.npy",
+        "source_matrix_role": "raw_h_sewing_action",
+        "source_gauge": "raw_saved_TAPW",
+        "target_role": "continuum_internal_rep",
+        "model_action": {
+            "antiunitary": True,
+            "k_map": {"type": "identity"},
+            "q_map": {"type": "identity"},
+            "sector_map": "identity",
+        },
+        "model_basis_action": {
+            "complete": True,
+            "items": [
+                {
+                    "source_sector": sector,
+                    "source_q_index": 0,
+                    "target_sector": sector,
+                    "target_q_index": 0,
+                    "q_residual": 0.0,
+                }
+                for sector in ("L1", "L2")
+            ],
+        },
+        "pairs": [],
+        "group_relations": [
+            projection_mod._operation_power_relation(
+                "C2T",
+                spin_convention="spinful",
+            )
+        ],
+    }
+    summary = {
+        "project_basis": {"symmetry_adapted_frame": frame.artifact()},
+        "operations": [operation],
+        "valley": "K1",
+        "spin": "spinful",
+        "tolerance": 1.0e-8,
+        "full_dim": 4,
+        "low_dim": 4,
+        "artifact_identity": {},
+    }
+    ctx = SimpleNamespace(
+        output_dir=tmp_path,
+        config=SimpleNamespace(
+            valley="K1",
+            symm_cfg={"exactification": {}},
+            tolerance=1.0e-8,
+            canonical_layout=False,
+        ),
+        q_model1=np.zeros((1, 2), dtype=float),
+        q_model2=np.zeros((1, 2), dtype=float),
+    )
+
+    result = projection_mod._exactify_and_write_projection_summary(
+        ctx,
+        summary=summary,
+        raw_low_matrices=raw,
+        n_orb=(2, 2),
+    )
+
+    exactification = result["kp_symm_exactification"]
+    assert exactification["fixed_target_exactification"]["status"] == "certified"
+    assert exactification["production_joint_solver"] == {
+        "kind": "persisted_project_owned_fixed_target",
+        "free_solver_status": "not_run",
+        "production_used_free_solver": False,
+        "additional_basis_gauge_applied": False,
+    }
+    assert "__fixed_target_bypass__" not in result
+
+
+def test_projection_basis_frame_composes_standard_c2_cycle_gauge() -> None:
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    actions = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            (1, 0),
+            (1, 1),
+            (np.asarray([[1.0]]), np.asarray([[-1.0]])),
+        ),
+        "C3z": BlockRouteAction(
+            "C3z",
+            False,
+            (0, 1),
+            (1, 1),
+            (np.asarray([[root]]), np.asarray([[root.conjugate()]])),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (1, 1),
+            (
+                np.asarray([[complex(-0.5, np.sqrt(3.0) / 2.0)]]),
+                np.asarray([[root]]),
+            ),
+        ),
+    }
+    presentation = MagneticPresentation(
+        generators=(
+            MagneticGenerator("TR", True),
+            MagneticGenerator("C3z", False),
+            MagneticGenerator("C2", False),
+        ),
+        relations=(
+            MagneticRelation("TR^2", ("TR", "TR"), (), -1.0),
+            MagneticRelation("C3z^3", ("C3z",) * 3, (), -1.0),
+            MagneticRelation("C2^2", ("C2", "C2"), (), -1.0),
+            MagneticRelation(
+                "TR_C3z_commute",
+                ("TR", "C3z"),
+                ("C3z", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "TR_C2_commute",
+                ("TR", "C2"),
+                ("C2", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "C2_C3z_dihedral",
+                ("C2", "C3z", "C2"),
+                ("C3z", "C3z"),
+                1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    joint = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    matrices = {
+        name: materialize_block_route_action(action)
+        for name, action in joint.actions.items()
+    }
+    reports = {
+        "__joint_exactification__": {
+            "metadata": dict(joint.artifact_metadata),
+            "arrays": dict(joint.artifact_arrays),
+            "report": dict(joint.report),
+        }
+    }
+
+    frame, canonical = _derive_projection_basis_frame(
+        matrices,
+        reports,
+        operations=[
+            {"name": "TR", "antiunitary": True},
+            {"name": "C3z", "antiunitary": False},
+            {"name": "C2", "antiunitary": False},
+        ],
+        sectors=[
+            {"name": "L1", "n_orb": 1, "n_q": 1},
+            {"name": "L2", "n_orb": 1, "n_q": 1},
+        ],
+        tolerance=1.0e-10,
+    )
+
+    assert canonical is not None
+    standard = frame.components["standard_generator_fiber_gauge"]
+    assert standard["cycle_targets"]["C2"] == ["+i"]
+    np.testing.assert_allclose(
+        frame.full_unitary,
+        np.diag(np.exp(1.0j * np.asarray([-np.pi / 12.0, np.pi / 12.0]))),
+        atol=2.0e-15,
+        rtol=0.0,
+    )
+    np.testing.assert_array_equal(
+        canonical["C3z"],
+        materialize_block_route_action(actions["C3z"]),
+    )
+    np.testing.assert_array_equal(
+        canonical["TR"],
+        materialize_block_route_action(actions["TR"]),
+    )
+    nonzero_c2 = canonical["C2"][canonical["C2"] != 0.0]
+    np.testing.assert_array_equal(
+        nonzero_c2,
+        np.full(2, complex(0.0, 1.0)),
+    )
+
+
+def test_projection_basis_frame_round_trips_ud_negative_i_swap() -> None:
+    identity = np.eye(2, dtype=np.complex128)
+    swap = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    angle = 0.13
+    rotation = np.asarray(
+        [[np.cos(angle), np.sin(angle)], [-np.sin(angle), np.cos(angle)]],
+        dtype=np.complex128,
+    )
+    gauges = (identity, rotation)
+    canonical_block = -1.0j * swap
+    blocks = tuple(
+        gauges[1 - source].conjugate().T @ canonical_block @ gauges[source]
+        for source in range(2)
+    )
+    actions = {
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (2, 2),
+            blocks,
+        )
+    }
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("C2", False),),
+        relations=(MagneticRelation("C2^2", ("C2", "C2"), (), -1.0),),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    joint = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    matrices = {
+        name: materialize_block_route_action(action)
+        for name, action in joint.actions.items()
+    }
+    reports = {
+        "__joint_exactification__": {
+            "metadata": dict(joint.artifact_metadata),
+            "arrays": dict(joint.artifact_arrays),
+            "report": dict(joint.report),
+        }
+    }
+
+    frame, exact = _derive_projection_basis_frame(
+        matrices,
+        reports,
+        operations=[{"name": "C2", "antiunitary": False}],
+        sectors=[{"name": "only", "n_orb": 2, "n_q": 2}],
+        tolerance=1.0e-10,
+    )
+
+    assert exact is not None
+    component = frame.components["standard_generator_fiber_gauge"]
+    assert component["fiber_mode"] == "free_orbit_Ud"
+    assert "algebraic_route_encoding" in component
+    nonzero = exact["C2"][exact["C2"] != 0.0]
+    np.testing.assert_array_equal(nonzero, np.full(4, complex(0.0, -1.0)))
+    np.testing.assert_allclose(
+        frame.full_unitary.conjugate().T @ matrices["C2"] @ frame.full_unitary,
+        exact["C2"],
+        atol=5.0e-14,
+        rtol=0.0,
+    )
+
+
+def test_projection_basis_frame_preserves_q_uniform_c3_routes() -> None:
+    root = complex(0.5, np.sqrt(3.0) / 2.0)
+    c3_diagonal = np.diag([root.conjugate(), -1.0, -1.0, root]).astype(
+        np.complex128
+    )
+    c2_diagonal = 1.0j * np.asarray(
+        [
+            [0.0, 0.0, 0.0, 1.0],
+            [0.0, 0.0, 1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    tr_diagonal = np.asarray(
+        [
+            [0.0, 0.0, 0.0, -1.0],
+            [0.0, 0.0, -1.0, 0.0],
+            [0.0, 1.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0, 0.0],
+        ],
+        dtype=np.complex128,
+    )
+    angle = 0.37
+    rotation = np.asarray(
+        [
+            [np.cos(angle), -np.sin(angle), 0.0, 0.0],
+            [np.sin(angle), np.cos(angle), 0.0, 0.0],
+            [0.0, 0.0, np.cos(angle), -np.sin(angle)],
+            [0.0, 0.0, np.sin(angle), np.cos(angle)],
+        ],
+        dtype=np.complex128,
+    )
+    dimensions = (4,) * 6
+    actions = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            tuple(range(6)),
+            dimensions,
+            tuple(rotation @ tr_diagonal @ rotation.T for _ in range(6)),
+        ),
+        "C3z": BlockRouteAction(
+            "C3z",
+            False,
+            (1, 2, 0, 4, 5, 3),
+            dimensions,
+            tuple(
+                rotation @ c3_diagonal @ rotation.conjugate().T
+                for _ in range(6)
+            ),
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (3, 5, 4, 0, 2, 1),
+            dimensions,
+            tuple(
+                rotation @ c2_diagonal @ rotation.conjugate().T
+                for _ in range(6)
+            ),
+        ),
+    }
+    presentation = MagneticPresentation(
+        generators=(
+            MagneticGenerator("TR", True),
+            MagneticGenerator("C3z", False),
+            MagneticGenerator("C2", False),
+        ),
+        relations=(
+            MagneticRelation("TR^2", ("TR",) * 2, (), -1.0),
+            MagneticRelation("C3z^3", ("C3z",) * 3, (), -1.0),
+            MagneticRelation("C2^2", ("C2",) * 2, (), -1.0),
+            MagneticRelation(
+                "TR_C3z_commute",
+                ("TR", "C3z"),
+                ("C3z", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "TR_C2_commute",
+                ("TR", "C2"),
+                ("C2", "TR"),
+                1.0,
+            ),
+            MagneticRelation(
+                "C2_C3z_dihedral",
+                ("C2", "C3z", "C2"),
+                ("C3z", "C3z"),
+                1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="test",
+    )
+    joint = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    matrices = {
+        name: materialize_block_route_action(action)
+        for name, action in joint.actions.items()
+    }
+    reports = {
+        "__joint_exactification__": {
+            "metadata": dict(joint.artifact_metadata),
+            "arrays": dict(joint.artifact_arrays),
+            "report": dict(joint.report),
+        }
+    }
+
+    frame, exact = _derive_projection_basis_frame(
+        matrices,
+        reports,
+        operations=[
+            {"name": "TR", "antiunitary": True},
+            {"name": "C3z", "antiunitary": False},
+            {"name": "C2", "antiunitary": False},
+        ],
+        sectors=[{"name": "only", "n_orb": 4, "n_q": 6}],
+        tolerance=1.0e-10,
+    )
+
+    assert exact is not None
+    component = frame.components["standard_generator_fiber_gauge"]
+    assert component["fiber_mode"] == "q_uniform_Ud"
+    assert component["uniform_generator"]["name"] == "C3z"
+    c3_blocks = [
+        exact["C3z"][4 * target : 4 * (target + 1), 4 * source : 4 * (source + 1)]
+        for source, target in enumerate((1, 2, 0, 4, 5, 3))
+    ]
+    for block in c3_blocks[1:]:
+        np.testing.assert_array_equal(block, c3_blocks[0])
+    np.testing.assert_array_equal(c3_blocks[0], np.diag(np.diag(c3_blocks[0])))
+    for name, antiunitary in (("TR", True), ("C3z", False), ("C2", False)):
+        right = frame.full_unitary.conjugate() if antiunitary else frame.full_unitary
+        np.testing.assert_allclose(
+            frame.full_unitary.conjugate().T @ matrices[name] @ right,
+            exact[name],
+            atol=5.0e-14,
+            rtol=0.0,
+        )
 
 
 def test_project_artifact_identity_rejects_basis_wavefunction_mismatch(tmp_path) -> None:
@@ -53,7 +839,7 @@ def test_project_artifact_identity_rejects_basis_wavefunction_mismatch(tmp_path)
         "config_hash": "config-a",
         "basis_hash": "basis-a",
         "package_version": "0.1.0",
-        "schema_version": 1,
+        "schema_version": 2,
         "k_indices_hash": "k-indices-a",
         "heff_hash": "heff-a",
     }
@@ -73,6 +859,281 @@ def test_project_artifact_identity_rejects_basis_wavefunction_mismatch(tmp_path)
         _load_project_artifact_identity(project_dir, verify_heff=False)
 
 
+def test_canonical_symmetry_package_exports_certified_factorized_action(
+    tmp_path: Path,
+) -> None:
+    exactified = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    np.save(tmp_path / "exactified_C2.npy", exactified)
+    items = [
+        {
+            "source_sector": "L1",
+            "source_q_index": 0,
+            "target_sector": "L2",
+            "target_q_index": 0,
+            "q_residual": 0.0,
+        },
+        {
+            "source_sector": "L2",
+            "source_q_index": 0,
+            "target_sector": "L1",
+            "target_q_index": 0,
+            "q_residual": 0.0,
+        },
+    ]
+    summary = {
+        "valley": "Gamma",
+        "spin": "spinful",
+        "tolerance": 1.0e-8,
+        "full_dim": 2,
+        "low_dim": 2,
+        "artifact_identity": {},
+        "kp_symm_exactification": {
+            "status": "exactified",
+            "matrix_source": "kp_symm_exactified_action",
+            "n_orb": [1, 1],
+        },
+        "operations": [
+            {
+                "name": "C2",
+                "operation": "C2",
+                "antiunitary": False,
+                "pairs": [],
+                "matrix_file": "exactified_C2.npy",
+                "matrix_kind": "continuum_internal_rep_exact",
+                "matrix_source": "kp_symm_exactified_action",
+                "internal_resolved_action": {
+                    "antiunitary": False,
+                    "k_map": {"type": "identity"},
+                    "q_map": {"type": "identity"},
+                    "sector_map": "layer_exchange",
+                },
+                "model_basis_action": {
+                    "complete": True,
+                    "items": items,
+                },
+            }
+        ],
+    }
+    q_geometry = CanonicalQResult(
+        raw_q={"L1": np.zeros((1, 2)), "L2": np.zeros((1, 2))},
+        canonical_q={"L1": np.zeros((1, 2)), "L2": np.zeros((1, 2))},
+        artifact={
+            "sector_order": ("L1", "L2"),
+            "canonical_closure_max": 0.0,
+            "status": "certified",
+        },
+    )
+
+    projection_mod._write_canonical_symmetry_outputs(
+        tmp_path,
+        summary,
+        q_geometry=q_geometry,
+    )
+
+    with np.load(tmp_path / "representations.npz", allow_pickle=False) as payload:
+        metadata = json.loads(str(payload["__metadata_json__"].item()))
+        factorized_metadata = metadata["kp_symm_exactification"][
+            "factorized_response_action"
+        ]
+        factorized_arrays = {
+            key: np.asarray(payload[key])
+            for key in payload.files
+            if key.startswith("__factorized_response_action_")
+        }
+    from kp.symmetry.factorized_action import (
+        load_factorized_actions,
+        load_factorized_actions_from_npz,
+    )
+
+    restored = load_factorized_actions(factorized_metadata, factorized_arrays)
+    restored_from_file = load_factorized_actions_from_npz(
+        tmp_path / "representations.npz"
+    )
+    assert set(restored) == {"C2"}
+    assert set(restored_from_file) == {"C2"}
+    assert restored_from_file["C2"].artifact_hash == restored["C2"].artifact_hash
+    assert restored["C2"].sector_permutation == (1, 0)
+    assert restored["C2"].q_permutation == (1, 0)
+
+
+def test_canonical_symmetry_package_exports_certified_joint_artifact(
+    tmp_path: Path,
+) -> None:
+    from kp.symmetry.joint_exactification import (
+        BlockRouteAction,
+        JointExactificationConfig,
+        compile_continuum_magnetic_presentation,
+        joint_exactify_block_actions,
+        load_joint_exactification_artifact,
+        materialize_block_route_action,
+    )
+
+    presentation = compile_continuum_magnetic_presentation(
+        [
+            {
+                "name": "TR",
+                "operation": "TR",
+                "antiunitary": True,
+                "k_map": {"type": "negation"},
+                "q_map": {"type": "negation"},
+                "sector_map": "identity",
+                "group_relations": [
+                    {"type": "power", "operation": "TR", "power": 2, "phase": 1}
+                ],
+            },
+            {
+                "name": "C2",
+                "operation": "C2",
+                "antiunitary": False,
+                "k_map": {"type": "reflection", "axis_deg": 0.0},
+                "q_map": {"type": "reflection", "axis_deg": 0.0},
+                "sector_map": "layer_exchange",
+                "group_relations": [
+                    {"type": "power", "operation": "C2", "power": 2, "phase": 1}
+                ],
+            },
+        ]
+    )
+    actions = {
+        "TR": BlockRouteAction(
+            "TR",
+            True,
+            (0, 1),
+            (1, 1),
+            (np.ones((1, 1), dtype=np.complex128),) * 2,
+        ),
+        "C2": BlockRouteAction(
+            "C2",
+            False,
+            (1, 0),
+            (1, 1),
+            (-np.ones((1, 1), dtype=np.complex128),) * 2,
+        ),
+    }
+    result = joint_exactify_block_actions(
+        actions,
+        presentation,
+        config=JointExactificationConfig(),
+    )
+    for name, action in result.actions.items():
+        np.save(tmp_path / f"exactified_{name}.npy", materialize_block_route_action(action))
+    summary = {
+        "valley": "M",
+        "spin": "up",
+        "tolerance": 1.0e-8,
+        "full_dim": 2,
+        "low_dim": 2,
+        "artifact_identity": {},
+        "kp_symm_exactification": {
+            "status": "exactified",
+            "matrix_source": "kp_symm_exactified_action",
+            "n_orb": [1, 1],
+            "joint_block_representation": dict(result.artifact_metadata),
+        },
+        "operations": [
+            {
+                "name": name,
+                "operation": name,
+                "antiunitary": bool(action.antiunitary),
+                "model_action": {
+                    "antiunitary": bool(action.antiunitary),
+                    "k_map": (
+                        {"type": "negation"}
+                        if name == "TR"
+                        else {"type": "reflection", "axis_deg": 0.0}
+                    ),
+                    "q_map": (
+                        {"type": "negation"}
+                        if name == "TR"
+                        else {"type": "reflection", "axis_deg": 0.0}
+                    ),
+                    "sector_map": "identity" if name == "TR" else "layer_exchange",
+                },
+                "pairs": [],
+                "matrix_file": f"exactified_{name}.npy",
+                "matrix_kind": "continuum_internal_rep_exact",
+                "matrix_source": "kp_symm_exactified_action",
+            }
+            for name, action in result.actions.items()
+        ],
+    }
+    q_geometry = CanonicalQResult(
+        raw_q={"L1": np.zeros((1, 2)), "L2": np.zeros((1, 2))},
+        canonical_q={"L1": np.zeros((1, 2)), "L2": np.zeros((1, 2))},
+        artifact={
+            "sector_order": ("L1", "L2"),
+            "canonical_closure_max": 0.0,
+            "status": "certified",
+        },
+    )
+
+    projection_mod._write_canonical_symmetry_outputs(
+        tmp_path,
+        summary,
+        q_geometry=q_geometry,
+        joint_artifact_arrays=result.artifact_arrays,
+    )
+
+    with np.load(tmp_path / "representations.npz", allow_pickle=False) as payload:
+        metadata = json.loads(str(payload["__metadata_json__"].item()))
+        joint_metadata = metadata["kp_symm_exactification"][
+            "joint_block_representation"
+        ]
+        joint_arrays = {
+            key: np.asarray(payload[key])
+            for key in payload.files
+            if key.startswith("__joint_block_representation_")
+        }
+    restored = load_joint_exactification_artifact(joint_metadata, joint_arrays)
+    assert restored.artifact_metadata["artifact_hash"] == result.artifact_metadata[
+        "artifact_hash"
+    ]
+    assert set(restored.actions) == {"TR", "C2"}
+    factorized = metadata["kp_symm_exactification"]["factorized_response_action"]
+    assert factorized["status"] == "certified"
+    assert {
+        record["name"]: tuple(record["q_permutation"])
+        for record in factorized["actions"]
+    } == {"TR": (0, 1), "C2": (1, 0)}
+
+
+def test_project_artifact_identity_includes_and_verifies_kpoints_hash(tmp_path) -> None:
+    project_dir = tmp_path / "projection"
+    project_dir.mkdir()
+    heff = np.eye(2, dtype=np.complex128)[None, :, :]
+    kpoints = np.array([[0.1, 0.2]], dtype=float)
+    k_indices = np.asarray([0], dtype=np.int64)
+    np.save(project_dir / "heff.npy", heff)
+    np.save(project_dir / "kpoints.npy", kpoints)
+    identity = {
+        "identity_schema": "moirekp.artifact-identity.v1",
+        "input_hash": "input-a",
+        "config_hash": "config-a",
+        "basis_hash": "basis-a",
+        "package_version": "0.1.0",
+        "schema_version": 2,
+        "k_indices_hash": hash_array(k_indices),
+        "heff_hash": hash_array(heff),
+        "kpoints_hash": hash_array(kpoints),
+    }
+    scalar_identity = {key: np.asarray(value) for key, value in identity.items()}
+    np.savez(project_dir / "basis.npz", **scalar_identity)
+    np.savez(
+        project_dir / "wavefunctions.npz",
+        wavefunctions=np.eye(2, dtype=np.complex128)[None, :, :],
+        k_indices=k_indices,
+        **scalar_identity,
+    )
+
+    resolved = _load_project_artifact_identity(project_dir)
+
+    assert resolved["kpoints_hash"] == hash_array(kpoints)
+
+    np.save(project_dir / "kpoints.npy", kpoints + 0.25)
+    with pytest.raises(ValueError, match="kpoints_hash mismatch"):
+        _load_project_artifact_identity(project_dir)
+
+
 def test_symmetry_project_identity_rejects_recomputed_basis_mismatch(tmp_path) -> None:
     hamk_path = tmp_path / "hamk.npy"
     q1 = np.array([[0.0, 0.0]], dtype=float)
@@ -80,8 +1141,6 @@ def test_symmetry_project_identity_rejects_recomputed_basis_mismatch(tmp_path) -
     hamk = np.eye(4, dtype=np.complex128)[None, :, :]
     np.save(hamk_path, hamk)
     expected = projection_mod.build_projection_basis_identity(
-        hamk_file=hamk_path,
-        hamk_fallback=hamk[0],
         qset1=q1,
         qset2=q2,
         spin="up",
@@ -102,7 +1161,7 @@ def test_symmetry_project_identity_rejects_recomputed_basis_mismatch(tmp_path) -
         _validate_symmetry_project_identity(expected, actual)
 
 
-def test_symmetry_resolves_identity_from_projection_artifacts(tmp_path) -> None:
+def test_symmetry_resolves_identity_from_projection_artifacts(monkeypatch, tmp_path) -> None:
     project_dir = tmp_path / "projection"
     project_dir.mkdir()
     hamk_path = tmp_path / "hamk.npy"
@@ -113,8 +1172,6 @@ def test_symmetry_resolves_identity_from_projection_artifacts(tmp_path) -> None:
     np.save(hamk_path, hamk)
     np.save(project_dir / "heff.npy", heff)
     identity = projection_mod.build_projection_basis_identity(
-        hamk_file=hamk_path,
-        hamk_fallback=hamk[0],
         qset1=q1,
         qset2=q2,
         spin="up",
@@ -129,7 +1186,11 @@ def test_symmetry_resolves_identity_from_projection_artifacts(tmp_path) -> None:
         model_dim=2,
         k_indices=[0],
     )
-    artifact_identity = {**identity, "heff_hash": hash_array(heff)}
+    artifact_identity = {
+        **identity,
+        "heff_hash": hash_array(heff),
+        "source_hamiltonian_hash": "legacy-large-file-hash",
+    }
     scalar_identity = {key: np.asarray(value) for key, value in artifact_identity.items()}
     np.savez(project_dir / "basis.npz", **scalar_identity)
     np.savez(
@@ -155,6 +1216,14 @@ def test_symmetry_resolves_identity_from_projection_artifacts(tmp_path) -> None:
         hamk_source_by_k={0: hamk[0]},
     )
     gauge_report = SimpleNamespace(gauge_mode="manual")
+    monkeypatch.setattr(
+        projection_mod,
+        "hash_file",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("kp symm rehashed the full source Hamiltonian")
+        ),
+        raising=False,
+    )
 
     resolved = _resolve_symmetry_project_identity(
         ctx,
@@ -163,7 +1232,11 @@ def test_symmetry_resolves_identity_from_projection_artifacts(tmp_path) -> None:
         low_dim=2,
     )
 
-    assert resolved == artifact_identity
+    assert resolved == {
+        field: artifact_identity[field]
+        for field in projection_mod.PROJECTION_ARTIFACT_IDENTITY_FIELDS
+    }
+    assert "source_hamiltonian_hash" not in resolved
 
 
 def test_symmetry_identity_rejects_project_k_indices_config_drift(tmp_path) -> None:
@@ -177,8 +1250,6 @@ def test_symmetry_identity_rejects_project_k_indices_config_drift(tmp_path) -> N
     np.save(hamk_path, hamk)
     np.save(project_dir / "heff.npy", heff)
     identity = projection_mod.build_projection_basis_identity(
-        hamk_file=hamk_path,
-        hamk_fallback=hamk[0],
         qset1=q1,
         qset2=q2,
         spin="up",
@@ -257,8 +1328,6 @@ def _write_projection_identity_artifacts(
     heff = np.zeros((1, model_dim, model_dim), dtype=np.complex128)
     np.save(project_dir / "heff.npy", heff)
     identity = projection_mod.build_projection_basis_identity(
-        hamk_file=hamk_file,
-        hamk_fallback=np.asarray(hamk[0] if hamk.ndim == 3 else hamk),
         qset1=q1,
         qset2=q2,
         spin=spin,
@@ -400,6 +1469,230 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertEqual(calls["e_ref"], 0.5)
         self.assertFalse(calls["u_high_is_none"])
         np.testing.assert_allclose(state.heff, [[2.0]])
+
+    def test_auto_gauge_candidate_states_reuse_reference_downfold(self) -> None:
+        reference_u = np.eye(4, 2, dtype=np.complex128)
+        transform = np.asarray(
+            [[0.0, 1.0], [1.0j, 0.0]],
+            dtype=np.complex128,
+        )
+        candidate_u = reference_u @ transform
+        reference_heff = np.asarray(
+            [[1.0, 0.2j], [-0.2j, 3.0]],
+            dtype=np.complex128,
+        )
+        calls: list[tuple[str, str]] = []
+
+        def fake_projectors_for_k(*_args, method, norb_fix_list, **_kwargs):
+            anchor_id = str(norb_fix_list[0])
+            calls.append((anchor_id, method))
+            if anchor_id == "reference":
+                return projection_mod.ProjectionState(
+                    hamk=np.eye(4, dtype=np.complex128),
+                    heff=reference_heff,
+                    u_low=reference_u,
+                )
+            if method != "first_order":
+                raise AssertionError("candidate repeated the expensive downfold")
+            return projection_mod.ProjectionState(
+                hamk=np.eye(4, dtype=np.complex128),
+                heff=np.zeros((2, 2), dtype=np.complex128),
+                u_low=candidate_u,
+            )
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                spin_sector_sewing=None,
+                spin="up",
+                project_cfg={},
+            ),
+            required_k=[0],
+            hamk_source_by_k={0: np.eye(4, dtype=np.complex128)},
+            hamk_target_by_k={0: np.eye(4, dtype=np.complex128)},
+            q1=np.zeros((1, 2), dtype=float),
+            q2=np.zeros((1, 2), dtype=float),
+            orb0=2,
+            num_layer_list=[1, 1],
+            num_orb_per_layer_list=[[2], [2]],
+            mode="gamma",
+            nlow_state_list=[[0], [1]],
+            method="linearized_lowdin",
+            e_ref=0.5,
+        )
+        diagnostics: list[dict] = []
+        with patch.object(
+            projection_mod,
+            "_projectors_for_k",
+            side_effect=fake_projectors_for_k,
+        ):
+            reference = projection_mod._states_for_resolved_anchors(
+                ctx,
+                ["reference"],
+            )
+            candidate = projection_mod._states_for_resolved_anchors(
+                ctx,
+                ["candidate"],
+                reference_states=reference,
+                reuse_diagnostics=diagnostics,
+            )
+
+        candidate_state = candidate[0][0]
+        np.testing.assert_allclose(
+            candidate_state.heff,
+            transform.conj().T @ reference_heff @ transform,
+            atol=1.0e-14,
+            rtol=0.0,
+        )
+        np.testing.assert_allclose(candidate_state.u_low, candidate_u)
+        self.assertEqual(calls, [("reference", "linearized_lowdin"), ("candidate", "first_order")])
+        self.assertEqual(diagnostics[0]["status"], "reused")
+
+    def test_auto_gauge_candidate_basis_does_not_run_configured_downfold(self) -> None:
+        calls: list[tuple[str, bool, bool]] = []
+        eigensystem_cache = {}
+
+        def fake_projectors_for_k(
+            *_args,
+            method,
+            eigensystem_cache,
+            compute_heff=True,
+            **_kwargs,
+        ):
+            calls.append(
+                (
+                    str(method),
+                    bool(compute_heff),
+                    eigensystem_cache is ctx.block_eigensystem_cache,
+                )
+            )
+            return projection_mod.ProjectionState(
+                hamk=np.eye(4, dtype=np.complex128),
+                heff=np.zeros((2, 2), dtype=np.complex128),
+                u_low=np.eye(4, 2, dtype=np.complex128),
+            )
+
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                spin_sector_sewing=None,
+                spin="up",
+                project_cfg={},
+            ),
+            required_k=[0],
+            hamk_source_by_k={0: np.eye(4, dtype=np.complex128)},
+            hamk_target_by_k={0: np.eye(4, dtype=np.complex128)},
+            q1=np.zeros((1, 2), dtype=float),
+            q2=np.zeros((1, 2), dtype=float),
+            orb0=2,
+            num_layer_list=[1, 1],
+            num_orb_per_layer_list=[[2], [2]],
+            mode="gamma",
+            nlow_state_list=[[0], [1]],
+            method="linearized_lowdin",
+            e_ref=0.5,
+            block_eigensystem_cache=eigensystem_cache,
+        )
+        with patch.object(
+            projection_mod,
+            "_projectors_for_k",
+            side_effect=fake_projectors_for_k,
+        ):
+            states = projection_mod._basis_states_for_resolved_anchors(
+                ctx,
+                ["candidate"],
+            )
+
+        self.assertEqual(calls, [("first_order", False, True)])
+        np.testing.assert_allclose(states[0][0].u_low, np.eye(4, 2))
+
+    def test_candidate_projection_can_skip_heff_covariance_metric(self) -> None:
+        state = projection_mod.ProjectionState(
+            hamk=np.eye(2, dtype=np.complex128),
+            heff=None,
+            u_low=np.eye(2, dtype=np.complex128),
+        )
+        raw, _polar, rows = projection_mod._project_operation(
+            operation="E",
+            antiunitary=False,
+            d_full=np.eye(2, dtype=np.complex128),
+            states={0: state},
+            pairs=[(0, 0)],
+            tolerance=1.0e-12,
+            compute_heff_covariance=False,
+        )
+
+        self.assertTrue(np.array_equal(raw[0], np.eye(2)))
+        self.assertIsNone(rows[0]["raw"]["heff_covariance_residual"])
+
+    def test_auto_gauge_falls_back_when_production_basis_frame_changes(self) -> None:
+        def bundle(u_low):
+            state = projection_mod.ProjectionState(
+                hamk=np.eye(2, dtype=np.complex128),
+                heff=np.zeros((1, 1), dtype=np.complex128),
+                u_low=np.asarray(u_low, dtype=np.complex128),
+            )
+            by_k = {0: state}
+            return by_k, by_k, by_k, state
+
+        basis_states = bundle([[1.0], [0.0]])
+        configured_states = bundle([[0.0], [1.0]])
+        report = GaugeAnchorReport(
+            gauge_mode="auto_scdm",
+            resolved_norb_fix_list=[[[0]]],
+            selections=[],
+            metric={},
+            state_selection_quality={},
+            gauge_anchor_quality={},
+            symmetry_closure_quality={},
+        )
+        candidate = SimpleNamespace(
+            candidate_id="candidate",
+            resolved_norb_fix_list=[[[0]]],
+            report=report,
+        )
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(symm_cfg={}, tolerance=1.0e-2),
+            full_dim=2,
+            method="linearized_lowdin",
+            selected_gauge_states="must_be_cleared",
+        )
+        calls = []
+
+        def fake_metrics(_ctx, _candidate, *, candidate_states=None, state_cache=None):
+            calls.append("configured" if candidate_states is not None else "basis")
+            if state_cache is not None:
+                state_cache["candidate"] = basis_states
+            return GaugeCandidateSymmetryMetrics(
+                candidate_id="candidate",
+                exactification_distance_by_op={"TR": 0.0},
+                metadata={
+                    "status": "evaluated",
+                    "symmetry_adapted_frame": {"status": "applied"},
+                },
+            )
+
+        decision = SimpleNamespace(rankings=[])
+        with (
+            patch.object(projection_mod, "_candidate_symmetry_metrics", side_effect=fake_metrics),
+            patch.object(
+                projection_mod,
+                "_configured_basis_states_for_resolved_anchors",
+                return_value=configured_states,
+            ),
+            patch.object(
+                projection_mod,
+                "_select_validated_auto_gauge_candidate",
+                return_value=(candidate, decision),
+            ),
+        ):
+            selected, selected_report = projection_mod._select_projection_gauge(ctx, [candidate])
+
+        self.assertIs(selected, candidate)
+        self.assertEqual(calls, ["basis", "configured"])
+        self.assertIsNone(ctx.selected_gauge_states)
+        certification = selected_report.symmetry_closure_quality["metrics"][0]["metadata"][
+            "production_basis_certification"
+        ]
+        self.assertEqual(certification["status"], "configured_basis_fallback")
 
     def test_projectors_for_k_uses_full_row_order_for_multilayer_k_mode(self) -> None:
         ham = np.diag(np.arange(6, dtype=float)).astype(np.complex128)
@@ -587,6 +1880,60 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 accept_support_resolved_action=True,
             )
 
+    def test_projected_action_inference_resolves_layer_exchange_with_provenance(self) -> None:
+        q = np.array([[0.0, 0.0]], dtype=float)
+        declared = {
+            "antiunitary": True,
+            "k_map": {"type": "negation", "in_model_frame": True},
+            "q_map": {"type": "negation", "in_model_frame": True},
+            "sector_map": "identity",
+        }
+        projected_action = np.array([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+
+        resolved, basis_action = _resolve_projected_model_action(
+            D_low=projected_action,
+            model_action=declared,
+            q_model1=q,
+            q_model2=q.copy(),
+            nlow_state_list=[[54], [55]],
+            num_layer_list=[1, 1],
+            tol=1.0e-8,
+            discover_action_candidates=True,
+            accept_support_resolved_action=True,
+        )
+
+        assert resolved["sector_map"] == "layer_exchange"
+        provenance = basis_action["support_resolution"]["provenance"]
+        assert provenance["accepted_by"] == "kp_projected_basis_inference"
+        assert provenance["accepted_by_user"] is False
+        assert provenance["declared_model_action"]["sector_map"] == "identity"
+        assert provenance["selected_action_candidate"]["sector_map"] == "layer_exchange"
+
+    def test_projected_action_inference_preserves_matching_identity_action(self) -> None:
+        q = np.array([[0.0, 0.0]], dtype=float)
+        declared = {
+            "antiunitary": True,
+            "k_map": {"type": "negation", "in_model_frame": True},
+            "q_map": {"type": "negation", "in_model_frame": True},
+            "sector_map": "identity",
+        }
+
+        resolved, basis_action = _resolve_projected_model_action(
+            D_low=np.eye(2, dtype=np.complex128),
+            model_action=declared,
+            q_model1=q,
+            q_model2=q.copy(),
+            nlow_state_list=[[40], [42]],
+            num_layer_list=[1, 1],
+            tol=1.0e-8,
+            discover_action_candidates=True,
+            accept_support_resolved_action=True,
+        )
+
+        assert resolved["sector_map"] == "identity"
+        assert basis_action["support_resolution"]["action_mismatch"] is False
+        assert "provenance" not in basis_action["support_resolution"]
+
     def test_projectors_for_k_uses_configured_downfold_method_and_e_ref(self) -> None:
         q = np.array([[0.0, 0.0]], dtype=float)
         ham = np.diag([0.0, 10.0, 0.0, 10.0]).astype(np.complex128)
@@ -744,8 +2091,6 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         heff = np.zeros((1, 2, 2), dtype=np.complex128)
         np.save(project_dir / "heff.npy", heff)
         project_identity = projection_mod.build_projection_basis_identity(
-            hamk_file=hamk_file,
-            hamk_fallback=hamk[0],
             qset1=np.load(q1_file),
             qset2=np.load(q2_file),
             spin="up",
@@ -944,6 +2289,169 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(report.symmetry_closure_quality["status"], "validated")
             self.assertFalse(case_root.exists())
 
+    def test_symmetry_gauge_resolver_skips_full_space_covariance_recheck(self) -> None:
+        run_cfg = object()
+        context = object()
+        report = GaugeAnchorReport(
+            gauge_mode="auto_scdm",
+            resolved_norb_fix_list=[[[0]]],
+            selections=[],
+            metric={},
+            state_selection_quality={},
+            gauge_anchor_quality={},
+            symmetry_closure_quality={"status": "validated"},
+        )
+
+        def fake_build_context(
+            observed_run_cfg,
+            *,
+            create_output_dir,
+            validate_full_space_covariance,
+        ):
+            self.assertIs(observed_run_cfg, run_cfg)
+            self.assertFalse(create_output_dir)
+            self.assertFalse(validate_full_space_covariance)
+            return context
+
+        with (
+            patch.object(projection_mod, "_load_projection_run_config", return_value=run_cfg),
+            patch.object(
+                projection_mod,
+                "_build_projection_run_context",
+                side_effect=fake_build_context,
+            ),
+            patch.object(
+                projection_mod,
+                "_resolve_validated_projection_gauge",
+                return_value=(object(), report),
+            ),
+        ):
+            actual = projection_mod.resolve_symmetry_validated_project_gauge("unused.yaml")
+
+        self.assertIs(actual, report)
+
+    def test_formal_symmetry_reuses_project_resolved_gauge(self) -> None:
+        report = GaugeAnchorReport(
+            gauge_mode="auto_scdm",
+            resolved_norb_fix_list=[[[0]], [[1]]],
+            selections=[],
+            metric={},
+            state_selection_quality={},
+            gauge_anchor_quality={},
+            symmetry_closure_quality={
+                "status": "validated",
+                "selected_candidate_id": "project-selected",
+            },
+        )
+
+        with patch.object(
+            projection_mod,
+            "_resolve_validated_projection_gauge",
+            side_effect=AssertionError("formal symmetry reran Auto-gauge"),
+        ):
+            candidate, actual = projection_mod._resolved_gauge_for_symmetry(
+                object(),
+                gauge_report=report,
+            )
+
+        self.assertIs(actual, report)
+        self.assertEqual(candidate.candidate_id, "project-selected")
+        self.assertEqual(candidate.resolved_norb_fix_list, report.resolved_norb_fix_list)
+
+    def test_certified_frames_accept_roundoff_level_matrix_differences(self) -> None:
+        project_frame = np.eye(4, dtype=np.complex128)
+        recomputed_frame = project_frame.copy()
+        recomputed_frame[0, 0] += 4.0e-16
+
+        residual, bound = projection_mod._certified_frame_equivalence(
+            project_frame,
+            recomputed_frame,
+        )
+
+        self.assertGreater(residual, 0.0)
+        self.assertLessEqual(residual, bound)
+
+    def test_summary_writer_reports_skipped_full_space_covariance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            summary_path = Path(td) / "summary.md"
+            projection_mod._write_summary_md(
+                summary_path,
+                {
+                    "valley": "Gamma",
+                    "spin": "all",
+                    "tolerance": 1.0e-8,
+                    "full_dim": 8,
+                    "low_dim": 4,
+                    "operations": [
+                        {
+                            "operation": "C3z",
+                            "antiunitary": False,
+                            "pairs": [
+                                {
+                                    "target_k_index": 0,
+                                    "source_k_index": 0,
+                                    "full_space_covariance_residual": None,
+                                    "raw": {
+                                        "heff_covariance_residual": None,
+                                        "subspace_leakage": 0.0,
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                },
+            )
+
+            self.assertIn("full cov=skipped", summary_path.read_text(encoding="utf-8"))
+            self.assertIn("raw cov=skipped", summary_path.read_text(encoding="utf-8"))
+
+    def test_loads_matching_project_prepared_symmetry_package(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            symm_dir = tmp / "symmetry"
+            project_dir = tmp / "projection"
+            symm_dir.mkdir()
+            project_dir.mkdir()
+            identity = {
+                field: f"value-{field}"
+                for field in projection_mod.PROJECTION_ARTIFACT_IDENTITY_FIELDS
+            }
+            metadata = {
+                "artifact_identity": identity,
+                "package_preparation": {
+                    "owner": "kp_project",
+                    "status": "prepared",
+                },
+                "operations": [],
+            }
+            np.savez_compressed(
+                symm_dir / "representations.npz",
+                __metadata_json__=np.asarray(json.dumps(metadata, sort_keys=True)),
+            )
+            run_cfg = SimpleNamespace(
+                cfg_dir=str(tmp),
+                project_cfg={"out_dir": str(project_dir)},
+                symm_cfg={"output_dir": str(symm_dir)},
+            )
+
+            with (
+                patch.object(
+                    projection_mod,
+                    "_load_projection_run_config",
+                    return_value=run_cfg,
+                ),
+                patch.object(
+                    projection_mod,
+                    "_load_project_artifact_identity",
+                    return_value=identity,
+                ),
+            ):
+                actual = projection_mod.load_project_prepared_symmetry_package(
+                    "unused.yaml"
+                )
+
+        self.assertEqual(actual, metadata)
+
     def test_symm_accepts_release_manifest_with_rawh_only(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             tmp = Path(td)
@@ -973,6 +2481,17 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(row["projection_diagnostic_pairs"], row["pairs"])
             self.assertNotIn("representation_file", row)
             self.assertFalse((out_dir / "diagnostics" / "C3_low_representation_raw.npy").exists())
+            polynomial_coordinate = summary["kp_symm_exactification"]["polynomial_coordinate"]
+            self.assertEqual(
+                polynomial_coordinate["coordinate_convention"],
+                "right_handed_model_cartesian_reciprocal_v1",
+            )
+            self.assertEqual(polynomial_coordinate["origin"], [0.0, 0.0])
+            self.assertEqual(
+                polynomial_coordinate["origin_role"],
+                "exactified_valley_expansion_origin_in_model_cartesian",
+            )
+            self.assertEqual(polynomial_coordinate["valley"], "K1")
 
     def test_symm_auto_frame_uses_reflection_axis_when_rotation_is_not_configured(self):
         with tempfile.TemporaryDirectory() as td:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from contextvars import ContextVar
 from dataclasses import dataclass
+from functools import wraps
 from typing import Any, List, Mapping, Tuple, Literal
 
 import numpy as np
@@ -19,6 +21,10 @@ from .downfold import (
 from kp.basis.selection import AutoGaugeConfig, GaugeAnchorReport, select_anchor_rows_qrcp
 
 PROJECTOR_BLAS_THREADS = 8
+_PROJECTOR_BLAS_SCOPE_DEPTH: ContextVar[int] = ContextVar(
+    "projector_blas_scope_depth",
+    default=0,
+)
 
 
 @dataclass(frozen=True)
@@ -29,12 +35,24 @@ class ProjectGaugeAnchorCandidate:
     priority: int = 0
 
 
+@contextmanager
 def _bounded_blas_threads():
+    depth = _PROJECTOR_BLAS_SCOPE_DEPTH.get()
+    token = _PROJECTOR_BLAS_SCOPE_DEPTH.set(depth + 1)
     try:
-        from threadpoolctl import threadpool_limits
-    except Exception:  # pragma: no cover - optional runtime dependency
-        return nullcontext()
-    return threadpool_limits(limits=PROJECTOR_BLAS_THREADS, user_api="blas")
+        if depth > 0:
+            yield
+            return
+        try:
+            from threadpoolctl import threadpool_limits
+        except Exception:  # pragma: no cover - optional runtime dependency
+            scope = nullcontext()
+        else:
+            scope = threadpool_limits(limits=PROJECTOR_BLAS_THREADS, user_api="blas")
+        with scope:
+            yield
+    finally:
+        _PROJECTOR_BLAS_SCOPE_DEPTH.reset(token)
 
 
 def set_projector_blas_threads(threads: int) -> None:
@@ -137,6 +155,42 @@ def _hermitian_eigh_columns(matrix: np.ndarray, columns: list[int] | None) -> tu
         eig[cols] = eig_window[window_cols]
         vec[:, cols] = vec_window[:, window_cols]
     return eig, vec
+
+
+def _cached_hermitian_eigh_columns(
+    *,
+    hamk: np.ndarray,
+    block: np.ndarray,
+    block_indices: np.ndarray,
+    columns: list[int] | None,
+    cache: dict[Any, tuple[np.ndarray, np.ndarray]] | None,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Reuse an unaligned block eigensystem within one projection run."""
+
+    if cache is None:
+        return _hermitian_eigh_columns(block, columns)
+    array = np.asarray(hamk)
+    storage_key = (
+        int(array.__array_interface__["data"][0]),
+        tuple(int(value) for value in array.shape),
+        tuple(int(value) for value in array.strides),
+        array.dtype.str,
+    )
+    column_key = None if columns is None else tuple(sorted({int(col) for col in columns}))
+    key = (
+        storage_key,
+        tuple(int(value) for value in np.asarray(block_indices, dtype=np.intp)),
+        column_key,
+    )
+    cached = cache.get(key)
+    if cached is None:
+        eig, vec = _hermitian_eigh_columns(block, columns)
+        cache[key] = (np.array(eig, copy=True), np.array(vec, copy=True))
+        return eig, vec
+    eig, vec = cached
+    # Anchor alignment mutates selected columns, so every caller needs its own
+    # working copy while the cache retains the unaligned eigensystem.
+    return np.array(eig, copy=True), np.array(vec, copy=True)
 
 
 def align_eigenstates(U_low: np.ndarray, Phi_ref: np.ndarray) -> np.ndarray:
@@ -1326,6 +1380,7 @@ def resolve_project_gauge_anchors(
     norb_fix_list: Any = None,
     gauge_config: Any = None,
     mode: str = "gamma",
+    eigensystem_cache: dict[Any, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> tuple[list[Any], GaugeAnchorReport]:
     """Resolve manual or automatic gauge anchors to legacy norb_fix_list format."""
 
@@ -1375,6 +1430,7 @@ def resolve_project_gauge_anchors(
         spin=spin,
         mode=mode_lower,
         selected_bands_by_layer=nlow_state_list,
+        eigensystem_cache=eigensystem_cache,
     )
     resolved: list[Any] = [[] for _ in range(total_layers)]
     selections: list[dict[str, Any]] = []
@@ -1578,6 +1634,7 @@ def resolve_project_gauge_anchor_candidates(
     norb_fix_list: Any = None,
     gauge_config: Any = None,
     mode: str = "gamma",
+    eigensystem_cache: dict[Any, tuple[np.ndarray, np.ndarray]] | None = None,
 ) -> list[ProjectGaugeAnchorCandidate]:
     """Return all finite-basis auto-gauge candidates usable by symmetry validation.
 
@@ -1598,6 +1655,7 @@ def resolve_project_gauge_anchor_candidates(
         norb_fix_list=norb_fix_list,
         gauge_config=gauge_config,
         mode=mode,
+        eigensystem_cache=eigensystem_cache,
     )
     auto_from_norb = _is_auto_token(norb_fix_list)
     auto_from_gauge = _gauge_requests_auto(gauge_config)
@@ -1634,6 +1692,7 @@ def resolve_project_gauge_anchor_candidates(
             spin=spin,
             mode=mode_lower,
             selected_bands_by_layer=nlow_state_list,
+            eigensystem_cache=eigensystem_cache,
         )
         layer_widths = _physical_layer_widths(
             num_layer_list,
@@ -1692,6 +1751,7 @@ def resolve_project_gauge_anchor_candidates(
         spin=spin,
         mode=mode_lower,
         selected_bands_by_layer=nlow_state_list,
+        eigensystem_cache=eigensystem_cache,
     )
     vec = np.asarray(h_vec_blk[ref_q], dtype=np.complex128)
     bands_flat: list[int] = []
@@ -1854,7 +1914,7 @@ def _source_group_band_lists(nlow_state_list: Any, num_layer_list: List[int]) ->
     return grouped
 
 
-def get_H_block(
+def _get_H_block_impl(
     Hamk_list: np.ndarray,
     Qlayer_list: List[np.ndarray],
     num_layer_list: List[int],
@@ -1865,6 +1925,7 @@ def get_H_block(
     spin: Literal["up", "down", "all"] = "up",
     mode: Literal["gamma", "K1", "K2"] = "gamma",
     selected_bands_by_layer: list[list[int]] | None = None,
+    eigensystem_cache: dict[Any, tuple[np.ndarray, np.ndarray]] | None = None,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Assemble Hamiltonian sub-blocks and diagonalize per-Q selection.
 
@@ -1968,7 +2029,13 @@ def get_H_block(
                         for band in layer_bands
                     }
                 )
-            eig, vec = _hermitian_eigh_columns(block, selected_bands)
+            eig, vec = _cached_hermitian_eigh_columns(
+                hamk=hamk,
+                block=block,
+                block_indices=same_q_index,
+                columns=selected_bands,
+                cache=eigensystem_cache,
+            )
             # print(np.sort(eig)[:5],np.linalg.norm(block))
             if nlow_state_list and norb_fix_list:
                 bands_flat: list[int] = []
@@ -2017,7 +2084,13 @@ def get_H_block(
                     block = _extract_square_block(hamk, same_q_index)
                     entry_layer = _physical_layer_entry_index(nlow_state_list, num_layer_arr, int(ilx), int(jj))
                     selected_bands = None if selected_bands_by_layer is None else [int(band) for band in selected_bands_by_layer[entry_layer]]
-                    eig, vec = _hermitian_eigh_columns(block, selected_bands)
+                    eig, vec = _cached_hermitian_eigh_columns(
+                        hamk=hamk,
+                        block=block,
+                        block_indices=same_q_index,
+                        columns=selected_bands,
+                        cache=eigensystem_cache,
+                    )
 
                     if nlow_state_list and norb_fix_list:
                         layer_for_global = int(num_layer_arr[:ilx].sum() + jj)
@@ -2051,6 +2124,14 @@ def get_H_block(
         np.array(H_diag_block, dtype=object),
         np.array(U_new_block, dtype=object),
     )
+
+
+@wraps(_get_H_block_impl)
+def get_H_block(*args, **kwargs) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Build all requested blocks under one BLAS thread-limit scope."""
+
+    with _bounded_blas_threads():
+        return _get_H_block_impl(*args, **kwargs)
 
 
 def calculate_energy_lists(

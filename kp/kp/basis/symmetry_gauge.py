@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -80,6 +80,7 @@ class SymmetryAdaptedBasisFrame:
     full_unitary: np.ndarray
     sector_frames: tuple[tuple[str, int, int, SymmetryAdaptedInternalFrame], ...]
     reason: str | None = None
+    components: Mapping[str, Any] = field(default_factory=dict)
     version: str = SYMMETRY_ADAPTED_GAUGE_VERSION
 
     def artifact(self) -> dict[str, Any]:
@@ -99,6 +100,14 @@ class SymmetryAdaptedBasisFrame:
                 for name, n_orb, n_q, frame in self.sector_frames
             ],
         }
+        assembled = _assemble_full_basis_unitary(self.sector_frames)
+        full = np.asarray(self.full_unitary, dtype=np.complex128)
+        if not np.array_equal(full, assembled):
+            payload["basis_ordering"] = "explicit_full_unitary_v1"
+            payload["full_unitary_real"] = full.real.tolist()
+            payload["full_unitary_imag"] = full.imag.tolist()
+        if self.components:
+            payload["components"] = dict(self.components)
         payload["frame_hash"] = symmetry_adapted_frame_hash(payload)
         return payload
 
@@ -127,12 +136,27 @@ class SymmetryAdaptedBasisFrame:
                     SymmetryAdaptedInternalFrame.from_artifact(row["internal_frame"]),
                 )
             )
-        full = _assemble_full_basis_unitary(sectors)
+        assembled = _assemble_full_basis_unitary(sectors)
+        if artifact.get("basis_ordering") == "explicit_full_unitary_v1":
+            real = np.asarray(artifact["full_unitary_real"], dtype=np.float64)
+            imag = np.asarray(artifact["full_unitary_imag"], dtype=np.float64)
+            full = np.asarray(real + 1.0j * imag, dtype=np.complex128)
+            if full.shape != assembled.shape or not np.all(np.isfinite(full)):
+                raise ValueError(
+                    "explicit symmetry-adapted full unitary has invalid shape or values"
+                )
+        else:
+            full = assembled
         return cls(
             status=str(artifact.get("status", "not_applicable")),
             full_unitary=full,
             sector_frames=tuple(sectors),
             reason=None if artifact.get("reason") is None else str(artifact["reason"]),
+            components=(
+                dict(artifact["components"])
+                if isinstance(artifact.get("components"), Mapping)
+                else {}
+            ),
             version=str(artifact.get("version", SYMMETRY_ADAPTED_GAUGE_VERSION)),
         )
 
@@ -330,6 +354,21 @@ def _frame_from_primary(
                     kramers_pairs.append((pair_start, pair_start + 1))
                     ordered_values.extend((complex(left["eigenvalue"]), complex(right["eigenvalue"])))
                 continue
+        if kind == "conjugate":
+            right = clusters[indices[1]]
+            right_basis = _canonical_subspace_basis(
+                np.asarray(right["projector"]),
+                int(right["rank"]),
+                tolerance=tolerance,
+            )
+            columns.extend((*left_basis, *right_basis))
+            ordered_values.extend(
+                [complex(left["eigenvalue"])] * len(left_basis)
+            )
+            ordered_values.extend(
+                [complex(right["eigenvalue"])] * len(right_basis)
+            )
+            continue
         if kind == "single" and pairing is not None and int(left["rank"]) % 2 == 0:
             projector = np.asarray(left["projector"], dtype=np.complex128)
             used: list[np.ndarray] = []
@@ -529,8 +568,10 @@ def _sector_offsets(
         name = str(sector.get("name", f"sector{index}"))
         n_orb = int(sector["n_orb"])
         n_q = int(sector["n_q"])
-        if n_orb <= 0 or n_q <= 0:
+        if n_orb < 0 or n_q <= 0:
             raise ValueError(f"invalid sector dimensions for {name!r}: n_orb={n_orb}, n_q={n_q}")
+        if n_orb == 0:
+            continue
         rows.append((name, n_orb, n_q, offset))
         offset += n_orb * n_q
     return rows, offset
