@@ -8,11 +8,13 @@ import pytest
 from scipy import sparse
 
 from kp.symmetry.candidate_certificate import (
+    CandidateJointFailureCode,
     CandidateOperationInput,
     CandidateProjectionState,
     CandidateSymmetryStatus,
     CandidateSymmetryThresholds,
     certify_candidate_symmetries,
+    evaluate_projected_pair,
 )
 from kp.symmetry.joint_exactification import (
     MagneticGenerator,
@@ -225,13 +227,26 @@ def test_sparse_raw_h_action_is_not_materialized_and_hashes_like_dense() -> None
         def toarray(self, *args, **kwargs):
             raise AssertionError("full raw-H action must remain sparse")
 
-    dimension = 4096
+    dimension = 100_000
     sparse_action = NoDenseCSR(sparse.eye(dimension, format="csr"))
     state = _state(np.eye(dimension, 1))
     sparse_result = _certify(
         name="E",
         state=state,
         d_full=sparse_action,
+        exact=np.eye(1),
+    )
+
+    assert sparse_result.status is CandidateSymmetryStatus.CERTIFIED
+
+
+def test_small_dense_and_sparse_raw_actions_have_identical_identity_and_hash() -> None:
+    dimension = 8
+    state = _state(np.eye(dimension, 1))
+    sparse_result = _certify(
+        name="E",
+        state=state,
+        d_full=sparse.eye(dimension, format="csr"),
         exact=np.eye(1),
     )
     dense_result = _certify(
@@ -243,6 +258,36 @@ def test_sparse_raw_h_action_is_not_materialized_and_hashes_like_dense() -> None
 
     assert sparse_result.status is CandidateSymmetryStatus.CERTIFIED
     assert sparse_result == dense_result
+    assert sparse_result.input_identity_hash == dense_result.input_identity_hash
+    assert sparse_result.certificate_hash == dense_result.certificate_hash
+
+
+def test_sparse_input_identity_sorts_coordinates_sums_duplicates_and_drops_zeros() -> None:
+    sparse_action = sparse.coo_matrix(
+        (
+            np.asarray([1.0, 0.25, 0.75, 0.0, 0.0]),
+            (
+                np.asarray([1, 0, 0, 1, 0]),
+                np.asarray([1, 0, 0, 0, 1]),
+            ),
+        ),
+        shape=(2, 2),
+    )
+    state = _state(np.eye(2))
+    sparse_result = _certify(
+        name="E",
+        state=state,
+        d_full=sparse_action,
+        exact=np.eye(2),
+    )
+    dense_result = _certify(
+        name="E",
+        state=state,
+        d_full=np.eye(2),
+        exact=np.eye(2),
+    )
+
+    assert sparse_result.input_identity_hash == dense_result.input_identity_hash
     assert sparse_result.certificate_hash == dense_result.certificate_hash
 
 
@@ -284,6 +329,118 @@ def test_certificate_hash_is_stable_under_mapping_and_pair_order() -> None:
     assert forward.status is CandidateSymmetryStatus.CERTIFIED
     assert reverse.status is CandidateSymmetryStatus.CERTIFIED
     assert forward.certificate_hash == reverse.certificate_hash
+
+
+def test_presentation_and_input_identity_bind_full_physical_contract() -> None:
+    baseline = _certify(
+        name="E",
+        state=_state(np.eye(2)),
+        d_full=np.eye(2),
+        exact=np.eye(2),
+    )
+    gauged_state = _state(np.diag([1.0, 1.0j]))
+    changed_state = _certify(
+        name="E",
+        state=gauged_state,
+        d_full=np.eye(2),
+        exact=np.eye(2),
+    )
+    changed_action = _certify(
+        name="E",
+        state=_state(np.eye(2)),
+        d_full=np.asarray([[0.0, 1.0], [1.0, 0.0]]),
+        exact=np.asarray([[0.0, 1.0], [1.0, 0.0]]),
+    )
+    fourth_power = MagneticPresentation(
+        generators=(MagneticGenerator("E", False),),
+        relations=(
+            MagneticRelation(
+                "E^4",
+                lhs=("E", "E", "E", "E"),
+                rhs=(),
+                central_phase=1.0,
+            ),
+        ),
+        central_phases=(1.0,),
+        source="different-description",
+    )
+    changed_presentation = certify_candidate_symmetries(
+        candidate_id="synthetic",
+        states={0: _state(np.eye(2))},
+        operations={
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=np.eye(2),
+                pairs=((0, 0),),
+            )
+        },
+        exactified_actions={"E": np.eye(2)},
+        presentation=fourth_power,
+        required_pairs={"E": ((0, 0),)},
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+    changed_phase_presentation = MagneticPresentation(
+        generators=(MagneticGenerator("E", False),),
+        relations=(
+            MagneticRelation(
+                "E^2",
+                lhs=("E", "E"),
+                rhs=(),
+                central_phase=-1.0,
+            ),
+        ),
+        central_phases=(1.0, -1.0),
+        source="phase-change",
+    )
+    changed_phase = certify_candidate_symmetries(
+        candidate_id="synthetic",
+        states={0: _state(np.eye(2))},
+        operations={
+            "E": CandidateOperationInput("E", False, np.eye(2), ((0, 0),))
+        },
+        exactified_actions={"E": np.eye(2)},
+        presentation=changed_phase_presentation,
+        required_pairs={"E": ((0, 0),)},
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+    assert baseline.presentation_payload["version"]
+    assert len(baseline.presentation_hash) == 64
+    assert len(baseline.input_identity_hash) == 64
+    assert baseline.input_identity_hash != changed_state.input_identity_hash
+    assert baseline.input_identity_hash != changed_action.input_identity_hash
+    assert baseline.presentation_hash != changed_presentation.presentation_hash
+    assert baseline.presentation_hash != changed_phase.presentation_hash
+    assert baseline.certificate_hash != changed_state.certificate_hash
+    assert baseline.certificate_hash != changed_action.certificate_hash
+    assert baseline.certificate_hash != changed_presentation.certificate_hash
+    assert baseline.certificate_hash != changed_phase.certificate_hash
+
+
+def test_presentation_source_description_is_explicitly_not_identity_bound() -> None:
+    first = _presentation("E")
+    second = MagneticPresentation(
+        generators=first.generators,
+        relations=first.relations,
+        central_phases=first.central_phases,
+        source="another-description-only-source",
+    )
+
+    def certify(presentation: MagneticPresentation):
+        return certify_candidate_symmetries(
+            candidate_id="presentation-source",
+            states={0: _state(np.eye(1))},
+            operations={
+                "E": CandidateOperationInput("E", False, np.eye(1), ((0, 0),))
+            },
+            exactified_actions={"E": np.eye(1)},
+            presentation=presentation,
+            required_pairs={"E": ((0, 0),)},
+            thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+        )
+
+    assert certify(first).presentation_hash == certify(second).presentation_hash
 
 
 def test_certificate_hash_binds_metrics_and_thresholds() -> None:
@@ -349,6 +506,27 @@ def test_certificate_hash_binds_each_typed_metric_and_threshold() -> None:
         ),
     )
     assert changed_unitarity.certificate_hash != baseline.certificate_hash
+    changed_raw_unitarity = replace(
+        baseline,
+        operations=(
+            replace(operation, raw_h_action_unitarity_residual=1.0e-12),
+        ),
+    )
+    assert changed_raw_unitarity.certificate_hash != baseline.certificate_hash
+
+    state = baseline.states[0]
+    for metric_name in (
+        "projection_orthonormality_residual",
+        "heff_hermiticity_residual",
+    ):
+        changed_states = tuple(
+            replace(item, **{metric_name: 1.0e-12})
+            if item == state
+            else item
+            for item in baseline.states
+        )
+        changed = replace(baseline, states=changed_states)
+        assert changed.certificate_hash != baseline.certificate_hash, metric_name
 
     relation = baseline.relations[0]
     for metric_name in ("residual", "maximum_entry"):
@@ -430,6 +608,112 @@ def test_small_leaky_candidate_fails_while_closed_larger_candidate_certifies() -
     assert larger.operations[0].pairs[0].raw_h_leakage == pytest.approx(0.0)
 
 
+def test_nonorthonormal_projection_and_nonunitary_raw_action_cannot_cancel() -> None:
+    source_state = _state(np.asarray([[2.0]]), np.eye(1))
+    target_state = _state(np.asarray([[1.0]]), np.eye(1))
+    result = certify_candidate_symmetries(
+        candidate_id="invalid-cancellation",
+        states={},
+        source_states={1: source_state},
+        target_states={0: target_state},
+        operations={
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=np.asarray([[0.5]]),
+                pairs=((0, 1),),
+            )
+        },
+        exactified_actions={"E": np.eye(1)},
+        presentation=_presentation("E"),
+        required_pairs={"E": ((0, 1),)},
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+    source_certificate = next(
+        state for state in result.states if state.role == "source"
+    )
+    operation = result.operations[0]
+    assert result.status is CandidateSymmetryStatus.FAILED
+    assert source_certificate.projection_orthonormality_residual == pytest.approx(3.0)
+    assert "projection_orthonormality_residual" in source_certificate.failures
+    assert operation.raw_h_action_unitarity_residual == pytest.approx(0.75)
+    assert "raw_h_action_unitarity_residual" in operation.failures
+
+
+def test_nonhermitian_heff_fails_with_typed_state_residual() -> None:
+    nonhermitian = np.asarray([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128)
+    result = _certify(
+        name="E",
+        state=_state(np.eye(2), nonhermitian),
+        d_full=np.eye(2),
+        exact=np.eye(2),
+    )
+
+    assert result.status is CandidateSymmetryStatus.FAILED
+    assert result.states
+    assert result.states[0].heff_hermiticity_residual == pytest.approx(np.sqrt(2.0))
+    assert "heff_hermiticity_residual" in result.states[0].failures
+
+
+def test_empty_required_and_observed_pair_coverage_fails_closed() -> None:
+    result = certify_candidate_symmetries(
+        candidate_id="empty-pairs",
+        states={},
+        operations={
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=np.eye(1),
+                pairs=(),
+            )
+        },
+        exactified_actions={"E": np.eye(1)},
+        presentation=_presentation("E"),
+        required_pairs={"E": ()},
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+    assert result.status is CandidateSymmetryStatus.FAILED
+    assert result.pair_coverage_complete is False
+    assert "empty_pair_coverage:E" in result.failures
+    assert "empty_pair_coverage" in result.operations[0].failures
+
+
+def test_evaluated_unexpected_pair_does_not_count_as_required_pair_coverage() -> None:
+    result = certify_candidate_symmetries(
+        candidate_id="unexpected-only-pair",
+        states={0: _state(np.eye(1)), 1: _state(np.eye(1))},
+        operations={
+            "E": CandidateOperationInput("E", False, np.eye(1), ((1, 1),))
+        },
+        exactified_actions={"E": np.eye(1)},
+        presentation=_presentation("E"),
+        required_pairs={"E": ((0, 0),)},
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+    assert result.status is CandidateSymmetryStatus.FAILED
+    assert result.pair_coverage_complete is False
+    assert "no_evaluated_required_pair" in result.operations[0].failures
+
+
+def test_projected_pair_exposes_projected_and_evaluated_actions_separately() -> None:
+    evaluation = evaluate_projected_pair(
+        d_full=np.eye(1),
+        target_u_low=np.eye(1),
+        source_u_low=np.eye(1),
+        target_heff=np.zeros((1, 1)),
+        source_heff=np.zeros((1, 1)),
+        antiunitary=False,
+        action=np.asarray([[2.0]]),
+    )
+
+    np.testing.assert_array_equal(evaluation.projected_action, np.eye(1))
+    np.testing.assert_array_equal(evaluation.evaluated_action, np.asarray([[2.0]]))
+    assert not hasattr(evaluation, "action")
+
+
 def test_complex_antiunitary_conjugates_basis_and_heff() -> None:
     root_two = np.sqrt(2.0)
     source_basis = np.asarray([[1.0, 1.0j], [1.0j, 1.0]]) / root_two
@@ -481,6 +765,9 @@ def test_exact_action_unitarity_has_typed_metric_and_independent_gate() -> None:
         relation_residual=1.0e-10,
         antiunitary_square_residual=1.0e-10,
         exact_action_unitarity_residual=0.0,
+        projection_orthonormality_residual=1.0e-10,
+        heff_hermiticity_residual=1.0e-10,
+        raw_h_action_unitarity_residual=1.0e-10,
     )
     result = _certify(
         name="E",
@@ -532,7 +819,22 @@ def test_relation_mismatch_is_recorded_and_fails_closed() -> None:
     assert result.relations[0].residual == pytest.approx(np.sqrt(2.0))
     assert "relation:E^2" in result.failures
     assert result.joint_certification_status == "failed"
-    assert "joint relation certification failed" in result.joint_certification_failure
+    assert (
+        result.joint_certification_failure
+        is CandidateJointFailureCode.RELATION_CERTIFICATION_FAILED
+    )
+    assert "joint relation certification failed" in result.joint_certification_diagnostic
+    assert all("residual=" not in failure for failure in result.failures)
+    changed_diagnostic = replace(
+        result,
+        joint_certification_diagnostic="platform-specific diagnostic changed",
+    )
+    assert changed_diagnostic.certificate_hash == result.certificate_hash
+    changed_code = replace(
+        result,
+        joint_certification_failure=CandidateJointFailureCode.ACTION_NOT_UNITARY,
+    )
+    assert changed_code.certificate_hash != result.certificate_hash
 
 
 def test_duplicate_pair_does_not_satisfy_exact_coverage() -> None:

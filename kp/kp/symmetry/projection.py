@@ -3569,7 +3569,7 @@ def _project_operation(
             antiunitary=antiunitary,
             compute_heff_covariance=compute_heff_covariance,
         )
-        d_raw = raw_evaluation.action
+        d_raw = raw_evaluation.projected_action
 
         def metrics(d_matrix: np.ndarray) -> dict[str, Any]:
             evaluation = (
