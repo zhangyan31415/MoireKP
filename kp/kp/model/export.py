@@ -1699,7 +1699,7 @@ def _assert_strict_json(name: str, value: Any) -> None:
 
 
 def _write_npz(path: Path, arrays: Mapping[str, np.ndarray]) -> None:
-    np.savez(path, **{key: np.asarray(value) for key, value in arrays.items()})
+    np.savez_compressed(path, **{key: np.asarray(value) for key, value in arrays.items()})
 
 
 def _debug_payloads(
