@@ -8,6 +8,7 @@ no artifact I/O and never searches nested diagnostic payloads for metrics.
 from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
+from decimal import Decimal, ROUND_HALF_EVEN
 from enum import Enum
 import hashlib
 import json
@@ -28,6 +29,87 @@ from .joint_exactification import (
     MagneticPresentation,
     certify_joint_block_actions,
 )
+
+
+CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION = (
+    "candidate_symmetry_certificate_v3"
+)
+CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION = (
+    "candidate_symmetry_metric_hash_v1"
+)
+CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION = (
+    "candidate_symmetry_phase_hash_v1"
+)
+_METRIC_HASH_ABSOLUTE_QUANTUM = 1.0e-14
+_METRIC_HASH_THRESHOLD_QUANTUM_RATIO = 1.0e-9
+
+
+class _FrozenDict(dict[str, object]):
+    """A JSON/pickle-compatible dict whose public mutation API is disabled."""
+
+    @staticmethod
+    def _immutable(*_args: object, **_kwargs: object) -> None:
+        raise TypeError("candidate payload is immutable")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+    def __copy__(self) -> _FrozenDict:
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, object]) -> _FrozenDict:
+        return self
+
+    def __reduce__(self) -> tuple[object, tuple[dict[str, object]]]:
+        return (_FrozenDict, (dict(self),))
+
+
+CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS: Mapping[str, str] = _FrozenDict(
+    {
+        "certificate.relation_residual_max": "relation_residual",
+        "operation.antiunitary_square_residual": "antiunitary_square_residual",
+        "operation.exact_action_unitarity_residual": (
+            "exact_action_unitarity_residual"
+        ),
+        "operation.raw_h_action_unitarity_residual": (
+            "raw_h_action_unitarity_residual"
+        ),
+        "pair.exactification_distance": "exactification_distance",
+        "pair.heff_covariance_residual": "heff_covariance_residual",
+        "pair.intertwining_residual": "intertwining_residual",
+        "pair.raw_action_unitarity_residual": (
+            "raw_h_action_unitarity_residual"
+        ),
+        "pair.raw_h_leakage": "raw_h_leakage",
+        "relation.maximum_entry": "relation_residual",
+        "relation.residual": "relation_residual",
+        "state.heff_hermiticity_residual": "heff_hermiticity_residual",
+        "state.projection_orthonormality_residual": (
+            "projection_orthonormality_residual"
+        ),
+    }
+)
+
+
+def _deep_freeze_payload(value: object) -> object:
+    """Defensively copy a canonical payload into immutable containers."""
+
+    if isinstance(value, Mapping):
+        frozen: dict[str, object] = {}
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise TypeError("candidate payload mapping keys must be strings")
+            frozen[key] = _deep_freeze_payload(item)
+        return _FrozenDict(frozen)
+    if isinstance(value, (list, tuple)):
+        return tuple(_deep_freeze_payload(item) for item in value)
+    return value
 
 
 class CandidateSymmetryStatus(str, Enum):
@@ -223,7 +305,17 @@ class CandidateSymmetryCertificate:
     certificate_hash: str = field(init=False)
 
     def __post_init__(self) -> None:
-        if hash_mapping(self.presentation_payload) != self.presentation_hash:
+        frozen_presentation_payload = _deep_freeze_payload(
+            self.presentation_payload
+        )
+        if not isinstance(frozen_presentation_payload, Mapping):
+            raise TypeError("candidate symmetry presentation payload must be a mapping")
+        object.__setattr__(
+            self,
+            "presentation_payload",
+            frozen_presentation_payload,
+        )
+        if hash_mapping(frozen_presentation_payload) != self.presentation_hash:
             raise ValueError("candidate symmetry presentation hash mismatch")
         object.__setattr__(
             self,
@@ -241,6 +333,73 @@ def _canonical_metric(value: float | None) -> float | None:
     return 0.0 if metric == 0.0 else metric
 
 
+def _quantized_scalar_hash_payload(
+    value: float,
+    *,
+    quantum: float,
+) -> dict[str, object]:
+    metric_decimal = Decimal(str(value))
+    quantum_decimal = Decimal(str(quantum))
+    bucket = int(
+        (metric_decimal / quantum_decimal).to_integral_value(
+            rounding=ROUND_HALF_EVEN
+        )
+    )
+    return {
+        "kind": "zero" if bucket == 0 else "quantized",
+        "quantum": str(quantum_decimal.normalize()),
+        "bucket": str(bucket),
+    }
+
+
+def _canonical_metric_hash_payload(
+    value: float | None,
+    threshold: float,
+) -> dict[str, object]:
+    """Quantize one diagnostic for deterministic, threshold-aware hashing.
+
+    Typed certificate fields retain their full floating values.  The hash uses
+    a fixed absolute quantum for numerical noise and, for large thresholds, a
+    fixed relative quantum.  This absorbs dense/sparse and BLAS roundoff while
+    preserving stable nonzero buckets for physically meaningful changes.
+    """
+
+    metric = _canonical_metric(value)
+    gate = _canonical_metric(threshold)
+    assert gate is not None
+    if gate < 0.0:
+        raise ValueError("candidate symmetry metric threshold must be nonnegative")
+    if metric is None:
+        return {
+            "version": CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION,
+            "kind": "missing",
+        }
+    quantum = max(
+        _METRIC_HASH_ABSOLUTE_QUANTUM,
+        gate * _METRIC_HASH_THRESHOLD_QUANTUM_RATIO,
+    )
+    return {
+        "version": CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION,
+        "gate": "above" if metric > gate else "within",
+        **_quantized_scalar_hash_payload(metric, quantum=quantum),
+    }
+
+
+def _candidate_metric_hash_payload(
+    value: float | None,
+    *,
+    thresholds: CandidateSymmetryThresholds,
+    metric_path: str,
+) -> dict[str, object]:
+    threshold_field = CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS[metric_path]
+    payload = _canonical_metric_hash_payload(
+        value,
+        getattr(thresholds, threshold_field),
+    )
+    payload["threshold_field"] = threshold_field
+    return payload
+
+
 def _finite_metric_or_none(value: float | None) -> float | None:
     if value is None:
         return None
@@ -248,22 +407,40 @@ def _finite_metric_or_none(value: float | None) -> float | None:
     return metric if np.isfinite(metric) else None
 
 
-def _canonical_phase(value: complex | None) -> list[float] | None:
+def _canonical_phase_hash_payload(
+    value: complex | None,
+) -> dict[str, object]:
     if value is None:
-        return None
+        return {
+            "version": CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION,
+            "kind": "missing",
+        }
     phase = complex(value)
-    return [
-        _canonical_metric(float(phase.real)),
-        _canonical_metric(float(phase.imag)),
-    ]
+    real = _canonical_metric(float(phase.real))
+    imaginary = _canonical_metric(float(phase.imag))
+    assert real is not None
+    assert imaginary is not None
+    return {
+        "version": CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION,
+        "kind": "quantized_components",
+        "real": _quantized_scalar_hash_payload(
+            real,
+            quantum=_METRIC_HASH_ABSOLUTE_QUANTUM,
+        ),
+        "imaginary": _quantized_scalar_hash_payload(
+            imaginary,
+            quantum=_METRIC_HASH_ABSOLUTE_QUANTUM,
+        ),
+    }
 
 
 def _candidate_certificate_payload(
     certificate: CandidateSymmetryCertificate,
 ) -> dict[str, object]:
+    thresholds = certificate.thresholds
     threshold_payload = {
-        item.name: _canonical_metric(getattr(certificate.thresholds, item.name))
-        for item in fields(certificate.thresholds)
+        item.name: _canonical_metric(getattr(thresholds, item.name))
+        for item in fields(thresholds)
     }
     operation_payloads: list[dict[str, object]] = []
     for operation in sorted(certificate.operations, key=lambda item: item.name):
@@ -272,18 +449,30 @@ def _candidate_certificate_payload(
                 "operation": pair.operation,
                 "target_k_index": int(pair.target_k_index),
                 "source_k_index": int(pair.source_k_index),
-                "raw_h_leakage": _canonical_metric(pair.raw_h_leakage),
-                "raw_action_unitarity_residual": _canonical_metric(
-                    pair.raw_action_unitarity_residual
+                "raw_h_leakage": _candidate_metric_hash_payload(
+                    pair.raw_h_leakage,
+                    thresholds=thresholds,
+                    metric_path="pair.raw_h_leakage",
                 ),
-                "exactification_distance": _canonical_metric(
-                    pair.exactification_distance
+                "raw_action_unitarity_residual": _candidate_metric_hash_payload(
+                    pair.raw_action_unitarity_residual,
+                    thresholds=thresholds,
+                    metric_path="pair.raw_action_unitarity_residual",
                 ),
-                "intertwining_residual": _canonical_metric(
-                    pair.intertwining_residual
+                "exactification_distance": _candidate_metric_hash_payload(
+                    pair.exactification_distance,
+                    thresholds=thresholds,
+                    metric_path="pair.exactification_distance",
                 ),
-                "heff_covariance_residual": _canonical_metric(
-                    pair.heff_covariance_residual
+                "intertwining_residual": _candidate_metric_hash_payload(
+                    pair.intertwining_residual,
+                    thresholds=thresholds,
+                    metric_path="pair.intertwining_residual",
+                ),
+                "heff_covariance_residual": _candidate_metric_hash_payload(
+                    pair.heff_covariance_residual,
+                    thresholds=thresholds,
+                    metric_path="pair.heff_covariance_residual",
                 ),
                 "failures": sorted(pair.failures),
             }
@@ -303,19 +492,25 @@ def _candidate_certificate_payload(
                 "required_pairs": [list(pair) for pair in sorted(operation.required_pairs)],
                 "observed_pairs": [list(pair) for pair in sorted(operation.observed_pairs)],
                 "coverage_complete": bool(operation.coverage_complete),
-                "raw_h_action_unitarity_residual": _canonical_metric(
-                    operation.raw_h_action_unitarity_residual
+                "raw_h_action_unitarity_residual": _candidate_metric_hash_payload(
+                    operation.raw_h_action_unitarity_residual,
+                    thresholds=thresholds,
+                    metric_path="operation.raw_h_action_unitarity_residual",
                 ),
                 "exact_action_finite": bool(operation.exact_action_finite),
-                "exact_action_unitarity_residual": _canonical_metric(
-                    operation.exact_action_unitarity_residual
+                "exact_action_unitarity_residual": _candidate_metric_hash_payload(
+                    operation.exact_action_unitarity_residual,
+                    thresholds=thresholds,
+                    metric_path="operation.exact_action_unitarity_residual",
                 ),
                 "pairs": pair_payloads,
-                "antiunitary_square_phase": _canonical_phase(
+                "antiunitary_square_phase": _canonical_phase_hash_payload(
                     operation.antiunitary_square_phase
                 ),
-                "antiunitary_square_residual": _canonical_metric(
-                    operation.antiunitary_square_residual
+                "antiunitary_square_residual": _candidate_metric_hash_payload(
+                    operation.antiunitary_square_residual,
+                    thresholds=thresholds,
+                    metric_path="operation.antiunitary_square_residual",
                 ),
                 "failures": sorted(operation.failures),
             }
@@ -323,8 +518,16 @@ def _candidate_certificate_payload(
     relation_payloads = [
         {
             "name": relation.name,
-            "residual": _canonical_metric(relation.residual),
-            "maximum_entry": _canonical_metric(relation.maximum_entry),
+            "residual": _candidate_metric_hash_payload(
+                relation.residual,
+                thresholds=thresholds,
+                metric_path="relation.residual",
+            ),
+            "maximum_entry": _candidate_metric_hash_payload(
+                relation.maximum_entry,
+                thresholds=thresholds,
+                metric_path="relation.maximum_entry",
+            ),
             "failures": sorted(relation.failures),
         }
         for relation in sorted(certificate.relations, key=lambda item: item.name)
@@ -333,11 +536,15 @@ def _candidate_certificate_payload(
         {
             "role": state.role,
             "k_index": int(state.k_index),
-            "projection_orthonormality_residual": _canonical_metric(
-                state.projection_orthonormality_residual
+            "projection_orthonormality_residual": _candidate_metric_hash_payload(
+                state.projection_orthonormality_residual,
+                thresholds=thresholds,
+                metric_path="state.projection_orthonormality_residual",
             ),
-            "heff_hermiticity_residual": _canonical_metric(
-                state.heff_hermiticity_residual
+            "heff_hermiticity_residual": _candidate_metric_hash_payload(
+                state.heff_hermiticity_residual,
+                thresholds=thresholds,
+                metric_path="state.heff_hermiticity_residual",
             ),
             "failures": sorted(failure.value for failure in state.failures),
         }
@@ -347,7 +554,7 @@ def _candidate_certificate_payload(
         )
     ]
     return {
-        "version": "candidate_symmetry_certificate_v2",
+        "version": CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION,
         "candidate_id": certificate.candidate_id,
         "status": certificate.status.value,
         "required_operations": sorted(certificate.required_operations),
@@ -362,8 +569,10 @@ def _candidate_certificate_payload(
         "states": state_payloads,
         "operations": operation_payloads,
         "relations": relation_payloads,
-        "relation_residual_max": _canonical_metric(
-            certificate.relation_residual_max
+        "relation_residual_max": _candidate_metric_hash_payload(
+            certificate.relation_residual_max,
+            thresholds=thresholds,
+            metric_path="certificate.relation_residual_max",
         ),
         "joint_certification_status": certificate.joint_certification_status.value,
         "joint_certification_failure": (
@@ -1339,6 +1548,10 @@ def certify_candidate_symmetries(
 
 
 __all__ = [
+    "CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION",
+    "CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION",
+    "CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS",
+    "CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION",
     "CandidateJointCertificationStatus",
     "CandidateJointFailureCode",
     "CandidateOperationCertificate",

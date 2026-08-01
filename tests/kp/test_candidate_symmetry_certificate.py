@@ -1,13 +1,19 @@
 from __future__ import annotations
 
+import json
 import warnings
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import numpy as np
 import pytest
 from scipy import sparse
 
+from kp.identity import hash_mapping
 from kp.symmetry.candidate_certificate import (
+    CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION,
+    CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION,
+    CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS,
+    CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION,
     CandidateJointFailureCode,
     CandidateOperationInput,
     CandidateProjectionState,
@@ -263,6 +269,37 @@ def test_small_dense_and_sparse_raw_actions_have_identical_identity_and_hash() -
     assert sparse_result.certificate_hash == dense_result.certificate_hash
 
 
+def test_nontrivial_unitary_dense_and_sparse_have_identical_certificate_hash() -> None:
+    rng = np.random.default_rng(20260801)
+    trial = rng.normal(size=(8, 8)) + 1.0j * rng.normal(size=(8, 8))
+    gauge, _ = np.linalg.qr(trial)
+    signs = np.diag([1.0, -1.0, 1.0, -1.0, 1.0, -1.0, 1.0, -1.0])
+    action = gauge @ signs @ gauge.conj().T
+    state = _state(np.eye(8), np.zeros((8, 8)))
+
+    dense_result = _certify(
+        name="E",
+        state=state,
+        d_full=action,
+        exact=action,
+    )
+    sparse_result = _certify(
+        name="E",
+        state=state,
+        d_full=sparse.csr_matrix(action),
+        exact=action,
+    )
+
+    assert dense_result.status is CandidateSymmetryStatus.CERTIFIED
+    assert sparse_result.status is CandidateSymmetryStatus.CERTIFIED
+    assert dense_result.input_identity_hash == sparse_result.input_identity_hash
+    assert (
+        dense_result.operations[0].raw_h_action_unitarity_residual
+        != sparse_result.operations[0].raw_h_action_unitarity_residual
+    )
+    assert dense_result.certificate_hash == sparse_result.certificate_hash
+
+
 def test_sparse_input_identity_sorts_coordinates_sums_duplicates_and_drops_zeros() -> None:
     sparse_action = sparse.coo_matrix(
         (
@@ -444,6 +481,41 @@ def test_presentation_source_description_is_explicitly_not_identity_bound() -> N
     assert certify(first).presentation_hash == certify(second).presentation_hash
 
 
+def test_presentation_payload_is_defensively_copied_and_deeply_immutable() -> None:
+    baseline = _certify(
+        name="E",
+        state=_state(np.eye(1)),
+        d_full=np.eye(1),
+        exact=np.eye(1),
+    )
+    external_payload = {
+        "version": "external-test-v1",
+        "nested": [{"value": 1}],
+    }
+    constructed = replace(
+        baseline,
+        presentation_payload=external_payload,
+        presentation_hash=hash_mapping(external_payload),
+    )
+    original_hash = constructed.certificate_hash
+
+    external_payload["nested"][0]["value"] = 2
+    assert constructed.presentation_payload["nested"][0]["value"] == 1
+    assert constructed.certificate_hash == original_hash
+    with pytest.raises(TypeError):
+        constructed.presentation_payload["version"] = "mutated"
+    with pytest.raises(TypeError):
+        constructed.presentation_payload["nested"][0]["value"] = 3
+    with pytest.raises(AttributeError):
+        constructed.presentation_payload["nested"].append({"value": 4})
+    serialized = json.loads(json.dumps(constructed.presentation_payload))
+    assert serialized == {
+        "version": "external-test-v1",
+        "nested": [{"value": 1}],
+    }
+    assert asdict(constructed)["presentation_payload"] == constructed.presentation_payload
+
+
 def test_certificate_hash_binds_metrics_and_thresholds() -> None:
     baseline = _certify(
         name="E",
@@ -475,6 +547,113 @@ def test_certificate_hash_binds_metrics_and_thresholds() -> None:
 
     assert baseline.certificate_hash != changed_metric.certificate_hash
     assert baseline.certificate_hash != changed_threshold.certificate_hash
+
+
+def test_metric_hash_canonicalization_absorbs_roundoff_but_not_gate_scale_changes() -> None:
+    baseline = _certify(
+        name="E",
+        state=_state(np.eye(1)),
+        d_full=np.eye(1),
+        exact=np.eye(1),
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-13),
+    )
+    operation = baseline.operations[0]
+    roundoff_a = replace(
+        baseline,
+        operations=(
+            replace(operation, raw_h_action_unitarity_residual=2.0e-15),
+        ),
+    )
+    roundoff_b = replace(
+        baseline,
+        operations=(
+            replace(operation, raw_h_action_unitarity_residual=3.0e-15),
+        ),
+    )
+    above_a = replace(
+        baseline,
+        operations=(
+            replace(operation, raw_h_action_unitarity_residual=2.0e-13),
+        ),
+    )
+    above_b = replace(
+        baseline,
+        operations=(
+            replace(operation, raw_h_action_unitarity_residual=3.0e-13),
+        ),
+    )
+
+    assert roundoff_a.certificate_hash == roundoff_b.certificate_hash
+    assert above_a.certificate_hash != above_b.certificate_hash
+
+
+def test_derived_complex_phase_hash_absorbs_roundoff_but_preserves_changes() -> None:
+    baseline = _certify(
+        name="TR",
+        state=_state(np.eye(2)),
+        d_full=np.asarray([[0.0, 1.0], [-1.0, 0.0]]),
+        exact=np.asarray([[0.0, 1.0], [-1.0, 0.0]]),
+        antiunitary=True,
+        phase=-1.0,
+    )
+    operation = baseline.operations[0]
+    roundoff_a = replace(
+        baseline,
+        operations=(replace(operation, antiunitary_square_phase=-1.0 + 2.0e-15j),),
+    )
+    roundoff_b = replace(
+        baseline,
+        operations=(replace(operation, antiunitary_square_phase=-1.0 + 3.0e-15j),),
+    )
+    changed_a = replace(
+        baseline,
+        operations=(replace(operation, antiunitary_square_phase=-1.0 + 2.0e-10j),),
+    )
+    changed_b = replace(
+        baseline,
+        operations=(replace(operation, antiunitary_square_phase=-1.0 + 3.0e-10j),),
+    )
+
+    assert roundoff_a.certificate_hash == roundoff_b.certificate_hash
+    assert changed_a.certificate_hash != changed_b.certificate_hash
+
+
+def test_certificate_and_metric_hash_schema_versions_are_explicit() -> None:
+    assert (
+        CANDIDATE_SYMMETRY_CERTIFICATE_SCHEMA_VERSION
+        == "candidate_symmetry_certificate_v3"
+    )
+    assert (
+        CANDIDATE_SYMMETRY_METRIC_HASH_SCHEMA_VERSION
+        == "candidate_symmetry_metric_hash_v1"
+    )
+    assert (
+        CANDIDATE_SYMMETRY_PHASE_HASH_SCHEMA_VERSION
+        == "candidate_symmetry_phase_hash_v1"
+    )
+    assert dict(CANDIDATE_SYMMETRY_METRIC_THRESHOLD_FIELDS) == {
+        "certificate.relation_residual_max": "relation_residual",
+        "operation.antiunitary_square_residual": "antiunitary_square_residual",
+        "operation.exact_action_unitarity_residual": (
+            "exact_action_unitarity_residual"
+        ),
+        "operation.raw_h_action_unitarity_residual": (
+            "raw_h_action_unitarity_residual"
+        ),
+        "pair.exactification_distance": "exactification_distance",
+        "pair.heff_covariance_residual": "heff_covariance_residual",
+        "pair.intertwining_residual": "intertwining_residual",
+        "pair.raw_action_unitarity_residual": (
+            "raw_h_action_unitarity_residual"
+        ),
+        "pair.raw_h_leakage": "raw_h_leakage",
+        "relation.maximum_entry": "relation_residual",
+        "relation.residual": "relation_residual",
+        "state.heff_hermiticity_residual": "heff_hermiticity_residual",
+        "state.projection_orthonormality_residual": (
+            "projection_orthonormality_residual"
+        ),
+    }
 
 
 def test_certificate_hash_binds_each_typed_metric_and_threshold() -> None:
