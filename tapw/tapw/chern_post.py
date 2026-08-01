@@ -87,7 +87,15 @@ def resolve_chern_post_runtime_input(config_path) -> ChernPostRuntimeInput:
     config = Config.from_yaml(str(config_path))
     config.apply_workflow_section("chern")
     structure = load_structure_from_config(config, legacy_factory=OpenMXFile)
-    reciprocal_basis = np.asarray(structure.reciprocal_Tmat, dtype=float)[:2, :2]
+    physical_reciprocal = np.asarray(structure.reciprocal_Tmat, dtype=float)
+    if physical_reciprocal.shape != (3, 3):
+        raise ValueError("Topology post-processing requires a 3x3 physical reciprocal lattice.")
+    if not np.allclose(physical_reciprocal[:2, 2], 0.0, atol=1.0e-10, rtol=0.0):
+        raise ValueError(
+            "Topology post-processing currently requires an xy-aligned reciprocal plane; "
+            "tilted cells are rejected rather than projected with a nonphysical xy slice."
+        )
+    reciprocal_basis = physical_reciprocal[:2, :2]
     if reciprocal_basis.shape != (2, 2) or abs(float(np.linalg.det(reciprocal_basis))) <= 1.0e-14:
         raise ValueError("Topology post-processing requires a nonsingular physical 2D reciprocal basis.")
     return ChernPostRuntimeInput(

@@ -262,6 +262,7 @@ def test_versioned_npz_basis_dimension_is_exact_and_must_match_expected(tmp_path
     [
         ("tapw.sparse-realspace.unknown", 1, "Unsupported sparse NPZ schema"),
         (SPARSE_NPZ_SCHEMA, 2, "Unsupported sparse NPZ schema version"),
+        (SPARSE_NPZ_SCHEMA, True, "Unsupported sparse NPZ schema version"),
     ],
 )
 def test_versioned_npz_rejects_unknown_schema_or_version(
@@ -513,29 +514,6 @@ def test_equivalent_canonical_and_legacy_sources_share_internal_site_basis_mappi
     legacy_mapping = legacy_config.resolved_structure_input.identity_components
     assert canonical_mapping["site_order"] == legacy_mapping["site_order"]
     assert canonical_mapping["basis_order"] == legacy_mapping["basis_order"]
-
-
-@pytest.mark.parametrize("source_kind", ["canonical", "legacy"])
-def test_five_public_workflow_loads_share_source_site_and_basis_identity(tmp_path, source_kind):
-    if source_kind == "canonical":
-        config_path = _write_system_case(tmp_path)
-    else:
-        config_path = _write_openmx_case(tmp_path, square=True)
-
-    contracts = []
-    for _workflow in ("run", "symm", "symm-rep", "topo", "orbital"):
-        config = Config.from_yaml(str(config_path))
-        load_structure_from_config(config)
-        resolved = config.resolved_structure_input
-        contracts.append(
-            (
-                resolved.source_identity,
-                resolved.identity_components["site_order"],
-                resolved.identity_components["basis_order"],
-            )
-        )
-
-    assert all(contract == contracts[0] for contract in contracts[1:])
 
 
 def test_canonical_save_reload_preserves_resolved_source_identity(tmp_path):

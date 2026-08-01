@@ -325,6 +325,49 @@ def test_hr_sparse_writer_fails_closed_without_exact_basis_dimension(tmp_path):
         handler.save_to_npz(tmp_path / "H.npz")
 
 
+def test_dat_rectangular_projection_writes_actual_output_basis_dimension(tmp_path):
+    import json
+
+    dat_path = tmp_path / "H.dat"
+    npz_path = tmp_path / "H.npz"
+    _write_sparse_dat(
+        dat_path,
+        "H",
+        3,
+        [
+            (0, 0, 0, 0, 0, 1.0 + 0.0j),
+            (0, 0, 0, 1, 1, 2.0 + 0.0j),
+            (0, 0, 0, 2, 2, 3.0 + 0.0j),
+        ],
+    )
+    projection = scipy.sparse.csr_matrix(
+        np.array([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0]], dtype=np.complex128)
+    )
+
+    saved = HrSparseHandler(
+        file_name=str(dat_path),
+        npz_file_name="",
+        A=projection,
+        read_from_npz=False,
+    ).get_hr_sparse()
+
+    assert set(saved) == {(0, 0, 0)}
+    with np.load(npz_path, allow_pickle=False) as payload:
+        metadata = json.loads(str(np.asarray(payload[SPARSE_NPZ_METADATA_KEY]).item()))
+    assert metadata["basis_dimension"] == 2
+
+    reloaded_handler = HrSparseHandler(
+        file_name="",
+        npz_file_name=str(npz_path),
+        read_from_npz=True,
+    )
+    reloaded = reloaded_handler.get_hr_sparse()
+    assert reloaded_handler.basis_dimension == 2
+    assert np.array_equal(reloaded[(0, 0, 0)]["row"], np.array([0, 1]))
+    assert np.array_equal(reloaded[(0, 0, 0)]["col"], np.array([0, 1]))
+    assert np.allclose(reloaded[(0, 0, 0)]["val"], np.array([1.0, 2.0]))
+
+
 def test_symm_npz_legacy_zero_tail_uses_transform_input_dimension(tmp_path):
     npz_path = tmp_path / "H_symm.npz"
     np.savez(

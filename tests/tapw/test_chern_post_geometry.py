@@ -11,11 +11,11 @@ from tapw import chern_post
 from tapw.config import resolve_chern_grid_shape
 
 
-def _write_canonical_topology_config(config_dir, *, topology=None, spin=False):
+def _write_canonical_topology_config(config_dir, *, topology=None, spin=False, cell=None):
     atoms = Atoms(
         symbols=["Te"],
         positions=[[0.0, 0.0, 0.0]],
-        cell=np.diag([1.0, 1.0, 12.0]),
+        cell=np.diag([1.0, 1.0, 12.0]) if cell is None else cell,
         pbc=[True, True, False],
     )
     write(config_dir / "POSCAR", atoms, format="vasp")
@@ -397,6 +397,22 @@ def test_chern_post_canonical_runtime_uses_shared_physical_reciprocal_basis(tmp_
     assert runtime.config.system_input.structure == (config_dir / "POSCAR").resolve()
     assert runtime.config.resolved_structure_input.structure is runtime.structure
     assert np.allclose(runtime.reciprocal_basis_2d, 2.0 * np.pi * np.eye(2))
+
+
+def test_chern_post_rejects_tilted_reciprocal_plane_instead_of_slicing_xy(tmp_path):
+    config_dir = tmp_path / "case"
+    config_dir.mkdir()
+    tilted_square = np.array(
+        [
+            [3.0, 0.0, 1.0],
+            [-1.0 / 3.0, 4.0 * np.sqrt(5.0) / 3.0, 1.0],
+            [-6.0, 0.0, 18.0],
+        ]
+    )
+    config_path = _write_canonical_topology_config(config_dir, cell=tilted_square)
+
+    with pytest.raises(ValueError, match="xy-aligned reciprocal plane"):
+        chern_post.resolve_chern_post_runtime_input(config_path)
 
 
 def test_chern_post_rejects_nonrelease_compute_config_before_geometry(tmp_path, monkeypatch):

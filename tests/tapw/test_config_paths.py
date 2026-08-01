@@ -335,6 +335,16 @@ def test_packaged_tapw_template_uses_canonical_system_contract():
         "spin",
     }
     assert not ({"case", "twist", "paths"} & set(payload))
+    assert payload["symmetry"]["num_bands"] == 100
+    assert not (
+        {"num_bands", "valence_count", "conduction_count", "output_dir", "cache"}
+        & set(payload["symmetry"]["representation"])
+    )
+    Config.from_yaml(str(root / "tapw/tapw/templates/config.yaml"))
+    from tapw.symm_rep import resolve_config_request
+
+    with pytest.raises(FileNotFoundError, match="representations.npz"):
+        resolve_config_request(root / "tapw/tapw/templates/config.yaml")
 
 
 def test_top_level_compute_config_is_rejected_for_release_only_configs(tmp_path):

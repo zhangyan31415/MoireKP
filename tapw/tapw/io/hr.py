@@ -36,9 +36,10 @@ def read_sparse_npz_metadata(payload, *, source="<npz>"):
         raise ValueError(
             f"Unsupported sparse NPZ schema {metadata.get('schema')!r} in {source}."
         )
-    if metadata.get("schema_version") != SPARSE_NPZ_SCHEMA_VERSION:
+    schema_version = metadata.get("schema_version")
+    if type(schema_version) is not int or schema_version != SPARSE_NPZ_SCHEMA_VERSION:
         raise ValueError(
-            f"Unsupported sparse NPZ schema version {metadata.get('schema_version')!r} in {source}."
+            f"Unsupported sparse NPZ schema version {schema_version!r} in {source}."
         )
     dimension = metadata.get("basis_dimension")
     if not isinstance(dimension, int) or isinstance(dimension, bool) or dimension <= 0:
@@ -139,7 +140,8 @@ class HrSparseHandler:
         self.hr_sparse = new_hr_sparse
 
         npz_file_name = self.file_name.replace('.dat', '.npz')
-        self.save_to_npz(npz_file_name)
+        saved_basis_dimension = nwann if self.A is None else int(self.A.shape[0])
+        self.save_to_npz(npz_file_name, basis_dimension=saved_basis_dimension)
 
     def save_to_npz(self, file_path, *, basis_dimension=None):
         dimension = getattr(self, "nwann", None) if basis_dimension is None else basis_dimension
