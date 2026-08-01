@@ -890,6 +890,26 @@ def test_kp_symm_loads_current_certified_gamma_selection_identity(
     assert selection_identity_hash == artifact.identity.selection_identity_hash
 
 
+def test_kp_symm_rejects_symlinked_current_gamma_selection_marker(
+    tmp_path: Path,
+) -> None:
+    spec = _spec()
+    project_dir = tmp_path / "projection"
+    project_dir.mkdir()
+    outside_marker = tmp_path / "outside-selection.json"
+    outside_marker.write_text(
+        json.dumps(_selection_artifact(spec).to_dict(), sort_keys=True),
+        encoding="utf-8",
+    )
+    (project_dir / "selection_artifact.json").symlink_to(outside_marker)
+
+    with pytest.raises(SelectionBindingError):
+        projection_mod._load_current_gamma_selection_identity_hash(
+            project_dir,
+            spec,
+        )
+
+
 @pytest.mark.parametrize("invalid_marker", ["missing", "malformed", "pending"])
 def test_kp_symm_rejects_invalid_current_gamma_selection(
     tmp_path: Path,
@@ -952,6 +972,69 @@ def test_canonical_symmetry_metadata_binds_one_selection_identity_per_operation(
     assert metadata["operations"][0]["selection_identity_hash"] == (
         selection_identity_hash
     )
+
+
+def test_kp_symm_validates_routed_selection_before_invalidating_outputs(
+    tmp_path: Path,
+) -> None:
+    class _StopAfterPreflight(RuntimeError):
+        pass
+
+    spec = _spec()
+    events: list[str] = []
+    run_cfg = SimpleNamespace(
+        symm_cfg={"output_dir": "symm"},
+        project_cfg={"out_dir": "projection"},
+        cfg_dir=tmp_path,
+    )
+    ctx = SimpleNamespace(output_dir=tmp_path / "symm")
+
+    def load_handoff(_project_dir: Path) -> GammaRoutedBasisSpec:
+        events.append("handoff")
+        return spec
+
+    def load_selection(
+        _project_dir: Path,
+        handoff: GammaRoutedBasisSpec,
+    ) -> str:
+        assert handoff is spec
+        events.append("selection")
+        return "f" * 64
+
+    def stop_at_first_invalidation(_output_dir: Path) -> None:
+        assert events == ["handoff", "selection"]
+        raise _StopAfterPreflight
+
+    with (
+        patch.object(
+            projection_mod,
+            "_load_projection_run_config",
+            return_value=run_cfg,
+        ),
+        patch.object(
+            projection_mod,
+            "_load_persisted_projection_basis_handoff",
+            side_effect=load_handoff,
+        ),
+        patch.object(
+            projection_mod,
+            "_build_projection_run_context",
+            return_value=ctx,
+        ) as build_context,
+        patch.object(
+            projection_mod,
+            "_load_current_gamma_selection_identity_hash",
+            side_effect=load_selection,
+        ),
+        patch.object(
+            projection_mod,
+            "_invalidate_stale_canonical_symmetry_outputs",
+            side_effect=stop_at_first_invalidation,
+        ),
+        pytest.raises(_StopAfterPreflight),
+    ):
+        projection_mod.run_symmetry_projection_from_config("unused.yaml")
+    assert build_context.call_args.kwargs["create_output_dir"] is False
 
 
 @pytest.mark.parametrize(

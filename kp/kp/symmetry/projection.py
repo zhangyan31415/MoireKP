@@ -5118,9 +5118,12 @@ def _load_current_gamma_selection_identity_hash(
     """Load and verify the current certified selection without rebuilding it."""
 
     try:
-        artifact = SelectionArtifactStore(project_dir).load_current(
-            require_certified=True
-        )
+        store = SelectionArtifactStore(project_dir)
+        if store.marker_path.is_symlink():
+            raise SelectionBindingError(
+                "kp symm current Gamma selection marker must not be a symlink"
+            )
+        artifact = store.load_current(require_certified=True)
         verified = verify_certified_gamma_selection_artifact(artifact, handoff)
     except SelectionBindingError:
         raise
@@ -6551,18 +6554,25 @@ def run_symmetry_projection_from_config(
             )
             or "symm_project"
         )
-        _invalidate_stale_canonical_symmetry_outputs(configured_output_dir)
         ctx = _build_projection_run_context(
             run_cfg,
+            create_output_dir=False,
             validate_full_space_covariance=validate_full_space_covariance,
         )
-        _invalidate_stale_canonical_symmetry_outputs(ctx.output_dir)
         project_dir = _resolve(run_cfg.project_cfg.get("out_dir"), run_cfg.cfg_dir)
         if project_dir is None:
             raise ValueError(
                 "project.out_dir is required before kp symm can consume the projection basis"
             )
         persisted_handoff = _load_persisted_projection_basis_handoff(project_dir)
+        if isinstance(persisted_handoff, GammaRoutedBasisSpec):
+            selection_identity_hash = _load_current_gamma_selection_identity_hash(
+                project_dir,
+                persisted_handoff,
+            )
+        _invalidate_stale_canonical_symmetry_outputs(configured_output_dir)
+        _invalidate_stale_canonical_symmetry_outputs(ctx.output_dir)
+        ctx.output_dir.mkdir(parents=True, exist_ok=True)
         if persisted_handoff is None:
             project_gauge_reused = False
             selected_gauge_candidate, gauge_report = _resolved_gauge_for_symmetry(
@@ -6571,10 +6581,6 @@ def run_symmetry_projection_from_config(
             )
             norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
         elif isinstance(persisted_handoff, GammaRoutedBasisSpec):
-            selection_identity_hash = _load_current_gamma_selection_identity_hash(
-                project_dir,
-                persisted_handoff,
-            )
             persisted_states = _states_from_gamma_routed_handoff(
                 ctx,
                 persisted_handoff,
