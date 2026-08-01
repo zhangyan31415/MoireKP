@@ -599,6 +599,57 @@ def test_candidate_metric_float_overflow_is_a_typed_boundary_failure() -> None:
     assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
 
 
+def test_structural_failure_is_trimmed_across_decision_exception_and_report() -> None:
+    selection = _selection_module()
+    rejected = _candidate(
+        selection,
+        "structural",
+        2,
+        structural_failure="  projector rank loss  ",
+    )
+    selected = _candidate(selection, "selected", 4)
+    thresholds = _thresholds(selection)
+    decision = selection.select_projection_candidate([rejected, selected], thresholds)
+
+    assert decision.candidates[0].structural_failure == "projector rank loss"
+    assert decision.structural_failures == (("structural", "projector rank loss"),)
+    report = selection.build_selection_report(
+        reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+        closure=selection.SymmetryClosure(states=(), additions=()),
+        decision=decision,
+        compositions=(),
+        candidates=[rejected, selected],
+        thresholds=thresholds,
+    )
+    assert report["structural_failures"] == [
+        {"candidate_id": "structural", "reason": "projector rank loss"}
+    ]
+    assert report["rejected_candidates"][0]["structural_failure"] == "projector rank loss"
+
+    hard_failure = _candidate(selection, "hard-failure", 4, band_rms_mev=2.0)
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate([rejected, hard_failure], thresholds)
+    assert exc_info.value.structural_failures == (
+        ("structural", "projector rank loss"),
+    )
+
+
+def test_selector_rejects_numpy_candidate_envelope_without_truth_value_error() -> None:
+    selection = _selection_module()
+    candidates = np.asarray(
+        [
+            _candidate(selection, "first", 2),
+            _candidate(selection, "second", 4),
+        ],
+        dtype=object,
+    )
+
+    with pytest.raises(selection.CandidateSelectionError, match="envelope") as exc_info:
+        selection.select_projection_candidate(candidates, _thresholds(selection))
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
 @pytest.mark.parametrize(
     "field",
     (
@@ -861,6 +912,25 @@ def test_report_rejects_array_structural_failure_without_truth_value_error() -> 
             decision=decision,
             compositions=(),
             candidates=[invalid],
+            thresholds=_thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+def test_report_rejects_numpy_candidate_envelope_as_a_typed_boundary_error() -> None:
+    selection = _selection_module()
+    selected = _candidate(selection, "selected", 4)
+    decision = selection.select_projection_candidate([selected], _thresholds(selection))
+    envelope = np.asarray([selected], dtype=object)
+
+    with pytest.raises(selection.CandidateSelectionError, match="envelope") as exc_info:
+        selection.build_selection_report(
+            reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+            closure=selection.SymmetryClosure(states=(), additions=()),
+            decision=decision,
+            compositions=(),
+            candidates=envelope,
             thresholds=_thresholds(selection),
         )
 

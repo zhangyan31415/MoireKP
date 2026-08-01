@@ -220,9 +220,25 @@ def _normalized_thresholds(thresholds: SelectionThresholds) -> SelectionThreshol
     return SelectionThresholds(*normalized)
 
 
+def _candidate_envelope(
+    candidates: Sequence[CandidateMetrics],
+) -> tuple[CandidateMetrics, ...]:
+    if (
+        isinstance(candidates, np.ndarray)
+        or isinstance(candidates, (str, bytes, bytearray))
+        or not isinstance(candidates, Sequence)
+    ):
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "projection candidate envelope must be a Python sequence",
+        )
+    return tuple(candidates)
+
+
 def _normalized_candidates(
     candidates: Sequence[CandidateMetrics],
 ) -> tuple[CandidateMetrics, ...]:
+    candidates = _candidate_envelope(candidates)
     if any(not isinstance(candidate, CandidateMetrics) for candidate in candidates):
         raise CandidateSelectionError(
             CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
@@ -358,7 +374,11 @@ def _normalized_candidates(
             subspace_overlap=normalized_metrics_by_id[candidate.candidate_id][2],
             symmetry_residual=normalized_metrics_by_id[candidate.candidate_id][3],
             symmetry_leakage=normalized_metrics_by_id[candidate.candidate_id][4],
-            structural_failure=candidate.structural_failure,
+            structural_failure=(
+                None
+                if candidate.structural_failure is None
+                else candidate.structural_failure.strip()
+            ),
         )
         for candidate in candidates
     )
@@ -409,6 +429,7 @@ def select_projection_candidate(
     candidates: Sequence[CandidateMetrics],
     thresholds: SelectionThresholds,
 ) -> SelectionDecision:
+    candidates = _candidate_envelope(candidates)
     if not candidates:
         raise CandidateSelectionError(
             CandidateSelectionFailureCode.NO_CANDIDATES,
