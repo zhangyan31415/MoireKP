@@ -6,10 +6,12 @@ import pytest
 from kp.projection_selection import (
     CandidateRejected,
     CandidateRejectionReason,
+    FrozenTargetWindow,
     TargetWindowSpec,
     certify_minimum_principal_overlap,
     evaluate_fixed_target_window,
     projection_overlap_metrics,
+    resolve_target_window,
 )
 
 
@@ -59,12 +61,12 @@ def test_fixed_window_rejects_candidate_with_too_few_bands_instead_of_shrinking(
         ]
     )
     candidate = np.array([[-0.19], [-0.14]])
+    target_window = resolve_target_window(target, _window_spec(band_count=2))
 
     with pytest.raises(CandidateRejected) as exc_info:
         evaluate_fixed_target_window(
-            target,
+            target_window,
             candidate,
-            _window_spec(band_count=2),
         )
 
     rejection = exc_info.value
@@ -77,8 +79,9 @@ def test_fixed_window_rejects_candidate_with_too_few_bands_instead_of_shrinking(
 def test_fixed_window_preserves_twenty_mev_offset_for_one_band() -> None:
     target = np.array([[-0.100], [-0.120]])
     candidate = np.array([[-0.080], [-0.100]])
+    target_window = resolve_target_window(target, _window_spec())
 
-    metrics = evaluate_fixed_target_window(target, candidate, _window_spec())
+    metrics = evaluate_fixed_target_window(target_window, candidate)
 
     assert metrics.band_count == 1
     assert metrics.validation_k_indices == (0, 1)
@@ -94,17 +97,9 @@ def test_target_window_rejects_boundary_that_splits_degenerate_multiplet() -> No
             [-0.2500000, -0.0800000, -0.0500000, 0.4500000],
         ]
     )
-    candidate = np.array(
-        [
-            [-0.280, -0.090, 0.420],
-            [-0.240, -0.070, 0.460],
-        ]
-    )
-
     with pytest.raises(CandidateRejected) as exc_info:
-        evaluate_fixed_target_window(
+        resolve_target_window(
             target,
-            candidate,
             _window_spec(band_count=1, degeneracy_tolerance_mev=1.0e-3),
         )
 
@@ -112,6 +107,53 @@ def test_target_window_rejects_boundary_that_splits_degenerate_multiplet() -> No
     assert rejection.reason is CandidateRejectionReason.TARGET_BOUNDARY_DEGENERACY
     assert rejection.k_index == 0
     assert rejection.boundary_gap_mev == pytest.approx(5.0e-4)
+
+
+def test_frozen_target_window_is_reused_across_candidates_and_target_mutation() -> None:
+    target = np.array(
+        [
+            [-0.40, -0.20, 0.30, 0.40],
+            [-0.35, -0.15, 0.35, 0.45],
+        ]
+    )
+    spec = _window_spec(band_count=1)
+
+    target_window = resolve_target_window(target, spec)
+
+    assert isinstance(target_window, FrozenTargetWindow)
+    assert target_window.target_band_ids == ((1,), (1,))
+    np.testing.assert_allclose(
+        target_window.target_energies_ev,
+        np.array([[-0.20], [-0.15]]),
+    )
+    with pytest.raises(ValueError, match="read-only"):
+        target_window.target_energies_ev[0, 0] = -99.0
+
+    target[:] = np.array(
+        [
+            [-0.40, 0.10, 0.30, 0.40],
+            [-0.35, 0.15, 0.35, 0.45],
+        ]
+    )
+    candidate_a = np.array(
+        [
+            [-0.40, -0.18, 0.30, 0.40],
+            [-0.35, -0.13, 0.35, 0.45],
+        ]
+    )
+    candidate_b = np.array(
+        [
+            [-0.40, -0.19, 0.30, 0.40],
+            [-0.35, -0.14, 0.35, 0.45],
+        ]
+    )
+
+    metrics_a = evaluate_fixed_target_window(target_window, candidate_a)
+    metrics_b = evaluate_fixed_target_window(target_window, candidate_b)
+
+    assert target_window.target_band_ids == ((1,), (1,))
+    np.testing.assert_allclose(metrics_a.errors_mev, np.full((2, 1), 20.0))
+    np.testing.assert_allclose(metrics_b.errors_mev, np.full((2, 1), 10.0))
 
 
 def test_projection_metrics_keep_principal_capture_and_anchor_quality_separate() -> None:
@@ -128,6 +170,7 @@ def test_projection_metrics_keep_principal_capture_and_anchor_quality_separate()
     metrics = projection_overlap_metrics(
         model,
         target,
+        validation_k_indices=(0,),
         projection_basis=projection,
         gauge_anchor_quality=0.123,
     )
@@ -153,6 +196,7 @@ def test_target_capture_measures_projection_space_not_model_band_gauge() -> None
     metrics = projection_overlap_metrics(
         model,
         target,
+        validation_k_indices=(0,),
         projection_basis=projection,
         gauge_anchor_quality=None,
     )
@@ -182,6 +226,7 @@ def test_projection_metrics_are_invariant_under_simultaneous_unitary_gauge() -> 
     reference = projection_overlap_metrics(
         model,
         target,
+        validation_k_indices=(0, 1),
         projection_basis=projection,
         gauge_anchor_quality=0.75,
     )
@@ -214,6 +259,7 @@ def test_projection_metrics_are_invariant_under_simultaneous_unitary_gauge() -> 
     transformed = projection_overlap_metrics(
         gauged_model,
         gauged_target,
+        validation_k_indices=(0, 1),
         projection_basis=gauged_projection,
         gauge_anchor_quality=0.75,
     )
@@ -228,18 +274,23 @@ def test_projection_metrics_are_invariant_under_simultaneous_unitary_gauge() -> 
     assert transformed.gauge_anchor_quality == reference.gauge_anchor_quality
 
 
-def test_one_bad_k_point_triggers_minimum_overlap_gate() -> None:
+def test_one_bad_k_point_reports_actual_noncontiguous_validation_k_index() -> None:
     target = np.zeros((2, 2, 1), dtype=complex)
     target[:, 0, 0] = 1.0
     model = target.copy()
     model[1, :, 0] = np.array([0.0, 1.0])
 
-    metrics = projection_overlap_metrics(model, target)
+    metrics = projection_overlap_metrics(
+        model,
+        target,
+        validation_k_indices=(3, 7),
+    )
 
     assert metrics.mean_principal_overlap_squared == pytest.approx(0.5)
     assert metrics.minimum_principal_overlap_squared == pytest.approx(0.0)
-    assert metrics.worst_k_index == 1
+    assert metrics.validation_k_indices == (3, 7)
+    assert metrics.worst_k_index == 7
     with pytest.raises(CandidateRejected) as exc_info:
         certify_minimum_principal_overlap(metrics, threshold=0.90)
     assert exc_info.value.reason is CandidateRejectionReason.SUBSPACE_OVERLAP
-    assert exc_info.value.k_index == 1
+    assert exc_info.value.k_index == 7

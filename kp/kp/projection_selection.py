@@ -98,6 +98,38 @@ class TargetWindowSpec:
 
 
 @dataclass(frozen=True)
+class FrozenTargetWindow:
+    """Resolved target-band identities and energies shared by all candidates."""
+
+    spec: TargetWindowSpec
+    target_band_ids: Tuple[Tuple[int, ...], ...]
+    target_energies_ev: np.ndarray = field(repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        band_ids = tuple(
+            tuple(int(band_id) for band_id in row)
+            for row in self.target_band_ids
+        )
+        expected_shape = (len(self.spec.validation_k_indices), self.spec.band_count)
+        if len(band_ids) != expected_shape[0] or any(
+            len(row) != expected_shape[1] for row in band_ids
+        ):
+            raise ValueError("target_band_ids shape does not match TargetWindowSpec")
+        if any(band_id < 0 for row in band_ids for band_id in row):
+            raise ValueError("target_band_ids must be non-negative")
+        energies = np.asarray(self.target_energies_ev, dtype=float).copy()
+        if energies.shape != expected_shape:
+            raise ValueError(
+                "target_energies_ev shape does not match TargetWindowSpec"
+            )
+        if not np.all(np.isfinite(energies)):
+            raise ValueError("target_energies_ev must be finite")
+        energies.setflags(write=False)
+        object.__setattr__(self, "target_band_ids", band_ids)
+        object.__setattr__(self, "target_energies_ev", energies)
+
+
+@dataclass(frozen=True)
 class FixedWindowBandMetrics:
     """Energy errors for a target window whose size never changes by candidate."""
 
@@ -123,6 +155,7 @@ class ProjectionOverlapMetrics:
     mean_principal_overlap_squared: float
     target_capture: float
     gauge_anchor_quality: Optional[float]
+    validation_k_indices: Tuple[int, ...]
     worst_k_index: int
 
 
@@ -197,26 +230,19 @@ def _certify_target_boundary(
             )
 
 
-def evaluate_fixed_target_window(
+def resolve_target_window(
     target_eigenvalues_ev: np.ndarray,
-    candidate_eigenvalues_ev: np.ndarray,
     spec: TargetWindowSpec,
-) -> FixedWindowBandMetrics:
-    """Evaluate exactly ``spec.band_count`` bands at every selected k point.
-
-    Both spectra are referenced to the same scalar ``energy_reference_ev``.
-    In particular, neither spectrum is independently re-centered at each k.
-    """
+) -> FrozenTargetWindow:
+    """Resolve and freeze target-band identities before candidates are scored."""
 
     target = _validated_eigenvalues("target_eigenvalues_ev", target_eigenvalues_ev)
-    candidate = _validated_eigenvalues(
-        "candidate_eigenvalues_ev", candidate_eigenvalues_ev
-    )
     maximum_k_index = max(spec.validation_k_indices)
-    if maximum_k_index >= target.shape[0] or maximum_k_index >= candidate.shape[0]:
-        raise ValueError("validation_k_indices exceed the supplied spectra")
+    if maximum_k_index >= target.shape[0]:
+        raise ValueError("validation_k_indices exceed the target spectrum")
 
-    errors = np.empty(
+    target_band_ids = []
+    target_energies = np.empty(
         (len(spec.validation_k_indices), spec.band_count), dtype=float
     )
     for output_index, k_index in enumerate(spec.validation_k_indices):
@@ -229,16 +255,54 @@ def evaluate_fixed_target_window(
             k_index=k_index,
             tolerance_mev=spec.degeneracy_tolerance_mev,
         )
+        target_band_ids.append(tuple(int(index) for index in target_indices))
+        target_energies[output_index] = target[k_index, target_indices]
+
+    return FrozenTargetWindow(
+        spec=spec,
+        target_band_ids=tuple(target_band_ids),
+        target_energies_ev=target_energies,
+    )
+
+
+def evaluate_fixed_target_window(
+    target_window: FrozenTargetWindow,
+    candidate_eigenvalues_ev: np.ndarray,
+) -> FixedWindowBandMetrics:
+    """Score one candidate against an already resolved target-band window.
+
+    The frozen target energies and candidate spectrum are referenced to the
+    same scalar ``energy_reference_ev``.  Neither spectrum is independently
+    re-centered at any k point.
+    """
+
+    if not isinstance(target_window, FrozenTargetWindow):
+        raise TypeError("target_window must be a FrozenTargetWindow")
+    spec = target_window.spec
+    candidate = _validated_eigenvalues(
+        "candidate_eigenvalues_ev", candidate_eigenvalues_ev
+    )
+    maximum_k_index = max(spec.validation_k_indices)
+    if maximum_k_index >= candidate.shape[0]:
+        raise ValueError("validation_k_indices exceed the candidate spectrum")
+
+    errors = np.empty(
+        (len(spec.validation_k_indices), spec.band_count), dtype=float
+    )
+    for output_index, k_index in enumerate(spec.validation_k_indices):
         candidate_indices = _edge_window_indices(
             candidate, k_index=k_index, spec=spec, candidate=True
         )
-        target_window = (
-            target[k_index, target_indices] - spec.energy_reference_ev
+        referenced_target = (
+            target_window.target_energies_ev[output_index]
+            - spec.energy_reference_ev
         )
-        candidate_window = (
+        referenced_candidate = (
             candidate[k_index, candidate_indices] - spec.energy_reference_ev
         )
-        errors[output_index] = (candidate_window - target_window) * 1000.0
+        errors[output_index] = (
+            referenced_candidate - referenced_target
+        ) * 1000.0
 
     return FixedWindowBandMetrics(
         band_count=spec.band_count,
@@ -267,6 +331,7 @@ def projection_overlap_metrics(
     model_basis: np.ndarray,
     target_basis: np.ndarray,
     *,
+    validation_k_indices: Tuple[int, ...],
     projection_basis: Optional[np.ndarray] = None,
     gauge_anchor_quality: Optional[float] = None,
 ) -> ProjectionOverlapMetrics:
@@ -290,6 +355,15 @@ def projection_overlap_metrics(
         raise ValueError(
             "projection_basis must match target_basis in Nk and ambient dimension"
         )
+    validation_indices = tuple(int(index) for index in validation_k_indices)
+    if len(validation_indices) != target.shape[0]:
+        raise ValueError(
+            "validation_k_indices length must match the basis k-point axis"
+        )
+    if any(index < 0 for index in validation_indices) or len(
+        set(validation_indices)
+    ) != len(validation_indices):
+        raise ValueError("validation_k_indices must be unique and non-negative")
     if gauge_anchor_quality is not None:
         gauge_anchor_quality = float(gauge_anchor_quality)
         if not np.isfinite(gauge_anchor_quality) or not (
@@ -319,7 +393,8 @@ def projection_overlap_metrics(
         mean_principal_overlap_squared=float(np.mean(squared_overlaps)),
         target_capture=float(np.mean(captures)),
         gauge_anchor_quality=gauge_anchor_quality,
-        worst_k_index=worst_local_index,
+        validation_k_indices=validation_indices,
+        worst_k_index=validation_indices[worst_local_index],
     )
 
 
@@ -350,9 +425,11 @@ __all__ = [
     "CandidateRejected",
     "CandidateRejectionReason",
     "FixedWindowBandMetrics",
+    "FrozenTargetWindow",
     "ProjectionOverlapMetrics",
     "TargetWindowSpec",
     "certify_minimum_principal_overlap",
     "evaluate_fixed_target_window",
     "projection_overlap_metrics",
+    "resolve_target_window",
 ]
