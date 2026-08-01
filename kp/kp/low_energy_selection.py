@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from numbers import Integral, Real
 from typing import Any, Mapping, Sequence
 
 import numpy as np
@@ -169,6 +170,131 @@ class FrozenBandCandidate:
         return sum(len(bands) for bands in self.nlow_state_list)
 
 
+_CANDIDATE_METRIC_NAMES = (
+    "band_rms_mev",
+    "band_max_mev",
+    "subspace_overlap",
+    "symmetry_residual",
+    "symmetry_leakage",
+)
+
+
+def _normalized_candidates(
+    candidates: Sequence[CandidateMetrics],
+) -> tuple[CandidateMetrics, ...]:
+    if any(not isinstance(candidate, CandidateMetrics) for candidate in candidates):
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "projection candidates must be CandidateMetrics records",
+        )
+
+    invalid_ids = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if not isinstance(candidate.candidate_id, str)
+        or not candidate.candidate_id.strip()
+    )
+    if invalid_ids:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "projection candidate IDs must be nonempty strings",
+        )
+
+    candidate_ids = tuple(candidate.candidate_id for candidate in candidates)
+    duplicate_ids = tuple(
+        candidate_id
+        for candidate_id in dict.fromkeys(candidate_ids)
+        if candidate_ids.count(candidate_id) > 1
+    )
+    if duplicate_ids:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.DUPLICATE_CANDIDATE_ID,
+            "projection candidate IDs must be unique",
+            candidate_ids=duplicate_ids,
+        )
+
+    invalid_dimensions = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if not isinstance(candidate.dimension, Integral)
+        or isinstance(candidate.dimension, (bool, np.bool_))
+        or int(candidate.dimension) <= 0
+    )
+    if invalid_dimensions:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "projection candidate dimensions must be positive integers",
+            candidate_ids=invalid_dimensions,
+        )
+
+    invalid_metric_types = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if any(
+            not isinstance(getattr(candidate, metric_name), Real)
+            or isinstance(getattr(candidate, metric_name), (bool, np.bool_))
+            for metric_name in _CANDIDATE_METRIC_NAMES
+        )
+    )
+    if invalid_metric_types:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "projection candidate metrics must be real scalars",
+            candidate_ids=invalid_metric_types,
+        )
+
+    nonfinite_ids = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if any(
+            not np.isfinite(float(getattr(candidate, metric_name)))
+            for metric_name in _CANDIDATE_METRIC_NAMES
+        )
+    )
+    if nonfinite_ids:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.NONFINITE_METRIC,
+            "projection candidate metrics must be finite",
+            candidate_ids=nonfinite_ids,
+        )
+
+    invalid_ranges = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if any(
+            float(getattr(candidate, metric_name)) < 0.0
+            for metric_name in (
+                "band_rms_mev",
+                "band_max_mev",
+                "symmetry_residual",
+                "symmetry_leakage",
+            )
+        )
+        or not 0.0 <= float(candidate.subspace_overlap) <= 1.0
+    )
+    if invalid_ranges:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "candidate errors and residuals must be non-negative and "
+            "subspace_overlap must lie in [0, 1]",
+            candidate_ids=invalid_ranges,
+        )
+
+    return tuple(
+        CandidateMetrics(
+            candidate_id=candidate.candidate_id,
+            dimension=int(candidate.dimension),
+            band_rms_mev=float(candidate.band_rms_mev),
+            band_max_mev=float(candidate.band_max_mev),
+            subspace_overlap=float(candidate.subspace_overlap),
+            symmetry_residual=float(candidate.symmetry_residual),
+            symmetry_leakage=float(candidate.symmetry_leakage),
+            structural_failure=candidate.structural_failure,
+        )
+        for candidate in candidates
+    )
+
+
 def _candidate_violations(
     candidate: CandidateMetrics,
     thresholds: SelectionThresholds,
@@ -228,55 +354,7 @@ def select_projection_candidate(
     )
     if any(not np.isfinite(value) or value <= 0.0 for value in threshold_values):
         raise ValueError("selection thresholds must be finite and strictly positive")
-
-    candidate_ids = tuple(str(candidate.candidate_id) for candidate in candidates)
-    duplicate_ids = tuple(
-        candidate_id
-        for candidate_id in dict.fromkeys(candidate_ids)
-        if candidate_ids.count(candidate_id) > 1
-    )
-    if duplicate_ids:
-        raise CandidateSelectionError(
-            CandidateSelectionFailureCode.DUPLICATE_CANDIDATE_ID,
-            "projection candidate IDs must be unique",
-            candidate_ids=duplicate_ids,
-        )
-
-    invalid_dimensions = tuple(
-        candidate.candidate_id
-        for candidate in candidates
-        if not isinstance(candidate.dimension, (int, np.integer))
-        or isinstance(candidate.dimension, (bool, np.bool_))
-        or int(candidate.dimension) <= 0
-    )
-    if invalid_dimensions:
-        raise CandidateSelectionError(
-            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
-            "projection candidate dimensions must be positive integers",
-            candidate_ids=invalid_dimensions,
-        )
-
-    metric_names = (
-        "band_rms_mev",
-        "band_max_mev",
-        "subspace_overlap",
-        "symmetry_residual",
-        "symmetry_leakage",
-    )
-    nonfinite_ids = tuple(
-        candidate.candidate_id
-        for candidate in candidates
-        if any(
-            not np.isfinite(float(getattr(candidate, metric_name)))
-            for metric_name in metric_names
-        )
-    )
-    if nonfinite_ids:
-        raise CandidateSelectionError(
-            CandidateSelectionFailureCode.NONFINITE_METRIC,
-            "projection candidate metrics must be finite",
-            candidate_ids=nonfinite_ids,
-        )
+    candidates = _normalized_candidates(candidates)
 
     structural_failures = tuple(
         (candidate.candidate_id, str(candidate.structural_failure))

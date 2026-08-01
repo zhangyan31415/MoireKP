@@ -418,6 +418,34 @@ def test_duplicate_candidate_ids_fail_closed_before_selection() -> None:
     assert exc_info.value.candidate_ids == ("duplicate",)
 
 
+@pytest.mark.parametrize(
+    "candidate_id",
+    ("", "   ", 1, True, 1.0 + 0.0j, ["candidate"], {"id": "candidate"}),
+)
+def test_candidate_id_must_be_a_nonempty_string(candidate_id: object) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, candidate_id, 2)],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+def test_mixed_non_string_candidate_ids_fail_typed_before_tie_break() -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, 1, 2), _candidate(selection, "a", 2)],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
 @pytest.mark.parametrize("dimension", (0, -1))
 def test_nonpositive_candidate_dimension_fails_closed(dimension: int) -> None:
     selection = _selection_module()
@@ -430,6 +458,22 @@ def test_nonpositive_candidate_dimension_fails_closed(dimension: int) -> None:
 
     assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
     assert exc_info.value.candidate_ids == ("bad-dimension",)
+
+
+@pytest.mark.parametrize(
+    "dimension",
+    (True, "2", 2.0 + 0.0j, [2], {"dimension": 2}),
+)
+def test_candidate_dimension_rejects_non_integer_boundary_types(dimension: object) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, "bad-dimension", dimension)],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
 
 
 @pytest.mark.parametrize(
@@ -454,6 +498,64 @@ def test_nonfinite_candidate_metric_fails_closed(metric: str, value: float) -> N
 
     assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.NONFINITE_METRIC
     assert exc_info.value.candidate_ids == ("nonfinite",)
+
+
+@pytest.mark.parametrize(
+    "metric",
+    (
+        "band_rms_mev",
+        "band_max_mev",
+        "subspace_overlap",
+        "symmetry_residual",
+        "symmetry_leakage",
+    ),
+)
+@pytest.mark.parametrize(
+    "value",
+    (True, "0.5", 0.5 + 0.0j, [0.5], {"value": 0.5}),
+)
+def test_candidate_metrics_reject_non_real_scalar_boundary_types(
+    metric: str,
+    value: object,
+) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, "bad-metric", 2, **{metric: value})],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+@pytest.mark.parametrize(
+    "metric",
+    ("band_rms_mev", "band_max_mev", "symmetry_residual", "symmetry_leakage"),
+)
+def test_nonnegative_candidate_metrics_reject_negative_values(metric: str) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, "negative", 2, **{metric: -1.0e-9})],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+@pytest.mark.parametrize("overlap", (-1.0e-9, 1.0 + 1.0e-9))
+def test_subspace_overlap_must_lie_in_closed_unit_interval(overlap: float) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, "bad-overlap-range", 2, subspace_overlap=overlap)],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
 
 
 def test_composition_reports_orbital_layer_and_spin_weights() -> None:
