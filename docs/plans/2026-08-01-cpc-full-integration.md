@@ -493,52 +493,141 @@ git commit -m "feat(kp): certify candidate source symmetries"
 `codex/cpc-auto-selection-core` only after the symmetry commit is reviewed.
 
 **Files:**
+- Create: `kp/kp/blocks/gamma_layout.py`
+- Create: `tests/kp/test_gamma_projector_closure.py`
+- Modify: `kp/kp/blocks/__init__.py`
 - Modify: `kp/kp/low_energy_selection.py`
 - Modify: `kp/kp/blocks/blocks.py`
 - Modify: `kp/kp/projection_selection.py`
+- Modify: `kp/kp/identity.py`
+- Modify: `kp/kp/cli.py`
+- Modify: `kp/kp/symmetry/projection.py`
 - Modify: `tests/kp/test_auto_low_energy_selection.py`
 - Modify: `tests/kp/test_blocks_get_h_block.py`
+- Modify: `tests/kp/test_symm_projection.py`
+- Modify: `tests/kp/test_auto_gauge_layer_layout.py`
 
-**Step 1: Add failing Gamma closure tests**
+**Step 1: Freeze the supported v1 domain**
+
+Automatic Gamma v1 supports exactly two source groups, equal ordered Q counts,
+the current release convention of equal orbital count per physical layer, and
+either spinful `all` or an explicitly identified single-spin slice. Reject all
+other layouts before indexing or diagonalization. Do not claim support for
+unequal Q or orbital widths while production still uses one `q_count` and one
+`orb_per_layer0`.
+
+The canonical layout hash must bind ordered Q arrays, TAPW source basis
+identity, source-group/layer/orbital dimensions, full-row order, and spin-slice
+convention. Repeated hand-written Gamma row formulas must become wrappers around
+this one layout.
+
+**Step 2: Add failing Gamma closure tests**
 
 Construct a synthetic spinful `num_layer_list=[1, 2]` Gamma case with the real
 projector assembler. Assert:
 
-- TR closes a seed to its Kramers partner;
+- rank-four TR closure has one Kramers pair inside each source group, matching
+  production `TR sector_map=identity`;
 - `U_low.conj().T @ U_low` is identity;
 - projected eigenvalues retain expected degeneracy;
 - random unitary rotation inside the degenerate seed does not change selection;
 - L2 orbital swap transforms the projector covariantly;
-- layer composition may change but ownership does not.
+- an independent rotation across physical layers inside source group 1 changes
+  layer composition but not source-group routing;
+- an intentionally wrong legacy row permutation produces a nonzero TR residual;
+- unequal Q/orbital layouts, inconsistent q routes, and whole-frame Procrustes
+  mixing across routed groups fail closed.
 
-**Step 2: Verify failures**
+Production seeds must contain complete energy clusters. A rank-one Kramers seed
+may test only the low-level closure primitive, not a production candidate.
 
-Run the two targeted files and record the failing invariants.
+**Step 3: Verify failures**
 
-**Step 3: Expose one canonical row-layout object**
+Run the targeted files and record the failing invariants.
 
-Extend the existing CPC row-order helper to return same-Q local row, full row,
-source group, physical layer, spin, and orbital. Keep the current projector
-ordering logic unchanged.
+**Step 4: Expose one strict canonical row-layout object**
 
-**Step 4: Implement projector-level closure**
+Create immutable `GammaRowLayout` / `GammaRowAddress` records returning same-Q
+local row, full row, q index, source group, physical layer, spin, and orbital.
+Validate a bijection over the full row space. Reuse the layout in
+`get_H_block`, `project_heff_full`, the Gamma projector assemblers, and
+`symmetry.projection`; do not leave an automatic path that silently collapses
+invalid metadata to one row segment.
 
-Cluster by energy/degeneracy, close the joint projector under raw-H actions, and
-only then resolve source-group routing. Use layer weights only for composition
-reporting. Ambiguous routing raises `CandidateRejected`.
+**Step 5: Implement projector-cluster closure**
 
-**Step 5: Run targeted and existing Gamma tests**
+Cluster by energy using separate certified-same and certified-different bounds;
+the numerical gray zone rejects the candidate. Seeds and additions are whole
+cluster projectors. Before applying a raw-H local action, certify isometry,
+unique q/sector routing, and off-route leakage. A target cluster is added only
+when it uniquely captures essentially the complete normalized image; nonzero
+overlap alone is not sufficient. After convergence, check normalized closure
+residual for every required generator/q route.
+
+**Step 6: Route each production k/q projector by source group**
+
+For an orthonormal joint frame `B`, construct
+`C = B.conj().T @ (R0 - R1) @ B`. Its positive and negative spectral
+projectors define the two source-group subspaces. Record
+`route_gap = min(abs(eig(C)))`; reject a zero/gray-zone gap, but do not require
+`abs(eig(C))` to be near one because real inter-group hybridization is allowed.
+Require both routed groups to be nonempty for automatic release output, stable
+ranks at every production k/q, orthogonality/completeness, and raw-H route
+covariance.
+
+Recompute this routing at every production k/q. Align frames only inside each
+routed source group using separate Procrustes/polar steps. Never align the
+whole joint frame and then split columns, because that can mix the positive and
+negative routing subspaces. Freeze joint band indices, but reject any production
+k/q with a cluster-boundary split or groupwise anchor rank loss.
+
+**Step 7: Add a typed routed handoff and real assembler**
+
+Represent projection inputs as a typed union:
+
+- `explicit_legacy`: existing physical-layer `nlow_state_list` plus optional
+  anchors, diagnostic/unverified until separately certified;
+- `gamma_routed`: joint band set, canonical layout identity, per-k/q routed
+  local frames and group slices, routing/closure certificate hashes.
+
+The two variants are mutually exclusive. Add an assembler that consumes the
+routed local frames directly and returns the complete low projector (and high
+complement when requested); do not encode routed linear combinations as fake
+physical-layer band lists. Persist the same typed handoff in projection
+artifacts, bind it into the projection identity, and make `kp symm` consume that
+persisted handoff rather than re-deriving the projector from
+`nlow_state_list/norb_fix_list`. Keep this routed frame distinct from the later
+continuum `SymmetryAdaptedBasisFrame`.
+
+Automatic Gamma must remain disabled until layout, per-k/q routing,
+groupwise alignment, assembler, persisted identity, and `kp symm` consumption
+are all present and tested.
+
+**Step 8: Run targeted and existing Gamma tests**
 
 Expected: PASS, including existing row-order/Kramers tests.
 
-**Step 6: Commit**
+```bash
+PYTHONPATH="$PWD/kp:$PWD/tapw" /data/home/zy/mambaforge/envs/moirekp/bin/python \
+  -m pytest -q -p no:cacheprovider \
+  tests/kp/test_gamma_projector_closure.py \
+  tests/kp/test_auto_low_energy_selection.py \
+  tests/kp/test_blocks_get_h_block.py \
+  tests/kp/test_symm_projection.py \
+  tests/kp/test_auto_gauge_layer_layout.py \
+  tests/kp/test_kp_artifact_identity.py
+```
+
+**Step 9: Commit in two reviewable stages**
 
 ```bash
-git add kp/kp/low_energy_selection.py kp/kp/blocks/blocks.py \
-  kp/kp/projection_selection.py tests/kp/test_auto_low_energy_selection.py \
-  tests/kp/test_blocks_get_h_block.py
-git commit -m "feat(kp): close Gamma candidates under source symmetry"
+git commit -m "feat(kp): certify routed Gamma projectors"
+git commit -m "feat(kp): persist routed Gamma projection handoffs"
 ```
+
+The first commit may add the strict mathematical core without enabling auto
+Gamma. The second commit must close production assembly, identity, and the
+`kp symm` handoff before enabling it.
 
 ### Task 9: Implement Selection Artifacts And Fail-Closed Decisions
 
