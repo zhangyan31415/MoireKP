@@ -205,7 +205,12 @@ def _normalized_thresholds(thresholds: SelectionThresholds) -> SelectionThreshol
         for value in values
     ):
         raise ValueError("selection thresholds must be real scalars, excluding booleans")
-    normalized = tuple(float(value) for value in values)
+    try:
+        normalized = tuple(float(value) for value in values)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise ValueError(
+            "selection thresholds must be representable as finite floats"
+        ) from exc
     if any(not np.isfinite(value) for value in normalized):
         raise ValueError("selection thresholds must be finite")
     if not 0.0 < normalized[2] <= 1.0:
@@ -263,6 +268,22 @@ def _normalized_candidates(
             candidate_ids=invalid_dimensions,
         )
 
+    invalid_structural_failures = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if candidate.structural_failure is not None
+        and (
+            not isinstance(candidate.structural_failure, str)
+            or not candidate.structural_failure.strip()
+        )
+    )
+    if invalid_structural_failures:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "candidate structural_failure values must be None or nonempty strings",
+            candidate_ids=invalid_structural_failures,
+        )
+
     invalid_metric_types = tuple(
         candidate.candidate_id
         for candidate in candidates
@@ -279,12 +300,29 @@ def _normalized_candidates(
             candidate_ids=invalid_metric_types,
         )
 
+    normalized_metrics_by_id: dict[str, tuple[float, ...]] = {}
+    unrepresentable_ids: list[str] = []
+    for candidate in candidates:
+        try:
+            normalized_metrics_by_id[candidate.candidate_id] = tuple(
+                float(getattr(candidate, metric_name))
+                for metric_name in _CANDIDATE_METRIC_NAMES
+            )
+        except (OverflowError, TypeError, ValueError):
+            unrepresentable_ids.append(candidate.candidate_id)
+    if unrepresentable_ids:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "projection candidate metrics must be representable as finite floats",
+            candidate_ids=unrepresentable_ids,
+        )
+
     nonfinite_ids = tuple(
         candidate.candidate_id
         for candidate in candidates
         if any(
-            not np.isfinite(float(getattr(candidate, metric_name)))
-            for metric_name in _CANDIDATE_METRIC_NAMES
+            not np.isfinite(value)
+            for value in normalized_metrics_by_id[candidate.candidate_id]
         )
     )
     if nonfinite_ids:
@@ -298,15 +336,10 @@ def _normalized_candidates(
         candidate.candidate_id
         for candidate in candidates
         if any(
-            float(getattr(candidate, metric_name)) < 0.0
-            for metric_name in (
-                "band_rms_mev",
-                "band_max_mev",
-                "symmetry_residual",
-                "symmetry_leakage",
-            )
+            normalized_metrics_by_id[candidate.candidate_id][index] < 0.0
+            for index in (0, 1, 3, 4)
         )
-        or not 0.0 <= float(candidate.subspace_overlap) <= 1.0
+        or not 0.0 <= normalized_metrics_by_id[candidate.candidate_id][2] <= 1.0
     )
     if invalid_ranges:
         raise CandidateSelectionError(
@@ -320,11 +353,11 @@ def _normalized_candidates(
         CandidateMetrics(
             candidate_id=candidate.candidate_id,
             dimension=int(candidate.dimension),
-            band_rms_mev=float(candidate.band_rms_mev),
-            band_max_mev=float(candidate.band_max_mev),
-            subspace_overlap=float(candidate.subspace_overlap),
-            symmetry_residual=float(candidate.symmetry_residual),
-            symmetry_leakage=float(candidate.symmetry_leakage),
+            band_rms_mev=normalized_metrics_by_id[candidate.candidate_id][0],
+            band_max_mev=normalized_metrics_by_id[candidate.candidate_id][1],
+            subspace_overlap=normalized_metrics_by_id[candidate.candidate_id][2],
+            symmetry_residual=normalized_metrics_by_id[candidate.candidate_id][3],
+            symmetry_leakage=normalized_metrics_by_id[candidate.candidate_id][4],
             structural_failure=candidate.structural_failure,
         )
         for candidate in candidates

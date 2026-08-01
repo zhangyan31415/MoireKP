@@ -560,6 +560,46 @@ def test_subspace_overlap_must_lie_in_closed_unit_interval(overlap: float) -> No
 
 
 @pytest.mark.parametrize(
+    "structural_failure",
+    ("", "   ", True, 1, ["rank loss"], np.asarray(["rank loss"]), object()),
+)
+def test_structural_failure_must_be_none_or_a_nonempty_string(
+    structural_failure: object,
+) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(
+        selection.CandidateSelectionError,
+        match="structural_failure.*nonempty strings",
+    ) as exc_info:
+        selection.select_projection_candidate(
+            [
+                _candidate(
+                    selection,
+                    "bad-structural-failure",
+                    2,
+                    structural_failure=structural_failure,
+                )
+            ],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+def test_candidate_metric_float_overflow_is_a_typed_boundary_failure() -> None:
+    selection = _selection_module()
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [_candidate(selection, "overflow", 2, band_rms_mev=10**1000)],
+            _thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+@pytest.mark.parametrize(
     "field",
     (
         "band_rms_mev",
@@ -595,6 +635,19 @@ def test_overlap_threshold_must_lie_in_open_closed_unit_interval(overlap: float)
     )
 
     with pytest.raises(ValueError, match="subspace_overlap"):
+        selection.select_projection_candidate(
+            [_candidate(selection, "candidate", 2)],
+            thresholds,
+        )
+
+
+def test_threshold_float_overflow_is_a_stable_value_error() -> None:
+    selection = _selection_module()
+    thresholds = selection.SelectionThresholds(
+        **(_thresholds(selection).__dict__ | {"band_rms_mev": 10**1000})
+    )
+
+    with pytest.raises(ValueError, match="representable"):
         selection.select_projection_candidate(
             [_candidate(selection, "candidate", 2)],
             thresholds,
@@ -790,6 +843,49 @@ def test_report_rejects_duplicate_candidate_envelope() -> None:
     assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.DUPLICATE_CANDIDATE_ID
 
 
+def test_report_rejects_array_structural_failure_without_truth_value_error() -> None:
+    selection = _selection_module()
+    selected = _candidate(selection, "selected", 4)
+    decision = selection.select_projection_candidate([selected], _thresholds(selection))
+    invalid = _candidate(
+        selection,
+        "selected",
+        4,
+        structural_failure=np.asarray(["rank loss", "other"]),
+    )
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.build_selection_report(
+            reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+            closure=selection.SymmetryClosure(states=(), additions=()),
+            decision=decision,
+            compositions=(),
+            candidates=[invalid],
+            thresholds=_thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
+def test_report_candidate_metric_float_overflow_is_typed() -> None:
+    selection = _selection_module()
+    selected = _candidate(selection, "selected", 4)
+    decision = selection.select_projection_candidate([selected], _thresholds(selection))
+    overflow = _candidate(selection, "selected", 4, band_rms_mev=10**1000)
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.build_selection_report(
+            reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+            closure=selection.SymmetryClosure(states=(), additions=()),
+            decision=decision,
+            compositions=(),
+            candidates=[overflow],
+            thresholds=_thresholds(selection),
+        )
+
+    assert exc_info.value.failure_code is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+
+
 @pytest.mark.parametrize("value", (0.0, True, "1.0", float("nan")))
 def test_report_rejects_invalid_thresholds_without_recomputing_violations(
     value: object,
@@ -809,6 +905,25 @@ def test_report_rejects_invalid_thresholds_without_recomputing_violations(
             compositions=(),
             candidates=[selected],
             thresholds=invalid,
+        )
+
+
+def test_report_threshold_float_overflow_is_a_stable_value_error() -> None:
+    selection = _selection_module()
+    selected = _candidate(selection, "selected", 4)
+    decision = selection.select_projection_candidate([selected], _thresholds(selection))
+    overflow = selection.SelectionThresholds(
+        **(_thresholds(selection).__dict__ | {"band_rms_mev": 10**1000})
+    )
+
+    with pytest.raises(ValueError, match="representable"):
+        selection.build_selection_report(
+            reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+            closure=selection.SymmetryClosure(states=(), additions=()),
+            decision=decision,
+            compositions=(),
+            candidates=[selected],
+            thresholds=overflow,
         )
 
 
