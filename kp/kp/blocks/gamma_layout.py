@@ -2,8 +2,8 @@
 
 The v1 implementation is intentionally narrow.  It supports exactly two TAPW
 source groups, equal ordered Q counts, a uniform physical-layer orbital width,
-and either the complete spinful basis or one explicitly identified spin slice.
-Unsupported inputs are rejected before any row indexing is attempted.
+and the complete spinful basis.  Unsupported inputs are rejected before any row
+indexing is attempted.
 """
 
 from __future__ import annotations
@@ -16,6 +16,7 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 import scipy.linalg
+import scipy.sparse
 
 from ..projection_selection import CandidateRejected, CandidateRejectionReason
 
@@ -61,6 +62,86 @@ def _hash_array(array: Any) -> str:
     digest.update(b"\0")
     digest.update(memoryview(value).cast("B"))
     return digest.hexdigest()
+
+
+def _freeze_complex_array(array: Any, *, message: str) -> np.ndarray:
+    value = np.array(array, dtype=np.complex128, copy=True, order="C")
+    if not np.all(np.isfinite(value)):
+        raise ValueError(message)
+    value.setflags(write=False)
+    return value
+
+
+def _strict_integral(value: Any) -> bool:
+    return (
+        isinstance(value, Integral)
+        and not isinstance(value, (bool, np.bool_))
+    )
+
+
+def _canonical_matrix_hash(matrix: Any) -> str:
+    """Hash dense and sparse matrices through the same sorted COO encoding."""
+
+    if scipy.sparse.issparse(matrix):
+        canonical = scipy.sparse.coo_matrix(matrix, dtype=np.complex128, copy=True)
+        canonical.sum_duplicates()
+        canonical.eliminate_zeros()
+        order = np.lexsort((canonical.col, canonical.row))
+        rows = np.asarray(canonical.row[order], dtype=np.int64)
+        columns = np.asarray(canonical.col[order], dtype=np.int64)
+        values = np.ascontiguousarray(canonical.data[order], dtype=np.complex128)
+        shape = canonical.shape
+    else:
+        dense = np.asarray(matrix, dtype=np.complex128)
+        rows, columns = np.nonzero(dense)
+        rows = np.asarray(rows, dtype=np.int64)
+        columns = np.asarray(columns, dtype=np.int64)
+        values = np.ascontiguousarray(dense[rows, columns], dtype=np.complex128)
+        shape = dense.shape
+    digest = hashlib.sha256()
+    digest.update(b"kp:gamma-matrix-coo:v1\0")
+    digest.update(
+        _canonical_json(
+            {"dtype": np.dtype(np.complex128).str, "shape": list(shape)}
+        ).encode("ascii")
+    )
+    for value in (rows, columns, values):
+        digest.update(b"\0")
+        digest.update(memoryview(np.ascontiguousarray(value)).cast("B"))
+    return digest.hexdigest()
+
+
+def _matrix_is_finite(matrix: Any) -> bool:
+    if scipy.sparse.issparse(matrix):
+        return bool(np.all(np.isfinite(matrix.data)))
+    return bool(np.all(np.isfinite(np.asarray(matrix))))
+
+
+def _dense_matrix_block(
+    matrix: Any, rows: np.ndarray, columns: np.ndarray
+) -> np.ndarray:
+    if scipy.sparse.issparse(matrix):
+        block = matrix[rows, :][:, columns]
+        return np.ascontiguousarray(block.toarray(), dtype=np.complex128)
+    return np.ascontiguousarray(
+        np.asarray(matrix, dtype=np.complex128)[np.ix_(rows, columns)]
+    )
+
+
+def _matrix_block_frobenius(
+    matrix: Any, rows: np.ndarray, columns: np.ndarray
+) -> float:
+    if rows.size == 0 or columns.size == 0:
+        return 0.0
+    if scipy.sparse.issparse(matrix):
+        block = matrix[rows, :][:, columns]
+        return float(np.sqrt(np.vdot(block.data, block.data).real))
+    return float(
+        np.linalg.norm(
+            np.asarray(matrix, dtype=np.complex128)[np.ix_(rows, columns)],
+            ord="fro",
+        )
+    )
 
 
 @dataclass(frozen=True)
@@ -224,6 +305,11 @@ class GammaRowLayout:
                 CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
                 "automatic Gamma v1 requires exactly two source groups",
             )
+        if any(not _strict_integral(value) for value in num_layer_list):
+            raise GammaLayoutError(
+                CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
+                "source-group layer counts must be strict integers",
+            )
         layers = tuple(int(value) for value in num_layer_list)
         if any(value <= 0 for value in layers):
             raise GammaLayoutError(
@@ -259,11 +345,15 @@ class GammaRowLayout:
                 CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
                 "orbital metadata must have one width per physical layer",
             )
-        widths = tuple(
-            int(width)
-            for group in num_orb_per_layer_list
-            for width in group
+        raw_widths = tuple(
+            width for group in num_orb_per_layer_list for width in group
         )
+        if any(not _strict_integral(width) for width in raw_widths):
+            raise GammaLayoutError(
+                CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
+                "per-physical-layer orbital widths must be strict integers",
+            )
+        widths = tuple(int(width) for width in raw_widths)
         if not widths or any(width <= 0 for width in widths) or len(set(widths)) != 1:
             raise GammaLayoutError(
                 CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
@@ -280,12 +370,12 @@ class GammaRowLayout:
                 "automatic Gamma v1 supports spinful_all only",
             )
         spin_scope, spin_labels = spin_map[spin_key]
-        basis_hash = str(source_basis_hash).strip()
-        if not basis_hash:
+        if not isinstance(source_basis_hash, str) or not source_basis_hash.strip():
             raise GammaLayoutError(
                 CandidateRejectionReason.INVALID_GAMMA_ROW_LAYOUT,
-                "TAPW source basis hash must be nonempty",
+                "TAPW source basis hash must be a literal nonempty string",
             )
+        basis_hash = source_basis_hash.strip()
 
         q_count = int(q_arrays[0].shape[0])
         orbital_width = widths[0]
@@ -398,7 +488,7 @@ class GammaRowLayout:
         return len(self.addresses_by_full_row)
 
     def same_q_full_rows(self, q_index: int) -> np.ndarray:
-        if int(q_index) < 0 or int(q_index) >= self.q_count:
+        if not _strict_integral(q_index) or int(q_index) < 0 or int(q_index) >= self.q_count:
             raise IndexError(f"Gamma q index {q_index} outside 0..{self.q_count - 1}")
         return np.asarray(
             [address.full_row for address in self.rows_by_q[int(q_index)]],
@@ -406,14 +496,18 @@ class GammaRowLayout:
         )
 
     def address_for_full_row(self, full_row: int) -> GammaRowAddress:
-        if int(full_row) < 0 or int(full_row) >= self.full_dimension:
+        if (
+            not _strict_integral(full_row)
+            or int(full_row) < 0
+            or int(full_row) >= self.full_dimension
+        ):
             raise IndexError(
                 f"Gamma full row {full_row} outside 0..{self.full_dimension - 1}"
             )
         return self.addresses_by_full_row[int(full_row)]
 
     def source_group_local_rows(self, source_group: int) -> np.ndarray:
-        if int(source_group) not in (0, 1):
+        if not _strict_integral(source_group) or int(source_group) not in (0, 1):
             raise IndexError("Gamma source group must be 0 or 1")
         return np.asarray(
             [
@@ -434,7 +528,11 @@ class GammaRowLayout:
 
     def physical_layer_local_projector(self, physical_layer: int) -> np.ndarray:
         total_layers = sum(self.num_layer_list)
-        if int(physical_layer) < 0 or int(physical_layer) >= total_layers:
+        if (
+            not _strict_integral(physical_layer)
+            or int(physical_layer) < 0
+            or int(physical_layer) >= total_layers
+        ):
             raise IndexError(
                 f"Gamma physical layer {physical_layer} outside 0..{total_layers - 1}"
             )
@@ -474,6 +572,64 @@ class GammaRowLayout:
         }
 
 
+def _computed_layout_hash(layout: GammaRowLayout) -> str:
+    q_arrays = tuple(np.asarray(qset, dtype=np.float64) for qset in layout.ordered_qsets)
+    q_hashes = tuple(_hash_array(array) for array in q_arrays)
+    full_rows_hash = _hash_array(
+        np.asarray(
+            [
+                [address.full_row for address in addresses]
+                for addresses in layout.rows_by_q
+            ],
+            dtype=np.int64,
+        )
+    )
+    payload = {
+        "schema": layout.SCHEMA,
+        "tapw_source_basis_hash": layout.tapw_source_basis_hash,
+        "ordered_qset_hashes": list(q_hashes),
+        "num_layer_list": list(layout.num_layer_list),
+        "uniform_orbital_count": layout.uniform_orbital_count,
+        "source_group_count": 2,
+        "spin_scope": layout.spin_scope,
+        "semantic_spin_labels": list(layout.spin_labels),
+        "full_dim": layout.full_dimension,
+        "local_dim": layout.same_q_dimension,
+        "full_rows_by_q_hash": full_rows_hash,
+        "basis_order": "spin->group->q->layer->orbital",
+    }
+    return _hash_payload(payload)
+
+
+def _validate_layout_identity(layout: GammaRowLayout) -> None:
+    try:
+        canonical = GammaRowLayout.build(
+            qsets=tuple(
+                np.asarray(qset, dtype=np.float64) for qset in layout.ordered_qsets
+            ),
+            num_layer_list=layout.num_layer_list,
+            num_orb_per_layer_list=tuple(
+                tuple(
+                    layout.uniform_orbital_count
+                    for _layer in range(layout.num_layer_list[group])
+                )
+                for group in range(2)
+            ),
+            spin_convention=layout.spin_scope,
+            source_basis_hash=layout.tapw_source_basis_hash,
+        )
+    except (GammaLayoutError, TypeError, ValueError) as error:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma row layout cannot be reconstructed from its certificate",
+        ) from error
+    if canonical != layout or _computed_layout_hash(layout) != layout.layout_hash:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma row layout identity is stale or internally inconsistent",
+        )
+
+
 @dataclass(frozen=True)
 class GammaEnergyCluster:
     band_indices: tuple[int, ...]
@@ -481,6 +637,20 @@ class GammaEnergyCluster:
     energy_max: float
     frame: np.ndarray
     projector: np.ndarray
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "frame",
+            _freeze_complex_array(self.frame, message="Gamma cluster frame must be finite"),
+        )
+        object.__setattr__(
+            self,
+            "projector",
+            _freeze_complex_array(
+                self.projector, message="Gamma cluster projector must be finite"
+            ),
+        )
 
 
 def cluster_gamma_eigensystem(
@@ -491,7 +661,11 @@ def cluster_gamma_eigensystem(
 ) -> tuple[GammaEnergyCluster, ...]:
     values = np.asarray(eigenvalues, dtype=float)
     vectors = np.asarray(eigenvectors, dtype=np.complex128)
-    if values.ndim != 1 or vectors.shape != (values.size, values.size):
+    if (
+        values.ndim != 1
+        or values.size == 0
+        or vectors.shape != (values.size, values.size)
+    ):
         raise GammaRoutingError(
             CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
             "Gamma eigensystem must be square with one eigenvalue per column",
@@ -547,7 +721,110 @@ class GammaCertifiedRawAction:
     q_permutation: tuple[int, ...]
     local_actions_by_source_q: tuple[np.ndarray, ...]
     tapw_source_basis_hash: str
+    layout_hash: str
+    thresholds_hash: str
+    full_matrix_hash: str
     action_hash: str
+
+    def __post_init__(self) -> None:
+        frozen = tuple(
+            _freeze_complex_array(
+                local, message="certified Gamma local actions must be finite"
+            )
+            for local in self.local_actions_by_source_q
+        )
+        object.__setattr__(self, "local_actions_by_source_q", frozen)
+
+
+def _raw_action_payload(
+    *,
+    name: str,
+    antiunitary: bool,
+    sector_map: tuple[int, int],
+    q_permutation: tuple[int, ...],
+    local_actions_by_source_q: Sequence[np.ndarray],
+    tapw_source_basis_hash: str,
+    layout_hash: str,
+    thresholds_hash: str,
+    full_matrix_hash: str,
+) -> dict[str, Any]:
+    return {
+        "schema": "kp.gamma-raw-action.v1",
+        "name": name,
+        "antiunitary": antiunitary,
+        "sector_map": list(sector_map),
+        "q_permutation": list(q_permutation),
+        "layout_hash": layout_hash,
+        "tapw_source_basis_hash": tapw_source_basis_hash,
+        "matrix_hash": full_matrix_hash,
+        "local_action_hashes": [
+            _hash_array(local) for local in local_actions_by_source_q
+        ],
+        "thresholds_hash": thresholds_hash,
+    }
+
+
+def _validate_action_certificate(
+    action: GammaCertifiedRawAction,
+    *,
+    layout: GammaRowLayout,
+    thresholds: GammaRoutingThresholds,
+) -> None:
+    expected_q = tuple(range(layout.q_count))
+    valid_routes = (
+        len(action.q_permutation) == layout.q_count
+        and tuple(sorted(action.q_permutation)) == expected_q
+        and all(_strict_integral(value) for value in action.q_permutation)
+    )
+    valid_sector = (
+        len(action.sector_map) == 2
+        and all(_strict_integral(value) for value in action.sector_map)
+        and tuple(sorted(action.sector_map)) == (0, 1)
+    )
+    valid_locals = len(action.local_actions_by_source_q) == layout.q_count
+    if (
+        action.layout_hash != layout.layout_hash
+        or action.thresholds_hash != thresholds.identity_hash
+    ):
+        valid_identity = False
+    else:
+        valid_identity = (
+            action.tapw_source_basis_hash == layout.tapw_source_basis_hash
+            and isinstance(action.full_matrix_hash, str)
+            and bool(action.full_matrix_hash)
+        )
+    if not (valid_routes and valid_sector and valid_locals and valid_identity):
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"action {action.name!r} does not match the Gamma layout/threshold certificate",
+        )
+    for local in action.local_actions_by_source_q:
+        value = np.asarray(local, dtype=np.complex128)
+        if value.shape != (layout.same_q_dimension, layout.same_q_dimension) or not np.all(
+            np.isfinite(value)
+        ):
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                f"action {action.name!r} contains an invalid certified local block",
+            )
+    expected_hash = _hash_payload(
+        _raw_action_payload(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            sector_map=action.sector_map,
+            q_permutation=action.q_permutation,
+            local_actions_by_source_q=action.local_actions_by_source_q,
+            tapw_source_basis_hash=action.tapw_source_basis_hash,
+            layout_hash=action.layout_hash,
+            thresholds_hash=action.thresholds_hash,
+            full_matrix_hash=action.full_matrix_hash,
+        )
+    )
+    if expected_hash != action.action_hash:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"action {action.name!r} has a stale certified identity hash",
+        )
 
 
 def certify_gamma_raw_action(
@@ -561,7 +838,11 @@ def certify_gamma_raw_action(
     thresholds: GammaRoutingThresholds,
     tapw_source_basis_hash: str,
 ) -> GammaCertifiedRawAction:
-    if str(tapw_source_basis_hash) != layout.tapw_source_basis_hash:
+    _validate_layout_identity(layout)
+    if (
+        not isinstance(tapw_source_basis_hash, str)
+        or tapw_source_basis_hash != layout.tapw_source_basis_hash
+    ):
         raise GammaRoutingError(
             CandidateRejectionReason.INVALID_GAMMA_ROW_LAYOUT,
             "raw-H action TAPW source basis hash does not match Gamma layout",
@@ -570,6 +851,15 @@ def certify_gamma_raw_action(
         raise GammaRoutingError(
             CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
             "Gamma raw action requires one Q permutation per source group",
+        )
+    if any(
+        len(route) != layout.q_count
+        or any(not _strict_integral(value) for value in route)
+        for route in q_permutations
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "Gamma raw action Q routes must contain strict integer indices",
         )
     permutations = tuple(tuple(int(value) for value in route) for route in q_permutations)
     expected_q = tuple(range(layout.q_count))
@@ -587,15 +877,23 @@ def certify_gamma_raw_action(
                 f"q route mismatch for joint source q {source_q}: {sorted(targets)}",
             )
         joint_route.append(targets.pop())
+    if len(sector_map) != 2 or any(not _strict_integral(value) for value in sector_map):
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "Gamma sector_map must contain two strict integer indices",
+        )
     sector = tuple(int(value) for value in sector_map)
     if len(sector) != 2 or tuple(sorted(sector)) != (0, 1):
         raise GammaRoutingError(
             CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
             "Gamma sector_map must be a permutation of two source groups",
         )
-    action = np.asarray(full_action, dtype=np.complex128)
-    if action.shape != (layout.full_dimension, layout.full_dimension) or not np.all(
-        np.isfinite(action)
+    if scipy.sparse.issparse(full_action):
+        action = full_action.astype(np.complex128, copy=False)
+    else:
+        action = np.asarray(full_action, dtype=np.complex128)
+    if action.shape != (layout.full_dimension, layout.full_dimension) or not _matrix_is_finite(
+        action
     ):
         raise GammaRoutingError(
             CandidateRejectionReason.LOCAL_ACTION_ISOMETRY,
@@ -607,14 +905,14 @@ def certify_gamma_raw_action(
         source_rows = layout.same_q_full_rows(source_q)
         target_rows = layout.same_q_full_rows(target_q)
         outside = np.setdiff1d(all_rows, target_rows, assume_unique=True)
-        off_route = float(np.linalg.norm(action[np.ix_(outside, source_rows)], ord="fro"))
+        off_route = _matrix_block_frobenius(action, outside, source_rows)
         off_route /= np.sqrt(layout.same_q_dimension)
         if off_route > thresholds.off_route_leakage:
             raise GammaRoutingError(
                 CandidateRejectionReason.RAW_ACTION_ROUTE_LEAKAGE,
                 f"raw-H off-route leakage {off_route:.3e} exceeds gate",
             )
-        local = np.ascontiguousarray(action[np.ix_(target_rows, source_rows)])
+        local = _dense_matrix_block(action, target_rows, source_rows)
         isometry = float(
             np.linalg.norm(
                 local.conj().T @ local - np.eye(layout.same_q_dimension), ord="fro"
@@ -644,25 +942,25 @@ def certify_gamma_raw_action(
                     f"raw-H source-group route leakage {group_leakage:.3e} exceeds gate",
                 )
         local_actions.append(local)
-    payload = {
-        "schema": "kp.gamma-raw-action.v1",
-        "name": str(name),
-        "antiunitary": bool(antiunitary),
-        "sector_map": list(sector),
-        "q_permutation": joint_route,
-        "layout_hash": layout.layout_hash,
-        "tapw_source_basis_hash": layout.tapw_source_basis_hash,
-        "matrix_hash": _hash_array(action),
-        "thresholds_hash": thresholds.identity_hash,
-    }
-    return GammaCertifiedRawAction(
+    frozen_locals = tuple(
+        _freeze_complex_array(local, message="Gamma local actions must be finite")
+        for local in local_actions
+    )
+    full_matrix_hash = _canonical_matrix_hash(action)
+    fields = dict(
         name=str(name),
         antiunitary=bool(antiunitary),
         sector_map=sector,  # type: ignore[arg-type]
         q_permutation=tuple(joint_route),
-        local_actions_by_source_q=tuple(local_actions),
+        local_actions_by_source_q=frozen_locals,
         tapw_source_basis_hash=layout.tapw_source_basis_hash,
-        action_hash=_hash_payload(payload),
+        layout_hash=layout.layout_hash,
+        thresholds_hash=thresholds.identity_hash,
+        full_matrix_hash=full_matrix_hash,
+    )
+    return GammaCertifiedRawAction(
+        **fields,
+        action_hash=_hash_payload(_raw_action_payload(**fields)),
     )
 
 
@@ -674,17 +972,35 @@ class GammaClusterClosure:
     closure_residuals: tuple[tuple[str, int, float], ...]
     closure_hash: str
 
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "projectors_by_q",
+            tuple(
+                _freeze_complex_array(
+                    projector, message="Gamma closure projectors must be finite"
+                )
+                for projector in self.projectors_by_q
+            ),
+        )
+
 
 def close_gamma_projector_clusters(
     eigenvalues_by_q: Sequence[Any],
     eigenvectors_by_q: Sequence[Any],
     *,
+    layout: GammaRowLayout,
     seed_band_indices: Sequence[Sequence[int]],
     actions: Sequence[GammaCertifiedRawAction],
     thresholds: GammaRoutingThresholds,
 ) -> GammaClusterClosure:
-    q_count = len(eigenvalues_by_q)
-    if len(eigenvectors_by_q) != q_count or len(seed_band_indices) != q_count:
+    _validate_layout_identity(layout)
+    q_count = layout.q_count
+    if (
+        len(eigenvalues_by_q) != q_count
+        or len(eigenvectors_by_q) != q_count
+        or len(seed_band_indices) != q_count
+    ):
         raise GammaRoutingError(
             CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
             "Gamma closure requires matching eigenvalue/vector/seed Q counts",
@@ -693,44 +1009,59 @@ def close_gamma_projector_clusters(
         cluster_gamma_eigensystem(values, vectors, thresholds=thresholds)
         for values, vectors in zip(eigenvalues_by_q, eigenvectors_by_q, strict=True)
     )
-    selected: list[set[int]] = [set() for _ in range(q_count)]
-    for q_index, bands in enumerate(seed_band_indices):
-        requested = {int(band) for band in bands}
-        for cluster_index, cluster in enumerate(clusters_by_q[q_index]):
-            overlap = requested.intersection(cluster.band_indices)
-            if overlap and overlap != set(cluster.band_indices):
-                raise GammaRoutingError(
-                    CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
-                    f"production seed splits q={q_index} cluster {cluster.band_indices}",
-                )
-            if overlap:
-                selected[q_index].add(cluster_index)
-        represented = {
-            band
-            for cluster_index in selected[q_index]
-            for band in clusters_by_q[q_index][cluster_index].band_indices
-        }
-        if represented != requested:
+    for action in actions:
+        _validate_action_certificate(action, layout=layout, thresholds=thresholds)
+
+    joint_bands: set[int] = set()
+    for bands in seed_band_indices:
+        if any(not _strict_integral(band) for band in bands):
             raise GammaRoutingError(
                 CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
-                f"seed bands at q={q_index} do not identify complete clusters",
+                "Gamma closure seeds must contain strict integer band indices",
             )
-    if not any(selected):
+        joint_bands.update(int(band) for band in bands)
+    if not joint_bands:
         raise GammaRoutingError(
             CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
             "Gamma closure seed is empty",
         )
 
+    def materialize_joint() -> list[set[int]]:
+        if len(joint_bands) > thresholds.max_rank:
+            raise GammaRoutingError(
+                CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
+                f"joint Gamma closure rank {len(joint_bands)} exceeds configured maximum",
+            )
+        selected_by_q: list[set[int]] = []
+        for q_index, clusters in enumerate(clusters_by_q):
+            selected_q: set[int] = set()
+            represented: set[int] = set()
+            for cluster_index, cluster in enumerate(clusters):
+                cluster_bands = set(cluster.band_indices)
+                overlap = joint_bands.intersection(cluster_bands)
+                if overlap and overlap != cluster_bands:
+                    raise GammaRoutingError(
+                        CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
+                        f"joint production bands split q={q_index} cluster {cluster.band_indices}",
+                    )
+                if overlap:
+                    selected_q.add(cluster_index)
+                    represented.update(cluster_bands)
+            if represented != joint_bands:
+                raise GammaRoutingError(
+                    CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
+                    f"joint bands are not represented at q={q_index}",
+                )
+            selected_by_q.append(selected_q)
+        return selected_by_q
+
+    selected = materialize_joint()
+
     converged = False
     for _iteration in range(thresholds.max_iterations):
-        changed = False
+        previous_joint = set(joint_bands)
         snapshot = [set(items) for items in selected]
         for action in actions:
-            if len(action.local_actions_by_source_q) != q_count:
-                raise GammaRoutingError(
-                    CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
-                    f"action {action.name!r} does not cover every q route",
-                )
             for source_q in range(q_count):
                 target_q = action.q_permutation[source_q]
                 local_action = action.local_actions_by_source_q[source_q]
@@ -747,10 +1078,7 @@ def close_gamma_projector_clusters(
                         float(np.trace(cluster.projector @ image).real / rank)
                         for cluster in clusters_by_q[target_q]
                     ]
-                    capture_numeric_tolerance = max(
-                        thresholds.projector_residual,
-                        thresholds.local_action_isometry,
-                    )
+                    capture_numeric_tolerance = thresholds.projector_residual
                     if any(
                         capture < -capture_numeric_tolerance
                         or capture > 1.0 + capture_numeric_tolerance
@@ -763,7 +1091,8 @@ def close_gamma_projector_clusters(
                     if abs(sum(captures) - 1.0) > thresholds.capture_loss_max:
                         raise GammaRoutingError(
                             CandidateRejectionReason.AMBIGUOUS_CLUSTER_CAPTURE,
-                            f"action {action.name!r} target clusters do not cover the image: {captures}",
+                            f"action {action.name!r} target clusters do not cover "
+                            f"the image: {captures}",
                         )
                     full = [
                         index
@@ -792,23 +1121,15 @@ def close_gamma_projector_clusters(
                     ):
                         raise GammaRoutingError(
                             CandidateRejectionReason.AMBIGUOUS_CLUSTER_CAPTURE,
-                            f"action {action.name!r} q={source_q}->{target_q} has captures {captures}",
+                            f"action {action.name!r} q={source_q}->{target_q} "
+                            f"has captures {captures}",
                         )
                     target_cluster_index = full[0]
-                    if target_cluster_index not in selected[target_q]:
-                        selected[target_q].add(target_cluster_index)
-                        changed = True
-        rank_total = sum(
-            len(clusters_by_q[q][cluster].band_indices)
-            for q in range(q_count)
-            for cluster in selected[q]
-        )
-        if rank_total > thresholds.max_rank * q_count:
-            raise GammaRoutingError(
-                CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
-                f"Gamma closure rank {rank_total} exceeds configured maximum",
-            )
-        if not changed:
+                    joint_bands.update(
+                        clusters_by_q[target_q][target_cluster_index].band_indices
+                    )
+        selected = materialize_joint()
+        if joint_bands == previous_joint:
             converged = True
             break
     if not converged:
@@ -859,6 +1180,7 @@ def close_gamma_projector_clusters(
         "band_indices_by_q": [list(bands) for bands in bands_by_q],
         "projector_hashes": [_hash_array(projector) for projector in projectors],
         "actions": [action.action_hash for action in actions],
+        "layout_hash": layout.layout_hash,
         "thresholds_hash": thresholds.identity_hash,
     }
     return GammaClusterClosure(
@@ -923,13 +1245,53 @@ class GammaRoutedFrames:
     joint_band_indices: tuple[int, ...]
     group_dimensions: tuple[int, int]
     group_offsets: tuple[int, int, int]
-    reference_q_index: int
     local_frames_by_q: tuple[np.ndarray, ...]
     reference_frames_by_q_group: tuple[tuple[np.ndarray, np.ndarray], ...]
     routed_projectors_by_q: tuple[tuple[np.ndarray, np.ndarray], ...]
     route_gaps: tuple[float, ...]
     frame_hash: str
     reference_frame_hash: str
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "local_frames_by_q",
+            tuple(
+                _freeze_complex_array(
+                    frame, message="routed Gamma frames must be finite"
+                )
+                for frame in self.local_frames_by_q
+            ),
+        )
+        object.__setattr__(
+            self,
+            "reference_frames_by_q_group",
+            tuple(
+                tuple(
+                    _freeze_complex_array(
+                        frame, message="routed Gamma reference frames must be finite"
+                    )
+                    for frame in groups
+                )
+                for groups in self.reference_frames_by_q_group
+            ),
+        )
+        object.__setattr__(
+            self,
+            "routed_projectors_by_q",
+            tuple(
+                tuple(
+                    _freeze_complex_array(
+                        projector,
+                        message="routed Gamma projectors must be finite",
+                    )
+                    for projector in groups
+                )
+                for groups in self.routed_projectors_by_q
+            ),
+        )
+        if any(not np.isfinite(float(gap)) for gap in self.route_gaps):
+            raise ValueError("routed Gamma route gaps must be finite")
 
 
 def build_gamma_routed_frames(
@@ -939,10 +1301,10 @@ def build_gamma_routed_frames(
     joint_band_indices: Sequence[int],
     layout: GammaRowLayout,
     thresholds: GammaRoutingThresholds,
-    reference_q_index: int,
     anchor_frames: Sequence[Any] | None = None,
     require_complete_clusters: bool = True,
 ) -> GammaRoutedFrames:
+    _validate_layout_identity(layout)
     if len(eigenvalues_by_q) != layout.q_count or len(eigenvectors_by_q) != layout.q_count:
         raise GammaRoutingError(
             CandidateRejectionReason.SOURCE_GROUP_RANK_CHANGE,
@@ -953,16 +1315,16 @@ def build_gamma_routed_frames(
             CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
             "materialized max_rank exceeds the validated Gamma local dimension",
         )
+    if any(not _strict_integral(value) for value in joint_band_indices):
+        raise GammaRoutingError(
+            CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
+            "joint Gamma band indices must be strict integers",
+        )
     joint = tuple(int(value) for value in joint_band_indices)
     if not joint or len(set(joint)) != len(joint) or len(joint) > thresholds.max_rank:
         raise GammaRoutingError(
             CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
             "joint Gamma band indices must be unique, nonempty, and within max_rank",
-        )
-    if int(reference_q_index) < 0 or int(reference_q_index) >= layout.q_count:
-        raise GammaRoutingError(
-            CandidateRejectionReason.HANDOFF_K_COVERAGE,
-            "Gamma reference q index is outside the ordered Q range",
         )
     projectors_by_q: list[tuple[np.ndarray, np.ndarray]] = []
     raw_frames_by_q: list[tuple[np.ndarray, np.ndarray]] = []
@@ -973,10 +1335,25 @@ def build_gamma_routed_frames(
     ):
         values = np.asarray(raw_values, dtype=float)
         vectors = np.asarray(raw_vectors, dtype=np.complex128)
-        if vectors.shape != (layout.same_q_dimension, layout.same_q_dimension):
+        if (
+            values.shape != (layout.same_q_dimension,)
+            or vectors.shape != (layout.same_q_dimension, layout.same_q_dimension)
+            or not np.all(np.isfinite(values))
+            or not np.all(np.isfinite(vectors))
+            or np.any(np.diff(values) < 0.0)
+        ):
             raise GammaRoutingError(
                 CandidateRejectionReason.SOURCE_GROUP_RANK_CHANGE,
-                f"q={q_index} eigensystem dimension does not match Gamma local layout",
+                f"q={q_index} eigensystem is not finite, sorted, and layout-complete",
+            )
+        full_orthonormality = _residual(
+            vectors.conj().T @ vectors - np.eye(layout.same_q_dimension),
+            rank=layout.same_q_dimension,
+        )
+        if full_orthonormality > thresholds.projector_residual:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"q={q_index} full Gamma eigenframe is not orthonormal",
             )
         if any(band < 0 or band >= values.size for band in joint):
             raise GammaRoutingError(
@@ -1068,17 +1445,41 @@ def build_gamma_routed_frames(
             )
         for q_index, raw_anchor in enumerate(anchor_frames):
             anchor = np.asarray(raw_anchor, dtype=np.complex128)
-            if anchor.shape != (layout.same_q_dimension, sum(group_dimensions)):
+            if (
+                anchor.shape != (layout.same_q_dimension, sum(group_dimensions))
+                or not np.all(np.isfinite(anchor))
+            ):
                 raise GammaRoutingError(
-                    CandidateRejectionReason.SOURCE_GROUP_RANK_CHANGE,
+                    CandidateRejectionReason.PROJECTOR_FRAME_RANK,
                     f"q={q_index} anchor frame shape {anchor.shape} is invalid",
                 )
-            reference_frames.append(
-                (
-                    anchor[:, : group_dimensions[0]],
-                    anchor[:, group_dimensions[0] :],
-                )
+            groups = (
+                np.ascontiguousarray(anchor[:, : group_dimensions[0]]),
+                np.ascontiguousarray(anchor[:, group_dimensions[0] :]),
             )
+            anchor_residuals = (
+                _residual(
+                    groups[0].conj().T @ groups[0] - np.eye(group_dimensions[0]),
+                    rank=group_dimensions[0],
+                ),
+                _residual(
+                    groups[1].conj().T @ groups[1] - np.eye(group_dimensions[1]),
+                    rank=group_dimensions[1],
+                ),
+                _residual(
+                    groups[0].conj().T @ groups[1], rank=min(group_dimensions)
+                ),
+                _residual(
+                    anchor.conj().T @ anchor - np.eye(sum(group_dimensions)),
+                    rank=sum(group_dimensions),
+                ),
+            )
+            if max(anchor_residuals) > thresholds.projector_residual:
+                raise GammaRoutingError(
+                    CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                    f"q={q_index} anchor frame is not an orthonormal group certificate",
+                )
+            reference_frames.append(groups)
 
     aligned_combined: list[np.ndarray] = []
     for q_index, (raw_groups, references) in enumerate(
@@ -1110,6 +1511,15 @@ def build_gamma_routed_frames(
                 CandidateRejectionReason.PROJECTOR_FRAME_RANK,
                 f"q={q_index} aligned routed groups are not orthogonal",
             )
+        combined_residual = _residual(
+            combined.conj().T @ combined - np.eye(sum(group_dimensions)),
+            rank=sum(group_dimensions),
+        )
+        if combined_residual > thresholds.projector_residual:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"q={q_index} aligned routed frame is not orthonormal",
+            )
         aligned_combined.append(combined)
 
     reference_tensor = np.stack(
@@ -1122,7 +1532,6 @@ def build_gamma_routed_frames(
         joint_band_indices=joint,
         group_dimensions=group_dimensions,
         group_offsets=(0, group_dimensions[0], sum(group_dimensions)),
-        reference_q_index=int(reference_q_index),
         local_frames_by_q=tuple(aligned_combined),
         reference_frames_by_q_group=tuple(reference_frames),
         routed_projectors_by_q=tuple(projectors_by_q),
@@ -1135,28 +1544,77 @@ def build_gamma_routed_frames(
 def certify_routed_covariance(
     routed_projectors_by_q: Sequence[Sequence[np.ndarray]],
     *,
+    layout: GammaRowLayout,
     actions: Sequence[GammaCertifiedRawAction],
     thresholds: GammaRoutingThresholds,
 ) -> tuple[tuple[str, int, float], ...]:
-    q_count = len(routed_projectors_by_q)
+    _validate_layout_identity(layout)
+    q_count = layout.q_count
+    if len(routed_projectors_by_q) != q_count:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_K_COVERAGE,
+            "routed projectors do not cover every ordered Q",
+        )
+    projectors: list[tuple[np.ndarray, np.ndarray]] = []
+    ranks_by_q: list[tuple[int, int]] = []
+    for q_index, raw_groups in enumerate(routed_projectors_by_q):
+        if len(raw_groups) != 2:
+            raise GammaRoutingError(
+                CandidateRejectionReason.SOURCE_GROUP_RANK_CHANGE,
+                f"q={q_index} must contain two routed source-group projectors",
+            )
+        groups: list[np.ndarray] = []
+        ranks: list[int] = []
+        for group_index, raw_projector in enumerate(raw_groups):
+            projector = np.asarray(raw_projector, dtype=np.complex128)
+            if (
+                projector.shape
+                != (layout.same_q_dimension, layout.same_q_dimension)
+                or not np.all(np.isfinite(projector))
+            ):
+                raise GammaRoutingError(
+                    CandidateRejectionReason.SOURCE_GROUP_ROUTE_COVARIANCE,
+                    f"q={q_index} group={group_index} routed projector is invalid",
+                )
+            raw_rank = float(np.trace(projector).real)
+            rank = int(round(raw_rank))
+            certificate_residual = max(
+                abs(raw_rank - rank),
+                _residual(projector - projector.conj().T, rank=max(1, rank)),
+                _residual(projector @ projector - projector, rank=max(1, rank)),
+            )
+            if rank <= 0 or certificate_residual > thresholds.projector_residual:
+                raise GammaRoutingError(
+                    CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                    f"q={q_index} group={group_index} is not a certified projector",
+                )
+            groups.append(projector)
+            ranks.append(rank)
+        cross = _residual(groups[0] @ groups[1], rank=min(ranks))
+        if cross > thresholds.projector_residual:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"q={q_index} routed source-group projectors overlap",
+            )
+        projectors.append((groups[0], groups[1]))
+        ranks_by_q.append((ranks[0], ranks[1]))
+
     residuals: list[tuple[str, int, float]] = []
     for action in actions:
-        if len(action.q_permutation) != q_count:
-            raise GammaRoutingError(
-                CandidateRejectionReason.SOURCE_GROUP_ROUTE_COVARIANCE,
-                f"action {action.name!r} does not cover every routed q",
-            )
+        _validate_action_certificate(action, layout=layout, thresholds=thresholds)
         for source_q, target_q in enumerate(action.q_permutation):
             operation_residual = 0.0
             for source_group in range(2):
                 target_group = action.sector_map[source_group]
-                source = np.asarray(
-                    routed_projectors_by_q[source_q][source_group], dtype=np.complex128
-                )
-                target = np.asarray(
-                    routed_projectors_by_q[target_q][target_group], dtype=np.complex128
-                )
-                rank = int(round(float(np.trace(source).real)))
+                source = projectors[source_q][source_group]
+                target = projectors[target_q][target_group]
+                rank = ranks_by_q[source_q][source_group]
+                target_rank = ranks_by_q[target_q][target_group]
+                if rank != target_rank:
+                    raise GammaRoutingError(
+                        CandidateRejectionReason.SOURCE_GROUP_RANK_CHANGE,
+                        f"action {action.name!r} maps routed rank {rank} to {target_rank}",
+                    )
                 image = action.local_actions_by_source_q[source_q] @ (
                     source.conjugate() if action.antiunitary else source
                 ) @ action.local_actions_by_source_q[source_q].conj().T
@@ -1167,7 +1625,8 @@ def certify_routed_covariance(
             if operation_residual > thresholds.route_covariance:
                 raise GammaRoutingError(
                     CandidateRejectionReason.SOURCE_GROUP_ROUTE_COVARIANCE,
-                    f"action {action.name!r} q={source_q} route covariance {operation_residual:.3e}",
+                    f"action {action.name!r} q={source_q} route covariance "
+                    f"{operation_residual:.3e}",
                 )
             residuals.append((action.name, source_q, operation_residual))
     return tuple(residuals)
@@ -1180,6 +1639,7 @@ def assemble_gamma_routed_projectors(
     thresholds: GammaRoutingThresholds,
     include_high: bool,
 ) -> tuple[np.ndarray, np.ndarray | None]:
+    _validate_layout_identity(layout)
     if routed.layout_hash != layout.layout_hash:
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
@@ -1190,33 +1650,109 @@ def assemble_gamma_routed_projectors(
             CandidateRejectionReason.HANDOFF_IDENTITY,
             "routed frame threshold identity does not match the assembler thresholds",
         )
-    if len(routed.local_frames_by_q) != layout.q_count:
+    if (
+        len(routed.local_frames_by_q) != layout.q_count
+        or len(routed.reference_frames_by_q_group) != layout.q_count
+        or len(routed.routed_projectors_by_q) != layout.q_count
+        or len(routed.route_gaps) != layout.q_count
+    ):
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_K_COVERAGE,
             "routed frames do not cover every ordered Q",
         )
-    if routed.group_offsets != (
-        0,
-        routed.group_dimensions[0],
-        sum(routed.group_dimensions),
+    if (
+        len(routed.group_dimensions) != 2
+        or any(
+            not _strict_integral(rank) or int(rank) <= 0
+            for rank in routed.group_dimensions
+        )
+        or routed.group_offsets != (
+            0,
+            routed.group_dimensions[0],
+            sum(routed.group_dimensions),
+        )
     ):
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
             "routed group offsets do not match group ranks",
         )
+    if (
+        not routed.joint_band_indices
+        or any(not _strict_integral(band) for band in routed.joint_band_indices)
+        or len(routed.joint_band_indices) != sum(routed.group_dimensions)
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "routed joint-band identity does not match routed group ranks",
+        )
+    if any(
+        gap <= thresholds.route_zero_gap
+        or gap > 1.0 + thresholds.projector_residual
+        for gap in routed.route_gaps
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "routed source-group gaps do not satisfy the certified routing gate",
+        )
     q_count = layout.q_count
-    ranks = routed.group_dimensions
+    ranks = tuple(int(rank) for rank in routed.group_dimensions)
+    try:
+        frame_tensor = np.stack(
+            [np.asarray(frame, dtype=np.complex128) for frame in routed.local_frames_by_q],
+            axis=0,
+        )
+        reference_tensor = np.stack(
+            [
+                np.column_stack(
+                    tuple(np.asarray(frame, dtype=np.complex128) for frame in groups)
+                )
+                for groups in routed.reference_frames_by_q_group
+            ],
+            axis=0,
+        )
+    except (TypeError, ValueError) as error:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "routed frame tensors are not shape-consistent",
+        ) from error
+    if (
+        not np.all(np.isfinite(frame_tensor))
+        or not np.all(np.isfinite(reference_tensor))
+        or _hash_array(frame_tensor) != routed.frame_hash
+        or _hash_array(reference_tensor) != routed.reference_frame_hash
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "routed frame identity hash is stale or contains non-finite data",
+        )
     low_dimension = q_count * sum(ranks)
     u_low = np.zeros((layout.full_dimension, low_dimension), dtype=np.complex128)
     high_frames: list[np.ndarray] = []
     for q_index, raw_frame in enumerate(routed.local_frames_by_q):
         frame = np.asarray(raw_frame, dtype=np.complex128)
-        if frame.shape != (layout.same_q_dimension, sum(ranks)):
+        if (
+            frame.shape != (layout.same_q_dimension, sum(ranks))
+            or not np.all(np.isfinite(frame))
+        ):
             raise GammaRoutingError(
                 CandidateRejectionReason.HANDOFF_IDENTITY,
                 f"q={q_index} routed frame shape is invalid",
             )
         rows = layout.same_q_full_rows(q_index)
+        combined_residual = _residual(
+            frame.conj().T @ frame - np.eye(sum(ranks)), rank=sum(ranks)
+        )
+        if combined_residual > thresholds.projector_residual:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"q={q_index} routed local frame is not orthonormal",
+            )
+        reference_groups = routed.reference_frames_by_q_group[q_index]
+        if len(reference_groups) != 2:
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                f"q={q_index} routed reference does not contain two groups",
+            )
         for group in range(2):
             start, stop = routed.group_offsets[group : group + 2]
             group_frame = frame[:, start:stop]
@@ -1224,6 +1760,38 @@ def assemble_gamma_routed_projectors(
                 routed.routed_projectors_by_q[q_index][group],
                 dtype=np.complex128,
             )
+            reference = np.asarray(reference_groups[group], dtype=np.complex128)
+            if (
+                expected_projector.shape
+                != (layout.same_q_dimension, layout.same_q_dimension)
+                or reference.shape != (layout.same_q_dimension, ranks[group])
+                or not np.all(np.isfinite(expected_projector))
+                or not np.all(np.isfinite(reference))
+            ):
+                raise GammaRoutingError(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    f"q={q_index} group={group} routed certificate shape is invalid",
+                )
+            projector_certificate = max(
+                _residual(
+                    expected_projector - expected_projector.conj().T,
+                    rank=ranks[group],
+                ),
+                _residual(
+                    expected_projector @ expected_projector - expected_projector,
+                    rank=ranks[group],
+                ),
+                abs(float(np.trace(expected_projector).real) - ranks[group]),
+                _residual(
+                    reference.conj().T @ reference - np.eye(ranks[group]),
+                    rank=ranks[group],
+                ),
+            )
+            if projector_certificate > thresholds.projector_residual:
+                raise GammaRoutingError(
+                    CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                    f"q={q_index} group={group} routed certificate is not a rank projector/frame",
+                )
             group_residual = _residual(
                 group_frame @ group_frame.conj().T - expected_projector,
                 rank=ranks[group],
@@ -1236,6 +1804,25 @@ def assemble_gamma_routed_projectors(
             for alpha in range(ranks[group]):
                 column = q_count * sum(ranks[:group]) + alpha * q_count + q_index
                 u_low[rows, column] = frame[:, start + alpha]
+        reference0 = np.asarray(reference_groups[0], dtype=np.complex128)
+        reference1 = np.asarray(reference_groups[1], dtype=np.complex128)
+        projector0 = np.asarray(
+            routed.routed_projectors_by_q[q_index][0], dtype=np.complex128
+        )
+        projector1 = np.asarray(
+            routed.routed_projectors_by_q[q_index][1], dtype=np.complex128
+        )
+        reference_cross = _residual(
+            reference0.conj().T @ reference1, rank=min(ranks)
+        )
+        projector_cross = _residual(
+            projector0 @ projector1, rank=min(ranks)
+        )
+        if max(reference_cross, projector_cross) > thresholds.projector_residual:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"q={q_index} routed reference/projector groups are not orthogonal",
+            )
         if include_high:
             high_frames.append(scipy.linalg.null_space(frame.conj().T))
     low_orthonormality = _residual(
@@ -1253,7 +1840,36 @@ def assemble_gamma_routed_projectors(
         (layout.full_dimension, q_count * high_per_q), dtype=np.complex128
     )
     for q_index, high in enumerate(high_frames):
+        high = np.asarray(high, dtype=np.complex128)
+        if (
+            high.shape != (layout.same_q_dimension, high_per_q)
+            or not np.all(np.isfinite(high))
+        ):
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"q={q_index} routed high frame has invalid shape or values",
+            )
         rows = layout.same_q_full_rows(q_index)
         start = q_index * high_per_q
         u_high[rows, start : start + high_per_q] = high
+    high_residual = _residual(
+        u_high.conj().T @ u_high - np.eye(u_high.shape[1]), rank=u_high.shape[1]
+    )
+    cross_residual = _residual(
+        u_low.conj().T @ u_high, rank=min(u_low.shape[1], u_high.shape[1])
+    )
+    completeness_residual = _residual(
+        u_low @ u_low.conj().T
+        + u_high @ u_high.conj().T
+        - np.eye(layout.full_dimension),
+        rank=layout.full_dimension,
+    )
+    if (
+        max(high_residual, cross_residual, completeness_residual)
+        > thresholds.projector_residual
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+            "assembled routed high frame failed orthonormality/cross/completeness gates",
+        )
     return u_low, u_high
