@@ -89,6 +89,12 @@ def _compile_identity(*, marker: int = 1) -> dict[str, object]:
             "sector_permutations": {"group_0_element_0": np.asarray([0, 1], dtype=np.int64)},
             "group_limits": [{"max_group_size": 256, "max_word_length": 32}],
             "factorized_action_hashes": [{}],
+            "joint_route_action_hashes": [
+                {
+                    "joint_artifact_hash": None,
+                    "generator_matrix_hashes": {},
+                }
+            ],
             "polynomial_coordinate": coordinate,
             "dtype": "complex128",
             "response_normalization": "reynolds_mean__hermitian_half_sum__dimensionless_k_v1",
@@ -141,6 +147,17 @@ def test_target_independent_basis_key_includes_factorized_action_hashes() -> Non
     factorized["identity"]["factorized_action_hashes"][0]["C3z"] = "a" * 64
 
     assert target_independent_basis_key(native) != target_independent_basis_key(factorized)
+
+
+def test_target_independent_basis_key_includes_joint_route_action_hashes() -> None:
+    native = _compile_identity()
+    routed = _compile_identity()
+    routed["identity"]["joint_route_action_hashes"][0] = {
+        "joint_artifact_hash": "b" * 64,
+        "generator_matrix_hashes": {"C2": "c" * 64},
+    }
+
+    assert target_independent_basis_key(native) != target_independent_basis_key(routed)
 
 
 @pytest.mark.parametrize("payload", [{}, {"identity": {}}])

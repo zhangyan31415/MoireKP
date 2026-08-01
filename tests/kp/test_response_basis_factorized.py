@@ -18,6 +18,10 @@ from kp.model.response_basis import (
     raw_polynomial_seed_from_term_key,
 )
 from kp.symmetry.factorized_action import certify_factorized_action
+from kp.symmetry.joint_exactification import (
+    BlockRouteAction,
+    materialize_block_route_action,
+)
 
 
 def _api():
@@ -1173,3 +1177,49 @@ def test_sparse_factorized_reynolds_matches_dense_for_nonclosed_harmonic_orbit()
                 fast_channel.coefficient(*monomial).toarray(),
                 atol=2.0e-14,
             )
+
+
+def test_sparse_joint_route_reynolds_supports_q_dependent_orbital_blocks() -> None:
+    api = _api()
+    x = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    z = np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128)
+    route = BlockRouteAction(
+        name="C2",
+        antiunitary=False,
+        fiber_permutation=(0, 1),
+        fiber_dimensions=(2, 2),
+        fiber_indices=((0, 2), (1, 3)),
+        route_blocks=(x, z),
+    )
+    internal_u = materialize_block_route_action(route)
+    group = response_basis.build_finite_group(
+        [
+            response_basis.FiniteGroupGenerator(
+                name="C2",
+                antiunitary=False,
+                canonical_k_map=((-1, 0), (0, -1)),
+                q_permutation=(0, 1),
+                sector_permutation=(0,),
+                k_forward=((-1.0, 0.0), (0.0, -1.0)),
+                internal_u=internal_u,
+            )
+        ]
+    )
+
+    internal_actions, artifact = api.compile_joint_route_group_element_actions(
+        group=group,
+        joint_route_generators={"C2": route},
+        joint_artifact_hash="a" * 64,
+    )
+
+    assert artifact["compiler"] == "joint_route_sparse_group_elements_v1"
+    assert artifact["generator_names"] == ["C2"]
+    assert artifact["dense_internal_transform_count"] == 0
+    assert len(internal_actions) == len(group.elements)
+    for element in group.elements:
+        word = tuple(element.canonical_word)
+        np.testing.assert_allclose(
+            internal_actions[word].toarray(),
+            element.internal_u,
+            atol=2.0e-14,
+        )

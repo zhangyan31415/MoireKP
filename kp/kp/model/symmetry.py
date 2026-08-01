@@ -73,6 +73,8 @@ class LoadedSymmetrySource:
 class _CertifiedPackedJoint:
     matrices: Mapping[str, np.ndarray]
     power_relations: Mapping[str, Mapping[str, Any]]
+    actions: Mapping[str, Any]
+    artifact_hash: str
 
 
 def _canonical_structural_zero_copy(matrix: np.ndarray) -> np.ndarray:
@@ -110,6 +112,8 @@ class MatrixSymmetryGenerator:
         metadata: Mapping[str, Any],
         *,
         factorized_actions: Mapping[str, Any] | None = None,
+        joint_route_actions: Mapping[str, Any] | None = None,
+        joint_artifact_hash: str | None = None,
         certified_power_relations: Mapping[str, Mapping[str, Any]] | None = None,
     ):
         self.matrices = {str(key): np.asarray(value, dtype=complex) for key, value in matrices.items()}
@@ -117,6 +121,12 @@ class MatrixSymmetryGenerator:
         self.factorized_actions = {
             str(key): value for key, value in (factorized_actions or {}).items()
         }
+        self.joint_route_actions = {
+            str(key): value for key, value in (joint_route_actions or {}).items()
+        }
+        self.joint_artifact_hash = (
+            None if joint_artifact_hash is None else str(joint_artifact_hash)
+        )
         self.certified_power_relations = {
             str(key): dict(value)
             for key, value in (certified_power_relations or {}).items()
@@ -169,6 +179,9 @@ class MatrixSymmetryGenerator:
 
     def get_factorized_action(self, name: str) -> Any | None:
         return self.factorized_actions.get(str(name))
+
+    def get_joint_route_action(self, name: str) -> Any | None:
+        return self.joint_route_actions.get(str(name))
 
     def get_operator(self, name: str, params: Any = None) -> np.ndarray:
         key = str(name)
@@ -503,6 +516,8 @@ def _certified_packed_joint_matrices(path: Path) -> _CertifiedPackedJoint | None
             return _CertifiedPackedJoint(
                 matrices=certified,
                 power_relations=power_relations,
+                actions=dict(restored.actions),
+                artifact_hash=str(restored.artifact_metadata["artifact_hash"]),
             )
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise ValueError(f"invalid packed joint symmetry artifact: {exc}") from exc
@@ -888,6 +903,14 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
         matrices,
         metadata,
         factorized_actions=factorized_actions,
+        joint_route_actions=(
+            None if certified_packed_joint is None else certified_packed_joint.actions
+        ),
+        joint_artifact_hash=(
+            None
+            if certified_packed_joint is None
+            else certified_packed_joint.artifact_hash
+        ),
         certified_power_relations=certified_power_relations,
     )
     return LoadedSymmetrySource(

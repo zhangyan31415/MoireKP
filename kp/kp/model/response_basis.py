@@ -13,6 +13,9 @@ import numpy as np
 import scipy.linalg
 from scipy import sparse
 
+from ..identity import hash_array
+from ..symmetry.joint_exactification import materialize_block_route_action
+
 
 COMPLETE_LINEAR_V2 = "complete_linear_v2"
 LEGACY_FROZEN_V1 = "legacy_frozen_v1"
@@ -25,7 +28,7 @@ FITTABLE_CHANNEL_CLASSIFICATIONS = frozenset({"confirmed_nonzero"})
 FIT_SOLVER_POLICY_V2 = "real_svd_global_monomial_propagated_backward_error_v2"
 FIT_SOLVER_POLICY_RIDGE_V3 = "real_ridge_all_confirmed__diagnostic_propagated_rank_v3"
 FIT_SOLVER_POLICY_LEGACY = "legacy_real_qr_machine_tolerance_v0"
-COMPILER_VERSION = "complete-response-basis-v2-symbolic-finite-p-v46"
+COMPILER_VERSION = "complete-response-basis-v2-symbolic-finite-p-v47"
 TARGET_SPECTRAL_WEIGHTING_V1 = "target_spectral_linear_v1"
 TARGET_SPECTRAL_TRACE_NORMALIZATION_V1 = "global_mean_trace_per_dimension_v1"
 NORMALIZED_LOW_ENERGY_LINEAR_V1 = "normalized-low-energy-linear-v1"
@@ -6081,7 +6084,9 @@ def _basis_layout_identity(
     config: Any,
     groups: Sequence[FiniteGroup],
     coordinate: PolynomialCoordinateBasis,
-    factorized_actions_by_group: Sequence[Mapping[str, Any]] | None = None,
+    factorized_actions_by_group: Sequence[Mapping[str, Any] | None] | None = None,
+    joint_route_actions_by_group: Sequence[Mapping[str, Any] | None] | None = None,
+    joint_artifact_hashes_by_group: Sequence[str | None] | None = None,
 ) -> dict[str, Any]:
     qset1 = np.asarray(config.Q_set1, dtype=np.float64)
     qset2 = np.asarray(config.Q_set2, dtype=np.float64)
@@ -6126,6 +6131,18 @@ def _basis_layout_identity(
     )
     if len(factorized_groups) != len(groups):
         raise ValueError("factorized action group layout must match finite groups")
+    joint_route_groups = list(
+        joint_route_actions_by_group
+        if joint_route_actions_by_group is not None
+        else ({} for _ in groups)
+    )
+    joint_hashes = list(
+        joint_artifact_hashes_by_group
+        if joint_artifact_hashes_by_group is not None
+        else (None for _ in groups)
+    )
+    if len(joint_route_groups) != len(groups) or len(joint_hashes) != len(groups):
+        raise ValueError("joint route action group layout must match finite groups")
     return {
         "basis_layout": {
             "order": "qset-slot-major_orbital-major_q-index-fastest",
@@ -6146,9 +6163,23 @@ def _basis_layout_identity(
         "factorized_action_hashes": [
             {
                 str(name): str(getattr(action, "artifact_hash", ""))
-                for name, action in sorted(actions.items())
+                for name, action in sorted((actions or {}).items())
             }
             for actions in factorized_groups
+        ],
+        "joint_route_action_hashes": [
+            {
+                "joint_artifact_hash": (
+                    None if joint_hash is None else str(joint_hash)
+                ),
+                "generator_matrix_hashes": {
+                    str(name): hash_array(
+                        materialize_block_route_action(action)
+                    )
+                    for name, action in sorted((actions or {}).items())
+                },
+            }
+            for actions, joint_hash in zip(joint_route_groups, joint_hashes)
         ],
         "polynomial_coordinate": coordinate.metadata(),
         "dtype": "complex128",
@@ -6184,6 +6215,7 @@ _PERSISTENT_CACHE_IDENTITY_FIELDS = frozenset(
         "sector_permutations",
         "group_limits",
         "factorized_action_hashes",
+        "joint_route_action_hashes",
         "polynomial_coordinate",
         "dtype",
         "response_normalization",
@@ -6313,6 +6345,48 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
                     "complete_linear_v2 persistent cache factorized action hash "
                     f"for group {group_index} is invalid"
                 )
+    joint_route_hashes = identity.get("joint_route_action_hashes")
+    if not isinstance(joint_route_hashes, list) or len(joint_route_hashes) != len(groups):
+        raise ValueError(
+            "complete_linear_v2 persistent cache identity.joint_route_action_hashes "
+            "must match groups"
+        )
+    for group_index, record in enumerate(joint_route_hashes):
+        if not isinstance(record, Mapping) or set(record) != {
+            "joint_artifact_hash",
+            "generator_matrix_hashes",
+        }:
+            raise ValueError(
+                "complete_linear_v2 persistent cache joint route hash record "
+                f"for group {group_index} is invalid"
+            )
+        artifact_hash = record["joint_artifact_hash"]
+        generator_hashes = record["generator_matrix_hashes"]
+        if not isinstance(generator_hashes, Mapping):
+            raise ValueError(
+                "complete_linear_v2 persistent cache joint route generator hashes "
+                f"for group {group_index} must be a mapping"
+            )
+        if artifact_hash is None:
+            if generator_hashes:
+                raise ValueError(
+                    "joint route generator hashes require a joint artifact hash"
+                )
+        elif (
+            len(str(artifact_hash)) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in str(artifact_hash)
+            )
+            or any(
+                not str(name) or len(str(value)) != 64
+                for name, value in generator_hashes.items()
+            )
+        ):
+            raise ValueError(
+                "complete_linear_v2 persistent cache joint route hashes "
+                f"for group {group_index} are invalid"
+            )
     expected_action_keys: list[str] = []
     for group_index, (group, internal_matrices, limits) in enumerate(
         zip(groups, group_internal_u, group_limits)
@@ -6461,7 +6535,9 @@ def _compile_model_response_basis_uncached(
     coordinate: PolynomialCoordinateBasis,
     groups: Sequence[FiniteGroup],
     seeds_by_group: Sequence[Sequence[RawPolynomialSeed]],
-    factorized_actions_by_group: Sequence[Mapping[str, Any]],
+    factorized_actions_by_group: Sequence[Mapping[str, Any] | None],
+    joint_route_actions_by_group: Sequence[Mapping[str, Any] | None] | None = None,
+    joint_artifact_hashes_by_group: Sequence[str | None] | None = None,
     dim: int,
     identity_payload: Mapping[str, Any],
     reduce: bool,
@@ -6482,13 +6558,35 @@ def _compile_model_response_basis_uncached(
         "response basis candidate compile (p0 fixed-space + finite-p symbolic atoms) start",
         state="start",
     )
-    if len(factorized_actions_by_group) != len(groups):
-        raise ValueError("factorized action group layout must match finite groups")
-    for group_index, (seeds, group, factorized_actions) in enumerate(
+    joint_route_groups = list(
+        joint_route_actions_by_group
+        if joint_route_actions_by_group is not None
+        else (None for _ in groups)
+    )
+    joint_hashes = list(
+        joint_artifact_hashes_by_group
+        if joint_artifact_hashes_by_group is not None
+        else (None for _ in groups)
+    )
+    if (
+        len(factorized_actions_by_group) != len(groups)
+        or len(joint_route_groups) != len(groups)
+        or len(joint_hashes) != len(groups)
+    ):
+        raise ValueError("certified action group layout must match finite groups")
+    for group_index, (
+        seeds,
+        group,
+        factorized_actions,
+        joint_route_actions,
+        joint_artifact_hash,
+    ) in enumerate(
         zip(
             seeds_by_group,
             groups,
             factorized_actions_by_group,
+            joint_route_groups,
+            joint_hashes,
         )
     ):
         zero_seeds: list[RawPolynomialSeed] = []
@@ -6506,22 +6604,42 @@ def _compile_model_response_basis_uncached(
 
         internal_actions: Mapping[tuple[str, ...], sparse.spmatrix] | None = None
         reynolds_artifact: dict[str, Any] = {}
-        if finite_seeds:
+        if finite_seeds or joint_route_actions is not None:
             from .response_basis_factorized import (
                 compile_factorized_group_element_actions,
+                compile_joint_route_group_element_actions,
             )
 
             try:
-                internal_actions, reynolds_artifact = (
-                    compile_factorized_group_element_actions(
-                        group=group,
-                        factorized_generators=factorized_actions,
+                if factorized_actions is not None:
+                    internal_actions, reynolds_artifact = (
+                        compile_factorized_group_element_actions(
+                            group=group,
+                            factorized_generators=factorized_actions,
+                        )
                     )
-                )
+                elif (
+                    joint_route_actions is not None
+                    and joint_artifact_hash is not None
+                ):
+                    internal_actions, reynolds_artifact = (
+                        compile_joint_route_group_element_actions(
+                            group=group,
+                            joint_route_generators=joint_route_actions,
+                            joint_artifact_hash=joint_artifact_hash,
+                        )
+                    )
+                else:
+                    internal_actions, reynolds_artifact = (
+                        compile_factorized_group_element_actions(
+                            group=group,
+                            factorized_generators={},
+                        )
+                    )
             except Exception as exc:
                 exc.add_note(
-                    "kp model response-basis compilation failed during finite-p "
-                    f"factorized group actions for group {group_index} "
+                    "kp model response-basis compilation failed during certified "
+                    f"sparse group actions for group {group_index} "
                     f"({len(finite_seeds)} seeds)"
                 )
                 raise
@@ -6546,12 +6664,30 @@ def _compile_model_response_basis_uncached(
             if str(seed.metadata.get("term_space_policy", ""))
             != "orbit_representative"
         ]
-        if zero_closed_seeds:
+        zero_joint_complete_seeds = (
+            [
+                seed
+                for seed in zero_closed_seeds
+                if str(seed.metadata.get("term_space_policy", "")) == "complete"
+            ]
+            if joint_route_actions is not None
+            else []
+        )
+        zero_fixed_seeds = (
+            [
+                seed
+                for seed in zero_closed_seeds
+                if str(seed.metadata.get("term_space_policy", "")) != "complete"
+            ]
+            if joint_route_actions is not None
+            else list(zero_closed_seeds)
+        )
+        if zero_fixed_seeds:
             try:
                 fixed_group = compile_generator_fixed_response_group(
-                    zero_closed_seeds,
+                    zero_fixed_seeds,
                     joint_keys=_zero_harmonic_joint_adjoint_keys(
-                        zero_closed_seeds,
+                        zero_fixed_seeds,
                         coordinate=coordinate,
                     ),
                     coordinate=coordinate,
@@ -6566,11 +6702,40 @@ def _compile_model_response_basis_uncached(
                 exc.add_note(
                     "kp model response-basis compilation failed during p=0 "
                     f"fixed-space compilation for group {group_index} "
-                    f"({len(zero_closed_seeds)} seeds)"
+                    f"({len(zero_fixed_seeds)} seeds)"
                 )
                 raise
             fixed_groups.append(fixed_group)
             compiled_groups.append(fixed_group.candidates)
+        if zero_joint_complete_seeds:
+            assert internal_actions is not None
+            try:
+                from .response_basis_symmetry_first import (
+                    compile_symbolic_atom_candidate_group,
+                )
+
+                joint_zero_candidates = compile_symbolic_atom_candidate_group(
+                    zero_joint_complete_seeds,
+                    coordinate=coordinate,
+                    group=group,
+                    factorized_actions={},
+                    internal_actions_by_word=internal_actions,
+                    factorized_group_artifact=reynolds_artifact,
+                )
+                joint_zero_fixed_group = _fixed_group_from_projected_candidates(
+                    joint_zero_candidates,
+                    reduce=bool(reduce),
+                    solver="joint_route_symbolic_p0_reynolds_v1",
+                )
+            except Exception as exc:
+                exc.add_note(
+                    "kp model response-basis compilation failed during certified "
+                    f"joint-route p=0 projection for group {group_index} "
+                    f"({len(zero_joint_complete_seeds)} seeds)"
+                )
+                raise
+            fixed_groups.append(joint_zero_fixed_group)
+            compiled_groups.append(joint_zero_candidates)
         if zero_orbit_seeds:
             try:
                 orbit_candidates = compile_candidate_responses(
@@ -6578,6 +6743,10 @@ def _compile_model_response_basis_uncached(
                     coordinate=coordinate,
                     group=group,
                     support_masks=support_masks,
+                    internal_actions_by_word=internal_actions,
+                    internal_action_absolute_error_bound=float(
+                        reynolds_artifact.get("maximum_action_error_bound", 0.0)
+                    ),
                 )
                 orbit_candidates = replace(
                     orbit_candidates,
@@ -6622,8 +6791,9 @@ def _compile_model_response_basis_uncached(
             assert internal_actions is not None
             _response_progress(
                 progress_callback,
-                "response basis finite-p factorized sparse group actions "
+                "response basis finite-p certified sparse group actions "
                 f"certified | elements={len(internal_actions)} "
+                f"compiler={reynolds_artifact['compiler']} "
                 f"max_nnz={int(reynolds_artifact['maximum_element_nnz'])}",
                 state="done",
             )
@@ -6912,19 +7082,54 @@ def compile_model_response_basis(
         group_record["terms"].append(seed)
     groups: list[FiniteGroup] = []
     seeds_by_group: list[list[RawPolynomialSeed]] = []
-    factorized_actions_by_group: list[dict[str, Any]] = []
+    factorized_actions_by_group: list[dict[str, Any] | None] = []
+    joint_route_actions_by_group: list[dict[str, Any] | None] = []
+    joint_artifact_hashes_by_group: list[str | None] = []
     for record in grouped.values():
         operations = record["operations"]
         factorized_actions: dict[str, Any] = {}
-        getter = getattr(symmetry_gen, "get_factorized_action", None)
-        if callable(getter):
+        joint_route_actions: dict[str, Any] = {}
+        factorized_getter = getattr(symmetry_gen, "get_factorized_action", None)
+        joint_route_getter = getattr(symmetry_gen, "get_joint_route_action", None)
+        if callable(factorized_getter) or callable(joint_route_getter):
             for operation in operations:
                 name = str(operation.get("name", ""))
                 if not name:
                     continue
-                action = getter(name)
-                if action is not None:
-                    factorized_actions[name] = action
+                if callable(factorized_getter):
+                    action = factorized_getter(name)
+                    if action is not None:
+                        factorized_actions[name] = action
+                if callable(joint_route_getter):
+                    action = joint_route_getter(name)
+                    if action is not None:
+                        joint_route_actions[name] = action
+        required_names = {
+            str(operation.get("name", ""))
+            for operation in operations
+            if str(operation.get("name", ""))
+        }
+        joint_artifact_hash = getattr(symmetry_gen, "joint_artifact_hash", None)
+        use_joint_routes = bool(
+            required_names
+            and set(joint_route_actions) == required_names
+            and isinstance(joint_artifact_hash, str)
+            and len(joint_artifact_hash) == 64
+        )
+        use_factorized = bool(
+            not required_names or set(factorized_actions) == required_names
+        )
+        active_factorized_actions: dict[str, Any] | None = (
+            factorized_actions if use_factorized or not use_joint_routes else None
+        )
+        active_joint_route_actions: dict[str, Any] | None = (
+            joint_route_actions if not use_factorized and use_joint_routes else None
+        )
+        active_joint_artifact_hash = (
+            str(joint_artifact_hash)
+            if active_joint_route_actions is not None
+            else None
+        )
         if operations:
             group = finite_group_from_model_actions(
                 operations,
@@ -6941,12 +7146,16 @@ def compile_model_response_basis(
             group = identity_finite_group(dim, q_size=q_count, sector_size=2)
         groups.append(group)
         seeds_by_group.append(list(record["terms"]))
-        factorized_actions_by_group.append(factorized_actions)
+        factorized_actions_by_group.append(active_factorized_actions)
+        joint_route_actions_by_group.append(active_joint_route_actions)
+        joint_artifact_hashes_by_group.append(active_joint_artifact_hash)
     identity_payload = _basis_layout_identity(
         config,
         groups,
         coordinate,
         factorized_actions_by_group,
+        joint_route_actions_by_group,
+        joint_artifact_hashes_by_group,
     )
     input_record = {
         "identity": identity_payload,
@@ -7030,6 +7239,8 @@ def compile_model_response_basis(
             groups=groups,
             seeds_by_group=seeds_by_group,
             factorized_actions_by_group=factorized_actions_by_group,
+            joint_route_actions_by_group=joint_route_actions_by_group,
+            joint_artifact_hashes_by_group=joint_artifact_hashes_by_group,
             dim=dim,
             identity_payload=identity_payload,
             reduce=bool(reduce),

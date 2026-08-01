@@ -8,6 +8,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 from scipy import sparse
 
+from ..identity import hash_array
+
 
 class FactorizedTermActionError(ValueError):
     """The authored term vocabulary is not closed under a factorized action."""
@@ -210,6 +212,165 @@ def compile_factorized_group_element_actions(
         "generator_action_hashes": {
             name: str(actions[name].artifact_hash) for name in sorted(required_names)
         },
+        "generator_match_residuals": dict(sorted(generator_residuals.items())),
+        "generator_match_bounds": dict(sorted(generator_bounds.items())),
+        "element_count": int(len(action_by_word)),
+        "maximum_element_nnz": int(maximum_nnz),
+        "maximum_action_match_residual": float(maximum_residual),
+        "maximum_action_error_bound": float(maximum_bound),
+        "dense_internal_transform_count": 0,
+        "elements": element_records,
+    }
+
+
+def compile_joint_route_group_element_actions(
+    *,
+    group: Any,
+    joint_route_generators: Mapping[str, Any],
+    joint_artifact_hash: str,
+) -> tuple[dict[tuple[str, ...], sparse.csr_matrix], dict[str, Any]]:
+    """Compose group words from certified sparse joint route blocks."""
+
+    from ..symmetry.joint_exactification import materialize_block_route_action
+
+    elements = tuple(getattr(group, "elements", ()))
+    if not elements:
+        raise FactorizedTermActionError(
+            "joint-route group-element compilation requires a nonempty finite group"
+        )
+    artifact_hash = str(joint_artifact_hash)
+    if len(artifact_hash) != 64 or any(
+        character not in "0123456789abcdef" for character in artifact_hash
+    ):
+        raise FactorizedTermActionError("joint route artifact hash must be SHA-256")
+    actions = {
+        str(name): action for name, action in joint_route_generators.items()
+    }
+    required_names = {
+        str(name)
+        for element in elements
+        for name in tuple(element.canonical_word)
+    }
+    missing = sorted(required_names - set(actions))
+    if missing:
+        raise FactorizedTermActionError(
+            f"certified joint route generators are missing group words: {missing}"
+        )
+    generator_elements = {
+        str(element.canonical_word[0]): element
+        for element in elements
+        if len(tuple(element.canonical_word)) == 1
+    }
+    dim = int(np.asarray(elements[0].internal_u).shape[0])
+    if any(np.asarray(element.internal_u).shape != (dim, dim) for element in elements):
+        raise FactorizedTermActionError(
+            "finite-group internal matrices do not share one square dimension"
+        )
+
+    sparse_generators: dict[str, sparse.csr_matrix] = {}
+    generator_bounds: dict[str, float] = {}
+    generator_residuals: dict[str, float] = {}
+    generator_hashes: dict[str, str] = {}
+    roundoff = float(
+        128.0
+        * np.finfo(np.float64).eps
+        * max(1, dim)
+        * max(1.0, np.sqrt(float(dim)))
+    )
+    for name in sorted(required_names):
+        action = actions[name]
+        element = generator_elements.get(name)
+        if element is None:
+            raise FactorizedTermActionError(
+                f"finite group has no canonical one-generator element for {name!r}"
+            )
+        if str(getattr(action, "name", "")) != name:
+            raise FactorizedTermActionError(
+                f"joint route artifact name {getattr(action, 'name', None)!r} "
+                f"does not match generator {name!r}"
+            )
+        if bool(action.antiunitary) != bool(element.antiunitary):
+            raise FactorizedTermActionError(
+                f"joint route generator {name!r} has the wrong antiunitary parity"
+            )
+        reconstructed = materialize_block_route_action(action)
+        if reconstructed.shape != (dim, dim):
+            raise FactorizedTermActionError(
+                f"joint route generator {name!r} has shape {reconstructed.shape}, "
+                f"expected {(dim, dim)}"
+            )
+        residual = _phase_aligned_frobenius_residual(
+            np.asarray(element.internal_u, dtype=np.complex128),
+            reconstructed,
+        )
+        bound = float(
+            getattr(action, "unitarity_certification_bound", 0.0)
+            + float(getattr(group, "algebra_residual", 0.0))
+            * max(1.0, np.sqrt(float(dim)))
+            + roundoff
+        )
+        if residual > bound:
+            raise FactorizedTermActionError(
+                f"joint route generator {name!r} does not match the active action: "
+                f"residual={residual:.6e}, bound={bound:.6e}"
+            )
+        matrix = sparse.csr_matrix(reconstructed, dtype=np.complex128)
+        matrix.eliminate_zeros()
+        matrix.sort_indices()
+        sparse_generators[name] = matrix
+        generator_bounds[name] = bound
+        generator_residuals[name] = residual
+        generator_hashes[name] = hash_array(reconstructed)
+
+    identity = sparse.eye(dim, format="csr", dtype=np.complex128)
+    action_by_word: dict[tuple[str, ...], sparse.csr_matrix] = {}
+    element_records: list[dict[str, Any]] = []
+    maximum_bound = 0.0
+    maximum_residual = 0.0
+    maximum_nnz = 0
+    algebra_residual = float(getattr(group, "algebra_residual", 0.0))
+    for element in elements:
+        word = tuple(str(value) for value in element.canonical_word)
+        composed = identity.copy()
+        accumulated_bound = 0.0
+        for name in word:
+            action = actions[name]
+            inner = composed.conjugate() if bool(action.antiunitary) else composed
+            composed = (sparse_generators[name] @ inner).tocsr()
+            composed.eliminate_zeros()
+            composed.sort_indices()
+            accumulated_bound += float(generator_bounds[name] + roundoff)
+        residual = _phase_aligned_frobenius_residual(
+            np.asarray(element.internal_u, dtype=np.complex128),
+            composed,
+        )
+        bound = float(
+            accumulated_bound
+            + (len(word) + 1)
+            * (algebra_residual * max(1.0, np.sqrt(float(dim))) + roundoff)
+        )
+        if residual > bound:
+            raise FactorizedTermActionError(
+                f"joint route sparse word {word!r} does not match the finite-group "
+                f"element: residual={residual:.6e}, bound={bound:.6e}"
+            )
+        action_by_word[word] = composed
+        maximum_bound = max(maximum_bound, bound)
+        maximum_residual = max(maximum_residual, residual)
+        maximum_nnz = max(maximum_nnz, int(composed.nnz))
+        element_records.append(
+            {
+                "canonical_word": list(word),
+                "nnz": int(composed.nnz),
+                "phase_aligned_residual": residual,
+                "absolute_error_bound": bound,
+            }
+        )
+    return action_by_word, {
+        "compiler": "joint_route_sparse_group_elements_v1",
+        "joint_artifact_hash": artifact_hash,
+        "generator_names": sorted(required_names),
+        "generator_action_hashes": dict(sorted(generator_hashes.items())),
         "generator_match_residuals": dict(sorted(generator_residuals.items())),
         "generator_match_bounds": dict(sorted(generator_bounds.items())),
         "element_count": int(len(action_by_word)),
@@ -692,6 +853,8 @@ def compile_factorized_raw_seed_action(
 
 __all__ = [
     "FactorizedTermActionError",
+    "compile_factorized_group_element_actions",
     "compile_factorized_raw_seed_action",
     "compile_factorized_real_channel_action",
+    "compile_joint_route_group_element_actions",
 ]

@@ -47,6 +47,10 @@ from kp.model.response_basis_adjoint import (
 from kp.model.response_basis_oracle import dense_direct_response
 from kp.model.response_basis_cache import ResponseBasisCacheCorruptionError
 from kp.symmetry.factorized_action import certify_factorized_action
+from kp.symmetry.joint_exactification import (
+    BlockRouteAction,
+    materialize_block_route_action,
+)
 from kp.model.core import (
     ContinuumTermKey,
     MoireConfig,
@@ -3741,6 +3745,80 @@ def test_complete_p0_rejects_missing_certified_factorized_action() -> None:
     )
 
 
+def test_complete_p0_uses_certified_joint_routes_for_nonclosed_authored_span() -> None:
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=0,
+    )
+    qset = np.asarray([[-1.0, 0.0], [1.0, 0.0]])
+    seeds = [
+        raw_polynomial_seed_from_term_key(
+            SimpleNamespace(
+                Mz=0,
+                Mz_star=0,
+                layer_from=1,
+                layer_to=1,
+                orbital_from=orbital_from + 1,
+                orbital_to=orbital_to + 1,
+                p=(0.0, 0.0),
+            ),
+            seed_id=f"p0-joint:{orbital_from}:{orbital_to}",
+            Q_set1=qset,
+            Q_set2=np.empty((0, 2)),
+            n_orb1=2,
+            n_orb2=0,
+            coordinate=coordinate,
+            support_component="kinetic",
+            metadata={"term_index": 2 * orbital_from + orbital_to, "term_space_policy": "complete"},
+        )
+        for orbital_from in range(2)
+        for orbital_to in range(2)
+    ]
+    x = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    z = np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128)
+    route = BlockRouteAction(
+        name="C2",
+        antiunitary=False,
+        fiber_permutation=(0, 1),
+        fiber_dimensions=(2, 2),
+        fiber_indices=((0, 2), (1, 3)),
+        route_blocks=(x, z),
+    )
+    group = build_finite_group(
+        [
+            FiniteGroupGenerator(
+                name="C2",
+                antiunitary=False,
+                canonical_k_map=((-1, 0), (0, -1)),
+                q_permutation=(0, 1),
+                sector_permutation=(0,),
+                k_forward=((-1.0, 0.0), (0.0, -1.0)),
+                internal_u=materialize_block_route_action(route),
+            )
+        ]
+    )
+
+    compiled = response_basis_module._compile_model_response_basis_uncached(
+        coordinate=coordinate,
+        groups=[group],
+        seeds_by_group=[seeds],
+        factorized_actions_by_group=[None],
+        joint_route_actions_by_group=[{"C2": route}],
+        joint_artifact_hashes_by_group=["a" * 64],
+        dim=4,
+        identity_payload=_identity_payload(4),
+        reduce=True,
+        cache_key="test-p0-joint-route-physical-closure",
+        progress_callback=None,
+    )
+
+    assert compiled.channels
+    assert "joint_route_sparse_group_elements_v1" in str(
+        compiled.candidate_artifact
+    )
+
+
 def test_complete_p0_rejects_malformed_singleton_identity_action() -> None:
     from kp.model.response_basis_factorized import FactorizedTermActionError
 
@@ -3852,7 +3930,7 @@ def test_complete_finite_p_propagates_factorized_term_action_error(
         )
 
     assert any(
-        "finite-p factorized group actions" in note and "group 0" in note
+        "certified sparse group actions" in note and "group 0" in note
         for note in getattr(caught.value, "__notes__", ())
     )
 
@@ -4035,13 +4113,13 @@ def test_model_basis_persistent_cache_survives_memory_cache_clear(
     assert str(config.output_dir) not in str(second.artifact())
 
 
-def test_model_basis_persistent_cache_v45_cannot_bypass_v46_active_q_compiler(
+def test_model_basis_persistent_cache_v46_cannot_bypass_v47_joint_route_compiler(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_response_basis_cache()
     assert response_basis_module.COMPILER_VERSION == (
-        "complete-response-basis-v2-symbolic-finite-p-v46"
+        "complete-response-basis-v2-symbolic-finite-p-v47"
     )
     config = _complete_onsite_config()
     config.output_dir = tmp_path / "model"
@@ -4049,18 +4127,18 @@ def test_model_basis_persistent_cache_v45_cannot_bypass_v46_active_q_compiler(
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-symbolic-finite-p-v45",
+        "complete-response-basis-v2-symbolic-finite-p-v46",
     )
     compile_model_response_basis(build_model(config), config, reduce=True)
     cache_dir = Path(config.output_dir) / ".compiled_response_basis_cache"
-    v43_files = set(cache_dir.glob("*.npz"))
-    assert len(v43_files) == 1
+    v46_files = set(cache_dir.glob("*.npz"))
+    assert len(v46_files) == 1
 
     clear_response_basis_cache()
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-symbolic-finite-p-v46",
+        "complete-response-basis-v2-symbolic-finite-p-v47",
     )
     cold_calls = 0
     original_cold_compile = response_basis_module._compile_model_response_basis_uncached
@@ -4078,9 +4156,9 @@ def test_model_basis_persistent_cache_v45_cannot_bypass_v46_active_q_compiler(
     compile_model_response_basis(build_model(config), config, reduce=True)
 
     assert cold_calls == 1
-    v46_files = set(cache_dir.glob("*.npz"))
-    assert len(v46_files) == 2
-    assert v43_files < v46_files
+    v47_files = set(cache_dir.glob("*.npz"))
+    assert len(v47_files) == 2
+    assert v46_files < v47_files
 
 
 def test_model_basis_persistent_cache_corruption_fails_closed(

@@ -266,6 +266,13 @@ def test_packed_fixed_target_loads_when_dense_routes_and_certificate_agree(
         source.generator.get_operator("C2"),
         np.asarray([[-1.0]], dtype=np.complex128),
     )
+    joint_action = source.generator.get_joint_route_action("C2")
+    assert joint_action is not None
+    assert np.array_equal(
+        materialize_block_route_action(joint_action),
+        source.generator.get_operator("C2"),
+    )
+    assert len(source.generator.joint_artifact_hash) == 64
 
 
 def test_packed_fixed_target_rejects_dense_matrix_not_matching_joint_routes(
