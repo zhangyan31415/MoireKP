@@ -55,6 +55,24 @@ class CandidateJointFailureCode(str, Enum):
     JOINT_CERTIFICATION_FAILED = "joint_certification_failed"
 
 
+class CandidateStateFailureCode(str, Enum):
+    """Stable machine-readable reason for an invalid referenced state."""
+
+    MISSING_PROJECTION_STATE = "missing_projection_state"
+    NONFINITE_U_LOW = "nonfinite_u_low"
+    INVALID_U_LOW_SHAPE = "invalid_u_low_shape"
+    NONFINITE_PROJECTION_ORTHONORMALITY_RESIDUAL = (
+        "nonfinite_projection_orthonormality_residual"
+    )
+    PROJECTION_ORTHONORMALITY_RESIDUAL = "projection_orthonormality_residual"
+    NONFINITE_HEFF = "nonfinite_heff"
+    HEFF_DIMENSION_MISMATCH = "heff_dimension_mismatch"
+    NONFINITE_HEFF_HERMITICITY_RESIDUAL = (
+        "nonfinite_heff_hermiticity_residual"
+    )
+    HEFF_HERMITICITY_RESIDUAL = "heff_hermiticity_residual"
+
+
 @dataclass(frozen=True)
 class CandidateProjectionState:
     """The in-memory projected basis and effective Hamiltonian at one k point."""
@@ -137,7 +155,7 @@ class CandidateStateCertificate:
     k_index: int
     projection_orthonormality_residual: float | None
     heff_hermiticity_residual: float | None
-    failures: tuple[str, ...]
+    failures: tuple[CandidateStateFailureCode, ...]
 
     @property
     def passed(self) -> bool:
@@ -321,7 +339,7 @@ def _candidate_certificate_payload(
             "heff_hermiticity_residual": _canonical_metric(
                 state.heff_hermiticity_residual
             ),
-            "failures": sorted(state.failures),
+            "failures": sorted(failure.value for failure in state.failures),
         }
         for state in sorted(
             certificate.states,
@@ -481,6 +499,23 @@ def _raw_action_identity_hash(value: object) -> str:
     )
 
 
+def _referenced_state_keys(
+    *,
+    operations: Mapping[str, CandidateOperationInput],
+    required_pairs: Mapping[str, Sequence[tuple[int, int]]],
+) -> set[tuple[str, int]]:
+    """Return every target/source state named by observed or required coverage."""
+
+    references: set[tuple[str, int]] = set()
+    pair_sequences = [operation.pairs for operation in operations.values()]
+    pair_sequences.extend(required_pairs.values())
+    for pairs in pair_sequences:
+        for target_index, source_index in pairs:
+            references.add(("target", int(target_index)))
+            references.add(("source", int(source_index)))
+    return references
+
+
 def _candidate_input_identity_hash(
     *,
     presentation_hash: str,
@@ -513,11 +548,10 @@ def _candidate_input_identity_hash(
                 ),
             }
         )
-    state_references: set[tuple[str, int]] = set()
-    for operation in operations.values():
-        for target_index, source_index in operation.pairs:
-            state_references.add(("target", int(target_index)))
-            state_references.add(("source", int(source_index)))
+    state_references = _referenced_state_keys(
+        operations=operations,
+        required_pairs=required_pairs,
+    )
     state_records: list[dict[str, object]] = []
     for role, index in sorted(state_references):
         mapping = target_states if role == "target" else source_states
@@ -637,48 +671,56 @@ def _state_certificate(
     state: CandidateProjectionState | None,
     thresholds: CandidateSymmetryThresholds,
 ) -> CandidateStateCertificate:
-    failures: list[str] = []
+    failures: list[CandidateStateFailureCode] = []
     projection_residual: float | None = None
     heff_residual: float | None = None
     if state is None:
-        failures.append("missing_projection_state")
+        failures.append(CandidateStateFailureCode.MISSING_PROJECTION_STATE)
     else:
         u_low = _finite_complex_matrix(state.u_low)
         heff = _finite_complex_matrix(state.heff)
         if u_low is None:
-            failures.append("nonfinite_u_low")
+            failures.append(CandidateStateFailureCode.NONFINITE_U_LOW)
         elif (
             u_low.shape[0] < u_low.shape[1]
             or u_low.shape[1] <= 0
         ):
-            failures.append("invalid_u_low_shape")
+            failures.append(CandidateStateFailureCode.INVALID_U_LOW_SHAPE)
         else:
             projection_residual = _finite_metric_or_none(
                 _unitarity_residual(u_low)
             )
             if projection_residual is None:
-                failures.append("nonfinite_projection_orthonormality_residual")
+                failures.append(
+                    CandidateStateFailureCode.NONFINITE_PROJECTION_ORTHONORMALITY_RESIDUAL
+                )
             elif (
                 projection_residual
                 > thresholds.projection_orthonormality_residual
             ):
-                failures.append("projection_orthonormality_residual")
+                failures.append(
+                    CandidateStateFailureCode.PROJECTION_ORTHONORMALITY_RESIDUAL
+                )
         if heff is None:
-            failures.append("nonfinite_heff")
+            failures.append(CandidateStateFailureCode.NONFINITE_HEFF)
         elif (
             heff.shape[0] != heff.shape[1]
             or u_low is None
             or heff.shape[0] != u_low.shape[1]
         ):
-            failures.append("heff_dimension_mismatch")
+            failures.append(CandidateStateFailureCode.HEFF_DIMENSION_MISMATCH)
         else:
             heff_residual = _finite_metric_or_none(
                 _fro_relative(heff, heff.conj().T, heff)
             )
             if heff_residual is None:
-                failures.append("nonfinite_heff_hermiticity_residual")
+                failures.append(
+                    CandidateStateFailureCode.NONFINITE_HEFF_HERMITICITY_RESIDUAL
+                )
             elif heff_residual > thresholds.heff_hermiticity_residual:
-                failures.append("heff_hermiticity_residual")
+                failures.append(
+                    CandidateStateFailureCode.HEFF_HERMITICITY_RESIDUAL
+                )
     return CandidateStateCertificate(
         role=str(role),
         k_index=int(k_index),
@@ -867,20 +909,19 @@ def certify_candidate_symmetries(
     state_certificate_by_role_and_k: dict[
         tuple[str, int], CandidateStateCertificate
     ] = {}
-    for operation in operations.values():
-        for target_index, source_index in operation.pairs:
-            for role, index, mapping in (
-                ("target", int(target_index), target),
-                ("source", int(source_index), source),
-            ):
-                key = (role, index)
-                if key not in state_certificate_by_role_and_k:
-                    state_certificate_by_role_and_k[key] = _state_certificate(
-                        role=role,
-                        k_index=index,
-                        state=mapping.get(index),
-                        thresholds=thresholds,
-                    )
+    for role, index in sorted(
+        _referenced_state_keys(
+            operations=operations,
+            required_pairs=required_pairs,
+        )
+    ):
+        mapping = target if role == "target" else source
+        state_certificate_by_role_and_k[(role, index)] = _state_certificate(
+            role=role,
+            k_index=index,
+            state=mapping.get(index),
+            thresholds=thresholds,
+        )
     required_names = tuple(generator.name for generator in presentation.generators)
     required_set = set(required_names)
     observed_names = tuple(sorted(str(name) for name in operations))
@@ -1218,30 +1259,28 @@ def certify_candidate_symmetries(
                     )
                     for name, matrix in finite_exact_actions.items()
                 }
-                certify_joint_block_actions(joint_actions, presentation)
-                joint_certification_status = (
-                    CandidateJointCertificationStatus.CERTIFIED
-                )
-                joint_certification_failure = None
             except (JointExactificationError, ValueError) as exc:
                 joint_certification_status = CandidateJointCertificationStatus.FAILED
-                if any(not relation.passed for relation in relation_certificates):
+                joint_certification_failure = (
+                    CandidateJointFailureCode.ACTION_NOT_UNITARY
+                )
+                joint_certification_diagnostic = str(exc)
+            else:
+                try:
+                    certify_joint_block_actions(joint_actions, presentation)
+                except (JointExactificationError, ValueError) as exc:
+                    joint_certification_status = (
+                        CandidateJointCertificationStatus.FAILED
+                    )
                     joint_certification_failure = (
                         CandidateJointFailureCode.RELATION_CERTIFICATION_FAILED
                     )
-                elif any(
-                    operation.exact_action_unitarity_residual is None
-                    or operation.exact_action_unitarity_residual > 0.0
-                    for operation in operation_certificates
-                ):
-                    joint_certification_failure = (
-                        CandidateJointFailureCode.ACTION_NOT_UNITARY
-                    )
+                    joint_certification_diagnostic = str(exc)
                 else:
-                    joint_certification_failure = (
-                        CandidateJointFailureCode.JOINT_CERTIFICATION_FAILED
+                    joint_certification_status = (
+                        CandidateJointCertificationStatus.CERTIFIED
                     )
-                joint_certification_diagnostic = str(exc)
+                    joint_certification_failure = None
 
     if joint_certification_status is not CandidateJointCertificationStatus.CERTIFIED:
         assert joint_certification_failure is not None
@@ -1308,6 +1347,7 @@ __all__ = [
     "CandidateProjectionState",
     "CandidateRelationCertificate",
     "CandidateStateCertificate",
+    "CandidateStateFailureCode",
     "CandidateSymmetryCertificate",
     "CandidateSymmetryStatus",
     "CandidateSymmetryThresholds",

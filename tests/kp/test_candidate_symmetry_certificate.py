@@ -11,6 +11,7 @@ from kp.symmetry.candidate_certificate import (
     CandidateJointFailureCode,
     CandidateOperationInput,
     CandidateProjectionState,
+    CandidateStateFailureCode,
     CandidateSymmetryStatus,
     CandidateSymmetryThresholds,
     certify_candidate_symmetries,
@@ -698,6 +699,57 @@ def test_evaluated_unexpected_pair_does_not_count_as_required_pair_coverage() ->
     assert "no_evaluated_required_pair" in result.operations[0].failures
 
 
+def test_required_only_pair_states_are_identity_bound_and_typed() -> None:
+    def certify(state_zero: CandidateProjectionState):
+        return certify_candidate_symmetries(
+            candidate_id="required-only-state",
+            states={0: state_zero, 1: _state(np.eye(1))},
+            operations={
+                "E": CandidateOperationInput("E", False, np.eye(1), ((1, 1),))
+            },
+            exactified_actions={"E": np.eye(1)},
+            presentation=_presentation("E"),
+            required_pairs={"E": ((0, 0),)},
+            thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+        )
+
+    baseline = certify(_state(np.eye(1)))
+    changed = certify(_state(np.asarray([[1.0j]])))
+
+    assert {(state.role, state.k_index) for state in baseline.states} == {
+        ("source", 0),
+        ("source", 1),
+        ("target", 0),
+        ("target", 1),
+    }
+    assert baseline.input_identity_hash != changed.input_identity_hash
+    assert baseline.certificate_hash != changed.certificate_hash
+
+
+def test_missing_required_only_state_has_stable_typed_reason() -> None:
+    result = certify_candidate_symmetries(
+        candidate_id="missing-required-only-state",
+        states={1: _state(np.eye(1))},
+        operations={
+            "E": CandidateOperationInput("E", False, np.eye(1), ((1, 1),))
+        },
+        exactified_actions={"E": np.eye(1)},
+        presentation=_presentation("E"),
+        required_pairs={"E": ((0, 0),)},
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-10),
+    )
+
+    required_only = {
+        (state.role, state.k_index): state for state in result.states
+    }
+    assert required_only[("source", 0)].failures == (
+        CandidateStateFailureCode.MISSING_PROJECTION_STATE,
+    )
+    assert required_only[("target", 0)].failures == (
+        CandidateStateFailureCode.MISSING_PROJECTION_STATE,
+    )
+
+
 def test_projected_pair_exposes_projected_and_evaluated_actions_separately() -> None:
     evaluation = evaluate_projected_pair(
         d_full=np.eye(1),
@@ -835,6 +887,43 @@ def test_relation_mismatch_is_recorded_and_fails_closed() -> None:
         joint_certification_failure=CandidateJointFailureCode.ACTION_NOT_UNITARY,
     )
     assert changed_code.certificate_hash != result.certificate_hash
+
+
+def test_strict_joint_relation_failure_has_relation_code_after_user_gate_passes() -> None:
+    phases = np.diag(np.exp(1.0j * np.asarray([1.0e-8, -1.0e-8])))
+    result = _certify(
+        name="E",
+        state=_state(np.eye(2), np.zeros((2, 2))),
+        d_full=phases,
+        exact=phases,
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-6),
+    )
+
+    assert result.relations[0].passed is True
+    assert result.relations[0].residual == pytest.approx(2.0e-8)
+    assert result.joint_certification_status == "failed"
+    assert (
+        result.joint_certification_failure
+        is CandidateJointFailureCode.RELATION_CERTIFICATION_FAILED
+    )
+
+
+def test_strict_joint_action_construction_failure_has_unitarity_code() -> None:
+    nonunitary = np.diag([1.0 + 1.0e-8, 1.0]).astype(np.complex128)
+    result = _certify(
+        name="E",
+        state=_state(np.eye(2), np.zeros((2, 2))),
+        d_full=np.eye(2),
+        exact=nonunitary,
+        thresholds=CandidateSymmetryThresholds.uniform(1.0e-6),
+    )
+
+    assert result.relations[0].passed is True
+    assert result.joint_certification_status == "failed"
+    assert (
+        result.joint_certification_failure
+        is CandidateJointFailureCode.ACTION_NOT_UNITARY
+    )
 
 
 def test_duplicate_pair_does_not_satisfy_exact_coverage() -> None:
