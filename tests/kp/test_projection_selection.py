@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
 import numpy as np
 import pytest
 
 from kp.projection_selection import (
     CandidateRejected,
     CandidateRejectionReason,
+    FixedWindowBandMetrics,
     FrozenTargetWindow,
+    ProjectionOverlapMetrics,
     TargetWindowSpec,
     certify_minimum_principal_overlap,
     evaluate_fixed_target_window,
@@ -90,6 +94,29 @@ def test_fixed_window_preserves_twenty_mev_offset_for_one_band() -> None:
     np.testing.assert_allclose(metrics.errors_mev, np.full((2, 1), 20.0))
 
 
+def test_valence_candidate_can_cross_global_reference_without_rejection() -> None:
+    target = np.array([[-0.010], [-0.010]])
+    candidate = np.array([[-0.200, 0.010], [-0.200, 0.010]])
+    target_window = resolve_target_window(target, _window_spec(edge="valence"))
+
+    metrics = evaluate_fixed_target_window(target_window, candidate)
+
+    np.testing.assert_allclose(metrics.errors_mev, np.full((2, 1), 20.0))
+
+
+def test_conduction_candidate_can_cross_global_reference_without_rejection() -> None:
+    target = np.array([[0.010], [0.010]])
+    candidate = np.array([[-0.010, 0.200], [-0.010, 0.200]])
+    target_window = resolve_target_window(
+        target,
+        _window_spec(edge="conduction"),
+    )
+
+    metrics = evaluate_fixed_target_window(target_window, candidate)
+
+    np.testing.assert_allclose(metrics.errors_mev, np.full((2, 1), -20.0))
+
+
 def test_target_window_rejects_boundary_that_splits_degenerate_multiplet() -> None:
     target = np.array(
         [
@@ -126,8 +153,16 @@ def test_frozen_target_window_is_reused_across_candidates_and_target_mutation() 
         target_window.target_energies_ev,
         np.array([[-0.20], [-0.15]]),
     )
-    with pytest.raises(ValueError, match="read-only"):
-        target_window.target_energies_ev[0, 0] = -99.0
+    assert isinstance(target_window.target_energies_ev, tuple)
+    with pytest.raises(TypeError, match="item assignment"):
+        target_window.target_energies_ev[0][0] = -99.0
+    changed_energies = FrozenTargetWindow(
+        spec=spec,
+        target_band_ids=((1,), (1,)),
+        target_energies_ev=((-0.21,), (-0.16,)),
+    )
+    assert changed_energies != target_window
+    assert hash(target_window) == hash(target_window)
 
     target[:] = np.array(
         [
@@ -137,14 +172,14 @@ def test_frozen_target_window_is_reused_across_candidates_and_target_mutation() 
     )
     candidate_a = np.array(
         [
-            [-0.40, -0.18, 0.30, 0.40],
-            [-0.35, -0.13, 0.35, 0.45],
+            [-0.40, -0.30, -0.25, -0.18],
+            [-0.35, -0.30, -0.25, -0.13],
         ]
     )
     candidate_b = np.array(
         [
-            [-0.40, -0.19, 0.30, 0.40],
-            [-0.35, -0.14, 0.35, 0.45],
+            [-0.40, -0.30, -0.25, -0.19],
+            [-0.35, -0.30, -0.25, -0.14],
         ]
     )
 
@@ -154,6 +189,55 @@ def test_frozen_target_window_is_reused_across_candidates_and_target_mutation() 
     assert target_window.target_band_ids == ((1,), (1,))
     np.testing.assert_allclose(metrics_a.errors_mev, np.full((2, 1), 20.0))
     np.testing.assert_allclose(metrics_b.errors_mev, np.full((2, 1), 10.0))
+    assert isinstance(metrics_a.errors_mev, tuple)
+    with pytest.raises(TypeError, match="item assignment"):
+        metrics_a.errors_mev[0][0] = -99.0
+    assert hash(metrics_a) == hash(metrics_a)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("rms_error_mev", float("nan")),
+        ("rms_error_mev", float("inf")),
+        ("maximum_abs_error_mev", float("nan")),
+        ("maximum_abs_error_mev", float("inf")),
+    ),
+)
+def test_fixed_window_metrics_reject_nonfinite_scalars(
+    field_name: str,
+    value: float,
+) -> None:
+    values = {
+        "band_count": 1,
+        "validation_k_indices": (0,),
+        "rms_error_mev": 1.0,
+        "maximum_abs_error_mev": 1.0,
+        "errors_mev": ((1.0,),),
+    }
+    values[field_name] = value
+
+    with pytest.raises(ValueError, match=field_name):
+        FixedWindowBandMetrics(**values)
+
+
+def test_fixed_window_metrics_reject_nonfinite_or_inconsistent_errors() -> None:
+    with pytest.raises(ValueError, match="errors_mev"):
+        FixedWindowBandMetrics(
+            band_count=1,
+            validation_k_indices=(0,),
+            rms_error_mev=1.0,
+            maximum_abs_error_mev=1.0,
+            errors_mev=((float("inf"),),),
+        )
+    with pytest.raises(ValueError, match="inconsistent"):
+        FixedWindowBandMetrics(
+            band_count=1,
+            validation_k_indices=(0,),
+            rms_error_mev=2.0,
+            maximum_abs_error_mev=2.0,
+            errors_mev=((1.0,),),
+        )
 
 
 def test_projection_metrics_keep_principal_capture_and_anchor_quality_separate() -> None:
@@ -205,6 +289,79 @@ def test_target_capture_measures_projection_space_not_model_band_gauge() -> None
     assert metrics.mean_principal_overlap_squared == pytest.approx(1.0)
     assert metrics.target_capture == pytest.approx(0.82)
     assert metrics.gauge_anchor_quality is None
+
+
+def test_projection_overlap_requires_explicit_complete_projection_space() -> None:
+    basis = np.ones((1, 1, 1), dtype=complex)
+
+    with pytest.raises(TypeError, match="projection_basis"):
+        projection_overlap_metrics(
+            basis,
+            basis,
+            validation_k_indices=(0,),
+        )
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("minimum_principal_overlap_squared", float("nan")),
+        ("mean_principal_overlap_squared", float("inf")),
+        ("target_capture", float("nan")),
+        ("gauge_anchor_quality", float("inf")),
+    ),
+)
+def test_projection_overlap_metrics_reject_nonfinite_scalars(
+    field_name: str,
+    value: float,
+) -> None:
+    metrics = ProjectionOverlapMetrics(
+        minimum_principal_overlap_squared=0.9,
+        mean_principal_overlap_squared=0.95,
+        target_capture=0.98,
+        gauge_anchor_quality=0.8,
+        validation_k_indices=(3, 7),
+        worst_k_index=7,
+    )
+
+    with pytest.raises(ValueError, match=field_name):
+        replace(metrics, **{field_name: value})
+
+
+def test_projection_overlap_metrics_reject_inconsistent_range_and_k_context() -> None:
+    with pytest.raises(ValueError, match="minimum.*mean"):
+        ProjectionOverlapMetrics(
+            minimum_principal_overlap_squared=0.9,
+            mean_principal_overlap_squared=0.8,
+            target_capture=0.95,
+            gauge_anchor_quality=None,
+            validation_k_indices=(3, 7),
+            worst_k_index=7,
+        )
+    with pytest.raises(ValueError, match="worst_k_index"):
+        ProjectionOverlapMetrics(
+            minimum_principal_overlap_squared=0.8,
+            mean_principal_overlap_squared=0.9,
+            target_capture=0.95,
+            gauge_anchor_quality=None,
+            validation_k_indices=(3, 7),
+            worst_k_index=1,
+        )
+
+
+def test_minimum_overlap_certifier_rejects_manually_corrupted_nan_metric() -> None:
+    metrics = ProjectionOverlapMetrics(
+        minimum_principal_overlap_squared=0.9,
+        mean_principal_overlap_squared=0.95,
+        target_capture=0.98,
+        gauge_anchor_quality=0.8,
+        validation_k_indices=(3, 7),
+        worst_k_index=7,
+    )
+    object.__setattr__(metrics, "minimum_principal_overlap_squared", float("nan"))
+
+    with pytest.raises(ValueError, match="minimum_principal_overlap_squared"):
+        certify_minimum_principal_overlap(metrics, threshold=0.90)
 
 
 def test_projection_metrics_are_invariant_under_simultaneous_unitary_gauge() -> None:
@@ -275,15 +432,17 @@ def test_projection_metrics_are_invariant_under_simultaneous_unitary_gauge() -> 
 
 
 def test_one_bad_k_point_reports_actual_noncontiguous_validation_k_index() -> None:
-    target = np.zeros((2, 2, 1), dtype=complex)
+    target = np.zeros((8, 2, 1), dtype=complex)
     target[:, 0, 0] = 1.0
     model = target.copy()
-    model[1, :, 0] = np.array([0.0, 1.0])
+    model[7, :, 0] = np.array([0.0, 1.0])
+    projection = target.copy()
 
     metrics = projection_overlap_metrics(
         model,
         target,
         validation_k_indices=(3, 7),
+        projection_basis=projection,
     )
 
     assert metrics.mean_principal_overlap_squared == pytest.approx(0.5)
@@ -294,3 +453,15 @@ def test_one_bad_k_point_reports_actual_noncontiguous_validation_k_index() -> No
         certify_minimum_principal_overlap(metrics, threshold=0.90)
     assert exc_info.value.reason is CandidateRejectionReason.SUBSPACE_OVERLAP
     assert exc_info.value.k_index == 7
+
+
+def test_projection_metrics_reject_out_of_bounds_actual_k_index() -> None:
+    basis = np.ones((2, 1, 1), dtype=complex)
+
+    with pytest.raises(ValueError, match="validation_k_indices"):
+        projection_overlap_metrics(
+            basis,
+            basis,
+            validation_k_indices=(0, 2),
+            projection_basis=basis,
+        )

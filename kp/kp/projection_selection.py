@@ -7,7 +7,7 @@ their dedicated layers.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from enum import Enum
 from typing import Optional, Tuple
 
@@ -103,7 +103,7 @@ class FrozenTargetWindow:
 
     spec: TargetWindowSpec
     target_band_ids: Tuple[Tuple[int, ...], ...]
-    target_energies_ev: np.ndarray = field(repr=False, compare=False)
+    target_energies_ev: Tuple[Tuple[float, ...], ...]
 
     def __post_init__(self) -> None:
         band_ids = tuple(
@@ -117,14 +117,21 @@ class FrozenTargetWindow:
             raise ValueError("target_band_ids shape does not match TargetWindowSpec")
         if any(band_id < 0 for row in band_ids for band_id in row):
             raise ValueError("target_band_ids must be non-negative")
-        energies = np.asarray(self.target_energies_ev, dtype=float).copy()
-        if energies.shape != expected_shape:
+        try:
+            energies = tuple(
+                tuple(float(energy) for energy in row)
+                for row in self.target_energies_ev
+            )
+        except TypeError as exc:
+            raise ValueError("target_energies_ev must be two-dimensional") from exc
+        if len(energies) != expected_shape[0] or any(
+            len(row) != expected_shape[1] for row in energies
+        ):
             raise ValueError(
                 "target_energies_ev shape does not match TargetWindowSpec"
             )
-        if not np.all(np.isfinite(energies)):
+        if not all(np.isfinite(energy) for row in energies for energy in row):
             raise ValueError("target_energies_ev must be finite")
-        energies.setflags(write=False)
         object.__setattr__(self, "target_band_ids", band_ids)
         object.__setattr__(self, "target_energies_ev", energies)
 
@@ -137,13 +144,59 @@ class FixedWindowBandMetrics:
     validation_k_indices: Tuple[int, ...]
     rms_error_mev: float
     maximum_abs_error_mev: float
-    errors_mev: np.ndarray = field(repr=False, compare=False)
+    errors_mev: Tuple[Tuple[float, ...], ...]
 
     def __post_init__(self) -> None:
-        errors = np.asarray(self.errors_mev, dtype=float).copy()
-        if errors.shape != (len(self.validation_k_indices), int(self.band_count)):
+        band_count = int(self.band_count)
+        if band_count <= 0:
+            raise ValueError("band_count must be positive")
+        validation_indices = tuple(
+            int(index) for index in self.validation_k_indices
+        )
+        if not validation_indices or any(index < 0 for index in validation_indices):
+            raise ValueError(
+                "validation_k_indices must contain non-negative indices"
+            )
+        if len(set(validation_indices)) != len(validation_indices):
+            raise ValueError("validation_k_indices must be unique")
+        try:
+            errors = tuple(
+                tuple(float(error) for error in row) for row in self.errors_mev
+            )
+        except TypeError as exc:
+            raise ValueError("errors_mev must be two-dimensional") from exc
+        if len(errors) != len(validation_indices) or any(
+            len(row) != band_count for row in errors
+        ):
             raise ValueError("errors_mev shape does not match the fixed target window")
-        errors.setflags(write=False)
+        if not all(np.isfinite(error) for row in errors for error in row):
+            raise ValueError("errors_mev must be finite")
+        rms_error = float(self.rms_error_mev)
+        maximum_error = float(self.maximum_abs_error_mev)
+        if not np.isfinite(rms_error):
+            raise ValueError("rms_error_mev must be finite")
+        if not np.isfinite(maximum_error):
+            raise ValueError("maximum_abs_error_mev must be finite")
+        if rms_error < 0.0 or maximum_error < 0.0:
+            raise ValueError("band errors must be non-negative")
+        error_array = np.asarray(errors, dtype=float)
+        expected_rms = float(np.sqrt(np.mean(error_array**2)))
+        expected_maximum = float(np.max(np.abs(error_array)))
+        if not np.isclose(rms_error, expected_rms, rtol=1.0e-12, atol=1.0e-12):
+            raise ValueError("rms_error_mev is inconsistent with errors_mev")
+        if not np.isclose(
+            maximum_error,
+            expected_maximum,
+            rtol=1.0e-12,
+            atol=1.0e-12,
+        ):
+            raise ValueError(
+                "maximum_abs_error_mev is inconsistent with errors_mev"
+            )
+        object.__setattr__(self, "band_count", band_count)
+        object.__setattr__(self, "validation_k_indices", validation_indices)
+        object.__setattr__(self, "rms_error_mev", rms_error)
+        object.__setattr__(self, "maximum_abs_error_mev", maximum_error)
         object.__setattr__(self, "errors_mev", errors)
 
 
@@ -158,6 +211,53 @@ class ProjectionOverlapMetrics:
     validation_k_indices: Tuple[int, ...]
     worst_k_index: int
 
+    def __post_init__(self) -> None:
+        values = {
+            "minimum_principal_overlap_squared": float(
+                self.minimum_principal_overlap_squared
+            ),
+            "mean_principal_overlap_squared": float(
+                self.mean_principal_overlap_squared
+            ),
+            "target_capture": float(self.target_capture),
+        }
+        for name, value in values.items():
+            if not np.isfinite(value):
+                raise ValueError(f"{name} must be finite")
+            if not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must lie in [0, 1]")
+        if (
+            values["minimum_principal_overlap_squared"]
+            > values["mean_principal_overlap_squared"]
+        ):
+            raise ValueError(
+                "minimum principal overlap squared cannot exceed mean overlap"
+            )
+        anchor = self.gauge_anchor_quality
+        if anchor is not None:
+            anchor = float(anchor)
+            if not np.isfinite(anchor):
+                raise ValueError("gauge_anchor_quality must be finite")
+            if not 0.0 <= anchor <= 1.0:
+                raise ValueError("gauge_anchor_quality must lie in [0, 1]")
+        validation_indices = tuple(
+            int(index) for index in self.validation_k_indices
+        )
+        if not validation_indices or any(index < 0 for index in validation_indices):
+            raise ValueError(
+                "validation_k_indices must contain non-negative indices"
+            )
+        if len(set(validation_indices)) != len(validation_indices):
+            raise ValueError("validation_k_indices must be unique")
+        worst_k_index = int(self.worst_k_index)
+        if worst_k_index not in validation_indices:
+            raise ValueError("worst_k_index must belong to validation_k_indices")
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "gauge_anchor_quality", anchor)
+        object.__setattr__(self, "validation_k_indices", validation_indices)
+        object.__setattr__(self, "worst_k_index", worst_k_index)
+
 
 def _validated_eigenvalues(name: str, values: np.ndarray) -> np.ndarray:
     array = np.asarray(values, dtype=float)
@@ -170,12 +270,11 @@ def _validated_eigenvalues(name: str, values: np.ndarray) -> np.ndarray:
     return array
 
 
-def _edge_window_indices(
+def _target_edge_window_indices(
     eigenvalues: np.ndarray,
     *,
     k_index: int,
     spec: TargetWindowSpec,
-    candidate: bool,
 ) -> np.ndarray:
     row = eigenvalues[k_index]
     if spec.edge == "valence":
@@ -186,21 +285,36 @@ def _edge_window_indices(
         selected = eligible[: spec.band_count]
     available = int(eligible.size)
     if available < spec.band_count:
-        kind = "candidate" if candidate else "target"
-        reason = (
-            CandidateRejectionReason.INSUFFICIENT_CANDIDATE_BANDS
-            if candidate
-            else CandidateRejectionReason.INSUFFICIENT_TARGET_BANDS
-        )
         raise CandidateRejected(
-            reason,
-            f"{kind} has {available} {spec.edge} bands at k={k_index}; "
+            CandidateRejectionReason.INSUFFICIENT_TARGET_BANDS,
+            f"target has {available} {spec.edge} bands at k={k_index}; "
             f"the fixed target window requires {spec.band_count}",
             k_index=k_index,
             required_band_count=spec.band_count,
             available_band_count=available,
         )
     return selected
+
+
+def _candidate_edge_window_indices(
+    eigenvalues: np.ndarray,
+    *,
+    k_index: int,
+    spec: TargetWindowSpec,
+) -> np.ndarray:
+    band_count = int(eigenvalues.shape[1])
+    if band_count < spec.band_count:
+        raise CandidateRejected(
+            CandidateRejectionReason.INSUFFICIENT_CANDIDATE_BANDS,
+            f"candidate has {band_count} total bands at k={k_index}; "
+            f"the fixed target window requires {spec.band_count}",
+            k_index=k_index,
+            required_band_count=spec.band_count,
+            available_band_count=band_count,
+        )
+    if spec.edge == "valence":
+        return np.arange(band_count - spec.band_count, band_count)
+    return np.arange(spec.band_count)
 
 
 def _certify_target_boundary(
@@ -246,8 +360,10 @@ def resolve_target_window(
         (len(spec.validation_k_indices), spec.band_count), dtype=float
     )
     for output_index, k_index in enumerate(spec.validation_k_indices):
-        target_indices = _edge_window_indices(
-            target, k_index=k_index, spec=spec, candidate=False
+        target_indices = _target_edge_window_indices(
+            target,
+            k_index=k_index,
+            spec=spec,
         )
         _certify_target_boundary(
             target[k_index],
@@ -271,9 +387,9 @@ def evaluate_fixed_target_window(
 ) -> FixedWindowBandMetrics:
     """Score one candidate against an already resolved target-band window.
 
-    The frozen target energies and candidate spectrum are referenced to the
-    same scalar ``energy_reference_ev``.  Neither spectrum is independently
-    re-centered at any k point.
+    Absolute frozen target energies are compared directly with the candidate
+    edge energies.  No candidate classification or spectrum re-centering uses
+    the target's global energy reference.
     """
 
     if not isinstance(target_window, FrozenTargetWindow):
@@ -290,26 +406,28 @@ def evaluate_fixed_target_window(
         (len(spec.validation_k_indices), spec.band_count), dtype=float
     )
     for output_index, k_index in enumerate(spec.validation_k_indices):
-        candidate_indices = _edge_window_indices(
-            candidate, k_index=k_index, spec=spec, candidate=True
+        candidate_indices = _candidate_edge_window_indices(
+            candidate,
+            k_index=k_index,
+            spec=spec,
         )
-        referenced_target = (
-            target_window.target_energies_ev[output_index]
-            - spec.energy_reference_ev
-        )
-        referenced_candidate = (
-            candidate[k_index, candidate_indices] - spec.energy_reference_ev
+        frozen_target = np.asarray(
+            target_window.target_energies_ev[output_index],
+            dtype=float,
         )
         errors[output_index] = (
-            referenced_candidate - referenced_target
+            candidate[k_index, candidate_indices] - frozen_target
         ) * 1000.0
 
+    error_values = tuple(
+        tuple(float(error) for error in row) for row in errors
+    )
     return FixedWindowBandMetrics(
         band_count=spec.band_count,
         validation_k_indices=spec.validation_k_indices,
         rms_error_mev=float(np.sqrt(np.mean(errors**2))),
         maximum_abs_error_mev=float(np.max(np.abs(errors))),
-        errors_mev=errors,
+        errors_mev=error_values,
     )
 
 
@@ -332,7 +450,7 @@ def projection_overlap_metrics(
     target_basis: np.ndarray,
     *,
     validation_k_indices: Tuple[int, ...],
-    projection_basis: Optional[np.ndarray] = None,
+    projection_basis: np.ndarray,
     gauge_anchor_quality: Optional[float] = None,
 ) -> ProjectionOverlapMetrics:
     """Compare model and target subspaces without conflating anchor quality.
@@ -346,24 +464,20 @@ def projection_overlap_metrics(
     target = _validated_basis("target_basis", target_basis)
     if model.shape != target.shape:
         raise ValueError("model_basis and target_basis must have matching shape")
-    projection = (
-        model
-        if projection_basis is None
-        else _validated_basis("projection_basis", projection_basis)
-    )
+    projection = _validated_basis("projection_basis", projection_basis)
     if projection.shape[:2] != target.shape[:2]:
         raise ValueError(
             "projection_basis must match target_basis in Nk and ambient dimension"
         )
     validation_indices = tuple(int(index) for index in validation_k_indices)
-    if len(validation_indices) != target.shape[0]:
+    if not validation_indices or any(index < 0 for index in validation_indices):
         raise ValueError(
-            "validation_k_indices length must match the basis k-point axis"
+            "validation_k_indices must contain non-negative indices"
         )
-    if any(index < 0 for index in validation_indices) or len(
-        set(validation_indices)
-    ) != len(validation_indices):
+    if len(set(validation_indices)) != len(validation_indices):
         raise ValueError("validation_k_indices must be unique and non-negative")
+    if max(validation_indices) >= target.shape[0]:
+        raise ValueError("validation_k_indices exceed the basis k-point axis")
     if gauge_anchor_quality is not None:
         gauge_anchor_quality = float(gauge_anchor_quality)
         if not np.isfinite(gauge_anchor_quality) or not (
@@ -374,7 +488,7 @@ def projection_overlap_metrics(
     squared_overlaps = []
     captures = []
     per_k_minima = []
-    for k_index in range(target.shape[0]):
+    for k_index in validation_indices:
         singular_values = np.linalg.svd(
             target[k_index].conj().T @ model[k_index], compute_uv=False
         )
@@ -383,8 +497,14 @@ def projection_overlap_metrics(
         per_k_minima.append(float(np.min(squared)))
         projected_target = projection[k_index].conj().T @ target[k_index]
         captures.append(
-            float(np.linalg.norm(projected_target, ord="fro") ** 2)
-            / target.shape[2]
+            float(
+                np.clip(
+                    np.linalg.norm(projected_target, ord="fro") ** 2
+                    / target.shape[2],
+                    0.0,
+                    1.0,
+                )
+            )
         )
 
     worst_local_index = int(np.argmin(per_k_minima))
@@ -405,20 +525,30 @@ def certify_minimum_principal_overlap(
 ) -> ProjectionOverlapMetrics:
     """Reject a candidate if any validation k/state misses the overlap floor."""
 
+    validated_metrics = ProjectionOverlapMetrics(
+        minimum_principal_overlap_squared=(
+            metrics.minimum_principal_overlap_squared
+        ),
+        mean_principal_overlap_squared=metrics.mean_principal_overlap_squared,
+        target_capture=metrics.target_capture,
+        gauge_anchor_quality=metrics.gauge_anchor_quality,
+        validation_k_indices=metrics.validation_k_indices,
+        worst_k_index=metrics.worst_k_index,
+    )
     threshold = float(threshold)
     if not np.isfinite(threshold) or not 0.0 <= threshold <= 1.0:
         raise ValueError("threshold must be finite and lie in [0, 1]")
-    if metrics.minimum_principal_overlap_squared < threshold:
+    if validated_metrics.minimum_principal_overlap_squared < threshold:
         raise CandidateRejected(
             CandidateRejectionReason.SUBSPACE_OVERLAP,
             "candidate minimum principal overlap squared "
-            f"{metrics.minimum_principal_overlap_squared:.12g} is below "
+            f"{validated_metrics.minimum_principal_overlap_squared:.12g} is below "
             f"the required {threshold:.12g}",
-            k_index=metrics.worst_k_index,
-            measured_value=metrics.minimum_principal_overlap_squared,
+            k_index=validated_metrics.worst_k_index,
+            measured_value=validated_metrics.minimum_principal_overlap_squared,
             threshold=threshold,
         )
-    return metrics
+    return validated_metrics
 
 
 __all__ = [
