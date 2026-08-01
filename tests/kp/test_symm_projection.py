@@ -2171,6 +2171,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                         "target_valley": "Gamma",
                         "supported": True,
                         "antiunitary": False,
+                        "k_pairs": [[0, 0]],
                         "k_map": {"type": "rotation", "angle_deg": 120.0},
                         "q_map": {"type": "rotation", "angle_deg": 120.0},
                         "sector_map": "identity",
@@ -2199,6 +2200,45 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertEqual(entry["raw_h_operator_file"], "representations.npz:C3z")
             matrix = projection_mod._load_matrix(rep_root / entry["raw_h_operator_file"])
             np.testing.assert_allclose(matrix.toarray(), np.diag([1.0, -1.0]))
+
+    def test_symm_rejects_packed_tapw_representation_without_k_route(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            packed_path = Path(td) / "representations.npz"
+            metadata = {
+                "matrices": [
+                    {
+                        "operation": "C3z",
+                        "key": "C3z",
+                        "source_valley": "Gamma",
+                        "target_valley": "Gamma",
+                        "supported": True,
+                    }
+                ]
+            }
+            np.savez_compressed(
+                packed_path,
+                C3z_data=np.array([1.0 + 0.0j]),
+                C3z_indices=np.array([0], dtype=np.int64),
+                C3z_indptr=np.array([0, 1], dtype=np.int64),
+                C3z_shape=np.array([1, 1], dtype=np.int64),
+                metadata_json=json.dumps(metadata),
+            )
+
+            _root, manifest = projection_mod._load_packed_tapw_symmetry_manifest(
+                packed_path
+            )
+            with self.assertRaisesRegex(
+                ValueError, "k_pairs/source_indices.*k rule"
+            ):
+                projection_mod._resolve_operation_entries(
+                    manifest=manifest,
+                    valley="Gamma",
+                    operation_requests=[
+                        {"source": "C3z", "output": "C3z", "requested": "C3z"}
+                    ],
+                    nk=2,
+                    default_k_index=0,
+                )
 
     def test_symm_omitted_operations_runs_and_reports_inference(self) -> None:
         with tempfile.TemporaryDirectory() as td:

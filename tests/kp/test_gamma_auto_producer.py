@@ -149,7 +149,11 @@ def _presentation() -> MagneticPresentation:
     )
 
 
-def _producer_inputs(*, action: np.ndarray | None = None) -> GammaAutomaticProducerInputs:
+def _producer_inputs(
+    *,
+    action: np.ndarray | None = None,
+    kpoints: np.ndarray | None = None,
+) -> GammaAutomaticProducerInputs:
     h0 = np.diag([-2.0, -1.0, 1.0, 2.0]).astype(np.complex128)
     h1 = np.diag([-1.8, -0.8, 1.2, 2.2]).astype(np.complex128)
     source = np.stack((h0, h1), axis=0)
@@ -157,7 +161,11 @@ def _producer_inputs(*, action: np.ndarray | None = None) -> GammaAutomaticProdu
     return GammaAutomaticProducerInputs(
         source_hamiltonians=source,
         k_indices=(0, 1),
-        kpoints=np.asarray([[0.0, 0.0], [0.25, 0.0]], dtype=np.float64),
+        kpoints=(
+            np.asarray([[0.0, 0.0], [0.25, 0.0]], dtype=np.float64)
+            if kpoints is None
+            else kpoints
+        ),
         qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
         num_layer_list=(1, 1),
         num_orb_per_layer_list=((1,), (1,)),
@@ -237,6 +245,22 @@ def test_gamma_auto_preselection_identity_binds_factorized_route_metadata() -> N
     )
 
     assert drifted_hash != preparation.selection_input.action_package_hash
+
+
+def test_gamma_auto_preselection_identity_binds_sampled_kpoints_and_pairs() -> None:
+    config = GammaAutomaticSelectionConfig.from_normalized_config(_config_payload())
+    original = prepare_gamma_automatic_selection(_producer_inputs(), config)
+    shifted = prepare_gamma_automatic_selection(
+        _producer_inputs(
+            kpoints=np.asarray([[0.0, 0.0], [0.5, 0.0]], dtype=np.float64)
+        ),
+        config,
+    )
+
+    contract = original.operation_inputs["E"].route_contract
+    assert contract is not None
+    assert contract["sampled_k_route"]["pairs"] == [[0, 0], [1, 1]]
+    assert original.selection_input.action_package_hash != shifted.selection_input.action_package_hash
 
 
 def test_real_gamma_auto_producer_fails_closed_when_raw_action_breaks_source_route() -> None:

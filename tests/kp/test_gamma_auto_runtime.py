@@ -145,6 +145,7 @@ def _write_packed_gamma_runtime_case(
     include_basis_hash: bool = True,
     top_level_basis_hash: object = "a" * 64,
     operation_basis_hashes: tuple[object | None, object | None] | None = None,
+    declared_k_pairs: list[list[int]] | None = None,
 ) -> Path:
     source = np.diag([-2.0, -1.0, -2.0, -1.0]).astype(np.complex128)
     np.save(tmp_path / "hamk.npy", source[None, :, :])
@@ -200,6 +201,9 @@ def _write_packed_gamma_runtime_case(
     }
     if include_basis_hash:
         metadata["basis_hash"] = top_level_basis_hash
+    if declared_k_pairs is not None:
+        for row in metadata["matrices"]:
+            row["k_pairs"] = declared_k_pairs
     symmetry_dir = tmp_path / "tapw_symmetry"
     symmetry_dir.mkdir()
     import json
@@ -344,6 +348,68 @@ def test_gamma_runtime_config_uses_strict_selection_payload_without_defaults() -
         runtime._load_strict_gamma_auto_config(payload)
 
 
+def test_sampled_k_route_keeps_every_exact_hit_including_duplicate_gamma() -> None:
+    kpoints = np.asarray(
+        [[0.0, 0.0], [1.0, 0.0], [0.0, 1.0], [0.0, 0.0]],
+        dtype=np.float64,
+    )
+
+    pairs = runtime._infer_sampled_k_pairs(
+        operation="mirror",
+        kpoints=kpoints,
+        k_map={
+            "type": "reflection",
+            "axis_deg": 0.0,
+            "reflection_axis_convention": "mirror_axis_deg",
+        },
+    )
+
+    assert pairs == ((0, 0), (3, 0), (1, 1), (0, 3), (3, 3))
+
+
+@pytest.mark.parametrize(
+    ("kpoints", "k_map", "message"),
+    [
+        (
+            np.asarray([[1.0, 0.0]], dtype=np.float64),
+            {"type": "negation"},
+            "no exact sampled k-pairs",
+        ),
+        (
+            np.asarray([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
+            {"type": "rotation", "angle_deg": np.degrees(5.0e-9)},
+            "gray zone",
+        ),
+        (
+            np.asarray([[0.0, 0.0], [np.nan, 0.0]], dtype=np.float64),
+            {"type": "identity"},
+            "finite",
+        ),
+        (
+            np.asarray([[0.0, 0.0]], dtype=np.float64),
+            {"type": "affine"},
+            "unsupported",
+        ),
+        (
+            np.asarray([[0.0, 0.0]], dtype=np.float64),
+            {"type": "rotation", "angle_deg": "120"},
+            "finite numeric",
+        ),
+    ],
+)
+def test_sampled_k_route_fails_closed_for_unresolved_geometry(
+    kpoints: np.ndarray,
+    k_map: dict[str, object],
+    message: str,
+) -> None:
+    with pytest.raises(ValueError, match=message):
+        runtime._infer_sampled_k_pairs(
+            operation="test",
+            kpoints=kpoints,
+            k_map=k_map,
+        )
+
+
 def test_gamma_physical_frontend_loads_layout_without_legacy_nlow(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -424,6 +490,7 @@ def test_gamma_runtime_materializes_real_packed_actions_routes_and_presentation(
     assert tuple(operation.name for operation in inputs.operations) == ("TR", "C3z")
     assert all(operation.q_permutations == ((0,), (0,)) for operation in inputs.operations)
     assert all(operation.sector_map == (0, 1) for operation in inputs.operations)
+    assert all(operation.pairs == ((0, 0),) for operation in inputs.operations)
     assert tuple(generator.name for generator in inputs.presentation.generators) == (
         "TR",
         "C3z",
@@ -512,6 +579,18 @@ def test_gamma_runtime_rejects_non_string_top_level_basis_identity(
     )
 
     with pytest.raises(ValueError, match="lowercase SHA-256 string"):
+        runtime.prepare_gamma_automatic_runtime(cfg_path)
+
+
+def test_gamma_runtime_rejects_packed_k_pairs_that_disagree_with_sampled_route(
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_packed_gamma_runtime_case(
+        tmp_path,
+        declared_k_pairs=[[0, 1]],
+    )
+
+    with pytest.raises(ValueError, match="disagrees with actual sampled k-set"):
         runtime.prepare_gamma_automatic_runtime(cfg_path)
 
 

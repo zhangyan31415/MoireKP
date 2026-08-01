@@ -39,6 +39,7 @@ from .low_energy_selection import (
 from .projection_handoff import (
     GammaRoutedBasisSpec,
     certify_gamma_routed_basis_spec,
+    gamma_sampled_k_route_contract,
 )
 from .projection_selection import (
     CandidateRejected,
@@ -1161,23 +1162,27 @@ def prepare_gamma_automatic_selection(
         )
         for operation in inputs.operations
     )
-    operation_inputs = {
-        operation.name: CandidateOperationInput(
+    operation_inputs: dict[str, CandidateOperationInput] = {}
+    for operation, certified_action in zip(
+        inputs.operations, certified_actions, strict=True
+    ):
+        route_contract = gamma_certified_action_route_contract(
+            certified_action,
+            layout=layout,
+            thresholds=config.routing_thresholds,
+            full_action=operation.full_action,
+        )
+        route_contract["sampled_k_route"] = gamma_sampled_k_route_contract(
+            inputs.kpoints,
+            operation.pairs,
+        )
+        operation_inputs[operation.name] = CandidateOperationInput(
             name=operation.name,
             antiunitary=operation.antiunitary,
             d_full=operation.full_action,
             pairs=operation.pairs,
-            route_contract=gamma_certified_action_route_contract(
-                certified_action,
-                layout=layout,
-                thresholds=config.routing_thresholds,
-                full_action=operation.full_action,
-            ),
+            route_contract=route_contract,
         )
-        for operation, certified_action in zip(
-            inputs.operations, certified_actions, strict=True
-        )
-    }
     required_pairs = {
         operation.name: operation.pairs for operation in inputs.operations
     }

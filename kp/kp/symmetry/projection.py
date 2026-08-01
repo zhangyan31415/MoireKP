@@ -7,7 +7,7 @@ import os
 import shutil
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 import numpy as np
 import yaml
@@ -3995,8 +3995,7 @@ def _load_packed_tapw_symmetry_manifest(packed_path: Path) -> tuple[Path, Mappin
         entry["raw_h_operator_file"] = f"{packed_path.name}:{key}"
         entry["packed_matrix_file"] = packed_path.name
         entry["packed_matrix_key"] = key
-        entry.setdefault("k_pairs", [[0, 0]])
-        entry.setdefault("k_pairs_source", "packed_tapw_single_point_default")
+        entry["_packed_tapw_source"] = True
         matrices.append(entry)
 
     manifest = dict(metadata)
@@ -4073,6 +4072,10 @@ def _resolve_operation_entries(
     operation_requests: Sequence[Mapping[str, Any]],
     nk: int,
     default_k_index: int,
+    packed_k_route_resolver: Callable[
+        [dict[str, Any], str, int], Sequence[tuple[int, int]]
+    ]
+    | None = None,
 ) -> tuple[dict[str, dict[str, Any]], set[tuple[int, int]]]:
     operation_entries: dict[str, dict[str, Any]] = {}
     all_pairs: set[tuple[int, int]] = set()
@@ -4080,7 +4083,17 @@ def _resolve_operation_entries(
         operation = request["source"]
         output_operation = request["output"]
         entry = _operation_entry(manifest, valley, operation)
-        pairs = _pairs_from_entry(entry, nk, default_k_index=default_k_index)
+        if (
+            entry.get("_packed_tapw_source") is True
+            and packed_k_route_resolver is not None
+        ):
+            pairs = list(packed_k_route_resolver(entry, output_operation, nk))
+        else:
+            pairs = _pairs_from_entry(
+                entry,
+                nk,
+                default_k_index=default_k_index,
+            )
         for target_idx, source_idx in pairs:
             if target_idx < 0 or target_idx >= nk or source_idx < 0 or source_idx >= nk:
                 raise IndexError(
@@ -4190,6 +4203,10 @@ def _build_projection_run_context(
     create_output_dir: bool = True,
     validate_full_space_covariance: bool = True,
     require_nlow_state_list: bool = True,
+    packed_k_route_resolver: Callable[
+        [dict[str, Any], str, int], Sequence[tuple[int, int]]
+    ]
+    | None = None,
 ) -> _ProjectionRunContext:
     rep_root, manifest, operation_requests = _load_manifest_and_operation_requests(run_cfg)
     if require_nlow_state_list:
@@ -4228,6 +4245,7 @@ def _build_projection_run_context(
         operation_requests=operation_requests,
         nk=nk,
         default_k_index=default_k_index,
+        packed_k_route_resolver=packed_k_route_resolver,
     )
     spin_sector_sewing, spin_route_inference = _resolve_spin_sector_sewing(
         spin=run_cfg.spin,

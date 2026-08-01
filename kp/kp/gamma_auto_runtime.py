@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import io
+from numbers import Real
 import os
 from pathlib import Path
 import tempfile
@@ -30,6 +31,8 @@ from .blocks.gamma_layout import (
 )
 from .identity import hash_array
 from .projection_handoff import (
+    GAMMA_SAMPLED_K_GRAY_TOLERANCE,
+    GAMMA_SAMPLED_K_MATCH_TOLERANCE,
     GammaRoutedBasisSpec,
     save_gamma_routed_basis_spec,
 )
@@ -132,6 +135,93 @@ def _manifest_sector_map(value: Any, projection: Any) -> tuple[int, int]:
     if tuple(sorted(mapped)) != (0, 1):
         raise ValueError("Gamma manifest sector_map must bijectively map L1/L2")
     return mapped  # type: ignore[return-value]
+
+
+def _strict_sampled_k_map_matrix(operation: str, value: Any) -> np.ndarray:
+    if not isinstance(value, Mapping):
+        raise ValueError(f"operation {operation!r} k_map must be a mapping")
+    map_type = str(value.get("type", "")).strip().lower()
+    allowed_keys: dict[str, set[str]] = {
+        "identity": {"type"},
+        "negation": {"type"},
+        "rotation": {"type", "angle_deg"},
+        "reflection": {"type", "axis_deg", "reflection_axis_convention"},
+    }
+    if map_type not in allowed_keys:
+        raise ValueError(
+            f"operation {operation!r} has unsupported k_map.type {value.get('type')!r}"
+        )
+    if set(value) != allowed_keys[map_type]:
+        raise ValueError(f"operation {operation!r} k_map has an invalid strict schema")
+    if map_type == "identity":
+        return np.eye(2, dtype=np.float64)
+    if map_type == "negation":
+        return -np.eye(2, dtype=np.float64)
+    field = "angle_deg" if map_type == "rotation" else "axis_deg"
+    raw_angle = value[field]
+    if isinstance(raw_angle, (bool, np.bool_)) or not isinstance(raw_angle, Real):
+        raise ValueError(
+            f"operation {operation!r} k_map angle must be finite numeric"
+        )
+    angle = float(raw_angle)
+    if not np.isfinite(angle):
+        raise ValueError(f"operation {operation!r} k_map angle must be finite")
+    theta = np.deg2rad(angle)
+    if map_type == "rotation":
+        return np.asarray(
+            [
+                [np.cos(theta), -np.sin(theta)],
+                [np.sin(theta), np.cos(theta)],
+            ],
+            dtype=np.float64,
+        )
+    if value["reflection_axis_convention"] != "mirror_axis_deg":
+        raise ValueError(
+            f"operation {operation!r} reflection k_map requires mirror_axis_deg"
+        )
+    axis = np.asarray([np.cos(theta), np.sin(theta)], dtype=np.float64)
+    return 2.0 * np.outer(axis, axis) - np.eye(2, dtype=np.float64)
+
+
+def _infer_sampled_k_pairs(
+    *,
+    operation: str,
+    kpoints: Any,
+    k_map: Any,
+) -> tuple[tuple[int, int], ...]:
+    """Enumerate the exact intersection of a sampled k-set with its image."""
+
+    points = np.asarray(kpoints, dtype=np.float64)
+    if points.ndim != 2 or points.shape[0] <= 0 or points.shape[1] != 2:
+        raise ValueError("automatic Gamma sampled kpoints must have shape (Nk, 2)")
+    if not np.all(np.isfinite(points)):
+        raise ValueError("automatic Gamma sampled kpoints must be finite")
+    matrix = _strict_sampled_k_map_matrix(operation, k_map)
+    pairs: list[tuple[int, int]] = []
+    for source_index, source in enumerate(points):
+        mapped = matrix @ source
+        distances = np.linalg.norm(points - mapped, axis=1)
+        exact_targets = np.flatnonzero(
+            distances <= GAMMA_SAMPLED_K_MATCH_TOLERANCE
+        )
+        gray_targets = np.flatnonzero(
+            (distances > GAMMA_SAMPLED_K_MATCH_TOLERANCE)
+            & (distances <= GAMMA_SAMPLED_K_GRAY_TOLERANCE)
+        )
+        if gray_targets.size:
+            raise ValueError(
+                f"operation {operation!r} sampled k-route has a numerical gray zone "
+                f"at source index {source_index}"
+            )
+        pairs.extend(
+            (int(target_index), int(source_index))
+            for target_index in exact_targets
+        )
+    if not pairs:
+        raise ValueError(
+            f"operation {operation!r} has no exact sampled k-pairs on the actual k-set"
+        )
+    return tuple(pairs)
 
 
 def _geometry_q_route(
@@ -391,11 +481,70 @@ def prepare_gamma_automatic_runtime(
     run_cfg = replace(run_cfg, project_cfg=project_cfg)
     if projection._valley_family(run_cfg.valley) != "Gamma":
         raise ValueError("automatic Gamma v1 requires symm.valley in the Gamma family")
+    hamk_file = projection._resolve(
+        run_cfg.material.get("hamk_file"), run_cfg.cfg_dir
+    )
+    if hamk_file is None:
+        raise ValueError("material.hamk_file is required")
+    sampled_kpoints: np.ndarray | None = None
+
+    def resolve_packed_k_route(
+        entry: dict[str, Any],
+        operation: str,
+        nk: int,
+    ) -> tuple[tuple[int, int], ...]:
+        nonlocal sampled_kpoints
+        route_fields = {
+            "k_pairs",
+            "pairs",
+            "target_indices",
+            "source_indices",
+            "source_k_rule",
+            "k_rule",
+            "target_k_rule",
+        }
+        declared_pairs = (
+            tuple(projection._pairs_from_entry(entry, nk))
+            if route_fields.intersection(entry)
+            else None
+        )
+        if sampled_kpoints is None:
+            sampled_kpoints = _load_project_source_kpoints(
+                cfg,
+                material,
+                cfg_dir=run_cfg.cfg_dir,
+                hamk_file=str(hamk_file),
+                nk=nk,
+                project_indices=tuple(range(nk)),
+            )
+        pairs = _infer_sampled_k_pairs(
+            operation=operation,
+            kpoints=sampled_kpoints,
+            k_map=entry.get("k_map"),
+        )
+        if declared_pairs is not None and sorted(declared_pairs) != sorted(pairs):
+            raise ValueError(
+                f"operation {operation!r} packed k-route disagrees with actual "
+                "sampled k-set intersection"
+            )
+        entry["k_pairs"] = [list(pair) for pair in pairs]
+        entry["k_pair_source"] = "actual_sampled_k_set_intersection"
+        entry["_k_pairs_provenance"] = {
+            "schema": "kp.gamma-sampled-k-route.v1",
+            "authored_in_manifest": False,
+            "candidate_source": "actual_sampled_k_set_intersection",
+            "kpoints_hash": hash_array(sampled_kpoints),
+            "match_tolerance": GAMMA_SAMPLED_K_MATCH_TOLERANCE,
+            "gray_tolerance": GAMMA_SAMPLED_K_GRAY_TOLERANCE,
+        }
+        return pairs
+
     ctx = projection._build_projection_run_context(
         run_cfg,
         create_output_dir=False,
         validate_full_space_covariance=False,
         require_nlow_state_list=False,
+        packed_k_route_resolver=resolve_packed_k_route,
     )
     if ctx.mode.strip().casefold() != "gamma":
         raise ValueError("automatic Gamma v1 requires project.mode='Gamma'")
@@ -415,19 +564,16 @@ def prepare_gamma_automatic_runtime(
     source_hamiltonians = np.asarray(ctx.hamk3d, dtype=np.complex128)
     nk = int(source_hamiltonians.shape[0])
     k_indices = tuple(range(nk))
-    hamk_file = projection._resolve(
-        run_cfg.material.get("hamk_file"), run_cfg.cfg_dir
-    )
-    if hamk_file is None:
-        raise ValueError("material.hamk_file is required")
-    kpoints = _load_project_source_kpoints(
-        cfg,
-        material,
-        cfg_dir=run_cfg.cfg_dir,
-        hamk_file=str(hamk_file),
-        nk=nk,
-        project_indices=k_indices,
-    )
+    kpoints = sampled_kpoints
+    if kpoints is None:
+        kpoints = _load_project_source_kpoints(
+            cfg,
+            material,
+            cfg_dir=run_cfg.cfg_dir,
+            hamk_file=str(hamk_file),
+            nk=nk,
+            project_indices=k_indices,
+        )
 
     operations: list[GammaRawOperationSpec] = []
     presentation_records: list[dict[str, Any]] = []

@@ -35,6 +35,38 @@ from .projection_selection import CandidateRejectionReason
 GAMMA_ROUTED_BASIS_HANDOFF_VERSION = "kp_project_gamma_routed_handoff_v2"
 EXPLICIT_LEGACY_BASIS_KIND = "explicit_legacy"
 GAMMA_ROUTED_BASIS_KIND = "gamma_routed"
+GAMMA_SAMPLED_K_MATCH_TOLERANCE = 1.0e-10
+GAMMA_SAMPLED_K_GRAY_TOLERANCE = 1.0e-8
+
+
+def gamma_sampled_k_route_contract(
+    kpoints: Any,
+    pairs: Sequence[tuple[int, int]],
+) -> dict[str, Any]:
+    """Bind a sampled-domain k route to its numeric k-point set."""
+
+    points = np.asarray(kpoints, dtype=np.float64)
+    if points.ndim != 2 or points.shape[0] <= 0 or points.shape[1] != 2:
+        raise ValueError("Gamma sampled kpoints must have shape (Nk, 2)")
+    if not np.all(np.isfinite(points)):
+        raise ValueError("Gamma sampled kpoints must be finite")
+    canonical_pairs = sorted((int(target), int(source)) for target, source in pairs)
+    if not canonical_pairs or len(set(canonical_pairs)) != len(canonical_pairs):
+        raise ValueError("Gamma sampled k route must contain unique nonempty pairs")
+    nk = int(points.shape[0])
+    if any(
+        target < 0 or source < 0 or target >= nk or source >= nk
+        for target, source in canonical_pairs
+    ):
+        raise ValueError("Gamma sampled k route references k outside its numeric domain")
+    return {
+        "schema": "kp.gamma-sampled-k-route.v1",
+        "coverage": "actual_sampled_k_set_intersection",
+        "kpoints_hash": hash_array(points),
+        "pairs": [list(pair) for pair in canonical_pairs],
+        "match_tolerance": GAMMA_SAMPLED_K_MATCH_TOLERANCE,
+        "gray_tolerance": GAMMA_SAMPLED_K_GRAY_TOLERANCE,
+    }
 
 _GAMMA_ROUTED_ARCHIVE_KEYS = frozenset(
     {
@@ -1016,6 +1048,11 @@ def certify_gamma_routed_basis_spec(
                 thresholds=thresholds,
                 full_action=operation.d_full,
             )
+            if "sampled_k_route" in operation.route_contract:
+                expected_contract["sampled_k_route"] = gamma_sampled_k_route_contract(
+                    kpoints,
+                    required_pairs[name],
+                )
             if operation.route_contract != expected_contract:
                 raise _reject(
                     CandidateRejectionReason.HANDOFF_IDENTITY,
