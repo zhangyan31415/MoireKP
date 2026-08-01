@@ -1,4 +1,4 @@
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from typing import Any, List, Dict, Optional, Sequence, Tuple, Union
 import yaml
 from pathlib import Path
@@ -695,6 +695,7 @@ class Config:
     kpath: Optional[Dict[str, Any]] = None
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
     field_config: Dict[str, Any] = field(default_factory=dict)
+    resolved_structure_input: Optional[Any] = field(default=None, init=False, repr=False, compare=False)
 
     def apply_workflow_section(self, mode: Optional[str] = None) -> None:
         """Apply release-facing workflow section fields to the internal runtime config."""
@@ -946,11 +947,12 @@ class Config:
             case["output_root"] = portable(self.paths.output_dir)
             config_dict["case"] = case
             config_dict["twist"] = {
-                "bravais": self.twist.bravais,
                 "twist_index_m": int(self.twist.twist_index_m),
                 "twist_layer": list(self.twist.twist_layer),
                 "spin": bool(self.twist.spin),
             }
+            if self.system_input.explicit_bravais is not None:
+                config_dict["twist"]["bravais"] = self.system_input.explicit_bravais
             paths = {
                 "H_file": portable(self.paths.H_file),
                 "input_file": portable(self.paths.input_file),
@@ -966,6 +968,8 @@ class Config:
                 config_dict[name] = section
         if self.field_config:
             config_dict["field"] = dict(self.field_config)
+        config_dict["cluster"] = asdict(self.cluster)
+        config_dict["symmetry_analysis"] = asdict(self.symmetry_analysis)
         destination.parent.mkdir(parents=True, exist_ok=True)
         with destination.open("w", encoding="utf-8") as handle:
             yaml.safe_dump(config_dict, handle, sort_keys=False)

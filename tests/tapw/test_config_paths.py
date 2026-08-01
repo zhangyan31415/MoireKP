@@ -240,6 +240,66 @@ def test_canonical_system_save_yaml_round_trip_remains_release_facing(tmp_path):
     assert reloaded.bands == config.bands
 
 
+def test_save_yaml_preserves_cluster_top_level_symmetry_analysis_and_optional_overlap(tmp_path):
+    source_dir = tmp_path / "source"
+    saved_dir = tmp_path / "relocated" / "configs"
+    source_dir.mkdir()
+    saved_dir.mkdir(parents=True)
+    config_path = _write_canonical_system_config(source_dir)
+    payload = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    payload["system"].pop("overlap")
+    payload["cluster"] = {
+        "layer_eps": 0.75,
+        "layer_min_samples": 2,
+        "sublayer_eps": 0.25,
+        "sublayer_min_samples": 3,
+        "atom_eps": 0.15,
+        "atom_min_samples": 4,
+        "period": 6.0,
+        "k_max": 5,
+    }
+    payload["symmetry_analysis"] = {
+        "enable": True,
+        "valleys": [5],
+        "tolerance": 0.004,
+        "spglib_symprec": 0.008,
+        "validation": "full",
+        "output_dir": "certificates",
+        "debug": True,
+        "developer_outputs": True,
+    }
+    config_path.write_text(yaml.safe_dump(payload, sort_keys=False), encoding="utf-8")
+    config = Config.from_yaml(str(config_path))
+    saved_path = saved_dir / "config.yaml"
+
+    config.save_yaml(str(saved_path))
+    saved_payload = yaml.safe_load(saved_path.read_text(encoding="utf-8"))
+    reloaded = Config.from_yaml(str(saved_path))
+
+    assert "overlap" not in saved_payload["system"]
+    assert not Path(saved_payload["system"]["structure"]).is_absolute()
+    assert reloaded.system_input.overlap is None
+    assert reloaded.system_input.structure == config.system_input.structure
+    assert reloaded.cluster == config.cluster
+    assert reloaded.symmetry_analysis == config.symmetry_analysis
+
+
+def test_legacy_save_yaml_preserves_unset_explicit_bravais(tmp_path):
+    source_dir = tmp_path / "source"
+    saved_dir = tmp_path / "saved"
+    source_dir.mkdir()
+    saved_dir.mkdir()
+    config = Config.from_yaml(str(_write_release_path_config(source_dir)))
+    saved_path = saved_dir / "config.yaml"
+
+    config.save_yaml(str(saved_path))
+    payload = yaml.safe_load(saved_path.read_text(encoding="utf-8"))
+    reloaded = Config.from_yaml(str(saved_path))
+
+    assert "bravais" not in payload["twist"]
+    assert reloaded.system_input.explicit_bravais is None
+
+
 def test_legacy_release_save_yaml_round_trip_does_not_emit_removed_sections(tmp_path):
     source_dir = tmp_path / "source"
     saved_dir = tmp_path / "saved"
