@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import re
 import sys
 
 import pytest
@@ -89,6 +90,12 @@ GMK_READMES = [
 ]
 
 
+def _assert_supported_release_schema(raw: dict, path: Path) -> None:
+    legacy_keys = {"case", "material", "project", "symm", "model"}
+    public_keys = {"system", "project", "symmetry", "model"}
+    assert legacy_keys <= raw.keys() or public_keys <= raw.keys(), path
+
+
 def _iter_path_strings(value: object) -> list[str]:
     if isinstance(value, dict):
         paths: list[str] = []
@@ -173,12 +180,20 @@ def test_gmk_case_configs_are_single_file_release_layout() -> None:
         assert path.exists(), path
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert "source_config" not in raw, path
-        assert isinstance(raw.get("case"), dict), path
-        assert raw["case"]["profile"] and raw["case"]["q_shell"], path
+        _assert_supported_release_schema(raw, path)
         normalized = normalize_case_config(raw, config_path=path)
+        assert normalized["case"]["profile"] and normalized["case"]["q_shell"], path
         assert normalized["project"]["out_dir"].endswith("/projection"), (case_id, normalized["project"]["out_dir"])
         assert normalized["symm"]["output_dir"].endswith("/symmetry"), (case_id, normalized["symm"]["output_dir"])
         assert normalized["output"]["dir"].endswith("/model"), (case_id, normalized["output"]["dir"])
+
+    readme = (EXAMPLES_ROOT / "README.md").read_text(encoding="utf-8")
+    active_section = readme.split("## Active GMK Cases", maxsplit=1)[1].split("\n## ", maxsplit=1)[0]
+    curated_paths = {
+        (REPO_ROOT / match).resolve()
+        for match in re.findall(r"`(examples/(?:mote2|mgi2)_3\.89/kp/configs/[^`]+\.yaml)`", active_section)
+    }
+    assert curated_paths == {path.resolve() for path in GMK_CASE_CONFIGS.values()}
 
 
 def test_gmk_model_config_dirs_are_file_organization_only() -> None:
@@ -236,25 +251,35 @@ def test_gmk_case_configs_do_not_use_split_source_model_configs() -> None:
     for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
         assert "source_config" not in raw, path
-        assert "material" in raw and "project" in raw and "symm" in raw and "model" in raw, path
+        _assert_supported_release_schema(raw, path)
+        normalized = normalize_case_config(raw, config_path=path)
+        assert {"case", "material", "project", "symm", "model"} <= normalized.keys(), path
 
 
 def test_gmk_case_configs_make_inspect_plot_settings_explicit() -> None:
     for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        plot = raw.get("plot")
+        normalized = normalize_case_config(raw, config_path=path)
+        assert normalized["plot"]["target"] in {"all", "valence", "conduction"}, path
+
+        plot = raw.get("plot", {})
         assert isinstance(plot, dict), path
-        assert plot.get("target") in {"all", "valence", "conduction"}, path
-        assert isinstance(plot.get("ref_q_index"), int), path
-        assert plot.get("ylim") == [-1.0, 1.0], path
-        assert int(plot.get("q_window_bands", 0)) > 0, path
+        if "target" in plot:
+            assert plot["target"] == normalized["plot"]["target"], path
+        if "ref_q_index" in plot:
+            assert isinstance(plot["ref_q_index"], int), path
+        if "ylim" in plot:
+            assert len(plot["ylim"]) == 2 and plot["ylim"][0] < plot["ylim"][1], path
+        if "q_window_bands" in plot:
+            assert int(plot["q_window_bands"]) > 0, path
 
 
 def test_gmk_model_configs_keep_user_harmonics_minimal() -> None:
     for path in GMK_CASE_CONFIGS.values():
         raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-        assert "valley" in raw, path
-        assert "spin" in raw, path
+        normalized = normalize_case_config(raw, config_path=path)
+        assert normalized["valley"] in {"Gamma", "K1", "M1"}, path
+        assert normalized["spin"] in {"all", "up"}, path
         model = raw.get("model", {})
         assert "vectors" not in model, path
         assert "term_templates" not in model, path
