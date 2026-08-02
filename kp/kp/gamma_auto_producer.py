@@ -16,6 +16,11 @@ from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .blocks import (
+    build_gamma_model_anchor_spec,
+    build_gamma_model_frames,
+    validate_gamma_model_anchor_reference,
+)
 from .blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from .blocks.gamma_layout import (
     GammaCertifiedRawAction,
@@ -39,6 +44,7 @@ from .low_energy_selection import (
 )
 from .projection_handoff import (
     GammaRoutedBasisSpec,
+    assemble_gamma_model_frame,
     certify_gamma_routed_basis_spec,
     gamma_sampled_k_route_contract,
 )
@@ -80,7 +86,7 @@ from .symmetry.joint_exactification import (
 )
 
 
-GAMMA_AUTO_PRODUCER_VERSION = "kp.gamma-auto-producer.v1"
+GAMMA_AUTO_PRODUCER_VERSION = "kp.gamma-auto-producer.v2"
 GAMMA_AUTO_CANDIDATE_SCHEMA = "kp.gamma-auto-candidate.v1"
 GAMMA_AUTO_METRIC_SCHEMA = "kp.candidate-metrics.v1"
 GAMMA_AUTO_ORDERING_RULE = "dimension-error-overlap-symmetry-v1"
@@ -875,6 +881,143 @@ def _certificate_metrics(
     )
 
 
+def _normalized_frobenius_residual(matrix: Any, *, rank: int) -> float:
+    value = np.asarray(matrix, dtype=np.complex128)
+    return float(
+        np.linalg.norm(value, ord="fro") / np.sqrt(float(max(1, int(rank))))
+    )
+
+
+def _relative_frobenius_residual(lhs: Any, rhs: Any) -> float:
+    left = np.asarray(lhs, dtype=np.complex128)
+    right = np.asarray(rhs, dtype=np.complex128)
+    denominator = float(np.linalg.norm(left, ord="fro"))
+    if denominator == 0.0:
+        denominator = 1.0
+    return float(np.linalg.norm(left - right, ord="fro") / denominator)
+
+
+def _require_residual_gate(
+    residuals: Mapping[str, float],
+    *,
+    tolerance: float,
+    context: str,
+) -> None:
+    if not residuals:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"{context}: no residual evidence was supplied",
+        )
+    nonfinite = next(
+        (
+            (name, float(value))
+            for name, value in residuals.items()
+            if not np.isfinite(value)
+        ),
+        None,
+    )
+    if nonfinite is not None:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"{context}: {nonfinite[0]}={nonfinite[1]:.3e} is nonfinite",
+        )
+    worst_name, worst_value = max(
+        residuals.items(), key=lambda item: float(item[1])
+    )
+    if float(worst_value) > tolerance:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"{context}: {worst_name}={float(worst_value):.3e} "
+            f"exceeds {tolerance:.3e}",
+        )
+
+
+def _certify_dual_frame_geometry(
+    *,
+    routed_low: np.ndarray,
+    routed_high: np.ndarray | None,
+    model_low: np.ndarray,
+    routed_frames_by_q: Sequence[np.ndarray],
+    model_frames_by_q: Sequence[np.ndarray],
+    layout: GammaRowLayout,
+    group_ranks: Sequence[int],
+    tolerance: float,
+    k_index: int,
+) -> np.ndarray:
+    model_dimension = int(model_low.shape[1])
+    identity = np.eye(model_dimension, dtype=np.complex128)
+    bridge = routed_low.conj().T @ model_low
+    _require_residual_gate(
+        {
+            "routed_orthonormality": _normalized_frobenius_residual(
+                routed_low.conj().T @ routed_low - identity,
+                rank=model_dimension,
+            ),
+            "model_orthonormality": _normalized_frobenius_residual(
+                model_low.conj().T @ model_low - identity,
+                rank=model_dimension,
+            ),
+            "bridge_left_unitarity": _normalized_frobenius_residual(
+                bridge.conj().T @ bridge - identity,
+                rank=model_dimension,
+            ),
+            "bridge_right_unitarity": _normalized_frobenius_residual(
+                bridge @ bridge.conj().T - identity,
+                rank=model_dimension,
+            ),
+            "bridge_reconstruction": _normalized_frobenius_residual(
+                routed_low @ bridge - model_low,
+                rank=model_dimension,
+            ),
+        },
+        tolerance=tolerance,
+        context=f"Gamma dual-frame geometry gate failed at k={k_index}",
+    )
+
+    local_rank = sum(int(value) for value in group_ranks)
+    high_per_q = layout.same_q_dimension - local_rank
+    local_identity = np.eye(layout.same_q_dimension, dtype=np.complex128)
+    for q_index, (raw_routed_frame, raw_model_frame) in enumerate(
+        zip(routed_frames_by_q, model_frames_by_q, strict=True)
+    ):
+        routed_frame = np.asarray(raw_routed_frame, dtype=np.complex128)
+        model_frame = np.asarray(raw_model_frame, dtype=np.complex128)
+        residuals = {
+            "projector": _normalized_frobenius_residual(
+                routed_frame @ routed_frame.conj().T
+                - model_frame @ model_frame.conj().T,
+                rank=local_rank,
+            )
+        }
+        if routed_high is not None:
+            rows = layout.same_q_full_rows(q_index)
+            high_columns = np.arange(
+                q_index * high_per_q,
+                (q_index + 1) * high_per_q,
+                dtype=np.intp,
+            )
+            local_high = routed_high[np.ix_(rows, high_columns)]
+            complete = np.column_stack((model_frame, local_high))
+            residuals.update(
+                {
+                    "gram_completeness": _normalized_frobenius_residual(
+                        complete.conj().T @ complete - local_identity,
+                        rank=layout.same_q_dimension,
+                    ),
+                    "cogram_completeness": _normalized_frobenius_residual(
+                        complete @ complete.conj().T - local_identity,
+                        rank=layout.same_q_dimension,
+                    ),
+                }
+            )
+        _require_residual_gate(
+            residuals,
+            tolerance=tolerance,
+            context=f"Gamma dual-frame local gate failed at k={k_index}, q={q_index}",
+        )
+    return bridge
+
+
 def _evaluate_candidate(
     *,
     seed: tuple[int, ...],
@@ -944,7 +1087,37 @@ def _evaluate_candidate(
         require_complete_clusters=True,
     )
     anchors = _reference_anchor_frames(reference)
+    model_anchor_spec = build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=local_values[reference_position],
+        reference_eigenvectors_by_q=local_vectors[reference_position],
+        joint_band_indices=joint,
+        group_ranks=reference.group_dimensions,
+        layout=layout,
+        gauge_config=None,
+        projector_tolerance=config.routing_thresholds.projector_residual,
+        orthonormality_tolerance=config.routing_thresholds.projector_residual,
+    )
+    validate_gamma_model_anchor_reference(
+        reference_eigenvalues_by_q=local_values[reference_position],
+        reference_eigenvectors_by_q=local_vectors[reference_position],
+        layout=layout,
+        anchor_spec=model_anchor_spec,
+    )
+    reference_columns = np.asarray(joint, dtype=np.intp)
+    reference_joint_frame = np.asarray(
+        local_vectors[reference_position][model_anchor_spec.reference_q_index],
+        dtype=np.complex128,
+    )[:, reference_columns]
+    model_reference_projector = (
+        reference_joint_frame @ reference_joint_frame.conj().T
+    )
+    if hash_array(model_reference_projector) != model_anchor_spec.reference_projector_hash:
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma model reference projector differs from its SCDM anchor identity",
+        )
     routed_by_position: list[GammaRoutedFrames] = []
+    model_frames_by_position = []
     routing_hashes: list[str] = []
     for position, k_index in enumerate(inputs.k_indices):
         little_group_actions = little_group_actions_by_k[k_index]
@@ -964,6 +1137,14 @@ def _evaluate_candidate(
             thresholds=config.routing_thresholds,
         )
         routed_by_position.append(routed)
+        model_frames_by_position.append(
+            build_gamma_model_frames(
+                eigenvalues_by_q=local_values[position],
+                eigenvectors_by_q=local_vectors[position],
+                layout=layout,
+                anchor_spec=model_anchor_spec,
+            )
+        )
         routing_hashes.append(
             _routing_certificate_hash(
                 k_index=k_index,
@@ -975,28 +1156,105 @@ def _evaluate_candidate(
             )
         )
 
+    heff_covariance_tolerance = float(
+        config.candidate_symmetry_thresholds.heff_covariance_residual
+    )
+    if (
+        not np.isfinite(heff_covariance_tolerance)
+        or heff_covariance_tolerance <= 0.0
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma routed/model Heff covariance gate requires a finite positive tolerance",
+        )
     u_low_by_position: list[np.ndarray] = []
+    routed_heff: list[np.ndarray] = []
     authoritative_heff: list[np.ndarray] = []
-    for position, routed in enumerate(routed_by_position):
+    for position, (routed, model_frames) in enumerate(
+        zip(routed_by_position, model_frames_by_position, strict=True)
+    ):
         include_high = config.downfold.options.method != "first_order"
-        u_low, u_high = assemble_gamma_routed_projectors(
+        routed_low, routed_high = assemble_gamma_routed_projectors(
             routed,
             layout=layout,
             thresholds=config.routing_thresholds,
             include_high=include_high,
         )
-        result = downfold_from_projectors(
+        model_low = assemble_gamma_model_frame(model_frames, layout=layout)
+        bridge = _certify_dual_frame_geometry(
+            routed_low=routed_low,
+            routed_high=routed_high,
+            model_low=model_low,
+            routed_frames_by_q=routed.local_frames_by_q,
+            model_frames_by_q=model_frames.local_frames_by_q,
+            layout=layout,
+            group_ranks=routed.group_dimensions,
+            tolerance=config.routing_thresholds.projector_residual,
+            k_index=inputs.k_indices[position],
+        )
+        routed_result = downfold_from_projectors(
             inputs.source_hamiltonians[position],
-            u_low,
-            u_high,
+            routed_low,
+            routed_high,
             config.downfold.options,
         )
-        if not np.all(np.isfinite(result.heff)):
-            raise ValueError("automatic Gamma downfold produced nonfinite Heff")
-        if result.hermiticity_residual > config.candidate_symmetry_thresholds.heff_hermiticity_residual:
-            raise ValueError("automatic Gamma downfold failed the Hermiticity gate")
-        u_low_by_position.append(u_low)
-        authoritative_heff.append(np.asarray(result.heff, dtype=np.complex128))
+        model_result = downfold_from_projectors(
+            inputs.source_hamiltonians[position],
+            model_low,
+            routed_high,
+            config.downfold.options,
+        )
+        routed_matrix = np.asarray(routed_result.heff, dtype=np.complex128)
+        model_matrix = np.asarray(model_result.heff, dtype=np.complex128)
+        if not (
+            np.all(np.isfinite(routed_matrix))
+            and np.all(np.isfinite(model_matrix))
+        ):
+            raise ValueError(
+                "automatic Gamma routed/model downfold produced nonfinite Heff"
+            )
+        hermiticity_tolerance = float(
+            config.candidate_symmetry_thresholds.heff_hermiticity_residual
+        )
+        _require_residual_gate(
+            {
+                "routed_heff": max(
+                    float(routed_result.hermiticity_residual),
+                    _relative_frobenius_residual(
+                        routed_matrix, routed_matrix.conj().T
+                    ),
+                ),
+                "model_heff": max(
+                    float(model_result.hermiticity_residual),
+                    _relative_frobenius_residual(
+                        model_matrix, model_matrix.conj().T
+                    ),
+                ),
+            },
+            tolerance=hermiticity_tolerance,
+            context=(
+                "Gamma routed/model downfold Hermiticity gate failed at "
+                f"k={inputs.k_indices[position]}"
+            ),
+        )
+        expected_model_matrix = bridge.conj().T @ routed_matrix @ bridge
+        covariance_residual = _relative_frobenius_residual(
+            model_matrix, expected_model_matrix
+        )
+        if (
+            not np.isfinite(covariance_residual)
+            or covariance_residual > heff_covariance_tolerance
+        ):
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma routed/model Heff covariance residual at "
+                f"k={inputs.k_indices[position]} is {covariance_residual:.3e}, "
+                f"exceeding {heff_covariance_tolerance:.3e}",
+            )
+        u_low_by_position.append(model_low)
+        routed_heff.append(routed_matrix)
+        authoritative_heff.append(model_matrix)
+    routed_heff_tensor = np.stack(routed_heff, axis=0)
     heff_tensor = np.stack(authoritative_heff, axis=0)
     states = {
         k_index: CandidateProjectionState(
@@ -1038,6 +1296,13 @@ def _evaluate_candidate(
         )
 
     model_dim = int(heff_tensor.shape[-1])
+    model_frame_tensor = np.stack(
+        [
+            np.stack(model_frames.local_frames_by_q, axis=0)
+            for model_frames in model_frames_by_position
+        ],
+        axis=0,
+    )
     artifact_identity = build_projection_basis_identity(
         qset1=inputs.qsets[0],
         qset2=inputs.qsets[1],
@@ -1049,8 +1314,8 @@ def _evaluate_candidate(
             "projection_basis_kind": "gamma_routed",
             "joint_band_indices": list(joint),
         },
-        resolved_norb_fix_list=[],
-        gauge_mode="gamma_routed",
+        resolved_norb_fix_list=model_anchor_spec.resolved_norb_fix_list,
+        gauge_mode="auto_scdm",
         num_layer_list=list(layout.num_layer_list),
         num_orb_per_layer_list=[
             [layout.uniform_orbital_count] * count
@@ -1059,15 +1324,7 @@ def _evaluate_candidate(
         orbital_block_dim=layout.same_q_dimension,
         model_dim=model_dim,
         k_indices=inputs.k_indices,
-        gauge_frame_hash=hash_array(
-            np.stack(
-                [
-                    np.stack(routed.local_frames_by_q, axis=0)
-                    for routed in routed_by_position
-                ],
-                axis=0,
-            )
-        ),
+        gauge_frame_hash=hash_array(model_frame_tensor),
     )
     handoff = certify_gamma_routed_basis_spec(
         candidate_id=candidate_id,
@@ -1077,6 +1334,12 @@ def _evaluate_candidate(
         k_indices=inputs.k_indices,
         kpoints=inputs.kpoints,
         routed_frames=tuple(routed_by_position),
+        model_reference_k_index=config.reference_k_index,
+        model_anchor_spec=model_anchor_spec,
+        model_frames=tuple(model_frames_by_position),
+        model_reference_projector=model_reference_projector,
+        routed_heff=routed_heff_tensor,
+        heff_covariance_tolerance=heff_covariance_tolerance,
         authoritative_heff=heff_tensor,
         heff_k_indices=inputs.k_indices,
         closure_certificate_hashes=closure_hashes,

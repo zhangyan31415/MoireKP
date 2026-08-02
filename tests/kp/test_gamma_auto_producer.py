@@ -9,6 +9,7 @@ import pytest
 
 from kp import blocks as blocks_mod
 from kp import gamma_auto_producer as producer_mod
+from kp.blocks.downfold import downfold_from_projectors
 from kp.gamma_auto_producer import (
     GammaAutomaticProducerInputs,
     GammaAutomaticSelectionConfig,
@@ -187,6 +188,105 @@ def _producer_inputs(
     )
 
 
+def _dual_frame_q2_case(
+    method: str,
+) -> tuple[GammaAutomaticProducerInputs, GammaAutomaticSelectionConfig]:
+    payload = _config_payload()
+    payload["selection_thresholds"] = {
+        "band_rms_mev": 1.0e3,
+        "band_max_mev": 1.0e3,
+        "subspace_overlap": 1.0e-12,
+        "symmetry_residual": 1.0e-9,
+        "symmetry_leakage": 1.0e-9,
+    }
+    payload["target_window"] = {
+        "edge": "valence",
+        "band_count": 4,
+        "validation_k_indices": [0, 1],
+        "energy_reference_ev": 0.0,
+        "degeneracy_tolerance_mev": 1.0e-6,
+    }
+    payload["downfold"] = {
+        **payload["downfold"],  # type: ignore[dict-item]
+        "method": method,
+        "e_ref": None if method == "first_order" else -1.4,
+        "fail_on_near_pole": False,
+        "compute_pole_diagnostics": False,
+    }
+    qsets = (
+        np.asarray([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
+        np.asarray([[0.0, 0.0], [1.0, 0.0]], dtype=np.float64),
+    )
+    basis_hash = hash_array(np.arange(8, dtype=np.int64))
+    layout = GammaRowLayout.build(
+        qsets=qsets,
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash=basis_hash,
+    )
+    hamiltonians: list[np.ndarray] = []
+    for k_position in range(2):
+        hamiltonian = np.zeros((layout.full_dimension, layout.full_dimension), dtype=np.complex128)
+        for q_index, angle in enumerate(
+            (0.20 + 0.03 * k_position, -0.27 + 0.02 * k_position)
+        ):
+            rotation = np.eye(layout.same_q_dimension, dtype=np.complex128)
+            rotation[:2, :2] = np.asarray(
+                [
+                    [np.cos(angle), -np.sin(angle)],
+                    [np.sin(angle), np.cos(angle)],
+                ]
+            )
+            local_values = np.asarray(
+                [-2.2, -1.2, 1.1, 2.1]
+                if q_index == 0
+                else [-1.9, -0.9, 1.3, 2.3],
+                dtype=np.float64,
+            )
+            local_values += 0.04 * k_position
+            rows = layout.same_q_full_rows(q_index)
+            hamiltonian[np.ix_(rows, rows)] = (
+                rotation @ np.diag(local_values) @ rotation.conj().T
+            )
+        q0_rows = layout.same_q_full_rows(0)
+        q1_rows = layout.same_q_full_rows(1)
+        q_coupling = np.zeros(
+            (layout.same_q_dimension, layout.same_q_dimension),
+            dtype=np.complex128,
+        )
+        q_coupling[0, 2] = 0.12 + 0.01j
+        q_coupling[1, 3] = -0.09 + 0.02j
+        q_coupling[2, 0] = 0.07 - 0.01j
+        q_coupling[3, 1] = -0.05
+        hamiltonian[np.ix_(q0_rows, q1_rows)] = q_coupling
+        hamiltonian[np.ix_(q1_rows, q0_rows)] = q_coupling.conj().T
+        hamiltonians.append(hamiltonian)
+    return (
+        GammaAutomaticProducerInputs(
+            source_hamiltonians=np.stack(hamiltonians, axis=0),
+            k_indices=(0, 1),
+            kpoints=np.asarray([[0.0, 0.0], [0.25, 0.0]], dtype=np.float64),
+            qsets=qsets,
+            num_layer_list=(1, 1),
+            num_orb_per_layer_list=((1,), (1,)),
+            tapw_source_basis_hash=basis_hash,
+            operations=(
+                GammaRawOperationSpec(
+                    name="E",
+                    full_action=np.eye(layout.full_dimension, dtype=np.complex128),
+                    antiunitary=False,
+                    q_permutations=((0, 1), (0, 1)),
+                    sector_map=(0, 1),
+                    pairs=((0, 0), (1, 1)),
+                ),
+            ),
+            presentation=_presentation(),
+        ),
+        GammaAutomaticSelectionConfig.from_normalized_config(payload),
+    )
+
+
 def test_gamma_auto_producer_hands_off_model_frame_not_routing_frame() -> None:
     inputs = _producer_inputs()
     hamiltonians = []
@@ -278,6 +378,227 @@ def test_gamma_auto_producer_hands_off_model_frame_not_routing_frame() -> None:
         )
 
 
+@pytest.mark.parametrize("method", ["first_order", "fixed_schur"])
+def test_gamma_auto_dual_frame_heff_is_bridge_covariant_and_bound(
+    method: str,
+) -> None:
+    inputs, config = _dual_frame_q2_case(method)
+
+    result = produce_gamma_automatic_selection(inputs, config)
+
+    handoff = result.handoff
+    assert handoff.model_reference_projector_hash == hash_array(
+        handoff.model_reference_projector
+    )
+    assert (
+        handoff.model_reference_projector_hash
+        == handoff.model_anchor_spec.reference_projector_hash
+    )
+    assert handoff.routed_heff_hash == hash_array(handoff.routed_heff)
+    assert handoff.heff_covariance_residuals_hash == hash_array(
+        handoff.heff_covariance_residuals
+    )
+    assert handoff.heff_covariance_tolerance == pytest.approx(
+        config.candidate_symmetry_thresholds.heff_covariance_residual
+    )
+    assert handoff.heff_covariance_evidence_hash != "0" * 64
+    assert np.max(handoff.heff_covariance_residuals) <= handoff.heff_covariance_tolerance
+    for position, k_index in enumerate(handoff.k_indices):
+        routing, routed_high = handoff.assemble_routing_for_k(
+            k_index,
+            include_high=method != "first_order",
+        )
+        model, model_heff = handoff.model_state_for_k(k_index)
+        bridge = handoff.routing_to_model_for_k(k_index)
+        assert not np.allclose(routing, model, rtol=0.0, atol=1.0e-10)
+        expected_routed = downfold_from_projectors(
+            inputs.source_hamiltonians[position],
+            routing,
+            routed_high,
+            config.downfold.options,
+        ).heff
+        np.testing.assert_allclose(
+            handoff.routed_heff[position],
+            expected_routed,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            model_heff,
+            bridge.conj().T @ handoff.routed_heff[position] @ bridge,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        if method == "fixed_schur":
+            assert routed_high is not None
+            low_high_coupling = model.conj().T @ inputs.source_hamiltonians[position] @ routed_high
+            assert np.linalg.norm(low_high_coupling, ord="fro") > 1.0e-3
+            high_per_q = handoff.layout.same_q_dimension - sum(handoff.group_ranks)
+            for q_index in range(handoff.layout.q_count):
+                rows = handoff.layout.same_q_full_rows(q_index)
+                high_columns = np.arange(
+                    q_index * high_per_q,
+                    (q_index + 1) * high_per_q,
+                    dtype=np.intp,
+                )
+                local_high = routed_high[np.ix_(rows, high_columns)]
+                complete = np.column_stack(
+                    (handoff.model_frames[position, q_index], local_high)
+                )
+                np.testing.assert_allclose(
+                    complete.conj().T @ complete,
+                    np.eye(handoff.layout.same_q_dimension),
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+                np.testing.assert_allclose(
+                    complete @ complete.conj().T,
+                    np.eye(handoff.layout.same_q_dimension),
+                    rtol=0.0,
+                    atol=1.0e-12,
+                )
+
+
+def test_gamma_auto_dual_frame_covariance_drift_fails_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs, config = _dual_frame_q2_case("fixed_schur")
+    original = producer_mod.downfold_from_projectors
+    call_count = 0
+
+    def drift_one_downfold(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        result = original(*args, **kwargs)
+        if call_count == 2:
+            drifted = np.array(result.heff, copy=True)
+            drifted[0, 0] += 1.0e-3
+            result.heff = drifted
+        return result
+
+    monkeypatch.setattr(
+        producer_mod,
+        "downfold_from_projectors",
+        drift_one_downfold,
+    )
+
+    with pytest.raises(Exception, match=r"(?i)covariance (?:residual|gate|drift)"):
+        produce_gamma_automatic_selection(inputs, config)
+
+    assert call_count >= 2
+
+
+def test_gamma_auto_model_builder_reuses_prepared_local_eigensystems(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs, config = _dual_frame_q2_case("first_order")
+    preparation = prepare_gamma_automatic_selection(inputs, config)
+    original_anchor = producer_mod.build_gamma_model_anchor_spec
+    original_validate = producer_mod.validate_gamma_model_anchor_reference
+    original_frames = producer_mod.build_gamma_model_frames
+    anchor_calls = 0
+    validation_calls = 0
+    frame_positions: list[int] = []
+
+    def anchor_spy(**kwargs):
+        nonlocal anchor_calls
+        anchor_calls += 1
+        reference_position = inputs.k_indices.index(config.reference_k_index)
+        assert kwargs["reference_eigenvalues_by_q"] is preparation.local_values[
+            reference_position
+        ]
+        assert kwargs["reference_eigenvectors_by_q"] is preparation.local_vectors[
+            reference_position
+        ]
+        return original_anchor(**kwargs)
+
+    def validation_spy(**kwargs):
+        nonlocal validation_calls
+        validation_calls += 1
+        reference_position = inputs.k_indices.index(config.reference_k_index)
+        assert kwargs["reference_eigenvalues_by_q"] is preparation.local_values[
+            reference_position
+        ]
+        assert kwargs["reference_eigenvectors_by_q"] is preparation.local_vectors[
+            reference_position
+        ]
+        return original_validate(**kwargs)
+
+    def frames_spy(**kwargs):
+        position = next(
+            position
+            for position, values in enumerate(preparation.local_values)
+            if kwargs["eigenvalues_by_q"] is values
+        )
+        assert kwargs["eigenvectors_by_q"] is preparation.local_vectors[position]
+        frame_positions.append(position)
+        return original_frames(**kwargs)
+
+    monkeypatch.setattr(
+        producer_mod,
+        "build_gamma_model_anchor_spec",
+        anchor_spy,
+    )
+    monkeypatch.setattr(
+        producer_mod,
+        "validate_gamma_model_anchor_reference",
+        validation_spy,
+    )
+    monkeypatch.setattr(producer_mod, "build_gamma_model_frames", frames_spy)
+    monkeypatch.setattr(
+        producer_mod,
+        "_local_eigensystems",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("candidate evaluation must reuse prepared local eigensystems")
+        ),
+    )
+
+    evaluate_gamma_automatic_selection(preparation)
+
+    assert anchor_calls == 1
+    assert validation_calls == 1
+    assert frame_positions == list(range(len(inputs.k_indices)))
+
+
+def test_gamma_auto_candidate_and_artifact_identity_bind_model_gauge(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    inputs, config = _dual_frame_q2_case("first_order")
+    original_identity = producer_mod.build_projection_basis_identity
+    identity_calls: list[dict[str, object]] = []
+
+    def identity_spy(**kwargs):
+        identity_calls.append(dict(kwargs))
+        return original_identity(**kwargs)
+
+    monkeypatch.setattr(producer_mod, "build_projection_basis_identity", identity_spy)
+
+    result = produce_gamma_automatic_selection(inputs, config)
+
+    assert len(identity_calls) == 1
+    identity_call = identity_calls[0]
+    assert identity_call["gauge_mode"] == "auto_scdm"
+    assert identity_call["gauge_frame_hash"] == hash_array(result.handoff.model_frames)
+    assert (
+        identity_call["resolved_norb_fix_list"]
+        == result.handoff.model_anchor_spec.resolved_norb_fix_list
+    )
+    state_records = result.evaluations[0].symmetry_certificate.input_identity_payload[
+        "states"
+    ]
+    for state in state_records:
+        k_index = int(state["k_index"])
+        model, model_heff = result.handoff.model_state_for_k(k_index)
+        routing, _ = result.handoff.assemble_routing_for_k(
+            k_index,
+            include_high=False,
+        )
+        assert state["present"] is True
+        assert state["u_low_hash"] == hash_array(model)
+        assert state["u_low_hash"] != hash_array(routing)
+        assert state["heff_hash"] == hash_array(model_heff)
+
+
 def test_real_gamma_auto_producer_builds_all_k_handoff_and_certified_identity() -> None:
     config = GammaAutomaticSelectionConfig.from_normalized_config(_config_payload())
     inputs = _producer_inputs()
@@ -308,7 +629,10 @@ def test_real_gamma_auto_producer_builds_all_k_handoff_and_certified_identity() 
     )
     assert identity.resolved_candidate.candidate_id == result.handoff.candidate_id
     for k_index in result.handoff.k_indices:
-        u_low, _ = result.handoff.assemble_for_k(k_index, include_high=False)
+        u_low, _ = result.handoff.assemble_routing_for_k(
+            k_index,
+            include_high=False,
+        )
         np.testing.assert_allclose(
             u_low.conj().T @ u_low,
             np.eye(result.handoff.model_dim),
