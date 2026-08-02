@@ -3,6 +3,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from kp import blocks as blocks_mod
 from kp.basis.selection import (
     build_reference_projectors_from_rows,
     compute_leverage_scores,
@@ -18,6 +19,70 @@ from kp.blocks.blocks import (
     _reference_overlap_singular_values,
     resolve_project_gauge_anchor_candidates,
 )
+from kp.blocks.gamma_layout import GammaRowLayout
+from kp.identity import hash_array
+
+
+def test_gamma_model_frame_aligns_complete_joint_space_with_full_u4() -> None:
+    layout = GammaRowLayout.build(
+        qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash=hash_array(np.arange(4, dtype=np.int64)),
+    )
+    eigenvalues = (np.asarray([-4.0, -3.0, -2.0, -1.0]),)
+    eigenframe = np.asarray(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0, 1.0],
+        ],
+        dtype=np.complex128,
+    ) / 2.0
+
+    anchor_spec = blocks_mod.build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=eigenvalues,
+        reference_eigenvectors_by_q=(eigenframe,),
+        joint_band_indices=(0, 1, 2, 3),
+        group_ranks=(2, 2),
+        layout=layout,
+    )
+    first = blocks_mod.build_gamma_model_frames(
+        eigenvalues_by_q=eigenvalues,
+        eigenvectors_by_q=(eigenframe,),
+        layout=layout,
+        anchor_spec=anchor_spec,
+    )
+    second = blocks_mod.build_gamma_model_frames(
+        eigenvalues_by_q=eigenvalues,
+        eigenvectors_by_q=(eigenframe,),
+        layout=layout,
+        anchor_spec=anchor_spec,
+    )
+
+    model_frame = first.local_frames_by_q[0]
+    expected = np.eye(4, dtype=np.complex128)[:, [3, 1, 2, 0]]
+    np.testing.assert_allclose(model_frame, expected, rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(
+        model_frame,
+        second.local_frames_by_q[0],
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+    np.testing.assert_allclose(
+        model_frame.conj().T @ model_frame,
+        np.eye(4),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+    assert anchor_spec.model_column_order == ((0, 0), (0, 1), (1, 0), (1, 1))
+
+    routing_frame = np.eye(4, dtype=np.complex128)[:, [0, 2, 1, 3]]
+    routing_to_model = routing_frame.conj().T @ model_frame
+    assert np.linalg.norm(routing_to_model[:2, 2:]) > 0.9
+    assert np.linalg.norm(routing_to_model[2:, :2]) > 0.9
 
 
 def test_one_dimensional_state_selects_largest_leverage_row() -> None:

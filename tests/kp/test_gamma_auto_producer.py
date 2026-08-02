@@ -7,6 +7,7 @@ import threading
 import numpy as np
 import pytest
 
+from kp import blocks as blocks_mod
 from kp import gamma_auto_producer as producer_mod
 from kp.gamma_auto_producer import (
     GammaAutomaticProducerInputs,
@@ -184,6 +185,97 @@ def _producer_inputs(
         ),
         presentation=_presentation(),
     )
+
+
+def test_gamma_auto_producer_hands_off_model_frame_not_routing_frame() -> None:
+    inputs = _producer_inputs()
+    hamiltonians = []
+    for angle in (0.2, -0.35):
+        rotation = np.eye(4, dtype=np.complex128)
+        rotation[:2, :2] = np.asarray(
+            [
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ]
+        )
+        hamiltonians.append(
+            rotation
+            @ np.diag([-2.0, -1.0, 1.0, 2.0])
+            @ rotation.conj().T
+        )
+    mixed_inputs = GammaAutomaticProducerInputs(
+        **{
+            **inputs.__dict__,
+            "source_hamiltonians": np.stack(hamiltonians, axis=0),
+        }
+    )
+
+    result = produce_gamma_automatic_selection(
+        mixed_inputs,
+        GammaAutomaticSelectionConfig.from_normalized_config(_config_payload()),
+    )
+
+    for position, k_index in enumerate(result.handoff.k_indices):
+        routing, _ = result.handoff.assemble_routing_for_k(
+            k_index,
+            include_high=False,
+        )
+        model = result.handoff.assemble_model_for_k(k_index)
+        bridge = result.handoff.routing_to_model_for_k(k_index)
+        state_frame, state_heff = result.handoff.model_state_for_k(k_index)
+        eigenvalues, eigenvectors = np.linalg.eigh(
+            mixed_inputs.source_hamiltonians[position]
+        )
+        expected_model = blocks_mod.build_gamma_model_frames(
+            eigenvalues_by_q=(eigenvalues,),
+            eigenvectors_by_q=(eigenvectors,),
+            layout=result.handoff.layout,
+            anchor_spec=result.handoff.model_anchor_spec,
+        ).local_frames_by_q[0]
+
+        assert not np.allclose(routing, model, atol=1.0e-10)
+        np.testing.assert_allclose(
+            model,
+            expected_model,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            routing @ routing.conj().T,
+            model @ model.conj().T,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            bridge.conj().T @ bridge,
+            np.eye(bridge.shape[0]),
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            routing @ bridge,
+            model,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_allclose(
+            state_frame,
+            model,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
+        np.testing.assert_array_equal(
+            state_heff,
+            result.handoff.authoritative_heff_for_k(k_index),
+        )
+        np.testing.assert_allclose(
+            state_heff,
+            model.conj().T
+            @ mixed_inputs.source_hamiltonians[position]
+            @ model,
+            rtol=0.0,
+            atol=1.0e-12,
+        )
 
 
 def test_real_gamma_auto_producer_builds_all_k_handoff_and_certified_identity() -> None:
