@@ -13,6 +13,7 @@ from kp.blocks.downfold import downfold_from_projectors
 from kp.gamma_auto_producer import (
     GammaAutomaticProducerInputs,
     GammaAutomaticSelectionConfig,
+    GammaProducerIntegrityThresholds,
     GammaRawOperationSpec,
     evaluate_gamma_automatic_selection,
     prepare_gamma_automatic_selection,
@@ -38,6 +39,10 @@ from kp.symmetry.candidate_certificate import (
 def _config_payload() -> dict[str, object]:
     return {
         "mode": "auto",
+        "producer_integrity_thresholds": {
+            "source_hamiltonian_covariance_residual": 1.0e-10,
+            "routed_model_heff_covariance_residual": 1.0e-10,
+        },
         "routing_thresholds": {
             "energy_same_ev": 1.0e-9,
             "energy_different_ev": 1.0e-5,
@@ -104,6 +109,14 @@ def _config_payload() -> dict[str, object]:
 @pytest.mark.parametrize(
     ("section", "field"),
     [
+        (
+            "producer_integrity_thresholds",
+            "source_hamiltonian_covariance_residual",
+        ),
+        (
+            "producer_integrity_thresholds",
+            "routed_model_heff_covariance_residual",
+        ),
         ("routing_thresholds", "route_covariance"),
         ("selection_thresholds", "band_max_mev"),
         ("candidate_symmetry_thresholds", "heff_covariance_residual"),
@@ -135,6 +148,81 @@ def test_gamma_auto_config_rejects_defaults_unknown_fields_and_bool_numbers() ->
     boolean["routing_thresholds"]["route_covariance"] = True  # type: ignore[index]
     with pytest.raises(ValueError, match="strict finite numeric"):
         GammaAutomaticSelectionConfig.from_normalized_config(boolean)
+
+    negative = _config_payload()
+    negative["producer_integrity_thresholds"][  # type: ignore[index]
+        "source_hamiltonian_covariance_residual"
+    ] = -1.0
+    with pytest.raises(ValueError, match="strict finite numeric"):
+        GammaAutomaticSelectionConfig.from_normalized_config(negative)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("source_hamiltonian_covariance_residual", True),
+        ("source_hamiltonian_covariance_residual", np.nan),
+        ("source_hamiltonian_covariance_residual", np.inf),
+        ("source_hamiltonian_covariance_residual", -1.0),
+        ("routed_model_heff_covariance_residual", False),
+        ("routed_model_heff_covariance_residual", np.nan),
+        ("routed_model_heff_covariance_residual", np.inf),
+        ("routed_model_heff_covariance_residual", 0.0),
+    ],
+)
+def test_gamma_producer_integrity_direct_constructor_fails_closed(
+    field: str,
+    value: object,
+) -> None:
+    thresholds = {
+        "source_hamiltonian_covariance_residual": 0.0,
+        "routed_model_heff_covariance_residual": 1.0e-10,
+    }
+    thresholds[field] = value
+
+    with pytest.raises(ValueError, match="producer integrity threshold"):
+        GammaProducerIntegrityThresholds(**thresholds)  # type: ignore[arg-type]
+
+
+def test_gamma_producer_integrity_accepts_zero_source_and_rejects_unknown_key() -> None:
+    thresholds = GammaProducerIntegrityThresholds(
+        source_hamiltonian_covariance_residual=0.0,
+        routed_model_heff_covariance_residual=1.0e-10,
+    )
+    assert thresholds.source_hamiltonian_covariance_residual == 0.0
+
+    unknown = _config_payload()
+    unknown["producer_integrity_thresholds"][  # type: ignore[index]
+        "unexpected"
+    ] = 1.0
+    with pytest.raises(ValueError, match="field mismatch.*unknown"):
+        GammaAutomaticSelectionConfig.from_normalized_config(unknown)
+
+
+def test_gamma_auto_integrity_gates_are_independent_and_policy_bound() -> None:
+    payloads = []
+    for field, value in (
+        ("source_hamiltonian_covariance_residual", 2.0e-10),
+        ("routed_model_heff_covariance_residual", 3.0e-10),
+    ):
+        payload = _config_payload()
+        payload["producer_integrity_thresholds"][field] = value  # type: ignore[index]
+        payloads.append(payload)
+
+    baseline = prepare_gamma_automatic_selection(
+        _producer_inputs(),
+        GammaAutomaticSelectionConfig.from_normalized_config(_config_payload()),
+    ).selection_input.selection_policy_hash
+    changed = {
+        prepare_gamma_automatic_selection(
+            _producer_inputs(),
+            GammaAutomaticSelectionConfig.from_normalized_config(payload),
+        ).selection_input.selection_policy_hash
+        for payload in payloads
+    }
+
+    assert len(changed) == 2
+    assert baseline not in changed
 
 
 def _presentation() -> MagneticPresentation:
@@ -190,8 +278,19 @@ def _producer_inputs(
 
 def _dual_frame_q2_case(
     method: str,
+    *,
+    source_covariance_tolerance: float = 1.0e-10,
+    candidate_covariance_tolerance: float = 1.0e-10,
+    routed_model_covariance_tolerance: float = 1.0e-10,
 ) -> tuple[GammaAutomaticProducerInputs, GammaAutomaticSelectionConfig]:
     payload = _config_payload()
+    payload["producer_integrity_thresholds"] = {
+        "source_hamiltonian_covariance_residual": source_covariance_tolerance,
+        "routed_model_heff_covariance_residual": routed_model_covariance_tolerance,
+    }
+    payload["candidate_symmetry_thresholds"][  # type: ignore[index]
+        "heff_covariance_residual"
+    ] = candidate_covariance_tolerance
     payload["selection_thresholds"] = {
         "band_rms_mev": 1.0e3,
         "band_max_mev": 1.0e3,
@@ -399,7 +498,7 @@ def test_gamma_auto_dual_frame_heff_is_bridge_covariant_and_bound(
         handoff.heff_covariance_residuals
     )
     assert handoff.heff_covariance_tolerance == pytest.approx(
-        config.candidate_symmetry_thresholds.heff_covariance_residual
+        config.producer_integrity_thresholds.routed_model_heff_covariance_residual
     )
     assert handoff.heff_covariance_evidence_hash != "0" * 64
     assert np.max(handoff.heff_covariance_residuals) <= handoff.heff_covariance_tolerance
@@ -462,7 +561,12 @@ def test_gamma_auto_dual_frame_heff_is_bridge_covariant_and_bound(
 def test_gamma_auto_dual_frame_covariance_drift_fails_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    inputs, config = _dual_frame_q2_case("fixed_schur")
+    inputs, config = _dual_frame_q2_case(
+        "fixed_schur",
+        source_covariance_tolerance=1.0,
+        candidate_covariance_tolerance=1.0,
+        routed_model_covariance_tolerance=1.0e-10,
+    )
     original = producer_mod.downfold_from_projectors
     call_count = 0
 
@@ -1038,6 +1142,18 @@ def test_gamma_auto_rejects_raw_full_h_covariance_failure_outside_low_space() ->
             cross_k,
             GammaAutomaticSelectionConfig.from_normalized_config(_config_payload()),
         )
+
+    permissive_source = _config_payload()
+    permissive_source["producer_integrity_thresholds"][  # type: ignore[index]
+        "source_hamiltonian_covariance_residual"
+    ] = 10.0
+    permissive_source["candidate_symmetry_thresholds"][  # type: ignore[index]
+        "heff_covariance_residual"
+    ] = 0.0
+    prepare_gamma_automatic_selection(
+        cross_k,
+        GammaAutomaticSelectionConfig.from_normalized_config(permissive_source),
+    )
 
 
 def test_gamma_auto_preparation_exposes_final_identity_before_first_candidate(

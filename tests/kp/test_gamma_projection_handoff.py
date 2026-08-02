@@ -397,7 +397,11 @@ def test_gamma_dual_frame_rejects_wrong_in_domain_model_reference_k() -> None:
     assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
-def _certified_q2_dual_frame_spec() -> GammaRoutedBasisSpec:
+def _certified_q2_dual_frame_spec(
+    *,
+    candidate_covariance_tolerance: float = 1.0e-9,
+    bridge_covariance_tolerance: float = 1.0e-9,
+) -> GammaRoutedBasisSpec:
     base = _q2_dual_frame_uncertified_spec()
     values = tuple(
         np.arange(base.layout.same_q_dimension, dtype=np.float64)
@@ -435,7 +439,7 @@ def _certified_q2_dual_frame_spec() -> GammaRoutedBasisSpec:
         model_frames=(model,),
         model_reference_projector=base.model_reference_projector,
         routed_heff=base.routed_heff,
-        heff_covariance_tolerance=1.0e-9,
+        heff_covariance_tolerance=bridge_covariance_tolerance,
         authoritative_heff=base.authoritative_heff,
         heff_k_indices=base.heff_k_indices,
         closure_certificate_hashes=base.closure_certificate_hashes,
@@ -456,8 +460,48 @@ def _certified_q2_dual_frame_spec() -> GammaRoutedBasisSpec:
         },
         presentation=presentation,
         required_pairs={"E": pairs},
-        candidate_thresholds=CandidateSymmetryThresholds.uniform(1.0e-9),
+        candidate_thresholds=CandidateSymmetryThresholds.uniform(
+            candidate_covariance_tolerance
+        ),
     )
+
+
+def test_gamma_certified_handoff_keeps_candidate_and_bridge_gates_independent(
+    tmp_path: Path,
+) -> None:
+    original = _certified_q2_dual_frame_spec(
+        candidate_covariance_tolerance=3.0e-6,
+        bridge_covariance_tolerance=1.0e-10,
+    )
+    path = tmp_path / "basis.npz"
+
+    save_gamma_routed_basis_spec(path, original)
+    restored = load_gamma_routed_basis_spec(path)
+
+    envelope = verify_candidate_certificate_envelope(
+        restored.candidate_certificate_envelope
+    )
+    assert envelope["certificate_payload"]["thresholds"][
+        "heff_covariance_residual"
+    ] == pytest.approx(3.0e-6)
+    assert restored.heff_covariance_tolerance == pytest.approx(1.0e-10)
+
+
+def test_gamma_certified_handoff_rejects_boolean_bridge_tolerance() -> None:
+    with pytest.raises(GammaRoutingError, match="finite and positive") as rejected:
+        _certified_q2_dual_frame_spec(
+            bridge_covariance_tolerance=True,  # type: ignore[arg-type]
+        )
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_gamma_routed_spec_rejects_boolean_bridge_tolerance() -> None:
+    original = _certified_q2_dual_frame_spec()
+    with pytest.raises(GammaRoutingError, match="strict numeric") as replaced:
+        replace(original, heff_covariance_tolerance=True)
+
+    assert replaced.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
 def test_gamma_dual_frame_v3_numeric_roundtrip_binds_model_state(
@@ -671,7 +715,8 @@ def test_gamma_dual_frame_rejects_missing_covariance_or_reference_evidence(
     assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
 
 
-def test_gamma_certified_handoff_rejects_rehashed_covariance_tolerance_drift() -> None:
+def test_gamma_certified_handoff_accepts_independently_rehashed_covariance_tolerance(
+) -> None:
     original = _spec()
     drifted_tolerance = 2.0e-10
     k_indices_hash = hash_array(np.asarray(original.k_indices, dtype=np.int64))
@@ -727,16 +772,15 @@ def test_gamma_certified_handoff_rejects_rehashed_covariance_tolerance_drift() -
         candidate_input_identity_hash=original.candidate_input_identity_hash,
     )
 
-    with pytest.raises(GammaRoutingError, match="candidate.*threshold") as rejected:
-        replace(
-            original,
-            artifact_identity=identity,
-            heff_covariance_tolerance=drifted_tolerance,
-            heff_covariance_evidence_hash=evidence_hash,
-            bridge_certificate_hash=bridge_hash,
-        )
+    updated = replace(
+        original,
+        artifact_identity=identity,
+        heff_covariance_tolerance=drifted_tolerance,
+        heff_covariance_evidence_hash=evidence_hash,
+        bridge_certificate_hash=bridge_hash,
+    )
 
-    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+    assert updated.heff_covariance_tolerance == drifted_tolerance
 
 
 def _uncertified_spec(*, kpoints: np.ndarray | None = None) -> GammaRoutedBasisSpec:

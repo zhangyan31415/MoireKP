@@ -78,6 +78,10 @@ def test_gamma_auto_dispatch_requires_exact_gamma_family(
 def _strict_auto_selection_payload() -> dict[str, object]:
     return {
         "mode": "auto",
+        "producer_integrity_thresholds": {
+            "source_hamiltonian_covariance_residual": 1.0e-10,
+            "routed_model_heff_covariance_residual": 1.0e-10,
+        },
         "routing_thresholds": {
             "energy_same_ev": 1.0e-9,
             "energy_different_ev": 1.0e-5,

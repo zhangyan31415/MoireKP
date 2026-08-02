@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, replace
 import json
-from numbers import Integral
+from numbers import Integral, Real
 from pathlib import Path
 from typing import Any, ClassVar, Mapping, Sequence, TypeAlias
 
@@ -290,6 +290,21 @@ def _strict_integral_scalar(value: Any, *, name: str) -> int:
             f"routed Gamma {name} must be a strict integer (bool excluded)",
         )
     return int(value)
+
+
+def _strict_positive_real_scalar(value: Any, *, name: str) -> float:
+    if isinstance(value, (bool, np.bool_)) or not isinstance(value, Real):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"{name} must be a strict numeric value that is finite and positive",
+        )
+    result = float(value)
+    if not np.isfinite(result) or result <= 0.0:
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            f"{name} must be a strict numeric value that is finite and positive",
+        )
+    return result
 
 
 def _strict_hash_tuple(value: Any, *, name: str, length: int) -> tuple[str, ...]:
@@ -947,7 +962,10 @@ class GammaRoutedBasisSpec:
             dtype=np.float64,
             name="heff_covariance_residuals",
         )
-        covariance_tolerance = float(self.heff_covariance_tolerance)
+        covariance_tolerance = _strict_positive_real_scalar(
+            self.heff_covariance_tolerance,
+            name="Gamma Heff covariance tolerance",
+        )
         heff = _freeze(
             self.authoritative_heff,
             dtype=np.complex128,
@@ -1010,14 +1028,6 @@ class GammaRoutedBasisSpec:
             raise _reject(
                 CandidateRejectionReason.HANDOFF_IDENTITY,
                 "Gamma routed-Heff covariance evidence shape is invalid",
-            )
-        if (
-            not np.isfinite(covariance_tolerance)
-            or covariance_tolerance <= 0.0
-        ):
-            raise _reject(
-                CandidateRejectionReason.HANDOFF_IDENTITY,
-                "Gamma Heff covariance tolerance must be finite and strictly positive",
             )
         if tuple(self.ordered_q_hashes) != tuple(self.layout.ordered_qset_hashes):
             raise _reject(
@@ -1234,7 +1244,7 @@ class GammaRoutedBasisSpec:
                 verified_threshold_payload = verified_envelope[
                     "certificate_payload"
                 ]["thresholds"]
-                verified_candidate_thresholds = CandidateSymmetryThresholds(
+                CandidateSymmetryThresholds(
                     **dict(verified_threshold_payload)
                 )
             except (ImportError, KeyError, TypeError, ValueError) as error:
@@ -1256,15 +1266,6 @@ class GammaRoutedBasisSpec:
                 raise _reject(
                     CandidateRejectionReason.HANDOFF_IDENTITY,
                     "routed Gamma candidate/action certificate identity mismatch",
-                )
-            if (
-                verified_candidate_thresholds.heff_covariance_residual
-                != covariance_tolerance
-            ):
-                raise _reject(
-                    CandidateRejectionReason.HANDOFF_IDENTITY,
-                    "routed Gamma candidate certificate covariance threshold "
-                    "differs from persisted Heff evidence",
                 )
             state_records = verified_envelope["input_identity_payload"].get(
                 "states", []
@@ -1575,11 +1576,12 @@ class GammaRoutedBasisSpec:
             q_count=layout.q_count,
             group_ranks=first.group_dimensions,
         )
-        covariance_tolerance = float(heff_covariance_tolerance)
+        covariance_tolerance = _strict_positive_real_scalar(
+            heff_covariance_tolerance,
+            name="Gamma producer routed/model Heff covariance tolerance",
+        )
         if (
-            not np.isfinite(covariance_tolerance)
-            or covariance_tolerance <= 0.0
-            or covariance_residuals.size != len(indices)
+            covariance_residuals.size != len(indices)
             or not np.all(np.isfinite(covariance_residuals))
             or float(np.max(covariance_residuals)) > covariance_tolerance
         ):
@@ -1944,19 +1946,10 @@ def certify_gamma_routed_basis_spec(
                     f"operation {name!r} route contract differs from its certified Gamma action",
                 )
 
-    configured_covariance_tolerance = float(heff_covariance_tolerance)
-    candidate_covariance_tolerance = float(
-        getattr(candidate_thresholds, "heff_covariance_residual", np.nan)
+    configured_covariance_tolerance = _strict_positive_real_scalar(
+        heff_covariance_tolerance,
+        name="Gamma routed/model Heff covariance tolerance",
     )
-    if (
-        not np.isfinite(configured_covariance_tolerance)
-        or configured_covariance_tolerance <= 0.0
-        or configured_covariance_tolerance != candidate_covariance_tolerance
-    ):
-        raise _reject(
-            CandidateRejectionReason.HANDOFF_IDENTITY,
-            "Gamma Heff covariance tolerance must equal the positive candidate threshold",
-        )
 
     provisional = GammaRoutedBasisSpec.create(
         artifact_identity=artifact_identity,

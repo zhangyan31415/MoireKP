@@ -86,7 +86,7 @@ from .symmetry.joint_exactification import (
 )
 
 
-GAMMA_AUTO_PRODUCER_VERSION = "kp.gamma-auto-producer.v2"
+GAMMA_AUTO_PRODUCER_VERSION = "kp.gamma-auto-producer.v3"
 GAMMA_AUTO_CANDIDATE_SCHEMA = "kp.gamma-auto-candidate.v1"
 GAMMA_AUTO_METRIC_SCHEMA = "kp.candidate-metrics.v1"
 GAMMA_AUTO_ORDERING_RULE = "dimension-error-overlap-symmetry-v1"
@@ -240,7 +240,96 @@ class GammaDownfoldConfig:
 
 
 @dataclass(frozen=True)
+class GammaProducerIntegrityThresholds:
+    source_hamiltonian_covariance_residual: float
+    routed_model_heff_covariance_residual: float
+
+    def __post_init__(self) -> None:
+        source = _strict_real(
+            self.source_hamiltonian_covariance_residual,
+            field=(
+                "producer integrity threshold "
+                "source_hamiltonian_covariance_residual"
+            ),
+            nonnegative=True,
+        )
+        routed_model = _strict_real(
+            self.routed_model_heff_covariance_residual,
+            field=(
+                "producer integrity threshold "
+                "routed_model_heff_covariance_residual"
+            ),
+            nonnegative=True,
+        )
+        if routed_model <= 0.0:
+            raise ValueError(
+                "producer integrity threshold "
+                "routed_model_heff_covariance_residual must be positive"
+            )
+        object.__setattr__(
+            self,
+            "source_hamiltonian_covariance_residual",
+            source,
+        )
+        object.__setattr__(
+            self,
+            "routed_model_heff_covariance_residual",
+            routed_model,
+        )
+
+    @classmethod
+    def from_normalized_config(
+        cls,
+        value: Any,
+    ) -> "GammaProducerIntegrityThresholds":
+        payload = _require_exact_keys(
+            value,
+            {
+                "source_hamiltonian_covariance_residual",
+                "routed_model_heff_covariance_residual",
+            },
+            context="automatic Gamma producer_integrity_thresholds",
+        )
+        source = _strict_real(
+            payload["source_hamiltonian_covariance_residual"],
+            field=(
+                "producer_integrity_thresholds."
+                "source_hamiltonian_covariance_residual"
+            ),
+            nonnegative=True,
+        )
+        routed_model = _strict_real(
+            payload["routed_model_heff_covariance_residual"],
+            field=(
+                "producer_integrity_thresholds."
+                "routed_model_heff_covariance_residual"
+            ),
+            nonnegative=True,
+        )
+        if routed_model <= 0.0:
+            raise ValueError(
+                "producer_integrity_thresholds."
+                "routed_model_heff_covariance_residual must be positive"
+            )
+        return cls(
+            source_hamiltonian_covariance_residual=source,
+            routed_model_heff_covariance_residual=routed_model,
+        )
+
+    def to_payload(self) -> dict[str, float]:
+        return {
+            "source_hamiltonian_covariance_residual": (
+                self.source_hamiltonian_covariance_residual
+            ),
+            "routed_model_heff_covariance_residual": (
+                self.routed_model_heff_covariance_residual
+            ),
+        }
+
+
+@dataclass(frozen=True)
 class GammaAutomaticSelectionConfig:
+    producer_integrity_thresholds: GammaProducerIntegrityThresholds
     routing_thresholds: GammaRoutingThresholds
     selection_thresholds: SelectionThresholds
     candidate_symmetry_thresholds: CandidateSymmetryThresholds
@@ -259,6 +348,7 @@ class GammaAutomaticSelectionConfig:
             value,
             {
                 "mode",
+                "producer_integrity_thresholds",
                 "routing_thresholds",
                 "selection_thresholds",
                 "candidate_symmetry_thresholds",
@@ -272,6 +362,9 @@ class GammaAutomaticSelectionConfig:
         )
         if payload["mode"] != "auto":
             raise ValueError("automatic Gamma selection mode must be exactly 'auto'")
+        producer_integrity = GammaProducerIntegrityThresholds.from_normalized_config(
+            payload["producer_integrity_thresholds"]
+        )
         routing = GammaRoutingThresholds.from_normalized_config(
             payload["routing_thresholds"]
         )
@@ -406,6 +499,7 @@ class GammaAutomaticSelectionConfig:
             field="reference_k_index",
         )[0]
         return cls(
+            producer_integrity_thresholds=producer_integrity,
             routing_thresholds=routing,
             selection_thresholds=selection,
             candidate_symmetry_thresholds=candidate_symmetry,
@@ -418,7 +512,10 @@ class GammaAutomaticSelectionConfig:
 
     def policy_payload(self) -> dict[str, Any]:
         return {
-            "schema": "kp.gamma-auto-policy-payload.v1",
+            "schema": "kp.gamma-auto-policy-payload.v2",
+            "producer_integrity_thresholds": (
+                self.producer_integrity_thresholds.to_payload()
+            ),
             "routing_thresholds": self.routing_thresholds.to_payload(),
             "selection_thresholds": {
                 item.name: getattr(self.selection_thresholds, item.name)
@@ -1157,7 +1254,7 @@ def _evaluate_candidate(
         )
 
     heff_covariance_tolerance = float(
-        config.candidate_symmetry_thresholds.heff_covariance_residual
+        config.producer_integrity_thresholds.routed_model_heff_covariance_residual
     )
     if (
         not np.isfinite(heff_covariance_tolerance)
@@ -1491,7 +1588,10 @@ def prepare_gamma_automatic_selection(
     )
     _certify_source_hamiltonian_covariance(
         inputs,
-        threshold=config.candidate_symmetry_thresholds.heff_covariance_residual,
+        threshold=(
+            config.producer_integrity_thresholds
+            .source_hamiltonian_covariance_residual
+        ),
     )
     local_values, local_vectors = _local_eigensystems(
         inputs.source_hamiltonians,
@@ -1506,6 +1606,10 @@ def prepare_gamma_automatic_selection(
     source_hamiltonian_hash = hash_array(inputs.source_hamiltonians)
 
     hard_thresholds: dict[str, float] = {
+        **{
+            f"producer_integrity.{name}": float(value)
+            for name, value in config.producer_integrity_thresholds.to_payload().items()
+        },
         **{
             f"selection.{item.name}": float(
                 getattr(config.selection_thresholds, item.name)
@@ -1680,6 +1784,7 @@ __all__ = [
     "GammaCandidateEvaluation",
     "GammaCandidateRejection",
     "GammaDownfoldConfig",
+    "GammaProducerIntegrityThresholds",
     "GammaRawOperationSpec",
     "evaluate_gamma_automatic_selection",
     "prepare_gamma_automatic_selection",
