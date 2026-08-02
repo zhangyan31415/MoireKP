@@ -1158,6 +1158,7 @@ def _write_routed_project_artifacts(project_dir: Path, spec: GammaRoutedBasisSpe
 def _write_legacy_project_artifacts(project_dir: Path) -> None:
     project_dir.mkdir()
     heff = np.eye(2, dtype=np.complex128)[None, :, :]
+    kpoints = np.asarray([[0.0, 0.0]], dtype=np.float64)
     wavefunctions = np.eye(2, dtype=np.complex128)[None, :, :]
     k_indices = np.asarray([0], dtype=np.int64)
     identity = {
@@ -1169,6 +1170,7 @@ def _write_legacy_project_artifacts(project_dir: Path) -> None:
         "schema_version": 2,
         "k_indices_hash": hash_array(k_indices),
         "heff_hash": hash_array(heff),
+        "kpoints_hash": hash_array(kpoints),
     }
     common = {
         "projection_basis_kind": np.asarray("explicit_legacy"),
@@ -1182,6 +1184,7 @@ def _write_legacy_project_artifacts(project_dir: Path) -> None:
         **{name: np.asarray(value) for name, value in identity.items()},
     }
     np.save(project_dir / "heff.npy", heff)
+    np.save(project_dir / "kpoints.npy", kpoints)
     np.savez(
         project_dir / "basis.npz",
         nlow_state_list=np.asarray([[0], [1]], dtype=object),

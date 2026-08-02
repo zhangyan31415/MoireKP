@@ -101,6 +101,8 @@ def test_model_infers_layerwise_n_orb_from_projection_basis(tmp_path: Path) -> N
     projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
     np.savez(
         projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("explicit_legacy"),
+        kpoints_hash=np.asarray("projection-kpoints-hash"),
         nlow_state_list=np.asarray([[0], [0], []], dtype=object),
     )
 

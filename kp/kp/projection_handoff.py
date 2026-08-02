@@ -141,6 +141,9 @@ GAMMA_ROUTED_ONLY_BASIS_FIELDS = frozenset(
         "projection_basis_kind",
         "projection_basis_handoff_version",
         "heff_hash",
+        # Explicit projection handoffs also bind their sampled k-domain.
+        # This field predates the routed Gamma archive and is not variant-only.
+        "kpoints_hash",
         "source_hamiltonian_hash",
         *PROJECTION_ARTIFACT_IDENTITY_FIELDS,
     }
