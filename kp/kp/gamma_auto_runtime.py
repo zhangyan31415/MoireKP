@@ -340,7 +340,7 @@ def _serialize_gamma_handoff(handoff: GammaRoutedBasisSpec) -> bytes:
 def _gamma_projected_spin_operator(
     handoff: GammaRoutedBasisSpec,
 ) -> np.ndarray:
-    """Project canonical full-space Sz through each certified routed frame."""
+    """Project canonical full-space Sz through each certified model frame."""
 
     if not isinstance(handoff, GammaRoutedBasisSpec):
         raise TypeError("handoff must be a GammaRoutedBasisSpec")
@@ -362,19 +362,19 @@ def _gamma_projected_spin_operator(
 
     projected_rows: list[np.ndarray] = []
     for k_index in handoff.k_indices:
-        routed_frame, _ = handoff.assemble_for_k(k_index, include_high=False)
-        if routed_frame.shape != (layout.full_dimension, handoff.model_dim):
+        model_frame = handoff.assemble_model_for_k(k_index)
+        if model_frame.shape != (layout.full_dimension, handoff.model_dim):
             raise ValueError(
-                f"routed Gamma frame at k={k_index} has shape {routed_frame.shape}, "
+                f"Gamma model frame at k={k_index} has shape {model_frame.shape}, "
                 f"expected {(layout.full_dimension, handoff.model_dim)}"
             )
-        raw = routed_frame.conj().T @ (
-            full_spin_diagonal[:, np.newaxis] * routed_frame
+        raw = model_frame.conj().T @ (
+            full_spin_diagonal[:, np.newaxis] * model_frame
         )
         projected = 0.5 * (raw + raw.conj().T)
         if not np.all(np.isfinite(projected)):
             raise ValueError(
-                f"routed Gamma spin projection is nonfinite at k={k_index}"
+                f"Gamma model-frame spin projection is nonfinite at k={k_index}"
             )
         projected_rows.append(np.ascontiguousarray(projected, dtype=np.complex128))
     return np.stack(projected_rows, axis=0)
@@ -384,7 +384,7 @@ def _gamma_project_payloads(
     handoff: GammaRoutedBasisSpec,
     kpoints: Any,
 ) -> dict[str, bytes]:
-    """Serialize the four canonical, mutually bound routed projection files."""
+    """Serialize the four canonical, mutually bound model-gauge projection files."""
 
     points = np.asarray(kpoints, dtype=np.float64)
     authoritative_points = np.asarray(handoff.kpoints, dtype=np.float64)

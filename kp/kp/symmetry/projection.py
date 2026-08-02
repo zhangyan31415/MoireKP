@@ -1485,7 +1485,7 @@ def _load_persisted_projection_basis_handoff(
         if not np.array_equal(companion_heff, routed.authoritative_heff):
             raise GammaRoutingError(
                 CandidateRejectionReason.HANDOFF_IDENTITY,
-                "projection/heff.npy differs from routed authoritative_heff",
+                "projection/heff.npy differs from authoritative model-frame Heff",
             )
         with np.load(wavefunctions_path, allow_pickle=False) as wave_payload:
             if "k_indices" not in wave_payload.files:
@@ -5033,31 +5033,84 @@ def _gauge_report_from_persisted_handoff(
 def _gauge_report_from_gamma_routed_handoff(
     handoff: GammaRoutedBasisSpec,
 ) -> GaugeAnchorReport:
-    """Describe a routed frame without inventing explicit orbital anchors."""
+    """Describe the certified routing evidence and authoritative model gauge."""
+
+    anchor = handoff.model_anchor_spec
+    covariance_residuals = np.asarray(
+        handoff.heff_covariance_residuals,
+        dtype=np.float64,
+    )
+    max_covariance_residual = (
+        float(np.max(covariance_residuals))
+        if covariance_residuals.size
+        else 0.0
+    )
 
     return GaugeAnchorReport(
-        gauge_mode="gamma_routed",
-        resolved_norb_fix_list=[],
+        gauge_mode="auto_scdm",
+        resolved_norb_fix_list=anchor.resolved_norb_fix_list,
         selections=[],
         metric={
-            "type": "persisted_gamma_routed_basis_handoff",
+            "type": "persisted_gamma_dual_frame_basis_handoff",
             "basis_is_orthonormal": True,
+            "projection_basis_kind": handoff.projection_basis_kind,
+            "authoritative_frame": "model",
+            "routing_frame_role": "selection_rank_and_certificate_evidence",
             "handoff_identity_hash": handoff.handoff_identity_hash,
+            "layout_hash": handoff.layout.layout_hash,
+            "routed_frame_hash": handoff.frame_hash,
+            "routed_reference_frame_hash": handoff.reference_frame_hash,
+            "model_frame_hash": handoff.model_frame_hash,
+            "routing_to_model_hash": handoff.routing_to_model_hash,
+            "bridge_certificate_hash": handoff.bridge_certificate_hash,
+            "model_anchor_spec_hash": anchor.identity_hash,
+            "model_reference_k_index": int(handoff.model_reference_k_index),
+            "model_reference_projector_hash": (
+                handoff.model_reference_projector_hash
+            ),
+            "routed_heff_hash": handoff.routed_heff_hash,
+            "model_heff_hash": handoff.heff_hash,
+            "heff_covariance_residuals_hash": (
+                handoff.heff_covariance_residuals_hash
+            ),
+            "heff_covariance_evidence_hash": (
+                handoff.heff_covariance_evidence_hash
+            ),
+            "heff_covariance_tolerance": float(
+                handoff.heff_covariance_tolerance
+            ),
+            "max_heff_covariance_residual": max_covariance_residual,
         },
         state_selection_quality={
-            "status": "persisted_gamma_routed_basis",
+            "status": "persisted_gamma_routing_evidence",
             "selection_policy": "consume_project_artifact",
+            "group_ranks": [int(rank) for rank in handoff.group_ranks],
+            "routing_certificate_hashes": list(
+                handoff.routing_certificate_hashes
+            ),
+            "routing_is_authoritative_for": (
+                "selection_rank_and_route_evidence"
+            ),
         },
         gauge_anchor_quality={
-            "status": "not_applicable",
-            "reason": "routed_frames_are_authoritative",
+            "status": "persisted_model_anchor",
+            "selection_policy": "consume_certified_model_anchor_contract",
+            "sigma_min": float(anchor.reference_sigma_min),
+            "condition_number": float(anchor.reference_condition_number),
+            "min_sigma": float(anchor.min_sigma),
+            "max_condition": float(anchor.max_condition),
+            "model_anchor_spec_hash": anchor.identity_hash,
+            "model_reference_k_index": int(handoff.model_reference_k_index),
+            "reference_q_index": int(anchor.reference_q_index),
         },
         symmetry_closure_quality={
-            "status": "persisted_gamma_routed_basis",
+            "status": "persisted_gamma_model_basis",
             "selection_policy": "consume_then_recertify",
+            "authoritative_frame": "model",
+            "candidate_certificate_hash": handoff.candidate_certificate_hash,
             "symmetry_adapted_frame": None,
         },
-        warnings=[],
+        warnings=list(anchor.warnings),
     )
 
 
@@ -5293,6 +5346,17 @@ def _initial_projection_summary(
     run_cfg = ctx.config
     frame_artifact_raw = gauge_report.symmetry_closure_quality.get("symmetry_adapted_frame")
     frame_artifact = frame_artifact_raw if isinstance(frame_artifact_raw, Mapping) else None
+    report_metric = (
+        gauge_report.metric
+        if isinstance(gauge_report.metric, Mapping)
+        else {}
+    )
+    projection_basis_kind = str(
+        report_metric.get("projection_basis_kind", "explicit_legacy")
+    )
+    uses_gamma_routed_layout = (
+        projection_basis_kind == GammaRoutedBasisSpec.projection_basis_kind
+    )
     return {
         "config": run_cfg.cfg_path,
         "valley": run_cfg.valley,
@@ -5318,6 +5382,7 @@ def _initial_projection_summary(
         "requires_model_exactification": False,
         "exactification_owner": "kp_symm",
         "project_basis": {
+            "projection_basis_kind": projection_basis_kind,
             "nlow_state_list_layout": "physical_layer",
             "num_layer_list": [int(n) for n in ctx.num_layer_list],
             "gauge_mode": gauge_report.gauge_mode,
@@ -5330,7 +5395,7 @@ def _initial_projection_summary(
             },
             "resolved_source_group_nlow_state_list": (
                 []
-                if gauge_report.gauge_mode == "gamma_routed"
+                if uses_gamma_routed_layout
                 else _source_group_nlow_state_list(
                     ctx.nlow_state_list,
                     ctx.num_layer_list,
@@ -6735,14 +6800,59 @@ def run_symmetry_projection_from_config(
         artifact_identity=artifact_identity,
     )
     if isinstance(persisted_handoff, GammaRoutedBasisSpec):
+        covariance_residuals = np.asarray(
+            persisted_handoff.heff_covariance_residuals,
+            dtype=np.float64,
+        )
         summary["project_basis"].update(
             {
                 "projection_basis_kind": persisted_handoff.projection_basis_kind,
                 "nlow_state_list_layout": "not_applicable_gamma_routed",
                 "layout_hash": persisted_handoff.layout.layout_hash,
+                "authoritative_frame": "model",
+                "routing_frame_role": "selection_rank_and_certificate_evidence",
+                "handoff_identity_hash": persisted_handoff.handoff_identity_hash,
                 "frame_hash": persisted_handoff.frame_hash,
+                "frame_hash_role": "legacy_alias_of_routed_frame_hash",
+                "routed_frame_hash": persisted_handoff.frame_hash,
                 "reference_frame_hash": persisted_handoff.reference_frame_hash,
+                "routed_reference_frame_hash": (
+                    persisted_handoff.reference_frame_hash
+                ),
+                "model_frame_hash": persisted_handoff.model_frame_hash,
+                "routing_to_model_hash": (
+                    persisted_handoff.routing_to_model_hash
+                ),
+                "bridge_certificate_hash": (
+                    persisted_handoff.bridge_certificate_hash
+                ),
+                "model_anchor_spec_hash": (
+                    persisted_handoff.model_anchor_spec.identity_hash
+                ),
+                "model_reference_k_index": int(
+                    persisted_handoff.model_reference_k_index
+                ),
+                "model_reference_projector_hash": (
+                    persisted_handoff.model_reference_projector_hash
+                ),
+                "routed_heff_hash": persisted_handoff.routed_heff_hash,
                 "heff_hash": persisted_handoff.heff_hash,
+                "heff_hash_role": "model_authoritative",
+                "model_heff_hash": persisted_handoff.heff_hash,
+                "heff_covariance_residuals_hash": (
+                    persisted_handoff.heff_covariance_residuals_hash
+                ),
+                "heff_covariance_evidence_hash": (
+                    persisted_handoff.heff_covariance_evidence_hash
+                ),
+                "heff_covariance_tolerance": float(
+                    persisted_handoff.heff_covariance_tolerance
+                ),
+                "max_heff_covariance_residual": (
+                    float(np.max(covariance_residuals))
+                    if covariance_residuals.size
+                    else 0.0
+                ),
                 "candidate_certificate_hash": (
                     persisted_handoff.candidate_certificate_hash
                 ),

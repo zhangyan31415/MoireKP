@@ -9,9 +9,10 @@ import yaml
 
 import kp.cli as cli
 import kp.gamma_auto_runtime as runtime
+from kp.blocks import GammaRowLayout
 from kp.selection_artifact import SelectionInputIdentity
 from kp.selection_artifact import CertificationStatus, SelectionArtifactStore
-from kp.projection_handoff import load_gamma_routed_basis_spec
+from kp.projection_handoff import GammaRoutedBasisSpec, load_gamma_routed_basis_spec
 from kp.identity import load_projection_artifact_identity
 from kp.symmetry import projection as projection_mod
 
@@ -649,7 +650,76 @@ def test_gamma_auto_project_end_to_end_commits_identical_canonical_and_staged_pa
     assert identity["basis_hash"] == handoff.artifact_identity["basis_hash"]
 
 
-def test_gamma_auto_wavefunctions_embed_loader_compatible_routed_spin_operator(
+def _runtime_dual_frame_spin_handoff() -> tuple[
+    GammaRoutedBasisSpec,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+]:
+    """Make a minimal runtime view whose bridge mixes opposite-spin columns."""
+
+    layout = GammaRowLayout.build(
+        qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash="runtime-dual-frame-spin",
+    )
+    routing = np.eye(layout.full_dimension, dtype=np.complex128)[:, [0, 2]]
+    bridge = np.asarray(
+        [[1.0, 1.0], [1.0, -1.0]],
+        dtype=np.complex128,
+    ) / np.sqrt(2.0)
+    model = routing @ bridge
+
+    # Runtime deliberately consumes only this narrow handoff surface.  Keep the
+    # fixture a real instance so the production type gate remains exercised,
+    # while avoiding an unrelated full certificate construction in this unit test.
+    handoff = object.__new__(GammaRoutedBasisSpec)
+    object.__setattr__(handoff, "layout", layout)
+    object.__setattr__(handoff, "k_indices", (4,))
+    object.__setattr__(
+        handoff,
+        "authoritative_heff",
+        np.zeros((1, model.shape[1], model.shape[1]), dtype=np.complex128),
+    )
+    object.__setattr__(
+        handoff,
+        "assemble_for_k",
+        lambda k_index, *, include_high: (routing, None),
+    )
+    object.__setattr__(handoff, "assemble_model_for_k", lambda k_index: model)
+    return handoff, routing, model, bridge
+
+
+def test_gamma_runtime_projects_spin_in_model_frame_not_routing_frame() -> None:
+    handoff, routing, model, bridge = _runtime_dual_frame_spin_handoff()
+    spin_signs = np.asarray(
+        [
+            1.0 if address.spin_label == "up" else -1.0
+            for address in handoff.layout.addresses_by_full_row
+        ],
+        dtype=np.complex128,
+    )
+    routing_spin = routing.conj().T @ (spin_signs[:, np.newaxis] * routing)
+    expected_model_spin = model.conj().T @ (spin_signs[:, np.newaxis] * model)
+
+    np.testing.assert_allclose(routing @ bridge, model, rtol=0.0, atol=1.0e-12)
+    assert np.linalg.norm(routing_spin @ bridge - bridge @ routing_spin) > 1.0
+    assert not np.allclose(routing_spin, expected_model_spin, atol=1.0e-12)
+
+    actual = runtime._gamma_projected_spin_operator(handoff)
+
+    np.testing.assert_allclose(actual[0], expected_model_spin, rtol=0.0, atol=1.0e-12)
+    np.testing.assert_allclose(
+        actual[0],
+        bridge.conj().T @ routing_spin @ bridge,
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+def test_gamma_auto_wavefunctions_embed_loader_compatible_model_spin_operator(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -676,10 +746,10 @@ def test_gamma_auto_wavefunctions_embed_loader_compatible_routed_spin_operator(
     )
     expected_rows = []
     for k_index in handoff.k_indices:
-        routed_frame, _ = handoff.assemble_for_k(k_index, include_high=False)
+        model_frame = handoff.assemble_model_for_k(k_index)
         expected_rows.append(
-            routed_frame.conj().T
-            @ (spin_signs[:, np.newaxis] * routed_frame)
+            model_frame.conj().T
+            @ (spin_signs[:, np.newaxis] * model_frame)
         )
     expected = np.stack(expected_rows, axis=0)
 
@@ -760,7 +830,10 @@ def test_gamma_auto_inspect_command_prepares_real_identity_without_candidates(
 def test_gamma_runtime_payloads_bind_handoff_heff_kpoints_and_wavefunctions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    heff = np.asarray([np.diag([-1.0, 1.0])], dtype=np.complex128)
+    heff = np.asarray(
+        [[[0.2, 0.3 + 0.1j], [0.3 - 0.1j, -0.4]]],
+        dtype=np.complex128,
+    )
     kpoints = np.asarray([[0.0, 0.0]], dtype=np.float64)
     identity = {
         "identity_schema": "moirekp.artifact-identity.v1",
@@ -802,7 +875,7 @@ def test_gamma_runtime_payloads_bind_handoff_heff_kpoints_and_wavefunctions(
         "wavefunctions.npz",
     }
     assert payloads["basis.npz"] == b"basis-bytes"
-    np.testing.assert_allclose(runtime._load_npy_bytes(payloads["heff.npy"]), heff)
+    np.testing.assert_array_equal(runtime._load_npy_bytes(payloads["heff.npy"]), heff)
     np.testing.assert_allclose(
         runtime._load_npy_bytes(payloads["kpoints.npy"]), kpoints
     )
@@ -811,8 +884,23 @@ def test_gamma_runtime_payloads_bind_handoff_heff_kpoints_and_wavefunctions(
         np.testing.assert_array_equal(archive["k_indices"], np.asarray([0]))
         assert str(archive["spin_convention"].item()) == "all"
         np.testing.assert_array_equal(archive["spin_operator"], projected_spin)
+        expected_eigenvalues = np.linalg.eigvalsh(heff)
+        np.testing.assert_allclose(
+            archive["eigenvalues"],
+            expected_eigenvalues,
+            rtol=0.0,
+            atol=1.0e-14,
+        )
         np.testing.assert_allclose(
             archive["wavefunctions"].conj().transpose(0, 2, 1)
             @ archive["wavefunctions"],
             np.eye(2)[None, :, :],
+            rtol=0.0,
+            atol=1.0e-14,
+        )
+        np.testing.assert_allclose(
+            heff @ archive["wavefunctions"],
+            archive["wavefunctions"] * archive["eigenvalues"][:, np.newaxis, :],
+            rtol=0.0,
+            atol=1.0e-14,
         )

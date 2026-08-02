@@ -1748,14 +1748,13 @@ def test_gamma_routed_factory_rejects_failed_task7_candidate() -> None:
 
 
 def test_kp_symm_states_consume_persisted_frames_and_heff_without_reprojection() -> None:
-    spec = _spec()
+    spec = _q2_dual_frame_uncertified_spec()
     ctx = SimpleNamespace(
-        required_k=[7, 4],
+        required_k=[4],
         q_count=spec.layout.q_count,
         full_dim=spec.layout.full_dimension,
         hamk_source_by_k={
             4: np.diag(np.arange(spec.layout.full_dimension)),
-            7: np.diag(np.arange(spec.layout.full_dimension) + 10.0),
         },
     )
 
@@ -1771,13 +1770,89 @@ def test_kp_symm_states_consume_persisted_frames_and_heff_without_reprojection()
 
     for k_index in ctx.required_k:
         expected_u, expected_heff = spec.model_state_for_k(k_index)
+        routed_u, _ = spec.assemble_routing_for_k(k_index, include_high=False)
+        assert not np.allclose(routed_u, expected_u, atol=1.0e-12)
         np.testing.assert_array_equal(source[k_index].u_low, expected_u)
         np.testing.assert_array_equal(
             source[k_index].heff,
             expected_heff,
         )
         assert target[k_index] is source[k_index]
-    assert first is source[7]
+    assert first is source[4]
+
+
+def test_kp_symm_dual_frame_report_names_model_gauge_and_all_evidence() -> None:
+    spec = _certified_q2_dual_frame_spec()
+
+    report = projection_mod._gauge_report_from_gamma_routed_handoff(spec)
+
+    assert report.gauge_mode == "auto_scdm"
+    assert report.resolved_norb_fix_list == (
+        spec.model_anchor_spec.resolved_norb_fix_list
+    )
+    assert report.warnings == list(spec.model_anchor_spec.warnings)
+    expected_hashes = {
+        "handoff_identity_hash": spec.handoff_identity_hash,
+        "routed_frame_hash": spec.frame_hash,
+        "model_frame_hash": spec.model_frame_hash,
+        "routing_to_model_hash": spec.routing_to_model_hash,
+        "bridge_certificate_hash": spec.bridge_certificate_hash,
+        "model_anchor_spec_hash": spec.model_anchor_spec.identity_hash,
+        "model_reference_projector_hash": spec.model_reference_projector_hash,
+        "routed_heff_hash": spec.routed_heff_hash,
+        "model_heff_hash": spec.heff_hash,
+        "heff_covariance_evidence_hash": spec.heff_covariance_evidence_hash,
+    }
+    assert report.metric["projection_basis_kind"] == spec.projection_basis_kind
+    for field, expected in expected_hashes.items():
+        assert report.metric[field] == expected
+
+
+def test_gamma_dual_frame_summary_uses_basis_kind_without_legacy_nlow_state() -> None:
+    spec = _certified_q2_dual_frame_spec()
+    persisted = projection_mod._gauge_report_from_gamma_routed_handoff(spec)
+    report = replace(
+        persisted,
+        gauge_mode="auto_scdm",
+        resolved_norb_fix_list=spec.model_anchor_spec.resolved_norb_fix_list,
+        metric={
+            **dict(persisted.metric),
+            "projection_basis_kind": spec.projection_basis_kind,
+        },
+    )
+    run_cfg = SimpleNamespace(
+        cfg_path="case.yaml",
+        cfg_dir=Path("."),
+        valley="Gamma",
+        spin="all",
+        tolerance=1.0e-10,
+        material={},
+    )
+    # Deliberately omit ctx.nlow_state_list: dual-frame Gamma owns a routed
+    # group layout even though its production gauge is auto_scdm.
+    ctx = SimpleNamespace(
+        config=run_cfg,
+        mode="gamma",
+        q_count=spec.layout.q_count,
+        orb0=spec.layout.same_q_dimension,
+        full_dim=spec.layout.full_dimension,
+        q_rotation_deg=0.0,
+        frame_inference=None,
+        num_layer_list=spec.layout.num_layer_list,
+    )
+
+    summary = projection_mod._initial_projection_summary(
+        ctx,
+        gauge_report=report,
+        low_dim=spec.model_dim,
+        n_orb_for_exactification=spec.group_ranks,
+        artifact_identity=spec.artifact_identity,
+    )
+
+    project_basis = summary["project_basis"]
+    assert project_basis["projection_basis_kind"] == "gamma_routed"
+    assert project_basis["gauge_mode"] == "auto_scdm"
+    assert project_basis["resolved_source_group_nlow_state_list"] == []
 
 
 def test_project_handoff_loader_rejects_wrong_companion_heff_with_typed_reason(
