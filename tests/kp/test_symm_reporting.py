@@ -85,3 +85,40 @@ def test_kp_symm_result_path_uses_canonical_case_default(tmp_path: Path) -> None
     assert cli._kp_symm_output_dir(cfg_path) == (
         tmp_path / "outputs" / "K1" / "q06" / "symmetry"
     ).resolve()
+
+
+def test_kp_symm_result_path_normalizes_system_style_case(tmp_path: Path) -> None:
+    from kp import cli
+
+    cfg_path = tmp_path / "case.yaml"
+    cfg_path.write_text(
+        yaml.safe_dump(
+            {
+                "system": {
+                    "name": "MgI2",
+                    "output": "runs/gamma_spinful",
+                    "tapw_output": "tapw/outputs",
+                    "layers": [1, 1],
+                    "spin": "all",
+                    "orbital_order": "I-s3p2d2,Mg-s2p2,I-s3p2d2",
+                    "cell": [
+                        [60.0, 0.0, 0.0],
+                        [-30.0, 51.9615242271, 0.0],
+                        [0.0, 0.0, 50.0],
+                    ],
+                },
+                "project": {
+                    "valley": "Gamma",
+                    "q_shell": 4,
+                    "efermi": -4.168612,
+                    "target": "valence",
+                },
+                "symmetry": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cli._kp_symm_output_dir(cfg_path) == (
+        tmp_path / "runs" / "gamma_spinful" / "Gamma" / "q04" / "symmetry"
+    ).resolve()
