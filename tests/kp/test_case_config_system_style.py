@@ -3,8 +3,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from kp.config.case import normalize_case_config
+
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def _tapw_style_system_config() -> dict:
@@ -34,6 +38,37 @@ def _tapw_style_system_config() -> dict:
         },
         "symmetry": {"tolerance": 0.01},
         "model": {},
+    }
+
+
+def test_tracked_mgi2_gamma_q04_keeps_reviewed_automatic_acceptance_policy() -> None:
+    config_path = (
+        REPO_ROOT
+        / "examples"
+        / "mgi2_3.89"
+        / "kp"
+        / "configs"
+        / "mgi2_3.89_Gamma_spinful_q04.yaml"
+    )
+    raw = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    project = raw["project"]
+    model = raw["model"]
+
+    assert model["target_bands"] == "top"
+    assert model["fit"] == {
+        "method": "linear",
+        "kpoints": [0, 40],
+        "bands": 10,
+        "one_sided_weight": 0.0,
+        "two_sided_weight": 0.0,
+    }
+    assert project["downfold_method"] == "fixed_schur"
+    assert project["e_ref"] == -5.74
+    assert model["harmonics"] == {"intralayer": 3, "interlayer": 3}
+    assert model["max_order"] == {
+        "kinetic": 10,
+        "intralayer": 6,
+        "interlayer": 10,
     }
 
 
