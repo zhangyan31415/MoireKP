@@ -6,9 +6,13 @@ case:
 valley: K1
 spin: up
 
+kpath:
+  tmat: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
 material:
   name: synthetic_kp_smoke
   hamk_file: ../../data/hamiltonian_k.npy
+  band_file: ../../data/band_energies.txt
   qset1_file: ../../data/g_vectors_group1.npy
   qset2_file: ../../data/g_vectors_group2.npy
   spin: up

@@ -77,6 +77,8 @@ from kp.model.pipeline import (  # noqa: E402
     _progress_line,
     _run_model_pipeline,
     _write_auto_model_selection_outputs,
+    _four_profile_candidate_pool,
+    _preferred_automatic_primary_family,
     _select_nonlinear_frontier_scores,
     _refine_nonlinear_frontier_candidates,
     _refit_linear_profile_candidates,
@@ -229,7 +231,10 @@ def _selection_gate_config(
     project_dir.mkdir(exist_ok=True)
     symmetry_dir.mkdir(exist_ok=True)
     np.save(project_dir / "heff.npy", np.eye(2, dtype=np.complex128)[None, :, :])
-    np.savez(project_dir / "basis.npz", placeholder=np.asarray(1))
+    np.savez(
+        project_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_routed"),
+    )
     (project_dir / "selection_artifact.json").write_text("{}\n", encoding="utf-8")
     operation = {
         "name": "C3z",
@@ -317,6 +322,24 @@ def test_model_selection_preflight_preserves_non_gamma_release_path(
     project_dir = Path(config.heff_file).parent
     (project_dir / "selection_artifact.json").unlink()
     (Path(config.symmetry_source_config["path"]) / "representations.npz").unlink()
+
+    assert _preflight_certified_model_selection(config) is None
+
+
+def test_model_selection_preflight_preserves_explicit_gamma_release_path(
+    tmp_path: Path,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    project_dir = Path(config.heff_file).parent
+    np.savez(
+        project_dir / "basis.npz",
+        projection_basis_kind=np.asarray("explicit_legacy"),
+    )
+    (project_dir / "selection_artifact.json").unlink()
 
     assert _preflight_certified_model_selection(config) is None
 
@@ -3850,6 +3873,78 @@ def test_nonlinear_frontier_keeps_linear_high_low_and_pareto_vocabularies() -> N
     ]
 
 
+def test_four_profile_pool_preserves_complete_linear_candidates() -> None:
+    complete = CandidateScore(
+        name="complete-linear-high",
+        orders=FamilyOrders(10, 6, 10),
+        independent_real_parameters=840,
+        weighted_rms_mev=3.0,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=8.0,
+        mean_subspace_overlap=0.97,
+        selection_scope="high",
+    )
+    frontier = replace(
+        complete,
+        name="frontier-linear-high",
+        orders=FamilyOrders(4, 3, 3),
+        weighted_rms_mev=40.0,
+        mean_subspace_overlap=0.75,
+    )
+    nonlinear = replace(
+        frontier,
+        name="frontier-nonlinear-high",
+        solver_family="nonlinear",
+        weighted_rms_mev=12.0,
+        mean_subspace_overlap=0.24,
+    )
+
+    pool = _four_profile_candidate_pool(
+        linear_high_scores=(complete,),
+        linear_low_scores=(),
+        weighted_linear_scores=(frontier,),
+        nonlinear_scores=(nonlinear,),
+    )
+
+    assert [score.name for score in pool] == [
+        "complete-linear-high",
+        "frontier-linear-high",
+        "frontier-nonlinear-high",
+    ]
+
+
+def test_primary_profile_prefers_passing_linear_over_warn_nonlinear() -> None:
+    score = CandidateScore(
+        name="candidate",
+        orders=FamilyOrders(1, 0, 0),
+        independent_real_parameters=1,
+        weighted_rms_mev=1.0,
+        weighted_rms_se_mev=0.1,
+        weighted_max_mev=2.0,
+        mean_subspace_overlap=0.99,
+    )
+    passing = SimpleNamespace(status="PASS", selected=score)
+    warning = SimpleNamespace(status="WARN_BEST_AVAILABLE", selected=score)
+    profiles = {
+        "linear": SimpleNamespace(high=passing),
+        "nonlinear": SimpleNamespace(high=warning),
+    }
+
+    assert _preferred_automatic_primary_family(profiles) == "linear"
+    profiles["nonlinear"] = SimpleNamespace(high=passing)
+    assert _preferred_automatic_primary_family(profiles) == "nonlinear"
+    worse_nonlinear = replace(score, weighted_rms_mev=2.0)
+    profiles["nonlinear"] = SimpleNamespace(
+        high=SimpleNamespace(status="PASS", selected=worse_nonlinear)
+    )
+    assert _preferred_automatic_primary_family(profiles) == "linear"
+    better_nonlinear = replace(score, weighted_rms_mev=0.5)
+    profiles["nonlinear"] = SimpleNamespace(
+        high=SimpleNamespace(status="PASS", selected=better_nonlinear)
+    )
+    assert _preferred_automatic_primary_family(profiles) == "nonlinear"
+
+
 def test_harmonic_support_size_uses_active_fitted_harmonics_not_configured_ceiling() -> None:
     model_config = SimpleNamespace(harmonics_config={"intra": 4, "inter": 4})
     model = SimpleNamespace(
@@ -6163,6 +6258,7 @@ def test_four_profile_report_records_solver_and_complexity_metadata(tmp_path: Pa
             nonlinear.name: {"score": nonlinear},
         },
         "nonlinear_frontier": {"enabled": True, "linear_sources": ["linear"]},
+        "primary_profile": "linear/high",
     }
 
     summary = _write_high_low_model_selection_outputs(scan=scan, output_dir=tmp_path)
@@ -6178,6 +6274,7 @@ def test_four_profile_report_records_solver_and_complexity_metadata(tmp_path: Pa
         "primary_band_count"
     ] == 4
     assert summary["nonlinear_frontier"]["enabled"] is True
+    assert summary["primary_profile"] == "linear/high"
     csv_text = (tmp_path / "candidate_metrics.csv").read_text(encoding="utf-8")
     assert "solver_family" in csv_text.splitlines()[0]
     assert "primary_band_count" in csv_text.splitlines()[0]
@@ -7180,6 +7277,7 @@ def test_ptse2_release_config_exposes_only_public_model_knobs() -> None:
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
 
     symmetry = raw.get("symmetry", {})
+    assert symmetry["tolerance"] == pytest.approx(2.0e-2)
     assert "exactification" not in symmetry
     assert "operation_actions" not in symmetry
     assert "spin_sector_sewing" not in symmetry
@@ -7201,6 +7299,10 @@ def test_ptse2_release_config_exposes_only_public_model_knobs() -> None:
         "two_sided_weight": 1.0,
         "band_loss_weight": 1.0,
     }
+    project = raw.get("project", {})
+    assert project["nlow_state_list"] == [[54], [55]]
+    assert project["gauge"] == "auto"
+    assert "selection" not in project
 
 
 def test_load_model_config_marks_symmetry_source_inferred_from_case_symm_section(tmp_path: Path) -> None:

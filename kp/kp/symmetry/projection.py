@@ -4903,6 +4903,11 @@ def infer_project_spin_route_from_config(
         operation_requests=operation_requests,
         nk=nk,
         default_k_index=int(run_cfg.plot_cfg.get("hamk_index", 0)),
+        packed_k_route_resolver=(
+            _actual_sampled_k_route_resolver(run_cfg)
+            if _valley_family(run_cfg.valley) == "Gamma"
+            else None
+        ),
     )
     return _resolve_spin_sector_sewing(
         spin=run_cfg.spin,
@@ -4942,6 +4947,11 @@ def prepare_symmetry_validated_project_gauge(
         run_cfg,
         create_output_dir=False,
         validate_full_space_covariance=False,
+        packed_k_route_resolver=(
+            _actual_sampled_k_route_resolver(run_cfg)
+            if _valley_family(run_cfg.valley) == "Gamma"
+            else None
+        ),
     )
     selected_gauge_candidate, gauge_report = _resolve_validated_projection_gauge(ctx)
     return ProjectSymmetryPreparation(

@@ -23,10 +23,16 @@ def main() -> None:
 
     q1 = np.array([[0.0, 0.0]], dtype=float)
     q2 = np.array([[0.1, 0.0]], dtype=float)
+    kpoints = np.array(
+        [[0.0, 0.0, 0.0], [0.1, 0.0, 0.0], [0.2, 0.0, 0.0]],
+        dtype=float,
+    )
 
     np.save(data / "hamiltonian_k.npy", hamk)
     np.save(data / "g_vectors_group1.npy", q1)
     np.save(data / "g_vectors_group2.npy", q2)
+    np.save(data / "kpoints.npy", kpoints)
+    np.savetxt(data / "band_energies.txt", np.linalg.eigvalsh(hamk), fmt="%.16e")
     print(f"Wrote inputs under {data}")
 
 

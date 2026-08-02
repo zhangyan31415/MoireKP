@@ -16,10 +16,12 @@ rigid OpenMX input. The local OpenMX layout also exposes the SOC/NSOC calculatio
 files and the symmetrized SOC Hamiltonian and overlap through relative links to
 the retained `examples/toZY/` data.
 
-The KP case keeps the current automatic low-energy selection, which resolves
-one state per layer (`[[54], [55]]`), and the current nonlinear fit: 38 bands
-at k-point indices 0, 20, and 40, fifth-shell intra/interlayer harmonics, and
-kinetic/intralayer/interlayer polynomial orders 10/8/8.
+The KP case uses the audited physical one-state-per-layer basis
+(`[[54], [55]]`) with symmetry-validated automatic gauge anchors. This avoids
+assigning an unstable source-group label to the isolated PtSe2 bands while
+keeping the current nonlinear fit: 38 bands at k-point indices 0, 20, and 40,
+fifth-shell intra/interlayer harmonics, and kinetic/intralayer/interlayer
+polynomial orders 10/8/8.
 
 ## Run TAPW
 

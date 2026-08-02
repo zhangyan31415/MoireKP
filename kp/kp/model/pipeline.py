@@ -1548,7 +1548,7 @@ def _first_symlink_component(path: Path) -> Path | None:
 
 
 def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
-    """Reject model publication unless projection and symmetry share one certificate."""
+    """Require a selection certificate for automatic routed Gamma bases."""
 
     valley_model = config.valley_model
     valley_type = (
@@ -1560,6 +1560,19 @@ def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
         return None
 
     project_dir = Path(config.heff_file).resolve().parent
+    basis_path = project_dir / "basis.npz"
+    with np.load(basis_path, allow_pickle=False) as basis_payload:
+        basis_kind = "explicit_legacy"
+        if "projection_basis_kind" in basis_payload.files:
+            basis_kind_raw = np.asarray(basis_payload["projection_basis_kind"])
+            if basis_kind_raw.shape != ():
+                raise ValueError("projection basis kind must be a scalar")
+            basis_kind = str(basis_kind_raw.item())
+    if basis_kind == "explicit_legacy":
+        return None
+    if basis_kind != "gamma_routed":
+        raise ValueError(f"unsupported projection_basis_kind: {basis_kind!r}")
+
     marker_path = project_dir / "selection_artifact.json"
     if marker_path.is_symlink():
         raise ValueError("kp model projection selection marker must not be a symlink")
@@ -7363,6 +7376,8 @@ def _write_high_low_model_selection_outputs(
     else:
         summary["profiles"]["high"]["output_dir"] = "high"
         summary["profiles"]["low"]["output_dir"] = "low"
+    if scan.get("primary_profile") is not None:
+        summary["primary_profile"] = str(scan["primary_profile"])
     output_dir.mkdir(parents=True, exist_ok=True)
     (output_dir / "auto_model_selection.json").write_text(
         json.dumps(_json_safe(summary), indent=2) + "\n",
@@ -14711,6 +14726,59 @@ def _refine_nonlinear_frontier_candidates(
     return refined_runs
 
 
+def _four_profile_candidate_pool(
+    *,
+    linear_high_scores: Sequence[CandidateScore],
+    linear_low_scores: Sequence[CandidateScore],
+    weighted_linear_scores: Sequence[CandidateScore],
+    nonlinear_scores: Sequence[CandidateScore],
+) -> tuple[CandidateScore, ...]:
+    """Keep the complete linear scan when comparing four model profiles."""
+
+    candidates_by_name: dict[str, CandidateScore] = {}
+    for score in (
+        *linear_high_scores,
+        *linear_low_scores,
+        *weighted_linear_scores,
+        *nonlinear_scores,
+    ):
+        candidates_by_name.setdefault(score.name, score)
+    return tuple(candidates_by_name.values())
+
+
+def _preferred_automatic_primary_family(
+    profile_families: Mapping[str, Any],
+) -> str:
+    """Prefer a passing high profile over a warning-only solver family."""
+
+    linear_profiles = profile_families.get("linear")
+    nonlinear_profiles = profile_families.get("nonlinear")
+    if nonlinear_profiles is None:
+        return "linear"
+    if linear_profiles is None:
+        return "nonlinear"
+
+    linear_high = linear_profiles.high
+    nonlinear_high = nonlinear_profiles.high
+    if nonlinear_high.selected is None:
+        return "linear"
+    if linear_high.selected is None:
+        return "nonlinear"
+
+    status_priority = {"PASS": 2, "WARN_BEST_AVAILABLE": 1, "FAIL": 0}
+    linear_priority = status_priority.get(str(linear_high.status), 0)
+    nonlinear_priority = status_priority.get(str(nonlinear_high.status), 0)
+    if linear_priority > nonlinear_priority:
+        return "linear"
+    if nonlinear_priority > linear_priority:
+        return "nonlinear"
+    linear_rms = float(linear_high.selected.weighted_rms_mev)
+    nonlinear_rms = float(nonlinear_high.selected.weighted_rms_mev)
+    if linear_rms < nonlinear_rms - 1.0e-12:
+        return "linear"
+    return "nonlinear"
+
+
 def _run_automatic_family_order_scan(
     *,
     moire_config: MoireConfig,
@@ -15096,8 +15164,14 @@ def _run_automatic_family_order_scan(
             nonlinear_score_list.append(low_score)
         nonlinear_scores = tuple(nonlinear_score_list)
         if nonlinear_scores:
+            four_profile_candidates = _four_profile_candidate_pool(
+                linear_high_scores=linear_high_scores,
+                linear_low_scores=tuple(linear_low_scores),
+                weighted_linear_scores=linear_profile_scores,
+                nonlinear_scores=nonlinear_scores,
+            )
             four_profiles = select_four_model_profiles(
-                (*linear_profile_scores, *nonlinear_scores),
+                four_profile_candidates,
                 overlap_target=selection_config.overlap_target,
                 overlap_safety_floor=selection_config.overlap_safety_floor,
                 low_se_multiplier=selection_config.low_se_multiplier,
@@ -15595,6 +15669,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
                 )
                 primary_family, primary_quality = primary_name.split("/", maxsplit=1)
                 primary_profile = profile_results[primary_family][primary_quality]
+                automatic_order_scan["primary_profile"] = primary_name
             elif nonlinear_profiles is None:
                 profiles = profile_families["linear"]
                 for profile_name, decision in (
@@ -15635,6 +15710,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
                         "status": decision.status,
                     }
                 primary_profile = profile_results["high"]
+                automatic_order_scan["primary_profile"] = "linear/high"
             else:
                 nested_results: dict[str, dict[str, dict[str, Any]]] = {}
                 for solver_family in ("linear", "nonlinear"):
@@ -15674,7 +15750,13 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
                             "status": decision.status,
                         }
                 profile_results = nested_results
-                primary_profile = profile_results["nonlinear"]["high"]
+                primary_family = _preferred_automatic_primary_family(
+                    profile_families
+                )
+                primary_profile = profile_results[primary_family]["high"]
+                automatic_order_scan["primary_profile"] = (
+                    f"{primary_family}/high"
+                )
             results = primary_profile["results"]
             moire_config = primary_profile["moire_config"]
             model_config = primary_profile["model_config"]

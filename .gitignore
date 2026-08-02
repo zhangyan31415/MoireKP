@@ -114,4 +114,5 @@ kp/configs/
 Mote_DFT_gen/
 *.npy
 *.npz
+examples/kp_canonical_smoke/data/band_energies.txt
 !examples/minimal_synthetic/expected/KPATH.out

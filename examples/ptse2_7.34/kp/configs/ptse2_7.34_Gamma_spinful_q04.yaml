@@ -15,15 +15,15 @@ project:
   q_shell: 4
   efermi: -4.5
   target: valence
-  selection:
-    mode: auto
-    max_dimension: 4
-    validation_indices: [0, 20, 40, 60]
-    validation_bands: 10
+  nlow_state_list:
+    - [54]
+    - [55]
+  gauge: auto
   e_ref: -4.8
   workers: 64
 
-symmetry: {}
+symmetry:
+  tolerance: 2.0e-2
 
 model:
   target_bands: top

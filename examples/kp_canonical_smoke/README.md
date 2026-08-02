@@ -10,7 +10,8 @@ physical validation.
 python examples/kp_canonical_smoke/generate_inputs.py
 ```
 
-This writes small ignored `.npy` files under `examples/kp_canonical_smoke/data/`.
+This writes small ignored `.npy` inputs and the exact reference
+`band_energies.txt` under `examples/kp_canonical_smoke/data/`.
 
 ## K1 Example
 

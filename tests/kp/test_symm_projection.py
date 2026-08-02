@@ -2330,8 +2330,9 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             self.assertFalse(case_root.exists())
 
     def test_symmetry_gauge_resolver_skips_full_space_covariance_recheck(self) -> None:
-        run_cfg = object()
+        run_cfg = SimpleNamespace(valley="Gamma")
         context = object()
+        route_resolver = object()
         report = GaugeAnchorReport(
             gauge_mode="auto_scdm",
             resolved_norb_fix_list=[[[0]]],
@@ -2347,10 +2348,12 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             *,
             create_output_dir,
             validate_full_space_covariance,
+            packed_k_route_resolver,
         ):
             self.assertIs(observed_run_cfg, run_cfg)
             self.assertFalse(create_output_dir)
             self.assertFalse(validate_full_space_covariance)
+            self.assertIs(packed_k_route_resolver, route_resolver)
             return context
 
         with (
@@ -2359,6 +2362,11 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 projection_mod,
                 "_build_projection_run_context",
                 side_effect=fake_build_context,
+            ),
+            patch.object(
+                projection_mod,
+                "_actual_sampled_k_route_resolver",
+                return_value=route_resolver,
             ),
             patch.object(
                 projection_mod,
