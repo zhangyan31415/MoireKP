@@ -23,6 +23,32 @@ from kp.blocks.gamma_layout import GammaRowLayout
 from kp.identity import hash_array
 
 
+def _gamma_model_mutability_records():
+    layout = GammaRowLayout.build(
+        qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash=hash_array(np.arange(4, dtype=np.int64)),
+    )
+    eigenvalues = np.arange(4, dtype=float)
+    eigenvectors = np.eye(4, dtype=np.complex128)
+    anchor = blocks_mod.build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=(eigenvalues,),
+        reference_eigenvectors_by_q=(eigenvectors,),
+        joint_band_indices=(0, 1, 2, 3),
+        group_ranks=(2, 2),
+        layout=layout,
+    )
+    frames = blocks_mod.build_gamma_model_frames(
+        eigenvalues_by_q=(eigenvalues,),
+        eigenvectors_by_q=(eigenvectors,),
+        layout=layout,
+        anchor_spec=anchor,
+    )
+    return anchor, frames
+
+
 def test_gamma_model_frame_aligns_complete_joint_space_with_full_u4() -> None:
     layout = GammaRowLayout.build(
         qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
@@ -64,6 +90,8 @@ def test_gamma_model_frame_aligns_complete_joint_space_with_full_u4() -> None:
 
     model_frame = first.local_frames_by_q[0]
     expected = np.eye(4, dtype=np.complex128)[:, [3, 1, 2, 0]]
+    assert not model_frame.flags.writeable
+    assert not first.alignment_unitaries_by_q[0].flags.writeable
     np.testing.assert_allclose(model_frame, expected, rtol=0.0, atol=1.0e-12)
     np.testing.assert_allclose(
         model_frame,
@@ -83,6 +111,247 @@ def test_gamma_model_frame_aligns_complete_joint_space_with_full_u4() -> None:
     routing_to_model = routing_frame.conj().T @ model_frame
     assert np.linalg.norm(routing_to_model[:2, 2:]) > 0.9
     assert np.linalg.norm(routing_to_model[2:, :2]) > 0.9
+
+
+def test_gamma_model_anchor_reference_validation_is_explicit() -> None:
+    layout = GammaRowLayout.build(
+        qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((2,), (2,)),
+        spin_convention="all",
+        source_basis_hash=hash_array(np.arange(8, dtype=np.int64)),
+    )
+    eigenvalues = np.arange(8, dtype=float)
+    reference_vectors = np.eye(8, dtype=np.complex128)
+    anchor_spec = blocks_mod.build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=(eigenvalues,),
+        reference_eigenvectors_by_q=(reference_vectors,),
+        joint_band_indices=(0, 1, 2, 3),
+        group_ranks=(2, 2),
+        layout=layout,
+    )
+
+    blocks_mod.validate_gamma_model_anchor_reference(
+        reference_eigenvalues_by_q=(eigenvalues,),
+        reference_eigenvectors_by_q=(reference_vectors,),
+        layout=layout,
+        anchor_spec=anchor_spec,
+    )
+
+    changed_energies = eigenvalues.copy()
+    changed_energies[0] += 0.25
+    with pytest.raises(ValueError, match="reference eigenvalues"):
+        blocks_mod.validate_gamma_model_anchor_reference(
+            reference_eigenvalues_by_q=(changed_energies,),
+            reference_eigenvectors_by_q=(reference_vectors,),
+            layout=layout,
+            anchor_spec=anchor_spec,
+        )
+
+    angle = 0.2
+    identity = np.eye(4, dtype=np.complex128)
+    changed_vectors = np.block(
+        [
+            [np.cos(angle) * identity, -np.sin(angle) * identity],
+            [np.sin(angle) * identity, np.cos(angle) * identity],
+        ]
+    )
+    with pytest.raises(ValueError, match="reference projector"):
+        blocks_mod.validate_gamma_model_anchor_reference(
+            reference_eigenvalues_by_q=(eigenvalues,),
+            reference_eigenvectors_by_q=(changed_vectors,),
+            layout=layout,
+            anchor_spec=anchor_spec,
+        )
+
+    other_k = blocks_mod.build_gamma_model_frames(
+        eigenvalues_by_q=(eigenvalues,),
+        eigenvectors_by_q=(changed_vectors,),
+        layout=layout,
+        anchor_spec=anchor_spec,
+    )
+    np.testing.assert_allclose(
+        other_k.local_frames_by_q[0] @ other_k.local_frames_by_q[0].conj().T,
+        changed_vectors[:, :4] @ changed_vectors[:, :4].conj().T,
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+
+
+def test_gamma_model_anchor_recursively_freezes_mutable_sequences() -> None:
+    anchor, _ = _gamma_model_mutability_records()
+
+    anchor_kwargs = {name: getattr(anchor, name) for name in anchor.__dataclass_fields__}
+    mutable_bands = list(anchor.joint_band_indices)
+    mutable_references = [
+        [list(term) for term in reference]
+        for reference in anchor.resolved_reference_terms
+    ]
+    anchor_kwargs.update(
+        joint_band_indices=mutable_bands,
+        group_ranks=list(anchor.group_ranks),
+        model_column_order=[list(value) for value in anchor.model_column_order],
+        resolved_reference_terms=mutable_references,
+        selected_rows=list(anchor.selected_rows),
+        reference_singular_values=list(anchor.reference_singular_values),
+        reference_eigenvalues=list(anchor.reference_eigenvalues),
+        warnings=list(anchor.warnings),
+    )
+    frozen_anchor = blocks_mod.GammaModelAnchorSpec(**anchor_kwargs)
+    mutable_bands.append(99)
+    mutable_references[0].append([3, 1.0 + 0.0j])
+
+    assert frozen_anchor.joint_band_indices == anchor.joint_band_indices
+    assert frozen_anchor.resolved_reference_terms == anchor.resolved_reference_terms
+    assert isinstance(frozen_anchor.joint_band_indices, tuple)
+    assert isinstance(frozen_anchor.resolved_reference_terms[0], tuple)
+    assert not hasattr(frozen_anchor.joint_band_indices, "append")
+
+    invalid_anchor_kwargs = {
+        name: getattr(anchor, name) for name in anchor.__dataclass_fields__
+    }
+    invalid_references = [
+        [list(term) for term in reference]
+        for reference in anchor.resolved_reference_terms
+    ]
+    invalid_references[0][0][0] = float(invalid_references[0][0][0])
+    invalid_anchor_kwargs["resolved_reference_terms"] = invalid_references
+    with pytest.raises(ValueError, match="reference row.*strict integer"):
+        blocks_mod.GammaModelAnchorSpec(**invalid_anchor_kwargs)
+
+
+def test_gamma_model_frames_recursively_freeze_mutable_sequences() -> None:
+    _, frames = _gamma_model_mutability_records()
+
+    frame_kwargs = {name: getattr(frames, name) for name in frames.__dataclass_fields__}
+    mutable_frames = [np.array(value, copy=True) for value in frames.local_frames_by_q]
+    mutable_quality = [list(value) for value in frames.alignment_singular_values_by_q]
+    frame_kwargs.update(
+        joint_band_indices=list(frames.joint_band_indices),
+        group_ranks=list(frames.group_ranks),
+        local_frames_by_q=mutable_frames,
+        alignment_unitaries_by_q=[
+            np.array(value, copy=True) for value in frames.alignment_unitaries_by_q
+        ],
+        alignment_singular_values_by_q=mutable_quality,
+        orthonormality_residuals_by_q=list(frames.orthonormality_residuals_by_q),
+        projector_residuals_by_q=list(frames.projector_residuals_by_q),
+        frame_hashes_by_q=list(frames.frame_hashes_by_q),
+        alignment_hashes_by_q=list(frames.alignment_hashes_by_q),
+    )
+    frozen_frames = blocks_mod.GammaModelFrames(**frame_kwargs)
+    mutable_frames.append(np.eye(4, dtype=np.complex128))
+    mutable_quality[0].append(0.0)
+
+    assert len(frozen_frames.local_frames_by_q) == 1
+    assert frozen_frames.alignment_singular_values_by_q == frames.alignment_singular_values_by_q
+    assert isinstance(frozen_frames.alignment_singular_values_by_q, tuple)
+    assert isinstance(frozen_frames.alignment_singular_values_by_q[0], tuple)
+    assert not hasattr(frozen_frames.frame_hashes_by_q, "append")
+
+
+def test_gamma_model_unsorted_joint_bands_use_true_maximum_for_bounds() -> None:
+    layout = GammaRowLayout.build(
+        qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash=hash_array(np.arange(4, dtype=np.int64)),
+    )
+    eigenvalues = np.arange(4, dtype=float)
+    eigenvectors = np.eye(4, dtype=np.complex128)
+
+    anchor = blocks_mod.build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=(eigenvalues,),
+        reference_eigenvectors_by_q=(eigenvectors,),
+        joint_band_indices=(3, 0, 1, 2),
+        group_ranks=(2, 2),
+        layout=layout,
+    )
+    assert anchor.joint_band_indices == (3, 0, 1, 2)
+
+    with pytest.raises(
+        IndexError,
+        match="Gamma model joint band 4 outside Q 0 eigensystem size 4",
+    ):
+        blocks_mod.build_gamma_model_anchor_spec(
+            reference_eigenvalues_by_q=(eigenvalues,),
+            reference_eigenvectors_by_q=(eigenvectors,),
+            joint_band_indices=(4, 0, 1, 2),
+            group_ranks=(2, 2),
+            layout=layout,
+        )
+
+
+def test_gamma_model_anchor_spec_preserves_legacy_resolved_references() -> None:
+    layout = GammaRowLayout.build(
+        qsets=(np.zeros((1, 2)), np.zeros((1, 2))),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash=hash_array(np.arange(4, dtype=np.int64)),
+    )
+    eigenframe = np.asarray(
+        [
+            [1.0, 1.0, 1.0, 1.0],
+            [1.0, -1.0, 1.0, -1.0],
+            [1.0, 1.0, -1.0, -1.0],
+            [1.0, -1.0, -1.0, 1.0],
+        ],
+        dtype=np.complex128,
+    ) / 2.0
+    hamiltonian = eigenframe @ np.diag([-4.0, -3.0, -2.0, -1.0]) @ eigenframe.conj().T
+    eigenvalues, eigenvectors = np.linalg.eigh(hamiltonian)
+
+    legacy, legacy_report = blocks_mod.resolve_project_gauge_anchors(
+        hamiltonian,
+        q_count=1,
+        orb_per_layer0=1,
+        num_layer_list=[1, 1],
+        spin="all",
+        Qlayer_list=[[np.zeros((1, 2))], [np.zeros((1, 2))]],
+        num_orb_per_layer_list=[[1], [1]],
+        nlow_state_list=[[0, 1], [2, 3]],
+        norb_fix_list="auto",
+        gauge_config="auto",
+        mode="gamma",
+    )
+    anchor_spec = blocks_mod.build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=(eigenvalues,),
+        reference_eigenvectors_by_q=(eigenvectors,),
+        joint_band_indices=(0, 1, 2, 3),
+        group_ranks=(2, 2),
+        layout=layout,
+    )
+
+    assert anchor_spec.resolved_norb_fix_list == legacy
+    legacy_payload = legacy_report.to_dict()
+    assert legacy_payload["resolved_norb_fix_list"] == legacy
+    assert legacy_payload["selections"][0]["reference_ordering"] == "gamma_model_frame"
+    np.testing.assert_allclose(
+        legacy_payload["selections"][0]["reference_singular_values"],
+        np.ones(4),
+        rtol=0.0,
+        atol=1.0e-12,
+    )
+    assert anchor_spec.reference_q == 0
+    assert anchor_spec.layout_hash == layout.layout_hash
+
+    payload = anchor_spec.to_payload()
+    restored = blocks_mod.GammaModelAnchorSpec.from_payload(payload)
+    assert restored == anchor_spec
+    tampered = dict(payload)
+    tampered["joint_band_indices"] = [0, 1, 2, 5]
+    with pytest.raises(ValueError, match="identity hash mismatch"):
+        blocks_mod.GammaModelAnchorSpec.from_payload(tampered)
+    with pytest.raises(ValueError, match="strict integers"):
+        blocks_mod.build_gamma_model_anchor_spec(
+            reference_eigenvalues_by_q=(eigenvalues,),
+            reference_eigenvectors_by_q=(eigenvectors,),
+            joint_band_indices=(0, 1, 2, 3.0),
+            group_ranks=(2, 2),
+            layout=layout,
+        )
 
 
 def test_one_dimensional_state_selects_largest_leverage_row() -> None:

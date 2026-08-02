@@ -2,6 +2,11 @@
 
 from .blocks import (
     align_eigenstates,
+    build_gamma_model_anchor_spec,
+    build_gamma_model_frames,
+    GammaModelAnchorSpec,
+    GammaModelFrames,
+    validate_gamma_model_anchor_reference,
     get_H_block,
     project_heff_full,
     ProjectGaugeAnchorCandidate,
@@ -30,6 +35,11 @@ from .gamma_layout import (
 __all__ = [
     "get_H_block",
     "align_eigenstates",
+    "build_gamma_model_anchor_spec",
+    "build_gamma_model_frames",
+    "GammaModelAnchorSpec",
+    "GammaModelFrames",
+    "validate_gamma_model_anchor_reference",
     # "get_h_dft_low",
     "project_heff_full",
     "ProjectGaugeAnchorCandidate",

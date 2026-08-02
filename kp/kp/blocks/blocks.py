@@ -4,7 +4,8 @@ from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import wraps
-from typing import Any, List, Mapping, Tuple, Literal
+from numbers import Integral, Number, Real
+from typing import Any, List, Mapping, Sequence, Tuple, Literal
 
 import numpy as np
 import scipy
@@ -18,7 +19,15 @@ from .downfold import (
     projector_groups_from_block_columns,
     set_projector_blas_threads as _set_downfold_projector_blas_threads,
 )
-from kp.basis.selection import AutoGaugeConfig, GaugeAnchorReport, select_anchor_rows_qrcp
+from kp.basis.selection import (
+    AutoGaugeConfig,
+    AutoGaugeSelection,
+    GaugeAnchorReport,
+    select_anchor_rows_qrcp,
+)
+from kp.identity import hash_array, hash_mapping
+
+from .gamma_layout import GammaRowLayout
 
 PROJECTOR_BLAS_THREADS = 8
 _PROJECTOR_BLAS_SCOPE_DEPTH: ContextVar[int] = ContextVar(
@@ -33,6 +42,481 @@ class ProjectGaugeAnchorCandidate:
     resolved_norb_fix_list: list[Any]
     report: GaugeAnchorReport
     priority: int = 0
+
+
+def _record_tuple(value: Any, *, context: str) -> tuple[Any, ...]:
+    if isinstance(value, (str, bytes)):
+        raise ValueError(f"{context} must be a sequence, not a string")
+    try:
+        return tuple(value)
+    except TypeError as error:
+        raise ValueError(f"{context} must be a sequence") from error
+
+
+def _record_int(value: Any, *, context: str) -> int:
+    if not isinstance(value, Integral) or isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context} must be a strict integer")
+    return int(value)
+
+
+def _record_float(value: Any, *, context: str) -> float:
+    if not isinstance(value, Real) or isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context} must be a real number")
+    return float(value)
+
+
+def _record_complex(value: Any, *, context: str) -> complex:
+    if not isinstance(value, Number) or isinstance(value, (bool, np.bool_)):
+        raise ValueError(f"{context} must be a numeric coefficient")
+    return complex(value)
+
+
+def _record_references(value: Any) -> tuple[tuple[tuple[int, complex], ...], ...]:
+    references: list[tuple[tuple[int, complex], ...]] = []
+    for raw_reference in _record_tuple(value, context="Gamma model resolved references"):
+        terms: list[tuple[int, complex]] = []
+        for raw_term in _record_tuple(raw_reference, context="Gamma model reference column"):
+            term = _record_tuple(raw_term, context="Gamma model reference term")
+            if len(term) != 2:
+                raise ValueError("Gamma model reference terms must contain exactly row and coefficient")
+            terms.append(
+                (
+                    _record_int(term[0], context="Gamma model reference row"),
+                    _record_complex(term[1], context="Gamma model reference coefficient"),
+                )
+            )
+        references.append(tuple(terms))
+    return tuple(references)
+
+
+@dataclass(frozen=True)
+class GammaModelAnchorSpec:
+    """Immutable SCDM anchor contract for one automatic-Gamma candidate."""
+
+    joint_band_indices: tuple[int, ...]
+    group_ranks: tuple[int, int]
+    model_column_order: tuple[tuple[int, int], ...]
+    resolved_reference_terms: tuple[tuple[tuple[int, complex], ...], ...]
+    selected_rows: tuple[int, ...]
+    reference_q_index: int
+    layout_hash: str
+    same_q_dimension: int
+    min_sigma: float
+    max_condition: float
+    projector_tolerance: float
+    orthonormality_tolerance: float
+    selection_sigma_min: float
+    selection_condition_number: float
+    reference_singular_values: tuple[float, ...]
+    reference_sigma_min: float
+    reference_condition_number: float
+    reference_eigenvalues: tuple[float, ...]
+    reference_projector_hash: str
+    warnings: tuple[str, ...]
+    identity_hash: str
+
+    SCHEMA = "kp.gamma-model-anchor-spec.v1"
+
+    def __post_init__(self) -> None:
+        raw_bands = _record_tuple(self.joint_band_indices, context="Gamma model joint bands")
+        raw_ranks = _record_tuple(self.group_ranks, context="Gamma model group ranks")
+        bands, ranks, expected_order = _gamma_joint_contract(raw_bands, raw_ranks)
+        raw_order = _record_tuple(self.model_column_order, context="Gamma model column order")
+        order = tuple(
+            tuple(
+                _record_int(value, context="Gamma model column-order index")
+                for value in _record_tuple(pair, context="Gamma model column-order pair")
+            )
+            for pair in raw_order
+        )
+        if any(len(pair) != 2 for pair in order) or order != expected_order:
+            raise ValueError("Gamma model anchor joint-band/group/model-column contract is not canonical")
+        references = _record_references(self.resolved_reference_terms)
+        if len(references) != len(bands):
+            raise ValueError("Gamma model anchor must contain one resolved reference per joint column")
+        selected_rows = tuple(
+            _record_int(row, context="Gamma model selected row")
+            for row in _record_tuple(self.selected_rows, context="Gamma model selected rows")
+        )
+        if (
+            len(selected_rows) != len(bands)
+            or len(set(selected_rows)) != len(bands)
+        ):
+            raise ValueError("Gamma model anchor selected rows must uniquely cover the joint rank")
+        reference_q_index = _record_int(
+            self.reference_q_index,
+            context="Gamma model reference_q_index",
+        )
+        if reference_q_index < 0:
+            raise ValueError("Gamma model anchor reference_q_index must be a non-negative integer")
+        same_q_dimension = _record_int(
+            self.same_q_dimension,
+            context="Gamma model same_q_dimension",
+        )
+        if same_q_dimension <= 0:
+            raise ValueError("Gamma model anchor same_q_dimension must be a positive integer")
+        if any(row < 0 or row >= same_q_dimension for row in selected_rows):
+            raise ValueError("Gamma model anchor selected row is outside same_q_dimension")
+        if not isinstance(self.layout_hash, str) or not self.layout_hash:
+            raise ValueError("Gamma model anchor layout_hash must be nonempty")
+        if not isinstance(self.reference_projector_hash, str) or not self.reference_projector_hash:
+            raise ValueError("Gamma model anchor reference_projector_hash must be nonempty")
+        scalar_names = (
+            "min_sigma",
+            "max_condition",
+            "projector_tolerance",
+            "orthonormality_tolerance",
+            "selection_sigma_min",
+            "selection_condition_number",
+            "reference_sigma_min",
+            "reference_condition_number",
+        )
+        scalar_values = tuple(
+            _record_float(getattr(self, name), context=f"Gamma model {name}")
+            for name in scalar_names
+        )
+        reference_singular_values = tuple(
+            _record_float(value, context="Gamma model reference singular value")
+            for value in _record_tuple(
+                self.reference_singular_values,
+                context="Gamma model reference singular values",
+            )
+        )
+        reference_eigenvalues = tuple(
+            _record_float(value, context="Gamma model reference eigenvalue")
+            for value in _record_tuple(
+                self.reference_eigenvalues,
+                context="Gamma model reference eigenvalues",
+            )
+        )
+        warnings = _record_tuple(self.warnings, context="Gamma model warnings")
+        if any(not isinstance(value, str) for value in warnings):
+            raise ValueError("Gamma model warnings must contain strings")
+        object.__setattr__(self, "joint_band_indices", bands)
+        object.__setattr__(self, "group_ranks", ranks)
+        object.__setattr__(self, "model_column_order", order)
+        object.__setattr__(self, "resolved_reference_terms", references)
+        object.__setattr__(self, "selected_rows", selected_rows)
+        object.__setattr__(self, "reference_q_index", reference_q_index)
+        object.__setattr__(self, "same_q_dimension", same_q_dimension)
+        for name, value in zip(scalar_names, scalar_values):
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "reference_singular_values", reference_singular_values)
+        object.__setattr__(self, "reference_eigenvalues", reference_eigenvalues)
+        object.__setattr__(self, "warnings", warnings)
+        all_numeric_values = scalar_values + reference_singular_values + reference_eigenvalues
+        if any(not np.isfinite(value) for value in all_numeric_values):
+            raise ValueError("Gamma model anchor quality/energy values must be finite")
+        if (
+            self.min_sigma <= 0.0
+            or self.max_condition < 1.0
+            or self.projector_tolerance <= 0.0
+            or self.orthonormality_tolerance <= 0.0
+            or self.selection_sigma_min < self.min_sigma
+            or self.selection_condition_number > self.max_condition
+            or self.reference_sigma_min < self.min_sigma
+            or self.reference_condition_number > self.max_condition
+        ):
+            raise ValueError("Gamma model anchor quality metrics violate their configured thresholds")
+        if len(reference_singular_values) != len(bands) or len(reference_eigenvalues) != len(bands):
+            raise ValueError("Gamma model anchor singular-value/energy metrics must cover the joint rank")
+        _gamma_reference_matrix(references, row_count=same_q_dimension)
+        if not isinstance(self.identity_hash, str) or not self.identity_hash:
+            raise ValueError("Gamma model anchor identity_hash must be nonempty")
+        actual = hash_mapping(self._identity_payload())
+        if actual != self.identity_hash:
+            raise ValueError(
+                f"Gamma model anchor identity hash mismatch: {self.identity_hash} != {actual}"
+            )
+
+    @property
+    def reference_q(self) -> int:
+        return self.reference_q_index
+
+    @property
+    def resolved_norb_fix_list(self) -> list[Any]:
+        """Return the legacy two-owner anchor shape without mutable aliases."""
+
+        resolved: list[Any] = []
+        cursor = 0
+        for rank in self.group_ranks:
+            owner_refs: list[Any] = []
+            for terms in self.resolved_reference_terms[cursor : cursor + rank]:
+                owner_refs.append(_format_auto_reference_terms(list(terms)))
+            resolved.append(owner_refs)
+            cursor += rank
+        return resolved
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.SCHEMA,
+            "joint_band_indices": list(self.joint_band_indices),
+            "group_ranks": list(self.group_ranks),
+            "model_column_order": [list(value) for value in self.model_column_order],
+            "resolved_reference_terms": _gamma_reference_payload(self.resolved_reference_terms),
+            "selected_rows": list(self.selected_rows),
+            "reference_q_index": self.reference_q_index,
+            "layout_hash": self.layout_hash,
+            "same_q_dimension": self.same_q_dimension,
+            "min_sigma": self.min_sigma,
+            "max_condition": self.max_condition,
+            "projector_tolerance": self.projector_tolerance,
+            "orthonormality_tolerance": self.orthonormality_tolerance,
+            "selection_sigma_min": self.selection_sigma_min,
+            "selection_condition_number": self.selection_condition_number,
+            "reference_singular_values": list(self.reference_singular_values),
+            "reference_sigma_min": self.reference_sigma_min,
+            "reference_condition_number": self.reference_condition_number,
+            "reference_eigenvalues": list(self.reference_eigenvalues),
+            "reference_projector_hash": self.reference_projector_hash,
+            "warnings": list(self.warnings),
+        }
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = self._identity_payload()
+        actual = hash_mapping(payload)
+        if actual != self.identity_hash:
+            raise ValueError(
+                f"Gamma model anchor identity hash mismatch: {self.identity_hash} != {actual}"
+            )
+        payload["identity_hash"] = self.identity_hash
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "GammaModelAnchorSpec":
+        if not isinstance(payload, Mapping):
+            raise TypeError("Gamma model anchor payload must be a mapping")
+        identity_keys = {
+            "schema",
+            "joint_band_indices",
+            "group_ranks",
+            "model_column_order",
+            "resolved_reference_terms",
+            "selected_rows",
+            "reference_q_index",
+            "layout_hash",
+            "same_q_dimension",
+            "min_sigma",
+            "max_condition",
+            "projector_tolerance",
+            "orthonormality_tolerance",
+            "selection_sigma_min",
+            "selection_condition_number",
+            "reference_singular_values",
+            "reference_sigma_min",
+            "reference_condition_number",
+            "reference_eigenvalues",
+            "reference_projector_hash",
+            "warnings",
+        }
+        expected = identity_keys | {"identity_hash"}
+        missing = sorted(expected - set(payload))
+        unknown = sorted(set(payload) - expected)
+        if missing or unknown:
+            raise ValueError(
+                "Gamma model anchor payload keys mismatch "
+                f"(missing={missing}, unknown={unknown})"
+            )
+        if payload["schema"] != cls.SCHEMA:
+            raise ValueError(f"unsupported Gamma model anchor schema {payload['schema']!r}")
+        canonical = {key: payload[key] for key in identity_keys}
+        expected_hash = payload["identity_hash"]
+        if not isinstance(expected_hash, str) or not expected_hash:
+            raise ValueError("Gamma model anchor identity_hash must be a nonempty string")
+        actual_hash = hash_mapping(canonical)
+        if actual_hash != expected_hash:
+            raise ValueError(
+                f"Gamma model anchor identity hash mismatch: {expected_hash} != {actual_hash}"
+            )
+        raw_references = payload["resolved_reference_terms"]
+        if not isinstance(raw_references, list):
+            raise ValueError("Gamma model resolved_reference_terms must be a list")
+        references: list[tuple[tuple[int, complex], ...]] = []
+        for terms in raw_references:
+            if not isinstance(terms, list) or not terms:
+                raise ValueError("Gamma model reference columns must be nonempty lists")
+            parsed: list[tuple[int, complex]] = []
+            for term in terms:
+                if not isinstance(term, list) or len(term) != 3:
+                    raise ValueError("Gamma model reference terms must be [row, real, imag]")
+                parsed.append(
+                    (
+                        term[0],
+                        complex(
+                            _record_float(term[1], context="Gamma model reference coefficient real part"),
+                            _record_float(term[2], context="Gamma model reference coefficient imaginary part"),
+                        ),
+                    )
+                )
+            references.append(tuple(parsed))
+        spec = cls(
+            joint_band_indices=payload["joint_band_indices"],
+            group_ranks=payload["group_ranks"],
+            model_column_order=payload["model_column_order"],
+            resolved_reference_terms=tuple(references),
+            selected_rows=payload["selected_rows"],
+            reference_q_index=payload["reference_q_index"],
+            layout_hash=payload["layout_hash"],
+            same_q_dimension=payload["same_q_dimension"],
+            min_sigma=payload["min_sigma"],
+            max_condition=payload["max_condition"],
+            projector_tolerance=payload["projector_tolerance"],
+            orthonormality_tolerance=payload["orthonormality_tolerance"],
+            selection_sigma_min=payload["selection_sigma_min"],
+            selection_condition_number=payload["selection_condition_number"],
+            reference_singular_values=payload["reference_singular_values"],
+            reference_sigma_min=payload["reference_sigma_min"],
+            reference_condition_number=payload["reference_condition_number"],
+            reference_eigenvalues=payload["reference_eigenvalues"],
+            reference_projector_hash=payload["reference_projector_hash"],
+            warnings=payload["warnings"],
+            identity_hash=expected_hash,
+        )
+        if spec._identity_payload() != canonical:
+            raise ValueError("Gamma model anchor payload is not in canonical numeric form")
+        return spec
+
+
+@dataclass(frozen=True)
+class GammaModelFrames:
+    """Compact per-Q SCDM frames and their full-space alignment evidence."""
+
+    anchor_spec_identity_hash: str
+    layout_hash: str
+    joint_band_indices: tuple[int, ...]
+    group_ranks: tuple[int, int]
+    local_frames_by_q: tuple[np.ndarray, ...]
+    alignment_unitaries_by_q: tuple[np.ndarray, ...]
+    alignment_singular_values_by_q: tuple[tuple[float, ...], ...]
+    orthonormality_residuals_by_q: tuple[float, ...]
+    projector_residuals_by_q: tuple[float, ...]
+    frame_hashes_by_q: tuple[str, ...]
+    alignment_hashes_by_q: tuple[str, ...]
+    identity_hash: str
+
+    SCHEMA = "kp.gamma-model-frames.v1"
+
+    def __post_init__(self) -> None:
+        raw_bands = _record_tuple(self.joint_band_indices, context="Gamma model frame joint bands")
+        raw_ranks = _record_tuple(self.group_ranks, context="Gamma model frame group ranks")
+        bands, ranks, _ = _gamma_joint_contract(raw_bands, raw_ranks)
+        local_frames = _record_tuple(self.local_frames_by_q, context="Gamma model local frames")
+        alignments = _record_tuple(
+            self.alignment_unitaries_by_q,
+            context="Gamma model alignment unitaries",
+        )
+        singular_values_by_q = tuple(
+            tuple(
+                _record_float(value, context="Gamma model alignment singular value")
+                for value in _record_tuple(values, context="Gamma model alignment singular values")
+            )
+            for values in _record_tuple(
+                self.alignment_singular_values_by_q,
+                context="Gamma model Q alignment singular values",
+            )
+        )
+        orthonormality_residuals = tuple(
+            _record_float(value, context="Gamma model orthonormality residual")
+            for value in _record_tuple(
+                self.orthonormality_residuals_by_q,
+                context="Gamma model orthonormality residuals",
+            )
+        )
+        projector_residuals = tuple(
+            _record_float(value, context="Gamma model projector residual")
+            for value in _record_tuple(
+                self.projector_residuals_by_q,
+                context="Gamma model projector residuals",
+            )
+        )
+        frame_hashes = _record_tuple(self.frame_hashes_by_q, context="Gamma model frame hashes")
+        alignment_hashes = _record_tuple(
+            self.alignment_hashes_by_q,
+            context="Gamma model alignment hashes",
+        )
+        if any(not isinstance(value, str) for value in frame_hashes + alignment_hashes):
+            raise ValueError("Gamma model frame/alignment hashes must contain strings")
+        object.__setattr__(self, "joint_band_indices", bands)
+        object.__setattr__(self, "group_ranks", ranks)
+        object.__setattr__(self, "local_frames_by_q", local_frames)
+        object.__setattr__(self, "alignment_unitaries_by_q", alignments)
+        object.__setattr__(self, "alignment_singular_values_by_q", singular_values_by_q)
+        object.__setattr__(self, "orthonormality_residuals_by_q", orthonormality_residuals)
+        object.__setattr__(self, "projector_residuals_by_q", projector_residuals)
+        object.__setattr__(self, "frame_hashes_by_q", frame_hashes)
+        object.__setattr__(self, "alignment_hashes_by_q", alignment_hashes)
+        q_count = len(local_frames)
+        lengths = (
+            q_count,
+            len(alignments),
+            len(singular_values_by_q),
+            len(orthonormality_residuals),
+            len(projector_residuals),
+            len(frame_hashes),
+            len(alignment_hashes),
+        )
+        if q_count <= 0 or len(set(lengths)) != 1:
+            raise ValueError("Gamma model frame arrays and quality records must have one row per Q")
+        frozen_frames: list[np.ndarray] = []
+        frozen_alignments: list[np.ndarray] = []
+        for q_index in range(q_count):
+            frame = np.array(local_frames[q_index], dtype=np.complex128, copy=True, order="C")
+            alignment = np.array(
+                alignments[q_index], dtype=np.complex128, copy=True, order="C"
+            )
+            if frame.ndim != 2 or frame.shape[1] != len(bands):
+                raise ValueError(f"Gamma model Q {q_index} frame does not have the joint column rank")
+            if alignment.shape != (len(bands), len(bands)):
+                raise ValueError(f"Gamma model Q {q_index} alignment shape mismatch")
+            if not np.all(np.isfinite(frame)) or not np.all(np.isfinite(alignment)):
+                raise ValueError(f"Gamma model Q {q_index} frame data contain NaN or Inf")
+            if hash_array(frame) != frame_hashes[q_index]:
+                raise ValueError(f"Gamma model Q {q_index} frame hash mismatch")
+            if hash_array(alignment) != alignment_hashes[q_index]:
+                raise ValueError(f"Gamma model Q {q_index} alignment hash mismatch")
+            singular_values = singular_values_by_q[q_index]
+            if len(singular_values) != len(bands) or any(not np.isfinite(value) for value in singular_values):
+                raise ValueError(f"Gamma model Q {q_index} alignment quality is invalid")
+            residuals = (
+                orthonormality_residuals[q_index],
+                projector_residuals[q_index],
+            )
+            if any(not np.isfinite(value) or value < 0.0 for value in residuals):
+                raise ValueError(f"Gamma model Q {q_index} residual quality is invalid")
+            frame.setflags(write=False)
+            alignment.setflags(write=False)
+            frozen_frames.append(frame)
+            frozen_alignments.append(alignment)
+        object.__setattr__(self, "local_frames_by_q", tuple(frozen_frames))
+        object.__setattr__(self, "alignment_unitaries_by_q", tuple(frozen_alignments))
+        if any(
+            not isinstance(value, str) or not value
+            for value in (
+                self.anchor_spec_identity_hash,
+                self.layout_hash,
+                self.identity_hash,
+            )
+        ):
+            raise ValueError("Gamma model frame identities must be nonempty")
+        actual = hash_mapping(self._identity_payload())
+        if actual != self.identity_hash:
+            raise ValueError(f"Gamma model frame identity hash mismatch: {self.identity_hash} != {actual}")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.SCHEMA,
+            "anchor_spec_identity_hash": self.anchor_spec_identity_hash,
+            "layout_hash": self.layout_hash,
+            "joint_band_indices": list(self.joint_band_indices),
+            "group_ranks": list(self.group_ranks),
+            "frame_hashes_by_q": list(self.frame_hashes_by_q),
+            "alignment_hashes_by_q": list(self.alignment_hashes_by_q),
+            "alignment_singular_values_by_q": [
+                list(value) for value in self.alignment_singular_values_by_q
+            ],
+            "orthonormality_residuals_by_q": list(self.orthonormality_residuals_by_q),
+            "projector_residuals_by_q": list(self.projector_residuals_by_q),
+        }
 
 
 @contextmanager
@@ -193,7 +677,7 @@ def _cached_hermitian_eigh_columns(
     return np.array(eig, copy=True), np.array(vec, copy=True)
 
 
-def align_eigenstates(U_low: np.ndarray, Phi_ref: np.ndarray) -> np.ndarray:
+def align_eigenstates(U_low: np.ndarray, Phi_ref: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     """Align low-energy eigenstates to a reference basis using Procrustes via SVD.
 
     Parameters
@@ -852,6 +1336,468 @@ def _assign_anchor_references_to_bands(
     )
 
 
+@dataclass(frozen=True)
+class _GammaReferenceResolution:
+    selection: AutoGaugeSelection
+    references_by_band: tuple[tuple[tuple[int, complex], ...], ...]
+    assigned_scores: tuple[float, ...]
+    completion_details: tuple[Mapping[str, Any], ...]
+    completion_warnings: tuple[str, ...]
+    reference_singular_values: tuple[float, ...]
+    reference_sigma_min: float
+    reference_condition_number: float
+
+
+def _resolve_gamma_reference_core(
+    u_low: np.ndarray,
+    *,
+    config: AutoGaugeConfig,
+    segments: list[tuple[int, int]] | None,
+) -> _GammaReferenceResolution:
+    """Resolve and certify one complete Gamma SCDM reference set."""
+
+    u = np.asarray(u_low, dtype=np.complex128)
+    if u.ndim != 2 or min(u.shape) <= 0:
+        raise ValueError(f"Gamma model reference eigenspace must be nonempty and 2D, got {u.shape}")
+    if not np.all(np.isfinite(u)):
+        raise ValueError("Gamma model reference eigenspace contains NaN or Inf")
+    selection = select_anchor_rows_qrcp(
+        u,
+        n_anchors=u.shape[1],
+        basis_is_orthonormal=config.basis_is_orthonormal,
+    )
+    if selection.sigma_min < config.min_sigma:
+        raise ValueError(
+            f"auto gauge sigma_min={selection.sigma_min:.3e} below min_sigma={config.min_sigma:.3e}"
+        )
+    if selection.condition_number > config.max_condition:
+        raise ValueError(
+            f"auto gauge condition_number={selection.condition_number:.3e} exceeds "
+            f"max_condition={config.max_condition:.3e}"
+        )
+
+    raw = [_auto_reference_terms(int(row)) for row in selection.selected_rows]
+    completion_details: list[dict[str, Any]] = []
+    completion_warnings: list[str] = []
+    if segments is None:
+        references, assigned_scores = _assign_anchor_references_to_bands(u, raw)
+    else:
+        completed, completion_details, completion_warnings = _complete_gamma_spinful_reference_terms(
+            u,
+            selection.selected_rows,
+            segments=segments,
+        )
+        references = _order_gamma_references_for_model_basis(completed, segments=segments)
+        scores = _reference_overlap_scores(u, references)
+        assigned_scores = [float(np.max(scores[index, :])) for index in range(scores.shape[0])]
+
+    singular_values = _reference_overlap_singular_values(u, references)
+    sigma_min = float(np.min(singular_values)) if singular_values.size else 0.0
+    sigma_max = float(np.max(singular_values)) if singular_values.size else 0.0
+    condition = float("inf") if sigma_min <= 0.0 else float(sigma_max / sigma_min)
+    if sigma_min < config.min_sigma:
+        raise ValueError(
+            f"auto gauge reference sigma_min={sigma_min:.3e} below min_sigma={config.min_sigma:.3e}"
+        )
+    if condition > config.max_condition:
+        raise ValueError(
+            f"auto gauge reference condition_number={condition:.3e} exceeds "
+            f"max_condition={config.max_condition:.3e}"
+        )
+    return _GammaReferenceResolution(
+        selection=selection,
+        references_by_band=tuple(
+            tuple((int(row), complex(coef)) for row, coef in reference)
+            for reference in references
+        ),
+        assigned_scores=tuple(float(value) for value in assigned_scores),
+        completion_details=tuple(dict(value) for value in completion_details),
+        completion_warnings=tuple(str(value) for value in completion_warnings),
+        reference_singular_values=tuple(float(value) for value in singular_values.tolist()),
+        reference_sigma_min=sigma_min,
+        reference_condition_number=condition,
+    )
+
+
+def _gamma_model_config(gauge_config: Any) -> AutoGaugeConfig:
+    config = gauge_config if isinstance(gauge_config, AutoGaugeConfig) else _auto_gauge_config(gauge_config)
+    if (
+        config.method != "auto_scdm"
+        or config.anchor_scope != "per_sector"
+        or config.candidate_pool != "all"
+        or config.projected_anchors
+    ):
+        raise ValueError("Gamma model frames require the supported AutoGaugeConfig SCDM policy")
+    if not config.basis_is_orthonormal:
+        raise ValueError("Gamma model frames require basis_is_orthonormal=True")
+    if (
+        not np.isfinite(float(config.min_sigma))
+        or float(config.min_sigma) <= 0.0
+        or not np.isfinite(float(config.max_condition))
+        or float(config.max_condition) < 1.0
+    ):
+        raise ValueError("Gamma model gauge quality thresholds must be finite and positive")
+    if (
+        not isinstance(config.reference_q_index, Integral)
+        or isinstance(config.reference_q_index, (bool, np.bool_))
+    ):
+        raise ValueError("Gamma model reference_q_index must be an integer")
+    return config
+
+
+def _gamma_joint_contract(
+    joint_band_indices: Sequence[int],
+    group_ranks: Sequence[int],
+) -> tuple[tuple[int, ...], tuple[int, int], tuple[tuple[int, int], ...]]:
+    if any(
+        not isinstance(value, Integral) or isinstance(value, (bool, np.bool_))
+        for value in joint_band_indices
+    ):
+        raise ValueError("Gamma model joint band indices must be strict integers")
+    bands = tuple(int(value) for value in joint_band_indices)
+    if not bands or len(set(bands)) != len(bands) or any(value < 0 for value in bands):
+        raise ValueError("Gamma model joint band indices must be nonempty, unique, and non-negative")
+    if len(group_ranks) != 2 or any(
+        not isinstance(value, Integral) or isinstance(value, (bool, np.bool_))
+        for value in group_ranks
+    ):
+        raise ValueError("Gamma model frames require exactly two strict group ranks")
+    ranks = tuple(int(value) for value in group_ranks)
+    if any(value <= 0 for value in ranks) or sum(ranks) != len(bands):
+        raise ValueError("Gamma model group ranks must be positive and sum to the joint rank")
+    order = tuple(
+        (int(group), int(orbital))
+        for group, rank in enumerate(ranks)
+        for orbital in range(rank)
+    )
+    return bands, (ranks[0], ranks[1]), order
+
+
+def _validate_gamma_model_eigensystems(
+    *,
+    eigenvalues_by_q: Sequence[np.ndarray],
+    eigenvectors_by_q: Sequence[np.ndarray],
+    layout: GammaRowLayout,
+    joint_band_indices: tuple[int, ...],
+    orthonormality_tolerance: float,
+) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
+    if len(eigenvalues_by_q) != layout.q_count or len(eigenvectors_by_q) != layout.q_count:
+        raise ValueError(
+            "Gamma model eigensystems must provide exactly one eigenvalue/vector pair per layout Q"
+        )
+    values_out: list[np.ndarray] = []
+    vectors_out: list[np.ndarray] = []
+    columns = np.asarray(joint_band_indices, dtype=np.intp)
+    for q_index, (raw_values, raw_vectors) in enumerate(zip(eigenvalues_by_q, eigenvectors_by_q)):
+        values = np.asarray(raw_values, dtype=np.float64)
+        vectors = np.asarray(raw_vectors, dtype=np.complex128)
+        if values.ndim != 1 or vectors.ndim != 2:
+            raise ValueError(f"Gamma model Q {q_index} eigensystem must be a vector and a matrix")
+        if vectors.shape[0] != layout.same_q_dimension or vectors.shape[1] != values.size:
+            raise ValueError(
+                f"Gamma model Q {q_index} eigensystem shape {values.shape}/{vectors.shape} "
+                f"does not match local dimension {layout.same_q_dimension}"
+            )
+        max_band = int(np.max(columns))
+        if max_band >= values.size:
+            raise IndexError(
+                f"Gamma model joint band {max_band} outside Q {q_index} eigensystem size {values.size}"
+            )
+        if not np.all(np.isfinite(values)) or not np.all(np.isfinite(vectors)):
+            raise ValueError(f"Gamma model Q {q_index} eigensystem contains NaN or Inf")
+        selected = vectors[:, columns]
+        gram_residual = float(
+            np.linalg.norm(selected.conj().T @ selected - np.eye(columns.size), ord="fro")
+        )
+        if gram_residual > orthonormality_tolerance:
+            raise ValueError(
+                f"Gamma model Q {q_index} selected eigenspace orthonormality residual "
+                f"{gram_residual:.3e} exceeds {orthonormality_tolerance:.3e}"
+            )
+        values_out.append(values)
+        vectors_out.append(vectors)
+    return tuple(values_out), tuple(vectors_out)
+
+
+def _gamma_reference_matrix(
+    references: Sequence[Sequence[tuple[int, complex]]],
+    *,
+    row_count: int,
+) -> np.ndarray:
+    phi = np.zeros((int(row_count), len(references)), dtype=np.complex128)
+    for column, terms in enumerate(references):
+        for row, coef in terms:
+            if int(row) < 0 or int(row) >= int(row_count):
+                raise IndexError(f"Gamma model reference row {row} outside local dimension {row_count}")
+            value = complex(coef)
+            if not np.isfinite(value.real) or not np.isfinite(value.imag):
+                raise ValueError("Gamma model reference coefficient contains NaN or Inf")
+            phi[int(row), int(column)] += value
+        norm = float(np.linalg.norm(phi[:, int(column)]))
+        if norm <= 0.0:
+            raise ValueError(f"Gamma model reference column {column} has zero norm")
+        phi[:, int(column)] /= norm
+    return phi
+
+
+def _gamma_reference_payload(
+    references: Sequence[Sequence[tuple[int, complex]]],
+) -> list[list[list[float | int]]]:
+    return [
+        [[int(row), float(complex(coef).real), float(complex(coef).imag)] for row, coef in terms]
+        for terms in references
+    ]
+
+
+def build_gamma_model_anchor_spec(
+    *,
+    reference_eigenvalues_by_q: Sequence[np.ndarray],
+    reference_eigenvectors_by_q: Sequence[np.ndarray],
+    joint_band_indices: Sequence[int],
+    group_ranks: Sequence[int],
+    layout: GammaRowLayout,
+    gauge_config: AutoGaugeConfig | Mapping[str, Any] | str | None = None,
+    projector_tolerance: float = 1.0e-10,
+    orthonormality_tolerance: float = 1.0e-10,
+) -> GammaModelAnchorSpec:
+    """Resolve one deterministic full-rank SCDM model gauge from eigensystems."""
+
+    if not isinstance(layout, GammaRowLayout):
+        raise TypeError("Gamma model anchor construction requires a GammaRowLayout")
+    config = _gamma_model_config(gauge_config)
+    bands, ranks, model_order = _gamma_joint_contract(joint_band_indices, group_ranks)
+    tolerances = (float(projector_tolerance), float(orthonormality_tolerance))
+    if any(not np.isfinite(value) or value <= 0.0 for value in tolerances):
+        raise ValueError("Gamma model projector/orthonormality tolerances must be finite and positive")
+    values_by_q, vectors_by_q = _validate_gamma_model_eigensystems(
+        eigenvalues_by_q=reference_eigenvalues_by_q,
+        eigenvectors_by_q=reference_eigenvectors_by_q,
+        layout=layout,
+        joint_band_indices=bands,
+        orthonormality_tolerance=tolerances[1],
+    )
+    reference_q = int(config.reference_q_index)
+    if reference_q < 0 or reference_q >= layout.q_count:
+        raise IndexError(
+            f"Gamma model reference_q_index={reference_q} outside available Q range 0..{layout.q_count - 1}"
+        )
+    u_reference = vectors_by_q[reference_q][:, np.asarray(bands, dtype=np.intp)]
+    widths = [
+        [int(layout.uniform_orbital_count)] * int(layer_count)
+        for layer_count in layout.num_layer_list
+    ]
+    segments = _gamma_same_q_row_segments(
+        layout.same_q_dimension,
+        list(layout.num_layer_list),
+        widths,
+        spin="all",
+    )
+    resolution = _resolve_gamma_reference_core(u_reference, config=config, segments=segments)
+    references = resolution.references_by_band
+    phi = _gamma_reference_matrix(references, row_count=layout.same_q_dimension)
+    if np.linalg.matrix_rank(phi.conj().T @ u_reference) != len(bands):
+        raise ValueError("Gamma model fixed anchors are rank deficient in the reference joint space")
+    selected_eigenvalues = tuple(float(values_by_q[reference_q][band]) for band in bands)
+    projector_hash = hash_array(u_reference @ u_reference.conj().T)
+    payload = {
+        "schema": GammaModelAnchorSpec.SCHEMA,
+        "joint_band_indices": list(bands),
+        "group_ranks": list(ranks),
+        "model_column_order": [list(value) for value in model_order],
+        "resolved_reference_terms": _gamma_reference_payload(references),
+        "selected_rows": list(resolution.selection.selected_rows),
+        "reference_q_index": reference_q,
+        "layout_hash": layout.layout_hash,
+        "same_q_dimension": layout.same_q_dimension,
+        "min_sigma": float(config.min_sigma),
+        "max_condition": float(config.max_condition),
+        "projector_tolerance": tolerances[0],
+        "orthonormality_tolerance": tolerances[1],
+        "selection_sigma_min": float(resolution.selection.sigma_min),
+        "selection_condition_number": float(resolution.selection.condition_number),
+        "reference_singular_values": list(resolution.reference_singular_values),
+        "reference_sigma_min": resolution.reference_sigma_min,
+        "reference_condition_number": resolution.reference_condition_number,
+        "reference_eigenvalues": list(selected_eigenvalues),
+        "reference_projector_hash": projector_hash,
+        "warnings": list(resolution.completion_warnings) + list(resolution.selection.warnings),
+    }
+    return GammaModelAnchorSpec(
+        joint_band_indices=bands,
+        group_ranks=ranks,
+        model_column_order=model_order,
+        resolved_reference_terms=references,
+        selected_rows=tuple(int(value) for value in resolution.selection.selected_rows),
+        reference_q_index=reference_q,
+        layout_hash=layout.layout_hash,
+        same_q_dimension=layout.same_q_dimension,
+        min_sigma=float(config.min_sigma),
+        max_condition=float(config.max_condition),
+        projector_tolerance=tolerances[0],
+        orthonormality_tolerance=tolerances[1],
+        selection_sigma_min=float(resolution.selection.sigma_min),
+        selection_condition_number=float(resolution.selection.condition_number),
+        reference_singular_values=resolution.reference_singular_values,
+        reference_sigma_min=resolution.reference_sigma_min,
+        reference_condition_number=resolution.reference_condition_number,
+        reference_eigenvalues=selected_eigenvalues,
+        reference_projector_hash=projector_hash,
+        warnings=tuple(payload["warnings"]),
+        identity_hash=hash_mapping(payload),
+    )
+
+
+def validate_gamma_model_anchor_reference(
+    *,
+    reference_eigenvalues_by_q: Sequence[np.ndarray],
+    reference_eigenvectors_by_q: Sequence[np.ndarray],
+    layout: GammaRowLayout,
+    anchor_spec: GammaModelAnchorSpec,
+) -> None:
+    """Validate the eigensystem used to create an existing anchor contract."""
+
+    if not isinstance(anchor_spec, GammaModelAnchorSpec):
+        raise TypeError("Gamma model reference validation requires a GammaModelAnchorSpec")
+    anchor_spec.to_payload()
+    if (
+        not isinstance(layout, GammaRowLayout)
+        or layout.layout_hash != anchor_spec.layout_hash
+        or layout.same_q_dimension != anchor_spec.same_q_dimension
+    ):
+        raise ValueError("Gamma model reference layout/spec identity mismatch")
+    bands, ranks, order = _gamma_joint_contract(
+        anchor_spec.joint_band_indices,
+        anchor_spec.group_ranks,
+    )
+    if ranks != anchor_spec.group_ranks or order != anchor_spec.model_column_order:
+        raise ValueError("Gamma model reference joint-band/model-column contract mismatch")
+    values_by_q, vectors_by_q = _validate_gamma_model_eigensystems(
+        eigenvalues_by_q=reference_eigenvalues_by_q,
+        eigenvectors_by_q=reference_eigenvectors_by_q,
+        layout=layout,
+        joint_band_indices=bands,
+        orthonormality_tolerance=anchor_spec.orthonormality_tolerance,
+    )
+    reference_q = anchor_spec.reference_q_index
+    if reference_q < 0 or reference_q >= layout.q_count:
+        raise IndexError(
+            f"Gamma model reference_q_index={reference_q} outside available Q range 0..{layout.q_count - 1}"
+        )
+    columns = np.asarray(bands, dtype=np.intp)
+    actual_energies = values_by_q[reference_q][columns]
+    expected_energies = np.asarray(anchor_spec.reference_eigenvalues, dtype=np.float64)
+    if not np.array_equal(actual_energies, expected_energies):
+        raise ValueError("Gamma model anchor reference eigenvalues mismatch")
+    u_reference = vectors_by_q[reference_q][:, columns]
+    actual_projector_hash = hash_array(u_reference @ u_reference.conj().T)
+    if actual_projector_hash != anchor_spec.reference_projector_hash:
+        raise ValueError("Gamma model anchor reference projector mismatch")
+
+
+def build_gamma_model_frames(
+    *,
+    eigenvalues_by_q: Sequence[np.ndarray],
+    eigenvectors_by_q: Sequence[np.ndarray],
+    layout: GammaRowLayout,
+    anchor_spec: GammaModelAnchorSpec,
+) -> GammaModelFrames:
+    """Materialize compact model frames with one full-U(N) alignment per Q."""
+
+    if not isinstance(anchor_spec, GammaModelAnchorSpec):
+        raise TypeError("Gamma model frame construction requires a GammaModelAnchorSpec")
+    anchor_spec.to_payload()
+    if not isinstance(layout, GammaRowLayout) or layout.layout_hash != anchor_spec.layout_hash:
+        raise ValueError("Gamma model frame layout/spec identity mismatch")
+    bands, ranks, order = _gamma_joint_contract(anchor_spec.joint_band_indices, anchor_spec.group_ranks)
+    if order != anchor_spec.model_column_order:
+        raise ValueError("Gamma model anchor model-column order is inconsistent with group ranks")
+    _, vectors_by_q = _validate_gamma_model_eigensystems(
+        eigenvalues_by_q=eigenvalues_by_q,
+        eigenvectors_by_q=eigenvectors_by_q,
+        layout=layout,
+        joint_band_indices=bands,
+        orthonormality_tolerance=anchor_spec.orthonormality_tolerance,
+    )
+    phi = _gamma_reference_matrix(
+        anchor_spec.resolved_reference_terms,
+        row_count=layout.same_q_dimension,
+    )
+    columns = np.asarray(bands, dtype=np.intp)
+    frames: list[np.ndarray] = []
+    alignments: list[np.ndarray] = []
+    singular_values_by_q: list[tuple[float, ...]] = []
+    orthonormality_residuals: list[float] = []
+    projector_residuals: list[float] = []
+    for q_index, vectors in enumerate(vectors_by_q):
+        u_joint = vectors[:, columns]
+        singular_values = np.linalg.svd(phi.conj().T @ u_joint, compute_uv=False)
+        sigma_min = float(np.min(singular_values)) if singular_values.size else 0.0
+        sigma_max = float(np.max(singular_values)) if singular_values.size else 0.0
+        condition = float("inf") if sigma_min <= 0.0 else float(sigma_max / sigma_min)
+        if sigma_min < anchor_spec.min_sigma or condition > anchor_spec.max_condition:
+            raise ValueError(
+                f"Gamma model Q {q_index} fixed-anchor quality failed: "
+                f"sigma_min={sigma_min:.3e}, condition_number={condition:.3e}"
+            )
+        model_frame, alignment = align_eigenstates(u_joint, phi)
+        orthonormality_residual = float(
+            np.linalg.norm(model_frame.conj().T @ model_frame - np.eye(len(bands)), ord="fro")
+        )
+        alignment_residual = float(
+            np.linalg.norm(alignment.conj().T @ alignment - np.eye(len(bands)), ord="fro")
+        )
+        projector_residual = float(
+            np.linalg.norm(
+                model_frame @ model_frame.conj().T - u_joint @ u_joint.conj().T,
+                ord="fro",
+            )
+        )
+        if max(orthonormality_residual, alignment_residual) > anchor_spec.orthonormality_tolerance:
+            raise ValueError(
+                f"Gamma model Q {q_index} frame/alignment orthonormality residual exceeds "
+                f"{anchor_spec.orthonormality_tolerance:.3e}"
+            )
+        if projector_residual > anchor_spec.projector_tolerance:
+            raise ValueError(
+                f"Gamma model Q {q_index} projector residual {projector_residual:.3e} exceeds "
+                f"{anchor_spec.projector_tolerance:.3e}"
+            )
+        frames.append(np.asarray(model_frame, dtype=np.complex128))
+        alignments.append(np.asarray(alignment, dtype=np.complex128))
+        singular_values_by_q.append(tuple(float(value) for value in singular_values.tolist()))
+        orthonormality_residuals.append(orthonormality_residual)
+        projector_residuals.append(projector_residual)
+
+    frame_hashes = tuple(hash_array(value) for value in frames)
+    alignment_hashes = tuple(hash_array(value) for value in alignments)
+    payload = {
+        "schema": GammaModelFrames.SCHEMA,
+        "anchor_spec_identity_hash": anchor_spec.identity_hash,
+        "layout_hash": layout.layout_hash,
+        "joint_band_indices": list(bands),
+        "group_ranks": list(ranks),
+        "frame_hashes_by_q": list(frame_hashes),
+        "alignment_hashes_by_q": list(alignment_hashes),
+        "alignment_singular_values_by_q": [list(value) for value in singular_values_by_q],
+        "orthonormality_residuals_by_q": orthonormality_residuals,
+        "projector_residuals_by_q": projector_residuals,
+    }
+    return GammaModelFrames(
+        anchor_spec_identity_hash=anchor_spec.identity_hash,
+        layout_hash=layout.layout_hash,
+        joint_band_indices=bands,
+        group_ranks=ranks,
+        local_frames_by_q=tuple(frames),
+        alignment_unitaries_by_q=tuple(alignments),
+        alignment_singular_values_by_q=tuple(singular_values_by_q),
+        orthonormality_residuals_by_q=tuple(orthonormality_residuals),
+        projector_residuals_by_q=tuple(projector_residuals),
+        frame_hashes_by_q=frame_hashes,
+        alignment_hashes_by_q=alignment_hashes,
+        identity_hash=hash_mapping(payload),
+    )
+
+
 def _selection_dict(
     *,
     scope: str,
@@ -1448,22 +2394,7 @@ def resolve_project_gauge_anchors(
             if len(set(bands_flat)) != len(bands_flat):
                 raise ValueError("project.gauge auto cannot resolve duplicate gamma low-state band indices")
             u_low = vec[:, np.asarray(bands_flat, dtype=np.intp)]
-            selection = select_anchor_rows_qrcp(
-                u_low,
-                n_anchors=len(bands_flat),
-                basis_is_orthonormal=config.basis_is_orthonormal,
-            )
-            if selection.sigma_min < config.min_sigma:
-                raise ValueError(
-                    f"auto gauge sigma_min={selection.sigma_min:.3e} below min_sigma={config.min_sigma:.3e}"
-                )
-            if selection.condition_number > config.max_condition:
-                raise ValueError(
-                    f"auto gauge condition_number={selection.condition_number:.3e} exceeds "
-                    f"max_condition={config.max_condition:.3e}"
-                )
-            references = [_auto_reference_terms(int(row)) for row in selection.selected_rows]
-            completion_details: list[dict[str, Any]] = []
+            segments: list[tuple[int, int]] | None = None
             if spin == "all":
                 segments = _gamma_same_q_row_segments(
                     u_low.shape[0],
@@ -1471,33 +2402,15 @@ def resolve_project_gauge_anchors(
                     num_orb_per_layer_list,
                     spin=spin,
                 )
-                references, completion_details, completion_warnings = _complete_gamma_spinful_reference_terms(
-                    u_low,
-                    selection.selected_rows,
-                    segments=segments,
-                )
-                warnings.extend(completion_warnings)
-                references_by_band = _order_gamma_references_for_model_basis(references, segments=segments)
-                scores = _reference_overlap_scores(u_low, references_by_band)
-                assigned_scores = [float(np.max(scores[index, :])) for index in range(scores.shape[0])]
-            else:
-                references_by_band, assigned_scores = _assign_anchor_references_to_bands(u_low, references)
-            reference_singular_values = _reference_overlap_singular_values(u_low, references_by_band)
-            reference_sigma_min = float(np.min(reference_singular_values)) if reference_singular_values.size else 0.0
-            reference_sigma_max = float(np.max(reference_singular_values)) if reference_singular_values.size else 0.0
-            reference_condition = (
-                float("inf") if reference_sigma_min <= 0.0 else float(reference_sigma_max / reference_sigma_min)
-            )
-            if reference_sigma_min < config.min_sigma:
-                raise ValueError(
-                    f"auto gauge reference sigma_min={reference_sigma_min:.3e} "
-                    f"below min_sigma={config.min_sigma:.3e}"
-                )
-            if reference_condition > config.max_condition:
-                raise ValueError(
-                    f"auto gauge reference condition_number={reference_condition:.3e} exceeds "
-                    f"max_condition={config.max_condition:.3e}"
-                )
+            reference = _resolve_gamma_reference_core(u_low, config=config, segments=segments)
+            selection = reference.selection
+            references_by_band = [list(terms) for terms in reference.references_by_band]
+            assigned_scores = list(reference.assigned_scores)
+            completion_details = [dict(value) for value in reference.completion_details]
+            reference_singular_values = reference.reference_singular_values
+            reference_sigma_min = reference.reference_sigma_min
+            reference_condition = reference.reference_condition_number
+            warnings.extend(reference.completion_warnings)
             for (layer, _band_pos), terms in zip(owners, references_by_band):
                 resolved[layer].append(_format_auto_reference_terms(terms))
             selections.append(
@@ -1514,7 +2427,7 @@ def resolve_project_gauge_anchors(
             selections[-1]["assigned_reference_scores"] = [float(score) for score in assigned_scores]
             selections[-1]["reference_ordering"] = "gamma_model_frame" if spin == "all" else "overlap_assignment"
             selections[-1]["reference_score_mode"] = "row_max_overlap" if spin == "all" else "assigned_overlap"
-            selections[-1]["reference_singular_values"] = [float(value) for value in reference_singular_values.tolist()]
+            selections[-1]["reference_singular_values"] = [float(value) for value in reference_singular_values]
             selections[-1]["reference_sigma_min"] = float(reference_sigma_min)
             selections[-1]["reference_condition_number"] = float(reference_condition)
             selections[-1]["anchor_completion"] = completion_details
