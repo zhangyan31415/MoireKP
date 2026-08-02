@@ -11,6 +11,8 @@ import pytest
 
 from kp import projection_handoff as handoff_mod
 from kp.blocks import (
+    build_gamma_model_anchor_spec,
+    build_gamma_model_frames,
     GammaRoutingError,
     GammaRoutingThresholds,
     GammaRowLayout,
@@ -29,7 +31,7 @@ from kp.projection_handoff import (
     save_gamma_routed_basis_spec,
 )
 from kp.projection_selection import CandidateRejectionReason
-from kp.identity import PROJECTION_BASIS_HANDOFF_VERSION, hash_array
+from kp.identity import PROJECTION_BASIS_HANDOFF_VERSION, hash_array, hash_mapping
 from kp.low_energy_selection import CandidateMetrics
 from kp.selection_artifact import (
     CertificationEvidence,
@@ -92,6 +94,651 @@ def _kpoints() -> np.ndarray:
     return np.asarray([[0.0, 0.0], [0.25, -0.125]], dtype=np.float64)
 
 
+def _identity_model_contract(
+    *,
+    layout: GammaRowLayout,
+    joint_band_indices: tuple[int, ...],
+    group_ranks: tuple[int, int],
+    k_count: int,
+):
+    values = tuple(
+        np.arange(layout.same_q_dimension, dtype=np.float64)
+        for _ in range(layout.q_count)
+    )
+    vectors = tuple(
+        np.eye(layout.same_q_dimension, dtype=np.complex128)
+        for _ in range(layout.q_count)
+    )
+    anchor = build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=values,
+        reference_eigenvectors_by_q=vectors,
+        joint_band_indices=joint_band_indices,
+        group_ranks=group_ranks,
+        layout=layout,
+    )
+    model = build_gamma_model_frames(
+        eigenvalues_by_q=values,
+        eigenvectors_by_q=vectors,
+        layout=layout,
+        anchor_spec=anchor,
+    )
+    return anchor, tuple(model for _ in range(k_count))
+
+
+def _test_global_bridge(
+    *,
+    layout: GammaRowLayout,
+    routed,
+    model,
+) -> np.ndarray:
+    model_dim = layout.q_count * sum(routed.group_dimensions)
+    bridge = np.zeros((model_dim, model_dim), dtype=np.complex128)
+    for q_index in range(layout.q_count):
+        columns = np.asarray(
+            [
+                layout.q_count * sum(routed.group_dimensions[:group])
+                + orbital * layout.q_count
+                + q_index
+                for group, rank in enumerate(routed.group_dimensions)
+                for orbital in range(rank)
+            ],
+            dtype=np.intp,
+        )
+        local = (
+            routed.local_frames_by_q[q_index].conj().T
+            @ model.local_frames_by_q[q_index]
+        )
+        bridge[np.ix_(columns, columns)] = local
+    return bridge
+
+
+def _test_routed_heff(
+    *,
+    layout: GammaRowLayout,
+    routed_rows,
+    model_rows,
+    model_heff: np.ndarray,
+) -> np.ndarray:
+    return np.asarray(
+        [
+            (bridge := _test_global_bridge(layout=layout, routed=routed, model=model))
+            @ model_heff[k]
+            @ bridge.conj().T
+            for k, (routed, model) in enumerate(zip(routed_rows, model_rows))
+        ],
+        dtype=np.complex128,
+    )
+
+
+def _q2_dual_frame_uncertified_spec() -> GammaRoutedBasisSpec:
+    """Build a two-Q handoff whose canonical model frame swaps route owners."""
+
+    layout = GammaRowLayout.build(
+        qsets=(
+            np.asarray([[0.0, 0.0], [1.0, 0.0]]),
+            np.asarray([[0.0, 0.0], [1.0, 0.0]]),
+        ),
+        num_layer_list=(1, 1),
+        num_orb_per_layer_list=((1,), (1,)),
+        spin_convention="all",
+        source_basis_hash="source-basis-q2",
+    )
+    values = tuple(np.arange(4, dtype=np.float64) for _ in range(layout.q_count))
+    vectors = tuple(
+        np.eye(4, dtype=np.complex128) for _ in range(layout.q_count)
+    )
+    routed = build_gamma_routed_frames(
+        values,
+        vectors,
+        joint_band_indices=(0, 1),
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    anchor = build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=values,
+        reference_eigenvectors_by_q=vectors,
+        joint_band_indices=routed.joint_band_indices,
+        group_ranks=routed.group_dimensions,
+        layout=layout,
+    )
+    model = build_gamma_model_frames(
+        eigenvalues_by_q=values,
+        eigenvectors_by_q=vectors,
+        layout=layout,
+        anchor_spec=anchor,
+    )
+    model_dim = layout.q_count * sum(routed.group_dimensions)
+    model_heff = np.diag(np.arange(model_dim, dtype=np.float64))[None]
+    global_bridge = np.zeros((model_dim, model_dim), dtype=np.complex128)
+    for q_index in range(layout.q_count):
+        columns = np.asarray(
+            [
+                layout.q_count * sum(routed.group_dimensions[:group])
+                + orbital * layout.q_count
+                + q_index
+                for group, rank in enumerate(routed.group_dimensions)
+                for orbital in range(rank)
+            ],
+            dtype=np.intp,
+        )
+        local_bridge = (
+            routed.local_frames_by_q[q_index].conj().T
+            @ model.local_frames_by_q[q_index]
+        )
+        global_bridge[np.ix_(columns, columns)] = local_bridge
+    routed_heff = np.asarray(
+        [global_bridge @ model_heff[0] @ global_bridge.conj().T],
+        dtype=np.complex128,
+    )
+    reference_joint = vectors[anchor.reference_q_index][
+        :, np.asarray(routed.joint_band_indices, dtype=np.intp)
+    ]
+    model_reference_projector = reference_joint @ reference_joint.conj().T
+    return GammaRoutedBasisSpec.create(
+        artifact_identity={
+            "identity_schema": "moirekp.artifact-identity.v1",
+            "input_hash": "1" * 64,
+            "config_hash": "2" * 64,
+            "basis_hash": "3" * 64,
+            "package_version": "0.1.0",
+            "schema_version": 2,
+            "k_indices_hash": "replaced-by-writer",
+            "heff_hash": "replaced-by-writer",
+        },
+        layout=layout,
+        thresholds=_thresholds(),
+        k_indices=(4,),
+        kpoints=np.asarray([[0.0, 0.0]], dtype=np.float64),
+        routed_frames=(routed,),
+        model_reference_k_index=4,
+        model_anchor_spec=anchor,
+        model_frames=(model,),
+        model_reference_projector=model_reference_projector,
+        routed_heff=routed_heff,
+        heff_covariance_tolerance=1.0e-9,
+        authoritative_heff=model_heff,
+        heff_k_indices=(4,),
+        closure_certificate_hashes=("4" * 64,),
+        routing_certificate_hashes=("5" * 64,),
+        source_hamiltonian_hash="a" * 64,
+        ordered_q_hashes=layout.ordered_qset_hashes,
+        raw_action_package_hash="0" * 64,
+        candidate_certificate_hash="0" * 64,
+        candidate_input_identity_hash="0" * 64,
+    )
+
+
+def test_gamma_dual_frame_v3_exposes_unambiguous_q2_global_bridge_api() -> None:
+    spec = _q2_dual_frame_uncertified_spec()
+
+    assert spec.handoff_version == "kp_project_gamma_routed_handoff_v3"
+    assert not hasattr(spec, "assemble_for_k")
+    routing, _ = spec.assemble_routing_for_k(4, include_high=False)
+    model = spec.assemble_model_for_k(4)
+    bridge = spec.routing_to_model_for_k(4)
+    state_frame, state_heff = spec.model_state_for_k(4)
+    np.testing.assert_allclose(routing @ bridge, model, atol=1.0e-12)
+    np.testing.assert_array_equal(state_frame, model)
+    np.testing.assert_array_equal(state_heff, spec.authoritative_heff[0])
+
+    expected = np.zeros_like(model)
+    q_count = spec.layout.q_count
+    for q_index in range(q_count):
+        rows = spec.layout.same_q_full_rows(q_index)
+        local = spec.model_frames[0, q_index]
+        local_column = 0
+        for group, rank in enumerate(spec.group_ranks):
+            for orbital in range(rank):
+                global_column = q_count * sum(spec.group_ranks[:group]) + orbital * q_count + q_index
+                expected[rows, global_column] = local[:, local_column]
+                local_column += 1
+    np.testing.assert_array_equal(model, expected)
+
+
+def test_gamma_dual_frame_rejects_wrong_in_domain_model_reference_k() -> None:
+    layout = _layout()
+    values = (np.arange(4, dtype=np.float64),)
+    identity_vectors = (np.eye(4, dtype=np.complex128),)
+    theta = 0.2
+    cosine, sine = np.cos(theta), np.sin(theta)
+    mixed = np.asarray(
+        [
+            [cosine, 0.0, -sine, 0.0],
+            [0.0, cosine, 0.0, -sine],
+            [sine, 0.0, cosine, 0.0],
+            [0.0, sine, 0.0, cosine],
+        ],
+        dtype=np.complex128,
+    )
+    mixed_vectors = (mixed,)
+    routed_reference = build_gamma_routed_frames(
+        values,
+        identity_vectors,
+        joint_band_indices=(0, 1),
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    routed_mixed = build_gamma_routed_frames(
+        values,
+        mixed_vectors,
+        joint_band_indices=(0, 1),
+        layout=layout,
+        thresholds=_thresholds(),
+        require_complete_clusters=False,
+    )
+    anchor = build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=values,
+        reference_eigenvectors_by_q=identity_vectors,
+        joint_band_indices=(0, 1),
+        group_ranks=routed_reference.group_dimensions,
+        layout=layout,
+    )
+    model_reference = build_gamma_model_frames(
+        eigenvalues_by_q=values,
+        eigenvectors_by_q=identity_vectors,
+        layout=layout,
+        anchor_spec=anchor,
+    )
+    model_mixed = build_gamma_model_frames(
+        eigenvalues_by_q=values,
+        eigenvectors_by_q=mixed_vectors,
+        layout=layout,
+        anchor_spec=anchor,
+    )
+    routed_rows = (routed_reference, routed_mixed)
+    model_rows = (model_reference, model_mixed)
+    model_heff = np.asarray(
+        [np.diag([0.25, 0.75]), np.diag([0.5, 1.0])],
+        dtype=np.complex128,
+    )
+    reference_joint = identity_vectors[0][:, :2]
+
+    with pytest.raises(GammaRoutingError, match="model_reference_k_index") as rejected:
+        GammaRoutedBasisSpec.create(
+            artifact_identity={
+                "identity_schema": "moirekp.artifact-identity.v1",
+                "input_hash": "1" * 64,
+                "config_hash": "2" * 64,
+                "basis_hash": "3" * 64,
+                "package_version": "0.1.0",
+                "schema_version": 2,
+                "k_indices_hash": "replaced",
+                "heff_hash": "replaced",
+            },
+            layout=layout,
+            thresholds=_thresholds(),
+            k_indices=(4, 7),
+            kpoints=_kpoints(),
+            routed_frames=routed_rows,
+            model_reference_k_index=7,
+            model_anchor_spec=anchor,
+            model_frames=model_rows,
+            model_reference_projector=reference_joint @ reference_joint.conj().T,
+            routed_heff=_test_routed_heff(
+                layout=layout,
+                routed_rows=routed_rows,
+                model_rows=model_rows,
+                model_heff=model_heff,
+            ),
+            heff_covariance_tolerance=1.0e-9,
+            authoritative_heff=model_heff,
+            heff_k_indices=(4, 7),
+            closure_certificate_hashes=("4" * 64, "7" * 64),
+            routing_certificate_hashes=("5" * 64, "8" * 64),
+            source_hamiltonian_hash="a" * 64,
+            ordered_q_hashes=layout.ordered_qset_hashes,
+            raw_action_package_hash="0" * 64,
+            candidate_certificate_hash="0" * 64,
+            candidate_input_identity_hash="0" * 64,
+        )
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def _certified_q2_dual_frame_spec() -> GammaRoutedBasisSpec:
+    base = _q2_dual_frame_uncertified_spec()
+    values = tuple(
+        np.arange(base.layout.same_q_dimension, dtype=np.float64)
+        for _ in range(base.layout.q_count)
+    )
+    vectors = tuple(
+        np.eye(base.layout.same_q_dimension, dtype=np.complex128)
+        for _ in range(base.layout.q_count)
+    )
+    model = build_gamma_model_frames(
+        eigenvalues_by_q=values,
+        eigenvectors_by_q=vectors,
+        layout=base.layout,
+        anchor_spec=base.model_anchor_spec,
+    )
+    pairs = ((4, 4),)
+    presentation = MagneticPresentation(
+        generators=(MagneticGenerator("E", False),),
+        relations=(
+            MagneticRelation("E^2", lhs=("E", "E"), rhs=(), central_phase=1.0),
+        ),
+        central_phases=(1.0,),
+        source="gamma_dual_frame_q2_test",
+    )
+    return certify_gamma_routed_basis_spec(
+        candidate_id="gamma-dual-frame-q2",
+        artifact_identity={**base.artifact_identity, "basis_hash": base.base_basis_hash},
+        layout=base.layout,
+        thresholds=base.thresholds,
+        k_indices=base.k_indices,
+        kpoints=base.kpoints,
+        routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
+        model_reference_k_index=base.model_reference_k_index,
+        model_anchor_spec=base.model_anchor_spec,
+        model_frames=(model,),
+        model_reference_projector=base.model_reference_projector,
+        routed_heff=base.routed_heff,
+        heff_covariance_tolerance=1.0e-9,
+        authoritative_heff=base.authoritative_heff,
+        heff_k_indices=base.heff_k_indices,
+        closure_certificate_hashes=base.closure_certificate_hashes,
+        routing_certificate_hashes=base.routing_certificate_hashes,
+        source_hamiltonian_hash=base.source_hamiltonian_hash,
+        ordered_q_hashes=base.ordered_q_hashes,
+        raw_action_package_hash="0" * 64,
+        operations={
+            "E": CandidateOperationInput(
+                name="E",
+                antiunitary=False,
+                d_full=np.eye(base.layout.full_dimension, dtype=np.complex128),
+                pairs=pairs,
+            )
+        },
+        exactified_actions={
+            "E": np.eye(base.model_dim, dtype=np.complex128),
+        },
+        presentation=presentation,
+        required_pairs={"E": pairs},
+        candidate_thresholds=CandidateSymmetryThresholds.uniform(1.0e-9),
+    )
+
+
+def test_gamma_dual_frame_v3_numeric_roundtrip_binds_model_state(
+    tmp_path: Path,
+) -> None:
+    original = _certified_q2_dual_frame_spec()
+    path = tmp_path / "basis.npz"
+
+    save_gamma_routed_basis_spec(path, original)
+
+    with np.load(path, allow_pickle=False) as payload:
+        assert str(payload["projection_basis_handoff_version"].item()).endswith("v3")
+        assert payload["model_reference_k_index"].dtype == np.dtype(np.int64)
+        assert payload["model_reference_k_index"].shape == ()
+        assert payload["model_anchor_spec_payload"].dtype.kind == "U"
+        assert payload["model_anchor_spec_hash"].dtype == np.dtype("<U64")
+        assert payload["model_reference_projector"].dtype == np.dtype(np.complex128)
+        assert payload["model_reference_projector_hash"].dtype == np.dtype("<U64")
+        assert payload["model_frames"].dtype == np.dtype(np.complex128)
+        assert payload["routing_to_model"].dtype == np.dtype(np.complex128)
+        assert payload["model_frame_hashes"].dtype == np.dtype("<U64")
+        assert payload["routing_to_model_hashes"].dtype == np.dtype("<U64")
+        assert payload["bridge_certificate_hash"].dtype == np.dtype("<U64")
+        assert payload["routed_heff"].dtype == np.dtype(np.complex128)
+        assert payload["routed_heff_hash"].dtype == np.dtype("<U64")
+        assert payload["heff_covariance_residuals"].dtype == np.dtype(np.float64)
+        assert payload["heff_covariance_tolerance"].dtype == np.dtype(np.float64)
+        assert payload["heff_covariance_evidence_hash"].dtype == np.dtype("<U64")
+    restored = load_gamma_routed_basis_spec(path)
+    assert restored.model_reference_k_index == original.model_reference_k_index
+    assert restored.model_anchor_spec.to_payload() == original.model_anchor_spec.to_payload()
+    np.testing.assert_array_equal(restored.model_frames, original.model_frames)
+    np.testing.assert_array_equal(restored.routing_to_model, original.routing_to_model)
+    assert restored.model_frame_hash == original.model_frame_hash
+    assert restored.routing_to_model_hash == original.routing_to_model_hash
+    assert restored.bridge_certificate_hash == original.bridge_certificate_hash
+    np.testing.assert_array_equal(restored.routed_heff, original.routed_heff)
+    np.testing.assert_array_equal(
+        restored.heff_covariance_residuals,
+        original.heff_covariance_residuals,
+    )
+    assert restored.heff_covariance_tolerance == 1.0e-9
+    assert restored.heff_covariance_tolerance != restored.thresholds.projector_residual
+    model, heff = restored.model_state_for_k(4)
+    envelope = verify_candidate_certificate_envelope(
+        restored.candidate_certificate_envelope
+    )
+    state = envelope["input_identity_payload"]["states"][0]
+    assert state["u_low_hash"] == hash_array(model)
+    assert state["heff_hash"] == hash_array(heff)
+    routing, _ = restored.assemble_routing_for_k(4, include_high=False)
+    assert state["u_low_hash"] != hash_array(routing)
+
+
+def test_gamma_dual_frame_v2_archive_fails_closed_with_rerun_message(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "basis.npz"
+    save_gamma_routed_basis_spec(path, _certified_q2_dual_frame_spec())
+    _rewrite_npz(
+        path,
+        projection_basis_handoff_version=np.asarray(
+            "kp_project_gamma_routed_handoff_v2"
+        ),
+    )
+
+    with pytest.raises(GammaRoutingError, match=r"v2.*rerun") as rejected:
+        load_gamma_routed_basis_spec(path)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "field",
+    [
+        "model_anchor_spec_hash",
+        "model_reference_k_index",
+        "model_reference_projector_hash",
+        "k_indices_hash",
+        "kpoints_hash",
+        "model_heff_hash",
+        "routed_heff_hash",
+        "heff_covariance_evidence_hash",
+    ],
+)
+def test_gamma_bridge_certificate_binds_reference_k_and_heff_evidence(
+    field: str,
+) -> None:
+    spec = _q2_dual_frame_uncertified_spec()
+    values = {
+        "layout_hash": spec.layout.layout_hash,
+        "thresholds_hash": spec.thresholds.identity_hash,
+        "frame_hash": spec.frame_hash,
+        "model_frame_hash": spec.model_frame_hash,
+        "model_reference_k_index": spec.model_reference_k_index,
+        "model_reference_projector_hash": spec.model_reference_projector_hash,
+        "model_anchor_spec_hash": spec.model_anchor_spec.identity_hash,
+        "routing_to_model_hash": spec.routing_to_model_hash,
+        "k_indices_hash": hash_array(np.asarray(spec.k_indices, dtype=np.int64)),
+        "kpoints_hash": spec.kpoints_hash,
+        "model_heff_hash": spec.heff_hash,
+        "routed_heff_hash": spec.routed_heff_hash,
+        "heff_covariance_evidence_hash": spec.heff_covariance_evidence_hash,
+        "projector_tolerance": spec.thresholds.projector_residual,
+    }
+    assert handoff_mod._bridge_certificate_hash(**values) == spec.bridge_certificate_hash
+    if field == "model_reference_k_index":
+        values[field] = int(values[field]) + 1
+    else:
+        values[field] = "f" * 64
+
+    assert handoff_mod._bridge_certificate_hash(**values) != spec.bridge_certificate_hash
+
+
+def test_gamma_heff_covariance_evidence_uses_relative_frobenius() -> None:
+    routed = np.asarray([np.diag([1000.0, 2000.0])], dtype=np.complex128)
+    model = np.array(routed, copy=True)
+    model[0, 0, 0] += 1.0
+    bridge = np.eye(2, dtype=np.complex128)[None, None, :, :]
+
+    residual = handoff_mod._heff_covariance_residuals(
+        routed_heff=routed,
+        model_heff=model,
+        compact_bridge=bridge,
+        q_count=1,
+        group_ranks=(1, 1),
+    )
+    expected = np.linalg.norm(model[0] - routed[0], ord="fro") / np.linalg.norm(
+        model[0], ord="fro"
+    )
+    np.testing.assert_allclose(residual, [expected], rtol=0.0, atol=1.0e-16)
+
+
+def test_gamma_dual_frame_rejects_noncanonical_rotation_with_same_projector() -> None:
+    base = _q2_dual_frame_uncertified_spec()
+    canonical = _model_rows_for_spec(base)[0]
+    rotation = np.asarray(
+        [[1.0, 1.0], [-1.0, 1.0]], dtype=np.complex128
+    ) / np.sqrt(2.0)
+    rotated_frames = tuple(frame @ rotation for frame in canonical.local_frames_by_q)
+    rotated_frame_hashes = tuple(hash_array(frame) for frame in rotated_frames)
+    identity_payload = canonical._identity_payload()
+    identity_payload["frame_hashes_by_q"] = list(rotated_frame_hashes)
+    rotated = replace(
+        canonical,
+        local_frames_by_q=rotated_frames,
+        frame_hashes_by_q=rotated_frame_hashes,
+        identity_hash=hash_mapping(identity_payload),
+    )
+    for expected, actual in zip(canonical.local_frames_by_q, rotated.local_frames_by_q):
+        np.testing.assert_allclose(
+            expected @ expected.conj().T,
+            actual @ actual.conj().T,
+            atol=1.0e-12,
+        )
+        bridge = expected.conj().T @ actual
+        np.testing.assert_allclose(bridge.conj().T @ bridge, np.eye(2), atol=1.0e-12)
+
+    routed_rows = tuple(base.routed_frames_for_k(k) for k in base.k_indices)
+    rotated_routed_heff = _test_routed_heff(
+        layout=base.layout,
+        routed_rows=routed_rows,
+        model_rows=(rotated,),
+        model_heff=base.authoritative_heff,
+    )
+
+    with pytest.raises(GammaRoutingError, match="canonical_scdm") as rejected:
+        GammaRoutedBasisSpec.create(
+            artifact_identity={**base.artifact_identity, "basis_hash": base.base_basis_hash},
+            layout=base.layout,
+            thresholds=base.thresholds,
+            k_indices=base.k_indices,
+            kpoints=base.kpoints,
+            routed_frames=routed_rows,
+            model_reference_k_index=base.model_reference_k_index,
+            model_anchor_spec=base.model_anchor_spec,
+            model_frames=(rotated,),
+            model_reference_projector=base.model_reference_projector,
+            routed_heff=rotated_routed_heff,
+            heff_covariance_tolerance=1.0e-9,
+            authoritative_heff=base.authoritative_heff,
+            heff_k_indices=base.heff_k_indices,
+            closure_certificate_hashes=base.closure_certificate_hashes,
+            routing_certificate_hashes=base.routing_certificate_hashes,
+            source_hamiltonian_hash=base.source_hamiltonian_hash,
+            ordered_q_hashes=base.ordered_q_hashes,
+            raw_action_package_hash="0" * 64,
+            candidate_certificate_hash="0" * 64,
+            candidate_input_identity_hash="0" * 64,
+        )
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"model_reference_projector": None},
+        {"routed_heff": None},
+        {"heff_covariance_residuals": None},
+        {"heff_covariance_tolerance": 0.0},
+        {"heff_covariance_evidence_hash": ""},
+    ],
+)
+def test_gamma_dual_frame_rejects_missing_covariance_or_reference_evidence(
+    updates: dict[str, object],
+) -> None:
+    with pytest.raises(GammaRoutingError) as rejected:
+        replace(_q2_dual_frame_uncertified_spec(), **updates)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+def test_gamma_certified_handoff_rejects_rehashed_covariance_tolerance_drift() -> None:
+    original = _spec()
+    drifted_tolerance = 2.0e-10
+    k_indices_hash = hash_array(np.asarray(original.k_indices, dtype=np.int64))
+    evidence_hash = handoff_mod._heff_covariance_evidence_hash(
+        k_indices_hash=k_indices_hash,
+        kpoints_hash=original.kpoints_hash,
+        routing_to_model_hash=original.routing_to_model_hash,
+        model_heff_hash=original.heff_hash,
+        routed_heff_hash=original.routed_heff_hash,
+        residuals_hash=original.heff_covariance_residuals_hash,
+        tolerance=drifted_tolerance,
+    )
+    bridge_hash = handoff_mod._bridge_certificate_hash(
+        layout_hash=original.layout.layout_hash,
+        thresholds_hash=original.thresholds.identity_hash,
+        frame_hash=original.frame_hash,
+        model_frame_hash=original.model_frame_hash,
+        model_reference_k_index=original.model_reference_k_index,
+        model_reference_projector_hash=original.model_reference_projector_hash,
+        model_anchor_spec_hash=original.model_anchor_spec.identity_hash,
+        routing_to_model_hash=original.routing_to_model_hash,
+        k_indices_hash=k_indices_hash,
+        kpoints_hash=original.kpoints_hash,
+        model_heff_hash=original.heff_hash,
+        routed_heff_hash=original.routed_heff_hash,
+        heff_covariance_evidence_hash=evidence_hash,
+        projector_tolerance=original.thresholds.projector_residual,
+    )
+    identity = dict(original.artifact_identity)
+    identity["basis_hash"] = handoff_mod._bound_routed_basis_hash(
+        base_basis_hash=original.base_basis_hash,
+        layout_hash=original.layout.layout_hash,
+        thresholds_hash=original.thresholds.identity_hash,
+        k_indices_hash=k_indices_hash,
+        kpoints_hash=original.kpoints_hash,
+        frame_hash=original.frame_hash,
+        reference_frame_hash=original.reference_frame_hash,
+        model_reference_k_index=original.model_reference_k_index,
+        model_reference_projector_hash=original.model_reference_projector_hash,
+        model_anchor_spec_hash=original.model_anchor_spec.identity_hash,
+        model_frame_hash=original.model_frame_hash,
+        routing_to_model_hash=original.routing_to_model_hash,
+        bridge_certificate_hash=bridge_hash,
+        routed_heff_hash=original.routed_heff_hash,
+        heff_covariance_evidence_hash=evidence_hash,
+        heff_hash=original.heff_hash,
+        closure_certificate_hashes=original.closure_certificate_hashes,
+        routing_certificate_hashes=original.routing_certificate_hashes,
+        source_hamiltonian_hash=original.source_hamiltonian_hash,
+        ordered_q_hashes=original.ordered_q_hashes,
+        raw_action_package_hash=original.raw_action_package_hash,
+        candidate_certificate_hash=original.candidate_certificate_hash,
+        candidate_input_identity_hash=original.candidate_input_identity_hash,
+    )
+
+    with pytest.raises(GammaRoutingError, match="candidate.*threshold") as rejected:
+        replace(
+            original,
+            artifact_identity=identity,
+            heff_covariance_tolerance=drifted_tolerance,
+            heff_covariance_evidence_hash=evidence_hash,
+            bridge_certificate_hash=bridge_hash,
+        )
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
 def _uncertified_spec(*, kpoints: np.ndarray | None = None) -> GammaRoutedBasisSpec:
     layout = _layout()
     routed = build_gamma_routed_frames(
@@ -105,6 +752,23 @@ def _uncertified_spec(*, kpoints: np.ndarray | None = None) -> GammaRoutedBasisS
     heff = np.asarray(
         [np.diag([0.25, 0.75]), np.diag([0.5, 1.0])],
         dtype=np.complex128,
+    )
+    anchor, model_rows = _identity_model_contract(
+        layout=layout,
+        joint_band_indices=routed.joint_band_indices,
+        group_ranks=routed.group_dimensions,
+        k_count=2,
+    )
+    routed_rows = (routed, routed)
+    reference_joint = np.eye(layout.same_q_dimension, dtype=np.complex128)[
+        :, np.asarray(routed.joint_band_indices, dtype=np.intp)
+    ]
+    model_reference_projector = reference_joint @ reference_joint.conj().T
+    routed_heff = _test_routed_heff(
+        layout=layout,
+        routed_rows=routed_rows,
+        model_rows=model_rows,
+        model_heff=heff,
     )
     return GammaRoutedBasisSpec.create(
         artifact_identity={
@@ -121,7 +785,13 @@ def _uncertified_spec(*, kpoints: np.ndarray | None = None) -> GammaRoutedBasisS
         thresholds=_thresholds(),
         k_indices=(4, 7),
         kpoints=_kpoints() if kpoints is None else kpoints,
-        routed_frames=(routed, routed),
+        routed_frames=routed_rows,
+        model_reference_k_index=4,
+        model_anchor_spec=anchor,
+        model_frames=model_rows,
+        model_reference_projector=model_reference_projector,
+        routed_heff=routed_heff,
+        heff_covariance_tolerance=1.0e-9,
         authoritative_heff=heff,
         heff_k_indices=(4, 7),
         closure_certificate_hashes=("4" * 64, "7" * 64),
@@ -132,6 +802,24 @@ def _uncertified_spec(*, kpoints: np.ndarray | None = None) -> GammaRoutedBasisS
         candidate_certificate_hash="0" * 64,
         candidate_input_identity_hash="0" * 64,
     )
+
+
+def _model_rows_for_spec(spec: GammaRoutedBasisSpec):
+    values = tuple(
+        np.arange(spec.layout.same_q_dimension, dtype=np.float64)
+        for _ in range(spec.layout.q_count)
+    )
+    vectors = tuple(
+        np.eye(spec.layout.same_q_dimension, dtype=np.complex128)
+        for _ in range(spec.layout.q_count)
+    )
+    model = build_gamma_model_frames(
+        eigenvalues_by_q=values,
+        eigenvectors_by_q=vectors,
+        layout=spec.layout,
+        anchor_spec=spec.model_anchor_spec,
+    )
+    return tuple(model for _ in spec.k_indices)
 
 
 def _spec() -> GammaRoutedBasisSpec:
@@ -157,6 +845,12 @@ def _spec() -> GammaRoutedBasisSpec:
         k_indices=base.k_indices,
         kpoints=base.kpoints,
         routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
+        model_reference_k_index=base.model_reference_k_index,
+        model_anchor_spec=base.model_anchor_spec,
+        model_frames=_model_rows_for_spec(base),
+        model_reference_projector=base.model_reference_projector,
+        routed_heff=base.routed_heff,
+        heff_covariance_tolerance=1.0e-10,
         authoritative_heff=base.authoritative_heff,
         heff_k_indices=base.heff_k_indices,
         closure_certificate_hashes=base.closure_certificate_hashes,
@@ -219,6 +913,12 @@ def test_exact_action_drift_keeps_raw_package_but_changes_candidate_and_handoff(
             routed_frames=tuple(
                 base.routed_frames_for_k(k) for k in base.k_indices
             ),
+            model_reference_k_index=base.model_reference_k_index,
+            model_anchor_spec=base.model_anchor_spec,
+            model_frames=_model_rows_for_spec(base),
+            model_reference_projector=base.model_reference_projector,
+            routed_heff=base.routed_heff,
+            heff_covariance_tolerance=3.0,
             authoritative_heff=base.authoritative_heff,
             heff_k_indices=base.heff_k_indices,
             closure_certificate_hashes=base.closure_certificate_hashes,
@@ -295,6 +995,12 @@ def test_gamma_handoff_recomputes_and_binds_factorized_route_contract() -> None:
             k_indices=base.k_indices,
             kpoints=base.kpoints,
             routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
+            model_reference_k_index=base.model_reference_k_index,
+            model_anchor_spec=base.model_anchor_spec,
+            model_frames=_model_rows_for_spec(base),
+            model_reference_projector=base.model_reference_projector,
+            routed_heff=base.routed_heff,
+            heff_covariance_tolerance=1.0e-10,
             authoritative_heff=base.authoritative_heff,
             heff_k_indices=base.heff_k_indices,
             closure_certificate_hashes=base.closure_certificate_hashes,
@@ -473,7 +1179,7 @@ def test_gamma_routed_handoff_roundtrip_is_numeric_and_assembles_identically(
             thresholds=original.thresholds,
             include_high=False,
         )
-        actual, high = restored.assemble_for_k(k_index, include_high=True)
+        actual, high = restored.assemble_routing_for_k(k_index, include_high=True)
         np.testing.assert_array_equal(actual, expected)
         assert high is not None
         np.testing.assert_allclose(actual.conj().T @ high, 0.0, atol=1.0e-12)
@@ -486,6 +1192,14 @@ def test_gamma_routed_handoff_roundtrip_is_numeric_and_assembles_identically(
         ("extra_object", "attacker_object"),
         ("missing", "k_indices"),
         ("missing", "kpoints"),
+        ("missing", "model_anchor_spec_payload"),
+        ("missing", "model_reference_projector"),
+        ("missing", "model_frames"),
+        ("missing", "routing_to_model"),
+        ("missing", "bridge_certificate_hash"),
+        ("missing", "routed_heff"),
+        ("missing", "heff_covariance_residuals"),
+        ("missing", "heff_covariance_evidence_hash"),
     ],
 )
 def test_gamma_routed_schema_boundary_rejects_as_typed_identity_error(
@@ -519,11 +1233,21 @@ def test_gamma_routed_schema_boundary_rejects_as_typed_identity_error(
         ("group_offsets", np.asarray([0, 1, 2], dtype=np.float64)),
         ("k_indices", np.asarray([4, 7], dtype=np.int32)),
         ("heff_k_indices", np.asarray([4, 7], dtype=np.int32)),
+        ("model_reference_k_index", np.asarray(4, dtype=np.int32)),
         ("frames", None),
         ("reference_frames", None),
+        ("model_reference_projector", None),
+        ("model_frames", None),
+        ("routing_to_model", None),
+        ("routed_heff", None),
         ("authoritative_heff", None),
         ("route_gaps", None),
         ("kpoints", None),
+        ("heff_covariance_residuals", None),
+        ("heff_covariance_tolerance", np.asarray(1.0e-9, dtype=np.float32)),
+        ("model_anchor_spec_payload", np.asarray(b"not-unicode")),
+        ("model_anchor_spec_hash", np.asarray("f" * 63)),
+        ("bridge_certificate_hash", np.asarray("e" * 63)),
     ],
 )
 def test_gamma_routed_schema_rejects_noncanonical_disk_dtype(
@@ -537,8 +1261,37 @@ def test_gamma_routed_schema_rejects_noncanonical_disk_dtype(
         with np.load(path, allow_pickle=False) as payload:
             original = np.array(payload[field], copy=True)
         replacement = original.astype(
-            np.float32 if field in {"route_gaps", "kpoints"} else np.complex64
+            np.float32
+            if field in {"route_gaps", "kpoints", "heff_covariance_residuals"}
+            else np.complex64
         )
+    _rewrite_npz(path, **{field: replacement})
+
+    with pytest.raises(GammaRoutingError) as rejected:
+        load_gamma_routed_basis_spec(path)
+
+    assert rejected.value.reason is CandidateRejectionReason.HANDOFF_IDENTITY
+
+
+@pytest.mark.parametrize(
+    ("field", "replacement"),
+    [
+        ("identity_schema", np.asarray(7, dtype=np.int64)),
+        ("package_version", np.asarray([7], dtype=np.int64)),
+        ("schema_version", np.asarray(999, dtype=np.int64)),
+        (
+            "identity_schema",
+            np.asarray(["moirekp.artifact-identity.v1"], dtype="<U30"),
+        ),
+    ],
+)
+def test_gamma_routed_schema_rejects_noncanonical_core_identity_metadata(
+    tmp_path: Path,
+    field: str,
+    replacement: np.ndarray,
+) -> None:
+    path = tmp_path / "basis.npz"
+    save_gamma_routed_basis_spec(path, _spec())
     _rewrite_npz(path, **{field: replacement})
 
     with pytest.raises(GammaRoutingError) as rejected:
@@ -612,6 +1365,24 @@ def test_gamma_routed_archive_rejects_legacy_variant_fields(
         "candidate_certificate_hash",
         "kpoints",
         "kpoints_hash",
+        "model_frames",
+        "model_frame_hashes",
+        "model_frame_hash",
+        "routing_to_model",
+        "routing_to_model_hashes",
+        "routing_to_model_hash",
+        "model_anchor_spec_payload",
+        "model_anchor_spec_hash",
+        "model_reference_k_index",
+        "model_reference_projector",
+        "model_reference_projector_hash",
+        "bridge_certificate_hash",
+        "routed_heff",
+        "routed_heff_hash",
+        "heff_covariance_residuals",
+        "heff_covariance_residuals_hash",
+        "heff_covariance_tolerance",
+        "heff_covariance_evidence_hash",
     ],
 )
 def test_gamma_routed_handoff_rejects_tampered_identity(
@@ -622,10 +1393,35 @@ def test_gamma_routed_handoff_rejects_tampered_identity(
     save_gamma_routed_basis_spec(path, _spec())
     with np.load(path, allow_pickle=False) as payload:
         value = np.array(payload[field], copy=True)
-    if field in {"frames", "kpoints"}:
+    if field in {
+        "frames",
+        "kpoints",
+        "model_reference_projector",
+        "model_frames",
+        "routing_to_model",
+        "routed_heff",
+        "heff_covariance_residuals",
+    }:
         value.flat[0] += 0.125
+    elif field == "heff_covariance_tolerance":
+        value = np.asarray(float(value.item()) * 0.5, dtype=np.float64)
+    elif field == "model_reference_k_index":
+        value = np.asarray(7, dtype=np.int64)
     elif field == "kpoints_hash":
         value = np.asarray("f" * 64)
+    elif field in {
+        "model_frame_hash",
+        "routing_to_model_hash",
+        "model_anchor_spec_hash",
+        "model_reference_projector_hash",
+        "bridge_certificate_hash",
+        "routed_heff_hash",
+        "heff_covariance_residuals_hash",
+        "heff_covariance_evidence_hash",
+    }:
+        value = np.asarray("f" * 64)
+    elif field == "model_anchor_spec_payload":
+        value = np.asarray(str(value.item()) + " ")
     elif value.shape == ():
         value = np.asarray(str(value.item()) + "-tampered")
     else:
@@ -725,6 +1521,14 @@ def test_gamma_routed_handoff_rejects_rehashed_incomplete_certificate_payload(
         kpoints_hash=original.kpoints_hash,
         frame_hash=original.frame_hash,
         reference_frame_hash=original.reference_frame_hash,
+        model_reference_k_index=original.model_reference_k_index,
+        model_reference_projector_hash=original.model_reference_projector_hash,
+        model_anchor_spec_hash=original.model_anchor_spec.identity_hash,
+        model_frame_hash=original.model_frame_hash,
+        routing_to_model_hash=original.routing_to_model_hash,
+        bridge_certificate_hash=original.bridge_certificate_hash,
+        routed_heff_hash=original.routed_heff_hash,
+        heff_covariance_evidence_hash=original.heff_covariance_evidence_hash,
         heff_hash=original.heff_hash,
         closure_certificate_hashes=original.closure_certificate_hashes,
         routing_certificate_hashes=original.routing_certificate_hashes,
@@ -844,6 +1648,12 @@ def test_gamma_routed_factory_binds_task7_candidate_certificate() -> None:
         k_indices=base.k_indices,
         kpoints=base.kpoints,
         routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
+        model_reference_k_index=base.model_reference_k_index,
+        model_anchor_spec=base.model_anchor_spec,
+        model_frames=_model_rows_for_spec(base),
+        model_reference_projector=base.model_reference_projector,
+        routed_heff=base.routed_heff,
+        heff_covariance_tolerance=1.0e-10,
         authoritative_heff=base.authoritative_heff,
         heff_k_indices=base.heff_k_indices,
         closure_certificate_hashes=base.closure_certificate_hashes,
@@ -907,6 +1717,12 @@ def test_gamma_routed_factory_rejects_failed_task7_candidate() -> None:
             k_indices=base.k_indices,
             kpoints=base.kpoints,
             routed_frames=tuple(base.routed_frames_for_k(k) for k in base.k_indices),
+            model_reference_k_index=base.model_reference_k_index,
+            model_anchor_spec=base.model_anchor_spec,
+            model_frames=_model_rows_for_spec(base),
+            model_reference_projector=base.model_reference_projector,
+            routed_heff=base.routed_heff,
+            heff_covariance_tolerance=1.0e-10,
             authoritative_heff=base.authoritative_heff,
             heff_k_indices=base.heff_k_indices,
             closure_certificate_hashes=base.closure_certificate_hashes,
@@ -954,11 +1770,11 @@ def test_kp_symm_states_consume_persisted_frames_and_heff_without_reprojection()
         )
 
     for k_index in ctx.required_k:
-        expected_u, _ = spec.assemble_for_k(k_index, include_high=False)
+        expected_u, expected_heff = spec.model_state_for_k(k_index)
         np.testing.assert_array_equal(source[k_index].u_low, expected_u)
         np.testing.assert_array_equal(
             source[k_index].heff,
-            spec.authoritative_heff_for_k(k_index),
+            expected_heff,
         )
         assert target[k_index] is source[k_index]
     assert first is source[7]

@@ -5126,7 +5126,7 @@ def _states_from_gamma_routed_handoff(
     dict[int, ProjectionState],
     ProjectionState,
 ]:
-    """Materialize persisted routed frames without diagonalization/downfolding."""
+    """Materialize persisted model states without diagonalization/downfolding."""
 
     handoff.require_k_indices(ctx.required_k)
     if handoff.layout.q_count != ctx.q_count or handoff.layout.full_dimension != ctx.full_dim:
@@ -5136,12 +5136,12 @@ def _states_from_gamma_routed_handoff(
         )
     states: dict[int, ProjectionState] = {}
     for k_index in ctx.required_k:
-        u_low, _u_high = handoff.assemble_for_k(k_index, include_high=False)
+        u_low, heff = handoff.model_state_for_k(int(k_index))
         # Keep the persisted numeric values exact.  No polar alignment, anchor
         # fallback, diagonalization, or Heff reconstruction is permitted here.
         states[int(k_index)] = ProjectionState(
             hamk=np.asarray(ctx.hamk_source_by_k[int(k_index)], dtype=np.complex128),
-            heff=handoff.authoritative_heff_for_k(int(k_index)),
+            heff=heff,
             u_low=u_low,
         )
     first = states[int(ctx.required_k[0])]

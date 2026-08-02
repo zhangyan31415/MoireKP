@@ -4,7 +4,13 @@ from pathlib import Path
 
 import numpy as np
 
-from kp.blocks import GammaRoutingThresholds, GammaRowLayout, build_gamma_routed_frames
+from kp.blocks import (
+    GammaRoutingThresholds,
+    GammaRowLayout,
+    build_gamma_model_anchor_spec,
+    build_gamma_model_frames,
+    build_gamma_routed_frames,
+)
 from kp.identity import hash_mapping
 from kp.low_energy_selection import CandidateMetrics, SelectionThresholds
 from kp.projection_handoff import GammaRoutedBasisSpec, certify_gamma_routed_basis_spec
@@ -71,11 +77,34 @@ def _gamma_handoff() -> GammaRoutedBasisSpec:
         thresholds=thresholds,
         require_complete_clusters=False,
     )
+    values = (np.arange(4, dtype=np.float64),)
+    vectors = (np.eye(4, dtype=np.complex128),)
+    anchor = build_gamma_model_anchor_spec(
+        reference_eigenvalues_by_q=values,
+        reference_eigenvectors_by_q=vectors,
+        joint_band_indices=routed.joint_band_indices,
+        group_ranks=routed.group_dimensions,
+        layout=layout,
+    )
+    model = build_gamma_model_frames(
+        eigenvalues_by_q=values,
+        eigenvectors_by_q=vectors,
+        layout=layout,
+        anchor_spec=anchor,
+    )
     k_indices = (0, 1)
     heff = np.asarray(
         [np.diag([0.25, 0.75]), np.diag([0.5, 1.0])],
         dtype=np.complex128,
     )
+    bridge = routed.local_frames_by_q[0].conj().T @ model.local_frames_by_q[0]
+    routed_heff = np.asarray(
+        [bridge @ row @ bridge.conj().T for row in heff],
+        dtype=np.complex128,
+    )
+    reference_joint = vectors[anchor.reference_q_index][
+        :, np.asarray(routed.joint_band_indices, dtype=np.intp)
+    ]
     pairs = ((0, 0), (1, 1))
     presentation = MagneticPresentation(
         generators=(MagneticGenerator("E", False),),
@@ -102,6 +131,12 @@ def _gamma_handoff() -> GammaRoutedBasisSpec:
         k_indices=k_indices,
         kpoints=np.asarray([[0.0, 0.0], [0.25, 0.0]], dtype=np.float64),
         routed_frames=(routed, routed),
+        model_reference_k_index=0,
+        model_anchor_spec=anchor,
+        model_frames=(model, model),
+        model_reference_projector=reference_joint @ reference_joint.conj().T,
+        routed_heff=routed_heff,
+        heff_covariance_tolerance=1.0e-10,
         authoritative_heff=heff,
         heff_k_indices=k_indices,
         closure_certificate_hashes=(_digest("closure-0"), _digest("closure-1")),
