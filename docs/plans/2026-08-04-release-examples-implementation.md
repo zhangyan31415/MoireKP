@@ -213,3 +213,85 @@ fit method/order, RMS/maximum band errors, paths, and timings.
 Run the same recorded protocol for the remaining eight release cases. Do not
 claim release readiness until the exact current tree has passed all ten cases
 and the release metadata blockers have real values.
+
+### Task 9: Remove The Implicit KPATH.in Release Dependency
+
+**Files:**
+- Modify: `tests/kp/test_configured_model.py`
+- Modify: `tests/kp/test_project_auto_gauge_cli.py`
+- Modify: `kp/kp/model/pipeline.py`
+- Modify: `kp/kp/cli.py`
+
+**Step 1: Write failing inline-axis tests**
+
+Require relocated configs containing only inline YAML labels, coordinates,
+points per segment, and `tmat` to produce Gamma-M-K-G ticks in both project and
+model plotting. Require omitted K-path metadata to fall back to point indices
+without discovering a neighboring `KPATH.in`.
+
+**Step 2: Verify the tests fail**
+
+```bash
+python -m pytest tests/kp/test_configured_model.py tests/kp/test_project_auto_gauge_cli.py -k "inline_kpath_axis or implicit_kpath" -q
+```
+
+Expected: FAIL because both plotting paths currently require `kpath.file`, and
+model config loading still discovers `../../tapw/KPATH.in`.
+
+**Step 3: Implement the minimal shared semantics**
+
+Use `generate_kpath_from_symbols` for inline `labels`/`coordinates`, preserve
+explicit `kpath.file` compatibility, and remove only implicit file discovery.
+
+**Step 4: Verify focused and existing K-path tests**
+
+Run the Step 2 command plus existing configured-model K-path tests.
+
+### Task 10: Convert Release KP Configs To Inline K Paths
+
+**Files:**
+- Modify: ten retained `examples/**/kp/configs/*.yaml` files
+- Modify: `examples/data-manifest.yaml`
+- Modify: `tests/kp/test_example_dependency_contract.py`
+
+**Step 1: Add a failing release-config contract**
+
+Require all ten KP configs to contain the same inline Gamma-M-K-G path as
+their TAPW source configs, no `kpath.file`, and no nested `model.bands`.
+Require MgI2 M1 spinless `bands.plot.ylim` to equal `[-0.01, 0.16]`.
+
+**Step 2: Verify failure**
+
+Run the exact release-config contract test and confirm it reports missing
+inline paths.
+
+**Step 3: Update the YAML files and manifest hashes**
+
+Move each legacy nested `model.bands` mapping to public top-level `bands`, add
+the inline path block, apply the M1 spinless plot margin, and refresh only
+changed config hashes/sizes.
+
+**Step 4: Verify config and release contracts**
+
+Run dependency, case-schema, manifest, and release tests.
+
+### Task 11: Replot And Diagnose MgI2 M1 Spinless
+
+**Files:**
+- Create only under: `validation_runs/release_examples_auto_20260804/`
+
+**Step 1: Re-run the automatic model**
+
+Reuse the successful project and symmetry outputs; rerun `kp model` with the
+inline path and `[-0.01, 0.16]` window. Verify Gamma-M-K-G labels visually.
+
+**Step 2: Run the 6/5 diagnostic model**
+
+Create a validation-only config with explicit 6/5 harmonics and a separate
+output directory. Reuse the same projected Heff and symmetry content, run one
+linear model fit, and record wall time and errors.
+
+**Step 3: Compare without changing release policy**
+
+Report automatic 4/4 versus diagnostic 6/5 band RMS/max and rendered plots.
+Do not add explicit harmonics to the release config.

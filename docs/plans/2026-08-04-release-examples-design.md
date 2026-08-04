@@ -71,6 +71,34 @@ evaluation may be chunked to bound memory.
 The 1+2 MoTe2 Gamma case uses the validated kinetic/intralayer/interlayer
 orders 8/6/8.
 
+## Inline K-Path Contract
+
+Released TAPW and KP configs define the plotted path directly in YAML with
+`labels`, `points_per_segment`, and fractional `coordinates`. Release behavior
+must not depend on a neighboring `KPATH.in` file or on the config's directory
+depth. KP project and model plots consume the inline path, reproduce the
+sampled Gamma-M-K-G rows, and show semantic high-symmetry ticks. Explicit
+file-based K paths remain a compatibility input, but implicit file discovery
+is removed.
+
+The public KP `bands` section owns both the inline `kpath` block and the model
+band-comparison/plot settings. Release configs do not split these settings
+between top-level `bands` and legacy nested `model.bands`.
+
+For MgI2 M1 spinless, the plotted bottom-aligned window is
+`[-0.01, 0.16]` eV so that the conduction edge has visible margin below zero.
+This is a display-only choice and does not alter fit inputs or errors.
+
+## MgI2 M Harmonic Diagnostic
+
+The automatic 4/4 result is compared once against the previous explicit 6/5
+support using the same projection, symmetry package, polynomial orders, fit
+rows, and linear solver. The 6/5 configuration exists only under
+`validation_runs`; it is not restored to the release YAML. The comparison
+determines whether the small M-valley difference is caused by harmonic
+truncation. Any production change must improve the automatic rule rather than
+introduce a material-specific default.
+
 ## Documentation And Manifest
 
 The examples README and each material README list only the released cases,
