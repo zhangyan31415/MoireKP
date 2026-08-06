@@ -1,14 +1,11 @@
 case:
-  profile: Gamma
+  profile: K1
   q_shell: q01
   output_root: ../outputs
-
-valley: Gamma
+valley: K1
 spin: up
-
 kpath:
   tmat: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-
 material:
   name: synthetic_kp_smoke
   hamk_file: ../../data/hamiltonian_k.npy
@@ -20,29 +17,25 @@ material:
   num_layers: 2
   num_layer_list: [1, 1]
   num_orb_per_layer: [1]
-
 plot:
-  mode: gamma
+  mode: K1
   hamk_index: 0
   target: all
   ref_q_index: 0
   ylim: [-0.5, 0.5]
-
 project:
-  mode: gamma
+  mode: K1
   workers: 1
   downfold_method: first_order
   nlow_state_list:
     - [0]
-    - [1]
+    - [0]
   norb_fix_list:
     - [[[0, 1.0]]]
-    - [[[1, 1.0]]]
+    - [[[0, 1.0]]]
   k_indices: [0, 1, 2]
   ylim: [-0.5, 0.5]
-
 symm:
   operations: []
-
 model:
   n_orb: [1, 1]

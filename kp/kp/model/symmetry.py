@@ -77,6 +77,176 @@ class _CertifiedPackedJoint:
     artifact_hash: str
 
 
+@dataclass(frozen=True)
+class _CertifiedResponseGauge:
+    matrices: Mapping[str, np.ndarray]
+    joint_route_actions: Mapping[str, Any]
+    factorized_actions: Mapping[str, Any]
+    basis_gauge: np.ndarray
+    metadata: Mapping[str, Any]
+
+
+def _certified_cyclotomic_response_gauge(
+    *,
+    matrices: Mapping[str, np.ndarray],
+    joint_route_actions: Mapping[str, Any],
+    factorized_actions: Mapping[str, Any],
+    report: Mapping[str, Any],
+    q_vectors: tuple[np.ndarray, ...],
+) -> _CertifiedResponseGauge:
+    """Materialize the already-certified scalar cyclotomic response gauge.
+
+    ``kp symm`` persists the exact joint actions together with the common fiber
+    gauge that maps them to their closest cyclotomic routes.  Model response
+    generation needs that canonical gauge: otherwise harmless per-Q phases can
+    turn a compact Fourier seed into many near-zero projected columns.
+    """
+
+    if str(report.get("status", "")) != "certified":
+        raise ValueError("cyclotomic response gauge must be certified")
+    if not joint_route_actions:
+        raise ValueError("cyclotomic response gauge requires certified joint routes")
+    angles = np.asarray(report.get("gauge_angles", ()), dtype=np.float64)
+    if angles.ndim != 1 or not angles.size or not np.all(np.isfinite(angles)):
+        raise ValueError("cyclotomic response gauge has invalid gauge angles")
+    root_order = int(report.get("root_order", 0))
+    root_exponents_raw = report.get("root_exponents")
+    if root_order <= 1 or not isinstance(root_exponents_raw, Mapping):
+        raise ValueError("cyclotomic response gauge lacks discrete route roots")
+    certification_bound = float(report.get("common_gauge_certification_bound", -1.0))
+    recorded_residual = float(report.get("common_gauge_residual_max", np.inf))
+    if (
+        not np.isfinite(certification_bound)
+        or certification_bound < 0.0
+        or not np.isfinite(recorded_residual)
+        or recorded_residual > certification_bound
+    ):
+        raise ValueError("cyclotomic response gauge certificate is invalid")
+
+    from ..symmetry.factorized_action import certify_factorized_action
+    from ..symmetry.joint_exactification import (
+        BlockRouteAction,
+        materialize_block_route_action,
+    )
+
+    reference = next(iter(joint_route_actions.values()))
+    if len(reference.fiber_dimensions) != angles.size or any(
+        int(value) != 1 for value in reference.fiber_dimensions
+    ):
+        raise ValueError("cyclotomic response gauge requires scalar joint fibers")
+    dimension = int(sum(reference.fiber_dimensions))
+    diagonal = np.empty(dimension, dtype=np.complex128)
+    for fiber, indices in enumerate(reference.fiber_indices):
+        if len(indices) != 1:
+            raise ValueError("cyclotomic response gauge requires scalar fiber indices")
+        diagonal[int(indices[0])] = np.exp(1.0j * angles[fiber])
+    basis_gauge = np.diag(diagonal)
+
+    transformed_routes: dict[str, Any] = {}
+    transformed_matrices: dict[str, np.ndarray] = {}
+    actual_residual = 0.0
+    for name, action in joint_route_actions.items():
+        if (
+            action.fiber_dimensions != reference.fiber_dimensions
+            or action.fiber_indices != reference.fiber_indices
+        ):
+            raise ValueError(f"joint route layout differs for {name!r}")
+        exponents_raw = root_exponents_raw.get(name)
+        if not isinstance(exponents_raw, (list, tuple)) or len(exponents_raw) != angles.size:
+            raise ValueError(f"cyclotomic response gauge lacks route roots for {name!r}")
+        blocks: list[np.ndarray] = []
+        for source, target in enumerate(action.fiber_permutation):
+            source_phase = diagonal[action.fiber_indices[source][0]]
+            if action.antiunitary:
+                source_phase = source_phase.conjugate()
+            target_phase = diagonal[action.fiber_indices[target][0]]
+            block = np.asarray(
+                target_phase.conjugate()
+                * action.route_blocks[source]
+                * source_phase,
+                dtype=np.complex128,
+            )
+            expected_root = np.exp(
+                2.0j * np.pi * int(exponents_raw[source]) / root_order
+            )
+            actual_residual = max(
+                actual_residual,
+                float(abs(complex(block[0, 0]) - expected_root)),
+            )
+            blocks.append(block)
+        transformed = BlockRouteAction(
+            name=action.name,
+            antiunitary=action.antiunitary,
+            fiber_permutation=action.fiber_permutation,
+            fiber_dimensions=action.fiber_dimensions,
+            fiber_indices=action.fiber_indices,
+            route_blocks=tuple(blocks),
+            unitarity_certification_bound=float(
+                action.unitarity_certification_bound + 8.0 * certification_bound
+            ),
+        )
+        transformed_routes[str(name)] = transformed
+        transformed_matrices[str(name)] = materialize_block_route_action(transformed)
+    if actual_residual > certification_bound:
+        raise ValueError(
+            "certified cyclotomic response gauge does not reproduce its route roots: "
+            f"residual={actual_residual:.6e}, bound={certification_bound:.6e}"
+        )
+
+    for name, matrix in matrices.items():
+        if name not in transformed_matrices:
+            raise ValueError(f"response matrix {name!r} lacks a transformed joint route")
+        source = np.asarray(matrix, dtype=np.complex128)
+        right_gauge = basis_gauge.conjugate() if joint_route_actions[name].antiunitary else basis_gauge
+        expected = basis_gauge.conjugate().T @ source @ right_gauge
+        mismatch = float(np.linalg.norm(expected - transformed_matrices[name], ord="fro"))
+        if mismatch > certification_bound * max(1, dimension):
+            raise ValueError(
+                f"cyclotomic response matrix mismatch for {name!r}: "
+                f"residual={mismatch:.6e}"
+            )
+
+    transformed_factorized: dict[str, Any] = {}
+    for name, action in factorized_actions.items():
+        transformed_factorized[str(name)] = certify_factorized_action(
+            name=str(name),
+            matrix=transformed_matrices[str(name)],
+            antiunitary=bool(action.antiunitary),
+            k_forward=np.asarray(action.k_forward, dtype=np.float64),
+            q_permutation=action.q_permutation,
+            sector_permutation=action.sector_permutation,
+            q_vectors=q_vectors,
+            q_counts=action.q_counts,
+            n_orb=action.n_orb,
+            matrix_absolute_error_bound=float(
+                certification_bound + action.matrix_certification_bound
+            ),
+            q_absolute_error_bound=float(action.q_certification_bound),
+        )
+
+    metadata = {
+        "status": "certified",
+        "version": "model_response_cyclotomic_gauge_v1",
+        "source": "kp_symm_exactification.joint_block_representation.report.closest_cyclotomic_u1_gauge",
+        "root_order": root_order,
+        "gauge_angles": angles.tolist(),
+        "recorded_common_gauge_residual_max": recorded_residual,
+        "reconstructed_common_gauge_residual_max": actual_residual,
+        "common_gauge_certification_bound": certification_bound,
+        "hamiltonian_transform": "G_dagger_H_G",
+        "antiunitary_action_transform": "G_dagger_D_G_conjugate",
+    }
+    return _CertifiedResponseGauge(
+        matrices={
+            str(name): transformed_matrices[str(name)] for name in matrices
+        },
+        joint_route_actions=transformed_routes,
+        factorized_actions=transformed_factorized,
+        basis_gauge=basis_gauge,
+        metadata=metadata,
+    )
+
+
 def _canonical_structural_zero_copy(matrix: np.ndarray) -> np.ndarray:
     """Copy a complex matrix while encoding exact structural zeros as +0+0j."""
 
@@ -115,6 +285,7 @@ class MatrixSymmetryGenerator:
         joint_route_actions: Mapping[str, Any] | None = None,
         joint_artifact_hash: str | None = None,
         certified_power_relations: Mapping[str, Mapping[str, Any]] | None = None,
+        model_basis_gauge: np.ndarray | None = None,
     ):
         self.matrices = {str(key): np.asarray(value, dtype=complex) for key, value in matrices.items()}
         self.metadata = dict(metadata)
@@ -131,6 +302,11 @@ class MatrixSymmetryGenerator:
             str(key): dict(value)
             for key, value in (certified_power_relations or {}).items()
         }
+        self.model_basis_gauge = (
+            None
+            if model_basis_gauge is None
+            else np.asarray(model_basis_gauge, dtype=np.complex128)
+        )
         unknown_relations = set(self.certified_power_relations) - set(self.matrices)
         if unknown_relations:
             raise ValueError(
@@ -899,19 +1075,67 @@ def load_symmetry_source(raw: Mapping[str, Any] | None, *, base: Path, expected_
         from ..symmetry.factorized_action import load_factorized_actions_from_npz
 
         factorized_actions = load_factorized_actions_from_npz(packed_path)
+    joint_route_actions = (
+        {} if certified_packed_joint is None else dict(certified_packed_joint.actions)
+    )
+    model_basis_gauge: np.ndarray | None = None
+    exactification = manifest.get("kp_symm_exactification")
+    joint_metadata = (
+        exactification.get("joint_block_representation")
+        if isinstance(exactification, Mapping)
+        else None
+    )
+    joint_report = (
+        joint_metadata.get("report")
+        if isinstance(joint_metadata, Mapping)
+        else None
+    )
+    closest_report = (
+        joint_report.get("closest_cyclotomic_u1_gauge")
+        if isinstance(joint_report, Mapping)
+        else None
+    )
+    if (
+        isinstance(closest_report, Mapping)
+        and str(closest_report.get("status", "")) == "certified"
+        and joint_route_actions
+    ):
+        with np.load(packed_path, allow_pickle=False) as payload:
+            q_keys = (
+                "__q_model_canonical_layer1__",
+                "__q_model_canonical_layer2__",
+            )
+            if not all(key in payload.files for key in q_keys):
+                raise ValueError(
+                    "certified cyclotomic response gauge requires canonical Q arrays"
+                )
+            q_vectors = tuple(
+                np.asarray(payload[key], dtype=np.float64) for key in q_keys
+            )
+        reframed = _certified_cyclotomic_response_gauge(
+            matrices=matrices,
+            joint_route_actions=joint_route_actions,
+            factorized_actions=factorized_actions,
+            report=closest_report,
+            q_vectors=q_vectors,
+        )
+        matrices = dict(reframed.matrices)
+        joint_route_actions = dict(reframed.joint_route_actions)
+        factorized_actions = dict(reframed.factorized_actions)
+        model_basis_gauge = reframed.basis_gauge
+        metadata["model_response_basis_gauge"] = dict(reframed.metadata)
     generator = MatrixSymmetryGenerator(
         matrices,
         metadata,
         factorized_actions=factorized_actions,
-        joint_route_actions=(
-            None if certified_packed_joint is None else certified_packed_joint.actions
-        ),
+        joint_route_actions=joint_route_actions,
         joint_artifact_hash=(
             None
             if certified_packed_joint is None
             else certified_packed_joint.artifact_hash
         ),
         certified_power_relations=certified_power_relations,
+        model_basis_gauge=model_basis_gauge,
     )
     return LoadedSymmetrySource(
         source_type="kp_symm_output",

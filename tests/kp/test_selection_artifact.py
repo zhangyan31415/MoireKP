@@ -1173,6 +1173,59 @@ def test_certified_artifact_binds_manifest_and_rejects_recomputed_replacement(
         load_selection_artifact(marker)
 
 
+def test_store_promotes_pending_symmetry_without_replacing_payload_generation(
+    tmp_path: Path,
+) -> None:
+    pending_metrics = replace(
+        _metrics(),
+        symmetry_residual=None,
+        symmetry_leakage=None,
+    )
+    metric_evidence = SelectionMetricEvidence.create(
+        candidate_id="candidate-4",
+        frozen_target_window_hash=_digest("target"),
+        validation_k_indices_hash=_digest("validation-k"),
+        basis_handoff_hash=_digest("basis"),
+        metrics=pending_metrics,
+    )
+    pending_identity = SelectionIdentity.create(
+        selection_input=_selection_input(),
+        selection_policy_hash=_digest("policy"),
+        resolved_candidate=_resolved(),
+        certification_evidence=CertificationEvidence.create(
+            metric_evidence=metric_evidence,
+            symmetry_certificate_hash=_digest("candidate-certificate"),
+            symmetry_input_identity_hash=_digest("candidate-input"),
+        ),
+    )
+    store = SelectionArtifactStore(tmp_path)
+    pending = SelectionArtifact.pending(
+        transaction_id="promote-symmetry",
+        selection_input_identity_hash=_selection_input_hash(),
+    )
+    with store.begin(pending) as transaction:
+        manifest_hash = transaction.stage_payloads({"basis.bin": b"basis"})
+        transaction.publish(
+            SelectionArtifact.pending_symmetry(
+                transaction_id="promote-symmetry",
+                identity=pending_identity,
+                payload_manifest_hash=manifest_hash,
+            )
+        )
+
+    certified = SelectionArtifact.certified(
+        transaction_id="promote-symmetry",
+        identity=_identity(),
+        payload_manifest_hash=manifest_hash,
+    )
+    store.promote_pending_symmetry(certified)
+
+    assert store.load_current(require_certified=True) == certified
+    assert store.load_current_payloads(require_certified=True) == {
+        "basis.bin": b"basis"
+    }
+
+
 @pytest.mark.parametrize("linked_name", ("basis.bin", "payload_manifest.json"))
 def test_generation_loader_rejects_symlink_even_with_identical_external_content(
     tmp_path: Path,

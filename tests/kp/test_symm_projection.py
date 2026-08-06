@@ -23,6 +23,7 @@ from kp.basis.selection import GaugeAnchorReport, GaugeCandidateSymmetryMetrics
 from kp.identity import hash_array
 from kp.model.symmetry import load_symmetry_source
 from kp.orbitals import expand_orbital_order_by_sector
+from kp.projection_selection import CandidateRejected, CandidateRejectionReason
 from kp.symmetry.projection import (
     _basis_action_for_candidate,
     _build_action_representation,
@@ -55,6 +56,23 @@ from kp.symmetry.joint_exactification import (
     materialize_block_route_action,
 )
 from kp.symmetry.q_canonicalization import CanonicalQResult
+
+
+def test_automatic_symm_uses_persisted_project_band_selection() -> None:
+    assert projection_mod._resolve_persisted_nlow_state_list(
+        project_cfg={"selection": {"mode": "auto"}},
+        configured=[],
+        persisted=[[22, 23], [22, 23]],
+    ) == [[22, 23], [22, 23]]
+
+
+def test_explicit_symm_rejects_persisted_project_band_mismatch() -> None:
+    with pytest.raises(ValueError, match="persisted project nlow_state_list"):
+        projection_mod._resolve_persisted_nlow_state_list(
+            project_cfg={"selection": {"mode": "explicit"}},
+            configured=[[20, 21], [20, 21]],
+            persisted=[[22, 23], [22, 23]],
+        )
 
 
 def test_spin_route_inference_keeps_same_spin_action_internal() -> None:
@@ -1426,6 +1444,36 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertEqual(decision.rankings[-1]["candidate_id"], "old_auto")
         self.assertEqual(decision.rankings[-1]["status"], "rejected")
 
+    def test_symmetry_validated_auto_gauge_rejects_one_physical_candidate_when_all_gauges_fail(
+        self,
+    ) -> None:
+        candidates = [
+            SimpleNamespace(candidate_id="qrcp", resolved_norb_fix_list=[[[0]]]),
+            SimpleNamespace(candidate_id="leverage", resolved_norb_fix_list=[[[1]]]),
+        ]
+
+        with self.assertRaises(CandidateRejected) as caught:
+            projection_mod._select_validated_auto_gauge_candidate(
+                candidates,
+                [
+                    GaugeCandidateSymmetryMetrics(
+                        candidate_id="qrcp",
+                        exactification_distance_by_op={"C3z": 0.105, "C2T": 0.428},
+                    ),
+                    GaugeCandidateSymmetryMetrics(
+                        candidate_id="leverage",
+                        exactification_distance_by_op={},
+                        metadata={"status": "failed"},
+                    ),
+                ],
+                max_exactification_distance=1.0e-2,
+            )
+
+        self.assertIs(
+            caught.exception.reason,
+            CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+        )
+
     def test_projectors_for_k_honors_configured_downfold_method(self) -> None:
         ham = np.diag([0.0, 1.0, 10.0, 20.0]).astype(np.complex128)
         u_low = np.eye(4, 1, dtype=np.complex128)
@@ -1623,18 +1671,7 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         self.assertTrue(np.array_equal(raw[0], np.eye(2)))
         self.assertIsNone(rows[0]["raw"]["heff_covariance_residual"])
 
-    def test_auto_gauge_falls_back_when_production_basis_frame_changes(self) -> None:
-        def bundle(u_low):
-            state = projection_mod.ProjectionState(
-                hamk=np.eye(2, dtype=np.complex128),
-                heff=np.zeros((1, 1), dtype=np.complex128),
-                u_low=np.asarray(u_low, dtype=np.complex128),
-            )
-            by_k = {0: state}
-            return by_k, by_k, by_k, state
-
-        basis_states = bundle([[1.0], [0.0]])
-        configured_states = bundle([[0.0], [1.0]])
+    def test_auto_gauge_selection_derives_canonical_frame_only_for_selected_candidate(self) -> None:
         report = GaugeAnchorReport(
             gauge_mode="auto_scdm",
             resolved_norb_fix_list=[[[0]]],
@@ -1644,8 +1681,13 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             gauge_anchor_quality={},
             symmetry_closure_quality={},
         )
-        candidate = SimpleNamespace(
-            candidate_id="candidate",
+        rejected_candidate = SimpleNamespace(
+            candidate_id="rejected",
+            resolved_norb_fix_list=[[[1]]],
+            report=report,
+        )
+        selected_candidate = SimpleNamespace(
+            candidate_id="selected",
             resolved_norb_fix_list=[[[0]]],
             report=report,
         )
@@ -1657,16 +1699,30 @@ class SymmetryProjectionCliTests(unittest.TestCase):
         )
         calls = []
 
-        def fake_metrics(_ctx, _candidate, *, candidate_states=None, state_cache=None):
-            calls.append("configured" if candidate_states is not None else "basis")
-            if state_cache is not None:
-                state_cache["candidate"] = basis_states
+        canonical_frame = {"status": "applied", "frame_hash": "selected-frame"}
+
+        def fake_metrics(
+            _ctx,
+            candidate,
+            *,
+            candidate_states=None,
+            state_cache=None,
+            derive_canonical_frame=False,
+        ):
+            calls.append((candidate.candidate_id, bool(derive_canonical_frame)))
             return GaugeCandidateSymmetryMetrics(
-                candidate_id="candidate",
+                candidate_id=candidate.candidate_id,
                 exactification_distance_by_op={"TR": 0.0},
                 metadata={
                     "status": "evaluated",
-                    "symmetry_adapted_frame": {"status": "applied"},
+                    **(
+                        {"symmetry_adapted_frame": canonical_frame}
+                        if derive_canonical_frame
+                        else {}
+                    ),
+                    "candidate_projection": {
+                        "status": "raw_action_exactification_only",
+                    },
                 },
             )
 
@@ -1675,24 +1731,124 @@ class SymmetryProjectionCliTests(unittest.TestCase):
             patch.object(projection_mod, "_candidate_symmetry_metrics", side_effect=fake_metrics),
             patch.object(
                 projection_mod,
-                "_configured_basis_states_for_resolved_anchors",
-                return_value=configured_states,
+                "_select_validated_auto_gauge_candidate",
+                return_value=(selected_candidate, decision),
+            ),
+        ):
+            selected, selected_report = projection_mod._select_projection_gauge(
+                ctx,
+                [rejected_candidate, selected_candidate],
+            )
+
+        self.assertIs(selected, selected_candidate)
+        self.assertEqual(
+            calls,
+            [
+                ("rejected", False),
+                ("selected", False),
+                ("selected", True),
+            ],
+        )
+        self.assertIsNone(ctx.selected_gauge_states)
+        self.assertEqual(
+            selected_report.symmetry_closure_quality["symmetry_adapted_frame"],
+            canonical_frame,
+        )
+
+    def test_dim004_raw_action_residual_remains_an_evaluated_candidate(self) -> None:
+        state = projection_mod.ProjectionState(
+            hamk=np.eye(4, dtype=np.complex128),
+            heff=None,
+            u_low=np.eye(4, dtype=np.complex128),
+        )
+        states = ({0: state}, {0: state}, {0: state}, state)
+        report = GaugeAnchorReport(
+            gauge_mode="auto_scdm",
+            resolved_norb_fix_list=[[[0, 1]], [[0, 1]]],
+            selections=[],
+            metric={},
+            state_selection_quality={},
+            gauge_anchor_quality={"sigma_min": 0.8, "condition_number": 1.25},
+            symmetry_closure_quality={},
+        )
+        candidate = SimpleNamespace(
+            candidate_id="dim004",
+            resolved_norb_fix_list=report.resolved_norb_fix_list,
+            report=report,
+            priority=0,
+        )
+        ctx = SimpleNamespace(
+            config=SimpleNamespace(
+                spin="up",
+                valley="K1",
+                tolerance=1.0e-2,
+                symm_cfg={},
+                spin_sector_sewing=None,
+            ),
+            nlow_state_list=[[0, 1], [0, 1]],
+            num_layer_list=[1, 1],
+            q_model1=np.zeros((1, 2), dtype=float),
+            q_model2=np.zeros((1, 2), dtype=float),
+            q_rotation_deg=0.0,
+            operation_requests=[{"output": "C3z"}],
+            operation_payloads={
+                "C3z": {
+                    "entry": {"_pairs": [(0, 0)]},
+                    "antiunitary": False,
+                    "action": SimpleNamespace(matrix=np.eye(4, dtype=np.complex128)),
+                }
+            },
+        )
+        exact_reports = {
+            "C3z": {
+                "report": {
+                    "distance_mod_global_phase": 4.0e-3,
+                    "phase_std_deg": 0.1,
+                },
+                "support_diagnostics": {"off_support_rel": 2.0e-3},
+            }
+        }
+        with (
+            patch.object(projection_mod, "_validate_project_layer_lists"),
+            patch.object(
+                projection_mod,
+                "_basis_states_for_resolved_anchors",
+                return_value=states,
+            ),
+            patch.object(projection_mod, "_sector_orbital_counts", return_value=(2, 2)),
+            patch.object(
+                projection_mod,
+                "_spin_convention_for_exactification",
+                return_value="spinless",
+            ),
+            patch.object(projection_mod, "_operation_action_metadata", return_value={}),
+            patch.object(projection_mod, "_model_action_metadata", return_value={}),
+            patch.object(projection_mod, "_operation_power_relation", return_value={}),
+            patch.object(
+                projection_mod,
+                "_project_operation",
+                return_value=([np.eye(4, dtype=np.complex128)], [], []),
             ),
             patch.object(
                 projection_mod,
-                "_select_validated_auto_gauge_candidate",
-                return_value=(candidate, decision),
+                "exactify_loaded_symmetry_source",
+                return_value=({"C3z": np.eye(4, dtype=np.complex128)}, exact_reports),
+            ),
+            patch.object(
+                projection_mod,
+                "_derive_projection_basis_frame",
+                side_effect=AssertionError("candidate selection must not build a canonical frame"),
             ),
         ):
-            selected, selected_report = projection_mod._select_projection_gauge(ctx, [candidate])
+            metric = projection_mod._candidate_symmetry_metrics(ctx, candidate)
 
-        self.assertIs(selected, candidate)
-        self.assertEqual(calls, ["basis", "configured"])
-        self.assertIsNone(ctx.selected_gauge_states)
-        certification = selected_report.symmetry_closure_quality["metrics"][0]["metadata"][
-            "production_basis_certification"
-        ]
-        self.assertEqual(certification["status"], "configured_basis_fallback")
+        self.assertEqual(metric.metadata["status"], "evaluated")
+        self.assertEqual(metric.exactification_distance_by_op, {"C3z": 4.0e-3})
+        self.assertEqual(metric.support_off_by_op, {"C3z": 2.0e-3})
+        self.assertEqual(
+            metric.metadata["candidate_projection"]["status"],
+            "raw_action_exactification_only",
+        )
 
     def test_projectors_for_k_uses_full_row_order_for_multilayer_k_mode(self) -> None:
         ham = np.diag(np.arange(6, dtype=float)).astype(np.complex128)

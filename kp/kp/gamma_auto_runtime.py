@@ -33,7 +33,9 @@ from .identity import hash_array
 from .projection_handoff import (
     GAMMA_SAMPLED_K_GRAY_TOLERANCE,
     GAMMA_SAMPLED_K_MATCH_TOLERANCE,
+    GammaCommonAnchorBasisSpec,
     GammaRoutedBasisSpec,
+    save_gamma_common_anchor_basis_spec,
     save_gamma_routed_basis_spec,
 )
 from .selection_orchestration import (
@@ -41,6 +43,10 @@ from .selection_orchestration import (
     PendingCaseSelection,
     ResolvedProjectionSelection,
     resolve_case_selection,
+)
+from .selection_artifact import (
+    ResolvedCandidateIdentity,
+    gamma_common_anchor_ordered_q_identity_hash,
 )
 from .symmetry.joint_exactification import (
     compile_continuum_magnetic_presentation,
@@ -56,9 +62,17 @@ class GammaAutomaticRuntimePreparation:
 
 
 def _load_strict_gamma_auto_config(value: Any) -> GammaAutomaticSelectionConfig:
-    """Parse the complete hard policy without inserting runtime defaults."""
+    """Parse a public project config, retaining legacy strict-policy reads."""
 
-    return GammaAutomaticSelectionConfig.from_normalized_config(value)
+    if not isinstance(value, Mapping):
+        raise ValueError("automatic Gamma project config must be a mapping")
+    project = dict(value)
+    selection = project.get("selection")
+    if isinstance(selection, Mapping) and "producer_integrity_thresholds" in selection:
+        return GammaAutomaticSelectionConfig.from_normalized_config(selection)
+    if "producer_integrity_thresholds" in project and "selection" not in project:
+        return GammaAutomaticSelectionConfig.from_normalized_config(project)
+    return GammaAutomaticSelectionConfig.from_normalized_project_config(project)
 
 
 def _strict_project_workers(project_cfg: Mapping[str, Any]) -> int:
@@ -77,6 +91,40 @@ def _strict_project_workers(project_cfg: Mapping[str, Any]) -> int:
             "automatic Gamma project.workers must be an explicit strict positive integer"
         )
     return workers
+
+
+def _load_external_target_band_spectra(
+    path: str | Path,
+    *,
+    nk: int,
+) -> np.ndarray:
+    """Load the authoritative eV band rows used by automatic Gamma scoring."""
+
+    from .cli import _load_bands_from_text
+
+    rows = _load_bands_from_text(str(path))
+    if len(rows) != int(nk):
+        raise ValueError(
+            "automatic Gamma band_file k-point coverage does not match "
+            f"source Hamiltonians: {len(rows)} != {int(nk)}"
+        )
+    band_counts = {int(np.asarray(row).size) for row in rows}
+    if len(band_counts) != 1 or not band_counts or next(iter(band_counts)) <= 0:
+        raise ValueError(
+            "automatic Gamma band_file must contain a rectangular Nk x Nband spectrum"
+        )
+    spectra = np.stack(
+        [np.asarray(row, dtype=np.float64) for row in rows],
+        axis=0,
+    )
+    if not np.all(np.isfinite(spectra)):
+        raise ValueError("automatic Gamma band_file spectra must be finite")
+    if np.any(np.diff(spectra, axis=1) < 0.0):
+        raise ValueError(
+            "automatic Gamma band_file spectra must be sorted in ascending energy"
+        )
+    spectra.setflags(write=False)
+    return spectra
 
 
 def _strict_sha256(value: Any, *, field: str) -> str:
@@ -328,22 +376,38 @@ def _npz_bytes(payload: Mapping[str, Any]) -> bytes:
     return buffer.getvalue()
 
 
-def _serialize_gamma_handoff(handoff: GammaRoutedBasisSpec) -> bytes:
+GammaAutomaticBasisSpec = GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec
+
+
+def _serialize_gamma_handoff(handoff: GammaAutomaticBasisSpec) -> bytes:
     """Use the authoritative strict writer, then return the exact archive bytes."""
 
     with tempfile.TemporaryDirectory(prefix="kp-gamma-handoff-") as directory:
         path = Path(directory) / "basis.npz"
-        save_gamma_routed_basis_spec(path, handoff)
+        if isinstance(handoff, GammaCommonAnchorBasisSpec):
+            save_gamma_common_anchor_basis_spec(path, handoff)
+        elif isinstance(handoff, GammaRoutedBasisSpec):
+            save_gamma_routed_basis_spec(path, handoff)
+        else:
+            raise TypeError(
+                "handoff must be a GammaCommonAnchorBasisSpec or "
+                "GammaRoutedBasisSpec"
+            )
         return path.read_bytes()
 
 
 def _gamma_projected_spin_operator(
-    handoff: GammaRoutedBasisSpec,
+    handoff: GammaAutomaticBasisSpec,
 ) -> np.ndarray:
     """Project canonical full-space Sz through each certified model frame."""
 
-    if not isinstance(handoff, GammaRoutedBasisSpec):
-        raise TypeError("handoff must be a GammaRoutedBasisSpec")
+    if not isinstance(
+        handoff, (GammaCommonAnchorBasisSpec, GammaRoutedBasisSpec)
+    ):
+        raise TypeError(
+            "handoff must be a GammaCommonAnchorBasisSpec or "
+            "GammaRoutedBasisSpec"
+        )
     layout = handoff.layout
     if layout.spin_scope != "spinful_all" or layout.spin_labels != ("up", "down"):
         raise ValueError(
@@ -381,7 +445,7 @@ def _gamma_projected_spin_operator(
 
 
 def _gamma_project_payloads(
-    handoff: GammaRoutedBasisSpec,
+    handoff: GammaAutomaticBasisSpec,
     kpoints: Any,
 ) -> dict[str, bytes]:
     """Serialize the four canonical, mutually bound model-gauge projection files."""
@@ -482,22 +546,15 @@ def prepare_gamma_automatic_runtime(
         raise ValueError("automatic Gamma v1 requires symm.spin='all'")
     if not isinstance(symm, Mapping):
         raise ValueError("automatic Gamma v1 requires a symm mapping")
-    if "tolerance" not in symm:
-        raise ValueError("automatic Gamma v1 requires explicit symm.tolerance")
-    tolerance_raw = symm["tolerance"]
-    if isinstance(tolerance_raw, (bool, np.bool_)):
-        raise ValueError("automatic Gamma symm.tolerance must be finite and positive")
-    tolerance = float(tolerance_raw)
-    if not np.isfinite(tolerance) or tolerance <= 0.0:
-        raise ValueError("automatic Gamma symm.tolerance must be finite and positive")
-    selection_config = _load_strict_gamma_auto_config(
-        project_cfg.get("selection", {})
-    )
+    selection_config = _load_strict_gamma_auto_config(project_cfg)
 
     run_cfg = projection._load_projection_run_config(
         str(path), developer_outputs=False
     )
     run_cfg = replace(run_cfg, project_cfg=project_cfg)
+    tolerance = float(run_cfg.tolerance)
+    if not np.isfinite(tolerance) or tolerance <= 0.0:
+        raise ValueError("automatic Gamma symmetry tolerance must be finite and positive")
     if projection._valley_family(run_cfg.valley) != "Gamma":
         raise ValueError("automatic Gamma v1 requires symm.valley in the Gamma family")
     hamk_file = projection._resolve(
@@ -583,6 +640,18 @@ def prepare_gamma_automatic_runtime(
     source_hamiltonians = np.asarray(ctx.hamk3d, dtype=np.complex128)
     nk = int(source_hamiltonians.shape[0])
     k_indices = tuple(range(nk))
+    band_file = projection._resolve(
+        material.get("band_file"),
+        run_cfg.cfg_dir,
+    )
+    if band_file is None:
+        raise ValueError(
+            "automatic Gamma requires material.band_file for the external target spectrum"
+        )
+    external_target_band_spectra = _load_external_target_band_spectra(
+        band_file,
+        nk=nk,
+    )
     kpoints = sampled_kpoints
     if kpoints is None:
         kpoints = _load_project_source_kpoints(
@@ -692,6 +761,7 @@ def prepare_gamma_automatic_runtime(
         tapw_source_basis_hash=source_basis_hash,
         operations=tuple(operations),
         presentation=presentation,
+        external_target_band_spectra=external_target_band_spectra,
     )
     raw_output = project_cfg.get("out_dir")
     if raw_output in (None, ""):
@@ -723,6 +793,44 @@ def finalize_gamma_automatic_runtime(
         raise ValueError("automatic Gamma evaluation changed the prepared identity")
     payloads = _gamma_project_payloads(result.handoff, result.handoff.kpoints)
     _install_canonical_payloads(preparation.output_directory, payloads)
+    handoff = result.handoff
+    selected_metrics = next(
+        (
+            metric
+            for metric in result.candidates
+            if metric.candidate_id == result.handoff.candidate_id
+        ),
+        None,
+    )
+    pending_symmetry_payload = None
+    if (
+        selected_metrics is not None
+        and selected_metrics.symmetry_residual is None
+        and selected_metrics.symmetry_leakage is None
+    ):
+        resolved = ResolvedCandidateIdentity.create(
+            selection_mode="auto",
+            candidate_id=handoff.candidate_id,
+            candidate_dimension=handoff.model_dim,
+            projection_basis_kind=handoff.projection_basis_kind,
+            basis_handoff_hash=str(handoff.artifact_identity["basis_hash"]),
+            authoritative_heff_hash=str(handoff.artifact_identity["heff_hash"]),
+            heff_k_indices_hash=str(handoff.artifact_identity["k_indices_hash"]),
+        )
+        pending_symmetry_payload = {
+            "schema": "kp.gamma-post-selection-symmetry-pending.v2",
+            "status": "pending",
+            "candidate_id": handoff.candidate_id,
+            "candidate_dimension": handoff.model_dim,
+            "nlow_state_list": [list(handoff.anchor_spec.joint_band_indices)],
+            "mode": "gamma",
+            "spin": handoff.layout.spin_scope,
+            "ordered_q_hash": gamma_common_anchor_ordered_q_identity_hash(handoff),
+            "qset_hashes": list(handoff.layout.ordered_qset_hashes),
+            "selection_input_identity_hash": result.selection_input.selection_input_identity_hash,
+            "resolved_candidate_hash": resolved.resolved_candidate_hash,
+            "basis_handoff_hash": resolved.basis_handoff_hash,
+        }
     return resolve_case_selection(
         CaseSelectionInputs.auto(
             selection_input=result.selection_input,
@@ -730,6 +838,7 @@ def finalize_gamma_automatic_runtime(
             thresholds=preparation.selection_preparation.config.selection_thresholds,
             projection_handoff=result.handoff,
             payloads=payloads,
+            pending_symmetry_payload=pending_symmetry_payload,
         ),
         session=session,
     )

@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from kp.blocks import (
     GammaRoutingThresholds,
@@ -18,6 +19,7 @@ from kp.selection_artifact import (
     CertificationStatus,
     ResolvedCandidateIdentity,
     SelectionArtifactStore,
+    SelectionFailureCode,
     SelectionInputIdentity,
     gamma_routed_ordered_q_identity_hash,
 )
@@ -212,6 +214,195 @@ def test_auto_resolution_certifies_only_real_gamma_handoff(tmp_path: Path) -> No
     assert result.status is CertificationStatus.CERTIFIED
     assert result.identity is not None
     assert store.load_current(require_certified=True) == result.artifact
+
+
+def test_auto_resolution_carries_diagnostic_band_metric_policy(tmp_path: Path) -> None:
+    handoff = _gamma_handoff()
+    store = SelectionArtifactStore(tmp_path / "projection")
+    selection_input = _selection_input(handoff, mode="auto")
+    session = begin_case_selection(
+        store=store,
+        selection_input=selection_input,
+        transaction_id="auto-diagnostic-bands",
+    )
+    metrics = CandidateMetrics(
+        candidate_id=handoff.candidate_id,
+        dimension=handoff.model_dim,
+        band_rms_mev=14.5,
+        band_max_mev=42.0,
+        subspace_overlap=0.999,
+        symmetry_residual=1.0e-10,
+        symmetry_leakage=2.0e-10,
+    )
+
+    result = resolve_case_selection(
+        CaseSelectionInputs.auto(
+            selection_input=selection_input,
+            candidates=(metrics,),
+            thresholds=_thresholds(),
+            projection_handoff=handoff,
+            payloads={"basis.npz": b"diagnostic-band-policy"},
+            diagnostic_metric_names=("band_rms_mev", "band_max_mev"),
+        ),
+        session=session,
+    )
+
+    assert result.status is CertificationStatus.CERTIFIED
+    assert result.decision is not None
+    assert result.decision.diagnostic_metric_names == (
+        "band_rms_mev",
+        "band_max_mev",
+    )
+
+
+def test_generic_auto_records_pending_symmetry_with_an_inactive_sector(
+    tmp_path: Path,
+) -> None:
+    handoff = _gamma_handoff()
+    qset1_hash = _digest("qset-1")
+    qset2_hash = _digest("qset-2")
+    selection_input = SelectionInputIdentity.create(
+        selection_mode="auto",
+        frozen_target_window_hash=_digest("target"),
+        validation_k_indices_hash=_digest("validation-k"),
+        ordered_q_hash=hash_mapping(
+            {
+                "schema": "kp.cli-ordered-q.v1",
+                "qset1_hash": qset1_hash,
+                "qset2_hash": qset2_hash,
+            }
+        ),
+        source_hamiltonian_hash=_digest("source-h"),
+        action_package_hash=_digest("actions"),
+        row_layout_hash=_digest("layout"),
+        selection_policy_hash=_digest("policy"),
+    )
+    metrics = CandidateMetrics(
+        candidate_id="k-dim004",
+        dimension=4,
+        band_rms_mev=0.1,
+        band_max_mev=0.2,
+        subspace_overlap=0.9,
+        symmetry_residual=None,
+        symmetry_leakage=None,
+    )
+    resolved = ResolvedCandidateIdentity.create(
+        selection_mode="auto",
+        candidate_id="k-dim004",
+        candidate_dimension=4,
+        projection_basis_kind="explicit_legacy",
+        basis_handoff_hash=_digest("k-basis"),
+        authoritative_heff_hash=_digest("k-heff"),
+        heff_k_indices_hash=_digest("k-indices"),
+    )
+    store = SelectionArtifactStore(tmp_path / "projection")
+    session = begin_case_selection(
+        store=store,
+        selection_input=selection_input,
+        transaction_id="k-pending-symmetry",
+    )
+
+    pending_payload = {
+        "schema": "kp.non-gamma-post-selection-symmetry-pending.v2",
+        "status": "pending",
+        "candidate_id": "k-dim004",
+        "candidate_dimension": 4,
+        "nlow_state_list": [[], [4, 5]],
+        "mode": "k",
+        "spin": "all",
+        "qset1_hash": qset1_hash,
+        "qset2_hash": qset2_hash,
+        "selection_input_identity_hash": selection_input.selection_input_identity_hash,
+        "resolved_candidate_hash": resolved.resolved_candidate_hash,
+        "basis_handoff_hash": resolved.basis_handoff_hash,
+    }
+    pending_input_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-post-selection-symmetry-input.v2",
+            **{
+                key: value
+                for key, value in pending_payload.items()
+                if key not in {"schema", "status"}
+            },
+        }
+    )
+    pending_certificate_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-post-selection-symmetry-certificate.v2",
+            "status": "pending",
+            "input_identity_hash": pending_input_hash,
+        }
+    )
+    result = resolve_case_selection(
+        CaseSelectionInputs.generic_auto(
+            selection_input=selection_input,
+            candidates=(metrics,),
+            thresholds=SelectionThresholds(1.0, 1.0, 0.5, 0.01, 0.01),
+            resolved_candidate=resolved,
+            certificate_hash=pending_certificate_hash,
+            certificate_input_identity_hash=pending_input_hash,
+            pending_symmetry_payload=pending_payload,
+            payloads={"basis.npz": b"materialized-k-basis"},
+            allow_pending_symmetry=True,
+        ),
+        session=session,
+    )
+
+    assert result.status is CertificationStatus.PENDING_SYMMETRY
+    assert result.decision is not None
+    assert result.decision.selected.symmetry_residual is None
+    assert result.decision.selected.symmetry_leakage is None
+    assert store.load_current().certification_status is CertificationStatus.PENDING_SYMMETRY
+    with pytest.raises(ValueError, match="not certified: PENDING_SYMMETRY"):
+        store.load_current(require_certified=True)
+
+
+def test_generic_pending_symmetry_rejects_opaque_unbound_hashes(tmp_path: Path) -> None:
+    handoff = _gamma_handoff()
+    selection_input = _selection_input(handoff, mode="auto")
+    metrics = CandidateMetrics(
+        candidate_id="k-dim004",
+        dimension=4,
+        band_rms_mev=0.1,
+        band_max_mev=0.2,
+        subspace_overlap=0.9,
+        symmetry_residual=None,
+        symmetry_leakage=None,
+    )
+    resolved = ResolvedCandidateIdentity.create(
+        selection_mode="auto",
+        candidate_id="k-dim004",
+        candidate_dimension=4,
+        projection_basis_kind="explicit_legacy",
+        basis_handoff_hash=_digest("k-basis"),
+        authoritative_heff_hash=_digest("k-heff"),
+        heff_k_indices_hash=_digest("k-indices"),
+    )
+    store = SelectionArtifactStore(tmp_path / "projection")
+    session = begin_case_selection(
+        store=store,
+        selection_input=selection_input,
+        transaction_id="k-opaque-pending",
+    )
+
+    result = resolve_case_selection(
+        CaseSelectionInputs.generic_auto(
+            selection_input=selection_input,
+            candidates=(metrics,),
+            thresholds=SelectionThresholds(1.0, 1.0, 0.5, 0.01, 0.01),
+            resolved_candidate=resolved,
+            certificate_hash=_digest("opaque-certificate"),
+            certificate_input_identity_hash=_digest("opaque-input"),
+            pending_symmetry_payload=None,
+            payloads={"basis.npz": b"materialized-k-basis"},
+            allow_pending_symmetry=True,
+        ),
+        session=session,
+    )
+
+    assert result.status is CertificationStatus.FAILED
+    assert result.artifact is not None
+    assert result.artifact.status_reason is SelectionFailureCode.CANDIDATE_CERTIFICATE_FAILED
 
 
 def test_auto_failure_replaces_previous_certified_marker(tmp_path: Path) -> None:

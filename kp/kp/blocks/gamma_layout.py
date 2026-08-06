@@ -366,6 +366,17 @@ class GammaRowLayout:
                 CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
                 "ordered Q sets must be finite",
             )
+        if not np.allclose(
+            q_arrays[0],
+            q_arrays[1],
+            rtol=0.0,
+            atol=1.0e-12,
+        ):
+            raise GammaLayoutError(
+                CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+                "automatic Gamma common-anchor fibres require the two ordered Q "
+                "sets to match coordinate-by-coordinate",
+            )
         if len(num_orb_per_layer_list) != 2 or any(
             len(num_orb_per_layer_list[group]) != layers[group]
             for group in range(2)

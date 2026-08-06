@@ -191,6 +191,34 @@ def test_metadata_only_nonself_orbit_requires_raw_coefficient_certification() ->
         )
 
 
+def test_raw_adjoint_certification_sums_per_seed_bounds_within_each_orbit() -> None:
+    forward_key = _key(orbital_from=0, orbital_to=1)
+    provisional = canonicalize_joint_adjoint_seeds(
+        [
+            JointAdjointSeed("forward", forward_key),
+            JointAdjointSeed("backward", forward_key.adjoint()),
+        ]
+    )
+    forward = np.asarray([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128)
+    backward = np.asarray([[0.0, 0.0], [1.09, 0.0]], dtype=np.complex128)
+
+    certified = certify_joint_adjoint_coefficients(
+        provisional,
+        {
+            "forward": {(0, 0): forward},
+            "backward": {(0, 0): backward},
+        },
+        absolute_error_bounds_by_seed={
+            "forward": 0.0455,
+            "backward": 0.0455,
+        },
+        relative_tolerance=0.0,
+    )
+
+    assert certified.orbits[0].raw_adjoint_residual == pytest.approx(0.09)
+    assert certified.orbits[0].certification_bound == pytest.approx(0.091)
+
+
 def test_center_identity_requires_canonical_dimensionless_serialization() -> None:
     with pytest.raises(TypeError, match="CanonicalDimensionlessCenter"):
         JointAdjointSeedKey(

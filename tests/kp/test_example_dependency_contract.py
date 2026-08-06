@@ -19,8 +19,9 @@ README_PATHS = [
     README,
     EXAMPLES_ROOT / "mote2_3.89" / "README.md",
     EXAMPLES_ROOT / "mgi2_3.89" / "README.md",
-    EXAMPLES_ROOT / "tapw" / "mote2_9.43" / "README.md",
-    EXAMPLES_ROOT / "tapw" / "mgi2_9.43" / "README.md",
+    EXAMPLES_ROOT / "mote2_aab_5.09" / "README.md",
+    EXAMPLES_ROOT / "ptse2_7.34" / "README.md",
+    EXAMPLES_ROOT / "zrs2_3.15" / "README.md",
 ]
 
 PATH_FIELD_SUFFIXES = ("_file", "_dir", "_path", "_source", "source_config")
@@ -107,7 +108,7 @@ def _active_kp_configs() -> list[Path]:
     tracked = _git_tracked_files()
     return sorted(
         path
-        for path in EXAMPLES_ROOT.glob("*_3.89/kp/configs/**/*.yaml")
+        for path in EXAMPLES_ROOT.glob("**/kp/configs/**/*.yaml")
         if path.relative_to(REPO_ROOT).as_posix() in tracked
     )
 
@@ -216,6 +217,130 @@ def _git_tracked_files(root: Path = REPO_ROOT) -> set[str]:
     except (FileNotFoundError, subprocess.CalledProcessError):
         return _source_archive_files(root)
     return {path for path in result.stdout.splitlines() if (root / path).exists()}
+
+
+def test_release_material_config_inventory_is_exact() -> None:
+    tracked = _git_tracked_files()
+    kp_configs = {
+        path
+        for path in tracked
+        if path.startswith("examples/") and "/kp/configs/" in path and path.endswith(".yaml")
+    }
+    tapw_configs = {
+        path
+        for path in tracked
+        if path.startswith("examples/") and "/tapw/configs/" in path and path.endswith(".yaml")
+    }
+
+    assert kp_configs == {
+        "examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml",
+        "examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml",
+        "examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml",
+        "examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml",
+        "examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml",
+        "examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml",
+        "examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml",
+        "examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml",
+        "examples/ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml",
+        "examples/zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml",
+    }
+    assert tapw_configs == {
+        "examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml",
+        "examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml",
+        "examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml",
+        "examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml",
+        "examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_K1_spinful_q04.yaml",
+        "examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml",
+        "examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml",
+    }
+
+
+def _commented_nlow_state_list(config: Path) -> list[list[int]]:
+    lines = config.read_text(encoding="utf-8").splitlines()
+    for start, line in enumerate(lines):
+        if line.strip() != "# nlow_state_list:":
+            continue
+        yaml_lines = ["nlow_state_list:"]
+        for item in lines[start + 1 :]:
+            stripped = item.strip()
+            if not stripped.startswith("#"):
+                break
+            payload = stripped.removeprefix("#").strip()
+            if not payload.startswith("-"):
+                break
+            yaml_lines.append(f"  {payload}")
+        return yaml.safe_load("\n".join(yaml_lines))["nlow_state_list"]
+    raise AssertionError(f"missing commented nlow_state_list in {config}")
+
+
+def test_release_kp_configs_use_auto_projection_and_auto_harmonics_contract() -> None:
+    expected_nlow = {
+        "mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml": [[44, 45], [44, 45]],
+        "mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml": [[22], [22]],
+        "mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml": [[40, 41], [42, 43]],
+        "mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml": [[22, 23], [22, 23]],
+        "mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml": [[11], [11]],
+        "mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml": [[], [136, 137], [134, 135]],
+        "mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml": [[22], [22], []],
+        "mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml": [[], [], [22]],
+        "ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml": [[54], [55]],
+        "zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml": [[40, 41, 42, 43], [44, 45, 46, 47]],
+    }
+
+    for relative, audited_nlow in expected_nlow.items():
+        config = EXAMPLES_ROOT / relative
+        raw = yaml.safe_load(config.read_text(encoding="utf-8"))
+        project = raw["project"]
+        selection = project.get("selection")
+        selection_mode = selection.get("mode") if isinstance(selection, dict) else selection
+        assert selection_mode == "auto", relative
+        assert "nlow_state_list" not in project, relative
+        assert _commented_nlow_state_list(config) == audited_nlow, relative
+
+        model = raw["model"]
+        assert "harmonics" not in model, relative
+        assert set(model["max_order"]) == {"kinetic", "intralayer", "interlayer"}, relative
+        expected_method = "nonlinear" if relative.startswith("ptse2_7.34/") else "linear"
+        assert model["fit"]["method"] == expected_method, relative
+
+    aab_gamma = yaml.safe_load(
+        (EXAMPLES_ROOT / "mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert aab_gamma["model"]["max_order"] == {
+        "kinetic": 8,
+        "intralayer": 6,
+        "interlayer": 8,
+    }
+
+
+def test_release_kp_configs_use_inline_yaml_kpath_contract() -> None:
+    expected_kpath = {
+        "labels": ["G", "M", "K", "G"],
+        "points_per_segment": 20,
+        "coordinates": {
+            "G": [0.0, 0.0],
+            "M": [0.5, 0.0],
+            "K": [0.3333333333, 0.3333333333],
+        },
+    }
+
+    for config in _active_kp_configs():
+        relative = config.relative_to(EXAMPLES_ROOT).as_posix()
+        raw = yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert "bands" not in raw["model"], relative
+        bands = raw["bands"]
+        assert bands["kpath"] == expected_kpath, relative
+        assert "file" not in bands["kpath"], relative
+
+    m_spinless = yaml.safe_load(
+        (
+            EXAMPLES_ROOT
+            / "mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml"
+        ).read_text(encoding="utf-8")
+    )
+    assert m_spinless["bands"]["plot"]["ylim"] == [-0.01, 0.16]
 
 
 def test_git_tracked_files_falls_back_to_source_archive_without_git(tmp_path: Path) -> None:

@@ -31,6 +31,7 @@ _PAYLOAD_MANIFEST_SCHEMA_VERSION = "kp.selection-payload-manifest.v1"
 
 class CertificationStatus(str, Enum):
     PENDING = "PENDING"
+    PENDING_SYMMETRY = "PENDING_SYMMETRY"
     CERTIFIED = "CERTIFIED"
     FAILED = "FAILED"
     UNVERIFIED_OVERRIDE = "UNVERIFIED_OVERRIDE"
@@ -187,18 +188,29 @@ def _normalized_metrics(metrics: CandidateMetrics) -> CandidateMetrics:
         "symmetry_leakage",
     )
     raw_values = tuple(getattr(metrics, name) for name in names)
+    if (raw_values[3] is None) != (raw_values[4] is None):
+        raise ValueError("candidate symmetry metrics must both be measured or pending")
     if any(
         not isinstance(value, Real) or isinstance(value, (bool, np.bool_))
-        for value in raw_values
+        for value in raw_values[:3]
+    ) or any(
+        value is not None
+        and (not isinstance(value, Real) or isinstance(value, (bool, np.bool_)))
+        for value in raw_values[3:]
     ):
-        raise ValueError("candidate metrics must be real scalars")
+        raise ValueError("candidate metrics must be real scalars or pending symmetry")
     try:
-        values = tuple(float(value) for value in raw_values)
+        values = tuple(
+            None if value is None else float(value) for value in raw_values
+        )
     except (OverflowError, TypeError, ValueError) as exc:
         raise ValueError("candidate metrics must be representable as finite floats") from exc
-    if any(not math.isfinite(value) for value in values):
+    if any(value is not None and not math.isfinite(value) for value in values):
         raise ValueError("candidate metrics must be finite")
-    if any(values[index] < 0.0 for index in (0, 1, 3, 4)):
+    if any(
+        values[index] is not None and values[index] < 0.0
+        for index in (0, 1, 3, 4)
+    ):
         raise ValueError("candidate errors and symmetry residuals must be non-negative")
     if not 0.0 <= values[2] <= 1.0:
         raise ValueError("candidate subspace_overlap must lie in [0, 1]")
@@ -878,6 +890,29 @@ def gamma_routed_ordered_q_identity_hash(handoff: Any) -> str:
     )
 
 
+def _require_gamma_common_anchor_handoff(handoff: Any) -> Any:
+    from .projection_handoff import GammaCommonAnchorBasisSpec
+
+    if not isinstance(handoff, GammaCommonAnchorBasisSpec):
+        raise SelectionBindingError(
+            "certified common-anchor selection requires a "
+            "GammaCommonAnchorBasisSpec handoff"
+        )
+    return handoff
+
+
+def gamma_common_anchor_ordered_q_identity_hash(handoff: Any) -> str:
+    """Hash the canonical ordered Q sets owned by a common-anchor handoff."""
+
+    common = _require_gamma_common_anchor_handoff(handoff)
+    return hash_mapping(
+        {
+            "schema": "kp.gamma-common-anchor-ordered-q-identity.v1",
+            "ordered_q_hashes": list(common.layout.ordered_qset_hashes),
+        }
+    )
+
+
 def _verified_gamma_candidate_envelope(handoff: Any) -> Mapping[str, Any]:
     from .symmetry.candidate_certificate import (
         CandidateSymmetryStatus,
@@ -951,13 +986,91 @@ def _verify_gamma_selection_input(
         )
 
 
+def _build_certified_gamma_common_anchor_selection_identity(
+    *,
+    selection_input: SelectionInputIdentity,
+    handoff: Any,
+    metrics: CandidateMetrics,
+) -> SelectionIdentity:
+    common = _require_gamma_common_anchor_handoff(handoff)
+    if not isinstance(selection_input, SelectionInputIdentity):
+        raise SelectionBindingError(
+            "certified common-anchor selection requires a SelectionInputIdentity"
+        )
+    expected_input = {
+        "selection_mode": "auto",
+        "ordered_q_hash": gamma_common_anchor_ordered_q_identity_hash(common),
+        "source_hamiltonian_hash": common.source_hamiltonian_hash,
+        "action_package_hash": common.action_package_hash,
+        "row_layout_hash": common.layout.layout_hash,
+    }
+    mismatched = tuple(
+        field
+        for field, value in expected_input.items()
+        if getattr(selection_input, field) != value
+    )
+    if mismatched:
+        raise SelectionBindingError(
+            "selection input does not match common-anchor Gamma handoff fields: "
+            + ", ".join(mismatched)
+        )
+    try:
+        normalized_metrics = _normalized_metrics(metrics)
+    except (TypeError, ValueError) as exc:
+        raise SelectionBindingError("selection metrics are invalid") from exc
+    if (
+        normalized_metrics.candidate_id != common.candidate_id
+        or normalized_metrics.dimension != common.model_dim
+    ):
+        raise SelectionBindingError(
+            "selection metrics do not match the common-anchor Gamma candidate"
+        )
+
+    resolved = ResolvedCandidateIdentity.create(
+        selection_mode="auto",
+        candidate_id=common.candidate_id,
+        candidate_dimension=common.model_dim,
+        projection_basis_kind=common.projection_basis_kind,
+        basis_handoff_hash=str(common.artifact_identity["basis_hash"]),
+        authoritative_heff_hash=str(common.artifact_identity["heff_hash"]),
+        heff_k_indices_hash=str(common.artifact_identity["k_indices_hash"]),
+    )
+    metric_evidence = SelectionMetricEvidence.create(
+        candidate_id=normalized_metrics.candidate_id,
+        frozen_target_window_hash=selection_input.frozen_target_window_hash,
+        validation_k_indices_hash=selection_input.validation_k_indices_hash,
+        basis_handoff_hash=resolved.basis_handoff_hash,
+        metrics=normalized_metrics,
+    )
+    evidence = CertificationEvidence.create(
+        metric_evidence=metric_evidence,
+        symmetry_certificate_hash=common.candidate_certificate_hash,
+        symmetry_input_identity_hash=common.candidate_input_identity_hash,
+    )
+    return SelectionIdentity.create(
+        selection_input=selection_input,
+        selection_policy_hash=selection_input.selection_policy_hash,
+        resolved_candidate=resolved,
+        certification_evidence=evidence,
+    )
+
+
 def build_certified_gamma_selection_identity(
     *,
     selection_input: SelectionInputIdentity,
     handoff: Any,
     metrics: CandidateMetrics,
 ) -> SelectionIdentity:
-    """Build certification evidence only from a validated routed handoff."""
+    """Build certification evidence from either supported Gamma handoff."""
+
+    from .projection_handoff import GammaCommonAnchorBasisSpec
+
+    if isinstance(handoff, GammaCommonAnchorBasisSpec):
+        return _build_certified_gamma_common_anchor_selection_identity(
+            selection_input=selection_input,
+            handoff=handoff,
+            metrics=metrics,
+        )
 
     routed = _require_gamma_routed_handoff(handoff)
     _verify_gamma_selection_input(selection_input, routed)
@@ -997,6 +1110,228 @@ def build_certified_gamma_selection_identity(
     )
 
 
+def build_certified_generic_selection_identity(
+    *,
+    selection_input: SelectionInputIdentity,
+    resolved_candidate: ResolvedCandidateIdentity,
+    metrics: CandidateMetrics,
+    certificate_hash: str,
+    certificate_input_identity_hash: str,
+) -> SelectionIdentity:
+    """Bind a non-Gamma automatic choice to its materialized project basis."""
+
+    if not isinstance(selection_input, SelectionInputIdentity):
+        raise SelectionBindingError(
+            "generic automatic selection requires a SelectionInputIdentity"
+        )
+    if selection_input.selection_mode != "auto":
+        raise SelectionBindingError(
+            "generic automatic selection requires auto input identity"
+        )
+    if not isinstance(resolved_candidate, ResolvedCandidateIdentity):
+        raise SelectionBindingError(
+            "generic automatic selection requires a resolved project candidate"
+        )
+    if resolved_candidate.selection_mode != "auto":
+        raise SelectionBindingError(
+            "generic automatic resolved candidate must retain auto mode"
+        )
+    input_hash = _require_hash(
+        certificate_input_identity_hash,
+        "certificate_input_identity_hash",
+    )
+    try:
+        normalized_metrics = _normalized_metrics(metrics)
+    except (TypeError, ValueError) as exc:
+        raise SelectionBindingError("selection metrics are invalid") from exc
+    if (
+        normalized_metrics.symmetry_residual is None
+        or normalized_metrics.symmetry_leakage is None
+    ):
+        raise SelectionBindingError(
+            "certified generic selection requires measured symmetry metrics"
+        )
+    if (
+        normalized_metrics.candidate_id != resolved_candidate.candidate_id
+        or normalized_metrics.dimension != resolved_candidate.candidate_dimension
+    ):
+        raise SelectionBindingError(
+            "selection metrics do not match the materialized generic candidate"
+        )
+    metric_evidence = SelectionMetricEvidence.create(
+        candidate_id=normalized_metrics.candidate_id,
+        frozen_target_window_hash=selection_input.frozen_target_window_hash,
+        validation_k_indices_hash=selection_input.validation_k_indices_hash,
+        basis_handoff_hash=resolved_candidate.basis_handoff_hash,
+        metrics=normalized_metrics,
+    )
+    evidence = CertificationEvidence.create(
+        metric_evidence=metric_evidence,
+        symmetry_certificate_hash=_require_hash(
+            certificate_hash,
+            "certificate_hash",
+        ),
+        symmetry_input_identity_hash=input_hash,
+    )
+    return SelectionIdentity.create(
+        selection_input=selection_input,
+        selection_policy_hash=selection_input.selection_policy_hash,
+        resolved_candidate=resolved_candidate,
+        certification_evidence=evidence,
+    )
+
+
+def validate_pending_generic_symmetry_payload(
+    *,
+    payload: Mapping[str, Any],
+    selection_input: SelectionInputIdentity,
+    resolved_candidate: ResolvedCandidateIdentity,
+    metrics: CandidateMetrics,
+    certificate_hash: str,
+    certificate_input_identity_hash: str,
+) -> dict[str, Any]:
+    """Validate and canonicalize a recomputable, basis-bound K/M pending record."""
+
+    fields = (
+        "schema",
+        "status",
+        "candidate_id",
+        "candidate_dimension",
+        "nlow_state_list",
+        "mode",
+        "spin",
+        "qset1_hash",
+        "qset2_hash",
+        "selection_input_identity_hash",
+        "resolved_candidate_hash",
+        "basis_handoff_hash",
+    )
+    _require_exact_keys(payload, fields, "pending symmetry evidence")
+    if payload["schema"] != "kp.non-gamma-post-selection-symmetry-pending.v2":
+        raise SelectionBindingError("unsupported pending symmetry evidence schema")
+    if payload["status"] != "pending":
+        raise SelectionBindingError("pending symmetry evidence status must be pending")
+    normalized_metrics = _normalized_metrics(metrics)
+    if (
+        normalized_metrics.symmetry_residual is not None
+        or normalized_metrics.symmetry_leakage is not None
+    ):
+        raise SelectionBindingError("pending symmetry evidence requires pending metrics")
+    candidate_id = _require_nonempty_string(payload["candidate_id"], "candidate_id")
+    dimension = _require_positive_integer(payload["candidate_dimension"], "candidate_dimension")
+    if (
+        candidate_id != normalized_metrics.candidate_id
+        or candidate_id != resolved_candidate.candidate_id
+        or dimension != normalized_metrics.dimension
+        or dimension != resolved_candidate.candidate_dimension
+    ):
+        raise SelectionBindingError("pending symmetry candidate identity mismatch")
+    rows = payload["nlow_state_list"]
+    if not isinstance(rows, (list, tuple)) or not rows:
+        raise SelectionBindingError("pending symmetry nlow_state_list must be nonempty")
+    nlow: list[list[int]] = []
+    for row in rows:
+        if not isinstance(row, (list, tuple)):
+            raise SelectionBindingError("pending symmetry band rows must be lists")
+        if any(not isinstance(value, Integral) or isinstance(value, bool) for value in row):
+            raise SelectionBindingError("pending symmetry band indices must be integers")
+        nlow.append([int(value) for value in row])
+    if not any(nlow):
+        raise SelectionBindingError(
+            "pending symmetry requires at least one active band row"
+        )
+    canonical = {
+        "schema": payload["schema"],
+        "status": "pending",
+        "candidate_id": candidate_id,
+        "candidate_dimension": dimension,
+        "nlow_state_list": nlow,
+        "mode": _require_nonempty_string(payload["mode"], "mode").lower(),
+        "spin": _require_nonempty_string(payload["spin"], "spin").lower(),
+        "qset1_hash": _require_hash(payload["qset1_hash"], "qset1_hash"),
+        "qset2_hash": _require_hash(payload["qset2_hash"], "qset2_hash"),
+        "selection_input_identity_hash": _require_hash(
+            payload["selection_input_identity_hash"], "selection_input_identity_hash"
+        ),
+        "resolved_candidate_hash": _require_hash(
+            payload["resolved_candidate_hash"], "resolved_candidate_hash"
+        ),
+        "basis_handoff_hash": _require_hash(
+            payload["basis_handoff_hash"], "basis_handoff_hash"
+        ),
+    }
+    expected_ordered_q = hash_mapping(
+        {
+            "schema": "kp.cli-ordered-q.v1",
+            "qset1_hash": canonical["qset1_hash"],
+            "qset2_hash": canonical["qset2_hash"],
+        }
+    )
+    if expected_ordered_q != selection_input.ordered_q_hash:
+        raise SelectionBindingError("pending symmetry Q identity mismatch")
+    if canonical["selection_input_identity_hash"] != selection_input.selection_input_identity_hash:
+        raise SelectionBindingError("pending symmetry selection input mismatch")
+    if canonical["resolved_candidate_hash"] != resolved_candidate.resolved_candidate_hash:
+        raise SelectionBindingError("pending symmetry resolved candidate mismatch")
+    if canonical["basis_handoff_hash"] != resolved_candidate.basis_handoff_hash:
+        raise SelectionBindingError("pending symmetry basis handoff mismatch")
+    input_payload = {
+        "schema": "kp.non-gamma-post-selection-symmetry-input.v2",
+        **{key: value for key, value in canonical.items() if key not in {"schema", "status"}},
+    }
+    expected_input_hash = hash_mapping(input_payload)
+    expected_certificate_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-post-selection-symmetry-certificate.v2",
+            "status": "pending",
+            "input_identity_hash": expected_input_hash,
+        }
+    )
+    if _require_hash(certificate_input_identity_hash, "certificate_input_identity_hash") != expected_input_hash:
+        raise SelectionBindingError("pending symmetry input hash is not recomputable")
+    if _require_hash(certificate_hash, "certificate_hash") != expected_certificate_hash:
+        raise SelectionBindingError("pending symmetry certificate hash is not recomputable")
+    return canonical
+
+
+def validate_pending_gamma_symmetry_payload(
+    *,
+    payload: Mapping[str, Any],
+    selection_input: SelectionInputIdentity,
+    identity: SelectionIdentity,
+    handoff: Any,
+) -> dict[str, Any]:
+    """Validate a persisted Gamma common-anchor pending-symmetry identity."""
+
+    common = _require_gamma_common_anchor_handoff(handoff)
+    fields = (
+        "schema", "status", "candidate_id", "candidate_dimension",
+        "nlow_state_list", "mode", "spin", "ordered_q_hash",
+        "qset_hashes", "selection_input_identity_hash",
+        "resolved_candidate_hash", "basis_handoff_hash",
+    )
+    _require_exact_keys(payload, fields, "Gamma pending symmetry evidence")
+    if payload["schema"] != "kp.gamma-post-selection-symmetry-pending.v2" or payload["status"] != "pending":
+        raise SelectionBindingError("invalid Gamma pending symmetry evidence tag")
+    resolved = identity.resolved_candidate
+    expected = {
+        "candidate_id": common.candidate_id,
+        "candidate_dimension": common.model_dim,
+        "nlow_state_list": [list(common.anchor_spec.joint_band_indices)],
+        "mode": "gamma",
+        "spin": common.layout.spin_scope,
+        "ordered_q_hash": gamma_common_anchor_ordered_q_identity_hash(common),
+        "qset_hashes": list(common.layout.ordered_qset_hashes),
+        "selection_input_identity_hash": selection_input.selection_input_identity_hash,
+        "resolved_candidate_hash": resolved.resolved_candidate_hash,
+        "basis_handoff_hash": resolved.basis_handoff_hash,
+    }
+    canonical = {"schema": payload["schema"], "status": "pending", **expected}
+    if dict(payload) != canonical:
+        raise SelectionBindingError("Gamma pending symmetry identity is not handoff-bound")
+    return canonical
+
+
 def verify_certified_gamma_selection_identity(
     identity: SelectionIdentity,
     handoff: Any,
@@ -1033,6 +1368,55 @@ def verify_certified_gamma_selection_artifact(
     ):
         raise SelectionBindingError("selection artifact is not CERTIFIED")
     verify_certified_gamma_selection_identity(artifact.identity, handoff)
+    return artifact
+
+
+def verify_certified_generic_selection_artifact(
+    artifact: "SelectionArtifact",
+    *,
+    artifact_identity: Mapping[str, Any],
+    candidate_dimension: int,
+) -> "SelectionArtifact":
+    """Verify a certified automatic K/M choice against current project files."""
+
+    if (
+        not isinstance(artifact, SelectionArtifact)
+        or artifact.certification_status is not CertificationStatus.CERTIFIED
+        or artifact.identity is None
+    ):
+        raise SelectionBindingError("generic selection artifact is not CERTIFIED")
+    if not isinstance(artifact_identity, Mapping):
+        raise SelectionBindingError("generic project artifact identity is invalid")
+    resolved = artifact.identity.resolved_candidate
+    expected = {
+        "candidate_dimension": _require_positive_integer(
+            candidate_dimension,
+            "candidate_dimension",
+        ),
+        "projection_basis_kind": "explicit_legacy",
+        "basis_handoff_hash": _require_hash(
+            artifact_identity.get("basis_hash"),
+            "basis_hash",
+        ),
+        "authoritative_heff_hash": _require_hash(
+            artifact_identity.get("heff_hash"),
+            "heff_hash",
+        ),
+        "heff_k_indices_hash": _require_hash(
+            artifact_identity.get("k_indices_hash"),
+            "k_indices_hash",
+        ),
+    }
+    mismatched = tuple(
+        field for field, value in expected.items() if getattr(resolved, field) != value
+    )
+    if resolved.selection_mode != "auto":
+        mismatched = ("selection_mode", *mismatched)
+    if mismatched:
+        raise SelectionBindingError(
+            "generic selection does not match the current project basis: "
+            + ", ".join(mismatched)
+        )
     return artifact
 
 
@@ -1120,6 +1504,19 @@ class SelectionArtifact:
             ) or self.failure_codes:
                 raise ValueError("PENDING selection artifact cannot contain final identity or evidence")
             return
+        if status is CertificationStatus.PENDING_SYMMETRY:
+            if self.payload_manifest_hash is None or self.identity is None or self.metrics is None:
+                raise ValueError("PENDING_SYMMETRY requires materialized identity, metrics, and payloads")
+            if self.identity.resolved_candidate.selection_mode != "auto":
+                raise ValueError("PENDING_SYMMETRY requires automatic selection mode")
+            evidence = self.identity.certification_evidence
+            if evidence is None or evidence.metric_evidence.metrics != self.metrics:
+                raise ValueError("PENDING_SYMMETRY requires identity-bound metric evidence")
+            if self.metrics.symmetry_residual is not None or self.metrics.symmetry_leakage is not None:
+                raise ValueError("PENDING_SYMMETRY cannot contain measured symmetry metrics")
+            if self.status_reason is not None or self.failure_codes or self.diagnostic is not None:
+                raise ValueError("PENDING_SYMMETRY cannot contain failure state")
+            return
         if status is CertificationStatus.FAILED:
             if self.payload_manifest_hash is not None:
                 raise ValueError("FAILED selection artifact cannot bind certified payloads")
@@ -1160,6 +1557,11 @@ class SelectionArtifact:
         evidence_metrics = self.identity.certification_evidence.metric_evidence.metrics
         if self.metrics is None or self.metrics != evidence_metrics:
             raise ValueError("top-level metrics must have certification evidence as single source of truth")
+        if (
+            evidence_metrics.symmetry_residual is None
+            or evidence_metrics.symmetry_leakage is None
+        ):
+            raise ValueError("CERTIFIED selection artifact requires measured symmetry metrics")
         if self.status_reason is not None or self.failure_codes:
             raise ValueError("CERTIFIED selection artifact cannot contain failure codes")
         if self.diagnostic is not None:
@@ -1223,15 +1625,18 @@ class SelectionArtifact:
             raise TypeError("identity must be SelectionIdentity")
         if identity.certification_evidence is None:
             raise ValueError("CERTIFIED selection artifact requires certification evidence")
-        from .projection_handoff import GAMMA_ROUTED_BASIS_KIND
+        from .projection_handoff import (
+            GAMMA_COMMON_ANCHOR_BASIS_KIND,
+            GAMMA_ROUTED_BASIS_KIND,
+        )
 
         if (
             identity.resolved_candidate.projection_basis_kind
-            == GAMMA_ROUTED_BASIS_KIND
+            in {GAMMA_COMMON_ANCHOR_BASIS_KIND, GAMMA_ROUTED_BASIS_KIND}
         ):
             if projection_handoff is None:
                 raise SelectionBindingError(
-                    "CERTIFIED routed Gamma selection requires its projection handoff"
+                    "CERTIFIED Gamma selection requires its projection handoff"
                 )
             verify_certified_gamma_selection_identity(identity, projection_handoff)
         return cls._create(
@@ -1244,6 +1649,29 @@ class SelectionArtifact:
             identity=identity,
             metrics=identity.certification_evidence.metric_evidence.metrics,
             certification_status=CertificationStatus.CERTIFIED,
+            status_reason=None,
+            failure_codes=(),
+            diagnostic=None,
+        )
+
+    @classmethod
+    def pending_symmetry(
+        cls,
+        *,
+        transaction_id: str,
+        identity: SelectionIdentity,
+        payload_manifest_hash: str,
+    ) -> "SelectionArtifact":
+        if not isinstance(identity, SelectionIdentity) or identity.certification_evidence is None:
+            raise TypeError("PENDING_SYMMETRY requires an evidence-bound identity")
+        return cls._create(
+            schema_version=SELECTION_ARTIFACT_SCHEMA_VERSION,
+            transaction_id=transaction_id,
+            selection_input_identity_hash=identity.selection_input_identity_hash,
+            payload_manifest_hash=_require_hash(payload_manifest_hash, "payload_manifest_hash"),
+            identity=identity,
+            metrics=identity.certification_evidence.metric_evidence.metrics,
+            certification_status=CertificationStatus.PENDING_SYMMETRY,
             status_reason=None,
             failure_codes=(),
             diagnostic=None,
@@ -1534,7 +1962,8 @@ class SelectionArtifactStore:
             artifact = self.load_current(require_certified=require_certified)
             manifest_hash, payloads = self._load_generation(artifact.transaction_id)
             if (
-                artifact.certification_status is CertificationStatus.CERTIFIED
+                artifact.certification_status
+                in {CertificationStatus.CERTIFIED, CertificationStatus.PENDING_SYMMETRY}
                 and artifact.payload_manifest_hash != manifest_hash
             ):
                 raise ValueError(
@@ -1543,6 +1972,48 @@ class SelectionArtifactStore:
             if self.load_current(require_certified=require_certified) != artifact:
                 raise ValueError("current selection marker changed during payload snapshot")
             return payloads
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+            lock_handle.close()
+
+    def promote_pending_symmetry(self, certified: SelectionArtifact) -> None:
+        """Atomically promote one immutable payload generation after kp symm."""
+
+        if not isinstance(certified, SelectionArtifact):
+            raise TypeError("certified must be a SelectionArtifact")
+        if certified.certification_status is not CertificationStatus.CERTIFIED:
+            raise ValueError("pending symmetry promotion requires CERTIFIED output")
+        lock_handle = self.lock_path.open("a+b")
+        try:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+            current = self.load_current()
+            if current.certification_status is not CertificationStatus.PENDING_SYMMETRY:
+                raise SelectionTransactionError(
+                    SelectionFailureCode.TRANSACTION_SUPERSEDED,
+                    "current selection is not PENDING_SYMMETRY",
+                )
+            if (
+                certified.transaction_id != current.transaction_id
+                or certified.selection_input_identity_hash
+                != current.selection_input_identity_hash
+                or certified.payload_manifest_hash != current.payload_manifest_hash
+            ):
+                raise SelectionTransactionError(
+                    SelectionFailureCode.IDENTITY_MISMATCH,
+                    "certified symmetry promotion changed transaction identity",
+                )
+            manifest_hash, _ = self._load_generation(current.transaction_id)
+            if manifest_hash != current.payload_manifest_hash:
+                raise SelectionTransactionError(
+                    SelectionFailureCode.PERSISTENCE_FAILURE,
+                    "pending symmetry payload generation changed before promotion",
+                )
+            self._atomic_write_artifact(certified)
+            if self.load_current(require_certified=True) != certified:
+                raise SelectionTransactionError(
+                    SelectionFailureCode.PERSISTENCE_FAILURE,
+                    "certified symmetry promotion failed strict reload",
+                )
         finally:
             fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
             lock_handle.close()
@@ -1778,7 +2249,11 @@ class SelectionArtifactTransaction:
                 "final selection transaction ID does not match PENDING",
             )
         allowed = (
-            {CertificationStatus.CERTIFIED, CertificationStatus.FAILED}
+            {
+                CertificationStatus.CERTIFIED,
+                CertificationStatus.PENDING_SYMMETRY,
+                CertificationStatus.FAILED,
+            }
             if self._selection_mode == "auto"
             else {CertificationStatus.UNVERIFIED_OVERRIDE}
         )
@@ -1795,7 +2270,10 @@ class SelectionArtifactTransaction:
                 SelectionFailureCode.IDENTITY_MISMATCH,
                 "final selection input identity does not match PENDING",
             )
-        if artifact.certification_status is CertificationStatus.CERTIFIED and (
+        if artifact.certification_status in {
+            CertificationStatus.CERTIFIED,
+            CertificationStatus.PENDING_SYMMETRY,
+        } and (
             self._payload_manifest_hash is None or self._payload_count == 0
         ):
             raise SelectionTransactionError(
@@ -1825,7 +2303,8 @@ class SelectionArtifactTransaction:
                 "selection payload manifest changed before publication",
             )
         if (
-            artifact.certification_status is CertificationStatus.CERTIFIED
+            artifact.certification_status
+            in {CertificationStatus.CERTIFIED, CertificationStatus.PENDING_SYMMETRY}
             and artifact.payload_manifest_hash != manifest_hash
         ):
             raise SelectionTransactionError(
@@ -1873,11 +2352,14 @@ __all__ = [
     "SelectionTransactionError",
     "build_selection_input_identity_hash",
     "build_selection_policy_hash",
+    "build_certified_generic_selection_identity",
     "build_certified_gamma_selection_identity",
+    "gamma_common_anchor_ordered_q_identity_hash",
     "gamma_routed_ordered_q_identity_hash",
     "hash_frozen_target_window",
     "hash_validation_k_indices",
     "load_selection_artifact",
+    "verify_certified_generic_selection_artifact",
     "verify_certified_gamma_selection_artifact",
     "verify_certified_gamma_selection_identity",
 ]

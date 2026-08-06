@@ -316,6 +316,96 @@ def test_smallest_candidate_passing_every_threshold_is_selected() -> None:
     assert decision.violations == ()
 
 
+def test_diagnostic_band_metrics_do_not_reject_or_hide_evidence() -> None:
+    selection = _selection_module()
+    partial_sector = _candidate(
+        selection,
+        "partial-sector",
+        2,
+        band_rms_mev=14.5,
+        band_max_mev=42.0,
+    )
+
+    decision = selection.select_projection_candidate(
+        [partial_sector],
+        _thresholds(selection),
+        diagnostic_metric_names=("band_rms_mev", "band_max_mev"),
+    )
+    report = selection.build_selection_report(
+        reference=selection.ReferencePoint(0, (0.0, 0.0), (0,), ((0.0, 0.0),)),
+        closure=selection.SymmetryClosure(states=(), additions=()),
+        decision=decision,
+        compositions=(),
+        candidates=[partial_sector],
+        thresholds=_thresholds(selection),
+    )
+
+    assert decision.selected.candidate_id == "partial-sector"
+    assert decision.selected.band_rms_mev == pytest.approx(14.5)
+    assert decision.selected.band_max_mev == pytest.approx(42.0)
+    assert decision.diagnostic_metric_names == (
+        "band_rms_mev",
+        "band_max_mev",
+    )
+    assert report["diagnostic_metric_names"] == [
+        "band_rms_mev",
+        "band_max_mev",
+    ]
+
+
+@pytest.mark.parametrize(
+    "diagnostic_metric_names",
+    (
+        ("subspace_overlap",),
+        ("symmetry_residual",),
+        ("band_rms_mev", "band_rms_mev"),
+        "band_rms_mev",
+    ),
+)
+def test_only_unique_band_errors_can_be_diagnostic(
+    diagnostic_metric_names: object,
+) -> None:
+    selection = _selection_module()
+
+    with pytest.raises(ValueError, match="diagnostic"):
+        selection.select_projection_candidate(
+            [_candidate(selection, "candidate", 2)],
+            _thresholds(selection),
+            diagnostic_metric_names=diagnostic_metric_names,
+        )
+
+
+@pytest.mark.parametrize(
+    ("symmetry_residual", "symmetry_leakage"),
+    ((None, 1.0e-7), (1.0e-8, None)),
+)
+def test_pending_symmetry_requires_both_metrics_to_be_none(
+    symmetry_residual: float | None,
+    symmetry_leakage: float | None,
+) -> None:
+    selection = _selection_module()
+    candidate = _candidate(
+        selection,
+        "mixed-pending-symmetry",
+        4,
+        symmetry_residual=symmetry_residual,
+        symmetry_leakage=symmetry_leakage,
+    )
+
+    with pytest.raises(selection.CandidateSelectionError) as exc_info:
+        selection.select_projection_candidate(
+            [candidate],
+            _thresholds(selection),
+            allow_pending_symmetry=True,
+        )
+
+    assert (
+        exc_info.value.failure_code
+        is selection.CandidateSelectionFailureCode.STRUCTURAL_REJECTION
+    )
+    assert exc_info.value.candidate_ids == ("mixed-pending-symmetry",)
+
+
 def test_same_dimension_uses_band_error_overlap_and_symmetry_tie_breaks() -> None:
     selection = _selection_module()
     candidates = [

@@ -34,6 +34,23 @@ from .selection_orchestration import (
     begin_case_selection,
     resolve_case_selection,
 )
+from .low_energy_selection import (
+    CandidateMetrics,
+    FrozenBandCandidate,
+    ReferenceBlock,
+    SelectionDecision,
+    SelectionThresholds,
+    generate_frozen_band_candidates,
+    resolve_reference_point,
+    select_projection_candidate,
+)
+from .non_gamma_selection import (
+    candidate_rejection_diagnostic as _non_gamma_rejection_diagnostic,
+    canonical_action_matrix_hash as _canonical_action_matrix_hash,
+    evaluate_non_gamma_validation_candidate as _evaluate_non_gamma_validation_candidate,
+    prepare_non_gamma_validation_target as _prepare_non_gamma_validation_target,
+)
+from .projection_selection import CandidateRejected, CandidateRejectionReason
 from .io.tapw_loader import load_hamk, load_Q_sets
 from .orbitals import (
     expand_orbital_order_by_sector,
@@ -76,6 +93,7 @@ from .plot_style import (
 #     SweepRow,
 # )
 from .symmetry.projection import (
+    prepare_symmetry_validated_project_gauge,
     resolve_symmetry_validated_project_gauge,
     run_symmetry_projection_from_config,
 )
@@ -83,6 +101,7 @@ from .config.case import normalize_case_config
 from .reporting import KpReporter
 
 HARTREE_TO_EV = 27.2113845
+_NON_GAMMA_SUBSPACE_METRIC_SEMANTICS = "gauge_anchor_sigma_min"
 
 _KP_MODEL_REPORTER: KpReporter | None = None
 
@@ -813,22 +832,46 @@ def _kpath_axis_from_config(
     kpath_cfg = cfg.get("kpath", {})
     if not isinstance(kpath_cfg, dict):
         return {}
-    file_raw = kpath_cfg.get("file")
     tmat_raw = kpath_cfg.get("tmat")
-    if file_raw is None or tmat_raw is None:
+    if tmat_raw is None:
         return {}
-    path = Path(str(file_raw))
-    if not path.is_absolute():
-        path = Path(cfg_dir) / path
     try:
-        from .model.core import generate_kpath_from_file
+        labels = kpath_cfg.get("labels")
+        coordinates = kpath_cfg.get("coordinates")
+        if labels is not None or coordinates is not None:
+            from .model.core import generate_kpath_from_symbols
 
-        kpath = generate_kpath_from_file(
-            Tmat=np.asarray(tmat_raw, dtype=float),
-            file_path=path,
-            phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
-            segment_points=kpath_cfg.get("segment_points"),
-        )
+            if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)):
+                raise ValueError("inline kpath.labels must be a sequence")
+            if not isinstance(coordinates, Mapping):
+                raise ValueError("inline kpath.coordinates must be a mapping")
+            points_per_segment = kpath_cfg.get(
+                "points_per_segment", kpath_cfg.get("segment_points")
+            )
+            if points_per_segment is None:
+                raise ValueError("inline kpath.points_per_segment is required")
+            kpath = generate_kpath_from_symbols(
+                Tmat=np.asarray(tmat_raw, dtype=float),
+                symbols=[str(label) for label in labels],
+                segment_points=int(points_per_segment),
+                phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
+                coords=coordinates,
+            )
+        else:
+            from .model.core import generate_kpath_from_file
+
+            file_raw = kpath_cfg.get("file")
+            if file_raw is None:
+                return {}
+            path = Path(str(file_raw))
+            if not path.is_absolute():
+                path = Path(cfg_dir) / path
+            kpath = generate_kpath_from_file(
+                Tmat=np.asarray(tmat_raw, dtype=float),
+                file_path=path,
+                phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
+                segment_points=kpath_cfg.get("segment_points"),
+            )
         x_all = np.asarray(kpath.x, dtype=float)
         if x_all.shape[0] == row_count:
             x_values = x_all
@@ -926,6 +969,56 @@ class _ExplicitProjectSelectionMaterialization:
     basis_handoff_hash: str
     authoritative_heff_hash: str
     heff_k_indices_hash: str
+    certification_hash: str | None = None
+    candidate_fiber_rank: int | None = None
+    q_count: int | None = None
+    resolved_nlow_state_list: tuple[tuple[int, ...], ...] | None = None
+    symmetry_certificate_hash: str | None = None
+    symmetry_input_identity_hash: str | None = None
+
+
+@dataclass(frozen=True)
+class _NonGammaSymmetryEvidence:
+    symmetry_residual: float | None
+    symmetry_leakage: float | None
+    certificate_hash: str
+    input_identity_hash: str
+    report: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class _NonGammaAutomaticSelection:
+    """One frozen K/M candidate selected before project materialization."""
+
+    candidate: FrozenBandCandidate
+    decision: SelectionDecision
+    metrics: tuple[CandidateMetrics, ...]
+    thresholds: SelectionThresholds
+    q_count: int
+    reference_k_index: int
+    symmetry_evidence: _NonGammaSymmetryEvidence
+    diagnostic_metric_names: tuple[str, ...]
+
+
+def _non_gamma_diagnostic_metric_names(
+    candidates: Sequence[FrozenBandCandidate],
+) -> tuple[str, ...]:
+    """Return band metrics that cannot gate a partial-sector model."""
+
+    if not candidates:
+        return ()
+    layer_count = len(candidates[0].nlow_state_list)
+    if any(len(candidate.nlow_state_list) != layer_count for candidate in candidates):
+        raise ValueError("non-Gamma candidates must share one physical-layer layout")
+    has_inactive_layer = any(
+        all(not candidate.nlow_state_list[layer] for candidate in candidates)
+        for layer in range(layer_count)
+    )
+    return (
+        ("band_rms_mev", "band_max_mev")
+        if has_inactive_layer
+        else ()
+    )
 
 
 def _selection_mode_from_project_config(project_cfg: Mapping[str, Any]) -> str:
@@ -1000,6 +1093,9 @@ def _prepare_cli_selection_request(
         }
     )
 
+    configured_mode = str(
+        project_cfg.get("mode", cfg.get("plot", {}).get("mode", "gamma"))
+    ).lower()
     raw_selection = project_cfg.get("selection", {})
     selection_cfg = (
         dict(raw_selection)
@@ -1010,25 +1106,37 @@ def _prepare_cli_selection_request(
     hard_thresholds = (
         dict(raw_thresholds) if isinstance(raw_thresholds, Mapping) else {}
     )
+    candidate_envelope_config = {
+        "selection": selection_cfg,
+        "nlow_state_list": project_cfg.get("nlow_state_list"),
+        "active_indices": project_cfg.get("active_indices"),
+    }
+    if mode == "auto" and configured_mode != "gamma":
+        candidate_envelope_config["partial_sector_band_metric_policy"] = (
+            "diagnostic_when_candidate_layer_is_inactive"
+        )
     policy_hash = build_selection_policy_hash(
         hard_thresholds=hard_thresholds,
-        candidate_envelope_config={
-            "selection": selection_cfg,
-            "nlow_state_list": project_cfg.get("nlow_state_list"),
-            "active_indices": project_cfg.get("active_indices"),
-        },
+        candidate_envelope_config=candidate_envelope_config,
         candidate_generator_version="kp.cli-selection.v1",
         candidate_schema_version="kp.projection-candidate.v1",
         metric_schema_version="kp.candidate-metrics.v1",
         ordering_rule_version="dimension-error-overlap-symmetry-v1",
     )
 
-    configured_indices = project_cfg.get("k_indices")
-    validation_indices = (
-        parse_int_list(configured_indices)
-        if configured_indices is not None
-        else list(range(nk))
-    )
+    if mode == "auto" and configured_mode != "gamma":
+        validation_indices = _non_gamma_selection_validation_indices(
+            cfg,
+            selection_cfg,
+            nk,
+        )
+    else:
+        configured_indices = project_cfg.get("k_indices")
+        validation_indices = (
+            parse_int_list(configured_indices)
+            if configured_indices is not None
+            else list(range(nk))
+        )
     validation_k_indices_hash = hash_array(
         np.asarray(validation_indices, dtype=np.int64)
     )
@@ -1042,11 +1150,14 @@ def _prepare_cli_selection_request(
     frozen_target_window_hash = hash_mapping(
         {
             "schema": "kp.cli-target-preview.v1",
-            "edge": project_cfg.get(
-                "target", cfg.get("plot", {}).get("target", "valence")
+            "edge": selection_cfg.get(
+                "edge",
+                project_cfg.get(
+                    "target", cfg.get("plot", {}).get("target", "valence")
+                ),
             ),
-            "energy_reference_ev": project_cfg.get(
-                "efermi", material.get("efermi")
+            "energy_reference_ev": selection_cfg.get(
+                "efermi", project_cfg.get("efermi", material.get("efermi"))
             ),
             "band_file_hash": band_hash,
             "validation_k_indices_hash": validation_k_indices_hash,
@@ -1158,6 +1269,19 @@ def _project_heff_full_kwargs_supports(name: str) -> bool:
 
 
 _PROJECT_WORKER_CONTEXT: dict[str, Any] | None = None
+_PROJECT_DEFAULT_WORKER_CAP = 16
+
+
+def _effective_project_workers(requested_workers: int, k_count: int) -> int:
+    """Bound process parallelism before each worker maps the large Hamiltonian."""
+    return max(
+        1,
+        min(
+            int(requested_workers),
+            int(k_count),
+            _PROJECT_DEFAULT_WORKER_CAP,
+        ),
+    )
 
 
 def _project_batches(indices: Sequence[int], workers: int, batch_size: int | str | None) -> list[list[int]]:
@@ -1884,10 +2008,107 @@ def cmd_project_from_config(
         transaction_id=uuid.uuid4().hex,
     )
     try:
-        materialized = _cmd_project_from_config_impl(cfg_path, overrides)
-        if request.selection_input.selection_mode != "explicit":
-            raise ValueError(
-                "automatic projection cannot certify without a routed Gamma handoff producer"
+        automatic: _NonGammaAutomaticSelection | None = None
+        materialization_overrides = None if overrides is None else dict(overrides)
+        if request.selection_input.selection_mode == "auto":
+            automatic = _prepare_non_gamma_automatic_selection(
+                cfg_path,
+                materialization_overrides,
+            )
+            materialization_overrides = dict(materialization_overrides or {})
+            materialization_overrides["nlow_state_list"] = [
+                list(row) for row in automatic.candidate.nlow_state_list
+            ]
+            materialization_overrides["_automatic_selection_materialization"] = True
+        materialized = _cmd_project_from_config_impl(
+            cfg_path,
+            materialization_overrides,
+        )
+        if request.selection_input.selection_mode == "auto":
+            if automatic is None:
+                raise RuntimeError("automatic K/M selection was not prepared")
+            expected_nlow = tuple(
+                tuple(int(band) for band in row)
+                for row in automatic.candidate.nlow_state_list
+            )
+            expected_fiber_rank = int(automatic.candidate.dimension)
+            expected_q_count = int(automatic.q_count)
+            expected_dimension = expected_q_count * expected_fiber_rank
+            if (
+                materialized.candidate_fiber_rank != expected_fiber_rank
+                or materialized.q_count != expected_q_count
+                or materialized.candidate_dimension != expected_dimension
+                or materialized.resolved_nlow_state_list != expected_nlow
+            ):
+                raise ValueError(
+                    "materialized automatic candidate dimension/bands do not match "
+                    "the selected q_count*fiber_rank identity"
+                )
+            resolved = ResolvedCandidateIdentity.create(
+                selection_mode="auto",
+                candidate_id=automatic.decision.selected.candidate_id,
+                candidate_dimension=materialized.candidate_dimension,
+                projection_basis_kind=EXPLICIT_LEGACY_BASIS_KIND,
+                basis_handoff_hash=materialized.basis_handoff_hash,
+                authoritative_heff_hash=materialized.authoritative_heff_hash,
+                heff_k_indices_hash=materialized.heff_k_indices_hash,
+            )
+            pending_base = automatic.symmetry_evidence.report.get(
+                "pending_identity_base"
+            )
+            if not isinstance(pending_base, Mapping):
+                raise ValueError(
+                    "automatic K/M pending symmetry evidence lacks structured identity"
+                )
+            pending_payload = {
+                "schema": "kp.non-gamma-post-selection-symmetry-pending.v2",
+                "status": "pending",
+                **dict(pending_base),
+                "candidate_dimension": resolved.candidate_dimension,
+                "selection_input_identity_hash": (
+                    request.selection_input.selection_input_identity_hash
+                ),
+                "resolved_candidate_hash": resolved.resolved_candidate_hash,
+                "basis_handoff_hash": resolved.basis_handoff_hash,
+            }
+            pending_input_hash = hash_mapping(
+                {
+                    "schema": "kp.non-gamma-post-selection-symmetry-input.v2",
+                    **{
+                        key: value
+                        for key, value in pending_payload.items()
+                        if key not in {"schema", "status"}
+                    },
+                }
+            )
+            pending_certificate_hash = hash_mapping(
+                {
+                    "schema": (
+                        "kp.non-gamma-post-selection-symmetry-certificate.v2"
+                    ),
+                    "status": "pending",
+                    "input_identity_hash": pending_input_hash,
+                }
+            )
+            basis_path = request.output_directory / "basis.npz"
+            if not basis_path.is_file():
+                raise FileNotFoundError(
+                    f"automatic K/M materialization did not write {basis_path}"
+                )
+            return resolve_case_selection(
+                CaseSelectionInputs.generic_auto(
+                    selection_input=request.selection_input,
+                    candidates=automatic.metrics,
+                    thresholds=automatic.thresholds,
+                    resolved_candidate=resolved,
+                    certificate_hash=pending_certificate_hash,
+                    certificate_input_identity_hash=pending_input_hash,
+                    pending_symmetry_payload=pending_payload,
+                    payloads={"basis.npz": basis_path.read_bytes()},
+                    allow_pending_symmetry=True,
+                    diagnostic_metric_names=automatic.diagnostic_metric_names,
+                ),
+                session=session,
             )
         resolved = ResolvedCandidateIdentity.create(
             selection_mode="explicit",
@@ -1916,6 +2137,918 @@ def cmd_project_from_config(
         session.close()
 
 
+def _non_gamma_selection_validation_indices(
+    cfg: Mapping[str, Any],
+    selection_cfg: Mapping[str, Any],
+    nk: int,
+) -> list[int]:
+    configured = selection_cfg.get("validation_indices")
+    if configured is None:
+        fit_cfg = cfg.get("fit", {})
+        if isinstance(fit_cfg, Mapping):
+            configured = fit_cfg.get("indices")
+    if configured is None:
+        configured = sorted({0, int(nk) // 2, int(nk) - 1})
+    indices = parse_int_list(configured)
+    if not indices:
+        raise ValueError("automatic selection validation_indices must not be empty")
+    for index in indices:
+        if index < 0 or index >= int(nk):
+            raise IndexError(
+                f"automatic selection validation index {index} outside 0..{int(nk) - 1}"
+            )
+    return indices
+
+
+def _non_gamma_selection_validation_band_count(
+    cfg: Mapping[str, Any],
+    selection_cfg: Mapping[str, Any],
+) -> int:
+    configured = selection_cfg.get("validation_bands")
+    if configured is None:
+        fit_cfg = cfg.get("fit", {})
+        objective = fit_cfg.get("objective", {}) if isinstance(fit_cfg, Mapping) else {}
+        window = objective.get("window", {}) if isinstance(objective, Mapping) else {}
+        if isinstance(window, Mapping):
+            configured = window.get("bands")
+    if configured is None:
+        bands_cfg = cfg.get("bands", {})
+        plot_cfg = bands_cfg.get("plot", {}) if isinstance(bands_cfg, Mapping) else {}
+        if isinstance(plot_cfg, Mapping):
+            configured = plot_cfg.get("top_bands", plot_cfg.get("bottom_bands"))
+    return max(1, int(8 if configured is None else configured))
+
+
+def _non_gamma_selection_thresholds(
+    selection_cfg: Mapping[str, Any],
+) -> SelectionThresholds:
+    raw = selection_cfg.get("thresholds", {})
+    raw = raw if isinstance(raw, Mapping) else {}
+    public_anchor_threshold = raw.get("gauge_anchor_sigma_min")
+    legacy_overlap_threshold = raw.get("subspace_overlap")
+    if (
+        public_anchor_threshold is not None
+        and legacy_overlap_threshold is not None
+        and float(public_anchor_threshold) != float(legacy_overlap_threshold)
+    ):
+        raise ValueError(
+            "non-Gamma thresholds gauge_anchor_sigma_min and legacy "
+            "subspace_overlap conflict"
+        )
+    anchor_threshold = (
+        public_anchor_threshold
+        if public_anchor_threshold is not None
+        else legacy_overlap_threshold
+    )
+    return SelectionThresholds(
+        band_rms_mev=float(raw.get("band_rms_mev", 10.0)),
+        band_max_mev=float(raw.get("band_max_mev", 30.0)),
+        subspace_overlap=float(
+            0.05 if anchor_threshold is None else anchor_threshold
+        ),
+        symmetry_residual=float(raw.get("symmetry_residual", 1.0e-2)),
+        symmetry_leakage=float(raw.get("symmetry_leakage", 1.0e-2)),
+    )
+
+
+def _spin_consistent_non_gamma_reference_rows(
+    reference_rows: Sequence[np.ndarray],
+    *,
+    validation_k_indices: Sequence[int],
+    spin: str,
+    edge: str,
+    band_count: int,
+    pair_tolerance_mev: float,
+    pair_isolation_ratio: float = 0.25,
+) -> tuple[np.ndarray, ...]:
+    """Collapse a certified doubled spin target without diagonalizing full H."""
+
+    rows = tuple(np.asarray(row, dtype=float).ravel() for row in reference_rows)
+    spin_norm = str(spin).lower()
+    if spin_norm == "all":
+        return rows
+    if spin_norm not in {"up", "down"}:
+        raise ValueError(
+            f"Unsupported spin value {spin!r}; expected 'up', 'down', or 'all'"
+        )
+    count = int(band_count)
+    tolerance_ev = float(pair_tolerance_mev) / 1000.0
+    isolation_ratio = float(pair_isolation_ratio)
+    if count <= 0:
+        raise ValueError("spin-consistent target band_count must be positive")
+    if not np.isfinite(tolerance_ev) or tolerance_ev <= 0.0:
+        raise ValueError("spin_pair_tolerance_mev must be finite and positive")
+    if not np.isfinite(isolation_ratio) or not 0.0 < isolation_ratio < 1.0:
+        raise ValueError("spin_pair_isolation_ratio must lie in (0, 1)")
+
+    edge_norm = str(edge).lower()
+    if edge_norm not in {"valence", "conduction"}:
+        raise ValueError("spin-consistent target edge must be valence or conduction")
+    pair_count = count + 1
+
+    def edge_window(row: np.ndarray) -> np.ndarray | None:
+        ordered = np.sort(row)
+        available_pairs = ordered.size // 2
+        selected_pairs = min(pair_count, available_pairs)
+        if selected_pairs < count or selected_pairs < 2:
+            return None
+        width = 2 * selected_pairs
+        return ordered[:width] if edge_norm == "conduction" else ordered[-width:]
+
+    for index in validation_k_indices:
+        window = edge_window(rows[int(index)])
+        if window is None:
+            return rows
+        within_pair = window[1::2] - window[0::2]
+        between_pairs = window[2::2] - window[1:-1:2]
+        if (
+            np.any(within_pair < 0.0)
+            or np.any(between_pairs <= 0.0)
+            or float(np.max(within_pair)) > tolerance_ev
+            or float(np.max(within_pair))
+            > isolation_ratio * float(np.min(between_pairs))
+        ):
+            return rows
+
+    collapsed: list[np.ndarray] = []
+    for row in rows:
+        window = edge_window(row)
+        if window is None:
+            return rows
+        collapsed.append(0.5 * (window[0::2] + window[1::2]))
+    return tuple(collapsed)
+
+
+def _monotone_spin_reference_subset(
+    reference_row: np.ndarray,
+    guide_row: np.ndarray,
+    *,
+    edge: str,
+    band_count: int,
+    energy_reference_ev: float,
+    cost_margin_mev: float = 0.1,
+) -> np.ndarray:
+    """Match one fixed ordered full-spin subset to a selected-spin guide."""
+
+    reference = np.sort(np.asarray(reference_row, dtype=float).ravel())
+    guide = np.sort(np.asarray(guide_row, dtype=float).ravel())
+    count = int(band_count)
+    if guide.size < count:
+        raise CandidateRejected(
+            CandidateRejectionReason.INSUFFICIENT_CANDIDATE_BANDS,
+            f"largest selected-spin envelope has {guide.size} bands; "
+            f"the fixed target requires {count}",
+            required_band_count=count,
+            available_band_count=int(guide.size),
+        )
+    edge_norm = str(edge).lower()
+    if edge_norm == "valence":
+        eligible = reference[reference <= float(energy_reference_ev)]
+        guide = guide[-count:]
+    elif edge_norm == "conduction":
+        eligible = reference[reference >= float(energy_reference_ev)]
+        guide = guide[:count]
+    else:
+        raise ValueError("spin target edge must be valence or conduction")
+    if eligible.size < count:
+        raise CandidateRejected(
+            CandidateRejectionReason.INSUFFICIENT_TARGET_BANDS,
+            f"full-spin reference has {eligible.size} eligible {edge_norm} bands; "
+            f"the selected-spin target requires {count}",
+            required_band_count=count,
+            available_band_count=int(eligible.size),
+        )
+    margin_mev = float(cost_margin_mev)
+    if not np.isfinite(margin_mev) or margin_mev <= 0.0:
+        raise ValueError("spin_mapping_cost_margin_mev must be finite and positive")
+
+    states: list[list[list[tuple[float, tuple[int, ...]]]]] = [
+        [[] for _ in range(eligible.size + 1)]
+        for _ in range(count + 1)
+    ]
+    for source_index in range(eligible.size + 1):
+        states[0][source_index] = [(0.0, ())]
+    for target_index in range(1, count + 1):
+        for source_index in range(1, eligible.size + 1):
+            choices = list(states[target_index][source_index - 1])
+            choices.extend(
+                (
+                    cost
+                    + abs(
+                        guide[target_index - 1]
+                        - eligible[source_index - 1]
+                    ),
+                    path + (source_index - 1,),
+                )
+                for cost, path in states[target_index - 1][source_index - 1]
+            )
+            by_path: dict[tuple[int, ...], float] = {}
+            for cost, path in choices:
+                by_path[path] = min(float(cost), by_path.get(path, np.inf))
+            states[target_index][source_index] = sorted(
+                ((cost, path) for path, cost in by_path.items()),
+                key=lambda item: (item[0], item[1]),
+            )[:2]
+
+    solutions = states[count][int(eligible.size)]
+    if not solutions:
+        raise RuntimeError("monotone selected-spin target matching failed")
+    if len(solutions) > 1:
+        cost_gap_mev = float((solutions[1][0] - solutions[0][0]) * 1000.0)
+        if cost_gap_mev <= margin_mev:
+            raise CandidateRejected(
+                CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
+                "selected-spin branch mapping is not uniquely isolated: "
+                f"best-to-second cost margin {cost_gap_mev:.12g} meV is not "
+                f"above {margin_mev:.12g} meV",
+                measured_value=cost_gap_mev,
+                threshold=margin_mev,
+            )
+    return np.asarray(eligible[list(solutions[0][1])], dtype=float)
+
+
+def _envelope_matched_non_gamma_target(
+    *,
+    reference_rows: Sequence[np.ndarray],
+    validation_k_indices: Sequence[int],
+    guide_values_by_k: Mapping[int, np.ndarray],
+    edge: str,
+    band_count: int,
+    energy_reference_ev: float,
+    degeneracy_tolerance_mev: float,
+    cost_margin_mev: float = 0.1,
+):
+    matched_rows = [
+        _monotone_spin_reference_subset(
+            reference_rows[int(k_index)],
+            guide_values_by_k[int(k_index)],
+            edge=edge,
+            band_count=band_count,
+            energy_reference_ev=energy_reference_ev,
+            cost_margin_mev=cost_margin_mev,
+        )
+        for k_index in validation_k_indices
+    ]
+    return _prepare_non_gamma_validation_target(
+        reference_rows=matched_rows,
+        validation_k_indices=range(len(matched_rows)),
+        edge=edge,
+        band_count=band_count,
+        energy_reference_ev=energy_reference_ev,
+        degeneracy_tolerance_mev=degeneracy_tolerance_mev,
+    )
+
+
+def _non_gamma_reference_candidates(
+    *,
+    hamk: np.ndarray,
+    source_kpoints: np.ndarray,
+    q1: np.ndarray,
+    q2: np.ndarray,
+    num_layer_list: Sequence[int],
+    orb0: int,
+    num_orb_per_layer_list: Sequence[Sequence[int]],
+    spin: str,
+    mode: str,
+    edge: str,
+    efermi: float,
+    selection_cfg: Mapping[str, Any],
+) -> tuple[int, tuple[FrozenBandCandidate, ...]]:
+    if str(mode).lower() == "gamma":
+        raise ValueError("generic automatic selection is only for non-Gamma valleys")
+    centered_qsets = tuple(
+        np.asarray(qset, dtype=float)
+        - np.mean(np.asarray(qset, dtype=float), axis=0, keepdims=True)
+        for qset in (q1, q2)
+    )
+    reference = resolve_reference_point(
+        source_kpoints,
+        centered_qsets,
+        origin_tolerance=float(selection_cfg.get("origin_tolerance", 1.0e-10)),
+    )
+    ham_reference = hamk[reference.k_index] if hamk.ndim == 3 else hamk
+    ham_reference, block_spin = _selected_spin_block_for_projection(
+        ham_reference,
+        spin,
+    )
+    total_layers = int(sum(int(value) for value in num_layer_list))
+    eigs, vecs, _blocks, _unused = get_H_block(
+        ham_reference,
+        [[q1], [q2]],
+        list(num_layer_list),
+        [list(group) for group in num_orb_per_layer_list],
+        [[] for _ in range(total_layers)],
+        [],
+        spin=block_spin,
+        mode=mode,
+    )
+    reference_blocks: list[ReferenceBlock] = []
+    block_offset = 0
+    physical_layer = 0
+    for group_index, layer_count in enumerate(num_layer_list):
+        q_length = len(q1) if group_index == 0 else len(q2)
+        q_index = int(reference.q_indices[group_index])
+        for _local_layer in range(int(layer_count)):
+            row = block_offset + q_index
+            block = ReferenceBlock(
+                key=f"layer-{physical_layer}",
+                eigenvalues=np.asarray(eigs[row], dtype=float),
+                eigenvectors=np.asarray(vecs[row], dtype=np.complex128),
+                physical_layer=physical_layer,
+            )
+            # An inactive layer may have no state on the requested side of EF.
+            # Leave it out of the active-layer envelope rather than rejecting
+            # an otherwise valid one-sided K/M edge candidate.
+            if (
+                (str(edge).lower() == "valence" and np.any(block.eigenvalues <= efermi))
+                or (
+                    str(edge).lower() == "conduction"
+                    and np.any(block.eigenvalues >= efermi)
+                )
+            ):
+                reference_blocks.append(block)
+            block_offset += q_length
+            physical_layer += 1
+    if not reference_blocks:
+        raise ValueError(f"no non-Gamma {edge} states exist at the reference point")
+    candidates = generate_frozen_band_candidates(
+        reference_blocks,
+        edge=edge,
+        efermi=efermi,
+        mode=mode,
+        total_layers=total_layers,
+        degeneracy_tolerance=float(selection_cfg.get("degeneracy_tolerance", 1.0e-5)),
+        active_layer_window=float(selection_cfg.get("active_layer_window", 0.1)),
+        max_dimension=int(selection_cfg.get("max_dimension", 16)),
+    )
+    min_states = int(
+        selection_cfg.get(
+            "min_states_per_active_layer",
+            2 if str(spin).lower() == "all" else 1,
+        )
+    )
+    candidates = tuple(
+        candidate
+        for candidate in candidates
+        if all(
+            not row or len(row) >= min_states
+            for row in candidate.nlow_state_list
+        )
+    )
+    if not candidates:
+        raise ValueError("automatic low-energy selection generated no candidates")
+    return int(reference.k_index), candidates
+
+
+def _non_gamma_json_safe_diagnostic(value: Any) -> Any:
+    """Encode legitimate infinite diagnostic sentinels deterministically."""
+
+    if isinstance(value, Mapping):
+        return {
+            str(key): _non_gamma_json_safe_diagnostic(item)
+            for key, item in value.items()
+        }
+    if isinstance(value, (list, tuple)):
+        return [_non_gamma_json_safe_diagnostic(item) for item in value]
+    if isinstance(value, np.generic):
+        return _non_gamma_json_safe_diagnostic(value.item())
+    if isinstance(value, float) and np.isinf(value):
+        return "Infinity" if value > 0.0 else "-Infinity"
+    return value
+
+
+def _non_gamma_symmetry_validation_evidence(
+    preparation: Any,
+) -> _NonGammaSymmetryEvidence:
+    """Extract measured residuals and hash the independently loaded source actions."""
+
+    report = preparation.gauge_report
+    if not isinstance(report, GaugeAnchorReport):
+        raise TypeError("source-symmetry validation did not return a GaugeAnchorReport")
+    report_payload = _non_gamma_json_safe_diagnostic(
+        {
+            **report.to_dict(),
+            "subspace_metric_semantics": _NON_GAMMA_SUBSPACE_METRIC_SEMANTICS,
+        }
+    )
+    closure = report.symmetry_closure_quality
+    if not isinstance(closure, Mapping) or closure.get("status") != "validated":
+        raise ValueError("source-symmetry validation report is not validated")
+    selected_id = str(closure.get("selected_candidate_id", ""))
+    rows = closure.get("metrics", ())
+    if not isinstance(rows, Sequence):
+        raise ValueError("source-symmetry validation report has no metric rows")
+    selected_row = next(
+        (
+            row
+            for row in rows
+            if isinstance(row, Mapping)
+            and str(row.get("candidate_id", "")) == selected_id
+        ),
+        None,
+    )
+    if not isinstance(selected_row, Mapping):
+        raise ValueError("source-symmetry validation report omits its selected metric row")
+    metadata = selected_row.get("metadata", {})
+    if not isinstance(metadata, Mapping) or metadata.get("status") != "evaluated":
+        raise ValueError("selected source-symmetry metric row was not evaluated")
+
+    def worst(mapping_name: str) -> float:
+        raw = selected_row.get(mapping_name)
+        if not isinstance(raw, Mapping) or not raw:
+            raise ValueError(
+                "source-symmetry validation report lacks independent "
+                f"{mapping_name} measurements"
+            )
+        values = np.asarray([float(value) for value in raw.values()], dtype=float)
+        if np.any(~np.isfinite(values)) or np.any(values < 0.0):
+            raise ValueError(
+                f"source-symmetry validation {mapping_name} values are invalid"
+            )
+        return float(np.max(values))
+
+    symmetry_residual = worst("exactification_distance_by_op")
+    symmetry_leakage = worst("support_off_by_op")
+    context = preparation.context
+    operations: list[dict[str, Any]] = []
+    for name, payload in sorted(context.operation_payloads.items()):
+        action_matrix = payload["action"].matrix
+        entry = payload["entry"]
+        operations.append(
+            {
+                "name": str(name),
+                "antiunitary": bool(payload["antiunitary"]),
+                "pairs": [
+                    [int(target), int(source)]
+                    for target, source in entry.get("_pairs", ())
+                ],
+                "raw_action_hash": _canonical_action_matrix_hash(action_matrix),
+            }
+        )
+    if not operations:
+        raise ValueError("source-symmetry validation loaded no symmetry actions")
+    input_identity_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-symmetry-validation-input.v1",
+            "valley": str(context.config.valley),
+            "spin": str(context.config.spin),
+            "mode": str(context.mode),
+            "nlow_state_list": [
+                [int(band) for band in row] for row in context.nlow_state_list
+            ],
+            "qset1_hash": hash_array(np.asarray(context.q_model1, dtype=float)),
+            "qset2_hash": hash_array(np.asarray(context.q_model2, dtype=float)),
+            "operations": operations,
+        }
+    )
+    certificate_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-symmetry-validation-certificate.v1",
+            "input_identity_hash": input_identity_hash,
+            "selected_candidate_id": selected_id,
+            "symmetry_residual": symmetry_residual,
+            "symmetry_leakage": symmetry_leakage,
+            "validation_report": report_payload,
+        }
+    )
+    return _NonGammaSymmetryEvidence(
+        symmetry_residual=symmetry_residual,
+        symmetry_leakage=symmetry_leakage,
+        certificate_hash=certificate_hash,
+        input_identity_hash=input_identity_hash,
+        report=report_payload,
+    )
+
+
+def _non_gamma_pending_symmetry_evidence(
+    candidate: FrozenBandCandidate,
+    *,
+    q1: np.ndarray,
+    q2: np.ndarray,
+    mode: str,
+    spin: str,
+) -> _NonGammaSymmetryEvidence:
+    """Bind an honest post-selection symmetry placeholder to one K/M choice."""
+
+    qset1_hash = hash_array(np.asarray(q1, dtype=float))
+    qset2_hash = hash_array(np.asarray(q2, dtype=float))
+    identity_base = {
+        "candidate_id": candidate.candidate_id,
+        "nlow_state_list": [
+            [int(band) for band in row]
+            for row in candidate.nlow_state_list
+        ],
+        "mode": str(mode).lower(),
+        "spin": str(spin).lower(),
+        "qset1_hash": qset1_hash,
+        "qset2_hash": qset2_hash,
+    }
+    input_identity_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-post-selection-symmetry-input.v1",
+            **identity_base,
+        }
+    )
+    certificate_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-post-selection-symmetry-pending.v1",
+            "input_identity_hash": input_identity_hash,
+            "status": "pending",
+        }
+    )
+    return _NonGammaSymmetryEvidence(
+        symmetry_residual=None,
+        symmetry_leakage=None,
+        certificate_hash=certificate_hash,
+        input_identity_hash=input_identity_hash,
+        report={
+            "status": "post_selection_pending",
+            "selection_role": "not_a_preselection_gate",
+            "pending_identity_base": identity_base,
+        },
+    )
+
+
+def _evaluate_non_gamma_automatic_candidates(
+    *,
+    cfg_path: str,
+    cfg: Mapping[str, Any],
+    candidates: Sequence[FrozenBandCandidate],
+    hamk: np.ndarray,
+    q1: np.ndarray,
+    q2: np.ndarray,
+    num_layer_list: Sequence[int],
+    orb0: int,
+    num_orb_per_layer_list: Sequence[Sequence[int]],
+    spin: str,
+    mode: str,
+    method: str,
+    e_ref: float | None,
+    reference_rows: Sequence[np.ndarray],
+    reference_k_index: int,
+    selection_cfg: Mapping[str, Any],
+    project_cfg: Mapping[str, Any],
+) -> _NonGammaAutomaticSelection:
+    nk = int(hamk.shape[0]) if hamk.ndim == 3 else 1
+    validation_indices = _non_gamma_selection_validation_indices(
+        cfg,
+        selection_cfg,
+        nk,
+    )
+    band_count = _non_gamma_selection_validation_band_count(cfg, selection_cfg)
+    edge = str(
+        selection_cfg.get(
+            "edge",
+            project_cfg.get("target", cfg.get("plot", {}).get("target", "valence")),
+        )
+    ).lower()
+    if reference_k_index < 0 or reference_k_index >= nk:
+        raise IndexError(
+            f"automatic selection reference k index {reference_k_index} outside 0..{nk - 1}"
+        )
+    thresholds = _non_gamma_selection_thresholds(selection_cfg)
+    diagnostic_metric_names = _non_gamma_diagnostic_metric_names(candidates)
+    projection_spin = "all" if str(spin).lower() == "all" else "up"
+    reference_ham = hamk[reference_k_index] if hamk.ndim == 3 else hamk
+    reference_ham = _selected_spin_project_input(reference_ham, spin)
+    q_count = len(q1)
+    explicit_energy_zero_raw = selection_cfg.get(
+        "efermi",
+        project_cfg.get("efermi", cfg.get("material", {}).get("efermi")),
+    )
+    explicit_energy_zero = (
+        None
+        if explicit_energy_zero_raw is None
+        else float(explicit_energy_zero_raw)
+    )
+    if explicit_energy_zero is None:
+        reference_values = np.sort(
+            np.asarray(reference_rows[reference_k_index], dtype=float).ravel()
+        )
+        if reference_values.size == 0:
+            raise ValueError("reference-point band row is empty")
+        explicit_energy_zero = float(
+            reference_values[-1] if edge == "valence" else reference_values[0]
+        )
+    raw_reference_rows = tuple(
+        np.asarray(row, dtype=float).ravel() for row in reference_rows
+    )
+    reference_rows = _spin_consistent_non_gamma_reference_rows(
+        raw_reference_rows,
+        validation_k_indices=validation_indices,
+        spin=spin,
+        edge=edge,
+        band_count=band_count,
+        pair_tolerance_mev=float(
+            selection_cfg.get("spin_pair_tolerance_mev", 2.0)
+        ),
+        pair_isolation_ratio=float(
+            selection_cfg.get("spin_pair_isolation_ratio", 0.25)
+        ),
+    )
+    target_degeneracy_tolerance_mev = float(
+        selection_cfg.get("target_degeneracy_tolerance_mev", 1.0e-6)
+    )
+    spin_target_needs_envelope_match = (
+        str(spin).lower() in {"up", "down"}
+        and all(
+            np.array_equal(raw_row, normalized_row)
+            for raw_row, normalized_row in zip(
+                raw_reference_rows,
+                reference_rows,
+                strict=True,
+            )
+        )
+    )
+    validation_target = None
+    if not spin_target_needs_envelope_match:
+        validation_target = _prepare_non_gamma_validation_target(
+            reference_rows=reference_rows,
+            validation_k_indices=validation_indices,
+            edge=edge,
+            band_count=band_count,
+            energy_reference_ev=explicit_energy_zero,
+            degeneracy_tolerance_mev=target_degeneracy_tolerance_mev,
+        )
+    # K/M preselection is deliberately limited to projected-band accuracy and
+    # reference-anchor quality.  Symmetry is authoritative only after the
+    # chosen basis has been materialized.
+    prepared_rows: list[
+        tuple[FrozenBandCandidate, dict[int, np.ndarray], float]
+    ] = []
+    metrics: list[CandidateMetrics] = []
+    for candidate in candidates:
+        nlow = [list(row) for row in candidate.nlow_state_list]
+        full_dimension = int(q_count * candidate.dimension)
+        try:
+            resolved_anchors, gauge_report = resolve_project_gauge_anchors(
+                reference_ham,
+                q_count,
+                orb0,
+                list(num_layer_list),
+                spin=projection_spin,
+                Qlayer_list=[[q1], [q2]],
+                num_orb_per_layer_list=[list(group) for group in num_orb_per_layer_list],
+                nlow_state_list=nlow,
+                norb_fix_list=None,
+                gauge_config=project_cfg.get("gauge"),
+                mode=mode,
+            )
+            projected_values_by_k: dict[int, np.ndarray] = {}
+            for k_index in validation_indices:
+                ham_row = hamk[k_index] if hamk.ndim == 3 else hamk
+                selected_ham = _selected_spin_project_input(ham_row, spin)
+                result = project_heff_full(
+                    selected_ham,
+                    q_count,
+                    orb0,
+                    list(num_layer_list),
+                    spin=projection_spin,
+                    Qlayer_list=[[q1], [q2]],
+                    num_orb_per_layer_list=[list(group) for group in num_orb_per_layer_list],
+                    nlow_state_list=nlow,
+                    norb_fix_list=resolved_anchors,
+                    downfold_method=method,
+                    E_ref=e_ref,
+                    return_diagnostics=True,
+                    mode=mode,
+                )
+                projected_values_by_k[k_index] = np.asarray(result[1], dtype=float)
+            anchor_quality = float(
+                gauge_report.gauge_anchor_quality.get("sigma_min", 1.0)
+            )
+            prepared_rows.append(
+                (candidate, projected_values_by_k, anchor_quality)
+            )
+        except CandidateRejected as exc:
+            metrics.append(
+                CandidateMetrics(
+                    candidate_id=candidate.candidate_id,
+                    dimension=full_dimension,
+                    band_rms_mev=2.0 * thresholds.band_rms_mev,
+                    band_max_mev=2.0 * thresholds.band_max_mev,
+                    subspace_overlap=0.0,
+                    symmetry_residual=None,
+                    symmetry_leakage=None,
+                    structural_failure=_non_gamma_rejection_diagnostic(exc),
+                )
+            )
+
+    if validation_target is None and prepared_rows:
+        envelope_candidate, envelope_values, _anchor_quality = max(
+            prepared_rows,
+            key=lambda row: (row[0].dimension, row[0].candidate_id),
+        )
+        if envelope_candidate.dimension <= 0:
+            raise RuntimeError("selected-spin candidate envelope is empty")
+        validation_target = _envelope_matched_non_gamma_target(
+            reference_rows=raw_reference_rows,
+            validation_k_indices=validation_indices,
+            guide_values_by_k=envelope_values,
+            edge=edge,
+            band_count=band_count,
+            energy_reference_ev=explicit_energy_zero,
+            degeneracy_tolerance_mev=target_degeneracy_tolerance_mev,
+            cost_margin_mev=float(
+                selection_cfg.get("spin_mapping_cost_margin_mev", 0.1)
+            ),
+        )
+
+    cheap_rows: list[tuple[FrozenBandCandidate, CandidateMetrics]] = []
+    if validation_target is not None:
+        for candidate, projected_values_by_k, anchor_quality in prepared_rows:
+            full_dimension = int(q_count * candidate.dimension)
+            try:
+                candidate_validation = _evaluate_non_gamma_validation_candidate(
+                    validation_target,
+                    candidate_eigenvalues=[
+                        projected_values_by_k[index]
+                        for index in validation_indices
+                    ],
+                    gauge_anchor_quality=anchor_quality,
+                )
+                band_metrics = candidate_validation.band_metrics
+                cheap_rows.append(
+                    (
+                        candidate,
+                        CandidateMetrics(
+                            candidate_id=candidate.candidate_id,
+                            dimension=full_dimension,
+                            band_rms_mev=band_metrics.rms_error_mev,
+                            band_max_mev=band_metrics.maximum_abs_error_mev,
+                            subspace_overlap=(
+                                candidate_validation.gauge_anchor_quality
+                            ),
+                            symmetry_residual=None,
+                            symmetry_leakage=None,
+                        ),
+                    )
+                )
+            except CandidateRejected as exc:
+                metrics.append(
+                    CandidateMetrics(
+                        candidate_id=candidate.candidate_id,
+                        dimension=full_dimension,
+                        band_rms_mev=2.0 * thresholds.band_rms_mev,
+                        band_max_mev=2.0 * thresholds.band_max_mev,
+                        subspace_overlap=0.0,
+                        symmetry_residual=None,
+                        symmetry_leakage=None,
+                        structural_failure=_non_gamma_rejection_diagnostic(exc),
+                    )
+                )
+
+    cheap_rows.sort(
+        key=lambda row: (
+            row[1].dimension,
+            row[1].band_rms_mev,
+            1.0 - row[1].subspace_overlap,
+            row[0].candidate_id,
+        )
+    )
+    metrics.extend(metric for _candidate, metric in cheap_rows)
+    decision = select_projection_candidate(
+        metrics,
+        thresholds,
+        allow_pending_symmetry=True,
+        diagnostic_metric_names=diagnostic_metric_names,
+    )
+    selected = next(
+        candidate
+        for candidate in candidates
+        if candidate.candidate_id == decision.selected.candidate_id
+    )
+    return _NonGammaAutomaticSelection(
+        candidate=selected,
+        decision=decision,
+        metrics=tuple(metrics),
+        thresholds=thresholds,
+        q_count=int(q_count),
+        reference_k_index=int(reference_k_index),
+        symmetry_evidence=_non_gamma_pending_symmetry_evidence(
+            selected,
+            q1=q1,
+            q2=q2,
+            mode=mode,
+            spin=spin,
+        ),
+        diagnostic_metric_names=diagnostic_metric_names,
+    )
+
+
+def _prepare_non_gamma_automatic_selection(
+    cfg_path: str,
+    overrides: Mapping[str, Any] | None,
+) -> _NonGammaAutomaticSelection:
+    path = Path(cfg_path).expanduser().resolve()
+    with path.open("r", encoding="utf-8") as handle:
+        cfg = normalize_case_config(yaml.safe_load(handle), config_path=path)
+    material = dict(cfg.get("material", {}))
+    project_cfg = _apply_project_overrides(
+        dict(cfg.get("project", {})),
+        None if overrides is None else dict(overrides),
+    )
+    if _selection_mode_from_project_config(project_cfg) != "auto":
+        raise ValueError("non-Gamma automatic preparation requires selection.mode=auto")
+    mode = str(project_cfg.get("mode", cfg.get("plot", {}).get("mode", ""))).lower()
+    if mode == "gamma":
+        raise ValueError("Gamma automatic selection must use the Gamma runtime")
+
+    def resolve(value: Any) -> str:
+        candidate = Path(str(value)).expanduser()
+        return str(candidate if candidate.is_absolute() else (path.parent / candidate).resolve())
+
+    hamk = _load_hamk_with_energy_unit(
+        resolve(material["hamk_file"]),
+        material,
+        mmap_mode="r",
+    )
+    if hamk.ndim not in {2, 3}:
+        raise ValueError(f"Unexpected hamk ndim: {hamk.ndim}")
+    hamk3d = hamk if hamk.ndim == 3 else hamk[np.newaxis, ...]
+    q1, q2 = load_Q_sets(
+        resolve(material["qset1_file"]),
+        resolve(material["qset2_file"]),
+    )
+    layout_ham = hamk3d[0]
+    spin = str(material.get("spin", "all"))
+    num_layer_list, orb0, num_orb_per_layer_list = _orbital_layout_from_material(
+        material,
+        layout_ham,
+        len(q1),
+        spin=spin,
+        mode=mode,
+    )
+    selection_raw = project_cfg.get("selection", {})
+    selection_cfg = dict(selection_raw) if isinstance(selection_raw, Mapping) else {}
+    edge = str(
+        selection_cfg.get(
+            "edge",
+            project_cfg.get("target", cfg.get("plot", {}).get("target", "valence")),
+        )
+    ).lower()
+    efermi_raw = selection_cfg.get(
+        "efermi",
+        project_cfg.get("efermi", material.get("efermi")),
+    )
+    if efermi_raw is None:
+        raise ValueError(
+            "automatic K/M selection requires project.efermi, "
+            "project.selection.efermi, or material.efermi"
+        )
+    nk = int(hamk3d.shape[0])
+    source_kpoints = _load_project_source_kpoints(
+        cfg,
+        material,
+        cfg_dir=str(path.parent),
+        hamk_file=resolve(material["hamk_file"]),
+        nk=nk,
+        project_indices=list(range(nk)),
+    )
+    reference_k_index, candidates = _non_gamma_reference_candidates(
+        hamk=hamk3d,
+        source_kpoints=source_kpoints,
+        q1=q1,
+        q2=q2,
+        num_layer_list=num_layer_list,
+        orb0=orb0,
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        spin=spin,
+        mode=mode,
+        edge=edge,
+        efermi=float(efermi_raw),
+        selection_cfg=selection_cfg,
+    )
+    band_file = material.get("band_file")
+    if not band_file:
+        raise ValueError("automatic K/M selection requires material.band_file")
+    reference_rows = _load_bands_from_text(resolve(band_file))
+    if len(reference_rows) != nk:
+        raise ValueError(
+            "automatic K/M selection requires one reference-band row per Hamiltonian k row: "
+            f"{len(reference_rows)} != {nk}"
+        )
+    return _evaluate_non_gamma_automatic_candidates(
+        cfg_path=str(path),
+        cfg=cfg,
+        candidates=candidates,
+        hamk=hamk3d,
+        q1=q1,
+        q2=q2,
+        num_layer_list=num_layer_list,
+        orb0=orb0,
+        num_orb_per_layer_list=num_orb_per_layer_list,
+        spin=spin,
+        mode=mode,
+        method=_downfold_method(project_cfg),
+        e_ref=_e_ref_from_project_cfg(project_cfg),
+        reference_rows=reference_rows,
+        reference_k_index=reference_k_index,
+        selection_cfg=selection_cfg,
+        project_cfg=project_cfg,
+    )
+
+
 def _cmd_project_from_config_impl(
     cfg_path: str,
     overrides: dict[str, Any] | None = None,
@@ -1937,6 +3070,9 @@ def _cmd_project_from_config_impl(
     material = cfg.get("material", {})
     plot_cfg = cfg.get("plot", {})
     project_cfg = _apply_project_overrides(cfg.get("project", {}), overrides)
+    automatic_selection_materialization = bool(
+        project_cfg.pop("_automatic_selection_materialization", False)
+    )
 
     def resolve(p: str | None) -> str | None:
         if p is None:
@@ -2050,18 +3186,35 @@ def _cmd_project_from_config_impl(
     resolved_norb_fix_list: list[Any] | None = None
     symm_cfg = cfg.get("symm", {})
     auto_gauge = _project_requests_auto_gauge(project_cfg)
-    if auto_gauge and not _symm_can_validate_auto_gauge(symm_cfg):
+    symmetry_source_available = _symm_can_validate_auto_gauge(symm_cfg)
+    source_validated_gauge = auto_gauge and symmetry_source_available
+    if auto_gauge and not automatic_selection_materialization and not symmetry_source_available:
         raise ValueError(
             "project auto gauge requires enabled symm.tapw_symmetry_dir so anchors are "
             "validated before production projection"
         )
-    if auto_gauge:
+    if source_validated_gauge:
         reporter.line("  resolving auto gauge against TAPW source symmetry")
         gauge_report = resolve_symmetry_validated_project_gauge(
             cfg_path,
             project_config=project_cfg,
         )
         resolved_norb_fix_list = list(gauge_report.resolved_norb_fix_list)
+    elif automatic_selection_materialization:
+        reporter.line("  resolving selected automatic projection anchors")
+        resolved_norb_fix_list, gauge_report = resolve_project_gauge_anchors(
+            _selected_spin_project_input(np.asarray(hamk2d), spin),
+            q_count,
+            orb0,
+            num_layer_list,
+            spin=projection_spin,
+            Qlayer_list=[[q1], [q2_for_projection]],
+            num_orb_per_layer_list=num_orb_per_layer_list,
+            nlow_state_list=nlow_state_list,
+            norb_fix_list=norb_fix_list,
+            gauge_config=project_cfg.get("gauge"),
+            mode=mode,
+        )
     else:
         resolved_norb_fix_list, gauge_report = resolve_project_gauge_anchors(
             _selected_spin_project_input(np.asarray(hamk2d), spin),
@@ -2161,17 +3314,22 @@ def _cmd_project_from_config_impl(
     }
 
     # Run projection for each k (first dim of hamk)
-    effective_workers = max(1, min(workers, len(project_indices)))
+    effective_workers = _effective_project_workers(workers, len(project_indices))
     inner_blas_threads = _project_blas_threads(project_cfg, effective_workers)
     set_projector_blas_threads(inner_blas_threads)
     reporter.section("Build projectors")
     reporter.fields([("k-points", len(project_indices)), ("workers", workers)])
     if workers > effective_workers:
-        reporter.fields([("effective workers", f"{effective_workers} (limited by k-point count)")])
+        limit_reason = (
+            "limited by k-point count"
+            if len(project_indices) < min(workers, _PROJECT_DEFAULT_WORKER_CAP)
+            else "memory-safe default cap"
+        )
+        reporter.fields([("effective workers", f"{effective_workers} ({limit_reason})")])
     if verbose:
         reporter.fields([("BLAS threads/worker", inner_blas_threads)])
 
-    if workers <= 1:
+    if effective_workers <= 1:
         results = [_project_one_from_context(i, project_context) for i in project_indices]
     else:
         try:
@@ -2423,12 +3581,31 @@ def _cmd_project_from_config_impl(
             "basis_hash": basis_identity["basis_hash"],
         }
     )
+    candidate_fiber_rank = int(
+        sum(len(layer_bands) for layer_bands in nlow_state_list)
+    )
+    expected_dimension = int(q_count * candidate_fiber_rank)
+    if int(heff_arr.shape[-1]) != expected_dimension:
+        raise ValueError(
+            "materialized project dimension does not equal q_count*fiber_rank: "
+            f"{int(heff_arr.shape[-1])} != {q_count}*{candidate_fiber_rank}"
+        )
+    symmetry_certificate_hash = None
+    symmetry_input_identity_hash = None
     return _ExplicitProjectSelectionMaterialization(
         candidate_id=f"explicit-{candidate_hash[:16]}",
         candidate_dimension=int(heff_arr.shape[-1]),
         basis_handoff_hash=str(basis_identity["basis_hash"]),
         authoritative_heff_hash=heff_hash,
         heff_k_indices_hash=str(basis_identity["k_indices_hash"]),
+        certification_hash=symmetry_certificate_hash,
+        candidate_fiber_rank=candidate_fiber_rank,
+        q_count=int(q_count),
+        resolved_nlow_state_list=tuple(
+            tuple(int(band) for band in row) for row in nlow_state_list
+        ),
+        symmetry_certificate_hash=symmetry_certificate_hash,
+        symmetry_input_identity_hash=symmetry_input_identity_hash,
     )
 
 
@@ -2693,7 +3870,7 @@ def _report_kp_symm_summary(
     reporter.fields(
         [
             ("output", output_dir),
-            ("manifest", output_dir / "manifest.json"),
+            ("representations", output_dir / "representations.npz"),
             ("summary", output_dir / "summary.md"),
         ]
     )

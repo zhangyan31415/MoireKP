@@ -3675,17 +3675,59 @@ class ContinuumModelBuilder:
                     )
                 seen_ids.add(record_id)
                 seen_vectors.add(vector_key)
-                records.append(
-                    {
-                        "id": record_id,
-                        "kind": kind,
-                        "vector": vector,
-                        "source": str(
-                            raw_record.get("source", "case_q_pair_support")
-                        ),
-                        "support_count": support_count,
-                    }
-                )
+                record: Dict[str, Any] = {
+                    "id": record_id,
+                    "kind": kind,
+                    "vector": vector,
+                    "source": str(
+                        raw_record.get("source", "case_q_pair_support")
+                    ),
+                    "support_count": support_count,
+                }
+                if "source_harmonic_id" in raw_record:
+                    record["source_harmonic_id"] = int(
+                        raw_record["source_harmonic_id"]
+                    )
+                for field in ("adjoint_harmonic_id", "adjoint_generation"):
+                    if field not in raw_record:
+                        continue
+                    value = str(raw_record[field]).strip()
+                    if not value:
+                        raise ValueError(
+                            f"{template.get('name', source)}: harmonic record {index} "
+                            f"requires a non-empty {field}"
+                        )
+                    record[field] = value
+                if "source_orbit_harmonic_ids" in raw_record:
+                    source_ids = raw_record["source_orbit_harmonic_ids"]
+                    if not isinstance(source_ids, Sequence) or isinstance(
+                        source_ids, (str, bytes)
+                    ):
+                        raise ValueError(
+                            f"{template.get('name', source)}: harmonic record {index} "
+                            "source_orbit_harmonic_ids must be a list"
+                        )
+                    record["source_orbit_harmonic_ids"] = [
+                        int(value) for value in source_ids
+                    ]
+                for field, expected_ndim in (
+                    ("adjoint_vector", 1),
+                    ("source_orbit_vectors", 2),
+                ):
+                    if field not in raw_record:
+                        continue
+                    values = np.asarray(raw_record[field], dtype=float)
+                    if (
+                        values.ndim != expected_ndim
+                        or values.shape[-1] != 2
+                        or not np.all(np.isfinite(values))
+                    ):
+                        raise ValueError(
+                            f"{template.get('name', source)}: harmonic record {index} "
+                            f"{field} must end in a finite two-vector axis"
+                        )
+                    record[field] = values
+                records.append(record)
             return records
         raw = (
             template.get("harmonics")
@@ -3813,6 +3855,24 @@ class ContinuumModelBuilder:
                             "coefficient_unit": "eV",
                             "coefficient_role": "fitted",
                         }
+                        for provenance_key in (
+                            "source_harmonic_id",
+                            "adjoint_harmonic_id",
+                            "adjoint_generation",
+                        ):
+                            if provenance_key in harmonic:
+                                registry_metadata[provenance_key] = harmonic[
+                                    provenance_key
+                                ]
+                        for provenance_key in (
+                            "adjoint_vector",
+                            "source_orbit_harmonic_ids",
+                            "source_orbit_vectors",
+                        ):
+                            if provenance_key in harmonic:
+                                registry_metadata[provenance_key] = np.asarray(
+                                    harmonic[provenance_key]
+                                ).tolist()
                         self.model.add_term(
                             key,
                             Y_func,
@@ -4113,22 +4173,33 @@ def generate_kpath_from_symbols(
     if coords is None:
         coords = _DEFAULT_HEX_HIGH_SYM
 
+    def coordinate(label: str) -> np.ndarray:
+        point = np.asarray(coords[label], dtype=float).ravel()
+        if point.size == 2:
+            point = np.append(point, 0.0)
+        if point.size != 3:
+            raise ValueError(
+                f"High-symmetry coordinate {label!r} must have two or three entries, "
+                f"got {point.size}."
+            )
+        return point
+
     points: list[Sequence[float]] = []
     labels: list[str] = []
     for s in symbols:
         if s in coords:
-            points.append(coords[s])
+            points.append(coordinate(s))
             labels.append(s)
             continue
         # try a few normalizations
         s2 = s.strip()
         if s2 in coords:
-            points.append(coords[s2])
+            points.append(coordinate(s2))
             labels.append(s2)
             continue
         sU = s2.upper()
         if sU in coords:
-            points.append(coords[sU])
+            points.append(coordinate(sU))
             labels.append(s2)
             continue
         raise ValueError(f"Unknown high-symmetry symbol {s!r}. Provide `coords=` mapping to define it.")

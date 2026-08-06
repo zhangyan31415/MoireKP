@@ -35,6 +35,7 @@ from kp.identity import PROJECTION_BASIS_HANDOFF_VERSION, hash_array, hash_mappi
 from kp.low_energy_selection import CandidateMetrics
 from kp.selection_artifact import (
     CertificationEvidence,
+    CertificationStatus,
     ResolvedCandidateIdentity,
     SelectionArtifact,
     SelectionBindingError,
@@ -2128,10 +2129,15 @@ def test_kp_symm_validates_routed_selection_before_invalidating_outputs(
     def load_selection(
         _project_dir: Path,
         handoff: GammaRoutedBasisSpec,
-    ) -> str:
+    ) -> object:
         assert handoff is spec
         events.append("selection")
-        return "f" * 64
+        return SimpleNamespace(
+            artifact=SimpleNamespace(
+                certification_status=CertificationStatus.CERTIFIED,
+                identity=SimpleNamespace(selection_identity_hash="f" * 64),
+            )
+        )
 
     def stop_at_first_invalidation(_output_dir: Path) -> None:
         assert events == ["handoff", "selection"]
@@ -2155,7 +2161,7 @@ def test_kp_symm_validates_routed_selection_before_invalidating_outputs(
         ) as build_context,
         patch.object(
             projection_mod,
-            "_load_current_gamma_selection_identity_hash",
+            "_load_current_gamma_selection_binding",
             side_effect=load_selection,
         ),
         patch.object(

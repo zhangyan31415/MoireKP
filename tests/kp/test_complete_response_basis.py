@@ -275,6 +275,62 @@ def test_support_closure_uses_monomial_structural_orbit_without_seed_transforms(
     np.testing.assert_array_equal(masks["onsite"], np.eye(2, dtype=bool))
 
 
+def test_support_closure_uses_certified_boolean_orbit_for_dense_internal_mixing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    coordinate = _toy_coordinate(max_degree=0)
+    mixing = np.asarray(
+        [[1.0, 1.0], [1.0, -1.0]],
+        dtype=np.complex128,
+    ) / np.sqrt(2.0)
+    group = build_finite_group(
+        [
+            FiniteGroupGenerator(
+                name="mix",
+                antiunitary=False,
+                canonical_k_map=((1, 0), (0, 1)),
+                q_permutation=(1, 0),
+                sector_permutation=(0,),
+                k_forward=((1.0, 0.0), (0.0, 1.0)),
+                internal_u=mixing,
+            )
+        ]
+    )
+    seed = RawPolynomialSeed(
+        seed_id="dense-mixing-support-seed",
+        coefficients={
+            (0, 0): sparse.csr_matrix(([1.0], ([0], [0])), shape=(2, 2))
+        },
+        support_component="onsite",
+        metadata={"term_space_policy": "complete"},
+    )
+    internal_actions = {
+        tuple(element.canonical_word): sparse.csr_matrix(element.internal_u)
+        for element in group.elements
+    }
+
+    def fail_per_seed_transform(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("certified dense support transformed every seed")
+
+    monkeypatch.setattr(
+        response_basis_module,
+        "_apply_group_element",
+        fail_per_seed_transform,
+    )
+    masks, policy = response_basis_module._support_masks_from_seeds(
+        [seed],
+        group=group,
+        coordinate=coordinate,
+        internal_actions_by_word=internal_actions,
+    )
+
+    np.testing.assert_array_equal(masks["onsite"], np.ones((2, 2), dtype=bool))
+    assert policy["onsite"]["structural_support_closure_certified"] is True
+    assert policy["onsite"]["support_mask_compiler"] == (
+        "certified_factorized_boolean_group_adjoint_closure_v1"
+    )
+
+
 def test_rank_reduction_solves_component_dependencies_in_one_batch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1423,9 +1479,11 @@ def test_basis_hash_is_target_independent_and_fit_does_not_mutate_basis() -> Non
     assert fit_a.basis_hash == fit_b.basis_hash == original_hash
     assert fit_a.fit_hash != fit_b.fit_hash
     assert fit_a.fit_hash != fit_c.fit_hash
-    assert fit_a.fit_pivots == (0, 1)
+    assert fit_a.fit_pivots == ()
     assert fit_b.fit_pivots == ()
     assert fit_a.fit_solver_channel_ids == fit_b.fit_solver_channel_ids
+    assert fit_a.fit_response_gram_rank == 2
+    assert fit_a.fit_design_certified_rank == 2
     np.testing.assert_allclose(fit_a.coefficients, [1.0, 2.0], atol=1.0e-12)
     assert fit_a.nonzero_channel_ids == ("E11:real", "E22:real")
 
@@ -1632,7 +1690,10 @@ def test_fitted_response_model_owns_finite_readonly_coefficients() -> None:
     with pytest.raises(ValueError, match="non-negative"):
         dataclasses.replace(fitted, fit_design_propagated_error_bound=-1.0)
     with pytest.raises(ValueError, match="certified rank"):
-        dataclasses.replace(fitted, fit_design_certified_rank=len(fitted.fit_pivots) + 1)
+        dataclasses.replace(
+            fitted,
+            fit_design_certified_rank=fitted.fit_response_gram_rank + 1,
+        )
     with pytest.raises(ValueError, match="fit solver policy"):
         dataclasses.replace(fitted, fit_solver_policy="untrusted-bypass")
 
@@ -1715,7 +1776,9 @@ def test_fit_rank_and_coefficients_use_dimensionless_response_normalized_variabl
         band_window=[0, 2],
     )
 
-    assert len(fitted.fit_selected_channel_ids) == 2
+    assert fitted.fit_selected_channel_ids == ()
+    assert len(fitted.fit_solver_channel_ids) == 2
+    assert fitted.fit_response_gram_rank == 2
     np.testing.assert_allclose(
         basis.hamiltonians([[0.0, 0.0]], fitted.coefficients),
         target,
@@ -2971,6 +3034,167 @@ class _GaugeCovarianceSymmetryGenerator(_MatrixGenerator):
         return self.factorized_actions.get(name)
 
 
+def test_nonclosed_factorized_seed_vocabulary_has_the_same_physical_projector_as_joint_and_dense() -> None:
+    from kp.model.response_basis_factorized import (
+        FactorizedTermActionError,
+        compile_factorized_group_element_actions,
+        compile_factorized_raw_seed_action,
+        compile_joint_route_group_element_actions,
+    )
+    from kp.model.response_basis_symmetry_first import (
+        compile_symmetry_first_fixed_space,
+    )
+
+    qset = np.asarray([[-1.0, 0.0], [1.0, 0.0]], dtype=float)
+    # A quarter-turn relative phase makes the missing authored Fourier
+    # direction well separated instead of manufacturing a nearly singular
+    # epsilon-scale counterexample.
+    q_phases = np.asarray(
+        [1.0, 1.0j, 1.0, -1.0j],
+        dtype=np.complex128,
+    )
+    q_permutation = (2, 3, 0, 1)
+    matrix = np.zeros((4, 4), dtype=np.complex128)
+    matrix[np.asarray(q_permutation), np.arange(4)] = q_phases
+    factorized = certify_factorized_action(
+        name="C2",
+        matrix=matrix,
+        antiunitary=False,
+        k_forward=np.eye(2),
+        q_permutation=q_permutation,
+        sector_permutation=(1, 0),
+        q_vectors=(qset, qset),
+        q_counts=(2, 2),
+        n_orb=(1, 1),
+        matrix_absolute_error_bound=1.0e-13,
+        q_absolute_error_bound=1.0e-13,
+    )
+    joint = BlockRouteAction(
+        name="C2",
+        antiunitary=False,
+        fiber_permutation=q_permutation,
+        fiber_dimensions=(1, 1, 1, 1),
+        fiber_indices=((0,), (1,), (2,), (3,)),
+        route_blocks=tuple(
+            np.asarray([[phase]], dtype=np.complex128) for phase in q_phases
+        ),
+    )
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=0,
+    )
+    seeds = tuple(
+        raw_polynomial_seed_from_term_key(
+            SimpleNamespace(
+                Mz=0,
+                Mz_star=0,
+                layer_from=layer_from,
+                layer_to=layer_to,
+                orbital_from=1,
+                orbital_to=1,
+                p=(0.0, 0.0),
+            ),
+            seed_id=f"inter:{layer_from}->{layer_to}",
+            Q_set1=qset,
+            Q_set2=qset,
+            n_orb1=1,
+            n_orb2=1,
+            coordinate=coordinate,
+            support_component="inter",
+            metadata={
+                "term_index": term_index,
+                "term_space_policy": "complete",
+            },
+        )
+        for term_index, (layer_from, layer_to) in enumerate(((1, 2), (2, 1)))
+    )
+    group = build_finite_group(
+        [
+            FiniteGroupGenerator(
+                name="C2",
+                antiunitary=False,
+                canonical_k_map=((1, 0), (0, 1)),
+                q_permutation=q_permutation,
+                sector_permutation=(1, 0),
+                k_forward=((1.0, 0.0), (0.0, 1.0)),
+                internal_u=matrix,
+            )
+        ]
+    )
+
+    # The authored equal-amplitude interlayer seeds are deliberately not
+    # closed under the Q-dependent phase pattern.
+    with pytest.raises(
+        FactorizedTermActionError,
+        match="not constant on its support|outside the authored seed vocabulary",
+    ):
+        compile_factorized_raw_seed_action(
+            seeds=seeds,
+            factorized_action=factorized,
+        )
+
+    factorized_actions, factorized_artifact = (
+        compile_factorized_group_element_actions(
+            group=group,
+            factorized_generators={"C2": factorized},
+        )
+    )
+    factorized_symbolic = compile_symmetry_first_fixed_space(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions={"C2": factorized},
+        internal_actions_by_word=factorized_actions,
+        factorized_group_artifact=factorized_artifact,
+    )
+    joint_actions, joint_artifact = compile_joint_route_group_element_actions(
+        group=group,
+        joint_route_generators={"C2": joint},
+        joint_artifact_hash="a" * 64,
+    )
+    joint_symbolic = compile_symmetry_first_fixed_space(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions={},
+        internal_actions_by_word=joint_actions,
+        factorized_group_artifact=joint_artifact,
+    )
+    dense = compile_candidate_responses(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+    )
+    dense_vectors = sparse.hstack(
+        [
+            response_basis_module._channel_sparse_vector(
+                channel,
+                coordinate,
+                4,
+            )
+            for channel in dense.channels
+        ],
+        format="csc",
+    ).toarray()
+
+    physical_bases = (
+        factorized_symbolic.physical_basis.toarray(),
+        joint_symbolic.physical_basis.toarray(),
+        dense_vectors,
+    )
+    ranks = [np.linalg.matrix_rank(basis, tol=1.0e-12) for basis in physical_bases]
+    assert factorized_symbolic.rank == joint_symbolic.rank == ranks[-1] > 0
+    assert ranks[0] == ranks[1] == ranks[2]
+    reference_projector = physical_bases[-1] @ np.linalg.pinv(
+        physical_bases[-1],
+        rcond=1.0e-12,
+    )
+    for basis in physical_bases[:-1]:
+        projector = basis @ np.linalg.pinv(basis, rcond=1.0e-12)
+        np.testing.assert_allclose(projector, reference_projector, atol=5.0e-12)
+
+
 def _gamma_gauge_covariance_config(
     *,
     matrices: dict[str, np.ndarray],
@@ -3423,59 +3647,81 @@ def test_complete_policy_enumerates_ordered_pairs_and_reduces_in_coefficient_spa
     assert basis.candidate_artifact["adjoint_orbit_descriptor_count"] == 3
     assert basis.candidate_artifact["hermitian_ambient_channel_count"] == 4
     assert (
+        basis.candidate_artifact["physically_materialized_projected_channel_count"]
+        == 4
+    )
+    assert (
         basis.candidate_artifact["physically_compiled_representative_channel_count"]
         == 4
     )
     assert basis.candidate_artifact["adjoint_certified_dropped_channel_count"] == 4
     assert len(basis.channels) == 4
     assert all(
-        proof["block_rule"] == "joint_group_adjoint_support_component"
+        proof["block_rule"] == "filtered_degree_residual_owner_pivots"
         for proof in basis.reduction_proofs
     )
 
 
-def test_complete_p0_model_routes_through_generator_fixed_compiler(
+def test_complete_p0_model_routes_through_graded_symbolic_compiler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import kp.model.response_basis_graded as graded_module
+
     clear_response_basis_cache()
     config = _complete_onsite_config()
     model = build_model(config)
     calls = 0
-    materialize_flags: list[bool] = []
-    original = response_basis_module.compile_generator_fixed_response_group
+    original = graded_module.compile_graded_candidate_group
 
-    def counted_fixed_compile(*args: object, **kwargs: object):
+    def counted_graded_compile(*args: object, **kwargs: object):
         nonlocal calls
         calls += 1
-        materialize_flags.append(bool(kwargs.get("materialize_ambient_vectors", True)))
         return original(*args, **kwargs)
 
-    def fail_dense_candidate_route(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("p=0 production basis entered per-seed Reynolds route")
-
     monkeypatch.setattr(
-        response_basis_module,
-        "compile_generator_fixed_response_group",
-        counted_fixed_compile,
-    )
-    monkeypatch.setattr(
-        response_basis_module,
-        "_compile_candidate_group_with_adjoint_fallback",
-        fail_dense_candidate_route,
+        graded_module,
+        "compile_graded_candidate_group",
+        counted_graded_compile,
     )
 
     basis = compile_model_response_basis(model, config, reduce=True)
     assert calls == 1
-    assert materialize_flags == [False]
     assert any(
-        proof["solver"] == "generator_fixed_subspace__direct_term_action_metric_v1"
+        proof["solver"] == "graded_filtered_symbolic_p0_reynolds_v1"
         for proof in basis.reduction_proofs
     )
     identity_artifact = basis.candidate_artifact["adjoint"]["groups"][0]
-    assert identity_artifact["generator_image_compiler"] == (
-        "analytic_identity_term_action_v1"
+    assert identity_artifact["certification"] == "graded_filtered_reynolds_v1"
+    outer_timings = basis.candidate_artifact["adjoint"]["outer_timings_seconds"]
+    for key in (
+        "certified_group_actions",
+        "support_mask_closure",
+        "p0_complete_compile",
+        "finite_complete_compile",
+        "group_artifact_merge",
+    ):
+        assert outer_timings[key] >= 0.0
+
+
+def test_complete_p0_graded_compiler_does_not_repeat_postcompile_adjoint_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_response_basis_cache()
+
+    def fail_repeated_scan(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("p=0 graded compile repeated the raw-adjoint scan")
+
+    monkeypatch.setattr(
+        response_basis_module,
+        "_certify_joint_adjoint_seed_orbits",
+        fail_repeated_scan,
     )
-    assert identity_artifact["builtin_exact_generator_names"] == ("identity",)
+    config = _complete_onsite_config()
+    basis = compile_model_response_basis(build_model(config), config, reduce=True)
+
+    assert basis.candidate_artifact["adjoint_orbit_descriptor_count"] == 3
+    assert basis.candidate_artifact["hermitian_ambient_channel_count"] == 4
+    assert basis.candidate_artifact["adjoint_certified_dropped_channel_count"] == 4
 
 
 def test_declared_p0_orbit_representative_uses_primary_reynolds_route() -> None:
@@ -3513,7 +3759,7 @@ def test_declared_p0_orbit_representative_uses_primary_reynolds_route() -> None:
     assert np.linalg.matrix_rank(real_vectors) == 2
 
 
-def test_complete_finite_p_routes_through_symbolic_atom_compiler(
+def test_complete_finite_p_routes_through_graded_symbolic_compiler(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
@@ -3580,8 +3826,76 @@ def test_complete_finite_p_routes_through_symbolic_atom_compiler(
     assert basis.candidate_artifact["candidate_channel_count"] == 4
     assert basis.candidate_artifact["logical_candidate_channel_count"] == 4
     assert basis.candidate_artifact["adjoint"]["groups"][0]["certification"] == (
+        "graded_filtered_reynolds_v1"
+    )
+
+
+def test_complete_finite_p_typed_graded_fallback_records_symbolic_oracle_provenance(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kp.model.response_basis_graded as graded_module
+
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=0,
+    )
+    q_vectors = np.asarray([[0.0, 0.0], [1.0, 0.0]])
+    seed = raw_polynomial_seed_from_term_key(
+        SimpleNamespace(
+            Mz=0,
+            Mz_star=0,
+            layer_from=1,
+            layer_to=1,
+            orbital_from=1,
+            orbital_to=1,
+            p=(1.0, 0.0),
+        ),
+        seed_id="finite-p-typed-graded-fallback",
+        Q_set1=q_vectors,
+        Q_set2=np.empty((0, 2)),
+        n_orb1=1,
+        n_orb2=0,
+        coordinate=coordinate,
+        support_component="intra",
+        metadata={"term_index": 0, "term_space_policy": "complete"},
+    )
+
+    def reject_graded(*_args: object, **_kwargs: object) -> None:
+        raise graded_module.GradedCompilationUnavailable(
+            "synthetic finite-p typed fallback"
+        )
+
+    monkeypatch.setattr(
+        graded_module,
+        "compile_graded_candidate_group",
+        reject_graded,
+    )
+
+    basis = response_basis_module._compile_model_response_basis_uncached(
+        coordinate=coordinate,
+        groups=[identity_finite_group(2, q_size=2, sector_size=2)],
+        seeds_by_group=[[seed]],
+        factorized_actions_by_group=[{}],
+        dim=2,
+        identity_payload=_identity_payload(2),
+        reduce=True,
+        cache_key="test-finite-p-typed-graded-fallback-provenance",
+        progress_callback=None,
+    )
+
+    assert basis.candidate_artifact["adjoint"]["groups"][0]["certification"] == (
         "closed_symbolic_atom_reynolds_v1"
     )
+    assert [
+        (proof["solver"], proof["block_rule"])
+        for proof in basis.reduction_proofs
+    ] == [
+        (
+            "symbolic_reynolds_typed_fallback_v1",
+            "symbolic_atom_support_components",
+        )
+    ]
 
 
 def test_fixed_group_direct_sum_is_certified_from_disjoint_coefficient_rows() -> None:
@@ -3622,32 +3936,43 @@ def test_fixed_group_direct_sum_is_certified_from_disjoint_coefficient_rows() ->
     )
 
 
-def test_complete_p0_model_propagates_generator_span_closure_error(
+def test_complete_p0_uses_symbolic_oracle_for_typed_graded_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kp.model.response_basis_fixed_compiler import GeneratorSpanClosureError
+    import kp.model.response_basis_graded as graded_module
+    import kp.model.response_basis_symmetry_first as symbolic_module
 
     clear_response_basis_cache()
     config = _complete_onsite_config()
+    symbolic_calls = 0
+    original_symbolic = symbolic_module.compile_symbolic_atom_candidate_group
 
-    def reject_fixed(*_args: object, **_kwargs: object) -> None:
-        raise GeneratorSpanClosureError("synthetic non-closed authored span")
+    def reject_graded(*_args: object, **_kwargs: object) -> None:
+        raise graded_module.GradedCompilationUnavailable("synthetic typed fallback")
+
+    def counted_symbolic(*args: object, **kwargs: object):
+        nonlocal symbolic_calls
+        symbolic_calls += 1
+        return original_symbolic(*args, **kwargs)
 
     monkeypatch.setattr(
-        response_basis_module,
-        "compile_generator_fixed_response_group",
-        reject_fixed,
+        graded_module,
+        "compile_graded_candidate_group",
+        reject_graded,
+    )
+    monkeypatch.setattr(
+        symbolic_module,
+        "compile_symbolic_atom_candidate_group",
+        counted_symbolic,
     )
 
-    with pytest.raises(
-        GeneratorSpanClosureError,
-        match="synthetic non-closed authored span",
-    ) as caught:
-        compile_model_response_basis(model=build_model(config), config=config, reduce=True)
-
+    basis = compile_model_response_basis(
+        model=build_model(config), config=config, reduce=True
+    )
+    assert symbolic_calls == 1
     assert any(
-        "p=0 fixed-space" in note and "group 0" in note
-        for note in getattr(caught.value, "__notes__", ())
+        proof["solver"] == "symbolic_p0_reynolds_typed_fallback_v1"
+        for proof in basis.reduction_proofs
     )
 
 
@@ -3713,7 +4038,7 @@ def test_complete_p0_propagates_factorized_term_action_error() -> None:
         )
 
     assert any(
-        "p=0 fixed-space" in note and "group 0" in note
+        "sparse group actions" in note and "group 0" in note
         for note in getattr(caught.value, "__notes__", ())
     )
 
@@ -3725,7 +4050,7 @@ def test_complete_p0_rejects_missing_certified_factorized_action() -> None:
 
     with pytest.raises(
         FactorizedTermActionError,
-        match="missing certified factorized action.*C2",
+        match="missing group words.*C2",
     ) as caught:
         response_basis_module._compile_model_response_basis_uncached(
             coordinate=coordinate,
@@ -3740,7 +4065,7 @@ def test_complete_p0_rejects_missing_certified_factorized_action() -> None:
         )
 
     assert any(
-        "p=0 fixed-space" in note and "group 0" in note
+        "sparse group actions" in note and "group 0" in note
         for note in getattr(caught.value, "__notes__", ())
     )
 
@@ -3858,7 +4183,7 @@ def test_complete_p0_rejects_malformed_singleton_identity_action() -> None:
 
     with pytest.raises(
         FactorizedTermActionError,
-        match="missing certified factorized action.*identity",
+        match="empty-word finite-group element is not a strict identity",
     ):
         response_basis_module._compile_model_response_basis_uncached(
             coordinate=coordinate,
@@ -3935,10 +4260,10 @@ def test_complete_finite_p_propagates_factorized_term_action_error(
     )
 
 
-def test_complete_finite_p_propagates_unexpected_symbolic_runtime_error(
+def test_complete_finite_p_propagates_unexpected_graded_runtime_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kp.model import response_basis_symmetry_first
+    from kp.model import response_basis_graded
 
     coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
         origin=(0.0, 0.0),
@@ -3965,18 +4290,18 @@ def test_complete_finite_p_propagates_unexpected_symbolic_runtime_error(
         metadata={"term_index": 0, "term_space_policy": "complete"},
     )
 
-    def crash_symbolic(*_args: object, **_kwargs: object) -> None:
-        raise RuntimeError("synthetic symbolic implementation bug")
+    def crash_graded(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("synthetic graded implementation bug")
 
     monkeypatch.setattr(
-        response_basis_symmetry_first,
-        "compile_symbolic_atom_candidate_group",
-        crash_symbolic,
+        response_basis_graded,
+        "compile_graded_candidate_group",
+        crash_graded,
     )
 
     with pytest.raises(
         RuntimeError,
-        match="synthetic symbolic implementation bug",
+        match="synthetic graded implementation bug",
     ) as caught:
         response_basis_module._compile_model_response_basis_uncached(
             coordinate=coordinate,
@@ -3986,7 +4311,7 @@ def test_complete_finite_p_propagates_unexpected_symbolic_runtime_error(
             dim=2,
             identity_payload=_identity_payload(2),
             reduce=True,
-            cache_key="test-symbolic-error-propagates",
+            cache_key="test-graded-error-propagates",
             progress_callback=None,
         )
 
@@ -4035,9 +4360,18 @@ def test_complete_compiler_preserves_authored_seeds_before_key_deduplication() -
     basis = compile_model_response_basis(model, config, reduce=False)
 
     assert basis.candidate_artifact["candidate_channel_count"] == 16
+    group_artifact = basis.candidate_artifact["adjoint"]["groups"][0]
+    assert group_artifact["physical_seed_count"] == 4
+    assert group_artifact["duplicate_seed_groups"] == (
+        (0, 4),
+        (1, 5),
+        (2, 6),
+        (3, 7),
+    )
     authored_names = {
-        channel["metadata"]["term_name"]
+        source["family"]
         for channel in basis.candidate_artifact["channels"]
+        for source in channel["metadata"]["graded_source_provenance"]
     }
     assert authored_names == {"complete_onsite", "complete_onsite_second_author"}
 
@@ -4081,25 +4415,25 @@ def test_model_basis_persistent_cache_survives_memory_cache_clear(
     clear_response_basis_cache()
     config = _complete_onsite_config()
     config.output_dir = tmp_path / "model"
-    candidate_compile_calls = 0
+    cold_compile_calls = 0
 
     import kp.model.response_basis as response_basis_module
 
-    original_compile_candidates = response_basis_module.compile_candidate_responses
+    original_cold_compile = response_basis_module._compile_model_response_basis_uncached
 
-    def counted_compile_candidates(*args: object, **kwargs: object):
-        nonlocal candidate_compile_calls
-        candidate_compile_calls += 1
-        return original_compile_candidates(*args, **kwargs)
+    def counted_cold_compile(*args: object, **kwargs: object):
+        nonlocal cold_compile_calls
+        cold_compile_calls += 1
+        return original_cold_compile(*args, **kwargs)
 
     monkeypatch.setattr(
         response_basis_module,
-        "compile_candidate_responses",
-        counted_compile_candidates,
+        "_compile_model_response_basis_uncached",
+        counted_cold_compile,
     )
 
     first = compile_model_response_basis(build_model(config), config, reduce=True)
-    assert candidate_compile_calls > 0
+    assert cold_compile_calls == 1
     cache_files = list(
         (Path(config.output_dir) / ".compiled_response_basis_cache").glob("*.npz")
     )
@@ -4109,17 +4443,17 @@ def test_model_basis_persistent_cache_survives_memory_cache_clear(
     second = compile_model_response_basis(build_model(config), config, reduce=True)
 
     assert second.basis_hash == first.basis_hash
-    assert candidate_compile_calls == 1
+    assert cold_compile_calls == 1
     assert str(config.output_dir) not in str(second.artifact())
 
 
-def test_model_basis_persistent_cache_v46_cannot_bypass_v47_joint_route_compiler(
+def test_model_basis_persistent_cache_v52_cannot_bypass_v53_structural_generators(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_response_basis_cache()
     assert response_basis_module.COMPILER_VERSION == (
-        "complete-response-basis-v2-symbolic-finite-p-v47"
+        "complete-response-basis-v2-structural-generators-v53"
     )
     config = _complete_onsite_config()
     config.output_dir = tmp_path / "model"
@@ -4127,18 +4461,18 @@ def test_model_basis_persistent_cache_v46_cannot_bypass_v47_joint_route_compiler
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-symbolic-finite-p-v46",
+        "complete-response-basis-v2-graded-finite-p-v52",
     )
     compile_model_response_basis(build_model(config), config, reduce=True)
     cache_dir = Path(config.output_dir) / ".compiled_response_basis_cache"
-    v46_files = set(cache_dir.glob("*.npz"))
-    assert len(v46_files) == 1
+    v52_files = set(cache_dir.glob("*.npz"))
+    assert len(v52_files) == 1
 
     clear_response_basis_cache()
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-symbolic-finite-p-v47",
+        "complete-response-basis-v2-structural-generators-v53",
     )
     cold_calls = 0
     original_cold_compile = response_basis_module._compile_model_response_basis_uncached
@@ -4156,9 +4490,9 @@ def test_model_basis_persistent_cache_v46_cannot_bypass_v47_joint_route_compiler
     compile_model_response_basis(build_model(config), config, reduce=True)
 
     assert cold_calls == 1
-    v47_files = set(cache_dir.glob("*.npz"))
-    assert len(v47_files) == 2
-    assert v46_files < v47_files
+    v53_files = set(cache_dir.glob("*.npz"))
+    assert len(v53_files) == 2
+    assert v52_files < v53_files
 
 
 def test_model_basis_persistent_cache_corruption_fails_closed(
@@ -4324,7 +4658,7 @@ def test_model_basis_persistent_cache_is_warm_in_second_python_process(
 
 def test_model_basis_same_key_concurrent_processes_compile_once(tmp_path: Path) -> None:
     cache_output = tmp_path / "model"
-    count_path = tmp_path / "candidate-compile-count"
+    count_path = tmp_path / "cold-compile-count"
     script = textwrap.dedent(
         f"""
         import time
@@ -4336,13 +4670,13 @@ def test_model_basis_same_key_concurrent_processes_compile_once(tmp_path: Path) 
         config = _complete_onsite_config()
         config.output_dir = {str(cache_output)!r}
         count_path = Path({str(count_path)!r})
-        original = response_basis_module.compile_candidate_responses
+        original = response_basis_module._compile_model_response_basis_uncached
         def counted(*args, **kwargs):
             with count_path.open("a", encoding="utf-8") as handle:
                 handle.write("compile\\n")
             time.sleep(0.5)
             return original(*args, **kwargs)
-        response_basis_module.compile_candidate_responses = counted
+        response_basis_module._compile_model_response_basis_uncached = counted
         response_basis_module.compile_model_response_basis(
             build_model(config), config, reduce=True
         )
@@ -4523,8 +4857,9 @@ def test_fit_grid_rank_and_pivots_never_change_compiled_basis() -> None:
         band_window=[0, 2],
     )
 
-    assert len(rank_one.fit_pivots) == 1
-    assert len(rank_two.fit_pivots) == 2
+    assert rank_one.fit_pivots == rank_two.fit_pivots == ()
+    assert rank_one.fit_design_certified_rank == 1
+    assert rank_two.fit_design_certified_rank == 2
     assert basis.artifact() == artifact_before
     assert rank_one.basis_hash == rank_two.basis_hash == basis.basis_hash
     assert rank_one.fit_hash != rank_two.fit_hash
@@ -4583,12 +4918,92 @@ def test_fit_rank_excludes_directions_below_propagated_fit_design_error() -> Non
         band_window=[0, 2],
     )
 
-    assert len(fitted.fit_pivots) == 1
-    assert fitted.fit_design_propagated_error_bound > fitted.fit_design_singular_values[1]
+    assert fitted.fit_pivots == ()
+    assert fitted.fit_response_gram_rank == 1
+    assert (
+        fitted.fit_response_gram_eigenvalues[1]
+        <= fitted.fit_response_gram_rank_tolerance
+    )
     assert fitted.fit_design_rank_tolerance >= fitted.fit_design_propagated_error_bound
-    assert fitted.fit_solver_policy == "real_svd_global_monomial_propagated_backward_error_v2"
+    assert (
+        fitted.fit_solver_policy
+        == "real_physical_coefficient_gram_whitened_minimum_norm_svd_v4"
+    )
     assert fitted.fit_selected_singular_value_min > fitted.fit_selected_error_bound
     assert basis.artifact() == artifact_before
+
+
+def test_fit_records_certified_rank_in_whitened_physical_response_span() -> None:
+    """Redundant owner channels do not reduce the physical fit-design rank."""
+
+    coordinate = _toy_coordinate(max_degree=0)
+    root_three_over_two = np.sqrt(3.0) / 2.0
+    candidates = compile_candidate_responses(
+        [
+            RawPolynomialSeed(
+                "direction-a",
+                {(0, 0): sparse.csr_matrix(np.diag([1.0, 0.0]).astype(complex))},
+                "diag",
+                {},
+            ),
+            RawPolynomialSeed(
+                "direction-b",
+                {
+                    (0, 0): sparse.csr_matrix(
+                        np.diag([0.5, root_three_over_two]).astype(complex)
+                    )
+                },
+                "diag",
+                {},
+            ),
+            RawPolynomialSeed(
+                "direction-c",
+                {
+                    (0, 0): sparse.csr_matrix(
+                        np.diag([-0.5, root_three_over_two]).astype(complex)
+                    )
+                },
+                "diag",
+                {},
+            ),
+        ],
+        coordinate=coordinate,
+        group=identity_finite_group(2),
+    )
+    candidates = dataclasses.replace(
+        candidates,
+        channels=tuple(
+            dataclasses.replace(
+                channel,
+                propagated_error_bound=0.51 * channel.response_scale,
+                error_bound_components={
+                    "certified_test_bound": 0.51 * channel.response_scale
+                },
+                classification="confirmed_nonzero",
+            )
+            if channel.component == "real"
+            else channel
+            for channel in candidates.channels
+        ),
+    )
+    basis = CompiledResponseBasis.from_candidates(
+        candidates,
+        identity_payload=_identity_payload(2),
+        reduce=False,
+    )
+
+    fitted = basis.fit(
+        [[0.0, 0.0]],
+        np.asarray([np.diag([2.0, 3.0])], dtype=complex),
+        fit_indices=[0],
+        regularization=0.0,
+        band_window=[0, 2],
+    )
+
+    assert fitted.fit_pivots == ()
+    assert fitted.fit_response_gram_rank == 2
+    assert fitted.fit_design_certified_rank == 2
+    assert fitted.fit_selected_singular_value_min > fitted.fit_selected_error_bound
 
 
 def test_regularized_fit_uses_all_confirmed_channels_instead_of_pretruncating() -> None:
@@ -4694,6 +5109,25 @@ def _spectral_fit_toy_basis(*, only_e11: bool = False) -> CompiledResponseBasis:
         identity_payload=_identity_payload(2),
         reduce=True,
     )
+
+
+def test_response_action_matches_dense_response_tensor() -> None:
+    basis = _spectral_fit_toy_basis()
+    points = np.asarray([[0.0, 0.0], [0.2, -0.1]], dtype=float)
+    frames = np.asarray(
+        [
+            [[1.0], [0.0]],
+            [[1.0 / np.sqrt(2.0)], [1.0j / np.sqrt(2.0)]],
+        ],
+        dtype=np.complex128,
+    )
+    selected = np.asarray([0, 2], dtype=np.int64)
+
+    action = basis.response_action(points, frames, channel_indices=selected)
+    dense = basis.response_tensor(points)[:, selected]
+    expected = np.einsum("kcmn,kns->kcms", dense, frames, optimize=True)
+
+    np.testing.assert_allclose(action, expected, atol=1.0e-13)
 
 
 def _dense_target_spectral_ridge_oracle(
@@ -5647,6 +6081,59 @@ def test_fit_design_error_maps_constant_complex_channel_without_extra_sqrt_two()
     # ||[1,1,1,1]||_2 * (e/s) = 2 * 0.01.  Real-stacking is
     # an isometry, so a complex Hermitian response adds no sqrt(2).
     assert fitted.fit_design_propagated_error_bound == pytest.approx(2.0e-2)
+    assert fitted.fit_design_certified_rank == 1
+
+
+def test_normalized_low_energy_fit_scales_design_error_with_full_matrix_rows() -> None:
+    """The error certificate must use the same 1/dim scaling as the objective."""
+
+    coordinate = _toy_coordinate(max_degree=0)
+    e12 = sparse.csr_matrix(np.asarray([[0.0, 1.0], [0.0, 0.0]], dtype=complex))
+    candidates = compile_candidate_responses(
+        [RawPolynomialSeed("E12", {(0, 0): e12}, "offdiag", {})],
+        coordinate=coordinate,
+        group=identity_finite_group(2),
+    )
+    candidates = dataclasses.replace(
+        candidates,
+        channels=tuple(
+            dataclasses.replace(
+                channel,
+                propagated_error_bound=1.0e-2 * channel.response_scale,
+                error_bound_components={"certified_test_bound": 1.0e-2 * channel.response_scale},
+                classification="confirmed_nonzero" if channel.component == "imag" else "ambiguous",
+            )
+            for channel in candidates.channels
+        ),
+    )
+    basis = CompiledResponseBasis.from_candidates(
+        candidates,
+        identity_payload=_identity_payload(2),
+        reduce=False,
+    )
+    points = np.zeros((4, 2), dtype=float)
+    imag_channel = next(channel for channel in basis.channels if channel.component == "imag")
+    target = np.repeat(imag_channel.coefficients[(0, 0)].toarray()[None, :, :], 4, axis=0)
+
+    fitted = basis.fit(
+        points,
+        target,
+        fit_indices=[0, 1, 2, 3],
+        regularization=0.0,
+        band_window=[0, 2],
+        spectral_weighting={
+            "mode": "normalized_low_energy_linear_v1",
+            "band_edge": "top",
+            "window_mode": "fixed_count_degeneracy_safe",
+            "n_bands": 1,
+            "one_sided_weight": 0.0,
+            "two_sided_weight": 0.0,
+        },
+    )
+
+    # Four identical k points give ||[1,1,1,1]||_2 = 2.  The public
+    # full-matrix objective divides both the response and its error by dim=2.
+    assert fitted.fit_design_propagated_error_bound == pytest.approx(1.0e-2)
     assert fitted.fit_design_certified_rank == 1
 
 

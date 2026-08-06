@@ -30,6 +30,52 @@ def _phase_aligned_frobenius_residual(
     return float(np.linalg.norm(reference_array - phase * candidate_array, ord="fro"))
 
 
+def _is_strict_empty_word_identity(element: Any, *, dim: int) -> bool:
+    """Return whether an empty finite-group word is the physical identity."""
+
+    if bool(element.antiunitary) or tuple(element.canonical_word):
+        return False
+    if not np.array_equal(
+        np.asarray(element.canonical_k_map, dtype=np.int64),
+        np.eye(2, dtype=np.int64),
+    ):
+        return False
+    if tuple(int(value) for value in element.q_permutation) != tuple(
+        range(len(element.q_permutation))
+    ):
+        return False
+    if tuple(int(value) for value in element.sector_permutation) != tuple(
+        range(len(element.sector_permutation))
+    ):
+        return False
+    pullback = np.asarray(element.k_pullback, dtype=np.float64)
+    tolerance = 64.0 * np.finfo(np.float64).eps
+    if (
+        pullback.shape != (2, 2)
+        or not np.all(np.isfinite(pullback))
+        or not np.allclose(
+            pullback,
+            np.eye(2, dtype=np.float64),
+            rtol=0.0,
+            atol=tolerance,
+        )
+    ):
+        return False
+    internal = np.asarray(element.internal_u, dtype=np.complex128)
+    if internal.shape != (int(dim), int(dim)) or not np.all(np.isfinite(internal)):
+        return False
+    residual = _phase_aligned_frobenius_residual(
+        np.eye(int(dim), dtype=np.complex128),
+        internal,
+    )
+    residual_bound = float(
+        tolerance
+        * max(1.0, np.sqrt(float(internal.size)))
+        * max(1.0, np.sqrt(float(dim)))
+    )
+    return bool(residual <= residual_bound)
+
+
 def compile_factorized_group_element_actions(
     *,
     group: Any,
@@ -72,6 +118,14 @@ def compile_factorized_group_element_actions(
         raise FactorizedTermActionError(
             "finite-group internal matrices do not share one square dimension"
         )
+    for element in elements:
+        if not tuple(element.canonical_word) and not _is_strict_empty_word_identity(
+            element,
+            dim=dim,
+        ):
+            raise FactorizedTermActionError(
+                "empty-word finite-group element is not a strict identity"
+            )
 
     sparse_generators: dict[str, sparse.csr_matrix] = {}
     generator_bounds: dict[str, float] = {}

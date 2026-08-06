@@ -528,7 +528,7 @@ def test_project_full_path_does_not_emit_k_indices_selection_file(monkeypatch, t
 def test_parallel_project_uses_worker_initializer_without_hamk_payload(monkeypatch, tmp_path: Path) -> None:
     class FullPathHamk:
         ndim = 3
-        shape = (9, 4, 4)
+        shape = (61, 4, 4)
 
         def __getitem__(self, key):
             if not isinstance(key, int):
@@ -610,8 +610,8 @@ def test_parallel_project_uses_worker_initializer_without_hamk_payload(monkeypat
         "plot": {"hamk_index": 0},
         "project": {
             "mode": "K1",
-            "workers": 4,
-            "k_indices": list(range(9)),
+            "workers": 64,
+            "k_indices": list(range(61)),
             "downfold_method": "first_order",
             "out_dir": "project",
             "nlow_state_list": [[0], [0]],
@@ -620,23 +620,25 @@ def test_parallel_project_uses_worker_initializer_without_hamk_payload(monkeypat
     }
     cfg_path = tmp_path / "source.yaml"
     cfg_path.write_text(
-        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=9)),
+        yaml.safe_dump(_canonical_case_cfg(cfg, tmp_path=tmp_path, nk=61)),
         encoding="utf-8",
     )
 
     cli.cmd_project_from_config(str(cfg_path))
 
-    assert seen["parallel_kwargs"]["n_jobs"] == 4
+    assert seen["parallel_kwargs"]["n_jobs"] == 16
     assert seen["parallel_kwargs"]["return_as"] == "generator"
     assert "hamk" not in seen["initializer_context"]
-    assert seen["batches"] == [[0, 1], [2, 3], [4, 5], [6, 7], [8]]
-    assert seen["progress_total"] == 9
+    assert seen["batches"] == [
+        list(range(start, min(start + 2, 61))) for start in range(0, 61, 2)
+    ]
+    assert seen["progress_total"] == 61
     assert seen["progress_unit"] == "k"
     assert seen["progress_leave"] is True
-    assert seen["progress_updates"] == [2, 2, 2, 2, 1]
+    assert seen["progress_updates"] == [2] * 30 + [1]
     assert seen["progress_closed"] is True
     assert np.loadtxt(tmp_path / "project" / "eigvals.txt")[:, 0].tolist() == [
-        float(i + 1) for i in range(9)
+        float(i + 1) for i in range(61)
     ]
 
 
@@ -677,6 +679,12 @@ def test_project_blas_threads_auto_scales_with_worker_count(monkeypatch) -> None
     assert cli._project_blas_threads({}, 32) == 4
     assert cli._project_blas_threads({}, 64) == 2
     assert cli._project_blas_threads({"blas_threads": 3}, 64) == 3
+
+
+def test_effective_project_workers_caps_memory_heavy_parallelism() -> None:
+    assert cli._effective_project_workers(64, 61) == 16
+    assert cli._effective_project_workers(8, 61) == 8
+    assert cli._effective_project_workers(64, 5) == 5
 
 
 def test_project_cli_leaves_diagnostics_opt_in_by_default(monkeypatch, tmp_path: Path) -> None:

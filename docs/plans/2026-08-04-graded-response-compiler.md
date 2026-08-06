@@ -67,8 +67,10 @@ git commit -m "test(kp): specify graded response compilation"
 **Step 1: Define immutable structural records**
 
 Add dataclasses for structural support keys, closed structural orbits, degree
-blocks, and certification artifacts.  Canonical keys include family, sector
-pair, harmonic/Q-pair support, orbital pair, and adjoint provenance.
+blocks, and certification artifacts.  Canonical keys include sector pair,
+harmonic/Q-pair support, orbital pair, and adjoint provenance.  Family is
+retained as provenance and a source of the configured order bound, but is not
+part of physical structural identity.
 
 **Step 2: Implement homogeneous momentum actions**
 
@@ -120,8 +122,10 @@ blocks and certify full coverage and disjointness.
 
 **Step 3: Add a production-shape count test**
 
-For the MgI2-like fixture assert 56 top-level structural supports before fiber
-closure, with no fixed orbital or harmonic-sign template.
+For an MgI2-like fixture, derive the top-level structural-support count from
+its actual single-sign harmonic records and assert it against an independent
+physical-key oracle.  Do not encode a fixed material count, orbital template,
+or harmonic-sign template.
 
 **Step 4: Run tests**
 

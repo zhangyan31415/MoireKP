@@ -12,7 +12,10 @@ import kp.gamma_auto_runtime as runtime
 from kp.blocks import GammaRowLayout
 from kp.selection_artifact import SelectionInputIdentity
 from kp.selection_artifact import CertificationStatus, SelectionArtifactStore
-from kp.projection_handoff import GammaRoutedBasisSpec, load_gamma_routed_basis_spec
+from kp.projection_handoff import (
+    GammaRoutedBasisSpec,
+    load_gamma_common_anchor_basis_spec,
+)
 from kp.identity import load_projection_artifact_identity
 from kp.symmetry import projection as projection_mod
 
@@ -158,6 +161,10 @@ def _write_packed_gamma_runtime_case(
     np.save(tmp_path / "q1.npy", np.zeros((1, 2), dtype=np.float64))
     np.save(tmp_path / "q2.npy", np.zeros((1, 2), dtype=np.float64))
     np.save(tmp_path / "kpoints.npy", np.asarray([[0.0, 0.0, 0.0]]))
+    np.savetxt(
+        tmp_path / "bands.txt",
+        np.asarray([[-2.0, -2.0, -1.0, -1.0]], dtype=np.float64),
+    )
     identity2 = np.eye(2, dtype=np.complex128)
     tr = np.block(
         [
@@ -234,6 +241,7 @@ def _write_packed_gamma_runtime_case(
                     "qset1_file": "q1.npy",
                     "qset2_file": "q2.npy",
                     "kpoints_file": "kpoints.npy",
+                    "band_file": "bands.txt",
                     "spin": "all",
                     "energy_unit": "eV",
                     "num_layer_list": [1, 1],
@@ -348,11 +356,21 @@ def test_gamma_auto_dispatch_rejects_non_spinful_gamma_before_legacy(
         cli.cmd_project_from_config(str(cfg_path))
 
 
-def test_gamma_runtime_config_uses_strict_selection_payload_without_defaults() -> None:
-    payload = {"mode": "auto"}
+def test_gamma_runtime_materializes_bare_public_project_policy() -> None:
+    project = {
+        "mode": "Gamma",
+        "target": "valence",
+        "efermi": 0.0,
+        "downfold_method": "first_order",
+        "selection": {"mode": "auto"},
+    }
 
-    with pytest.raises(ValueError, match="routing_thresholds"):
-        runtime._load_strict_gamma_auto_config(payload)
+    config = runtime._load_strict_gamma_auto_config(project)
+
+    assert config.generated_candidate_envelope is True
+    assert config.candidate_seed_band_indices == ()
+    assert config.reference_k_index == -1
+    assert config.downfold.options.method == "first_order"
 
 
 def test_sampled_k_route_keeps_every_exact_hit_including_duplicate_gamma() -> None:
@@ -506,6 +524,30 @@ def test_gamma_runtime_materializes_real_packed_actions_routes_and_presentation(
     )
 
 
+def test_gamma_runtime_uses_projection_default_when_symmetry_tolerance_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg_path = _write_packed_gamma_runtime_case(tmp_path)
+    payload = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    del payload["symm"]["tolerance"]
+    cfg_path.write_text(yaml.safe_dump(payload), encoding="utf-8")
+    captured: dict[str, object] = {}
+
+    def prepare(inputs, config, *, workers):
+        captured["inputs"] = inputs
+        captured["config"] = config
+        captured["workers"] = workers
+        return object()
+
+    monkeypatch.setattr(runtime, "prepare_gamma_automatic_selection", prepare)
+
+    runtime.prepare_gamma_automatic_runtime(cfg_path)
+
+    assert captured["workers"] == 3
+    assert captured["inputs"].external_target_band_spectra.shape == (1, 4)
+
+
 @pytest.mark.parametrize("workers", [None, 0, -1, True, 1.5])
 def test_gamma_runtime_requires_explicit_positive_integer_project_workers(
     tmp_path: Path,
@@ -646,7 +688,8 @@ def test_gamma_auto_project_end_to_end_commits_identical_canonical_and_staged_pa
     }
     for name, content in staged.items():
         assert (project_dir / name).read_bytes() == content
-    handoff = load_gamma_routed_basis_spec(project_dir / "basis.npz")
+    handoff = load_gamma_common_anchor_basis_spec(project_dir / "basis.npz")
+    assert handoff.projection_basis_kind == "gamma_common_anchor"
     assert handoff.kpoints_hash == runtime.hash_array(
         np.load(project_dir / "kpoints.npy", allow_pickle=False)
     )
@@ -740,7 +783,8 @@ def test_gamma_auto_wavefunctions_embed_loader_compatible_model_spin_operator(
 
     project_dir = tmp_path / "projection"
     wavefunctions_path = project_dir / "wavefunctions.npz"
-    handoff = load_gamma_routed_basis_spec(project_dir / "basis.npz")
+    handoff = load_gamma_common_anchor_basis_spec(project_dir / "basis.npz")
+    assert handoff.projection_basis_kind == "gamma_common_anchor"
     spin_signs = np.asarray(
         [
             1.0 if address.spin_label == "up" else -1.0

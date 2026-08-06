@@ -54,12 +54,14 @@ from ..plot_style import (
 )
 from ..projection_handoff import (
     GAMMA_ROUTED_ONLY_BASIS_FIELDS,
+    load_gamma_common_anchor_basis_spec,
     load_gamma_routed_basis_spec,
 )
 from ..reporting import KpReporter
 from ..selection_artifact import (
     CertificationStatus,
     SelectionArtifactStore,
+    verify_certified_generic_selection_artifact,
     verify_certified_gamma_selection_artifact,
 )
 from ..symmetry.action_schema import SOURCE_MATRIX_SEMANTICS, allows_inferred_action_metadata
@@ -80,6 +82,7 @@ from .core import (
     compute_bands,
     compute_coefficients,
     generate_kpath_from_file,
+    generate_kpath_from_symbols,
     load_Q_sets_from_gvec_files,
     reciprocal_Tmat_from_Tmat,
     rot,
@@ -202,6 +205,7 @@ class ConfiguredModel:
     valley_model: dict[str, Any] = field(default_factory=dict)
     symmetry_source_config: dict[str, Any] = field(default_factory=dict)
     symmetry_source_metadata: dict[str, Any] = field(default_factory=dict)
+    model_basis_gauge: np.ndarray | None = field(default=None, repr=False)
     sectors_config: list[dict[str, Any]] = field(default_factory=list)
     term_templates: list[dict[str, Any]] = field(default_factory=list)
     term_template_metadata: dict[str, Any] = field(default_factory=dict)
@@ -513,9 +517,10 @@ def _resolve_projection_qset_counts(
             "projection Gamma group_ranks must contain one count for each of "
             f"qset1/qset2; got ranks={raw_values}, num_layer_list={list(num_layer_list)}"
         )
-    if any(value <= 0 for value in raw_values):
+    if any(value < 0 for value in raw_values) or sum(raw_values) <= 0:
         raise ValueError(
-            f"projection Gamma group_ranks must be positive, got {raw_values}"
+            "projection Gamma sector ranks must be non-negative with at least "
+            f"one active sector, got {raw_values}"
         )
     return raw_values, {
         "raw": list(raw_values),
@@ -726,6 +731,12 @@ def _projection_layerwise_orbital_counts(
         if basis_kind == "gamma_routed":
             handoff = load_gamma_routed_basis_spec(basis_file)
             return [int(rank) for rank in handoff.group_ranks], "projection_gamma_routed"
+        if basis_kind == "gamma_common_anchor":
+            handoff = load_gamma_common_anchor_basis_spec(basis_file)
+            return (
+                [int(rank) for rank in handoff.continuum_sector_ranks],
+                "projection_gamma_common_anchor",
+            )
         if basis_kind != "explicit_legacy":
             raise ValueError(f"unsupported projection_basis_kind: {basis_kind!r}")
         routed_fields = sorted(basis_files.intersection(GAMMA_ROUTED_ONLY_BASIS_FIELDS))
@@ -1323,12 +1334,7 @@ def _default_kpath_config(raw: Mapping[str, Any], *, source_base: Path) -> dict[
         kpath = {}
     if not isinstance(kpath, Mapping):
         raise ValueError("kpath section must be a mapping")
-    out = dict(kpath)
-    if "file" not in out:
-        candidate = (source_base / "../../tapw/KPATH.in").resolve()
-        if candidate.exists():
-            out["file"] = str(candidate)
-    return out
+    return dict(kpath)
 
 
 def _rotation_deg_from_symmetry_manifest(raw: Mapping[str, Any], *, base: Path) -> float | None:
@@ -1548,7 +1554,7 @@ def _first_symlink_component(path: Path) -> Path | None:
 
 
 def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
-    """Require a selection certificate for automatic routed Gamma bases."""
+    """Require the kp-symm-certified project choice for automatic bases."""
 
     valley_model = config.valley_model
     valley_type = (
@@ -1556,11 +1562,28 @@ def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
         if isinstance(valley_model, Mapping)
         else ""
     )
-    if valley_type != "gamma":
+    source_raw = getattr(config, "source_raw", {})
+    source_project = (
+        source_raw.get("project", {}) if isinstance(source_raw, Mapping) else {}
+    )
+    selection = (
+        source_project.get("selection")
+        if isinstance(source_project, Mapping)
+        else None
+    )
+    selection_mode = (
+        selection.get("mode", "") if isinstance(selection, Mapping) else selection
+    )
+    automatic_non_gamma = (
+        valley_type in {"k", "m"}
+        and str(selection_mode or "").strip().casefold() == "auto"
+    )
+    if valley_type != "gamma" and not automatic_non_gamma:
         return None
 
     project_dir = Path(config.heff_file).resolve().parent
     basis_path = project_dir / "basis.npz"
+    generic_artifact_identity: dict[str, str] = {}
     with np.load(basis_path, allow_pickle=False) as basis_payload:
         basis_kind = "explicit_legacy"
         if "projection_basis_kind" in basis_payload.files:
@@ -1568,9 +1591,26 @@ def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
             if basis_kind_raw.shape != ():
                 raise ValueError("projection basis kind must be a scalar")
             basis_kind = str(basis_kind_raw.item())
-    if basis_kind == "explicit_legacy":
+        if automatic_non_gamma:
+            for field in ("basis_hash", "heff_hash", "k_indices_hash"):
+                if field not in basis_payload.files:
+                    raise ValueError(
+                        f"automatic K/M project basis lacks {field}"
+                    )
+                raw_value = np.asarray(basis_payload[field])
+                if raw_value.shape != ():
+                    raise ValueError(
+                        f"automatic K/M project basis {field} must be a scalar"
+                    )
+                generic_artifact_identity[field] = str(raw_value.item())
+    if basis_kind == "explicit_legacy" and not automatic_non_gamma:
         return None
-    if basis_kind != "gamma_routed":
+    allowed_basis_kinds = (
+        {"explicit_legacy"}
+        if automatic_non_gamma
+        else {"gamma_common_anchor", "gamma_routed"}
+    )
+    if basis_kind not in allowed_basis_kinds:
         raise ValueError(f"unsupported projection_basis_kind: {basis_kind!r}")
 
     marker_path = project_dir / "selection_artifact.json"
@@ -1654,8 +1694,23 @@ def _preflight_certified_model_selection(config: ConfiguredModel) -> Any:
                 f"{name!r} selection_identity_hash mismatch"
             )
 
-    handoff = load_gamma_routed_basis_spec(project_dir / "basis.npz")
-    verify_certified_gamma_selection_artifact(artifact, handoff)
+    if automatic_non_gamma:
+        heff = np.load(config.heff_file, mmap_mode="r", allow_pickle=False)
+        if heff.ndim != 3 or heff.shape[-2] != heff.shape[-1]:
+            raise ValueError(
+                "automatic K/M projection/heff.npy must be a square matrix stack"
+            )
+        verify_certified_generic_selection_artifact(
+            artifact,
+            artifact_identity=generic_artifact_identity,
+            candidate_dimension=int(heff.shape[-1]),
+        )
+    elif basis_kind == "gamma_common_anchor":
+        handoff = load_gamma_common_anchor_basis_spec(project_dir / "basis.npz")
+        verify_certified_gamma_selection_artifact(artifact, handoff)
+    else:
+        handoff = load_gamma_routed_basis_spec(project_dir / "basis.npz")
+        verify_certified_gamma_selection_artifact(artifact, handoff)
     return artifact
 
 
@@ -1881,7 +1936,11 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             "for a legacy projection artifact"
         )
     n_orb_input = _as_int_list(n_orb_raw, name="model.n_orb")
-    if not explicit_n_orb and projection_n_orb_source == "projection_gamma_routed":
+    projection_uses_qset_counts = projection_n_orb_source in {
+        "projection_gamma_common_anchor",
+        "projection_gamma_routed",
+    }
+    if not explicit_n_orb and projection_uses_qset_counts:
         n_orb_values, n_orb_resolution = _resolve_projection_qset_counts(
             n_orb_input,
             num_layer_list=num_layer_list,
@@ -1894,7 +1953,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             prefer_active_layer_sectors=prefer_active_layer_sectors,
         )
     if projection_n_orb_input is not None:
-        if projection_n_orb_source == "projection_gamma_routed":
+        if projection_uses_qset_counts:
             projection_n_orb_values, _ = _resolve_projection_qset_counts(
                 projection_n_orb_input,
                 num_layer_list=num_layer_list,
@@ -2132,11 +2191,20 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
                 fit.get("weighted_fit_bands", min(dim_for_selection, max(n_primary_for_selection, 10))),
             )
         )
-        max_shell_for_selection = int(harmonic_selection_cfg.get("max_shell", 5))
-        candidate_pairs_for_selection = _harmonic_candidate_pairs_from_config(
-            harmonic_selection_cfg.get("candidate_pairs"),
-            max_shell=max_shell_for_selection,
-            search=str(harmonic_selection_cfg.get("search", "ladder")),
+        configured_harmonic_search = bool(harmonic_selection_cfg)
+        max_shell_for_selection = (
+            int(harmonic_selection_cfg.get("max_shell", 5))
+            if configured_harmonic_search
+            else None
+        )
+        candidate_pairs_for_selection = (
+            _harmonic_candidate_pairs_from_config(
+                harmonic_selection_cfg.get("candidate_pairs"),
+                max_shell=int(max_shell_for_selection),
+                search=str(harmonic_selection_cfg.get("search", "ladder")),
+            )
+            if configured_harmonic_search
+            else None
         )
         harmonic_selection_report = _run_harmonic_ablation_selection(
             heff_scan,
@@ -3634,24 +3702,37 @@ def _signed_case_harmonic_records(
     kind: str,
     tol: float,
 ) -> list[dict[str, Any]]:
-    grouped: dict[tuple[int, int], dict[str, Any]] = {}
+    """Return one authored representative for each ``{p, -p}`` orbit.
+
+    Every response seed is passed through the unconditional Hermitian
+    projector, which supplies the reversed ``-p`` matrix support.  Authoring
+    both signs here therefore doubles the symbolic/rank workload without
+    enlarging the physical response span.  Keep the missing sign as explicit
+    provenance so the downstream adjoint certificate remains auditable.
+    """
+
+    grouped: dict[tuple[tuple[int, int], tuple[int, int]], dict[str, Any]] = {}
     for raw_id, raw_vector in sorted(mapping.items(), key=lambda item: int(item[0])):
         vector = np.asarray(raw_vector, dtype=float)
         if vector.shape != (2,) or not np.all(np.isfinite(vector)):
             raise ValueError(
                 f"Case-derived {kind} harmonic {raw_id!r} must be a finite two-vector"
             )
-        for sign in (1.0, -1.0):
-            oriented = sign * vector
-            key = _vector_key(oriented, tol)
-            grouped.setdefault(
-                key,
-                {
-                    "kind": str(kind),
-                    "vector": oriented,
-                    "source_harmonic_id": int(raw_id),
-                },
-            )
+        direct_key = _vector_key(vector, tol)
+        adjoint_key = _vector_key(-vector, tol)
+        orbit_key = tuple(sorted((direct_key, adjoint_key)))
+        record = grouped.setdefault(
+            orbit_key,
+            {
+                "kind": str(kind),
+                "vector": vector.copy(),
+                "source_harmonic_id": int(raw_id),
+                "source_orbit_harmonic_ids": [],
+            },
+        )
+        source_ids = record["source_orbit_harmonic_ids"]
+        if int(raw_id) not in source_ids:
+            source_ids.append(int(raw_id))
     ordered = sorted(
         grouped.values(),
         key=lambda record: (
@@ -3661,14 +3742,26 @@ def _signed_case_harmonic_records(
             int(record["source_harmonic_id"]),
         ),
     )
-    return [
-        {
-            **record,
-            "id": f"case:{kind}:{index}",
-            "source": "case_q_pair_support",
-        }
-        for index, record in enumerate(ordered, start=1)
-    ]
+    records: list[dict[str, Any]] = []
+    for index, record in enumerate(ordered, start=1):
+        harmonic_id = f"case:{kind}:{index}"
+        vector = np.asarray(record["vector"], dtype=float)
+        adjoint = -vector
+        orbit_vectors = [vector.tolist()]
+        if not np.allclose(adjoint, vector, rtol=0.0, atol=tol):
+            orbit_vectors.append(adjoint.tolist())
+        records.append(
+            {
+                **record,
+                "id": harmonic_id,
+                "adjoint_harmonic_id": harmonic_id,
+                "adjoint_generation": "hermitian_projection",
+                "adjoint_vector": adjoint.tolist(),
+                "source_orbit_vectors": orbit_vectors,
+                "source": "case_q_pair_support",
+            }
+        )
+    return records
 
 
 def _case_derived_term_templates(
@@ -4704,6 +4797,37 @@ def _load_model_q_sets(config: ConfiguredModel) -> tuple[np.ndarray, np.ndarray]
     )
 
 
+def _heff_in_model_basis(
+    heff: np.ndarray,
+    model_basis_gauge: np.ndarray | None,
+) -> np.ndarray:
+    """Return Hamiltonians in the response basis used by model symmetries."""
+
+    if model_basis_gauge is None:
+        return heff
+    array = np.asarray(heff, dtype=np.complex128)
+    gauge = np.asarray(model_basis_gauge, dtype=np.complex128)
+    if array.ndim != 3 or array.shape[1:] != gauge.shape:
+        raise ValueError(
+            "model response gauge and Heff shapes differ: "
+            f"heff={array.shape}, gauge={gauge.shape}"
+        )
+    return np.einsum(
+        "ab,kbc,cd->kad",
+        gauge.conjugate().T,
+        array,
+        gauge,
+        optimize=True,
+    )
+
+
+def _load_heff_in_model_basis(config: ConfiguredModel) -> np.ndarray:
+    return _heff_in_model_basis(
+        np.load(config.heff_file, mmap_mode="r"),
+        getattr(config, "model_basis_gauge", None),
+    )
+
+
 def _operation_matrix_is_exactified(record: Mapping[str, Any]) -> bool:
     return exactified_operation_provenance_is_complete(record)
 
@@ -4859,6 +4983,15 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         loaded_symmetry.metadata = {**config.symmetry_source_metadata, **loaded_symmetry.metadata}
         if hasattr(loaded_symmetry.generator, "metadata") and isinstance(loaded_symmetry.generator.metadata, dict):
             loaded_symmetry.generator.metadata.update(config.symmetry_source_metadata)
+    config.model_basis_gauge = getattr(
+        loaded_symmetry.generator,
+        "model_basis_gauge",
+        None,
+    )
+    fit_heff_list = _heff_in_model_basis(
+        fit_heff_list,
+        config.model_basis_gauge,
+    )
     config.symmetry_source_metadata = loaded_symmetry.metadata
     enriched_symmetry_map = _enrich_symmetry_map(
         config.symmetry_map,
@@ -5241,21 +5374,28 @@ def _refinement_target_hamiltonians(
     row_selector: Sequence[int] | None,
 ) -> tuple[np.ndarray, np.ndarray, str]:
     original = _select_rows(
-        np.load(model_config.heff_file, mmap_mode="r"),
+        _load_heff_in_model_basis(model_config),
         row_selector,
     )
     fit_mode = str(
         getattr(model_config, "fit_selection_metadata", {}).get("mode", "")
     ).strip().lower()
     requested_reference = str(raw_cfg.get("reference", "")).strip().lower()
+    if requested_reference not in {"", "original_heff", "current_heff_support_mask"}:
+        raise ValueError(
+            "fit.refine_bands.reference must be 'original_heff' or "
+            "'current_heff_support_mask'"
+        )
     response_semantics = str(
         getattr(model_config, "response_semantics", "legacy_frozen_v1")
     ).strip().lower()
-    use_current_support = (
-        requested_reference == "current_heff_support_mask"
-        or str(raw_cfg.get("mode", "")).strip().lower() == "auto_low_energy"
-        or fit_mode == "auto_low_energy"
-        or response_semantics == "complete_linear_v2"
+    use_current_support = requested_reference == "current_heff_support_mask" or (
+        requested_reference != "original_heff"
+        and (
+            str(raw_cfg.get("mode", "")).strip().lower() == "auto_low_energy"
+            or fit_mode == "auto_low_energy"
+            or response_semantics == "complete_linear_v2"
+        )
     )
     if use_current_support:
         target = _current_heff_support_hamiltonians(
@@ -5930,18 +6070,40 @@ def _plot_axis_from_kpath(config: ConfiguredModel, npoints: int) -> tuple[np.nda
     if config.band_indices is not None:
         return np.arange(npoints, dtype=float), None, None
 
-    file_path = _resolve_path(config.kpath_config.get("file"), config.path.parent)
-    if file_path is None or not file_path.exists() or config.kpath_config.get("tmat") is None:
+    tmat = config.kpath_config.get("tmat")
+    if tmat is None:
         return np.arange(npoints, dtype=float), None, None
-
-    generated = generate_kpath_from_file(
-        Tmat=np.asarray(config.kpath_config.get("tmat"), dtype=float),
-        file_path=file_path,
-        phase_deg=float(config.rotation_deg),
-        segment_points=None
-        if config.kpath_config.get("segment_points") is None
-        else int(config.kpath_config.get("segment_points")),
-    )
+    labels = config.kpath_config.get("labels")
+    coordinates = config.kpath_config.get("coordinates")
+    if labels is not None or coordinates is not None:
+        if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)):
+            raise ValueError("inline kpath.labels must be a sequence")
+        if not isinstance(coordinates, Mapping):
+            raise ValueError("inline kpath.coordinates must be a mapping")
+        points_per_segment = config.kpath_config.get(
+            "points_per_segment", config.kpath_config.get("segment_points")
+        )
+        if points_per_segment is None:
+            raise ValueError("inline kpath.points_per_segment is required")
+        generated = generate_kpath_from_symbols(
+            Tmat=np.asarray(tmat, dtype=float),
+            symbols=[str(label) for label in labels],
+            segment_points=int(points_per_segment),
+            phase_deg=float(config.rotation_deg),
+            coords=coordinates,
+        )
+    else:
+        file_path = _resolve_path(config.kpath_config.get("file"), config.path.parent)
+        if file_path is None or not file_path.exists():
+            return np.arange(npoints, dtype=float), None, None
+        generated = generate_kpath_from_file(
+            Tmat=np.asarray(tmat, dtype=float),
+            file_path=file_path,
+            phase_deg=float(config.rotation_deg),
+            segment_points=None
+            if config.kpath_config.get("segment_points") is None
+            else int(config.kpath_config.get("segment_points")),
+        )
     x = np.asarray(generated.x, dtype=float)
     if x.shape[0] != npoints:
         return np.arange(npoints, dtype=float), None, None
@@ -7090,7 +7252,7 @@ def _compute_validation_outputs(
     if model_config.compare_to_heff:
         try:
             h_model = get_validation_hamiltonians()
-            heff_all = np.load(model_config.heff_file, mmap_mode="r")
+            heff_all = _load_heff_in_model_basis(model_config)
             heff_selected = _select_rows(heff_all, model_config.band_indices)
             residual = matrix_residual(h_model, heff_selected)
             fit_positions, holdout_positions = _selected_index_positions(model_config, len(residual["residuals"]))
@@ -7609,7 +7771,7 @@ def _materialize_automatic_profile_output(
     np.save(output_dir / "eigvals.npy", eigvals)
     np.save(output_dir / "current_heff_support_eigvals.npy", target_eigvals)
 
-    heff_matrix_all = np.load(model_config.heff_file, mmap_mode="r")
+    heff_matrix_all = _load_heff_in_model_basis(model_config)
     heff_matrix_selected = np.asarray(
         _select_rows(heff_matrix_all, model_config.band_indices)
     )
@@ -7968,7 +8130,7 @@ def _write_auto_model_selection_outputs(
         return {"enabled": False, "reason": "missing_model"}
 
     original_heff_all = _select_rows(
-        np.load(model_config.heff_file, mmap_mode="r"),
+        _load_heff_in_model_basis(model_config),
         model_config.band_indices,
     )
     heff_all = _current_heff_support_hamiltonians(
@@ -9517,6 +9679,90 @@ def _harmonic_ablation_mask(
     )
 
 
+def _physical_harmonic_ablation_candidates(
+    qset1: np.ndarray,
+    qset2: np.ndarray,
+    *,
+    n_orb: tuple[int, int],
+    tol: float = 1.0e-6,
+) -> list[dict[str, Any]]:
+    """Enumerate unique harmonic support masks available in the actual Q rows."""
+
+    q1 = np.asarray(qset1, dtype=float)
+    q2 = np.asarray(qset2, dtype=float)
+    rows = _model_row_metadata_for_harmonic_scan(q1, q2, n_orb)
+    if not rows:
+        raise ValueError("physical harmonic candidates require at least one active model row")
+    shell_norms = _harmonic_shell_norms_from_qsets(q1, q2, tol=tol)
+    shell_maps = _harmonic_ablation_shell_maps(rows, shell_norms, tol=tol)
+    intra_shell = np.asarray(shell_maps["intra_shell"], dtype=np.int32)
+    inter_shell = np.asarray(shell_maps["inter_shell"], dtype=np.int32)
+    intra_support = np.asarray(shell_maps["intra"], dtype=bool)
+    inter_support = np.asarray(shell_maps["inter"], dtype=bool)
+    active_intra_shells = intra_shell[intra_support]
+    active_inter_shells = inter_shell[inter_support]
+    max_intra_positive = int(np.max(active_intra_shells)) if active_intra_shells.size else 0
+    max_inter_positive = int(np.max(active_inter_shells)) if active_inter_shells.size else 0
+
+    layers = np.asarray([int(row["layer"]) for row in rows], dtype=np.int16)
+    cross_sector = layers[:, None] != layers[None, :]
+    has_inter_zero = bool(np.any(np.logical_and(cross_sector, np.asarray(shell_maps["zero"], dtype=bool))))
+    max_intra_count = max_intra_positive + 1 if max_intra_positive else 0
+    max_inter_count = max_inter_positive + int(has_inter_zero)
+
+    unique: dict[str, dict[str, Any]] = {}
+    for intra_count in range(max_intra_count + 1):
+        for inter_count in range(max_inter_count + 1):
+            mask = _selected_harmonic_support_mask(
+                q1,
+                q2,
+                n_orb=(int(n_orb[0]), int(n_orb[1])),
+                current_counts={"intra": int(intra_count), "inter": int(inter_count)},
+                tol=tol,
+            )
+            packed = np.packbits(np.asarray(mask, dtype=np.uint8), bitorder="little")
+            fingerprint = hashlib.sha256(
+                np.asarray(mask.shape, dtype=np.int64).tobytes() + packed.tobytes()
+            ).hexdigest()
+            record = {
+                "intra_shells": int(intra_count),
+                "inter_shells": int(inter_count),
+                "support_entries": int(np.count_nonzero(mask)),
+                "mask_fingerprint": fingerprint,
+                "mask": np.asarray(mask, dtype=bool),
+            }
+            previous = unique.get(fingerprint)
+            key = (
+                int(intra_count) + int(inter_count),
+                max(int(intra_count), int(inter_count)),
+                abs(int(intra_count) - int(inter_count)),
+                int(intra_count),
+                int(inter_count),
+            )
+            if previous is None:
+                unique[fingerprint] = record
+                continue
+            previous_key = (
+                int(previous["intra_shells"]) + int(previous["inter_shells"]),
+                max(int(previous["intra_shells"]), int(previous["inter_shells"])),
+                abs(int(previous["intra_shells"]) - int(previous["inter_shells"])),
+                int(previous["intra_shells"]),
+                int(previous["inter_shells"]),
+            )
+            if key < previous_key:
+                unique[fingerprint] = record
+
+    return sorted(
+        unique.values(),
+        key=lambda item: (
+            int(item["support_entries"]),
+            int(item["intra_shells"]) + int(item["inter_shells"]),
+            int(item["intra_shells"]),
+            int(item["inter_shells"]),
+        ),
+    )
+
+
 def _evaluate_harmonic_ablation_candidate(
     heff: np.ndarray,
     mask: np.ndarray,
@@ -9714,7 +9960,7 @@ def _run_harmonic_ablation_selection(
     target_bands: str,
     primary_bands: int,
     plot_bands: int,
-    max_shell: int,
+    max_shell: int | None = None,
     thresholds: Mapping[str, Any] | None = None,
     candidate_pairs: Sequence[tuple[int, int]] | None = None,
     tol: float = 1.0e-6,
@@ -9732,23 +9978,63 @@ def _run_harmonic_ablation_selection(
     records: list[dict[str, Any]] = []
     full_norm = float(np.linalg.norm(target))
     target_eig, target_vec = np.linalg.eigh(target)
-    pair_list = (
-        [(int(intra), int(inter)) for intra, inter in candidate_pairs]
-        if candidate_pairs is not None
-        else [
-            (int(intra_shells), int(inter_shells))
-            for intra_shells in range(int(max_shell) + 1)
-            for inter_shells in range(int(max_shell) + 1)
-        ]
-    )
-    for intra_shells, inter_shells in pair_list:
-        mask = _selected_harmonic_support_mask(
+    generation_started = time.perf_counter()
+    physical_candidates: list[dict[str, Any]] | None = None
+    if candidate_pairs is None and max_shell is None:
+        physical_candidates = _physical_harmonic_ablation_candidates(
             qset1,
             qset2,
             n_orb=n_orb,
-            current_counts={"intra": int(intra_shells), "inter": int(inter_shells)},
             tol=tol,
         )
+        pair_list = [
+            (int(item["intra_shells"]), int(item["inter_shells"]))
+            for item in physical_candidates
+        ]
+        max_intra_count = max((pair[0] for pair in pair_list), default=0)
+        max_inter_count = max((pair[1] for pair in pair_list), default=0)
+        candidate_generation = {
+            "mode": "physical_q_support",
+            "max_intra_count": int(max_intra_count),
+            "max_inter_count": int(max_inter_count),
+            "raw_pair_count": int((max_intra_count + 1) * (max_inter_count + 1)),
+            "unique_mask_count": int(len(physical_candidates)),
+            "duplicate_mask_count": int(
+                (max_intra_count + 1) * (max_inter_count + 1) - len(physical_candidates)
+            ),
+        }
+    else:
+        limit = int(max_shell if max_shell is not None else 0)
+        pair_list = (
+            [(int(intra), int(inter)) for intra, inter in candidate_pairs]
+            if candidate_pairs is not None
+            else [
+                (int(intra_shells), int(inter_shells))
+                for intra_shells in range(limit + 1)
+                for inter_shells in range(limit + 1)
+            ]
+        )
+        candidate_generation = {
+            "mode": "configured_pairs" if candidate_pairs is not None else "configured_grid",
+            "max_intra_count": max((pair[0] for pair in pair_list), default=0),
+            "max_inter_count": max((pair[1] for pair in pair_list), default=0),
+            "raw_pair_count": int(len(pair_list)),
+            "unique_mask_count": int(len(pair_list)),
+            "duplicate_mask_count": 0,
+        }
+    candidate_generation["elapsed_seconds"] = float(time.perf_counter() - generation_started)
+
+    for candidate_index, (intra_shells, inter_shells) in enumerate(pair_list):
+        if physical_candidates is None:
+            mask = _selected_harmonic_support_mask(
+                qset1,
+                qset2,
+                n_orb=n_orb,
+                current_counts={"intra": int(intra_shells), "inter": int(inter_shells)},
+                tol=tol,
+            )
+        else:
+            mask = np.asarray(physical_candidates[candidate_index]["mask"], dtype=bool)
         metrics = _evaluate_harmonic_ablation_candidate(
             target,
             mask,
@@ -9778,8 +10064,9 @@ def _run_harmonic_ablation_selection(
         "target_bands": target_bands,
         "primary_bands": int(primary_bands),
         "plot_bands": int(plot_bands),
-        "max_shell": int(max_shell),
+        "max_shell": None if max_shell is None else int(max_shell),
         "candidate_pairs": [[int(intra), int(inter)] for intra, inter in pair_list],
+        "candidate_generation": candidate_generation,
         "thresholds": threshold_values,
         "shell_norms": {key: [float(item) for item in value] for key, value in shell_norms.items()},
         "selection_status": status,
@@ -11542,6 +11829,81 @@ def _public_hamiltonian_quadratic_residual(
     }
 
 
+def _solve_target_subspace_action_linear(
+    response_actions: np.ndarray,
+    base_hamiltonians: np.ndarray,
+    target_hamiltonians: np.ndarray,
+    target_frames: np.ndarray,
+    *,
+    regularization: float,
+    response_scales: np.ndarray,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Fit ``(H_model-H_target)V_target`` as one real linear system."""
+
+    actions = np.asarray(response_actions, dtype=np.complex128)
+    base = np.asarray(base_hamiltonians, dtype=np.complex128)
+    target = np.asarray(target_hamiltonians, dtype=np.complex128)
+    frames = np.asarray(target_frames, dtype=np.complex128)
+    if actions.ndim != 4:
+        raise ValueError(
+            "response_actions must have shape (Nvar,Nk,dim,Nstate), got "
+            f"{actions.shape}"
+        )
+    n_variables, n_kpoints, dim, n_states = actions.shape
+    if base.shape != (n_kpoints, dim, dim) or target.shape != base.shape:
+        raise ValueError(
+            "base/target Hamiltonians must match response actions, got "
+            f"actions={actions.shape}, base={base.shape}, target={target.shape}"
+        )
+    if frames.shape != (n_kpoints, dim, n_states):
+        raise ValueError(
+            "target_frames must have shape (Nk,dim,Nstate), got "
+            f"{frames.shape}"
+        )
+    ridge = float(regularization)
+    if ridge < 0.0:
+        raise ValueError("target-subspace action regularization must be non-negative")
+    scales = np.asarray(response_scales, dtype=float)
+    if scales.shape != (n_variables,) or np.any(scales <= 0.0):
+        raise ValueError("response_scales must be positive with shape (Nvar,)")
+
+    target_action = np.einsum(
+        "kmn,kns->kms",
+        target - base,
+        frames,
+        optimize=True,
+    ).reshape(-1)
+    design_complex = np.moveaxis(actions, 0, -1).reshape(-1, n_variables)
+    design = np.vstack((design_complex.real, design_complex.imag))
+    right = np.concatenate((target_action.real, target_action.imag))
+    physical_rows = int(design.shape[0])
+    if ridge > 0.0:
+        design = np.vstack((design, np.sqrt(ridge) * np.diag(scales)))
+        right = np.concatenate((right, np.zeros(n_variables, dtype=float)))
+    delta, residuals, rank, singular_values = np.linalg.lstsq(
+        design,
+        right,
+        rcond=1.0e-10,
+    )
+    action_residual = design_complex @ delta - target_action
+    return np.asarray(delta, dtype=float), {
+        "physical_rows": physical_rows,
+        "rows": int(design.shape[0]),
+        "cols": int(design.shape[1]),
+        "rank": int(rank),
+        "regularization": ridge,
+        "action_residual_norm": float(np.linalg.norm(action_residual)),
+        "least_squares_residual_norm": (
+            float(np.sqrt(float(residuals[0]))) if np.size(residuals) else None
+        ),
+        "condition_number": (
+            float(singular_values[0] / singular_values[-1])
+            if np.size(singular_values) and float(singular_values[-1]) > 0.0
+            else None
+        ),
+    }
+
+
 def _compiled_response_band_jacobian(
     basis: Any,
     channel_indices: np.ndarray,
@@ -11866,7 +12228,7 @@ def _refine_public_nonlinear_complete_response(
 
     all_kpoints = _load_kpoints(model_config)
     original_heff = np.asarray(
-        np.load(model_config.heff_file, mmap_mode="r"),
+        _load_heff_in_model_basis(model_config),
         dtype=np.complex128,
     )
     target_all = _current_heff_support_hamiltonians(
@@ -12064,6 +12426,54 @@ def _refine_public_nonlinear_complete_response(
     }
 
 
+def _refinement_initial_fitted_model(
+    raw_cfg: Mapping[str, Any],
+    basis: Any,
+    fitted: Any,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Optionally initialize refinement from a certified fit on the same basis."""
+    raw_path = raw_cfg.get("initial_model_data")
+    if raw_path in {None, ""}:
+        return fitted, None
+    path = Path(str(raw_path)).expanduser().resolve()
+    if not path.is_file():
+        raise FileNotFoundError(f"fit.refine_bands.initial_model_data not found: {path}")
+    with np.load(path, allow_pickle=False) as arrays:
+        if "fitted_coefficients" not in arrays or "basis_hash" not in arrays:
+            raise ValueError(
+                "fit.refine_bands.initial_model_data must contain fitted_coefficients and basis_hash"
+            )
+        coefficients = np.asarray(arrays["fitted_coefficients"], dtype=float)
+        source_basis_hash = str(np.asarray(arrays["basis_hash"]).item())
+    if source_basis_hash != str(basis.basis_hash):
+        raise ValueError(
+            "fit.refine_bands.initial_model_data belongs to a different response basis: "
+            f"source={source_basis_hash}, current={basis.basis_hash}"
+        )
+    expected_shape = np.asarray(fitted.coefficients, dtype=float).shape
+    if coefficients.shape != expected_shape:
+        raise ValueError(
+            "fit.refine_bands.initial_model_data coefficient shape mismatch: "
+            f"source={coefficients.shape}, current={expected_shape}"
+        )
+    if not np.all(np.isfinite(coefficients)):
+        raise ValueError("fit.refine_bands.initial_model_data contains non-finite coefficients")
+    initialized = fitted.with_coefficients(
+        coefficients,
+        channel_ids=basis.channel_ids,
+        response_scales=basis.response_scales,
+        provenance={
+            "operation": "refinement_initialization",
+            "source_model_data": str(path),
+        },
+    )
+    return initialized, {
+        "source": str(path),
+        "basis_hash": source_basis_hash,
+        "coefficient_count": int(coefficients.size),
+    }
+
+
 def _refine_complete_response_basis(
     moire_config: MoireConfig,
     model_config: ConfiguredModel,
@@ -12086,6 +12496,10 @@ def _refine_complete_response_basis(
         raise ValueError("complete_linear_v2 refinement requires a fitted CompiledResponseBasis")
     if fitted.basis_hash != basis.basis_hash:
         raise ValueError("complete_linear_v2 refinement received a fit from a different basis")
+    fitted, initialization_report = _refinement_initial_fitted_model(raw_cfg, basis, fitted)
+    if initialization_report is not None:
+        setattr(model, "_fitted_response_model", fitted)
+        _sync_complete_response_coefficients_to_terms(model, fitted.coefficients)
 
     refine_row_selector: Sequence[int] | None = getattr(model_config, "band_indices", None)
     kpoints = np.asarray(moire_config.kpoints, dtype=float)
@@ -12149,6 +12563,171 @@ def _refine_complete_response_basis(
     selected_components = {str(component).strip().lower() for component in raw_components}
     if not selected_components <= {"real", "imag"}:
         raise ValueError("fit.refine_bands.components must contain only 'real' and/or 'imag'")
+
+    solver = str(raw_cfg.get("solver", "")).strip().lower()
+    if solver in {
+        "linear_target_subspace_action",
+        "target_subspace_action_linear",
+        "linear_wavefunction_action",
+    }:
+        candidate_indices: list[int] = []
+        excluded_unconfirmed_channels: list[str] = []
+        for index, channel in enumerate(basis.channels):
+            tag = _refinement_tag_alias(str(channel.metadata.get("tag", "")))
+            if tag not in selected_tags or channel.component not in selected_components:
+                continue
+            if channel.classification != "confirmed_nonzero":
+                excluded_unconfirmed_channels.append(channel.channel_id)
+                continue
+            candidate_indices.append(index)
+        if not candidate_indices:
+            raise ValueError("fit.refine_bands selected no retained complete-response channels")
+
+        base_h = _model_hamiltonians_for_kpoints(moire_config, model, kpoints)
+        band_slice = _refinement_band_slice(raw_cfg, model_config, base_h.shape[-1])
+        align = str(
+            raw_cfg.get(
+                "align",
+                getattr(model_config, "band_plot_config", {}).get("align", "top"),
+            )
+        ).strip().lower()
+        initial_metrics = _band_refinement_metrics(
+            base_h,
+            heff_eig,
+            heff_all,
+            band_slice=band_slice,
+            align=align,
+        )
+        _target_eigvals, target_eigenvectors = np.linalg.eigh(heff_all)
+        slice_start, slice_stop = (int(value) for value in band_slice)
+        target_frames = target_eigenvectors[:, :, slice_start:slice_stop]
+        action_start = time.perf_counter()
+        action_by_k = basis.response_action(
+            kpoints,
+            target_frames,
+            channel_indices=np.asarray(candidate_indices, dtype=np.int64),
+        )
+        action_norms = np.sqrt(
+            np.sum(np.abs(action_by_k) ** 2, axis=(0, 2, 3))
+        )
+        norm_tol = float(raw_cfg.get("variable_norm_tol", 1.0e-12))
+        retained_mask = action_norms > norm_tol
+        zero_grid_channels = [
+            basis.channels[index].channel_id
+            for index, retained in zip(candidate_indices, retained_mask)
+            if not bool(retained)
+        ]
+        selected_indices = [
+            index
+            for index, retained in zip(candidate_indices, retained_mask)
+            if bool(retained)
+        ]
+        if not selected_indices:
+            raise ValueError("target-subspace action refinement has zero response rank")
+        response_actions = np.moveaxis(action_by_k[:, retained_mask], 1, 0)
+        action_seconds = float(time.perf_counter() - action_start)
+
+        max_variables_raw = raw_cfg.get("max_variables")
+        max_variables = int(max_variables_raw) if max_variables_raw is not None else None
+        if max_variables is not None and max_variables > 0 and len(selected_indices) > max_variables:
+            raise ValueError(
+                "target-subspace action refinement selected "
+                f"{len(selected_indices)} variables, exceeding max_variables={max_variables}"
+            )
+        selected = np.asarray(selected_indices, dtype=np.int64)
+        coefficients0 = np.asarray(fitted.coefficients, dtype=float)
+        y0 = coefficients0[selected].copy()
+        response_scales = np.asarray(basis.response_scales[selected], dtype=float)
+        delta, linear_report = _solve_target_subspace_action_linear(
+            response_actions,
+            base_h,
+            heff_all,
+            target_frames,
+            regularization=float(
+                raw_cfg.get("regularization", raw_cfg.get("linear_regularization", 0.0))
+            ),
+            response_scales=response_scales,
+        )
+        candidate_y = y0 + delta
+
+        def h_from_y(y: np.ndarray) -> np.ndarray:
+            coefficients = coefficients0.copy()
+            coefficients[selected] = np.asarray(y, dtype=float)
+            return basis.hamiltonians(kpoints, coefficients)
+
+        accepted_y, acceptance_guard = _apply_refinement_acceptance_guard(
+            raw_cfg=raw_cfg,
+            model_config=model_config,
+            base_h=base_h,
+            heff_eig=heff_eig,
+            heff_all=heff_all,
+            y0=y0,
+            candidate_y=candidate_y,
+            h_from_y=h_from_y,
+        )
+        coefficients = coefficients0.copy()
+        coefficients[selected] = accepted_y
+        response_report = {
+            "mode": "compiled_sparse_target_subspace_action_v1",
+            "basis_hash": basis.basis_hash,
+            "candidate_channels": int(basis.candidate_artifact.get("candidate_channel_count", 0)),
+            "retained_basis_channels": int(len(basis.channels)),
+            "requested_refinement_channels": int(
+                len(selected_indices) + len(zero_grid_channels) + len(excluded_unconfirmed_channels)
+            ),
+            "refinement_channels": int(len(selected_indices)),
+            "zero_on_target_action": zero_grid_channels,
+            "excluded_unconfirmed_channels": excluded_unconfirmed_channels,
+            "selected_channel_ids": [basis.channels[index].channel_id for index in selected_indices],
+            "wall_seconds": action_seconds,
+            "dense_response_tensor_materialized": False,
+        }
+        refined_fit = fitted.with_coefficients(
+            coefficients,
+            channel_ids=basis.channel_ids,
+            response_scales=basis.response_scales,
+            provenance={
+                "operation": "target_subspace_action_refinement",
+                "reference": target_reference,
+                "selected_channel_ids": response_report["selected_channel_ids"],
+                "fit_kpoints": fit_kpoints_report,
+                "band_slice": list(band_slice),
+            },
+        )
+        setattr(model, "_fitted_response_model", refined_fit)
+        _sync_complete_response_coefficients_to_terms(model, coefficients)
+        refined_h = h_from_y(accepted_y)
+        refined_metrics = _band_refinement_metrics(
+            refined_h,
+            heff_eig,
+            heff_all,
+            band_slice=band_slice,
+            align=align,
+        )
+        normalized_drift = np.abs((accepted_y - y0) * response_scales)
+        return {
+            "enabled": True,
+            "solver": "linear_target_subspace_action",
+            "initialization": initialization_report,
+            "reference": target_reference,
+            "fit_kpoints": fit_kpoints_report,
+            "band_slice": [slice_start, slice_stop],
+            "align": align,
+            "variable_tags": sorted(selected_tags),
+            "components": sorted(selected_components),
+            "n_variables": int(len(selected_indices)),
+            "max_variables": max_variables,
+            "response_basis": response_report,
+            "linear_system": linear_report,
+            "acceptance_guard": acceptance_guard if acceptance_guard is not None else {"enabled": False},
+            "initial": initial_metrics,
+            "refined": refined_metrics,
+            "max_scaled_coefficient_drift": float(np.max(normalized_drift)) if normalized_drift.size else 0.0,
+            "p95_scaled_coefficient_drift": (
+                float(np.quantile(normalized_drift, 0.95)) if normalized_drift.size else 0.0
+            ),
+            "nfev": 0,
+        }
 
     all_responses = basis.response_tensor(kpoints)
     norm_tol = float(raw_cfg.get("variable_norm_tol", 1.0e-12))
@@ -12304,6 +12883,7 @@ def _refine_complete_response_basis(
     return {
         "enabled": True,
         "solver": "compiled_response_least_squares",
+        "initialization": initialization_report,
         "reference": target_reference,
         "fit_kpoints": fit_kpoints_report,
         "band_slice": [int(band_slice[0]), int(band_slice[1])],
@@ -14790,7 +15370,7 @@ def _run_automatic_family_order_scan(
     selection_config = model_config.model_selection_config
     if selection_config is None or not bool(selection_config.enabled):
         raise ValueError("automatic family order scan requires enabled model selection")
-    original_heff = np.load(model_config.heff_file, mmap_mode="r")
+    original_heff = _load_heff_in_model_basis(model_config)
     try:
         target_all = _current_heff_support_hamiltonians(
             original_heff,
@@ -15258,7 +15838,7 @@ def _run_auto_low_energy_fit_candidate_scan(
         return None
 
     kpoints_all = _load_kpoints(model_config)
-    original_heff_list = np.load(model_config.heff_file, mmap_mode="r")
+    original_heff_list = _load_heff_in_model_basis(model_config)
     heff_list = _current_heff_support_hamiltonians(
         original_heff_list,
         qset1=np.asarray(moire_config.Q_set1, dtype=float),
@@ -15815,7 +16395,7 @@ def run_configured_model(path: str | Path) -> dict[str, Any]:
         ],
     )
     if model_config.compare_to_heff:
-        heff_matrix_all = np.load(model_config.heff_file, mmap_mode="r")
+        heff_matrix_all = _load_heff_in_model_basis(model_config)
         heff_matrix_selected = _select_rows(heff_matrix_all, model_config.band_indices)
         if model_config.heff_eig_file is not None and model_config.heff_eig_file.exists():
             heff_eig = np.load(model_config.heff_eig_file)

@@ -57,14 +57,16 @@ def test_tracked_mgi2_gamma_q04_keeps_reviewed_automatic_acceptance_policy() -> 
     assert model["target_bands"] == "top"
     assert model["fit"] == {
         "method": "linear",
-        "kpoints": [0, 40],
+        "kpoints": [0, 10, 20, 30, 40, 50, 60],
         "bands": 10,
         "one_sided_weight": 0.0,
         "two_sided_weight": 0.0,
     }
     assert project["downfold_method"] == "fixed_schur"
     assert project["e_ref"] == -5.74
-    assert model["harmonics"] == {"intralayer": 3, "interlayer": 3}
+    assert project["selection"] == "auto"
+    assert "nlow_state_list" not in project
+    assert "harmonics" not in model
     assert model["max_order"] == {
         "kinetic": 10,
         "intralayer": 6,

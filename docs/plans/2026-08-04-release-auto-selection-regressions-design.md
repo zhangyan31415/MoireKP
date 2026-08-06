@@ -20,6 +20,19 @@ The audited four-dimensional fibre is rejected only by the unreasonably tight
 1 meV RMS gate.  The next nominally accurate candidate is anchor-singular, so
 the selector reaches rank 12 and expands the production model from 76 to 228.
 
+The AAB Gamma curve provides the upper bound needed to avoid an overly loose
+replacement:
+
+| local rank | joint bands | RMS/max (meV) | anchor coverage |
+|---:|---|---:|---:|
+| 2 | 136-137 | 5.413 / 10.617 | 0.358 |
+| 4 | 134-137 | 0.093 / 0.184 | 0.141 |
+
+Therefore `10/30 meV` is too loose: it accepts the incomplete AAB two-band
+branch.  `3/3 meV` is the smallest simple shared default supported by both
+curves: it accepts the audited MgI2 rank-4 fibre while rejecting the incomplete
+AAB rank-2 fibre.
+
 For AAB K-B, every candidate is measured against the full-system target even
 though the intended model keeps only the B source sector.  The audited
 one-dimensional fibre gives a good continuum fit to its authoritative Heff,
@@ -33,14 +46,13 @@ a partial-sector model.
 
 - Keep the actual `(k_Gamma, Q0)` complete-cluster envelope.
 - Keep anchor coverage as a hard gate.
-- Use the existing generic automatic-selection defaults, `10/30 meV`
-  (RMS/max), for representative-fibre band adequacy.
+- Use `3/3 meV` (RMS/max) for representative-fibre band adequacy.
 - Select the smallest complete cluster passing those gates, then materialize
   the full production k/Q handoff exactly once.
 - Do not add per-material threshold parameters to release YAML files.
 
-This selects MgI2 rank 4 while continuing to reject rank 2.  It also preserves
-the compact PtSe2 rank-2 result.
+This selects MgI2 rank 4 and AAB rank 4 while continuing to reject their
+incomplete smaller fibres.  It also preserves the compact PtSe2 rank-2 result.
 
 ### Partial-sector K/M
 
@@ -66,6 +78,7 @@ amplifying response-space compilation cost.
 ## Regression contract
 
 - MgI2 Gamma selects joint bands 40-43 and model dimension 76.
+- AAB Gamma selects joint bands 134-137 and model dimension 76.
 - PtSe2 Gamma remains joint bands 54-55 and model dimension 38.
 - AAB K-B automatic selection resolves the one-dimensional B-sector fibre.
 - AAB K-A, bilayer MoTe2 K, and MgI2 M keep their audited automatic choices.

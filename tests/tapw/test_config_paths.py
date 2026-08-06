@@ -662,28 +662,34 @@ def test_tapw_config_requires_explicit_ng_without_twist_angle_inference(tmp_path
 @pytest.mark.parametrize(
     "config_path",
     [
-        "examples/tapw/mote2_9.43/configs/K1_q03.yaml",
-        "examples/tapw/mgi2_9.43/configs/M1_q03.yaml",
-        "examples/tapw/mgi2_9.43/configs/Gamma_q03.yaml",
+        "examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml",
+        "examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml",
+        "examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml",
+        "examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml",
+        "examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_K1_spinful_q04.yaml",
+        "examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml",
+        "examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml",
     ],
 )
 def test_release_tapw_example_paths_are_config_relative(config_path):
     root = Path(__file__).resolve().parents[2]
-    config = Config.from_yaml(str(root / config_path))
-    case_root = (root / config_path).parent.parent
+    source = root / config_path
+    raw_system = yaml.safe_load(source.read_text(encoding="utf-8"))["system"]
+    config = Config.from_yaml(str(source))
 
-    assert Path(config.paths.H_file).parent == case_root / "openmx" / "soc"
-    assert Path(config.paths.S_file).parent == case_root / "openmx" / "soc"
-    assert Path(config.paths.input_file).parent == case_root / "openmx" / "soc"
+    for key in ("hamiltonian", "overlap", "structure", "output"):
+        assert not Path(raw_system[key]).is_absolute()
+    assert Path(config.paths.H_file) == (source.parent / raw_system["hamiltonian"]).resolve()
+    assert Path(config.paths.S_file) == (source.parent / raw_system["overlap"]).resolve()
+    assert Path(config.paths.input_file) == (source.parent / raw_system["structure"]).resolve()
     assert config.paths.kpath_in is None
     assert config.kpath["labels"] == ["G", "M", "K", "G"]
-    assert Path(config.paths.output_dir) == case_root / "outputs"
+    assert Path(config.paths.output_dir) == (source.parent / raw_system["output"]).resolve()
 
 
 @pytest.mark.parametrize(
     "config_path",
     [
-        "examples/bitei/AA/6_5.09/tapw/configs/bitei_AA_6_5.09_Gamma_spinful_q05.yaml",
         "examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml",
         "examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml",
         "examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml",

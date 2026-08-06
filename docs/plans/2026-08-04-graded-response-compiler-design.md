@@ -7,8 +7,10 @@ the current generate-all-then-rank workflow.  A low-order probe identifies the
 actual sector/orbital/harmonic action, but the configured kinetic, intra, and
 inter maximum orders remain authoritative and are reproduced exactly.
 
-For MgI2 Gamma q04 the compiler must start from 56 structural supports rather
-than materializing 2,784 complex polynomial seeds and 5,568 real directions.
+For the current MgI2 Gamma q04 single-sign envelope the compiler should derive
+40 structural supports rather than materializing 2,032 complex polynomial
+seeds and 4,064 real directions.  This count is a case diagnostic, never a
+hard-coded material constant.
 It must preserve the invariant response span, Hermitian/antiunitary semantics,
 Hamiltonian residual, bands, and orbital-gauge covariance.
 
@@ -23,23 +25,36 @@ Hamiltonian residual, bands, and orbital-gauge covariance.
 
 ## Structural envelope
 
-A structural support contains only:
+A structural support contains only its physical identity:
 
-- family;
 - source and target sectors;
 - an actual Q-pair/harmonic support;
 - ordered source and target orbital slots;
 - adjoint provenance.
 
-It does not contain a momentum monomial.  MgI2 Gamma has:
+`kinetic`, `onsite`, `intra`, and `inter` remain provenance and determine which
+configured order bound authored a degree; they are not part of structural
+identity.  Consequently exact physical duplicates such as
+
+\[
+\text{onsite}=\text{intra}(p=0,d=0),\qquad
+\text{kinetic}(d)=\text{intra}(p=0,d)
+\]
+
+are represented once while retaining both provenance records and their
+original family-specific truncation rules.
+
+It does not contain a momentum monomial.  The current MgI2 Gamma q04 case
+derives:
 
 \[
 N_K^{\rm struct}=2\cdot4=8,\qquad
-N_{\rm intra}^{\rm struct}=2\cdot3\cdot4=24,\qquad
-N_{\rm inter}^{\rm struct}=2\cdot3\cdot4=24.
+N_{\rm intra}^{\rm struct}=2\cdot2\cdot4=16,\qquad
+N_{\rm inter}^{\rm struct}=2\cdot2\cdot4=16.
 \]
 
-Thus only 56 structural supports enter action analysis.
+Thus only 40 dynamically discovered structural supports enter action analysis
+before symmetry-orbit merging.
 
 The actual exactified factorized or joint-route action determines how these
 supports and their Q-pair amplitude fibers mix.  No operation-name geometry or

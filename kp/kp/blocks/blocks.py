@@ -26,8 +26,9 @@ from kp.basis.selection import (
     select_anchor_rows_qrcp,
 )
 from kp.identity import hash_array, hash_mapping
+from kp.projection_selection import CandidateRejectionReason
 
-from .gamma_layout import GammaRowLayout
+from .gamma_layout import GammaRoutingError, GammaRowLayout
 
 PROJECTOR_BLAS_THREADS = 8
 _PROJECTOR_BLAS_SCOPE_DEPTH: ContextVar[int] = ContextVar(
@@ -514,6 +515,539 @@ class GammaModelFrames:
             "alignment_singular_values_by_q": [
                 list(value) for value in self.alignment_singular_values_by_q
             ],
+            "orthonormality_residuals_by_q": list(self.orthonormality_residuals_by_q),
+            "projector_residuals_by_q": list(self.projector_residuals_by_q),
+        }
+
+
+@dataclass(frozen=True)
+class GammaModelOwnerSpec:
+    """One model-sector owner assigned independently of anchor support gauge."""
+
+    lambda_index: int
+    rank: int
+    source_group: int
+    qset_index: int
+    physical_layers: tuple[int, ...]
+    reference_columns: tuple[int, ...]
+
+    def __post_init__(self) -> None:
+        integer_fields = ("lambda_index", "rank", "source_group", "qset_index")
+        values = {
+            name: _record_int(getattr(self, name), context=f"Gamma common-anchor owner {name}")
+            for name in integer_fields
+        }
+        if values["lambda_index"] < 0 or values["source_group"] < 0 or values["qset_index"] < 0:
+            raise ValueError("Gamma common-anchor owner indices must be non-negative")
+        if values["rank"] <= 0:
+            raise ValueError("Gamma common-anchor owner rank must be positive")
+        physical_layers = tuple(
+            _record_int(value, context="Gamma common-anchor owner physical layer")
+            for value in _record_tuple(
+                self.physical_layers,
+                context="Gamma common-anchor owner physical layers",
+            )
+        )
+        reference_columns = tuple(
+            _record_int(value, context="Gamma common-anchor owner reference column")
+            for value in _record_tuple(
+                self.reference_columns,
+                context="Gamma common-anchor owner reference columns",
+            )
+        )
+        if (
+            not physical_layers
+            or any(value < 0 for value in physical_layers)
+            or len(set(physical_layers)) != len(physical_layers)
+        ):
+            raise ValueError("Gamma common-anchor owner physical layers must be unique and non-negative")
+        if (
+            len(reference_columns) != values["rank"]
+            or len(set(reference_columns)) != values["rank"]
+            or any(value < 0 for value in reference_columns)
+        ):
+            raise ValueError("Gamma common-anchor owner columns must uniquely cover its rank")
+        for name, value in values.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "physical_layers", physical_layers)
+        object.__setattr__(self, "reference_columns", reference_columns)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "lambda_index": self.lambda_index,
+            "rank": self.rank,
+            "source_group": self.source_group,
+            "qset_index": self.qset_index,
+            "physical_layers": list(self.physical_layers),
+            "reference_columns": list(self.reference_columns),
+        }
+
+
+@dataclass(frozen=True)
+class GammaCommonAnchorSpec:
+    """Common reference-orbital contract shared by every Gamma Q fibre."""
+
+    joint_band_indices: tuple[int, ...]
+    resolved_reference_terms: tuple[tuple[tuple[int, complex], ...], ...]
+    selected_rows: tuple[int, ...]
+    reference_physical_layers: tuple[int, ...]
+    reference_source_groups: tuple[int, ...]
+    owner_specs: tuple[GammaModelOwnerSpec, ...]
+    reference_q_index: int
+    layout_hash: str
+    same_q_dimension: int
+    physical_layer_count: int
+    source_qset_count: int
+    min_sigma: float
+    max_condition: float
+    projector_tolerance: float
+    orthonormality_tolerance: float
+    selection_sigma_min: float
+    selection_condition_number: float
+    reference_singular_values: tuple[float, ...]
+    reference_sigma_min: float
+    reference_condition_number: float
+    reference_eigenvalues: tuple[float, ...]
+    reference_projector_hash: str
+    warnings: tuple[str, ...]
+    identity_hash: str
+
+    SCHEMA = "kp.gamma-common-anchor-spec.v1"
+
+    def __post_init__(self) -> None:
+        bands = _gamma_common_band_indices(self.joint_band_indices)
+        rank = len(bands)
+        references = _record_references(self.resolved_reference_terms)
+        selected_rows = tuple(
+            _record_int(row, context="Gamma common-anchor selected row")
+            for row in _record_tuple(self.selected_rows, context="Gamma common-anchor selected rows")
+        )
+        physical_layers = tuple(
+            _record_int(value, context="Gamma common-anchor reference physical layer")
+            for value in _record_tuple(
+                self.reference_physical_layers,
+                context="Gamma common-anchor reference physical layers",
+            )
+        )
+        source_groups = tuple(
+            _record_int(value, context="Gamma common-anchor reference source group")
+            for value in _record_tuple(
+                self.reference_source_groups,
+                context="Gamma common-anchor reference source groups",
+            )
+        )
+        if any(len(value) != rank for value in (references, selected_rows, physical_layers, source_groups)):
+            raise ValueError("Gamma common-anchor column metadata must cover the selected rank")
+        if len(set(selected_rows)) != rank:
+            raise ValueError("Gamma common-anchor selected rows must be unique")
+        reference_q_index = _record_int(
+            self.reference_q_index,
+            context="Gamma common-anchor reference_q_index",
+        )
+        same_q_dimension = _record_int(
+            self.same_q_dimension,
+            context="Gamma common-anchor same_q_dimension",
+        )
+        physical_layer_count = _record_int(
+            self.physical_layer_count,
+            context="Gamma common-anchor physical_layer_count",
+        )
+        source_qset_count = _record_int(
+            self.source_qset_count,
+            context="Gamma common-anchor source_qset_count",
+        )
+        if reference_q_index < 0:
+            raise ValueError("Gamma common-anchor reference_q_index must be non-negative")
+        if same_q_dimension <= 0 or physical_layer_count <= 0 or source_qset_count <= 0:
+            raise ValueError("Gamma common-anchor dimensions must be positive")
+        if any(row < 0 or row >= same_q_dimension for row in selected_rows):
+            raise ValueError("Gamma common-anchor selected row lies outside the local dimension")
+        if any(value < 0 or value >= physical_layer_count for value in physical_layers):
+            raise ValueError("Gamma common-anchor physical-layer metadata is out of range")
+        if any(value < 0 or value >= source_qset_count for value in source_groups):
+            raise ValueError("Gamma common-anchor source-group metadata is out of range")
+        owners = tuple(self.owner_specs)
+        if not owners or any(not isinstance(owner, GammaModelOwnerSpec) for owner in owners):
+            raise ValueError("Gamma common-anchor requires one or more model owners")
+        if tuple(owner.lambda_index for owner in owners) != tuple(range(len(owners))):
+            raise ValueError("Gamma common-anchor owner lambda indices must be canonical")
+        owner_columns = tuple(column for owner in owners for column in owner.reference_columns)
+        if owner_columns != tuple(range(rank)):
+            raise ValueError("Gamma common-anchor owners must canonically partition reference columns")
+        for owner in owners:
+            if owner.source_group >= source_qset_count or owner.qset_index >= source_qset_count:
+                raise ValueError("Gamma common-anchor owner source/Q-set index is out of range")
+            for column in owner.reference_columns:
+                if physical_layers[column] not in owner.physical_layers:
+                    raise ValueError("Gamma common-anchor owner does not cover its physical-layer column")
+                if source_groups[column] != owner.source_group:
+                    raise ValueError("Gamma common-anchor owner source group disagrees with its columns")
+        scalar_names = (
+            "min_sigma",
+            "max_condition",
+            "projector_tolerance",
+            "orthonormality_tolerance",
+            "selection_sigma_min",
+            "selection_condition_number",
+            "reference_sigma_min",
+            "reference_condition_number",
+        )
+        scalars = {
+            name: _record_float(getattr(self, name), context=f"Gamma common-anchor {name}")
+            for name in scalar_names
+        }
+        singular_values = tuple(
+            _record_float(value, context="Gamma common-anchor reference singular value")
+            for value in _record_tuple(
+                self.reference_singular_values,
+                context="Gamma common-anchor reference singular values",
+            )
+        )
+        eigenvalues = tuple(
+            _record_float(value, context="Gamma common-anchor reference eigenvalue")
+            for value in _record_tuple(
+                self.reference_eigenvalues,
+                context="Gamma common-anchor reference eigenvalues",
+            )
+        )
+        warnings = tuple(str(value) for value in _record_tuple(self.warnings, context="Gamma common-anchor warnings"))
+        if (
+            len(singular_values) != rank
+            or len(eigenvalues) != rank
+            or any(not np.isfinite(value) for value in tuple(scalars.values()) + singular_values + eigenvalues)
+            or scalars["min_sigma"] <= 0.0
+            or scalars["max_condition"] < 1.0
+            or scalars["projector_tolerance"] <= 0.0
+            or scalars["orthonormality_tolerance"] <= 0.0
+            or scalars["selection_sigma_min"] < scalars["min_sigma"]
+            or scalars["selection_condition_number"] > scalars["max_condition"]
+            or scalars["reference_sigma_min"] < scalars["min_sigma"]
+            or scalars["reference_condition_number"] > scalars["max_condition"]
+        ):
+            raise ValueError("Gamma common-anchor quality metrics are invalid")
+        if not isinstance(self.layout_hash, str) or not self.layout_hash:
+            raise ValueError("Gamma common-anchor layout hash must be nonempty")
+        if not isinstance(self.reference_projector_hash, str) or not self.reference_projector_hash:
+            raise ValueError("Gamma common-anchor reference projector hash must be nonempty")
+        _gamma_reference_matrix(references, row_count=same_q_dimension)
+        object.__setattr__(self, "joint_band_indices", bands)
+        object.__setattr__(self, "resolved_reference_terms", references)
+        object.__setattr__(self, "selected_rows", selected_rows)
+        object.__setattr__(self, "reference_physical_layers", physical_layers)
+        object.__setattr__(self, "reference_source_groups", source_groups)
+        object.__setattr__(self, "owner_specs", owners)
+        object.__setattr__(self, "reference_q_index", reference_q_index)
+        object.__setattr__(self, "same_q_dimension", same_q_dimension)
+        object.__setattr__(self, "physical_layer_count", physical_layer_count)
+        object.__setattr__(self, "source_qset_count", source_qset_count)
+        for name, value in scalars.items():
+            object.__setattr__(self, name, value)
+        object.__setattr__(self, "reference_singular_values", singular_values)
+        object.__setattr__(self, "reference_eigenvalues", eigenvalues)
+        object.__setattr__(self, "warnings", warnings)
+        if not isinstance(self.identity_hash, str) or hash_mapping(self._identity_payload()) != self.identity_hash:
+            raise ValueError("Gamma common-anchor identity hash mismatch")
+
+    @property
+    def physical_layer_anchor_counts(self) -> tuple[int, ...]:
+        return tuple(self.reference_physical_layers.count(index) for index in range(self.physical_layer_count))
+
+    @property
+    def source_qset_anchor_counts(self) -> tuple[int, ...]:
+        return tuple(
+            sum(owner.rank for owner in self.owner_specs if owner.qset_index == index)
+            for index in range(self.source_qset_count)
+        )
+
+    @property
+    def active_model_layers(self) -> tuple[int, ...]:
+        return tuple(layer for owner in self.owner_specs for layer in owner.physical_layers)
+
+    @property
+    def model_group_ranks(self) -> tuple[int, ...]:
+        return tuple(owner.rank for owner in self.owner_specs)
+
+    @property
+    def model_group_qset_indices(self) -> tuple[int, ...]:
+        return tuple(owner.qset_index for owner in self.owner_specs)
+
+    @property
+    def continuum_sector_ranks(self) -> tuple[int, int]:
+        """Return the two-sector rank layout consumed by symm/model.
+
+        Two active owners already define the two continuum sectors, even when
+        both owners draw Q geometry from the same source Q set.  A single
+        active owner is placed in its source-Q-set slot and the other
+        continuum sector remains present with zero rank.
+        """
+
+        ranks = self.model_group_ranks
+        if len(ranks) == 2:
+            return int(ranks[0]), int(ranks[1])
+        if len(ranks) == 1 and self.source_qset_count == 2:
+            owner = self.owner_specs[0]
+            resolved = [0, 0]
+            resolved[int(owner.qset_index)] = int(owner.rank)
+            return int(resolved[0]), int(resolved[1])
+        raise ValueError(
+            "Gamma common-anchor model owners cannot be represented by the "
+            "two-sector continuum layout: "
+            f"owner_ranks={list(ranks)}, source_qset_count={self.source_qset_count}"
+        )
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.SCHEMA,
+            "joint_band_indices": list(self.joint_band_indices),
+            "resolved_reference_terms": _gamma_reference_payload(self.resolved_reference_terms),
+            "selected_rows": list(self.selected_rows),
+            "reference_physical_layers": list(self.reference_physical_layers),
+            "reference_source_groups": list(self.reference_source_groups),
+            "owner_specs": [owner.to_payload() for owner in self.owner_specs],
+            "reference_q_index": self.reference_q_index,
+            "layout_hash": self.layout_hash,
+            "same_q_dimension": self.same_q_dimension,
+            "physical_layer_count": self.physical_layer_count,
+            "source_qset_count": self.source_qset_count,
+            "min_sigma": self.min_sigma,
+            "max_condition": self.max_condition,
+            "projector_tolerance": self.projector_tolerance,
+            "orthonormality_tolerance": self.orthonormality_tolerance,
+            "selection_sigma_min": self.selection_sigma_min,
+            "selection_condition_number": self.selection_condition_number,
+            "reference_singular_values": list(self.reference_singular_values),
+            "reference_sigma_min": self.reference_sigma_min,
+            "reference_condition_number": self.reference_condition_number,
+            "reference_eigenvalues": list(self.reference_eigenvalues),
+            "reference_projector_hash": self.reference_projector_hash,
+            "warnings": list(self.warnings),
+        }
+
+    def to_payload(self) -> dict[str, Any]:
+        payload = self._identity_payload()
+        payload["identity_hash"] = self.identity_hash
+        return payload
+
+    @classmethod
+    def from_payload(cls, payload: Mapping[str, Any]) -> "GammaCommonAnchorSpec":
+        """Restore one canonical, hash-bound common-anchor specification."""
+
+        if not isinstance(payload, Mapping):
+            raise TypeError("Gamma common-anchor payload must be a mapping")
+        identity_keys = {
+            "schema",
+            "joint_band_indices",
+            "resolved_reference_terms",
+            "selected_rows",
+            "reference_physical_layers",
+            "reference_source_groups",
+            "owner_specs",
+            "reference_q_index",
+            "layout_hash",
+            "same_q_dimension",
+            "physical_layer_count",
+            "source_qset_count",
+            "min_sigma",
+            "max_condition",
+            "projector_tolerance",
+            "orthonormality_tolerance",
+            "selection_sigma_min",
+            "selection_condition_number",
+            "reference_singular_values",
+            "reference_sigma_min",
+            "reference_condition_number",
+            "reference_eigenvalues",
+            "reference_projector_hash",
+            "warnings",
+        }
+        expected_keys = identity_keys | {"identity_hash"}
+        missing = sorted(expected_keys - set(payload))
+        unknown = sorted(set(payload) - expected_keys)
+        if missing or unknown:
+            raise ValueError(
+                "Gamma common-anchor payload keys mismatch "
+                f"(missing={missing}, unknown={unknown})"
+            )
+        if payload["schema"] != cls.SCHEMA:
+            raise ValueError(
+                f"unsupported Gamma common-anchor schema {payload['schema']!r}"
+            )
+        canonical = {key: payload[key] for key in identity_keys}
+        expected_hash = payload["identity_hash"]
+        if not isinstance(expected_hash, str) or not expected_hash:
+            raise ValueError(
+                "Gamma common-anchor identity_hash must be a nonempty string"
+            )
+        if hash_mapping(canonical) != expected_hash:
+            raise ValueError("Gamma common-anchor identity hash mismatch")
+
+        raw_references = payload["resolved_reference_terms"]
+        if not isinstance(raw_references, list):
+            raise ValueError(
+                "Gamma common-anchor resolved_reference_terms must be a list"
+            )
+        references: list[tuple[tuple[int, complex], ...]] = []
+        for terms in raw_references:
+            if not isinstance(terms, list) or not terms:
+                raise ValueError(
+                    "Gamma common-anchor reference columns must be nonempty lists"
+                )
+            parsed: list[tuple[int, complex]] = []
+            for term in terms:
+                if not isinstance(term, list) or len(term) != 3:
+                    raise ValueError(
+                        "Gamma common-anchor reference terms must be [row, real, imag]"
+                    )
+                parsed.append(
+                    (
+                        term[0],
+                        complex(
+                            _record_float(
+                                term[1],
+                                context="Gamma common-anchor coefficient real part",
+                            ),
+                            _record_float(
+                                term[2],
+                                context="Gamma common-anchor coefficient imaginary part",
+                            ),
+                        ),
+                    )
+                )
+            references.append(tuple(parsed))
+
+        raw_owners = payload["owner_specs"]
+        if not isinstance(raw_owners, list) or not raw_owners:
+            raise ValueError("Gamma common-anchor owner_specs must be a nonempty list")
+        owner_keys = {
+            "lambda_index",
+            "rank",
+            "source_group",
+            "qset_index",
+            "physical_layers",
+            "reference_columns",
+        }
+        owners: list[GammaModelOwnerSpec] = []
+        for raw_owner in raw_owners:
+            if not isinstance(raw_owner, Mapping) or set(raw_owner) != owner_keys:
+                raise ValueError("Gamma common-anchor owner payload keys mismatch")
+            owners.append(
+                GammaModelOwnerSpec(
+                    lambda_index=raw_owner["lambda_index"],
+                    rank=raw_owner["rank"],
+                    source_group=raw_owner["source_group"],
+                    qset_index=raw_owner["qset_index"],
+                    physical_layers=raw_owner["physical_layers"],
+                    reference_columns=raw_owner["reference_columns"],
+                )
+            )
+
+        spec = cls(
+            joint_band_indices=payload["joint_band_indices"],
+            resolved_reference_terms=tuple(references),
+            selected_rows=payload["selected_rows"],
+            reference_physical_layers=payload["reference_physical_layers"],
+            reference_source_groups=payload["reference_source_groups"],
+            owner_specs=tuple(owners),
+            reference_q_index=payload["reference_q_index"],
+            layout_hash=payload["layout_hash"],
+            same_q_dimension=payload["same_q_dimension"],
+            physical_layer_count=payload["physical_layer_count"],
+            source_qset_count=payload["source_qset_count"],
+            min_sigma=payload["min_sigma"],
+            max_condition=payload["max_condition"],
+            projector_tolerance=payload["projector_tolerance"],
+            orthonormality_tolerance=payload["orthonormality_tolerance"],
+            selection_sigma_min=payload["selection_sigma_min"],
+            selection_condition_number=payload["selection_condition_number"],
+            reference_singular_values=payload["reference_singular_values"],
+            reference_sigma_min=payload["reference_sigma_min"],
+            reference_condition_number=payload["reference_condition_number"],
+            reference_eigenvalues=payload["reference_eigenvalues"],
+            reference_projector_hash=payload["reference_projector_hash"],
+            warnings=payload["warnings"],
+            identity_hash=expected_hash,
+        )
+        if spec._identity_payload() != canonical:
+            raise ValueError(
+                "Gamma common-anchor payload is not in canonical numeric form"
+            )
+        return spec
+
+
+@dataclass(frozen=True)
+class GammaCommonAnchorFrames:
+    """Per-Q frames aligned to one common Gamma reference basis."""
+
+    anchor_spec_identity_hash: str
+    layout_hash: str
+    joint_band_indices: tuple[int, ...]
+    model_group_ranks: tuple[int, ...]
+    local_frames_by_q: tuple[np.ndarray, ...]
+    alignment_unitaries_by_q: tuple[np.ndarray, ...]
+    alignment_singular_values_by_q: tuple[tuple[float, ...], ...]
+    orthonormality_residuals_by_q: tuple[float, ...]
+    projector_residuals_by_q: tuple[float, ...]
+    frame_hashes_by_q: tuple[str, ...]
+    alignment_hashes_by_q: tuple[str, ...]
+    identity_hash: str
+
+    SCHEMA = "kp.gamma-common-anchor-frames.v1"
+
+    def __post_init__(self) -> None:
+        bands = _gamma_common_band_indices(self.joint_band_indices)
+        ranks = tuple(
+            _record_int(value, context="Gamma common-anchor model rank")
+            for value in _record_tuple(self.model_group_ranks, context="Gamma common-anchor model ranks")
+        )
+        if not ranks or any(value <= 0 for value in ranks) or sum(ranks) != len(bands):
+            raise ValueError("Gamma common-anchor model ranks must be positive and sum to total rank")
+        frames = tuple(self.local_frames_by_q)
+        alignments = tuple(self.alignment_unitaries_by_q)
+        singular_values_by_q = tuple(tuple(float(value) for value in values) for values in self.alignment_singular_values_by_q)
+        orthonormality = tuple(float(value) for value in self.orthonormality_residuals_by_q)
+        projector = tuple(float(value) for value in self.projector_residuals_by_q)
+        frame_hashes = tuple(self.frame_hashes_by_q)
+        alignment_hashes = tuple(self.alignment_hashes_by_q)
+        q_count = len(frames)
+        if q_count <= 0 or len({q_count, len(alignments), len(singular_values_by_q), len(orthonormality), len(projector), len(frame_hashes), len(alignment_hashes)}) != 1:
+            raise ValueError("Gamma common-anchor frame evidence must contain one row per Q")
+        frozen_frames: list[np.ndarray] = []
+        frozen_alignments: list[np.ndarray] = []
+        for q_index, (raw_frame, raw_alignment) in enumerate(zip(frames, alignments)):
+            frame = np.array(raw_frame, dtype=np.complex128, copy=True, order="C")
+            alignment = np.array(raw_alignment, dtype=np.complex128, copy=True, order="C")
+            if frame.ndim != 2 or frame.shape[1] != len(bands) or alignment.shape != (len(bands), len(bands)):
+                raise ValueError(f"Gamma common-anchor Q {q_index} frame/alignment shape mismatch")
+            if hash_array(frame) != frame_hashes[q_index] or hash_array(alignment) != alignment_hashes[q_index]:
+                raise ValueError(f"Gamma common-anchor Q {q_index} frame/alignment hash mismatch")
+            if len(singular_values_by_q[q_index]) != len(bands):
+                raise ValueError(f"Gamma common-anchor Q {q_index} singular-value rank mismatch")
+            frame.setflags(write=False)
+            alignment.setflags(write=False)
+            frozen_frames.append(frame)
+            frozen_alignments.append(alignment)
+        object.__setattr__(self, "joint_band_indices", bands)
+        object.__setattr__(self, "model_group_ranks", ranks)
+        object.__setattr__(self, "local_frames_by_q", tuple(frozen_frames))
+        object.__setattr__(self, "alignment_unitaries_by_q", tuple(frozen_alignments))
+        object.__setattr__(self, "alignment_singular_values_by_q", singular_values_by_q)
+        object.__setattr__(self, "orthonormality_residuals_by_q", orthonormality)
+        object.__setattr__(self, "projector_residuals_by_q", projector)
+        object.__setattr__(self, "frame_hashes_by_q", frame_hashes)
+        object.__setattr__(self, "alignment_hashes_by_q", alignment_hashes)
+        if not isinstance(self.identity_hash, str) or hash_mapping(self._identity_payload()) != self.identity_hash:
+            raise ValueError("Gamma common-anchor frame identity hash mismatch")
+
+    def _identity_payload(self) -> dict[str, Any]:
+        return {
+            "schema": self.SCHEMA,
+            "anchor_spec_identity_hash": self.anchor_spec_identity_hash,
+            "layout_hash": self.layout_hash,
+            "joint_band_indices": list(self.joint_band_indices),
+            "model_group_ranks": list(self.model_group_ranks),
+            "frame_hashes_by_q": list(self.frame_hashes_by_q),
+            "alignment_hashes_by_q": list(self.alignment_hashes_by_q),
+            "alignment_singular_values_by_q": [list(values) for values in self.alignment_singular_values_by_q],
             "orthonormality_residuals_by_q": list(self.orthonormality_residuals_by_q),
             "projector_residuals_by_q": list(self.projector_residuals_by_q),
         }
@@ -1473,6 +2007,20 @@ def _gamma_joint_contract(
     return bands, (ranks[0], ranks[1]), order
 
 
+def _gamma_common_band_indices(joint_band_indices: Sequence[int]) -> tuple[int, ...]:
+    if any(
+        not isinstance(value, Integral) or isinstance(value, (bool, np.bool_))
+        for value in joint_band_indices
+    ):
+        raise ValueError("Gamma common-anchor band indices must be strict integers")
+    bands = tuple(int(value) for value in joint_band_indices)
+    if not bands or len(set(bands)) != len(bands) or any(value < 0 for value in bands):
+        raise ValueError(
+            "Gamma common-anchor band indices must be nonempty, unique, and non-negative"
+        )
+    return bands
+
+
 def _validate_gamma_model_eigensystems(
     *,
     eigenvalues_by_q: Sequence[np.ndarray],
@@ -1547,6 +2095,379 @@ def _gamma_reference_payload(
         [[int(row), float(complex(coef).real), float(complex(coef).imag)] for row, coef in terms]
         for terms in references
     ]
+
+
+def _common_anchor_source_group_orbits(
+    source_group_orbits: Sequence[Sequence[int]] | None,
+    *,
+    source_group_count: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Normalize the source-group partition used only for model ownership.
+
+    With no narrower contract, all Gamma source groups form the common model
+    owner fiber.  Explicit partitions can still require separate owners.
+    """
+
+    if source_group_orbits is None:
+        return (tuple(range(int(source_group_count))),)
+    try:
+        raw_orbits = tuple(tuple(orbit) for orbit in source_group_orbits)
+    except TypeError as error:
+        raise ValueError("Gamma common-anchor source-group orbits must be sequences") from error
+    normalized: list[tuple[int, ...]] = []
+    for orbit in raw_orbits:
+        if not orbit or any(
+            isinstance(group, (bool, np.bool_)) or not isinstance(group, Integral)
+            for group in orbit
+        ):
+            raise ValueError(
+                "Gamma common-anchor source-group orbits must contain strict integers"
+            )
+        groups = tuple(sorted(int(group) for group in orbit))
+        if len(set(groups)) != len(groups):
+            raise ValueError("Gamma common-anchor source-group orbit contains duplicates")
+        normalized.append(groups)
+    normalized.sort(key=lambda orbit: orbit[0])
+    flattened = tuple(group for orbit in normalized for group in orbit)
+    if flattened != tuple(range(int(source_group_count))):
+        raise ValueError(
+            "Gamma common-anchor source-group orbits must canonically partition all groups"
+        )
+    return tuple(normalized)
+
+
+def build_gamma_common_anchor_spec(
+    *,
+    reference_eigenvalues_by_q: Sequence[np.ndarray],
+    reference_eigenvectors_by_q: Sequence[np.ndarray],
+    joint_band_indices: Sequence[int],
+    layout: GammaRowLayout,
+    gauge_config: AutoGaugeConfig | Mapping[str, Any] | str | None = None,
+    projector_tolerance: float = 1.0e-10,
+    orthonormality_tolerance: float = 1.0e-10,
+    source_group_orbits: Sequence[Sequence[int]] | None = None,
+) -> GammaCommonAnchorSpec:
+    """Select one canonical orbital anchor pattern at a representative Gamma Q."""
+
+    if not isinstance(layout, GammaRowLayout):
+        raise TypeError("Gamma common-anchor construction requires a GammaRowLayout")
+    config = _gamma_model_config(gauge_config)
+    bands = _gamma_common_band_indices(joint_band_indices)
+    tolerances = (float(projector_tolerance), float(orthonormality_tolerance))
+    if any(not np.isfinite(value) or value <= 0.0 for value in tolerances):
+        raise ValueError(
+            "Gamma common-anchor projector/orthonormality tolerances must be finite and positive"
+        )
+    values_by_q, vectors_by_q = _validate_gamma_model_eigensystems(
+        eigenvalues_by_q=reference_eigenvalues_by_q,
+        eigenvectors_by_q=reference_eigenvectors_by_q,
+        layout=layout,
+        joint_band_indices=bands,
+        orthonormality_tolerance=tolerances[1],
+    )
+    reference_q = int(config.reference_q_index)
+    if reference_q < 0 or reference_q >= layout.q_count:
+        raise IndexError(
+            f"Gamma common-anchor reference_q_index={reference_q} outside available Q range "
+            f"0..{layout.q_count - 1}"
+        )
+    columns = np.asarray(bands, dtype=np.intp)
+    u_reference = vectors_by_q[reference_q][:, columns]
+    widths = [
+        [int(layout.uniform_orbital_count)] * int(layer_count)
+        for layer_count in layout.num_layer_list
+    ]
+    segments = _gamma_same_q_row_segments(
+        layout.same_q_dimension,
+        list(layout.num_layer_list),
+        widths,
+        spin="all",
+    )
+    try:
+        resolution = _resolve_gamma_reference_core(
+            u_reference,
+            config=config,
+            segments=segments,
+        )
+    except GammaRoutingError:
+        raise
+    except ValueError as error:
+        raise GammaRoutingError(
+            CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+            str(error),
+        ) from error
+    selected_rows = tuple(int(row) for row in resolution.selection.selected_rows)
+    group_orbits = _common_anchor_source_group_orbits(
+        source_group_orbits,
+        source_group_count=len(layout.ordered_qsets),
+    )
+    resolved_references: list[
+        tuple[set[int], set[int], tuple[tuple[int, complex], ...]]
+    ] = []
+    for reference in resolution.references_by_band:
+        addresses = tuple(
+            layout.rows_by_q[reference_q][int(row)] for row, _coefficient in reference
+        )
+        physical_layers = {int(address.physical_layer) for address in addresses}
+        source_groups = {int(address.source_group) for address in addresses}
+        resolved_references.append((physical_layers, source_groups, reference))
+
+    pure_owner_support = all(
+        len(physical_layers) == 1 and len(source_groups) == 1
+        for physical_layers, source_groups, _reference in resolved_references
+    )
+    if pure_owner_support:
+        resolved_references.sort(
+            key=lambda item: (
+                next(iter(item[0])),
+                next(iter(item[1])),
+            )
+        )
+        references = tuple(item[2] for item in resolved_references)
+        reference_physical_layers = [
+            next(iter(item[0])) for item in resolved_references
+        ]
+        reference_source_groups = [
+            next(iter(item[1])) for item in resolved_references
+        ]
+    else:
+        mixed_supports = tuple(
+            tuple(sorted(source_groups))
+            for _physical_layers, source_groups, _reference in resolved_references
+        )
+        matching_orbits = tuple(
+            orbit
+            for orbit in group_orbits
+            if len(orbit) > 1 and all(support == orbit for support in mixed_supports)
+        )
+        if len(matching_orbits) != 1:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                "Gamma common-anchor reference orbital spans multiple physical layers "
+                "or source groups without one matching symmetry owner contract",
+            )
+        owner_orbit = matching_orbits[0]
+        if any(int(layout.num_layer_list[group]) != 1 for group in owner_orbit):
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                "Gamma common-anchor mixed reference owner contract is ambiguous for "
+                "multi-layer source groups",
+            )
+        if len(resolved_references) % len(owner_orbit) != 0:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                "Gamma common-anchor mixed reference rank is incompatible with its "
+                "source-group symmetry orbit",
+            )
+        references = tuple(item[2] for item in resolved_references)
+        rank_per_group = len(references) // len(owner_orbit)
+        reference_source_groups = [
+            group
+            for group in owner_orbit
+            for _column in range(rank_per_group)
+        ]
+        physical_offsets = tuple(
+            sum(int(value) for value in layout.num_layer_list[:group])
+            for group in range(len(layout.num_layer_list))
+        )
+        reference_physical_layers = [
+            physical_offsets[group] for group in reference_source_groups
+        ]
+    phi = _gamma_reference_matrix(references, row_count=layout.same_q_dimension)
+    singular_values = np.asarray(
+        resolution.reference_singular_values,
+        dtype=np.float64,
+    )
+    sigma_min = float(resolution.reference_sigma_min)
+    condition = float(resolution.reference_condition_number)
+
+    owner_specs: list[GammaModelOwnerSpec] = []
+    ordered_physical_layers = tuple(dict.fromkeys(reference_physical_layers))
+    for physical_layer in ordered_physical_layers:
+        reference_columns = tuple(
+            index
+            for index, column_layer in enumerate(reference_physical_layers)
+            if int(column_layer) == physical_layer
+        )
+        source_groups = {
+            int(reference_source_groups[index]) for index in reference_columns
+        }
+        if len(source_groups) != 1:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                "Gamma common-anchor physical-layer owner spans multiple source groups",
+            )
+        source_group = next(iter(source_groups))
+        owner_specs.append(
+            GammaModelOwnerSpec(
+                lambda_index=len(owner_specs),
+                rank=len(reference_columns),
+                source_group=source_group,
+                qset_index=source_group,
+                physical_layers=(physical_layer,),
+                reference_columns=reference_columns,
+            )
+        )
+
+    selected_eigenvalues = tuple(float(values_by_q[reference_q][band]) for band in bands)
+    payload = {
+        "schema": GammaCommonAnchorSpec.SCHEMA,
+        "joint_band_indices": list(bands),
+        "resolved_reference_terms": _gamma_reference_payload(references),
+        "selected_rows": list(selected_rows),
+        "reference_physical_layers": list(reference_physical_layers),
+        "reference_source_groups": list(reference_source_groups),
+        "owner_specs": [owner.to_payload() for owner in owner_specs],
+        "reference_q_index": reference_q,
+        "layout_hash": layout.layout_hash,
+        "same_q_dimension": layout.same_q_dimension,
+        "physical_layer_count": sum(int(value) for value in layout.num_layer_list),
+        "source_qset_count": len(layout.ordered_qsets),
+        "min_sigma": float(config.min_sigma),
+        "max_condition": float(config.max_condition),
+        "projector_tolerance": tolerances[0],
+        "orthonormality_tolerance": tolerances[1],
+        "selection_sigma_min": float(resolution.selection.sigma_min),
+        "selection_condition_number": float(resolution.selection.condition_number),
+        "reference_singular_values": [float(value) for value in singular_values.tolist()],
+        "reference_sigma_min": sigma_min,
+        "reference_condition_number": condition,
+        "reference_eigenvalues": list(selected_eigenvalues),
+        "reference_projector_hash": hash_array(u_reference @ u_reference.conj().T),
+        "warnings": list(resolution.completion_warnings)
+        + list(resolution.selection.warnings),
+    }
+    return GammaCommonAnchorSpec(
+        joint_band_indices=bands,
+        resolved_reference_terms=references,
+        selected_rows=selected_rows,
+        reference_physical_layers=tuple(reference_physical_layers),
+        reference_source_groups=tuple(reference_source_groups),
+        owner_specs=tuple(owner_specs),
+        reference_q_index=reference_q,
+        layout_hash=layout.layout_hash,
+        same_q_dimension=layout.same_q_dimension,
+        physical_layer_count=sum(int(value) for value in layout.num_layer_list),
+        source_qset_count=len(layout.ordered_qsets),
+        min_sigma=float(config.min_sigma),
+        max_condition=float(config.max_condition),
+        projector_tolerance=tolerances[0],
+        orthonormality_tolerance=tolerances[1],
+        selection_sigma_min=float(resolution.selection.sigma_min),
+        selection_condition_number=float(resolution.selection.condition_number),
+        reference_singular_values=tuple(float(value) for value in singular_values.tolist()),
+        reference_sigma_min=sigma_min,
+        reference_condition_number=condition,
+        reference_eigenvalues=selected_eigenvalues,
+        reference_projector_hash=payload["reference_projector_hash"],
+        warnings=tuple(payload["warnings"]),
+        identity_hash=hash_mapping(payload),
+    )
+
+
+def build_gamma_common_anchor_frames(
+    *,
+    eigenvalues_by_q: Sequence[np.ndarray],
+    eigenvectors_by_q: Sequence[np.ndarray],
+    layout: GammaRowLayout,
+    anchor_spec: GammaCommonAnchorSpec,
+) -> GammaCommonAnchorFrames:
+    """Align each local selected eigenspace to the shared common-anchor basis."""
+
+    if not isinstance(anchor_spec, GammaCommonAnchorSpec):
+        raise TypeError("Gamma common-anchor frames require a GammaCommonAnchorSpec")
+    anchor_spec.to_payload()
+    if (
+        not isinstance(layout, GammaRowLayout)
+        or layout.layout_hash != anchor_spec.layout_hash
+        or layout.same_q_dimension != anchor_spec.same_q_dimension
+    ):
+        raise ValueError("Gamma common-anchor frame layout/spec identity mismatch")
+    bands = _gamma_common_band_indices(anchor_spec.joint_band_indices)
+    _, vectors_by_q = _validate_gamma_model_eigensystems(
+        eigenvalues_by_q=eigenvalues_by_q,
+        eigenvectors_by_q=eigenvectors_by_q,
+        layout=layout,
+        joint_band_indices=bands,
+        orthonormality_tolerance=anchor_spec.orthonormality_tolerance,
+    )
+    phi = _gamma_reference_matrix(
+        anchor_spec.resolved_reference_terms,
+        row_count=layout.same_q_dimension,
+    )
+    columns = np.asarray(bands, dtype=np.intp)
+    frames: list[np.ndarray] = []
+    alignments: list[np.ndarray] = []
+    singular_values_by_q: list[tuple[float, ...]] = []
+    orthonormality_residuals: list[float] = []
+    projector_residuals: list[float] = []
+    for q_index, vectors in enumerate(vectors_by_q):
+        u_joint = vectors[:, columns]
+        singular_values = np.linalg.svd(phi.conj().T @ u_joint, compute_uv=False)
+        sigma_min = float(np.min(singular_values)) if singular_values.size else 0.0
+        sigma_max = float(np.max(singular_values)) if singular_values.size else 0.0
+        condition = float("inf") if sigma_min <= 0.0 else float(sigma_max / sigma_min)
+        if sigma_min < anchor_spec.min_sigma or condition > anchor_spec.max_condition:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"Gamma common-anchor Q {q_index} coverage failed: "
+                f"sigma_min={sigma_min:.3e}, condition_number={condition:.3e}",
+            )
+        frame, alignment = align_eigenstates(u_joint, phi)
+        orthonormality_residual = float(
+            max(
+                np.linalg.norm(frame.conj().T @ frame - np.eye(len(bands)), ord="fro"),
+                np.linalg.norm(alignment.conj().T @ alignment - np.eye(len(bands)), ord="fro"),
+            )
+        )
+        projector_residual = float(
+            np.linalg.norm(frame @ frame.conj().T - u_joint @ u_joint.conj().T, ord="fro")
+        )
+        if orthonormality_residual > anchor_spec.orthonormality_tolerance:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"Gamma common-anchor Q {q_index} orthonormality residual exceeds "
+                f"{anchor_spec.orthonormality_tolerance:.3e}",
+            )
+        if projector_residual > anchor_spec.projector_tolerance:
+            raise GammaRoutingError(
+                CandidateRejectionReason.PROJECTOR_FRAME_RANK,
+                f"Gamma common-anchor Q {q_index} projector residual exceeds "
+                f"{anchor_spec.projector_tolerance:.3e}",
+            )
+        frames.append(np.asarray(frame, dtype=np.complex128))
+        alignments.append(np.asarray(alignment, dtype=np.complex128))
+        singular_values_by_q.append(tuple(float(value) for value in singular_values.tolist()))
+        orthonormality_residuals.append(orthonormality_residual)
+        projector_residuals.append(projector_residual)
+    frame_hashes = tuple(hash_array(value) for value in frames)
+    alignment_hashes = tuple(hash_array(value) for value in alignments)
+    payload = {
+        "schema": GammaCommonAnchorFrames.SCHEMA,
+        "anchor_spec_identity_hash": anchor_spec.identity_hash,
+        "layout_hash": layout.layout_hash,
+        "joint_band_indices": list(bands),
+        "model_group_ranks": list(anchor_spec.model_group_ranks),
+        "frame_hashes_by_q": list(frame_hashes),
+        "alignment_hashes_by_q": list(alignment_hashes),
+        "alignment_singular_values_by_q": [list(values) for values in singular_values_by_q],
+        "orthonormality_residuals_by_q": orthonormality_residuals,
+        "projector_residuals_by_q": projector_residuals,
+    }
+    return GammaCommonAnchorFrames(
+        anchor_spec_identity_hash=anchor_spec.identity_hash,
+        layout_hash=layout.layout_hash,
+        joint_band_indices=bands,
+        model_group_ranks=anchor_spec.model_group_ranks,
+        local_frames_by_q=tuple(frames),
+        alignment_unitaries_by_q=tuple(alignments),
+        alignment_singular_values_by_q=tuple(singular_values_by_q),
+        orthonormality_residuals_by_q=tuple(orthonormality_residuals),
+        projector_residuals_by_q=tuple(projector_residuals),
+        frame_hashes_by_q=frame_hashes,
+        alignment_hashes_by_q=alignment_hashes,
+        identity_hash=hash_mapping(payload),
+    )
 
 
 def build_gamma_model_anchor_spec(

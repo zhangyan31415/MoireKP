@@ -1,9 +1,8 @@
 """Typed, fail-closed projection-basis handoffs.
 
-The automatic-Gamma variant certifies routed selection frames and canonical
-SCDM model frames for the same subspace.  Effective Hamiltonians are bound to
-the model frame; the numeric archive and every identity are revalidated on
-load.
+Common-anchor Gamma handoffs persist one compact model frame and bind sibling
+Heff/k-point authorities.  Legacy routed Gamma handoffs remain readable with
+their full routing/model bridge evidence.
 """
 
 from __future__ import annotations
@@ -26,6 +25,7 @@ from .blocks.gamma_layout import (
     gamma_certified_action_route_contract,
 )
 from .blocks.blocks import (
+    GammaCommonAnchorSpec,
     GammaModelAnchorSpec,
     GammaModelFrames,
     _gamma_reference_matrix,
@@ -43,8 +43,12 @@ from .projection_selection import CandidateRejectionReason
 
 
 GAMMA_ROUTED_BASIS_HANDOFF_VERSION = "kp_project_gamma_routed_handoff_v3"
+GAMMA_COMMON_ANCHOR_BASIS_HANDOFF_VERSION = (
+    "kp_project_gamma_common_anchor_handoff_v1"
+)
 EXPLICIT_LEGACY_BASIS_KIND = "explicit_legacy"
 GAMMA_ROUTED_BASIS_KIND = "gamma_routed"
+GAMMA_COMMON_ANCHOR_BASIS_KIND = "gamma_common_anchor"
 GAMMA_SAMPLED_K_MATCH_TOLERANCE = 1.0e-10
 GAMMA_SAMPLED_K_GRAY_TOLERANCE = 1.0e-8
 
@@ -132,6 +136,31 @@ _GAMMA_ROUTED_ARCHIVE_KEYS = frozenset(
         "candidate_input_identity_hash",
         "handoff_identity_hash",
         *PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+    }
+)
+
+_GAMMA_COMMON_ANCHOR_ARCHIVE_KEYS = frozenset(
+    {
+        "projection_basis_kind",
+        "projection_basis_handoff_version",
+        "identity_schema",
+        "input_hash",
+        "config_hash",
+        "basis_hash",
+        "package_version",
+        "schema_version",
+        "k_indices_hash",
+        "heff_hash",
+        "source_hamiltonian_hash",
+        "kpoints_hash",
+        "layout_payload",
+        "anchor_spec_payload",
+        "candidate_id",
+        "action_package_hash",
+        "candidate_certificate_hash",
+        "candidate_input_identity_hash",
+        "k_indices",
+        "local_frames",
     }
 )
 
@@ -814,6 +843,56 @@ def _bound_routed_basis_hash(
     )
 
 
+def _bound_common_anchor_basis_hash(
+    *,
+    identity_schema: str,
+    input_hash: str,
+    config_hash: str,
+    package_version: str,
+    schema_version: int,
+    layout_payload: Mapping[str, Any],
+    anchor_spec_payload: Mapping[str, Any],
+    k_indices_hash: str,
+    local_frames_hash: str,
+    heff_hash: str,
+    source_hamiltonian_hash: str,
+    kpoints_hash: str,
+    candidate_id: str,
+    action_package_hash: str,
+    candidate_certificate_hash: str,
+    candidate_input_identity_hash: str,
+) -> str:
+    """Bind the compact common-anchor archive to all numeric authorities."""
+
+    return hash_mapping(
+        {
+            "schema": "kp.gamma-common-anchor-projection-basis.v1",
+            "projection_basis_kind": GAMMA_COMMON_ANCHOR_BASIS_KIND,
+            "projection_basis_handoff_version": (
+                GAMMA_COMMON_ANCHOR_BASIS_HANDOFF_VERSION
+            ),
+            "identity_schema": str(identity_schema),
+            "input_hash": str(input_hash),
+            "config_hash": str(config_hash),
+            "package_version": str(package_version),
+            "schema_version": int(schema_version),
+            "layout_payload": dict(layout_payload),
+            "anchor_spec_payload": dict(anchor_spec_payload),
+            "k_indices_hash": str(k_indices_hash),
+            "local_frames_hash": str(local_frames_hash),
+            "heff_hash": str(heff_hash),
+            "source_hamiltonian_hash": str(source_hamiltonian_hash),
+            "kpoints_hash": str(kpoints_hash),
+            "candidate_id": str(candidate_id),
+            "action_package_hash": str(action_package_hash),
+            "candidate_certificate_hash": str(candidate_certificate_hash),
+            "candidate_input_identity_hash": str(
+                candidate_input_identity_hash
+            ),
+        }
+    )
+
+
 @dataclass(frozen=True)
 class ExplicitLegacyBasisSpec:
     """Versioned compatibility view of the explicit physical-layer basis."""
@@ -827,6 +906,421 @@ class ExplicitLegacyBasisSpec:
     frame: Any | None = None
 
     projection_basis_kind: ClassVar[str] = EXPLICIT_LEGACY_BASIS_KIND
+
+
+@dataclass(frozen=True)
+class GammaCommonAnchorBasisSpec:
+    """Compact common-anchor projection handoff with external Heff authority."""
+
+    artifact_identity: Mapping[str, Any]
+    layout: GammaRowLayout
+    anchor_spec: GammaCommonAnchorSpec
+    k_indices: tuple[int, ...]
+    local_frames: np.ndarray
+    authoritative_heff: np.ndarray
+    kpoints: np.ndarray
+    source_hamiltonian_hash: str
+    action_package_hash: str
+    candidate_id: str
+    candidate_certificate_hash: str
+    candidate_input_identity_hash: str
+
+    projection_basis_kind: ClassVar[str] = GAMMA_COMMON_ANCHOR_BASIS_KIND
+    handoff_version: ClassVar[str] = (
+        GAMMA_COMMON_ANCHOR_BASIS_HANDOFF_VERSION
+    )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.layout, GammaRowLayout):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor handoff requires a canonical row layout",
+            )
+        if not isinstance(self.anchor_spec, GammaCommonAnchorSpec):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor handoff requires a common-anchor spec",
+            )
+        if self.anchor_spec.layout_hash != self.layout.layout_hash:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor spec does not match the row layout",
+            )
+        anchor_layout_metadata = {
+            "same_q_dimension": (
+                self.anchor_spec.same_q_dimension,
+                self.layout.same_q_dimension,
+            ),
+            "reference_q_index": (
+                0 <= self.anchor_spec.reference_q_index < self.layout.q_count,
+                True,
+            ),
+            "physical_layer_count": (
+                self.anchor_spec.physical_layer_count,
+                sum(self.layout.num_layer_list),
+            ),
+            "source_qset_count": (
+                self.anchor_spec.source_qset_count,
+                len(self.layout.num_layer_list),
+            ),
+        }
+        mismatched_metadata = tuple(
+            name
+            for name, (actual, expected) in anchor_layout_metadata.items()
+            if actual != expected
+        )
+        if mismatched_metadata:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor metadata differs from the row layout: "
+                + ", ".join(mismatched_metadata),
+            )
+
+        k_indices = _strict_integral_tuple(self.k_indices, name="k_indices")
+        if (
+            not k_indices
+            or any(index < 0 for index in k_indices)
+            or len(set(k_indices)) != len(k_indices)
+        ):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor k indices must be unique and non-negative",
+            )
+        local_frames = _freeze(
+            self.local_frames,
+            dtype=np.complex128,
+            name="common-anchor local_frames",
+        )
+        heff = _freeze(
+            self.authoritative_heff,
+            dtype=np.complex128,
+            name="common-anchor authoritative Heff",
+        )
+        kpoints = _freeze(
+            self.kpoints,
+            dtype=np.float64,
+            name="common-anchor kpoints",
+        )
+        local_rank = len(self.anchor_spec.joint_band_indices)
+        model_dim = self.layout.q_count * sum(self.anchor_spec.model_group_ranks)
+        expected_frames_shape = (
+            len(k_indices),
+            self.layout.q_count,
+            self.layout.same_q_dimension,
+            local_rank,
+        )
+        if local_frames.shape != expected_frames_shape:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor local frame tensor does not match k/Q/layout/rank",
+            )
+        local_identity = np.eye(local_rank, dtype=np.complex128)
+        for k_position in range(len(k_indices)):
+            for q_index in range(self.layout.q_count):
+                frame = local_frames[k_position, q_index]
+                residual = float(
+                    np.linalg.norm(
+                        frame.conj().T @ frame - local_identity,
+                        ord="fro",
+                    )
+                )
+                if residual > self.anchor_spec.orthonormality_tolerance:
+                    raise _reject(
+                        CandidateRejectionReason.HANDOFF_IDENTITY,
+                        "Gamma common-anchor local frame is not orthonormal at "
+                        f"k_position={k_position}, q={q_index}: "
+                        f"residual={residual:.3e}",
+                    )
+        if heff.shape != (len(k_indices), model_dim, model_dim):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor authoritative Heff shape is invalid",
+            )
+        if kpoints.shape != (len(k_indices), 2):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor kpoints must have shape (Nk, 2)",
+            )
+
+        candidate_id = str(self.candidate_id)
+        hashes = {
+            "source_hamiltonian_hash": str(self.source_hamiltonian_hash),
+            "action_package_hash": str(self.action_package_hash),
+            "candidate_certificate_hash": str(
+                self.candidate_certificate_hash
+            ),
+            "candidate_input_identity_hash": str(
+                self.candidate_input_identity_hash
+            ),
+        }
+        if not candidate_id:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor candidate id must be nonempty",
+            )
+        if any(not _is_sha256(value) for value in hashes.values()):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor source/action/candidate identities must be SHA-256 hashes",
+            )
+
+        try:
+            identity = dict(self.artifact_identity)
+        except (TypeError, ValueError) as error:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor projection identity must be a mapping",
+            ) from error
+        required_identity = set(PROJECTION_ARTIFACT_IDENTITY_FIELDS) | {
+            "source_hamiltonian_hash",
+            "kpoints_hash",
+        }
+        if set(identity) != required_identity:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor projection identity fields are incomplete",
+            )
+        if (
+            identity.get("identity_schema") != IDENTITY_SCHEMA
+            or identity.get("package_version") != KP_VERSION
+            or isinstance(identity.get("schema_version"), (bool, np.bool_))
+            or not isinstance(identity.get("schema_version"), Integral)
+            or int(identity["schema_version"])
+            != PROJECTION_BASIS_SCHEMA_VERSION
+        ):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor projection identity schema/package is unsupported",
+            )
+        identity_hash_fields = (
+            "input_hash",
+            "config_hash",
+            "basis_hash",
+            "k_indices_hash",
+            "heff_hash",
+            "source_hamiltonian_hash",
+            "kpoints_hash",
+        )
+        if any(not _is_sha256(identity.get(name)) for name in identity_hash_fields):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor projection identity contains an invalid hash",
+            )
+
+        k_indices_hash = hash_array(np.asarray(k_indices, dtype=np.int64))
+        heff_hash = hash_array(heff)
+        kpoints_hash = hash_array(kpoints)
+        if (
+            identity["k_indices_hash"] != k_indices_hash
+            or identity["heff_hash"] != heff_hash
+            or identity["kpoints_hash"] != kpoints_hash
+            or identity["source_hamiltonian_hash"]
+            != hashes["source_hamiltonian_hash"]
+        ):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor numeric/source hashes differ from the projection identity",
+            )
+        expected_basis_hash = _bound_common_anchor_basis_hash(
+            identity_schema=str(identity["identity_schema"]),
+            input_hash=str(identity["input_hash"]),
+            config_hash=str(identity["config_hash"]),
+            package_version=str(identity["package_version"]),
+            schema_version=int(identity["schema_version"]),
+            layout_payload=self.layout.to_payload(),
+            anchor_spec_payload=self.anchor_spec.to_payload(),
+            k_indices_hash=k_indices_hash,
+            local_frames_hash=hash_array(local_frames),
+            heff_hash=heff_hash,
+            source_hamiltonian_hash=hashes["source_hamiltonian_hash"],
+            kpoints_hash=kpoints_hash,
+            candidate_id=candidate_id,
+            action_package_hash=hashes["action_package_hash"],
+            candidate_certificate_hash=hashes[
+                "candidate_certificate_hash"
+            ],
+            candidate_input_identity_hash=hashes[
+                "candidate_input_identity_hash"
+            ],
+        )
+        if identity["basis_hash"] != expected_basis_hash:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor basis hash does not bind the complete handoff",
+            )
+
+        identity["schema_version"] = int(identity["schema_version"])
+        object.__setattr__(self, "artifact_identity", identity)
+        object.__setattr__(self, "k_indices", k_indices)
+        object.__setattr__(self, "local_frames", local_frames)
+        object.__setattr__(self, "authoritative_heff", heff)
+        object.__setattr__(self, "kpoints", kpoints)
+        object.__setattr__(self, "candidate_id", candidate_id)
+        for name, value in hashes.items():
+            object.__setattr__(self, name, value)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        candidate_id: str,
+        artifact_identity: Mapping[str, Any],
+        layout: GammaRowLayout,
+        anchor_spec: GammaCommonAnchorSpec,
+        k_indices: Sequence[int],
+        local_frames: Any,
+        authoritative_heff: Any,
+        kpoints: Any,
+        source_hamiltonian_hash: str,
+        action_package_hash: str,
+        candidate_certificate_hash: str,
+        candidate_input_identity_hash: str,
+    ) -> "GammaCommonAnchorBasisSpec":
+        """Create a handoff whose basis hash ignores any caller placeholder."""
+
+        if not isinstance(artifact_identity, Mapping):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor projection identity must be a mapping",
+            )
+        required_seed_fields = {
+            "identity_schema",
+            "input_hash",
+            "config_hash",
+            "package_version",
+            "schema_version",
+        }
+        if not required_seed_fields.issubset(artifact_identity):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor projection identity seed is incomplete",
+            )
+        indices = _strict_integral_tuple(k_indices, name="k_indices")
+        frames = _freeze(
+            local_frames,
+            dtype=np.complex128,
+            name="common-anchor local_frames",
+        )
+        heff = _freeze(
+            authoritative_heff,
+            dtype=np.complex128,
+            name="common-anchor authoritative Heff",
+        )
+        points = _freeze(
+            kpoints,
+            dtype=np.float64,
+            name="common-anchor kpoints",
+        )
+        identity: dict[str, Any] = {
+            "identity_schema": artifact_identity["identity_schema"],
+            "input_hash": artifact_identity["input_hash"],
+            "config_hash": artifact_identity["config_hash"],
+            "basis_hash": "",
+            "package_version": artifact_identity["package_version"],
+            "schema_version": artifact_identity["schema_version"],
+            "k_indices_hash": hash_array(
+                np.asarray(indices, dtype=np.int64)
+            ),
+            "heff_hash": hash_array(heff),
+            "source_hamiltonian_hash": str(source_hamiltonian_hash),
+            "kpoints_hash": hash_array(points),
+        }
+        identity["basis_hash"] = _bound_common_anchor_basis_hash(
+            identity_schema=str(identity["identity_schema"]),
+            input_hash=str(identity["input_hash"]),
+            config_hash=str(identity["config_hash"]),
+            package_version=str(identity["package_version"]),
+            schema_version=int(identity["schema_version"]),
+            layout_payload=layout.to_payload(),
+            anchor_spec_payload=anchor_spec.to_payload(),
+            k_indices_hash=str(identity["k_indices_hash"]),
+            local_frames_hash=hash_array(frames),
+            heff_hash=str(identity["heff_hash"]),
+            source_hamiltonian_hash=str(source_hamiltonian_hash),
+            kpoints_hash=str(identity["kpoints_hash"]),
+            candidate_id=str(candidate_id),
+            action_package_hash=str(action_package_hash),
+            candidate_certificate_hash=str(candidate_certificate_hash),
+            candidate_input_identity_hash=str(
+                candidate_input_identity_hash
+            ),
+        )
+        return cls(
+            artifact_identity=identity,
+            layout=layout,
+            anchor_spec=anchor_spec,
+            k_indices=indices,
+            local_frames=frames,
+            authoritative_heff=heff,
+            kpoints=points,
+            source_hamiltonian_hash=str(source_hamiltonian_hash),
+            action_package_hash=str(action_package_hash),
+            candidate_id=str(candidate_id),
+            candidate_certificate_hash=str(candidate_certificate_hash),
+            candidate_input_identity_hash=str(
+                candidate_input_identity_hash
+            ),
+        )
+
+    @property
+    def physical_layer_anchor_counts(self) -> tuple[int, ...]:
+        return self.anchor_spec.physical_layer_anchor_counts
+
+    @property
+    def source_qset_anchor_counts(self) -> tuple[int, ...]:
+        return self.anchor_spec.source_qset_anchor_counts
+
+    @property
+    def active_model_layers(self) -> tuple[int, ...]:
+        return self.anchor_spec.active_model_layers
+
+    @property
+    def model_group_ranks(self) -> tuple[int, ...]:
+        return self.anchor_spec.model_group_ranks
+
+    @property
+    def model_group_qset_indices(self) -> tuple[int, ...]:
+        return self.anchor_spec.model_group_qset_indices
+
+    @property
+    def continuum_sector_ranks(self) -> tuple[int, int]:
+        return self.anchor_spec.continuum_sector_ranks
+
+    @property
+    def model_dim(self) -> int:
+        return self.layout.q_count * sum(self.model_group_ranks)
+
+    @property
+    def heff_hash(self) -> str:
+        return str(self.artifact_identity["heff_hash"])
+
+    @property
+    def kpoints_hash(self) -> str:
+        return str(self.artifact_identity["kpoints_hash"])
+
+    def _k_position(self, k_index: int) -> int:
+        try:
+            return self.k_indices.index(int(k_index))
+        except ValueError as error:
+            raise KeyError(
+                f"k index {k_index} is outside the common-anchor handoff"
+            ) from error
+
+    def assemble_model_for_k(self, k_index: int) -> np.ndarray:
+        return _assemble_model_tensor(
+            self.local_frames[self._k_position(k_index)],
+            layout=self.layout,
+            group_ranks=self.model_group_ranks,
+        )
+
+    def authoritative_heff_for_k(self, k_index: int) -> np.ndarray:
+        return self.authoritative_heff[self._k_position(k_index)]
+
+    def model_state_for_k(self, k_index: int) -> tuple[np.ndarray, np.ndarray]:
+        return (
+            self.assemble_model_for_k(k_index),
+            self.authoritative_heff_for_k(k_index),
+        )
 
 
 @dataclass(frozen=True)
@@ -1849,7 +2343,9 @@ class GammaRoutedBasisSpec:
         return payload
 
 
-ProjectionBasisSpec: TypeAlias = ExplicitLegacyBasisSpec | GammaRoutedBasisSpec
+ProjectionBasisSpec: TypeAlias = (
+    ExplicitLegacyBasisSpec | GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec
+)
 
 
 def certify_gamma_routed_basis_spec(
@@ -2055,6 +2551,225 @@ def certify_gamma_routed_basis_spec(
         candidate_certificate_hash=certificate.certificate_hash,
         candidate_input_identity_hash=certificate.input_identity_hash,
     )
+
+
+def save_gamma_common_anchor_basis_spec(
+    path: str | Path,
+    spec: GammaCommonAnchorBasisSpec,
+) -> None:
+    """Persist the exact 20-field numeric common-anchor handoff."""
+
+    if not isinstance(spec, GammaCommonAnchorBasisSpec):
+        raise TypeError(
+            "save_gamma_common_anchor_basis_spec requires a common-anchor handoff"
+        )
+    identity = spec.artifact_identity
+    payload: dict[str, np.ndarray] = {
+        "projection_basis_kind": np.asarray(spec.projection_basis_kind),
+        "projection_basis_handoff_version": np.asarray(spec.handoff_version),
+        "identity_schema": np.asarray(identity["identity_schema"]),
+        "input_hash": np.asarray(identity["input_hash"]),
+        "config_hash": np.asarray(identity["config_hash"]),
+        "basis_hash": np.asarray(identity["basis_hash"]),
+        "package_version": np.asarray(identity["package_version"]),
+        "schema_version": np.asarray(identity["schema_version"], dtype=np.int64),
+        "k_indices_hash": np.asarray(identity["k_indices_hash"]),
+        "heff_hash": np.asarray(identity["heff_hash"]),
+        "source_hamiltonian_hash": np.asarray(
+            spec.source_hamiltonian_hash
+        ),
+        "kpoints_hash": np.asarray(identity["kpoints_hash"]),
+        "layout_payload": np.asarray(
+            _canonical_json(spec.layout.to_payload())
+        ),
+        "anchor_spec_payload": np.asarray(
+            _canonical_json(spec.anchor_spec.to_payload())
+        ),
+        "candidate_id": np.asarray(spec.candidate_id),
+        "action_package_hash": np.asarray(spec.action_package_hash),
+        "candidate_certificate_hash": np.asarray(
+            spec.candidate_certificate_hash
+        ),
+        "candidate_input_identity_hash": np.asarray(
+            spec.candidate_input_identity_hash
+        ),
+        "k_indices": np.asarray(spec.k_indices, dtype=np.int64),
+        "local_frames": spec.local_frames,
+    }
+    if frozenset(payload) != _GAMMA_COMMON_ANCHOR_ARCHIVE_KEYS:
+        raise AssertionError("internal common-anchor archive schema mismatch")
+    if any(array.dtype.hasobject for array in payload.values()):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor archives cannot contain object arrays",
+        )
+    np.savez(Path(path), **payload)
+
+
+def _require_common_anchor_archive(payload: Mapping[str, np.ndarray]) -> None:
+    if frozenset(payload) != _GAMMA_COMMON_ANCHOR_ARCHIVE_KEYS:
+        missing = sorted(_GAMMA_COMMON_ANCHOR_ARCHIVE_KEYS - set(payload))
+        extra = sorted(set(payload) - _GAMMA_COMMON_ANCHOR_ARCHIVE_KEYS)
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor archive key set mismatch "
+            f"(missing={missing}, extra={extra})",
+        )
+    text_fields = _GAMMA_COMMON_ANCHOR_ARCHIVE_KEYS - {
+        "schema_version",
+        "k_indices",
+        "local_frames",
+    }
+    if any(
+        np.asarray(payload[name]).shape != ()
+        or np.asarray(payload[name]).dtype.kind != "U"
+        for name in text_fields
+    ):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor metadata must use Unicode scalar fields",
+        )
+    schema_version = np.asarray(payload["schema_version"])
+    if schema_version.shape != () or schema_version.dtype != np.dtype(np.int64):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor schema_version must be an int64 scalar",
+        )
+    k_indices = np.asarray(payload["k_indices"])
+    if k_indices.ndim != 1 or k_indices.dtype != np.dtype(np.int64):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor k_indices must be an int64 vector",
+        )
+    if np.asarray(payload["local_frames"]).dtype != np.dtype(np.complex128):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor local_frames must have dtype complex128",
+        )
+    hash_fields = {
+        "input_hash",
+        "config_hash",
+        "basis_hash",
+        "k_indices_hash",
+        "heff_hash",
+        "source_hamiltonian_hash",
+        "kpoints_hash",
+        "action_package_hash",
+        "candidate_certificate_hash",
+        "candidate_input_identity_hash",
+    }
+    if any(
+        np.asarray(payload[name]).dtype != np.dtype("<U64")
+        or not _is_sha256(np.asarray(payload[name]).item())
+        for name in hash_fields
+    ):
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor archive contains a noncanonical hash field",
+        )
+
+
+def load_gamma_common_anchor_basis_spec(
+    path: str | Path,
+) -> GammaCommonAnchorBasisSpec:
+    """Load a compact handoff and bind it to sibling Heff/k-point arrays."""
+
+    archive_path = Path(path)
+    try:
+        with np.load(archive_path, allow_pickle=False) as archive:
+            payload = {
+                str(name): np.array(archive[name], copy=True)
+                for name in archive.files
+            }
+        _require_common_anchor_archive(payload)
+        if (
+            _required_text(payload, "projection_basis_kind")
+            != GAMMA_COMMON_ANCHOR_BASIS_KIND
+            or _required_text(payload, "projection_basis_handoff_version")
+            != GAMMA_COMMON_ANCHOR_BASIS_HANDOFF_VERSION
+        ):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "unsupported Gamma common-anchor discriminator/version",
+            )
+        if (
+            _required_text(payload, "identity_schema") != IDENTITY_SCHEMA
+            or _required_text(payload, "package_version") != KP_VERSION
+            or int(np.asarray(payload["schema_version"]).item())
+            != PROJECTION_BASIS_SCHEMA_VERSION
+        ):
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor identity schema/package is unsupported",
+            )
+
+        layout_text = _required_text(payload, "layout_payload")
+        raw_layout = json.loads(layout_text)
+        if not isinstance(raw_layout, Mapping):
+            raise TypeError("layout payload is not a mapping")
+        layout = _restore_layout(layout_text, str(raw_layout["layout_hash"]))
+        if _canonical_json(layout.to_payload()) != layout_text:
+            raise _reject(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "Gamma common-anchor layout payload is not canonical",
+            )
+
+        anchor_text = _required_text(payload, "anchor_spec_payload")
+        raw_anchor = json.loads(anchor_text)
+        if not isinstance(raw_anchor, Mapping):
+            raise TypeError("anchor payload is not a mapping")
+        anchor_spec = GammaCommonAnchorSpec.from_payload(raw_anchor)
+        if _canonical_json(anchor_spec.to_payload()) != anchor_text:
+            raise ValueError("common-anchor payload is not canonical")
+
+        heff_path = archive_path.parent / "heff.npy"
+        kpoints_path = archive_path.parent / "kpoints.npy"
+        heff = np.load(heff_path, allow_pickle=False)
+        kpoints = np.load(kpoints_path, allow_pickle=False)
+        if np.asarray(heff).dtype != np.dtype(np.complex128):
+            raise TypeError("authoritative heff.npy must have dtype complex128")
+        if np.asarray(kpoints).dtype != np.dtype(np.float64):
+            raise TypeError("authoritative kpoints.npy must have dtype float64")
+
+        identity = {
+            field: np.asarray(payload[field]).item()
+            for field in PROJECTION_ARTIFACT_IDENTITY_FIELDS
+        }
+        identity["source_hamiltonian_hash"] = _required_text(
+            payload, "source_hamiltonian_hash"
+        )
+        identity["kpoints_hash"] = _required_text(payload, "kpoints_hash")
+        return GammaCommonAnchorBasisSpec(
+            artifact_identity=identity,
+            layout=layout,
+            anchor_spec=anchor_spec,
+            k_indices=tuple(
+                int(value) for value in np.asarray(payload["k_indices"]).tolist()
+            ),
+            local_frames=payload["local_frames"],
+            authoritative_heff=heff,
+            kpoints=kpoints,
+            source_hamiltonian_hash=_required_text(
+                payload, "source_hamiltonian_hash"
+            ),
+            action_package_hash=_required_text(
+                payload, "action_package_hash"
+            ),
+            candidate_id=_required_text(payload, "candidate_id"),
+            candidate_certificate_hash=_required_text(
+                payload, "candidate_certificate_hash"
+            ),
+            candidate_input_identity_hash=_required_text(
+                payload, "candidate_input_identity_hash"
+            ),
+        )
+    except GammaRoutingError:
+        raise
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as error:
+        raise _reject(
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            "Gamma common-anchor handoff or numeric authority cannot be reconstructed",
+        ) from error
 
 
 def save_gamma_routed_basis_spec(

@@ -361,3 +361,194 @@ def test_factorized_action_materializes_the_certified_full_matrix() -> None:
         matrix,
         atol=2.0e-14,
     )
+
+
+def test_certified_cyclotomic_response_gauge_removes_q_dependent_basis_phase() -> None:
+    api = _api()
+    from kp.model.symmetry import _certified_cyclotomic_response_gauge
+    from kp.symmetry.joint_exactification import BlockRouteAction
+
+    q_counts = (2, 2)
+    n_orb = (1, 1)
+    q_permutation = (2, 3, 0, 1)
+    sector_permutation = (1, 0)
+    gauge_angles = np.asarray([0.0, 4.0e-7, -2.0e-7, 3.0e-7])
+    roots = np.asarray(
+        [
+            np.exp(1.0j * np.pi / 3.0),
+            np.exp(1.0j * np.pi / 3.0),
+            np.exp(-1.0j * np.pi / 3.0),
+            np.exp(-1.0j * np.pi / 3.0),
+        ]
+    )
+    phases = tuple(
+        np.exp(1.0j * gauge_angles[target])
+        * roots[source]
+        * np.exp(-1.0j * gauge_angles[source])
+        for source, target in enumerate(q_permutation)
+    )
+    matrix = _factorized_matrix(
+        (np.eye(1, dtype=complex), np.eye(1, dtype=complex)),
+        phases,
+        q_counts=q_counts,
+        n_orb=n_orb,
+        q_permutation=q_permutation,
+        sector_permutation=sector_permutation,
+    )
+    factorized = api.certify_factorized_action(
+        name="C2",
+        matrix=matrix,
+        antiunitary=False,
+        k_forward=np.eye(2),
+        q_permutation=q_permutation,
+        sector_permutation=sector_permutation,
+        q_vectors=(np.zeros((2, 2)), np.zeros((2, 2))),
+        q_counts=q_counts,
+        n_orb=n_orb,
+        matrix_absolute_error_bound=1.0e-13,
+        q_absolute_error_bound=1.0e-13,
+    )
+    joint = BlockRouteAction(
+        name="C2",
+        antiunitary=False,
+        fiber_permutation=q_permutation,
+        fiber_dimensions=(1, 1, 1, 1),
+        fiber_indices=((0,), (1,), (2,), (3,)),
+        route_blocks=tuple(
+            np.asarray([[phase]], dtype=np.complex128) for phase in phases
+        ),
+    )
+    report = {
+        "status": "certified",
+        "root_order": 12,
+        "root_exponents": {"C2": [2, 2, 10, 10]},
+        "gauge_angles": gauge_angles.tolist(),
+        "common_gauge_residual_max": 1.0e-15,
+        "common_gauge_certification_bound": 1.0e-11,
+    }
+
+    reframed = _certified_cyclotomic_response_gauge(
+        matrices={"C2": matrix},
+        joint_route_actions={"C2": joint},
+        factorized_actions={"C2": factorized},
+        report=report,
+        q_vectors=(np.zeros((2, 2)), np.zeros((2, 2))),
+    )
+
+    np.testing.assert_allclose(
+        reframed.factorized_actions["C2"].q_phases,
+        (1.0, 1.0, 1.0, 1.0),
+        atol=2.0e-14,
+    )
+    gauge = reframed.basis_gauge
+    np.testing.assert_allclose(
+        reframed.matrices["C2"],
+        gauge.conj().T @ matrix @ gauge,
+        atol=2.0e-14,
+    )
+    hamiltonian = np.asarray(
+        [[1.0, 0.2j, 0.3, 0.0], [-0.2j, 2.0, 0.0, 0.4],
+         [0.3, 0.0, 3.0, -0.1j], [0.0, 0.4, 0.1j, 4.0]],
+        dtype=np.complex128,
+    )
+    transformed_hamiltonian = gauge.conj().T @ hamiltonian @ gauge
+    np.testing.assert_allclose(
+        reframed.matrices["C2"]
+        @ transformed_hamiltonian
+        @ reframed.matrices["C2"].conj().T,
+        gauge.conj().T @ (matrix @ hamiltonian @ matrix.conj().T) @ gauge,
+        atol=2.0e-14,
+    )
+
+
+def test_certified_cyclotomic_response_gauge_conjugates_antiunitary_source_gauge() -> None:
+    api = _api()
+    from kp.model.symmetry import _certified_cyclotomic_response_gauge
+    from kp.symmetry.joint_exactification import BlockRouteAction
+
+    q_counts = (2, 2)
+    n_orb = (1, 1)
+    q_permutation = (2, 3, 0, 1)
+    sector_permutation = (1, 0)
+    gauge_angles = np.asarray([0.13, -0.29, 0.41, -0.37])
+    roots = np.asarray([1.0j, 1.0j, -1.0j, -1.0j])
+    phases = tuple(
+        np.exp(1.0j * gauge_angles[target])
+        * roots[source]
+        * np.exp(1.0j * gauge_angles[source])
+        for source, target in enumerate(q_permutation)
+    )
+    matrix = _factorized_matrix(
+        (np.eye(1, dtype=complex), np.eye(1, dtype=complex)),
+        phases,
+        q_counts=q_counts,
+        n_orb=n_orb,
+        q_permutation=q_permutation,
+        sector_permutation=sector_permutation,
+    )
+    factorized = api.certify_factorized_action(
+        name="TR",
+        matrix=matrix,
+        antiunitary=True,
+        k_forward=-np.eye(2),
+        q_permutation=q_permutation,
+        sector_permutation=sector_permutation,
+        q_vectors=(np.zeros((2, 2)), np.zeros((2, 2))),
+        q_counts=q_counts,
+        n_orb=n_orb,
+        matrix_absolute_error_bound=1.0e-13,
+        q_absolute_error_bound=1.0e-13,
+    )
+    joint = BlockRouteAction(
+        name="TR",
+        antiunitary=True,
+        fiber_permutation=q_permutation,
+        fiber_dimensions=(1, 1, 1, 1),
+        fiber_indices=((0,), (1,), (2,), (3,)),
+        route_blocks=tuple(
+            np.asarray([[phase]], dtype=np.complex128) for phase in phases
+        ),
+    )
+    report = {
+        "status": "certified",
+        "root_order": 4,
+        "root_exponents": {"TR": [1, 1, 3, 3]},
+        "gauge_angles": gauge_angles.tolist(),
+        "common_gauge_residual_max": 1.0e-15,
+        "common_gauge_certification_bound": 1.0e-11,
+    }
+
+    reframed = _certified_cyclotomic_response_gauge(
+        matrices={"TR": matrix},
+        joint_route_actions={"TR": joint},
+        factorized_actions={"TR": factorized},
+        report=report,
+        q_vectors=(np.zeros((2, 2)), np.zeros((2, 2))),
+    )
+
+    gauge = reframed.basis_gauge
+    expected_action = gauge.conj().T @ matrix @ gauge.conjugate()
+    wrong_unitary_action = gauge.conj().T @ matrix @ gauge
+    np.testing.assert_allclose(reframed.matrices["TR"], expected_action, atol=2.0e-14)
+    assert np.linalg.norm(expected_action - wrong_unitary_action) > 0.1
+    np.testing.assert_allclose(
+        reframed.factorized_actions["TR"].q_phases,
+        (1.0, 1.0, 1.0, 1.0),
+        atol=2.0e-14,
+    )
+
+    hamiltonian = np.asarray(
+        [[1.0, 0.2j, 0.3, 0.0], [-0.2j, 2.0, 0.0, 0.4],
+         [0.3, 0.0, 3.0, -0.1j], [0.0, 0.4, 0.1j, 4.0]],
+        dtype=np.complex128,
+    )
+    transformed_hamiltonian = gauge.conj().T @ hamiltonian @ gauge
+    np.testing.assert_allclose(
+        reframed.matrices["TR"]
+        @ transformed_hamiltonian.conjugate()
+        @ reframed.matrices["TR"].conj().T,
+        gauge.conj().T
+        @ (matrix @ hamiltonian.conjugate() @ matrix.conj().T)
+        @ gauge,
+        atol=2.0e-14,
+    )

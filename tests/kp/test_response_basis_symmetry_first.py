@@ -5,10 +5,11 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from scipy import sparse
+from scipy import linalg, sparse
 
 import kp.model.response_basis as response_basis
 from kp.model.response_basis import (
+    FiniteGroupElement,
     FiniteGroupGenerator,
     PolynomialCoordinateBasis,
     build_finite_group,
@@ -20,6 +21,209 @@ from kp.model.response_basis_factorized import FactorizedTermActionError
 
 def _api():
     return importlib.import_module("kp.model.response_basis_symmetry_first")
+
+
+def _graded_api():
+    return importlib.import_module("kp.model.response_basis_graded")
+
+
+def _unitary_momentum_element(
+    name: str,
+    k_pullback: np.ndarray,
+) -> FiniteGroupElement:
+    return FiniteGroupElement(
+        canonical_word=(name,),
+        antiunitary=False,
+        canonical_k_map=((1, 0), (0, 1)),
+        q_permutation=(0,),
+        sector_permutation=(0,),
+        k_pullback=tuple(
+            tuple(float(value) for value in row)
+            for row in np.asarray(k_pullback, dtype=np.float64)
+        ),
+        internal_u=np.eye(1, dtype=np.complex128),
+    )
+
+
+def _degree_monomials(
+    coordinate: PolynomialCoordinateBasis,
+    degree: int,
+) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        monomial
+        for monomial in coordinate.monomials
+        if sum(monomial) == int(degree)
+    )
+
+
+def _dense_complex_matrix(value) -> np.ndarray:
+    return np.asarray(
+        value.toarray() if sparse.issparse(value) else value,
+        dtype=np.complex128,
+    )
+
+
+def _homogeneous_pullback_oracle(
+    element: FiniteGroupElement,
+    *,
+    coordinate: PolynomialCoordinateBasis,
+    degree: int,
+) -> np.ndarray:
+    basis = _degree_monomials(coordinate, degree)
+    basis_index = {monomial: index for index, monomial in enumerate(basis)}
+    pullbacks = response_basis._monomial_pullback_table(element, coordinate)
+    expected = np.zeros((len(basis), len(basis)), dtype=np.complex128)
+    for source_index, source in enumerate(basis):
+        for target, coefficient in pullbacks[source].items():
+            assert sum(target) == degree
+            expected[basis_index[target], source_index] = coefficient
+    return expected
+
+
+def test_homogeneous_momentum_action_matches_exact_full_pullback() -> None:
+    graded = _graded_api()
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=3,
+    )
+    angle = 2.0 * np.pi / 3.0
+    c3 = _unitary_momentum_element(
+        "C3",
+        np.asarray(
+            [
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ]
+        ),
+    )
+
+    for degree in range(4):
+        compiled = _dense_complex_matrix(
+            graded.compile_homogeneous_momentum_action(
+                c3,
+                coordinate=coordinate,
+                degree=degree,
+            )
+        )
+        expected = _homogeneous_pullback_oracle(
+            c3,
+            coordinate=coordinate,
+            degree=degree,
+        )
+        assert compiled.shape == (degree + 1, degree + 1)
+        np.testing.assert_allclose(compiled, expected, atol=5.0e-13)
+
+
+def test_homogeneous_antiunitary_action_matches_coefficient_oracle() -> None:
+    graded = _graded_api()
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=1,
+    )
+    time_reversal = FiniteGroupElement(
+        canonical_word=("T",),
+        antiunitary=True,
+        canonical_k_map=((-1, 0), (0, -1)),
+        q_permutation=(0,),
+        sector_permutation=(0,),
+        k_pullback=((-1.0, 0.0), (0.0, -1.0)),
+        internal_u=np.eye(1, dtype=np.complex128),
+    )
+    basis = _degree_monomials(coordinate, 1)
+    coefficients = np.asarray(
+        [1.0 + 2.0j, -0.5 + 0.25j],
+        dtype=np.complex128,
+    )
+    transformed = response_basis._apply_group_element(
+        {
+            monomial: sparse.csr_matrix([[coefficient]])
+            for monomial, coefficient in zip(basis, coefficients)
+        },
+        time_reversal,
+        coordinate,
+    )
+    oracle = np.asarray(
+        [complex(transformed[monomial][0, 0]) for monomial in basis],
+        dtype=np.complex128,
+    )
+
+    action = _dense_complex_matrix(
+        graded.compile_homogeneous_momentum_action(
+            time_reversal,
+            coordinate=coordinate,
+            degree=1,
+        )
+    )
+
+    # Antiunitary coefficient actions are antilinear: z' = C conjugate(z).
+    # C itself includes the post-pullback (r,s) swap and prefactor conjugation.
+    np.testing.assert_allclose(action @ coefficients.conjugate(), oracle, atol=5.0e-13)
+
+
+def test_c3_even_c2_odd_channel_first_appears_at_cubic_degree() -> None:
+    graded = _graded_api()
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=3,
+    )
+    angle = 2.0 * np.pi / 3.0
+    c3 = _unitary_momentum_element(
+        "C3",
+        np.asarray(
+            [
+                [np.cos(angle), -np.sin(angle)],
+                [np.sin(angle), np.cos(angle)],
+            ]
+        ),
+    )
+    c2 = _unitary_momentum_element(
+        "C2",
+        np.asarray(((1.0, 0.0), (0.0, -1.0))),
+    )
+
+    fixed_spaces: list[np.ndarray] = []
+    for degree in range(4):
+        c3_momentum = _dense_complex_matrix(
+            graded.compile_homogeneous_momentum_action(
+                c3,
+                coordinate=coordinate,
+                degree=degree,
+            )
+        )
+        c2_momentum = _dense_complex_matrix(
+            graded.compile_homogeneous_momentum_action(
+                c2,
+                coordinate=coordinate,
+                degree=degree,
+            )
+        )
+        identity = np.eye(degree + 1, dtype=np.complex128)
+        # The internal response A is C3-even and C2-odd.  A scalar momentum
+        # channel f therefore survives exactly when C3 f=f and C2 f=-f.
+        constraints = np.vstack(
+            (
+                c3_momentum - identity,
+                -c2_momentum - identity,
+            )
+        )
+        fixed_spaces.append(linalg.null_space(constraints, rcond=1.0e-12))
+
+    assert [space.shape[1] for space in fixed_spaces] == [0, 0, 0, 1]
+
+    # PolynomialCoordinateBasis orders degree-three monomials as
+    # (wbar^3, w*wbar^2, w^2*wbar, w^3).  The retained line is therefore
+    # w^3-wbar^3, i.e. Im(w^3) up to a nonzero complex scalar.
+    cubic = fixed_spaces[3]
+    expected = np.asarray([1.0, 0.0, 0.0, -1.0], dtype=np.complex128)
+    expected /= np.linalg.norm(expected)
+    np.testing.assert_allclose(
+        cubic @ cubic.conj().T,
+        np.outer(expected, expected.conj()),
+        atol=5.0e-12,
+    )
 
 
 def _finite_p_degree_one_seed():
@@ -182,6 +386,142 @@ def _closed_finite_p_case():
         ]
     )
     return coordinate, seeds, factorized, group
+
+
+def _complete_degree_two_finite_p_case():
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=2,
+    )
+    q_vectors = np.asarray([[-0.5, 0.0], [0.5, 0.0]])
+    seeds = []
+    term_index = 0
+    for layer_from, layer_to in ((1, 2), (2, 1)):
+        for p_x in (-1.0, 1.0):
+            for total_degree in range(3):
+                for mz in range(total_degree + 1):
+                    mz_star = total_degree - mz
+                    seeds.append(
+                        raw_polynomial_seed_from_term_key(
+                            SimpleNamespace(
+                                Mz=mz,
+                                Mz_star=mz_star,
+                                layer_from=layer_from,
+                                layer_to=layer_to,
+                                orbital_from=1,
+                                orbital_to=1,
+                                p=(p_x, 0.0),
+                            ),
+                            seed_id=(
+                                f"finite-d2:{layer_from}:{layer_to}:{p_x:+.0f}:"
+                                f"{mz}:{mz_star}"
+                            ),
+                            Q_set1=q_vectors,
+                            Q_set2=q_vectors,
+                            n_orb1=1,
+                            n_orb2=1,
+                            coordinate=coordinate,
+                            support_component="inter",
+                            metadata={
+                                "term_index": term_index,
+                                "term_space_policy": "complete",
+                            },
+                        )
+                    )
+                    term_index += 1
+
+    translated_quadratic = next(
+        seed
+        for seed in seeds
+        if seed.metadata["term_key"]["Mz"] == 2
+        and seed.metadata["term_key"]["p"] == [1.0, 0.0]
+    )
+    assert {
+        sum(monomial)
+        for monomial, matrix in translated_quadratic.coefficients.items()
+        if matrix.nnz
+    } == {0, 1, 2}
+
+    q_permutation = (1, 0, 3, 2)
+    internal_u = np.zeros((4, 4), dtype=np.complex128)
+    for source_q, target_q in enumerate(q_permutation):
+        internal_u[target_q, source_q] = 1.0
+    reflection = -np.eye(2)
+    factorized = certify_factorized_action(
+        name="C2",
+        matrix=internal_u,
+        antiunitary=False,
+        k_forward=reflection,
+        q_permutation=q_permutation,
+        sector_permutation=(0, 1),
+        q_vectors=(q_vectors, q_vectors),
+        q_counts=(2, 2),
+        n_orb=(1, 1),
+        matrix_absolute_error_bound=1.0e-13,
+        q_absolute_error_bound=1.0e-13,
+    )
+    group = build_finite_group(
+        [
+            FiniteGroupGenerator(
+                name="C2",
+                antiunitary=False,
+                canonical_k_map=((-1, 0), (0, -1)),
+                q_permutation=q_permutation,
+                sector_permutation=(0, 1),
+                k_forward=tuple(
+                    tuple(float(value) for value in row) for row in reflection
+                ),
+                internal_u=internal_u,
+            )
+        ]
+    )
+    return coordinate, tuple(seeds), factorized, group
+
+
+def _candidate_vectors(candidate) -> np.ndarray:
+    return sparse.hstack(
+        [
+            response_basis._channel_sparse_vector(
+                channel,
+                candidate.coordinate,
+                candidate.dim,
+            )
+            for channel in candidate.channels
+        ],
+        format="csc",
+    ).toarray()
+
+
+def test_graded_complete_envelope_matches_symbolic_span_and_rank() -> None:
+    graded = _graded_api()
+    api = _api()
+    coordinate, seeds, factorized, group = _complete_degree_two_finite_p_case()
+
+    symbolic = api.compile_symbolic_atom_candidate_group(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions={"C2": factorized},
+    )
+    compiled = graded.compile_graded_candidate_group(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions={"C2": factorized},
+    )
+
+    symbolic_vectors = _candidate_vectors(symbolic)
+    compiled_vectors = _candidate_vectors(compiled)
+    assert len(compiled.channels) == len(symbolic.channels)
+    assert np.linalg.matrix_rank(compiled_vectors) == np.linalg.matrix_rank(
+        symbolic_vectors
+    )
+    np.testing.assert_allclose(
+        compiled_vectors @ np.linalg.pinv(compiled_vectors),
+        symbolic_vectors @ np.linalg.pinv(symbolic_vectors),
+        atol=1.0e-10,
+    )
 
 
 def test_symmetry_first_fixed_space_matches_complete_reynolds_span() -> None:

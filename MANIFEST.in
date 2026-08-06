@@ -42,14 +42,17 @@ prune cpc_submission
 prune kp/.tmp_*
 prune kp/context
 prune examples/garbage
+prune examples/toZY
+prune examples/bitei
 prune examples/mgi2_3.89/kp/outputs
 prune examples/mgi2_3.89/kp/runs
-prune examples/mgi2_3.89/tapw
+prune examples/mgi2_3.89/tapw/outputs
 prune examples/mote2_3.89/kp/outputs
 prune examples/mote2_3.89/kp/runs
-prune examples/mote2_3.89/tapw
-prune examples/tapw/mgi2_9.43/runs
-prune examples/tapw/mote2_9.43/runs
+prune examples/mote2_3.89/tapw/outputs
+prune examples/mote2_aab_5.09/tapw/outputs
+prune examples/ptse2_7.34/tapw/outputs
+prune examples/zrs2_3.15/tapw/outputs
 
 global-exclude __pycache__/*
 global-exclude *.py[cod]

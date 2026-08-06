@@ -25,6 +25,7 @@ from ..blocks.downfold import DownfoldingOptions, downfold_from_projectors
 from ..basis.selection import (
     GaugeAnchorReport,
     GaugeCandidateSymmetryMetrics,
+    NoGaugeCandidatePassedError,
     select_gauge_candidate_by_symmetry,
     write_basis_selection_report,
 )
@@ -40,6 +41,7 @@ from ..identity import (
     PROJECTION_BASIS_HANDOFF_VERSION,
     build_projection_basis_identity,
     hash_array,
+    hash_mapping,
     load_projection_artifact_identity,
     require_identity_fields,
     require_matching_identity,
@@ -50,15 +52,27 @@ from ..projection_handoff import (
     GAMMA_SAMPLED_K_GRAY_TOLERANCE,
     GAMMA_SAMPLED_K_MATCH_TOLERANCE,
     GAMMA_ROUTED_ONLY_BASIS_FIELDS,
+    GammaCommonAnchorBasisSpec,
     GammaRoutedBasisSpec,
     ProjectionBasisSpec,
+    load_gamma_common_anchor_basis_spec,
     load_gamma_routed_basis_spec,
 )
-from ..projection_selection import CandidateRejectionReason
+from ..projection_selection import (
+    CandidateRejected,
+    CandidateRejectionReason,
+)
 from ..selection_artifact import (
+    CertificationStatus as SelectionCertificationStatus,
+    SelectionArtifact,
     SelectionArtifactStore,
     SelectionBindingError,
+    build_certified_generic_selection_identity,
+    build_certified_gamma_selection_identity,
+    validate_pending_generic_symmetry_payload,
+    validate_pending_gamma_symmetry_payload,
     verify_certified_gamma_selection_artifact,
+    verify_certified_gamma_selection_identity,
 )
 from .candidate_certificate import evaluate_projected_pair
 from .exactify_representation import exactify_loaded_symmetry_source
@@ -156,10 +170,16 @@ def _select_validated_auto_gauge_candidate(
 ):
     """Select a resolved auto-gauge candidate from symmetry validation metrics."""
 
-    decision = select_gauge_candidate_by_symmetry(
-        metrics,
-        max_exactification_distance=max_exactification_distance,
-    )
+    try:
+        decision = select_gauge_candidate_by_symmetry(
+            metrics,
+            max_exactification_distance=max_exactification_distance,
+        )
+    except NoGaugeCandidatePassedError as exc:
+        raise CandidateRejected(
+            CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+            str(exc),
+        ) from exc
     by_id = {str(candidate.candidate_id): candidate for candidate in candidates}
     selected = by_id.get(str(decision.selected.candidate_id))
     if selected is None:
@@ -1464,6 +1484,17 @@ def _load_persisted_projection_basis_handoff(
             CandidateRejectionReason.HANDOFF_IDENTITY,
             f"projection basis discriminator is invalid: {error}",
         ) from error
+    if basis_kind == GammaCommonAnchorBasisSpec.projection_basis_kind:
+        try:
+            return load_gamma_common_anchor_basis_spec(basis_path)
+        except GammaRoutingError:
+            raise
+        except (KeyError, OSError, TypeError, ValueError) as error:
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                "common-anchor Gamma projection artifact identity failed: "
+                f"{error}",
+            ) from error
     if basis_kind == GammaRoutedBasisSpec.projection_basis_kind:
         try:
             routed = load_gamma_routed_basis_spec(basis_path)
@@ -1994,6 +2025,23 @@ def _merged_exactification_overrides(
         symmetry_tolerance=symmetry_tolerance,
     )
     merged = dict(defaults)
+    if (
+        _valley_family(str(valley)) != "Gamma"
+        and symmetry_tolerance is not None
+    ):
+        tolerance = float(symmetry_tolerance)
+        if tolerance > 0.0:
+            joint_defaults = JointExactificationConfig()
+            merged["joint_exactification"] = {
+                "max_rms_correction": max(
+                    float(joint_defaults.max_rms_correction),
+                    tolerance,
+                ),
+                "max_route_correction": max(
+                    float(joint_defaults.max_route_correction),
+                    tolerance,
+                ),
+            }
     if user_overrides is not None:
         if not isinstance(user_overrides, Mapping):
             raise ValueError("symm.exactification must be a mapping when provided")
@@ -2003,6 +2051,15 @@ def _merged_exactification_overrides(
                 for op_name, op_spec in value.items():
                     op_merged[str(op_name)] = dict(op_spec) if isinstance(op_spec, Mapping) else op_spec
                 merged[key] = op_merged
+            elif (
+                key == "joint_exactification"
+                and isinstance(value, Mapping)
+                and isinstance(merged.get("joint_exactification"), Mapping)
+            ):
+                merged[key] = {
+                    **dict(merged["joint_exactification"]),
+                    **dict(value),
+                }
             else:
                 merged[str(key)] = value
 
@@ -4401,56 +4458,6 @@ def _basis_states_for_resolved_anchors(
     )
 
 
-def _configured_basis_states_for_resolved_anchors(
-    ctx: _ProjectionRunContext,
-    resolved_norb_fix_list: list[Any],
-) -> tuple[
-    dict[int, ProjectionState],
-    dict[int, ProjectionState],
-    dict[int, ProjectionState],
-    ProjectionState,
-]:
-    """Build the production-method frame without evaluating its downfold."""
-
-    return _states_for_resolved_anchors(
-        ctx,
-        resolved_norb_fix_list,
-        projection_method=ctx.method,
-        compute_heff=False,
-    )
-
-
-def _projection_basis_frame_residual(
-    candidate_states: tuple[
-        dict[int, ProjectionState],
-        dict[int, ProjectionState],
-        dict[int, ProjectionState],
-        ProjectionState,
-    ],
-    configured_states: tuple[
-        dict[int, ProjectionState],
-        dict[int, ProjectionState],
-        dict[int, ProjectionState],
-        ProjectionState,
-    ],
-) -> float:
-    residual = 0.0
-    for candidate_by_k, configured_by_k in zip(candidate_states[1:3], configured_states[1:3]):
-        if set(candidate_by_k) != set(configured_by_k):
-            return float("inf")
-        for k_index in candidate_by_k:
-            candidate_u = np.asarray(candidate_by_k[k_index].u_low, dtype=np.complex128)
-            configured_u = np.asarray(configured_by_k[k_index].u_low, dtype=np.complex128)
-            if candidate_u.shape != configured_u.shape:
-                return float("inf")
-            scale = np.sqrt(max(1, candidate_u.shape[1]))
-            residual = max(
-                residual,
-                float(np.linalg.norm(candidate_u - configured_u, ord="fro") / scale),
-            )
-    return residual
-
-
 def _certified_frame_equivalence(
     project_frame: np.ndarray,
     recomputed_frame: np.ndarray,
@@ -4472,6 +4479,7 @@ def _candidate_symmetry_metrics(
     ctx: _ProjectionRunContext,
     candidate: ProjectGaugeAnchorCandidate,
     *,
+    derive_canonical_frame: bool = False,
     candidate_states: tuple[
         dict[int, ProjectionState],
         dict[int, ProjectionState],
@@ -4607,25 +4615,37 @@ def _candidate_symmetry_metrics(
             rotation_deg=0.0,
             output_dir=None,
         )
-        diagnostic_stage = "basis_frame_derivation"
-        adapted_frame_candidate, _canonical_candidate_matrices = _derive_projection_basis_frame(
-            exact_matrices_candidate,
-            exact_reports_candidate,
-            operations=operation_records,
-            sectors=[
-                {"name": "L1", "n_orb": int(n_orb_candidate[0]), "n_q": int(len(ctx.q_model1))},
-                {"name": "L2", "n_orb": int(n_orb_candidate[1]), "n_q": int(len(ctx.q_model2))},
-            ],
-            # The input matrices have already been exactified.  The frame
-            # solver therefore needs an algebraic floating-point threshold,
-            # not the (possibly percent-level) source-symmetry acceptance
-            # tolerance from the user configuration.
-            tolerance=min(max(float(run_cfg.tolerance), 1.0e-12), 1.0e-8),
-            raw_source_matrices=_basis_frame_raw_source_matrices(
-                raw_candidate_matrices,
-                spin_sector_sewing=run_cfg.spin_sector_sewing,
-            ),
-        )
+        symmetry_adapted_frame: dict[str, Any] | None = None
+        if derive_canonical_frame:
+            diagnostic_stage = "selected_basis_frame_derivation"
+            adapted_frame_candidate, _canonical_candidate_matrices = (
+                _derive_projection_basis_frame(
+                    exact_matrices_candidate,
+                    exact_reports_candidate,
+                    operations=operation_records,
+                    sectors=[
+                        {
+                            "name": "L1",
+                            "n_orb": int(n_orb_candidate[0]),
+                            "n_q": int(len(ctx.q_model1)),
+                        },
+                        {
+                            "name": "L2",
+                            "n_orb": int(n_orb_candidate[1]),
+                            "n_q": int(len(ctx.q_model2)),
+                        },
+                    ],
+                    tolerance=min(
+                        max(float(run_cfg.tolerance), 1.0e-12),
+                        1.0e-8,
+                    ),
+                    raw_source_matrices=_basis_frame_raw_source_matrices(
+                        raw_candidate_matrices,
+                        spin_sector_sewing=run_cfg.spin_sector_sewing,
+                    ),
+                )
+            )
+            symmetry_adapted_frame = adapted_frame_candidate.artifact()
         distances: dict[str, float] = {}
         support_off: dict[str, float] = {}
         phase_branch: dict[str, float] = {}
@@ -4649,9 +4669,17 @@ def _candidate_symmetry_metrics(
                 "sigma_min": candidate.report.gauge_anchor_quality.get("sigma_min"),
                 "condition_number": candidate.report.gauge_anchor_quality.get("condition_number"),
                 "resolved_norb_fix_list": candidate.resolved_norb_fix_list,
-                "symmetry_adapted_frame": adapted_frame_candidate.artifact(),
+                **(
+                    {"symmetry_adapted_frame": symmetry_adapted_frame}
+                    if symmetry_adapted_frame is not None
+                    else {}
+                ),
                 "candidate_projection": {
-                    "status": "basis_only_no_downfold",
+                    "status": (
+                        "selected_canonical_frame"
+                        if derive_canonical_frame
+                        else "raw_action_exactification_only"
+                    ),
                     "projection_method": "first_order",
                 },
             },
@@ -4720,17 +4748,8 @@ def _select_projection_gauge(
     if gauge_report.gauge_mode != "auto_scdm":
         return selected_gauge_candidate, gauge_report
 
-    basis_state_cache: dict[
-        str,
-        tuple[
-            dict[int, ProjectionState],
-            dict[int, ProjectionState],
-            dict[int, ProjectionState],
-            ProjectionState,
-        ],
-    ] = {}
     candidate_metrics = [
-        _candidate_symmetry_metrics(ctx, candidate, state_cache=basis_state_cache)
+        _candidate_symmetry_metrics(ctx, candidate)
         for candidate in gauge_candidates
     ]
     validation_cfg = ctx.config.symm_cfg.get("gauge_validation", {})
@@ -4741,79 +4760,33 @@ def _select_projection_gauge(
         candidate_metrics,
         max_exactification_distance=float(validation_cfg.get("max_exactification_distance", ctx.config.tolerance)),
     )
-    selected_id = str(selected_gauge_candidate.candidate_id)
-    configured_selected_states = _configured_basis_states_for_resolved_anchors(
+    selected_metric = _candidate_symmetry_metrics(
         ctx,
-        selected_gauge_candidate.resolved_norb_fix_list,
+        selected_gauge_candidate,
+        derive_canonical_frame=True,
     )
-    frame_residual = _projection_basis_frame_residual(
-        basis_state_cache[selected_id],
-        configured_selected_states,
-    )
-    frame_tolerance = float(
-        max(
-            1.0e-10,
-            64.0 * np.finfo(np.float64).eps * max(1, ctx.full_dim),
+    selected_metadata = selected_metric.metadata
+    if selected_metadata.get("status") != "evaluated":
+        raise CandidateRejected(
+            CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+            "selected automatic gauge canonicalization failed: "
+            f"{selected_metadata.get('error', 'unknown error')}",
         )
-    )
-    frame_certification = {
-        "status": "certified" if frame_residual <= frame_tolerance else "configured_basis_fallback",
-        "frame_residual": frame_residual,
-        "tolerance": frame_tolerance,
-        "configured_method": ctx.method,
-    }
-    if frame_residual > frame_tolerance:
-        configured_state_cache = {
-            str(candidate.candidate_id): _configured_basis_states_for_resolved_anchors(
-                ctx,
-                candidate.resolved_norb_fix_list,
-            )
-            for candidate in gauge_candidates
-        }
-        candidate_metrics = [
-            _candidate_symmetry_metrics(
-                ctx,
-                candidate,
-                candidate_states=configured_state_cache[str(candidate.candidate_id)],
-            )
-            for candidate in gauge_candidates
-        ]
-        candidate_metrics = [
-            replace(
-                metric,
-                metadata={
-                    **dict(metric.metadata),
-                    "candidate_projection": {
-                        "status": "configured_basis_fallback",
-                        "projection_method": ctx.method,
-                    },
-                },
-            )
-            for metric in candidate_metrics
-        ]
-        selected_gauge_candidate, validation_decision = _select_validated_auto_gauge_candidate(
-            gauge_candidates,
-            candidate_metrics,
-            max_exactification_distance=float(
-                validation_cfg.get("max_exactification_distance", ctx.config.tolerance)
-            ),
+    symmetry_adapted_frame = selected_metadata.get("symmetry_adapted_frame")
+    if not isinstance(symmetry_adapted_frame, Mapping):
+        raise CandidateRejected(
+            CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+            "selected automatic gauge did not produce a canonical frame",
         )
-    selected_metric = next(
-        metric for metric in candidate_metrics if metric.candidate_id == selected_gauge_candidate.candidate_id
-    )
-    selected_metric = replace(
-        selected_metric,
-        metadata={
-            **dict(selected_metric.metadata),
-            "production_basis_certification": frame_certification,
-        },
-    )
     candidate_metrics = [
-        selected_metric if metric.candidate_id == selected_metric.candidate_id else metric
+        selected_metric
+        if metric.candidate_id == selected_metric.candidate_id
+        else metric
         for metric in candidate_metrics
     ]
-    # Candidate scoring intentionally skips the configured downfold.  The
-    # selected frame is downfolded once by the normal production path.
+    # Candidate scoring stops at raw-action exactification.  Materialization
+    # owns the configured downfold.  Canonical-frame derivation runs exactly
+    # once, after the final anchor candidate has been selected.
     ctx.selected_gauge_states = None
     gauge_report = replace(
         selected_gauge_candidate.report,
@@ -4821,7 +4794,7 @@ def _select_projection_gauge(
             "status": "validated",
             "selection_policy": "symmetry_exactification_residual",
             "selected_candidate_id": selected_gauge_candidate.candidate_id,
-            "symmetry_adapted_frame": selected_metric.metadata.get("symmetry_adapted_frame"),
+            "symmetry_adapted_frame": dict(symmetry_adapted_frame),
             "candidate_rankings": validation_decision.rankings,
             "metrics": [
                 {
@@ -5124,11 +5097,334 @@ def _gauge_report_from_gamma_routed_handoff(
     )
 
 
-def _load_current_gamma_selection_identity_hash(
+def _gauge_report_from_gamma_common_anchor_handoff(
+    handoff: GammaCommonAnchorBasisSpec,
+) -> GaugeAnchorReport:
+    """Describe the persisted common-anchor gauge without re-selection."""
+
+    anchor = handoff.anchor_spec
+    return GaugeAnchorReport(
+        gauge_mode="auto_scdm",
+        resolved_norb_fix_list=[],
+        selections=[],
+        metric={
+            "type": "persisted_gamma_common_anchor_basis_handoff",
+            "basis_is_orthonormal": True,
+            "projection_basis_kind": handoff.projection_basis_kind,
+            "authoritative_frame": "common_anchor",
+            "basis_hash": handoff.artifact_identity["basis_hash"],
+            "layout_hash": handoff.layout.layout_hash,
+            "anchor_spec_hash": anchor.identity_hash,
+            "heff_hash": handoff.heff_hash,
+        },
+        state_selection_quality={
+            "status": "persisted_gamma_common_anchor",
+            "selection_policy": "consume_project_artifact",
+            "owner_specs": [owner.to_payload() for owner in anchor.owner_specs],
+            "model_group_ranks": [
+                int(rank) for rank in handoff.model_group_ranks
+            ],
+            "model_group_qset_indices": [
+                int(index) for index in handoff.model_group_qset_indices
+            ],
+        },
+        gauge_anchor_quality={
+            "status": "persisted_common_anchor",
+            "selection_policy": "consume_certified_common_anchor_contract",
+            "sigma_min": float(anchor.reference_sigma_min),
+            "condition_number": float(anchor.reference_condition_number),
+            "min_sigma": float(anchor.min_sigma),
+            "max_condition": float(anchor.max_condition),
+            "reference_q_index": int(anchor.reference_q_index),
+        },
+        symmetry_closure_quality={
+            "status": "persisted_gamma_common_anchor_basis",
+            "selection_policy": "consume_then_recertify",
+            "authoritative_frame": "common_anchor",
+            "candidate_certificate_hash": handoff.candidate_certificate_hash,
+            "symmetry_adapted_frame": None,
+        },
+        warnings=list(anchor.warnings),
+    )
+
+
+@dataclass(frozen=True)
+class _GenericSelectionBinding:
+    store: SelectionArtifactStore
+    artifact: SelectionArtifact
+    handoff: ExplicitLegacyBasisSpec
+
+
+def _verify_generic_selection_handoff(
+    artifact: SelectionArtifact,
+    handoff: ExplicitLegacyBasisSpec,
+) -> None:
+    """Bind one automatic K/M selection marker to its persisted project basis."""
+
+    if not isinstance(artifact, SelectionArtifact) or artifact.identity is None:
+        raise SelectionBindingError("automatic K/M selection has no identity")
+    resolved = artifact.identity.resolved_candidate
+    if (
+        resolved.selection_mode != "auto"
+        or resolved.projection_basis_kind != ExplicitLegacyBasisSpec.projection_basis_kind
+    ):
+        raise SelectionBindingError(
+            "automatic K/M selection does not describe an explicit project basis"
+        )
+    expected = {
+        "candidate_dimension": int(handoff.model_dim),
+        "basis_handoff_hash": str(handoff.artifact_identity.get("basis_hash", "")),
+        "authoritative_heff_hash": str(handoff.artifact_identity.get("heff_hash", "")),
+        "heff_k_indices_hash": str(handoff.artifact_identity.get("k_indices_hash", "")),
+    }
+    mismatched = tuple(
+        field for field, value in expected.items() if getattr(resolved, field) != value
+    )
+    if mismatched:
+        raise SelectionBindingError(
+            "automatic K/M selection does not match the persisted project basis: "
+            + ", ".join(mismatched)
+        )
+
+
+def _load_current_generic_selection_binding(
     project_dir: str | Path,
-    handoff: GammaRoutedBasisSpec,
-) -> str:
-    """Load and verify the current certified selection without rebuilding it."""
+    handoff: ExplicitLegacyBasisSpec,
+) -> _GenericSelectionBinding:
+    """Load a current, basis-bound automatic K/M selection for kp symm."""
+
+    try:
+        store = SelectionArtifactStore(project_dir)
+        if store.marker_path.is_symlink():
+            raise SelectionBindingError(
+                "kp symm current K/M selection marker must not be a symlink"
+            )
+        artifact = store.load_current()
+        if artifact.certification_status not in {
+            SelectionCertificationStatus.CERTIFIED,
+            SelectionCertificationStatus.PENDING_SYMMETRY,
+        }:
+            raise SelectionBindingError(
+                "kp symm requires a current CERTIFIED or PENDING_SYMMETRY "
+                "automatic K/M selection artifact"
+            )
+        _verify_generic_selection_handoff(artifact, handoff)
+        if (
+            artifact.certification_status
+            is SelectionCertificationStatus.PENDING_SYMMETRY
+        ):
+            if artifact.metrics is None or artifact.identity is None:
+                raise SelectionBindingError(
+                    "kp symm pending K/M selection is missing metric evidence"
+                )
+            evidence = artifact.identity.certification_evidence
+            if evidence is None:
+                raise SelectionBindingError(
+                    "kp symm pending K/M selection is missing certification evidence"
+                )
+            payloads = store.load_current_payloads(require_certified=False)
+            raw_pending = payloads.get("pending_symmetry.json")
+            if raw_pending is None:
+                raise SelectionBindingError(
+                    "kp symm pending K/M selection lacks pending_symmetry.json"
+                )
+            pending_payload = json.loads(raw_pending.decode("utf-8"))
+            if not isinstance(pending_payload, Mapping):
+                raise SelectionBindingError(
+                    "kp symm pending K/M symmetry payload must be a mapping"
+                )
+            canonical = validate_pending_generic_symmetry_payload(
+                payload=pending_payload,
+                selection_input=artifact.identity.selection_input,
+                resolved_candidate=artifact.identity.resolved_candidate,
+                metrics=artifact.metrics,
+                certificate_hash=evidence.symmetry_certificate_hash,
+                certificate_input_identity_hash=(
+                    evidence.symmetry_input_identity_hash
+                ),
+            )
+            persisted_rows = [list(row) for row in handoff.nlow_state_list]
+            if canonical["nlow_state_list"] != persisted_rows:
+                raise SelectionBindingError(
+                    "kp symm pending K/M band rows do not match the project handoff"
+                )
+            if store.load_current() != artifact:
+                raise SelectionBindingError(
+                    "kp symm current K/M selection changed during preflight"
+                )
+    except SelectionBindingError:
+        raise
+    except (
+        json.JSONDecodeError,
+        UnicodeDecodeError,
+        OSError,
+        TypeError,
+        ValueError,
+    ) as error:
+        raise SelectionBindingError(
+            "kp symm requires a valid current CERTIFIED or PENDING_SYMMETRY "
+            "automatic K/M selection artifact"
+        ) from error
+    return _GenericSelectionBinding(store=store, artifact=artifact, handoff=handoff)
+
+
+def _measured_selection_symmetry_metrics(
+    *,
+    summary: Mapping[str, Any],
+    raw_low_matrices: Mapping[str, np.ndarray],
+    exact_matrices: Mapping[str, np.ndarray],
+) -> tuple[float, float]:
+    """Reduce successful kp symm evidence to the two selection gate metrics."""
+
+    residuals: list[float] = []
+    leakages: list[float] = []
+    for operation in summary.get("operations", ()):
+        if not isinstance(operation, Mapping):
+            continue
+        name = str(operation.get("name", ""))
+        if name in raw_low_matrices and name in exact_matrices:
+            raw = np.asarray(raw_low_matrices[name], dtype=np.complex128)
+            exact = np.asarray(exact_matrices[name], dtype=np.complex128)
+            if raw.shape != exact.shape:
+                raise SelectionBindingError(
+                    f"kp symm exactified action {name!r} changed shape"
+                )
+            residuals.append(
+                float(
+                    np.linalg.norm(raw - exact, ord="fro")
+                    / np.sqrt(max(1, raw.shape[0]))
+                )
+            )
+        pairs = operation.get("pairs", ())
+        if not isinstance(pairs, Sequence) or isinstance(pairs, (str, bytes)):
+            continue
+        for pair in pairs:
+            if not isinstance(pair, Mapping):
+                continue
+            raw_metrics = pair.get("raw", {})
+            if isinstance(raw_metrics, Mapping):
+                for field in ("d_unitarity_error", "heff_covariance_residual"):
+                    value = raw_metrics.get(field)
+                    if value is not None:
+                        residuals.append(float(value))
+                leakage = raw_metrics.get("subspace_leakage")
+                if leakage is not None:
+                    leakages.append(float(leakage))
+            full_residual = pair.get("full_space_covariance_residual")
+            if full_residual is not None:
+                residuals.append(float(full_residual))
+
+    if any(
+        not np.isfinite(value) or value < 0.0
+        for value in (*residuals, *leakages)
+    ):
+        raise SelectionBindingError("kp symm produced invalid symmetry metrics")
+    return max(residuals, default=0.0), max(leakages, default=0.0)
+
+
+def _certify_pending_generic_selection(
+    binding: _GenericSelectionBinding,
+    *,
+    summary: dict[str, Any],
+    raw_low_matrices: Mapping[str, np.ndarray],
+    exact_matrices: Mapping[str, np.ndarray],
+) -> SelectionArtifact | None:
+    """Promote an automatic K/M project choice using current kp symm evidence."""
+
+    pending = binding.artifact
+    if pending.certification_status is SelectionCertificationStatus.CERTIFIED:
+        return None
+    if (
+        pending.certification_status
+        is not SelectionCertificationStatus.PENDING_SYMMETRY
+        or pending.identity is None
+        or pending.metrics is None
+        or pending.payload_manifest_hash is None
+    ):
+        raise SelectionBindingError(
+            "kp symm cannot certify an invalid pending K/M selection"
+        )
+    symmetry_residual, symmetry_leakage = _measured_selection_symmetry_metrics(
+        summary=summary,
+        raw_low_matrices=raw_low_matrices,
+        exact_matrices=exact_matrices,
+    )
+    metrics = replace(
+        pending.metrics,
+        symmetry_residual=symmetry_residual,
+        symmetry_leakage=symmetry_leakage,
+    )
+    operations: list[dict[str, Any]] = []
+    for operation in summary.get("operations", ()):
+        if not isinstance(operation, Mapping):
+            continue
+        name = str(operation.get("name", ""))
+        if name not in raw_low_matrices or name not in exact_matrices:
+            raise SelectionBindingError(
+                f"kp symm K/M certification lacks exactified action {name!r}"
+            )
+        if operation.get("exactification_status") != "exactified":
+            raise SelectionBindingError(
+                f"kp symm K/M action {name!r} is not exactified"
+            )
+        operations.append(
+            {
+                "name": name,
+                "antiunitary": bool(operation.get("antiunitary", False)),
+                "raw_matrix_hash": hash_array(raw_low_matrices[name]),
+                "exact_matrix_hash": hash_array(exact_matrices[name]),
+            }
+        )
+    input_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-post-selection-symmetry-input.v3",
+            "selection_input_identity_hash": pending.selection_input_identity_hash,
+            "resolved_candidate_hash": (
+                pending.identity.resolved_candidate.resolved_candidate_hash
+            ),
+            "project_artifact_identity": dict(
+                sorted(binding.handoff.artifact_identity.items())
+            ),
+            "operations": operations,
+        }
+    )
+    certificate_hash = hash_mapping(
+        {
+            "schema": "kp.non-gamma-post-selection-symmetry-certificate.v3",
+            "status": "certified",
+            "input_identity_hash": input_hash,
+            "symmetry_residual": symmetry_residual,
+            "symmetry_leakage": symmetry_leakage,
+        }
+    )
+    identity = build_certified_generic_selection_identity(
+        selection_input=pending.identity.selection_input,
+        resolved_candidate=pending.identity.resolved_candidate,
+        metrics=metrics,
+        certificate_hash=certificate_hash,
+        certificate_input_identity_hash=input_hash,
+    )
+    certified = SelectionArtifact.certified(
+        transaction_id=pending.transaction_id,
+        identity=identity,
+        payload_manifest_hash=pending.payload_manifest_hash,
+    )
+    _bind_selection_identity_to_summary(summary, identity.selection_identity_hash)
+    return certified
+
+
+@dataclass(frozen=True)
+class _GammaSelectionBinding:
+    store: SelectionArtifactStore
+    artifact: SelectionArtifact
+    handoff: GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec
+
+
+def _load_current_gamma_selection_binding(
+    project_dir: str | Path,
+    handoff: GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec,
+) -> _GammaSelectionBinding:
+    """Load a basis-bound Gamma selection that kp symm may consume."""
 
     try:
         store = SelectionArtifactStore(project_dir)
@@ -5136,19 +5432,150 @@ def _load_current_gamma_selection_identity_hash(
             raise SelectionBindingError(
                 "kp symm current Gamma selection marker must not be a symlink"
             )
-        artifact = store.load_current(require_certified=True)
-        verified = verify_certified_gamma_selection_artifact(artifact, handoff)
+        artifact = store.load_current()
+        if artifact.certification_status is SelectionCertificationStatus.CERTIFIED:
+            verify_certified_gamma_selection_artifact(artifact, handoff)
+        elif (
+            artifact.certification_status
+            is SelectionCertificationStatus.PENDING_SYMMETRY
+        ):
+            if artifact.identity is None:
+                raise SelectionBindingError(
+                    "kp symm pending Gamma selection has no identity"
+                )
+            verify_certified_gamma_selection_identity(artifact.identity, handoff)
+            payloads = store.load_current_payloads(require_certified=False)
+            raw_pending = payloads.get("pending_symmetry.json")
+            if raw_pending is None:
+                raise SelectionBindingError(
+                    "kp symm pending Gamma selection lacks pending_symmetry.json"
+                )
+            pending_payload = json.loads(raw_pending.decode("utf-8"))
+            if not isinstance(pending_payload, Mapping):
+                raise SelectionBindingError(
+                    "kp symm pending Gamma symmetry payload must be a mapping"
+                )
+            validate_pending_gamma_symmetry_payload(
+                payload=pending_payload,
+                selection_input=artifact.identity.selection_input,
+                identity=artifact.identity,
+                handoff=handoff,
+            )
+            if store.load_current() != artifact:
+                raise SelectionBindingError(
+                    "kp symm current Gamma selection changed during preflight"
+                )
+        else:
+            raise SelectionBindingError(
+                "kp symm requires a current CERTIFIED or PENDING_SYMMETRY "
+                "Gamma selection artifact"
+            )
     except SelectionBindingError:
         raise
-    except (OSError, TypeError, ValueError) as error:
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, TypeError, ValueError) as error:
         raise SelectionBindingError(
-            "kp symm requires a valid current CERTIFIED Gamma selection artifact"
+            "kp symm requires a valid current CERTIFIED or PENDING_SYMMETRY "
+            "Gamma selection artifact"
         ) from error
-    if verified.identity is None:  # pragma: no cover - verifier is fail-closed
+    if artifact.identity is None:  # pragma: no cover - validated above
         raise SelectionBindingError(
-            "kp symm certified Gamma selection has no identity"
+            "kp symm Gamma selection has no identity"
         )
-    return verified.identity.selection_identity_hash
+    return _GammaSelectionBinding(store=store, artifact=artifact, handoff=handoff)
+
+
+def _load_current_gamma_selection_identity_hash(
+    project_dir: str | Path,
+    handoff: GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec,
+) -> str:
+    """Load and verify the current Gamma selection identity."""
+
+    binding = _load_current_gamma_selection_binding(project_dir, handoff)
+    assert binding.artifact.identity is not None
+    return binding.artifact.identity.selection_identity_hash
+
+
+def _certify_pending_gamma_selection(
+    binding: _GammaSelectionBinding,
+    *,
+    summary: dict[str, Any],
+    raw_low_matrices: Mapping[str, np.ndarray],
+    exact_matrices: Mapping[str, np.ndarray],
+) -> SelectionArtifact | None:
+    """Materialize measured symmetry metrics and the final selection identity."""
+
+    pending = binding.artifact
+    if pending.certification_status is SelectionCertificationStatus.CERTIFIED:
+        return None
+    if (
+        pending.certification_status
+        is not SelectionCertificationStatus.PENDING_SYMMETRY
+        or pending.identity is None
+        or pending.metrics is None
+        or pending.payload_manifest_hash is None
+    ):
+        raise SelectionBindingError(
+            "kp symm cannot certify an invalid pending Gamma selection"
+        )
+
+    residuals: list[float] = []
+    leakages: list[float] = []
+    for operation in summary.get("operations", ()):
+        if not isinstance(operation, Mapping):
+            continue
+        name = str(operation.get("name", ""))
+        if name in raw_low_matrices and name in exact_matrices:
+            raw = np.asarray(raw_low_matrices[name], dtype=np.complex128)
+            exact = np.asarray(exact_matrices[name], dtype=np.complex128)
+            if raw.shape != exact.shape:
+                raise SelectionBindingError(
+                    f"kp symm exactified Gamma action {name!r} changed shape"
+                )
+            residuals.append(
+                float(
+                    np.linalg.norm(raw - exact, ord="fro")
+                    / np.sqrt(max(1, raw.shape[0]))
+                )
+            )
+        pairs = operation.get("pairs", ())
+        if not isinstance(pairs, Sequence) or isinstance(pairs, (str, bytes)):
+            continue
+        for pair in pairs:
+            if not isinstance(pair, Mapping):
+                continue
+            raw_metrics = pair.get("raw", {})
+            if isinstance(raw_metrics, Mapping):
+                for field in ("d_unitarity_error", "heff_covariance_residual"):
+                    value = raw_metrics.get(field)
+                    if value is not None:
+                        residuals.append(float(value))
+                leakage = raw_metrics.get("subspace_leakage")
+                if leakage is not None:
+                    leakages.append(float(leakage))
+            full_residual = pair.get("full_space_covariance_residual")
+            if full_residual is not None:
+                residuals.append(float(full_residual))
+
+    if any(not np.isfinite(value) or value < 0.0 for value in (*residuals, *leakages)):
+        raise SelectionBindingError("kp symm produced invalid Gamma symmetry metrics")
+    metrics = replace(
+        pending.metrics,
+        symmetry_residual=max(residuals, default=0.0),
+        symmetry_leakage=max(leakages, default=0.0),
+    )
+    identity = build_certified_gamma_selection_identity(
+        selection_input=pending.identity.selection_input,
+        handoff=binding.handoff,
+        metrics=metrics,
+    )
+    certified = SelectionArtifact.certified(
+        transaction_id=pending.transaction_id,
+        identity=identity,
+        payload_manifest_hash=pending.payload_manifest_hash,
+        projection_handoff=binding.handoff,
+    )
+    _bind_selection_identity_to_summary(summary, identity.selection_identity_hash)
+    return certified
 
 
 def _bind_selection_identity_to_summary(
@@ -5180,22 +5607,35 @@ def _bind_selection_identity_to_summary(
     summary["selection_identity_hash"] = identity_hash
 
 
-def _states_from_gamma_routed_handoff(
+def _states_from_persisted_gamma_handoff(
     ctx: _ProjectionRunContext,
-    handoff: GammaRoutedBasisSpec,
+    handoff: GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec,
 ) -> tuple[
     dict[int, ProjectionState],
     dict[int, ProjectionState],
     dict[int, ProjectionState],
     ProjectionState,
 ]:
-    """Materialize persisted model states without diagonalization/downfolding."""
+    """Materialize persisted Gamma states without diagonalization/downfolding."""
 
-    handoff.require_k_indices(ctx.required_k)
-    if handoff.layout.q_count != ctx.q_count or handoff.layout.full_dimension != ctx.full_dim:
+    if isinstance(handoff, GammaRoutedBasisSpec):
+        handoff.require_k_indices(ctx.required_k)
+    else:
+        missing = sorted(
+            set(int(value) for value in ctx.required_k) - set(handoff.k_indices)
+        )
+        if missing:
+            raise GammaRoutingError(
+                CandidateRejectionReason.HANDOFF_IDENTITY,
+                f"common-anchor Gamma handoff is missing k indices {missing}",
+            )
+    if (
+        handoff.layout.q_count != ctx.q_count
+        or handoff.layout.full_dimension != ctx.full_dim
+    ):
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
-            "routed Gamma layout does not match the active symmetry row space",
+            "persisted Gamma layout does not match the active symmetry row space",
         )
     states: dict[int, ProjectionState] = {}
     for k_index in ctx.required_k:
@@ -5211,6 +5651,20 @@ def _states_from_gamma_routed_handoff(
     return states, states, states, first
 
 
+def _states_from_gamma_routed_handoff(
+    ctx: _ProjectionRunContext,
+    handoff: GammaRoutedBasisSpec,
+) -> tuple[
+    dict[int, ProjectionState],
+    dict[int, ProjectionState],
+    dict[int, ProjectionState],
+    ProjectionState,
+]:
+    """Compatibility wrapper for the legacy routed Gamma handoff."""
+
+    return _states_from_persisted_gamma_handoff(ctx, handoff)
+
+
 def _resolve_symmetry_project_identity(
     ctx: _ProjectionRunContext,
     *,
@@ -5221,8 +5675,21 @@ def _resolve_symmetry_project_identity(
 ) -> dict[str, Any]:
     run_cfg = ctx.config
     if handoff is not None:
-        if isinstance(handoff, GammaRoutedBasisSpec):
-            handoff.require_k_indices(ctx.required_k)
+        if isinstance(
+            handoff,
+            (GammaCommonAnchorBasisSpec, GammaRoutedBasisSpec),
+        ):
+            if isinstance(handoff, GammaRoutedBasisSpec):
+                handoff.require_k_indices(ctx.required_k)
+            else:
+                missing = sorted(
+                    set(int(value) for value in ctx.required_k) - set(handoff.k_indices)
+                )
+                if missing:
+                    raise GammaRoutingError(
+                        CandidateRejectionReason.HANDOFF_IDENTITY,
+                        f"common-anchor Gamma handoff is missing k indices {missing}",
+                    )
             layout_qsets = tuple(
                 np.asarray(qset, dtype=np.float64)
                 for qset in handoff.layout.ordered_qsets
@@ -5233,7 +5700,7 @@ def _resolve_symmetry_project_identity(
             ):
                 raise GammaRoutingError(
                     CandidateRejectionReason.HANDOFF_IDENTITY,
-                    "routed Gamma ordered-Q identity differs from the active config",
+                    "persisted Gamma ordered-Q identity differs from the active config",
                 )
             return dict(handoff.artifact_identity)
         hamk_file = _resolve(run_cfg.material.get("hamk_file"), run_cfg.cfg_dir)
@@ -5364,8 +5831,9 @@ def _initial_projection_summary(
     projection_basis_kind = str(
         report_metric.get("projection_basis_kind", "explicit_legacy")
     )
-    uses_gamma_routed_layout = (
-        projection_basis_kind == GammaRoutedBasisSpec.projection_basis_kind
+    uses_persisted_gamma_layout = projection_basis_kind in (
+        GammaCommonAnchorBasisSpec.projection_basis_kind,
+        GammaRoutedBasisSpec.projection_basis_kind,
     )
     return {
         "config": run_cfg.cfg_path,
@@ -5405,7 +5873,7 @@ def _initial_projection_summary(
             },
             "resolved_source_group_nlow_state_list": (
                 []
-                if uses_gamma_routed_layout
+                if uses_persisted_gamma_layout
                 else _source_group_nlow_state_list(
                     ctx.nlow_state_list,
                     ctx.num_layer_list,
@@ -5616,6 +6084,84 @@ def _append_projected_operation_summaries(
     return raw_low_matrices
 
 
+def _resolve_factorized_owner_geometry(
+    metadata: Mapping[str, Any],
+    *,
+    q_geometry: CanonicalQResult,
+) -> dict[str, Any]:
+    """Resolve model-owner Q fibers independently of source-qset ownership."""
+
+    sector_order = tuple(
+        str(value) for value in q_geometry.artifact.get("sector_order", ())
+    )
+    if len(sector_order) != 2:
+        raise ValueError("missing_two_sector_basis_layout")
+    source_q_vectors = tuple(
+        np.asarray(q_geometry.canonical_q[name], dtype=np.float64)
+        for name in sector_order
+    )
+    exactification = metadata.get("kp_symm_exactification", {})
+    n_orb_raw = (
+        exactification.get("n_orb")
+        if isinstance(exactification, Mapping)
+        else None
+    )
+    if not isinstance(n_orb_raw, Sequence) or isinstance(
+        n_orb_raw, (str, bytes)
+    ):
+        raise ValueError("missing_two_sector_basis_layout")
+    n_orb = tuple(int(value) for value in n_orb_raw)
+
+    project_basis = metadata.get("project_basis", {})
+    is_common_anchor = (
+        isinstance(project_basis, Mapping)
+        and project_basis.get("projection_basis_kind")
+        == GammaCommonAnchorBasisSpec.projection_basis_kind
+    )
+    if is_common_anchor:
+        ranks_raw = project_basis.get("model_group_ranks")
+        qset_indices_raw = project_basis.get("model_group_qset_indices")
+        if (
+            not isinstance(ranks_raw, Sequence)
+            or isinstance(ranks_raw, (str, bytes))
+            or not isinstance(qset_indices_raw, Sequence)
+            or isinstance(qset_indices_raw, (str, bytes))
+        ):
+            raise ValueError("missing_common_anchor_owner_geometry")
+        model_ranks = tuple(int(value) for value in ranks_raw)
+        source_qset_indices = tuple(int(value) for value in qset_indices_raw)
+        if len(source_qset_indices) != len(model_ranks) or any(
+            index < 0 or index >= len(source_q_vectors)
+            for index in source_qset_indices
+        ):
+            raise ValueError("common_anchor_owner_qset_index_mismatch")
+        if model_ranks == n_orb:
+            q_vectors = tuple(
+                source_q_vectors[index] for index in source_qset_indices
+            )
+        elif len(model_ranks) == 1 and len(n_orb) == len(source_q_vectors):
+            padded_ranks = [0 for _ in source_q_vectors]
+            padded_ranks[source_qset_indices[0]] = model_ranks[0]
+            if tuple(padded_ranks) != n_orb:
+                raise ValueError("common_anchor_owner_rank_mismatch")
+            source_qset_indices = tuple(range(len(source_q_vectors)))
+            q_vectors = source_q_vectors
+        else:
+            raise ValueError("common_anchor_owner_rank_mismatch")
+    else:
+        source_qset_indices = tuple(range(len(source_q_vectors)))
+        q_vectors = source_q_vectors
+
+    if len(n_orb) != len(q_vectors):
+        raise ValueError("n_orb_sector_count_mismatch")
+    return {
+        "q_vectors": q_vectors,
+        "q_counts": tuple(int(array.shape[0]) for array in q_vectors),
+        "n_orb": n_orb,
+        "source_qset_indices": source_qset_indices,
+    }
+
+
 def _factorized_response_action_package(
     metadata: Mapping[str, Any],
     matrices: Mapping[str, np.ndarray],
@@ -5624,33 +6170,30 @@ def _factorized_response_action_package(
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Certify all packed exactified actions for the reusable model fast path."""
 
-    sector_order = tuple(str(value) for value in q_geometry.artifact.get("sector_order", ()))
     exactification = metadata.get("kp_symm_exactification", {})
-    n_orb_raw = exactification.get("n_orb") if isinstance(exactification, Mapping) else None
-    if len(sector_order) != 2 or not isinstance(n_orb_raw, Sequence):
-        return (
-            {
-                "version": FACTORIZED_RESPONSE_ACTION_V1,
-                "status": "unavailable",
-                "reason": "missing_two_sector_basis_layout",
-            },
-            {},
+    sector_order = tuple(
+        str(value) for value in q_geometry.artifact.get("sector_order", ())
+    )
+    try:
+        owner_geometry = _resolve_factorized_owner_geometry(
+            metadata,
+            q_geometry=q_geometry,
         )
-    n_orb = tuple(int(value) for value in n_orb_raw)
-    if len(n_orb) != len(sector_order):
+    except (KeyError, TypeError, ValueError) as error:
         return (
             {
                 "version": FACTORIZED_RESPONSE_ACTION_V1,
                 "status": "unavailable",
-                "reason": "n_orb_sector_count_mismatch",
+                "reason": str(error),
             },
             {},
         )
     q_vectors = tuple(
-        np.asarray(q_geometry.canonical_q[name], dtype=np.float64)
-        for name in sector_order
+        np.asarray(array, dtype=np.float64)
+        for array in owner_geometry["q_vectors"]
     )
-    q_counts = tuple(int(array.shape[0]) for array in q_vectors)
+    q_counts = tuple(int(value) for value in owner_geometry["q_counts"])
+    n_orb = tuple(int(value) for value in owner_geometry["n_orb"])
     q_offsets = np.cumsum((0, *q_counts[:-1])).astype(np.int64)
     sector_by_name = {name: index for index, name in enumerate(sector_order)}
     q_bound = float(q_geometry.artifact.get("canonical_closure_max", 0.0))
@@ -5998,7 +6541,11 @@ def _exactify_and_write_projection_summary(
     summary: dict[str, Any],
     raw_low_matrices: Mapping[str, np.ndarray],
     n_orb: tuple[int, int],
+    gamma_selection_binding: _GammaSelectionBinding | None = None,
+    generic_selection_binding: _GenericSelectionBinding | None = None,
 ) -> dict[str, Any]:
+    if gamma_selection_binding is not None and generic_selection_binding is not None:
+        raise ValueError("kp symm cannot certify Gamma and K/M selections together")
     _invalidate_stale_canonical_symmetry_outputs(ctx.output_dir)
     run_cfg = ctx.config
     bM_candidates = bM_candidates_from_q_distances(ctx.q_model1, ctx.q_model2)
@@ -6535,6 +7082,22 @@ def _exactify_and_write_projection_summary(
         }
     )
 
+    certified_selection = None
+    if gamma_selection_binding is not None:
+        certified_selection = _certify_pending_gamma_selection(
+            gamma_selection_binding,
+            summary=summary,
+            raw_low_matrices=raw_low_matrices,
+            exact_matrices=exact_matrices,
+        )
+    elif generic_selection_binding is not None:
+        certified_selection = _certify_pending_generic_selection(
+            generic_selection_binding,
+            summary=summary,
+            raw_low_matrices=raw_low_matrices,
+            exact_matrices=exact_matrices,
+        )
+
     payload = json.dumps(summary, indent=2, sort_keys=True) + "\n"
     (ctx.output_dir / "manifest.json").write_text(payload, encoding="utf-8")
     (ctx.output_dir / "summary.json").write_text(payload, encoding="utf-8")
@@ -6550,6 +7113,14 @@ def _exactify_and_write_projection_summary(
                 else final_joint_result.artifact_arrays
             ),
         )
+    if certified_selection is not None:
+        selection_binding = (
+            gamma_selection_binding
+            if gamma_selection_binding is not None
+            else generic_selection_binding
+        )
+        assert selection_binding is not None
+        selection_binding.store.promote_pending_symmetry(certified_selection)
     return summary
 
 
@@ -6631,6 +7202,41 @@ def _actual_sampled_k_route_resolver(
     return resolve
 
 
+def _resolve_persisted_nlow_state_list(
+    *,
+    project_cfg: Mapping[str, Any],
+    configured: Sequence[Sequence[int]],
+    persisted: Sequence[Sequence[int]],
+) -> list[list[int]]:
+    """Use the project-owned bands when an automatic config has no explicit list."""
+
+    configured_rows = [[int(value) for value in row] for row in configured]
+    persisted_rows = [[int(value) for value in row] for row in persisted]
+    if configured_rows == persisted_rows:
+        return configured_rows
+    selection = project_cfg.get("selection")
+    automatic = (
+        isinstance(selection, Mapping)
+        and str(selection.get("mode", "")).strip().lower() == "auto"
+        and not configured_rows
+    )
+    if automatic:
+        return persisted_rows
+    raise ValueError(
+        "persisted project nlow_state_list does not match the current config: "
+        f"{persisted_rows!r} != {configured_rows!r}"
+    )
+
+
+def _automatic_project_selection_requested(project_cfg: Mapping[str, Any]) -> bool:
+    selection = project_cfg.get("selection")
+    if isinstance(selection, Mapping):
+        mode = selection.get("mode", "")
+    else:
+        mode = selection
+    return str(mode or "").strip().lower() == "auto"
+
+
 def run_symmetry_projection_from_config(
     cfg_path: str,
     *,
@@ -6643,6 +7249,8 @@ def run_symmetry_projection_from_config(
 ) -> dict[str, Any]:
     persisted_handoff: ProjectionBasisSpec | None = None
     selection_identity_hash: str | None = None
+    gamma_selection_binding: _GammaSelectionBinding | None = None
+    generic_selection_binding: _GenericSelectionBinding | None = None
     persisted_states: tuple[
         dict[int, ProjectionState],
         dict[int, ProjectionState],
@@ -6676,18 +7284,45 @@ def run_symmetry_projection_from_config(
             if not isinstance(error.__cause__, FileNotFoundError):
                 raise
             deferred_missing_handoff = error
-        if isinstance(persisted_handoff, GammaRoutedBasisSpec):
-            selection_identity_hash = _load_current_gamma_selection_identity_hash(
+        if isinstance(
+            persisted_handoff,
+            (GammaCommonAnchorBasisSpec, GammaRoutedBasisSpec),
+        ):
+            gamma_selection_binding = _load_current_gamma_selection_binding(
                 project_dir,
                 persisted_handoff,
             )
+            if (
+                gamma_selection_binding.artifact.certification_status
+                is SelectionCertificationStatus.CERTIFIED
+            ):
+                assert gamma_selection_binding.artifact.identity is not None
+                selection_identity_hash = (
+                    gamma_selection_binding.artifact.identity.selection_identity_hash
+                )
+        elif (
+            isinstance(persisted_handoff, ExplicitLegacyBasisSpec)
+            and _automatic_project_selection_requested(run_cfg.project_cfg)
+        ):
+            generic_selection_binding = _load_current_generic_selection_binding(
+                project_dir,
+                persisted_handoff,
+            )
+            if (
+                generic_selection_binding.artifact.certification_status
+                is SelectionCertificationStatus.CERTIFIED
+            ):
+                assert generic_selection_binding.artifact.identity is not None
+                selection_identity_hash = (
+                    generic_selection_binding.artifact.identity.selection_identity_hash
+                )
         ctx = _build_projection_run_context(
             run_cfg,
             create_output_dir=False,
             validate_full_space_covariance=validate_full_space_covariance,
             require_nlow_state_list=not isinstance(
                 persisted_handoff,
-                GammaRoutedBasisSpec,
+                (GammaCommonAnchorBasisSpec, GammaRoutedBasisSpec),
             ),
             packed_k_route_resolver=(
                 _actual_sampled_k_route_resolver(run_cfg)
@@ -6707,22 +7342,29 @@ def run_symmetry_projection_from_config(
                 gauge_report=None,
             )
             norb_fix_list = selected_gauge_candidate.resolved_norb_fix_list
-        elif isinstance(persisted_handoff, GammaRoutedBasisSpec):
-            persisted_states = _states_from_gamma_routed_handoff(
+        elif isinstance(
+            persisted_handoff,
+            (GammaCommonAnchorBasisSpec, GammaRoutedBasisSpec),
+        ):
+            persisted_states = _states_from_persisted_gamma_handoff(
                 ctx,
                 persisted_handoff,
             )
             norb_fix_list = []
-            gauge_report = _gauge_report_from_gamma_routed_handoff(
-                persisted_handoff
+            gauge_report = (
+                _gauge_report_from_gamma_common_anchor_handoff(
+                    persisted_handoff
+                )
+                if isinstance(persisted_handoff, GammaCommonAnchorBasisSpec)
+                else _gauge_report_from_gamma_routed_handoff(persisted_handoff)
             )
             project_gauge_reused = True
         else:
-            if persisted_handoff.nlow_state_list != ctx.nlow_state_list:
-                raise ValueError(
-                    "persisted project nlow_state_list does not match the current config: "
-                    f"{persisted_handoff.nlow_state_list!r} != {ctx.nlow_state_list!r}"
-                )
+            ctx.nlow_state_list = _resolve_persisted_nlow_state_list(
+                project_cfg=ctx.config.project_cfg,
+                configured=ctx.nlow_state_list,
+                persisted=persisted_handoff.nlow_state_list,
+            )
             norb_fix_list = list(persisted_handoff.resolved_norb_fix_list)
             _validate_project_layer_lists(
                 ctx.nlow_state_list,
@@ -6791,17 +7433,18 @@ def run_symmetry_projection_from_config(
     np.save(ctx.output_dir / "q_model_layer1.npy", ctx.q_model1)
     np.save(ctx.output_dir / "q_model_layer2.npy", ctx.q_model2)
 
-    n_orb_for_exactification = (
-        persisted_handoff.group_ranks
-        if isinstance(persisted_handoff, GammaRoutedBasisSpec)
-        else _sector_orbital_counts(
+    if isinstance(persisted_handoff, GammaCommonAnchorBasisSpec):
+        n_orb_for_exactification = persisted_handoff.continuum_sector_ranks
+    elif isinstance(persisted_handoff, GammaRoutedBasisSpec):
+        n_orb_for_exactification = persisted_handoff.group_ranks
+    else:
+        n_orb_for_exactification = _sector_orbital_counts(
             ctx.q_model1,
             ctx.q_model2,
             ctx.nlow_state_list,
             low_dim=low_dim,
             num_layer_list=ctx.num_layer_list,
         )
-    )
     summary = _initial_projection_summary(
         ctx,
         gauge_report=gauge_report,
@@ -6809,7 +7452,37 @@ def run_symmetry_projection_from_config(
         n_orb_for_exactification=n_orb_for_exactification,
         artifact_identity=artifact_identity,
     )
-    if isinstance(persisted_handoff, GammaRoutedBasisSpec):
+    if isinstance(persisted_handoff, GammaCommonAnchorBasisSpec):
+        summary["project_basis"].update(
+            {
+                "projection_basis_kind": persisted_handoff.projection_basis_kind,
+                "nlow_state_list_layout": (
+                    "not_applicable_gamma_common_anchor"
+                ),
+                "layout_hash": persisted_handoff.layout.layout_hash,
+                "authoritative_frame": "common_anchor",
+                "basis_hash": persisted_handoff.artifact_identity["basis_hash"],
+                "anchor_spec_hash": persisted_handoff.anchor_spec.identity_hash,
+                "model_group_ranks": [
+                    int(rank) for rank in persisted_handoff.model_group_ranks
+                ],
+                "model_group_qset_indices": [
+                    int(index)
+                    for index in persisted_handoff.model_group_qset_indices
+                ],
+                "active_model_layers": [
+                    int(layer) for layer in persisted_handoff.active_model_layers
+                ],
+                "heff_hash": persisted_handoff.heff_hash,
+                "candidate_certificate_hash": (
+                    persisted_handoff.candidate_certificate_hash
+                ),
+                "candidate_input_identity_hash": (
+                    persisted_handoff.candidate_input_identity_hash
+                ),
+            }
+        )
+    elif isinstance(persisted_handoff, GammaRoutedBasisSpec):
         covariance_residuals = np.asarray(
             persisted_handoff.heff_covariance_residuals,
             dtype=np.float64,
@@ -6886,9 +7559,14 @@ def run_symmetry_projection_from_config(
     )
     if selection_identity_hash is not None:
         _bind_selection_identity_to_summary(summary, selection_identity_hash)
-    return _exactify_and_write_projection_summary(
-        ctx,
-        summary=summary,
-        raw_low_matrices=raw_low_matrices,
-        n_orb=n_orb_for_exactification,
-    )
+    exactification_kwargs: dict[str, Any] = {
+        "summary": summary,
+        "raw_low_matrices": raw_low_matrices,
+        "n_orb": n_orb_for_exactification,
+        "gamma_selection_binding": gamma_selection_binding,
+    }
+    if generic_selection_binding is not None:
+        exactification_kwargs["generic_selection_binding"] = (
+            generic_selection_binding
+        )
+    return _exactify_and_write_projection_summary(ctx, **exactification_kwargs)

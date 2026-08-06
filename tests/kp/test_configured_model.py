@@ -234,6 +234,9 @@ def _selection_gate_config(
     np.savez(
         project_dir / "basis.npz",
         projection_basis_kind=np.asarray("gamma_routed"),
+        basis_hash=np.asarray("b" * 64),
+        heff_hash=np.asarray("c" * 64),
+        k_indices_hash=np.asarray("d" * 64),
     )
     (project_dir / "selection_artifact.json").write_text("{}\n", encoding="utf-8")
     operation = {
@@ -319,11 +322,100 @@ def test_model_selection_preflight_preserves_non_gamma_release_path(
         selection_identity_hash=selection_hash,
     )
     config.valley_model = {"valley_type": valley_type}
+    config.source_raw = {"project": {"selection": "explicit"}}
     project_dir = Path(config.heff_file).parent
     (project_dir / "selection_artifact.json").unlink()
     (Path(config.symmetry_source_config["path"]) / "representations.npz").unlink()
 
     assert _preflight_certified_model_selection(config) is None
+
+
+@pytest.mark.parametrize("valley_type", ("K", "M"))
+def test_model_selection_preflight_requires_certified_automatic_non_gamma(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valley_type: str,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    config.valley_model = {"valley_type": valley_type}
+    config.source_raw = {"project": {"selection": "auto"}}
+    project_dir = Path(config.heff_file).parent
+    np.savez(
+        project_dir / "basis.npz",
+        projection_basis_kind=np.asarray("explicit_legacy"),
+        basis_hash=np.asarray("b" * 64),
+        heff_hash=np.asarray("c" * 64),
+        k_indices_hash=np.asarray("d" * 64),
+    )
+    artifact = SimpleNamespace(
+        certification_status=CertificationStatus.CERTIFIED,
+        identity=SimpleNamespace(selection_identity_hash=selection_hash),
+    )
+    seen: dict[str, object] = {}
+    _patch_selection_store(monkeypatch, artifact, seen=seen)
+
+    def verify_generic(actual_artifact, *, artifact_identity, candidate_dimension):
+        seen["verified"] = (
+            actual_artifact,
+            dict(artifact_identity),
+            candidate_dimension,
+        )
+        return actual_artifact
+
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_certified_generic_selection_artifact",
+        verify_generic,
+        raising=False,
+    )
+
+    assert _preflight_certified_model_selection(config) is artifact
+    assert seen["store"] == project_dir
+    assert seen["require_certified"] is True
+    assert seen["verified"] == (
+        artifact,
+        {
+            "basis_hash": "b" * 64,
+            "heff_hash": "c" * 64,
+            "k_indices_hash": "d" * 64,
+        },
+        2,
+    )
+
+
+@pytest.mark.parametrize("valley_type", ("K", "M"))
+def test_model_selection_preflight_rejects_pending_automatic_non_gamma(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    valley_type: str,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    config.valley_model = {"valley_type": valley_type}
+    config.source_raw = {"project": {"selection": "auto"}}
+    project_dir = Path(config.heff_file).parent
+    np.savez(
+        project_dir / "basis.npz",
+        projection_basis_kind=np.asarray("explicit_legacy"),
+        basis_hash=np.asarray("b" * 64),
+        heff_hash=np.asarray("c" * 64),
+        k_indices_hash=np.asarray("d" * 64),
+    )
+    artifact = SimpleNamespace(
+        certification_status=CertificationStatus.PENDING_SYMMETRY,
+        identity=SimpleNamespace(selection_identity_hash=selection_hash),
+    )
+    _patch_selection_store(monkeypatch, artifact)
+
+    with pytest.raises(ValueError, match="not CERTIFIED: PENDING_SYMMETRY"):
+        _preflight_certified_model_selection(config)
 
 
 def test_model_selection_preflight_preserves_explicit_gamma_release_path(
@@ -366,6 +458,7 @@ def test_model_selection_preflight_rejects_symlinked_current_marker(
     "status",
     (
         CertificationStatus.PENDING,
+        CertificationStatus.PENDING_SYMMETRY,
         CertificationStatus.FAILED,
         CertificationStatus.UNVERIFIED_OVERRIDE,
     ),
@@ -453,6 +546,60 @@ def test_model_selection_preflight_calls_routed_gamma_handoff_verifier(
 
     assert _preflight_certified_model_selection(config) is artifact
     project_dir = Path(config.heff_file).parent
+    assert seen == {
+        "store": project_dir,
+        "require_certified": True,
+        "handoff_path": project_dir / "basis.npz",
+        "verified": (artifact, handoff),
+    }
+    assert config.symmetry_source_config["path"] == str(
+        (tmp_path / "symmetry").resolve()
+    )
+
+
+def test_model_selection_preflight_calls_common_anchor_handoff_verifier(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selection_hash = "a" * 64
+    config = _selection_gate_config(
+        tmp_path,
+        selection_identity_hash=selection_hash,
+    )
+    project_dir = Path(config.heff_file).parent
+    np.savez(
+        project_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_common_anchor"),
+    )
+    config.symmetry_source_config["path"] = "symmetry"
+    artifact = SimpleNamespace(
+        certification_status=CertificationStatus.CERTIFIED,
+        identity=SimpleNamespace(selection_identity_hash=selection_hash),
+    )
+    handoff = SimpleNamespace(model_group_ranks=(1, 1))
+    seen: dict[str, object] = {}
+
+    def fake_load_handoff(path: Path) -> object:
+        seen["handoff_path"] = Path(path)
+        return handoff
+
+    def fake_verify(actual_artifact: object, actual_handoff: object) -> object:
+        seen["verified"] = (actual_artifact, actual_handoff)
+        return actual_artifact
+
+    _patch_selection_store(monkeypatch, artifact, seen=seen)
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_common_anchor_basis_spec",
+        fake_load_handoff,
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "verify_certified_gamma_selection_artifact",
+        fake_verify,
+    )
+
+    assert _preflight_certified_model_selection(config) is artifact
     assert seen == {
         "store": project_dir,
         "require_certified": True,
@@ -1693,6 +1840,7 @@ def test_public_fit_method_automatically_selects_omitted_harmonics(
 
     report = config.automatic_harmonic_selection
     assert config.raw["model"]["automatic_defaults"]["harmonics"] is True
+    assert report["candidate_generation"]["mode"] == "physical_q_support"
     assert config.harmonics_config["intra"]["count"] == report["selected"]["intra_shells"]
     assert config.harmonics_config["inter"]["count"] == report["selected"]["inter_shells"]
     assert config.fit_method_config["method"] == method
@@ -4881,6 +5029,33 @@ def test_harmonic_ablation_can_scan_explicit_candidate_pairs_only() -> None:
     assert report["selected"]["inter_shells"] == 0
 
 
+def test_harmonic_ablation_omitted_search_uses_complete_physical_q_support() -> None:
+    qset = np.asarray([[float(index), 0.0] for index in range(8)], dtype=float)
+    heff = np.zeros((1, 16, 16), dtype=np.complex128)
+    heff[0] = np.diag(np.arange(16, dtype=float))
+
+    report = _run_harmonic_ablation_selection(
+        heff,
+        qset,
+        qset,
+        n_orb=(1, 1),
+        target_bands="bottom",
+        primary_bands=2,
+        plot_bands=2,
+        thresholds={"plot_rms_mev": 1.0, "plot_max_mev": 2.0, "min_overlap": 0.99},
+    )
+
+    generation = report["candidate_generation"]
+    assert generation["mode"] == "physical_q_support"
+    assert generation["max_intra_count"] > 5
+    assert generation["max_inter_count"] > 5
+    assert generation["raw_pair_count"] > generation["unique_mask_count"]
+    assert generation["unique_mask_count"] == len(report["candidates"])
+    assert generation["elapsed_seconds"] >= 0.0
+    assert [6, 2] in report["candidate_pairs"]
+    assert [6, 5] in report["candidate_pairs"]
+
+
 def test_harmonic_ablation_precomputed_shell_maps_match_mask_stats() -> None:
     q1 = np.array([[0.0, 0.0], [1.0, 0.0]], dtype=float)
     q2 = np.array([[0.0, 0.0], [0.0, 2.0]], dtype=float)
@@ -4908,6 +5083,67 @@ def test_harmonic_ablation_precomputed_shell_maps_match_mask_stats() -> None:
 
     np.testing.assert_array_equal(fast_mask, direct_mask)
     assert fast_stats == direct_stats
+
+
+def test_physical_harmonic_candidates_cover_asymmetric_support_beyond_five_shells() -> None:
+    qset = np.asarray([[float(index), 0.0] for index in range(8)], dtype=float)
+
+    candidates = pipeline_module._physical_harmonic_ablation_candidates(
+        qset,
+        qset,
+        n_orb=(1, 1),
+    )
+
+    pairs = {
+        (int(item["intra_shells"]), int(item["inter_shells"]))
+        for item in candidates
+    }
+    assert (6, 2) in pairs
+    assert (6, 5) in pairs
+    assert max(intra for intra, _inter in pairs) > 5
+    assert max(inter for _intra, inter in pairs) > 5
+
+
+def test_physical_harmonic_candidates_deduplicate_masks_and_inactive_family() -> None:
+    qset1 = np.asarray([[0.0, 0.0], [1.0, 0.0]], dtype=float)
+    qset2 = np.empty((0, 2), dtype=float)
+
+    candidates = pipeline_module._physical_harmonic_ablation_candidates(
+        qset1,
+        qset2,
+        n_orb=(1, 0),
+    )
+
+    pairs = [
+        (int(item["intra_shells"]), int(item["inter_shells"]))
+        for item in candidates
+    ]
+    assert pairs == [(0, 0), (2, 0)]
+    fingerprints = [str(item["mask_fingerprint"]) for item in candidates]
+    assert len(fingerprints) == len(set(fingerprints))
+    assert all(int(item["inter_shells"]) == 0 for item in candidates)
+
+
+def test_physical_harmonic_candidates_are_ordered_by_support_complexity() -> None:
+    qset1 = np.asarray([[0.0, 0.0], [1.0, 0.0], [2.0, 0.0]], dtype=float)
+    qset2 = np.asarray([[0.0, 0.0], [0.0, 1.0]], dtype=float)
+
+    candidates = pipeline_module._physical_harmonic_ablation_candidates(
+        qset1,
+        qset2,
+        n_orb=(1, 1),
+    )
+
+    ordering = [
+        (
+            int(item["support_entries"]),
+            int(item["intra_shells"]) + int(item["inter_shells"]),
+            int(item["intra_shells"]),
+            int(item["inter_shells"]),
+        )
+        for item in candidates
+    ]
+    assert ordering == sorted(ordering)
 
 
 def test_auto_low_energy_windows_reports_small_boundary_gap() -> None:
@@ -5882,6 +6118,131 @@ def test_band_refinement_linear_low_subspace_solver_updates_coefficients(monkeyp
     assert report["shell_projected_matrix_loss"]["shells"][0]["subspace_bands"] == 1
     assert report["shell_projected_matrix_loss"]["refined"]["shells"][0]["subspace"]["mean_overlap"] == pytest.approx(1.0)
     assert report["shell_subspace_loss"]["legacy_alias_of"] == "shell_projected_matrix_loss"
+
+
+def test_refinement_explicit_original_heff_overrides_complete_response_default(monkeypatch) -> None:
+    import kp.model.pipeline as pipeline
+
+    original = np.array(
+        [
+            [
+                [1.0, 0.25],
+                [0.25, 2.0],
+            ]
+        ],
+        dtype=np.complex128,
+    )
+    monkeypatch.setattr(pipeline, "_load_heff_in_model_basis", lambda _config: original)
+    moire_config = SimpleNamespace(
+        Q_set1=np.zeros((1, 2), dtype=float),
+        Q_set2=np.zeros((0, 2), dtype=float),
+    )
+    model_config = SimpleNamespace(
+        fit_selection_metadata={"mode": "auto_low_energy"},
+        response_semantics="complete_linear_v2",
+        n_orb=(2, 0),
+        harmonics_config={},
+        heff_eig_file=None,
+    )
+
+    target, eigvals, reference = pipeline._refinement_target_hamiltonians(
+        moire_config,
+        model_config,
+        {"reference": "original_heff"},
+        None,
+    )
+
+    assert reference == "original_heff"
+    assert np.array_equal(target, original)
+    assert np.allclose(eigvals, np.linalg.eigvalsh(original))
+
+
+def test_target_subspace_action_linear_solver_recovers_hamiltonian_action() -> None:
+    import kp.model.pipeline as pipeline
+
+    sigma_x = np.asarray([[0.0, 1.0], [1.0, 0.0]], dtype=np.complex128)
+    sigma_z = np.asarray([[1.0, 0.0], [0.0, -1.0]], dtype=np.complex128)
+    responses = np.asarray([[sigma_x], [sigma_z]], dtype=np.complex128)
+    base = np.zeros((1, 2, 2), dtype=np.complex128)
+    target = np.asarray([0.4 * sigma_x + 0.8 * sigma_z], dtype=np.complex128)
+    _target_eig, target_vec = np.linalg.eigh(target)
+    frame = target_vec[:, :, 1:2]
+    actions = np.einsum("vkmn,kns->vkms", responses, frame, optimize=True)
+
+    delta, report = pipeline._solve_target_subspace_action_linear(
+        actions,
+        base,
+        target,
+        frame,
+        regularization=0.0,
+        response_scales=np.ones(2),
+    )
+
+    np.testing.assert_allclose(delta, [0.4, 0.8], atol=1.0e-12)
+    assert report["rank"] == 2
+    assert report["action_residual_norm"] == pytest.approx(0.0, abs=1.0e-12)
+
+
+def test_refinement_can_initialize_from_matching_model_data(tmp_path: Path) -> None:
+    import kp.model.pipeline as pipeline
+
+    model_data = tmp_path / "model_data.npz"
+    np.savez_compressed(
+        model_data,
+        fitted_coefficients=np.asarray([1.5, -2.0]),
+        basis_hash=np.asarray("matching-basis"),
+    )
+
+    class Fitted:
+        coefficients = np.asarray([0.0, 0.0])
+
+        def with_coefficients(self, coefficients, **_kwargs):
+            result = Fitted()
+            result.coefficients = np.asarray(coefficients, dtype=float)
+            return result
+
+    basis = SimpleNamespace(
+        basis_hash="matching-basis",
+        channel_ids=("a", "b"),
+        response_scales=np.ones(2),
+    )
+
+    initialized, report = pipeline._refinement_initial_fitted_model(
+        {"initial_model_data": str(model_data)},
+        basis,
+        Fitted(),
+    )
+
+    np.testing.assert_allclose(initialized.coefficients, [1.5, -2.0])
+    assert report == {
+        "source": str(model_data.resolve()),
+        "basis_hash": "matching-basis",
+        "coefficient_count": 2,
+    }
+
+
+def test_refinement_rejects_initial_model_data_from_another_basis(tmp_path: Path) -> None:
+    import kp.model.pipeline as pipeline
+
+    model_data = tmp_path / "model_data.npz"
+    np.savez_compressed(
+        model_data,
+        fitted_coefficients=np.asarray([1.5, -2.0]),
+        basis_hash=np.asarray("wrong-basis"),
+    )
+    basis = SimpleNamespace(
+        basis_hash="matching-basis",
+        channel_ids=("a", "b"),
+        response_scales=np.ones(2),
+    )
+    fitted = SimpleNamespace(coefficients=np.zeros(2))
+
+    with pytest.raises(ValueError, match="different response basis"):
+        pipeline._refinement_initial_fitted_model(
+            {"initial_model_data": str(model_data)},
+            basis,
+            fitted,
+        )
 
 
 def test_band_refinement_linear_low_subspace_guard_reverts_all_band_degradation(monkeypatch, tmp_path: Path) -> None:
@@ -7282,7 +7643,7 @@ def test_ptse2_release_config_exposes_only_public_model_knobs() -> None:
     assert "operation_actions" not in symmetry
     assert "spin_sector_sewing" not in symmetry
     model = raw.get("model", {})
-    assert model["harmonics"] == {"intralayer": 5, "interlayer": 5}
+    assert "harmonics" not in model
     assert model["max_order"] == {
         "kinetic": 10,
         "intralayer": 8,
@@ -7300,9 +7661,9 @@ def test_ptse2_release_config_exposes_only_public_model_knobs() -> None:
         "band_loss_weight": 1.0,
     }
     project = raw.get("project", {})
-    assert project["nlow_state_list"] == [[54], [55]]
+    assert project["selection"] == "auto"
+    assert "nlow_state_list" not in project
     assert project["gauge"] == "auto"
-    assert "selection" not in project
 
 
 def test_load_model_config_marks_symmetry_source_inferred_from_case_symm_section(tmp_path: Path) -> None:
@@ -7981,8 +8342,38 @@ def test_kp_symm_gamma_exactification_default_uses_auto_c3_support() -> None:
     exact_cfg = _merged_exactification_overrides("Gamma", None, symmetry_tolerance=2.0e-2)
 
     assert exact_cfg["reject_if_off_support_rel_gt"] == pytest.approx(2.0e-2)
+    assert "joint_exactification" not in exact_cfg
     assert exact_cfg["operations"] == {
         "C3z": {"support_mode": "auto", "algebraic_template": "auto"}
+    }
+
+
+@pytest.mark.parametrize("valley", ["K1", "M"])
+def test_kp_symm_non_gamma_public_tolerance_is_the_joint_correction_default(
+    valley: str,
+) -> None:
+    exact_cfg = _merged_exactification_overrides(
+        valley,
+        None,
+        symmetry_tolerance=1.0e-2,
+    )
+
+    assert exact_cfg["joint_exactification"] == {
+        "max_rms_correction": pytest.approx(1.0e-2),
+        "max_route_correction": pytest.approx(1.0e-2),
+    }
+
+
+def test_kp_symm_explicit_joint_correction_override_wins_field_by_field() -> None:
+    exact_cfg = _merged_exactification_overrides(
+        "K1",
+        {"joint_exactification": {"max_rms_correction": 2.0e-3}},
+        symmetry_tolerance=1.0e-2,
+    )
+
+    assert exact_cfg["joint_exactification"] == {
+        "max_rms_correction": pytest.approx(2.0e-3),
+        "max_route_correction": pytest.approx(1.0e-2),
     }
 
 
@@ -8112,6 +8503,80 @@ def test_build_moire_config_loads_fit_block_and_band_kpoints(tmp_path: Path) -> 
     np.testing.assert_allclose(moire_cfg.intra_harmonics_map[3], moire_cfg.bM1 + moire_cfg.bM2)
 
 
+def test_build_moire_config_uses_one_response_gauge_for_fit_and_reloaded_targets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from kp.model.symmetry import LoadedSymmetrySource, MatrixSymmetryGenerator
+
+    cfg_path = _write_fixture(tmp_path)
+    permutation = np.asarray(
+        [[0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0],
+         [1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0]],
+        dtype=np.complex128,
+    )
+    raw_seed = np.asarray(
+        [[0.2, 0.1j, 0.4, -0.3j], [-0.1j, 0.7, 0.2j, 0.5],
+         [0.4, -0.2j, 1.1, 0.6j], [0.3j, 0.5, -0.6j, 1.4]],
+        dtype=np.complex128,
+    )
+    raw_seed = 0.5 * (raw_seed + raw_seed.conj().T)
+    raw_seed = 0.5 * (raw_seed + permutation @ raw_seed @ permutation.conj().T)
+    raw_heff = np.stack(
+        [raw_seed + shift * np.eye(4) for shift in (0.0, 0.1, 0.2)]
+    )
+    np.save(tmp_path / "project" / "heff.npy", raw_heff)
+    _write_symm_frame_manifest(tmp_path, rotation_deg=0.0)
+
+    gauge = np.diag(np.exp(1.0j * np.asarray([0.11, -0.23, 0.37, -0.41])))
+    transformed_action = gauge.conj().T @ permutation @ gauge
+    generator = MatrixSymmetryGenerator(
+        {"C2": transformed_action},
+        {},
+        model_basis_gauge=gauge,
+    )
+    loaded = LoadedSymmetrySource(
+        source_type="kp_symm_output",
+        generator=generator,
+        metadata={"operations": []},
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_symmetry_source",
+        lambda *_args, **_kwargs: loaded,
+    )
+
+    moire_cfg, model_cfg = build_moire_config_from_file(cfg_path)
+
+    expected_targets = np.asarray(
+        [gauge.conj().T @ matrix @ gauge for matrix in raw_heff]
+    )
+    assert np.linalg.norm(expected_targets - raw_heff) > 0.1
+    np.testing.assert_allclose(
+        pipeline_module._load_heff_in_model_basis(model_cfg),
+        expected_targets,
+        atol=2.0e-14,
+    )
+    dim = expected_targets.shape[-1]
+    fit_targets = np.asarray(
+        [
+            moire_cfg.heff[i * dim : (i + 1) * dim, i * dim : (i + 1) * dim]
+            for i in range(len(model_cfg.fit_indices))
+        ]
+    )
+    np.testing.assert_allclose(
+        fit_targets,
+        expected_targets[model_cfg.fit_indices],
+        atol=2.0e-14,
+    )
+    for target in expected_targets:
+        np.testing.assert_allclose(
+            transformed_action @ target @ transformed_action.conj().T,
+            target,
+            atol=2.0e-14,
+        )
+
+
 def test_build_moire_config_auto_harmonics_selects_q_shell_stars(tmp_path: Path) -> None:
     cfg_path = _write_auto_fixture(tmp_path)
 
@@ -8184,6 +8649,40 @@ def test_build_moire_config_infers_bM_from_q_distances_not_q_norm(tmp_path: Path
 
     assert np.linalg.norm(moire_cfg.bM1) > radius
     np.testing.assert_allclose(np.linalg.norm(moire_cfg.bM1), np.sqrt(3.0) * radius, atol=1.0e-12)
+
+
+def test_model_plot_axis_uses_inline_kpath_without_kpath_in(tmp_path: Path) -> None:
+    config = SimpleNamespace(
+        path=tmp_path / "relocated" / "case.yaml",
+        band_indices=None,
+        rotation_deg=0.0,
+        kpath_config={
+            "labels": ["Gamma", "M", "K", "Gamma"],
+            "points_per_segment": 2,
+            "coordinates": {
+                "Gamma": [0.0, 0.0],
+                "M": [0.5, 0.0],
+                "K": [1.0 / 3.0, 1.0 / 3.0],
+            },
+            "tmat": np.eye(3).tolist(),
+        },
+    )
+
+    x, ticks, labels = pipeline_module._plot_axis_from_kpath(config, 7)
+
+    assert x.shape == (7,)
+    assert ticks is not None and len(ticks) == 4
+    assert labels == [r"$\Gamma$", "M", "K", r"$\Gamma$"]
+
+
+def test_model_config_does_not_discover_implicit_kpath_in(tmp_path: Path) -> None:
+    source_base = tmp_path / "kp" / "configs"
+    legacy_path = tmp_path / "tapw" / "KPATH.in"
+    source_base.mkdir(parents=True)
+    legacy_path.parent.mkdir(parents=True)
+    legacy_path.write_text("legacy path must not be discovered\n", encoding="utf-8")
+
+    assert pipeline_module._default_kpath_config({}, source_base=source_base) == {}
 
 
 def test_build_moire_config_infers_bM_from_tmat_with_shared_rotation(tmp_path: Path) -> None:

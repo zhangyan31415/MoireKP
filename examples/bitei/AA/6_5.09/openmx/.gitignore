@@ -1,7 +1,0 @@
-# Large or archived OpenMX inputs are local external-data links.
-soc/*
-nsoc/*
-
-# The validated rigid structures are release metadata.
-!soc/POSCAR_rigid
-!nsoc/POSCAR_rigid

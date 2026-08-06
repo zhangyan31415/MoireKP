@@ -15,18 +15,34 @@ project:
   q_shell: 4
   efermi: -5.71
   target: valence
-  nlow_state_list:
-    - [40, 41, 42, 43]
-    - [44, 45, 46, 47]
+  selection: auto
+  # Audited automatic result. Uncommenting this list makes selection explicit.
+  # nlow_state_list:
+  #   - [40, 41, 42, 43]
+  #   - [44, 45, 46, 47]
   downfold_method: fixed_schur
   e_ref: -6.21
   workers: 64
 
 symmetry: {}
 
+bands:
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 20
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
+  compare_to_heff: true
+  band_slice: [0, 124]
+  plot:
+    top_bands: 10
+    align: top
+    figsize: [3.0, 5.0]
+
 model:
   target_bands: top
-  harmonics: {intralayer: 2, interlayer: 2}
   max_order: {kinetic: 8, intralayer: 2, interlayer: 3}
   fit:
     method: linear
@@ -34,10 +50,3 @@ model:
     bands: 20
     one_sided_weight: 0.0
     two_sided_weight: 300.0
-  bands:
-    compare_to_heff: true
-    band_slice: [0, 124]
-    plot:
-      top_bands: 10
-      align: top
-      figsize: [3.0, 5.0]

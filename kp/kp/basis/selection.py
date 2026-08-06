@@ -59,6 +59,10 @@ class GaugeCandidateSymmetryDecision:
     rankings: list[Mapping[str, Any]]
 
 
+class NoGaugeCandidatePassedError(ValueError):
+    """Every gauge realization of one physical candidate failed symmetry."""
+
+
 @dataclass(frozen=True)
 class GaugeAnchorReport:
     gauge_mode: str
@@ -411,7 +415,9 @@ def select_gauge_candidate_by_symmetry(
 
     if not valid:
         ranked.sort(key=lambda item: (item["status"] != "ok", *item["sort_key"]))
-        raise ValueError(f"No gauge candidate passed symmetry validation: {ranked}")
+        raise NoGaugeCandidatePassedError(
+            f"No gauge candidate passed symmetry validation: {ranked}"
+        )
 
     valid.sort(key=lambda item: item[0])
     best_key, best_candidate, _best_row = valid[0]

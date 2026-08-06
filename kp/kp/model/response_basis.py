@@ -27,8 +27,11 @@ FIT_CHANNEL_POLICY_V2 = "confirmed_nonzero_only_v2"
 FITTABLE_CHANNEL_CLASSIFICATIONS = frozenset({"confirmed_nonzero"})
 FIT_SOLVER_POLICY_V2 = "real_svd_global_monomial_propagated_backward_error_v2"
 FIT_SOLVER_POLICY_RIDGE_V3 = "real_ridge_all_confirmed__diagnostic_propagated_rank_v3"
+FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4 = (
+    "real_physical_coefficient_gram_whitened_minimum_norm_svd_v4"
+)
 FIT_SOLVER_POLICY_LEGACY = "legacy_real_qr_machine_tolerance_v0"
-COMPILER_VERSION = "complete-response-basis-v2-symbolic-finite-p-v47"
+COMPILER_VERSION = "complete-response-basis-v2-structural-generators-v53"
 TARGET_SPECTRAL_WEIGHTING_V1 = "target_spectral_linear_v1"
 TARGET_SPECTRAL_TRACE_NORMALIZATION_V1 = "global_mean_trace_per_dimension_v1"
 NORMALIZED_LOW_ENERGY_LINEAR_V1 = "normalized-low-energy-linear-v1"
@@ -1858,24 +1861,16 @@ def compile_candidate_responses(
     )
 
 
-def compile_candidate_responses_adjoint_canonicalized(
+def _certify_joint_adjoint_seed_orbits(
     seeds: Sequence[RawPolynomialSeed],
     *,
     joint_keys: Mapping[str, Any],
     coordinate: PolynomialCoordinateBasis,
     group: FiniteGroup,
-    null_policy: NullClassificationPolicy | None = None,
-    support_masks: Mapping[str, np.ndarray] | None = None,
-    internal_actions_by_word: Mapping[
-        tuple[str, ...], sparse.spmatrix | np.ndarray
-    ]
-    | None = None,
-    internal_action_absolute_error_bound: float = 0.0,
-) -> CandidateResponseSet:
-    """Compile one Reynolds representative per raw-coefficient-certified adjoint orbit."""
+) -> tuple[Any, dict[str, float]]:
+    """Certify joint-adjoint metadata against the actual raw coefficients."""
 
     from .response_basis_adjoint import (
-        JointAdjointCanonicalization,
         JointAdjointSeed,
         canonicalize_joint_adjoint_seeds,
         certify_joint_adjoint_coefficients,
@@ -1906,34 +1901,39 @@ def compile_candidate_responses_adjoint_canonicalized(
         )
         for seed in seeds
     }
-    certified_orbits = []
-    certified_mappings = []
-    for orbit in provisional.orbits:
-        member_ids = set(orbit.member_seed_ids)
-        orbit_canonicalization = JointAdjointCanonicalization(
-            orbits=(orbit,),
-            mappings=tuple(
-                mapping
-                for mapping in provisional.mappings
-                if mapping.seed_id in member_ids
-            ),
-        )
-        orbit_certified = certify_joint_adjoint_coefficients(
-            orbit_canonicalization,
-            {
-                seed_id: by_id[seed_id].coefficients
-                for seed_id in orbit.member_seed_ids
-            },
-            absolute_error_bound=sum(
-                absolute_bounds_by_seed[seed_id]
-                for seed_id in orbit.member_seed_ids
-            ),
-        )
-        certified_orbits.extend(orbit_certified.orbits)
-        certified_mappings.extend(orbit_certified.mappings)
-    certified = JointAdjointCanonicalization(
-        orbits=tuple(certified_orbits),
-        mappings=tuple(certified_mappings),
+    certified = certify_joint_adjoint_coefficients(
+        provisional,
+        {
+            seed.seed_id: seed.coefficients
+            for seed in seeds
+        },
+        absolute_error_bounds_by_seed=absolute_bounds_by_seed,
+    )
+    return certified, absolute_bounds_by_seed
+
+
+def compile_candidate_responses_adjoint_canonicalized(
+    seeds: Sequence[RawPolynomialSeed],
+    *,
+    joint_keys: Mapping[str, Any],
+    coordinate: PolynomialCoordinateBasis,
+    group: FiniteGroup,
+    null_policy: NullClassificationPolicy | None = None,
+    support_masks: Mapping[str, np.ndarray] | None = None,
+    internal_actions_by_word: Mapping[
+        tuple[str, ...], sparse.spmatrix | np.ndarray
+    ]
+    | None = None,
+    internal_action_absolute_error_bound: float = 0.0,
+) -> CandidateResponseSet:
+    """Compile one Reynolds representative per raw-coefficient-certified adjoint orbit."""
+
+    by_id = {seed.seed_id: seed for seed in seeds}
+    certified, absolute_bounds_by_seed = _certify_joint_adjoint_seed_orbits(
+        seeds,
+        joint_keys=joint_keys,
+        coordinate=coordinate,
+        group=group,
     )
     representatives = [by_id[seed_id] for seed_id in certified.representative_seed_ids]
     components_by_representative = {
@@ -2439,6 +2439,39 @@ def _channel_sparse_vector(
     )
 
 
+def _normalized_response_coefficient_gram(
+    channels: Sequence[ResponseChannel],
+    channel_indices: Sequence[int],
+    *,
+    coordinate: PolynomialCoordinateBasis,
+    dim: int,
+    response_scales: np.ndarray,
+) -> np.ndarray:
+    """Return the real physical polynomial-coefficient Gram matrix.
+
+    The fit coordinates are ``theta_i = scale_i * coefficient_i``.  Therefore
+    each Gram column is the full real/imag polynomial coefficient vector of a
+    response channel divided by that channel's response scale.  Unlike a Gram
+    built from values on the fit grid, this metric is target- and grid-independent.
+    """
+
+    indices = np.asarray(channel_indices, dtype=np.int64)
+    if indices.ndim != 1:
+        raise ValueError("response Gram channel indices must be one-dimensional")
+    if indices.size == 0:
+        return np.zeros((0, 0), dtype=np.float64)
+    columns = sparse.hstack(
+        [
+            _channel_sparse_vector(channels[int(index)], coordinate, int(dim))
+            / float(response_scales[int(index)])
+            for index in indices
+        ],
+        format="csc",
+    )
+    gram = np.asarray((columns.T @ columns).toarray(), dtype=np.float64)
+    return 0.5 * (gram + gram.T)
+
+
 def _reduce_confirmed_channels(
     channels: Sequence[ResponseChannel],
     *,
@@ -2738,6 +2771,11 @@ class FittedResponseModel:
     fit_selected_condition_number: float = 0.0
     fit_selected_singular_value_min: float = 0.0
     fit_selected_error_bound: float = 0.0
+    fit_response_gram_eigenvalues: tuple[float, ...] = ()
+    fit_response_gram_rank: int = 0
+    fit_response_gram_rank_tolerance: float = 0.0
+    fit_response_gram_condition_number: float = 0.0
+    fit_response_gram_orthonormality_residual: float = 0.0
     max_response_amplitude: float = 0.0
     fit_objective: Mapping[str, Any] = field(default_factory=_equal_matrix_fit_objective)
 
@@ -2758,6 +2796,23 @@ class FittedResponseModel:
                 "fit design singular values must be finite, non-negative, and descending"
             )
         object.__setattr__(self, "fit_design_singular_values", singular_values)
+        response_gram_eigenvalues = tuple(
+            float(value) for value in self.fit_response_gram_eigenvalues
+        )
+        response_gram_array = np.asarray(response_gram_eigenvalues, dtype=np.float64)
+        if response_gram_array.size and (
+            not np.all(np.isfinite(response_gram_array))
+            or np.any(response_gram_array < 0.0)
+            or np.any(np.diff(response_gram_array) > 0.0)
+        ):
+            raise ValueError(
+                "fit response Gram eigenvalues must be finite, non-negative, and descending"
+            )
+        object.__setattr__(
+            self,
+            "fit_response_gram_eigenvalues",
+            response_gram_eigenvalues,
+        )
         nonnegative_diagnostics = {
             "fit_design_machine_error_bound": self.fit_design_machine_error_bound,
             "fit_design_propagated_error_bound": self.fit_design_propagated_error_bound,
@@ -2765,6 +2820,11 @@ class FittedResponseModel:
             "fit_selected_condition_number": self.fit_selected_condition_number,
             "fit_selected_singular_value_min": self.fit_selected_singular_value_min,
             "fit_selected_error_bound": self.fit_selected_error_bound,
+            "fit_response_gram_condition_number": self.fit_response_gram_condition_number,
+            "fit_response_gram_rank_tolerance": self.fit_response_gram_rank_tolerance,
+            "fit_response_gram_orthonormality_residual": (
+                self.fit_response_gram_orthonormality_residual
+            ),
             "max_response_amplitude": self.max_response_amplitude,
         }
         for name, raw_value in nonnegative_diagnostics.items():
@@ -2776,6 +2836,10 @@ class FittedResponseModel:
         if certified_rank < 0:
             raise ValueError("fit design certified rank must be non-negative")
         object.__setattr__(self, "fit_design_certified_rank", certified_rank)
+        response_gram_rank = int(self.fit_response_gram_rank)
+        if response_gram_rank < 0 or response_gram_rank > len(response_gram_eigenvalues):
+            raise ValueError("fit response Gram rank is outside its stored spectrum")
+        object.__setattr__(self, "fit_response_gram_rank", response_gram_rank)
         solver_indices = tuple(int(value) for value in self.fit_solver_channel_indices)
         solver_ids = tuple(str(value) for value in self.fit_solver_channel_ids)
         if not solver_indices and not solver_ids and self.fit_selected_channel_ids:
@@ -2794,6 +2858,7 @@ class FittedResponseModel:
         if self.fit_solver_policy not in {
             FIT_SOLVER_POLICY_V2,
             FIT_SOLVER_POLICY_RIDGE_V3,
+            FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4,
             FIT_SOLVER_POLICY_LEGACY,
         }:
             raise ValueError(f"unsupported fit solver policy: {self.fit_solver_policy!r}")
@@ -2821,6 +2886,25 @@ class FittedResponseModel:
                 raise ValueError("fit design certified rank exceeds stored singular spectrum")
             if solver_ids and self.fit_selected_singular_value_min <= 0.0:
                 raise ValueError("regularized fit design must have positive stabilized singular value")
+        elif self.fit_solver_policy == FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4:
+            if self.regularization != 0.0:
+                raise ValueError("physical minimum-norm fit solver policy requires zero ridge")
+            if self.fit_pivots or self.fit_selected_channel_ids:
+                raise ValueError(
+                    "physical minimum-norm fit must not report coordinate-channel pivots"
+                )
+            if not solver_ids:
+                raise ValueError("physical minimum-norm fit must record its owner-frame channels")
+            if response_gram_rank == 0:
+                raise ValueError("physical minimum-norm fit requires a non-empty response span")
+            if certified_rank > response_gram_rank or certified_rank > len(singular_values):
+                raise ValueError(
+                    "physical minimum-norm fit certified rank exceeds its response span"
+                )
+            if certified_rank and self.fit_selected_singular_value_min <= self.fit_selected_error_bound:
+                raise ValueError(
+                    "physical minimum-norm fit directions are not certified above their error bound"
+                )
 
     def with_coefficients(
         self,
@@ -2876,6 +2960,13 @@ class FittedResponseModel:
             fit_selected_condition_number=self.fit_selected_condition_number,
             fit_selected_singular_value_min=self.fit_selected_singular_value_min,
             fit_selected_error_bound=self.fit_selected_error_bound,
+            fit_response_gram_eigenvalues=self.fit_response_gram_eigenvalues,
+            fit_response_gram_rank=self.fit_response_gram_rank,
+            fit_response_gram_rank_tolerance=self.fit_response_gram_rank_tolerance,
+            fit_response_gram_condition_number=self.fit_response_gram_condition_number,
+            fit_response_gram_orthonormality_residual=(
+                self.fit_response_gram_orthonormality_residual
+            ),
             max_response_amplitude=float(np.max(amplitude)) if amplitude.size else 0.0,
             fit_objective=self.fit_objective,
         )
@@ -2905,6 +2996,17 @@ class FittedResponseModel:
             "fit_selected_condition_number": float(self.fit_selected_condition_number),
             "fit_selected_singular_value_min": float(self.fit_selected_singular_value_min),
             "fit_selected_error_bound": float(self.fit_selected_error_bound),
+            "fit_response_gram_eigenvalues": list(self.fit_response_gram_eigenvalues),
+            "fit_response_gram_rank": int(self.fit_response_gram_rank),
+            "fit_response_gram_rank_tolerance": float(
+                self.fit_response_gram_rank_tolerance
+            ),
+            "fit_response_gram_condition_number": float(
+                self.fit_response_gram_condition_number
+            ),
+            "fit_response_gram_orthonormality_residual": float(
+                self.fit_response_gram_orthonormality_residual
+            ),
             "max_response_amplitude": float(self.max_response_amplitude),
             "fit_objective": _json_record(self.fit_objective),
         }
@@ -3043,6 +3145,20 @@ class CompiledResponseRuntime:
                 metadata.get("fit_selected_singular_value_min", 0.0)
             ),
             fit_selected_error_bound=float(metadata.get("fit_selected_error_bound", 0.0)),
+            fit_response_gram_eigenvalues=tuple(
+                float(value)
+                for value in metadata.get("fit_response_gram_eigenvalues", [])
+            ),
+            fit_response_gram_rank=int(metadata.get("fit_response_gram_rank", 0)),
+            fit_response_gram_rank_tolerance=float(
+                metadata.get("fit_response_gram_rank_tolerance", 0.0)
+            ),
+            fit_response_gram_condition_number=float(
+                metadata.get("fit_response_gram_condition_number", 0.0)
+            ),
+            fit_response_gram_orthonormality_residual=float(
+                metadata.get("fit_response_gram_orthonormality_residual", 0.0)
+            ),
             max_response_amplitude=float(metadata.get("max_response_amplitude", 0.0)),
             fit_objective=dict(metadata.get("fit_objective", _equal_matrix_fit_objective())),
         )
@@ -3244,6 +3360,58 @@ class CompiledResponseBasis:
             for monomial, matrix in channel.coefficients.items():
                 dense = matrix.toarray()
                 out[:, channel_index] += monomial_values[monomial][:, None, None] * dense[None, :, :]
+        return out
+
+    def response_action(
+        self,
+        kpoints: Sequence[Sequence[float]],
+        frames: np.ndarray,
+        *,
+        channel_indices: Sequence[int] | None = None,
+    ) -> np.ndarray:
+        """Apply response channels to k-dependent frames without dense matrices."""
+
+        points = np.asarray(kpoints, dtype=np.float64)
+        if points.ndim != 2 or points.shape[1] != 2:
+            raise ValueError(f"kpoints must have shape (Nk,2), got {points.shape}")
+        vectors = np.asarray(frames, dtype=np.complex128)
+        if vectors.ndim != 3 or vectors.shape[:2] != (points.shape[0], self.dim):
+            raise ValueError(
+                "frames must have shape (Nk,dim,N), got "
+                f"{vectors.shape} for Nk={points.shape[0]}, dim={self.dim}"
+            )
+        if channel_indices is None:
+            selected = np.arange(len(self.channels), dtype=np.int64)
+        else:
+            selected = np.asarray(channel_indices, dtype=np.int64)
+            if selected.ndim != 1:
+                raise ValueError("channel_indices must be one-dimensional")
+            if selected.size and (
+                int(np.min(selected)) < 0 or int(np.max(selected)) >= len(self.channels)
+            ):
+                raise IndexError("channel_indices contains an out-of-range channel")
+        dimensionless = self.coordinate.to_dimensionless(points)
+        w = dimensionless[:, 0] + 1j * dimensionless[:, 1]
+        monomial_values = {
+            monomial: (w ** monomial[0]) * (np.conjugate(w) ** monomial[1])
+            for monomial in self.coordinate.monomials
+        }
+        n_vectors = int(vectors.shape[2])
+        flat_vectors = np.transpose(vectors, (1, 0, 2)).reshape(self.dim, -1)
+        out = np.zeros(
+            (points.shape[0], selected.size, self.dim, n_vectors),
+            dtype=np.complex128,
+        )
+        for output_index, channel_index in enumerate(selected):
+            channel = self.channels[int(channel_index)]
+            for monomial, matrix in channel.coefficients.items():
+                applied = np.asarray(matrix @ flat_vectors).reshape(
+                    self.dim,
+                    points.shape[0],
+                    n_vectors,
+                )
+                applied = np.transpose(applied, (1, 0, 2))
+                out[:, output_index] += monomial_values[monomial][:, None, None] * applied
         return out
 
     def hamiltonians(
@@ -3594,8 +3762,23 @@ class CompiledResponseBasis:
                 prepared_normalized_weighting,
             )
             fit_objective = prepared_normalized_weighting.artifact()
+            # Bound coefficient errors in the same normalized row metric used
+            # above.  Each row family is a contraction in Frobenius norm; its
+            # squared prefactor is therefore the contribution to the operator
+            # bound.  Using ``1 + w1 + w2`` here would ignore the public
+            # dimension normalization and overstate the fit-design error by as
+            # much as ``dim`` (76 for the MgI2 Gamma release case).
+            selected_counts = np.asarray(
+                prepared_normalized_weighting.selected_counts,
+                dtype=np.float64,
+            )
+            dimension = float(self.dim)
             maximum_weight_by_kpoint = (
-                prepared_normalized_weighting.maximum_weight_by_kpoint
+                np.full(points.shape[0], 1.0 / dimension**2, dtype=np.float64)
+                + float(prepared_normalized_weighting.spec.one_sided_weight)
+                / (dimension * selected_counts)
+                + float(prepared_normalized_weighting.spec.two_sided_weight)
+                / selected_counts**2
             )
         elif spectral_weighting is not None and not equal_weighting_requested:
             prepared_weighting = build_target_spectral_weighting(target, spectral_weighting)
@@ -3634,20 +3817,6 @@ class CompiledResponseBasis:
         ridge = float(regularization)
         if not np.isfinite(ridge) or ridge < 0.0:
             raise ValueError("regularization must be finite and non-negative")
-        ridge_left_vectors: np.ndarray | None = None
-        ridge_right_vectors_h: np.ndarray | None = None
-        if ridge > 0.0:
-            ridge_left_vectors, singular_values, ridge_right_vectors_h = scipy.linalg.svd(
-                normalized_design,
-                full_matrices=False,
-                check_finite=False,
-            )
-        else:
-            singular_values = scipy.linalg.svdvals(normalized_design, check_finite=False)
-        spectral_norm = float(singular_values[0]) if singular_values.size else 0.0
-        machine_error_bound = float(
-            np.finfo(float).eps * max(normalized_design.shape) * spectral_norm
-        )
 
         # A channel's propagated error is an absolute Frobenius bound in the
         # global polynomial coefficient basis.  Map that bound through the
@@ -3680,11 +3849,33 @@ class CompiledResponseBasis:
                 channel.propagated_error_bound / safe_scales[int(channel_index)]
             )
             propagated_column_bounds.append(global_evaluation_norm * relative_coefficient_error)
-        propagated_error_bound = float(np.linalg.norm(propagated_column_bounds))
-        rank_tolerance = machine_error_bound + propagated_error_bound
-        certified_rank = int(np.count_nonzero(singular_values > rank_tolerance))
         propagated_column_bounds_array = np.asarray(propagated_column_bounds, dtype=np.float64)
+        relative_coefficient_error_bounds = np.asarray(
+            [
+                self.channels[int(index)].propagated_error_bound
+                / safe_scales[int(index)]
+                for index in eligible
+            ],
+            dtype=np.float64,
+        )
+        response_gram_eigenvalues: tuple[float, ...] = ()
+        response_gram_rank = 0
+        response_gram_rank_tolerance = 0.0
+        response_gram_condition_number = 0.0
+        response_gram_orthonormality_residual = 0.0
         if ridge > 0.0:
+            ridge_left_vectors, singular_values, ridge_right_vectors_h = scipy.linalg.svd(
+                normalized_design,
+                full_matrices=False,
+                check_finite=False,
+            )
+            spectral_norm = float(singular_values[0]) if singular_values.size else 0.0
+            machine_error_bound = float(
+                np.finfo(float).eps * max(normalized_design.shape) * spectral_norm
+            )
+            propagated_error_bound = float(np.linalg.norm(propagated_column_bounds_array))
+            rank_tolerance = machine_error_bound + propagated_error_bound
+            certified_rank = int(np.count_nonzero(singular_values > rank_tolerance))
             # Ridge makes the complete confirmed channel space well posed even
             # when the unregularized fit grid cannot identify every direction.
             # Pre-truncating with a target-dependent RRQR would defeat that
@@ -3710,8 +3901,6 @@ class CompiledResponseBasis:
             )
             selected_error_bound = propagated_error_bound
             fit_solver_policy = FIT_SOLVER_POLICY_RIDGE_V3
-            if ridge_left_vectors is None or ridge_right_vectors_h is None:
-                raise RuntimeError("ridge SVD factors are unavailable")
             filter_factors = selected_singular_values / (
                 selected_singular_values**2 + ridge
             )
@@ -3721,68 +3910,129 @@ class CompiledResponseBasis:
             if not np.all(np.isfinite(selected_theta)):
                 raise ValueError("complete response ridge solve produced non-finite coefficients")
         else:
+            # The fit grid can have a nullspace even when the global response
+            # space is physically complete.  First express that global span in
+            # an orthonormal physical polynomial-coefficient frame.  A minimum
+            # norm solve in this frame is invariant under an invertible change
+            # of authored/owner response channels.
+            response_gram = _normalized_response_coefficient_gram(
+                self.channels,
+                eligible,
+                coordinate=self.coordinate,
+                dim=self.dim,
+                response_scales=safe_scales,
+            )
+            gram_values_ascending, gram_vectors_ascending = scipy.linalg.eigh(
+                response_gram,
+                check_finite=False,
+            )
+            gram_scale = float(
+                max(float(gram_values_ascending[-1]), 0.0)
+                if gram_values_ascending.size
+                else 0.0
+            )
+            coefficient_ambient_dimension = int(
+                2 * len(self.coordinate.monomials) * self.dim * self.dim
+            )
+            gram_machine_eigenvalue_bound = float(
+                np.finfo(float).eps
+                * max(coefficient_ambient_dimension, response_gram.shape[0])
+                * gram_scale
+            )
+            gram_machine_singular_tolerance = float(
+                np.sqrt(gram_machine_eigenvalue_bound)
+            )
+            gram_propagated_singular_tolerance = float(
+                np.linalg.norm(relative_coefficient_error_bounds)
+            )
+            response_gram_rank_tolerance = float(
+                (gram_machine_singular_tolerance + gram_propagated_singular_tolerance) ** 2
+            )
+            negative_gram_tolerance = float(
+                max(
+                    gram_machine_eigenvalue_bound,
+                    np.finfo(float).eps * max(response_gram.shape) * max(gram_scale, 1.0),
+                )
+            )
+            if (
+                gram_values_ascending.size
+                and float(gram_values_ascending[0]) < -negative_gram_tolerance
+            ):
+                raise ValueError("complete response physical coefficient Gram is not positive semidefinite")
+            gram_values_ascending = np.maximum(gram_values_ascending, 0.0)
+            retained_gram = gram_values_ascending > response_gram_rank_tolerance
+            response_gram_rank = int(np.count_nonzero(retained_gram))
+            if response_gram_rank == 0:
+                raise ValueError(
+                    "complete response basis has no physical coefficient direction certified above "
+                    f"the Gram error bound {response_gram_rank_tolerance:.6e}"
+                )
+            retained_gram_values = gram_values_ascending[retained_gram]
+            retained_gram_vectors = gram_vectors_ascending[:, retained_gram]
+            physical_to_owner = retained_gram_vectors / np.sqrt(
+                retained_gram_values
+            )[None, :]
+            response_gram_eigenvalues = tuple(
+                float(value) for value in gram_values_ascending[::-1]
+            )
+            response_gram_condition_number = float(
+                retained_gram_values[-1] / retained_gram_values[0]
+            )
+            whitened_gram = physical_to_owner.T @ response_gram @ physical_to_owner
+            response_gram_orthonormality_residual = float(
+                np.linalg.norm(
+                    whitened_gram - np.eye(response_gram_rank, dtype=np.float64),
+                    ord=2,
+                )
+            )
+
+            physical_design = normalized_design @ physical_to_owner
+            left_vectors, singular_values, right_vectors_h = scipy.linalg.svd(
+                physical_design,
+                full_matrices=False,
+                check_finite=False,
+            )
+            spectral_norm = float(singular_values[0]) if singular_values.size else 0.0
+            machine_error_bound = float(
+                np.finfo(float).eps * max(physical_design.shape) * spectral_norm
+            )
+            physical_propagated_column_bounds = (
+                np.abs(physical_to_owner).T @ propagated_column_bounds_array
+            )
+            propagated_error_bound = float(
+                np.linalg.norm(physical_propagated_column_bounds)
+            )
+            rank_tolerance = machine_error_bound + propagated_error_bound
+            certified_rank = int(np.count_nonzero(singular_values > rank_tolerance))
             if certified_rank == 0:
                 raise ValueError(
                     "complete response fit grid has no response direction certified above "
                     f"the propagated design error bound {rank_tolerance:.6e}"
                 )
-            rank = int(certified_rank)
-            _q, _r, pivots = scipy.linalg.qr(
-                normalized_design,
-                mode="economic",
-                pivoting=True,
-                check_finite=False,
-            )
-            while rank > 0:
-                selected_local = np.asarray(pivots[:rank], dtype=np.int64)
-                selected_design = normalized_design[:, selected_local]
-                selected_singular_values = scipy.linalg.svdvals(
-                    selected_design,
-                    check_finite=False,
-                )
-                selected_machine_error_bound = float(
-                    np.finfo(float).eps
-                    * max(selected_design.shape)
-                    * float(selected_singular_values[0])
-                )
-                selected_propagated_error_bound = float(
-                    np.linalg.norm(propagated_column_bounds_array[selected_local])
-                )
-                selected_error_bound = (
-                    selected_machine_error_bound + selected_propagated_error_bound
-                )
-                if float(selected_singular_values[-1]) > selected_error_bound:
-                    break
-                rank -= 1
-            if rank == 0:
-                raise ValueError(
-                    "complete response RRQR pivot subset has no direction certified above "
-                    "its propagated design error bound"
-                )
-            selected = eligible[selected_local]
+            selected = eligible.copy()
+            selected_singular_values = singular_values[:certified_rank]
             selected_condition_number = float(
-                selected_singular_values[0] / selected_singular_values[-1]
+                singular_values[0] / singular_values[certified_rank - 1]
             )
-            selected_singular_value_min = float(selected_singular_values[-1])
-            fit_solver_policy = FIT_SOLVER_POLICY_V2
-            solve_design = selected_design
-            solve_target = target_vector
-            selected_theta, _residuals, solve_rank, _solve_singular_values = scipy.linalg.lstsq(
-                solve_design,
-                solve_target,
-                cond=None,
-                lapack_driver="gelsy",
-                check_finite=False,
+            selected_singular_value_min = float(
+                singular_values[certified_rank - 1]
             )
-            if int(solve_rank) != int(selected.size) or not np.all(np.isfinite(selected_theta)):
+            selected_error_bound = rank_tolerance
+            fit_solver_policy = FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4
+            physical_theta = right_vectors_h[:certified_rank, :].T @ (
+                (left_vectors[:, :certified_rank].T @ target_vector)
+                / singular_values[:certified_rank]
+            )
+            selected_theta = physical_to_owner @ physical_theta
+            if not np.all(np.isfinite(selected_theta)):
                 raise ValueError(
-                    "complete response fit solve is not full rank in its selected solver space"
+                    "complete response physical minimum-norm solve produced non-finite coefficients"
                 )
         _response_progress(
             progress_callback,
             "fit response rank/solve done "
             f"in {time.perf_counter() - solve_started:.2f} s | "
-            f"eligible={eligible.size} selected={selected.size} "
+            f"eligible={eligible.size} response_span={response_gram_rank or eligible.size} "
             f"certified_rank={certified_rank} ridge={ridge:.3g}",
             state="done",
         )
@@ -3795,7 +4045,10 @@ class CompiledResponseBasis:
             self.channels[index].channel_id
             for index in np.flatnonzero(coefficients != 0.0)
         )
-        if fit_solver_policy == FIT_SOLVER_POLICY_RIDGE_V3:
+        if fit_solver_policy in {
+            FIT_SOLVER_POLICY_RIDGE_V3,
+            FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4,
+        }:
             fit_pivots: tuple[int, ...] = ()
             fit_selected_channel_ids: tuple[str, ...] = ()
         else:
@@ -3829,6 +4082,13 @@ class CompiledResponseBasis:
             "fit_selected_condition_number": selected_condition_number,
             "fit_selected_singular_value_min": selected_singular_value_min,
             "fit_selected_error_bound": selected_error_bound,
+            "fit_response_gram_eigenvalues": list(response_gram_eigenvalues),
+            "fit_response_gram_rank": response_gram_rank,
+            "fit_response_gram_rank_tolerance": response_gram_rank_tolerance,
+            "fit_response_gram_condition_number": response_gram_condition_number,
+            "fit_response_gram_orthonormality_residual": (
+                response_gram_orthonormality_residual
+            ),
             "max_response_amplitude": float(np.max(amplitude)) if amplitude.size else 0.0,
             "coefficients": _json_record(coefficients),
             "coefficient_tolerance": float(coefficient_tolerance),
@@ -3859,6 +4119,13 @@ class CompiledResponseBasis:
             fit_selected_condition_number=selected_condition_number,
             fit_selected_singular_value_min=selected_singular_value_min,
             fit_selected_error_bound=selected_error_bound,
+            fit_response_gram_eigenvalues=response_gram_eigenvalues,
+            fit_response_gram_rank=response_gram_rank,
+            fit_response_gram_rank_tolerance=response_gram_rank_tolerance,
+            fit_response_gram_condition_number=response_gram_condition_number,
+            fit_response_gram_orthonormality_residual=(
+                response_gram_orthonormality_residual
+            ),
             max_response_amplitude=float(np.max(amplitude)) if amplitude.size else 0.0,
             fit_objective=fit_objective,
         )
@@ -4049,6 +4316,7 @@ def _fixed_group_from_projected_candidates(
     *,
     reduce: bool,
     solver: str,
+    block_rule: str = "declared_orbit_representative_reynolds_hermitian_projection",
 ) -> GeneratorFixedResponseGroup:
     """Certify an already projected candidate set without a second group solve."""
 
@@ -4080,7 +4348,7 @@ def _fixed_group_from_projected_candidates(
     proofs.append(
         {
             "solver": solver,
-            "block_rule": "declared_orbit_representative_reynolds_hermitian_projection",
+            "block_rule": str(block_rule),
             "selected_channel_ids": [channel.channel_id for channel in channels],
             "certification_space": (
                 "global_two_dimensional_polynomial_coefficient_space_real_imag_stack"
@@ -5922,6 +6190,18 @@ def _support_masks_from_seeds(
         for component, mask in masks.items()
         if _exact_structural_support_is_group_adjoint_closed(mask, group=group)
     }
+    support_mask_compilers = {
+        component: (
+            "explicit_reduced_authored_v1"
+            if policies_by_component[component] == {"explicit_reduced"}
+            else (
+                "authored_exact_structural_group_adjoint_closed_v1"
+                if component in structurally_closed_components
+                else "per_seed_propagated_error_group_adjoint_closure_v1"
+            )
+        )
+        for component in masks
+    }
     polynomial_pullbacks_by_word = {
         tuple(str(value) for value in element.canonical_word): (
             _monomial_pullback_table(element, coordinate)
@@ -5950,13 +6230,18 @@ def _support_masks_from_seeds(
         if internal_actions is not None
         else {}
     )
-    if internal_monomial_actions and all(
-        action is not None for action in internal_monomial_actions.values()
-    ):
-        # A certified monomial internal action maps each matrix entry to one
-        # matrix entry.  Close the already-unioned authored component mask
-        # directly under every finite-group route and adjoint, rather than
-        # transforming every numerical seed separately.
+    if internal_actions is not None:
+        # The certified factorized matrices are a representation of the full
+        # finite group.  Structural closure therefore needs only one Boolean
+        # orbit of the already-unioned authored component mask:
+        #
+        #   S = union_g supp(U_g) A supp(U_g)^T  union  adjoint.
+        #
+        # Acting on S again only permutes the group index, so no fixed-point
+        # iteration and, crucially, no seed-by-seed numerical transform is
+        # needed.  This is an exact structural envelope: numerical projection
+        # and dependency reduction are still performed independently at every
+        # configured polynomial degree downstream.
         for component, mask in masks.items():
             if policies_by_component[component] not in (
                 {"complete"},
@@ -5964,15 +6249,34 @@ def _support_masks_from_seeds(
             ):
                 continue
             authored_mask = np.asarray(mask, dtype=bool).copy()
-            source_rows, source_cols = np.nonzero(authored_mask)
-            for action in internal_monomial_actions.values():
-                assert action is not None
-                target_rows = action[0]
-                routed_rows = target_rows[source_rows]
-                routed_cols = target_rows[source_cols]
-                mask[routed_rows, routed_cols] = True
-                mask[routed_cols, routed_rows] = True
+            authored_integer = sparse.csr_matrix(
+                authored_mask.astype(np.int32, copy=False)
+            )
+            closed_mask = authored_mask | authored_mask.T
+            for action in internal_actions.values():
+                if action.shape != authored_mask.shape:
+                    raise ValueError(
+                        "support-closure internal action has shape "
+                        f"{action.shape}, expected {authored_mask.shape}"
+                    )
+                pattern = sparse.csr_matrix(
+                    (
+                        np.ones(action.nnz, dtype=np.int32),
+                        action.indices.copy(),
+                        action.indptr.copy(),
+                    ),
+                    shape=action.shape,
+                )
+                image = pattern @ authored_integer @ pattern.T
+                image.eliminate_zeros()
+                image_coo = image.tocoo(copy=False)
+                closed_mask[image_coo.row, image_coo.col] = True
+                closed_mask[image_coo.col, image_coo.row] = True
+            mask[...] = closed_mask
             structurally_closed_components.add(component)
+            support_mask_compilers[component] = (
+                "certified_factorized_boolean_group_adjoint_closure_v1"
+            )
 
     def expand_until_certified(
         mask: np.ndarray,
@@ -6076,6 +6380,7 @@ def _support_masks_from_seeds(
             "structural_support_closure_certified": bool(
                 component in structurally_closed_components
             ),
+            "support_mask_compiler": support_mask_compilers[component],
         }
     return masks, policy_artifact
 
@@ -6223,6 +6528,7 @@ _PERSISTENT_CACHE_IDENTITY_FIELDS = frozenset(
         "regularization_normalization",
         "compiler_version",
         "term_templates",
+        "structural_preselection",
     }
 )
 
@@ -6552,6 +6858,13 @@ def _compile_model_response_basis_uncached(
     group_artifacts: list[Any] = []
     adjoint_artifacts: list[Mapping[str, Any]] = []
     fixed_groups: list[GeneratorFixedResponseGroup] = []
+    outer_timings_seconds = {
+        "certified_group_actions": 0.0,
+        "support_mask_closure": 0.0,
+        "p0_complete_compile": 0.0,
+        "finite_complete_compile": 0.0,
+        "group_artifact_merge": 0.0,
+    }
     candidate_started = time.perf_counter()
     _response_progress(
         progress_callback,
@@ -6604,12 +6917,13 @@ def _compile_model_response_basis_uncached(
 
         internal_actions: Mapping[tuple[str, ...], sparse.spmatrix] | None = None
         reynolds_artifact: dict[str, Any] = {}
-        if finite_seeds or joint_route_actions is not None:
+        if seeds:
             from .response_basis_factorized import (
                 compile_factorized_group_element_actions,
                 compile_joint_route_group_element_actions,
             )
 
+            group_actions_started = time.perf_counter()
             try:
                 if factorized_actions is not None:
                     internal_actions, reynolds_artifact = (
@@ -6640,15 +6954,22 @@ def _compile_model_response_basis_uncached(
                 exc.add_note(
                     "kp model response-basis compilation failed during certified "
                     f"sparse group actions for group {group_index} "
-                    f"({len(finite_seeds)} seeds)"
+                    f"({len(seeds)} seeds)"
                 )
                 raise
+            outer_timings_seconds["certified_group_actions"] += (
+                time.perf_counter() - group_actions_started
+            )
 
+        support_masks_started = time.perf_counter()
         support_masks, support_policy_artifact = _support_masks_from_seeds(
             seeds,
             group=group,
             coordinate=coordinate,
             internal_actions_by_word=internal_actions,
+        )
+        outer_timings_seconds["support_mask_closure"] += (
+            time.perf_counter() - support_masks_started
         )
 
         compiled_groups: list[CandidateResponseSet] = []
@@ -6664,24 +6985,16 @@ def _compile_model_response_basis_uncached(
             if str(seed.metadata.get("term_space_policy", ""))
             != "orbit_representative"
         ]
-        zero_joint_complete_seeds = (
-            [
-                seed
-                for seed in zero_closed_seeds
-                if str(seed.metadata.get("term_space_policy", "")) == "complete"
-            ]
-            if joint_route_actions is not None
-            else []
-        )
-        zero_fixed_seeds = (
-            [
-                seed
-                for seed in zero_closed_seeds
-                if str(seed.metadata.get("term_space_policy", "")) != "complete"
-            ]
-            if joint_route_actions is not None
-            else list(zero_closed_seeds)
-        )
+        zero_complete_seeds = [
+            seed
+            for seed in zero_closed_seeds
+            if str(seed.metadata.get("term_space_policy", "")) == "complete"
+        ]
+        zero_fixed_seeds = [
+            seed
+            for seed in zero_closed_seeds
+            if str(seed.metadata.get("term_space_policy", "")) != "complete"
+        ]
         if zero_fixed_seeds:
             try:
                 fixed_group = compile_generator_fixed_response_group(
@@ -6707,35 +7020,73 @@ def _compile_model_response_basis_uncached(
                 raise
             fixed_groups.append(fixed_group)
             compiled_groups.append(fixed_group.candidates)
-        if zero_joint_complete_seeds:
+        if zero_complete_seeds:
             assert internal_actions is not None
             try:
-                from .response_basis_symmetry_first import (
-                    compile_symbolic_atom_candidate_group,
+                from .response_basis_graded import (
+                    GradedCompilationUnavailable,
+                    compile_graded_candidate_group,
                 )
 
-                joint_zero_candidates = compile_symbolic_atom_candidate_group(
-                    zero_joint_complete_seeds,
-                    coordinate=coordinate,
-                    group=group,
-                    factorized_actions={},
-                    internal_actions_by_word=internal_actions,
-                    factorized_group_artifact=reynolds_artifact,
-                )
-                joint_zero_fixed_group = _fixed_group_from_projected_candidates(
-                    joint_zero_candidates,
-                    reduce=bool(reduce),
-                    solver="joint_route_symbolic_p0_reynolds_v1",
+                try:
+                    p0_complete_started = time.perf_counter()
+                    complete_zero_candidates = compile_graded_candidate_group(
+                        zero_complete_seeds,
+                        coordinate=coordinate,
+                        group=group,
+                        factorized_actions=factorized_actions or {},
+                        internal_actions_by_word=internal_actions,
+                        factorized_group_artifact=reynolds_artifact,
+                        joint_adjoint_keys=_zero_harmonic_joint_adjoint_keys(
+                            zero_complete_seeds,
+                            coordinate=coordinate,
+                        ),
+                    )
+                    outer_timings_seconds["p0_complete_compile"] += (
+                        time.perf_counter() - p0_complete_started
+                    )
+                    zero_solver = "graded_filtered_symbolic_p0_reynolds_v1"
+                    zero_block_rule = "filtered_degree_residual_owner_pivots"
+                except GradedCompilationUnavailable as graded_error:
+                    from .response_basis_symmetry_first import (
+                        compile_symbolic_atom_candidate_group,
+                    )
+
+                    _response_progress(
+                        progress_callback,
+                        "response basis p=0 graded compiler unavailable; "
+                        f"using symbolic oracle | reason={graded_error.reason}",
+                        state="done",
+                    )
+                    complete_zero_candidates = compile_symbolic_atom_candidate_group(
+                        zero_complete_seeds,
+                        coordinate=coordinate,
+                        group=group,
+                        factorized_actions=factorized_actions or {},
+                        internal_actions_by_word=internal_actions,
+                        factorized_group_artifact=reynolds_artifact,
+                    )
+                    zero_solver = "symbolic_p0_reynolds_typed_fallback_v1"
+                    zero_block_rule = "symbolic_atom_support_components"
+                complete_zero_fixed_group = _fixed_group_from_projected_candidates(
+                    complete_zero_candidates,
+                    # Both the graded compiler and its symbolic oracle fallback
+                    # already return independent projected columns.  Repeating
+                    # a global coefficient-space QR here recreates the p=0
+                    # bottleneck this path is meant to remove.
+                    reduce=False,
+                    solver=zero_solver,
+                    block_rule=zero_block_rule,
                 )
             except Exception as exc:
                 exc.add_note(
-                    "kp model response-basis compilation failed during certified "
-                    f"joint-route p=0 projection for group {group_index} "
-                    f"({len(zero_joint_complete_seeds)} seeds)"
+                    "kp model response-basis compilation failed during complete "
+                    f"p=0 graded projection for group {group_index} "
+                    f"({len(zero_complete_seeds)} seeds)"
                 )
                 raise
-            fixed_groups.append(joint_zero_fixed_group)
-            compiled_groups.append(joint_zero_candidates)
+            fixed_groups.append(complete_zero_fixed_group)
+            compiled_groups.append(complete_zero_candidates)
         if zero_orbit_seeds:
             try:
                 orbit_candidates = compile_candidate_responses(
@@ -6798,18 +7149,47 @@ def _compile_model_response_basis_uncached(
                 state="done",
             )
             try:
-                from .response_basis_symmetry_first import (
-                    compile_symbolic_atom_candidate_group,
+                from .response_basis_graded import (
+                    GradedCompilationUnavailable,
+                    compile_graded_candidate_group,
                 )
 
-                candidate_group = compile_symbolic_atom_candidate_group(
-                    finite_seeds,
-                    coordinate=coordinate,
-                    group=group,
-                    factorized_actions=factorized_actions,
-                    internal_actions_by_word=internal_actions,
-                    factorized_group_artifact=reynolds_artifact,
-                )
+                try:
+                    finite_complete_started = time.perf_counter()
+                    candidate_group = compile_graded_candidate_group(
+                        finite_seeds,
+                        coordinate=coordinate,
+                        group=group,
+                        factorized_actions=factorized_actions or {},
+                        internal_actions_by_word=internal_actions,
+                        factorized_group_artifact=reynolds_artifact,
+                    )
+                    outer_timings_seconds["finite_complete_compile"] += (
+                        time.perf_counter() - finite_complete_started
+                    )
+                    finite_solver = "graded_filtered_symbolic_reynolds_v1"
+                    finite_block_rule = "filtered_degree_residual_owner_pivots"
+                except GradedCompilationUnavailable as graded_error:
+                    from .response_basis_symmetry_first import (
+                        compile_symbolic_atom_candidate_group,
+                    )
+
+                    _response_progress(
+                        progress_callback,
+                        "response basis finite-p graded compiler unavailable; "
+                        f"using symbolic oracle | reason={graded_error.reason}",
+                        state="done",
+                    )
+                    candidate_group = compile_symbolic_atom_candidate_group(
+                        finite_seeds,
+                        coordinate=coordinate,
+                        group=group,
+                        factorized_actions=factorized_actions or {},
+                        internal_actions_by_word=internal_actions,
+                        factorized_group_artifact=reynolds_artifact,
+                    )
+                    finite_solver = "symbolic_reynolds_typed_fallback_v1"
+                    finite_block_rule = "symbolic_atom_support_components"
             except Exception as exc:
                 exc.add_note(
                     "kp model response-basis compilation failed during finite-p "
@@ -6833,8 +7213,8 @@ def _compile_model_response_basis_uncached(
                 retained_channels=tuple(candidate_group.channels),
                 reduction_proofs=(
                     {
-                        "solver": "closed_symbolic_atom_reynolds__two_stage_rrqr",
-                        "block_rule": "symbolic_atom_support_components",
+                        "solver": finite_solver,
+                        "block_rule": finite_block_rule,
                         "selected_channel_ids": sorted(selected_ids),
                         "rank_proof_stage_count": int(
                             len(
@@ -6867,35 +7247,33 @@ def _compile_model_response_basis_uncached(
                 f"retained={len(candidate_group.channels)} "
                 f"atoms={float(symbolic_timings.get('seed_atoms', 0.0)):.2f}s "
                 f"project={float(symbolic_timings.get('symbolic_projection', 0.0)):.2f}s "
-                f"rank={float(symbolic_timings.get('rank_selection', 0.0)):.2f}s "
+                f"rank={float(symbolic_timings.get('graded_rank_selection', symbolic_timings.get('rank_selection', 0.0))):.2f}s "
                 f"materialize={float(symbolic_timings.get('channel_materialization', 0.0)):.2f}s",
                 state="done",
             )
             compiled_groups.append(candidate_group)
+        group_merge_started = time.perf_counter()
         for candidate_group in compiled_groups:
+            merged_support_artifact = {
+                component: {
+                    **dict(policy_record),
+                    **dict(candidate_group.support_artifact.get(component, {})),
+                }
+                for component, policy_record in support_policy_artifact.items()
+            }
+            for component, record in candidate_group.support_artifact.items():
+                merged_support_artifact.setdefault(component, dict(record))
             candidate_group = replace(
                 candidate_group,
-                support_artifact={
-                    component: {
-                        **dict(record),
-                        **(
-                            dict(support_policy_artifact.get(component, {}))
-                            if int(
-                                support_policy_artifact.get(component, {}).get(
-                                    "symmetry_adjoint_added_entry_count", 0
-                                )
-                            )
-                            > 0
-                            else {}
-                        ),
-                    }
-                    for component, record in candidate_group.support_artifact.items()
-                },
+                support_artifact=merged_support_artifact,
             )
             channel_rows.extend(candidate_group.channels)
             support_artifact.update(candidate_group.support_artifact)
             group_artifacts.append(candidate_group.group_artifact)
             adjoint_artifacts.append(candidate_group.adjoint_artifact)
+        outer_timings_seconds["group_artifact_merge"] += (
+            time.perf_counter() - group_merge_started
+        )
     _response_progress(
         progress_callback,
         "response basis candidate compile (p0 fixed-space + finite-p symbolic atoms) done "
@@ -6918,6 +7296,7 @@ def _compile_model_response_basis_uncached(
         adjoint_artifact={
             "certification": "raw_polynomial_coefficient_adjoint_v1",
             "groups": adjoint_artifacts,
+            "outer_timings_seconds": dict(outer_timings_seconds),
             "logical_candidate_channel_count": int(
                 sum(
                     int(
@@ -7061,30 +7440,20 @@ def compile_model_response_basis(
             authored_sym_ops,
             symmetry_group_key_cache,
         )
-        group_record = grouped.setdefault(sym_key, {"operations": sym_ops, "terms": []})
+        group_record = grouped.setdefault(
+            sym_key, {"operations": sym_ops, "term_records": []}
+        )
         term_name = str(getattr(term, "registry_metadata", {}).get("term_name", term.tag))
         support_component = f"{term_name}|{hashlib.sha256(sym_key.encode('utf-8')).hexdigest()[:16]}"
-        seed = raw_polynomial_seed_from_term_key(
-            term.key,
-            seed_id=f"term:{term_index}",
-            Q_set1=np.asarray(config.Q_set1),
-            Q_set2=np.asarray(config.Q_set2),
-            n_orb1=int(config.n_orb1),
-            n_orb2=int(config.n_orb2),
-            coordinate=coordinate,
-            support_component=support_component,
-            metadata={
-                **dict(getattr(term, "registry_metadata", {})),
-                "term_index": int(term_index),
-                "tag": str(term.tag),
-            },
+        group_record["term_records"].append(
+            (int(term_index), term, support_component)
         )
-        group_record["terms"].append(seed)
     groups: list[FiniteGroup] = []
     seeds_by_group: list[list[RawPolynomialSeed]] = []
     factorized_actions_by_group: list[dict[str, Any] | None] = []
     joint_route_actions_by_group: list[dict[str, Any] | None] = []
     joint_artifact_hashes_by_group: list[str | None] = []
+    structural_plan_artifacts: list[dict[str, Any]] = []
     for record in grouped.values():
         operations = record["operations"]
         factorized_actions: dict[str, Any] = {}
@@ -7144,11 +7513,106 @@ def compile_model_response_basis(
             )
         else:
             group = identity_finite_group(dim, q_size=q_count, sector_size=2)
+        from .response_basis_structural import compile_structural_generator_plan
+
+        term_records = list(record["term_records"])
+        maximum_action_error_bound = max(
+            (
+                float(getattr(action, "matrix_certification_bound", 0.0))
+                for action in factorized_actions.values()
+            ),
+            default=0.0,
+        )
+        structural_plan = compile_structural_generator_plan(
+            [(term_index, term) for term_index, term, _support in term_records],
+            group=group,
+            Q_set1=np.asarray(config.Q_set1),
+            Q_set2=np.asarray(config.Q_set2),
+            n_orb1=int(config.n_orb1),
+            n_orb2=int(config.n_orb2),
+            maximum_action_error_bound=maximum_action_error_bound,
+            optimize_zero_harmonic=False,
+        )
+        selected_term_indices = set(structural_plan.selected_term_indices)
+        orbit_representative_term_indices = set(
+            structural_plan.orbit_representative_term_indices
+        )
+        materialized_seeds = [
+            raw_polynomial_seed_from_term_key(
+                term.key,
+                seed_id=f"term:{term_index}",
+                Q_set1=np.asarray(config.Q_set1),
+                Q_set2=np.asarray(config.Q_set2),
+                n_orb1=int(config.n_orb1),
+                n_orb2=int(config.n_orb2),
+                coordinate=coordinate,
+                support_component=(
+                    f"{support_component}|structural_generators_v1"
+                    if term_index in orbit_representative_term_indices
+                    else support_component
+                ),
+                metadata={
+                    **dict(getattr(term, "registry_metadata", {})),
+                    **(
+                        {
+                            "authored_term_space_policy": "complete",
+                            "term_space_policy": "orbit_representative",
+                            "structural_generator_preselected": True,
+                        }
+                        if term_index in orbit_representative_term_indices
+                        else {}
+                    ),
+                    "term_index": int(term_index),
+                    "tag": str(term.tag),
+                },
+            )
+            for term_index, term, support_component in term_records
+            if term_index in selected_term_indices
+        ]
         groups.append(group)
-        seeds_by_group.append(list(record["terms"]))
+        seeds_by_group.append(materialized_seeds)
         factorized_actions_by_group.append(active_factorized_actions)
         joint_route_actions_by_group.append(active_joint_route_actions)
         joint_artifact_hashes_by_group.append(active_joint_artifact_hash)
+        structural_plan_artifacts.append(structural_plan.artifact())
+    structural_preselection = {
+        "compiler": "exact_structural_cyclic_generators_v1",
+        "full_structural_support_count": int(
+            sum(
+                int(item["full_structural_support_count"])
+                for item in structural_plan_artifacts
+            )
+        ),
+        "selected_generator_count": int(
+            sum(
+                int(item["selected_generator_count"])
+                for item in structural_plan_artifacts
+            )
+        ),
+        "full_logical_term_count": int(len(terms)),
+        "materialized_term_count": int(
+            sum(int(item["materialized_term_count"]) for item in structural_plan_artifacts)
+        ),
+        "full_closure_rank": int(
+            sum(int(item["full_closure_rank"]) for item in structural_plan_artifacts)
+        ),
+        "selected_closure_rank": int(
+            sum(
+                int(item["selected_closure_rank"])
+                for item in structural_plan_artifacts
+            )
+        ),
+        "maximum_omitted_closure_residual": float(
+            max(
+                (
+                    float(item["maximum_omitted_closure_residual"])
+                    for item in structural_plan_artifacts
+                ),
+                default=0.0,
+            )
+        ),
+        "groups": structural_plan_artifacts,
+    }
     identity_payload = _basis_layout_identity(
         config,
         groups,
@@ -7157,6 +7621,10 @@ def compile_model_response_basis(
         joint_route_actions_by_group,
         joint_artifact_hashes_by_group,
     )
+    identity_payload = {
+        **dict(identity_payload),
+        "structural_preselection": structural_preselection,
+    }
     input_record = {
         "identity": identity_payload,
         "coordinate": coordinate.metadata(),
@@ -7234,7 +7702,7 @@ def compile_model_response_basis(
     def cold_compile() -> CompiledResponseBasis:
         nonlocal compiled_here
         compiled_here = True
-        return _compile_model_response_basis_uncached(
+        basis = _compile_model_response_basis_uncached(
             coordinate=coordinate,
             groups=groups,
             seeds_by_group=seeds_by_group,
@@ -7247,6 +7715,16 @@ def compile_model_response_basis(
             cache_key=cache_key,
             progress_callback=progress_callback,
         )
+        basis = replace(
+            basis,
+            candidate_artifact={
+                **dict(basis.candidate_artifact),
+                "structural_preselection": structural_preselection,
+            },
+            basis_hash="",
+        )
+        object.__setattr__(basis, "basis_hash", basis._compute_hash())
+        return basis
 
     if persistent_cache is not None:
         cache_started = time.perf_counter()

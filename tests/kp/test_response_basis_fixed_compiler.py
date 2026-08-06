@@ -294,6 +294,53 @@ def test_direct_actions_assign_zero_residual_to_empty_fixed_subspace() -> None:
     assert certification["residual_operator_norm"] == 0.0
 
 
+def test_direct_action_bounds_are_propagated_through_metric_whitening() -> None:
+    api = _api()
+    dimension = 4
+    correlation = 0.99
+    gram = (
+        (1.0 - correlation) * np.eye(dimension)
+        + correlation * np.ones((dimension, dimension))
+    )
+    lower = np.linalg.cholesky(gram)
+    vocabulary = lower.T
+
+    eigenvalues, eigenvectors = np.linalg.eigh(lower.T @ lower)
+    assert eigenvalues[:3] == pytest.approx((0.01, 0.01, 0.01))
+    ill_conditioned_projector = eigenvectors[:, :3] @ eigenvectors[:, :3].T
+    physical_residual_scale = 2.2e-12
+    physical_action = (
+        np.eye(dimension)
+        + physical_residual_scale * ill_conditioned_projector
+    )
+    coefficient_action = np.linalg.solve(
+        lower.T,
+        physical_action @ lower.T,
+    )
+    ambient_residual = vocabulary @ (
+        coefficient_action - np.eye(dimension)
+    )
+    column_bounds = np.linalg.norm(ambient_residual, axis=0)
+
+    result = api.compile_generator_fixed_vocabulary_from_actions(
+        vocabulary,
+        generator_actions={"g": coefficient_action},
+        antiunitary_parities={"g": False},
+        logical_channel_ids=tuple(f"c{index}" for index in range(dimension)),
+        generator_column_absolute_error_bounds={"g": column_bounds},
+    )
+
+    assert result.rank == dimension
+    fixed_metadata = result.metadata["fixed_subspace"]["components"][0][
+        "fixed_subspace"
+    ]
+    unwhitened_bound = float(np.linalg.norm(column_bounds))
+    whitening_gain = float(np.linalg.norm(np.linalg.inv(lower.T), ord=2))
+    assert fixed_metadata["action_absolute_error_bound"] == pytest.approx(
+        unwhitened_bound * whitening_gain
+    )
+
+
 def test_direct_actions_still_reject_normalized_rank_ambiguity() -> None:
     api = _api()
     vocabulary = np.asarray(

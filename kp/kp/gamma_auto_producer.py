@@ -1,51 +1,55 @@
-"""Pure, fail-closed automatic Gamma projection production.
+"""Pure automatic Gamma projection production with one common anchor fibre.
 
 The producer starts from already loaded physical arrays and explicit symmetry
-metadata.  It has no CLI or filesystem side effects: every candidate is built
-through the routed Gamma core, downfolded, symmetry-certified, and scored
-before the smallest passing candidate is returned.
+metadata.  It has no CLI or filesystem side effects: each candidate selects
+one reference-orbital pattern at the representative point, copies that pattern
+to every Q fibre, downfolds once per k, and is symmetry-certified before the
+smallest passing candidate is returned.
 """
 
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from numbers import Integral, Real
 from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
 import numpy as np
 
+from .basis.selection import AutoGaugeConfig
 from .blocks import (
-    build_gamma_model_anchor_spec,
-    build_gamma_model_frames,
-    validate_gamma_model_anchor_reference,
+    GammaCommonAnchorFrames,
+    GammaCommonAnchorSpec,
+    build_gamma_common_anchor_frames,
+    build_gamma_common_anchor_spec,
 )
-from .blocks.downfold import DownfoldingOptions, downfold_from_projectors
+from .blocks.downfold import (
+    DownfoldingOptions,
+    downfold_from_projector_groups,
+    downfold_from_projectors,
+    projector_groups_from_block_columns,
+)
 from .blocks.gamma_layout import (
     GammaCertifiedRawAction,
     GammaRoutingError,
     GammaRoutingThresholds,
     GammaRowLayout,
-    GammaRoutedFrames,
-    assemble_gamma_routed_projectors,
-    build_gamma_routed_frames,
     certify_gamma_raw_action,
-    certify_routed_covariance,
-    close_gamma_projector_clusters,
     gamma_certified_action_route_contract,
 )
 from .identity import build_projection_basis_identity, hash_array, hash_mapping
 from .low_energy_selection import (
+    CandidateSelectionError,
+    CandidateSelectionFailureCode,
     CandidateMetrics,
+    ReferencePoint,
     SelectionDecision,
     SelectionThresholds,
     select_projection_candidate,
 )
 from .projection_handoff import (
-    GammaRoutedBasisSpec,
-    assemble_gamma_model_frame,
-    certify_gamma_routed_basis_spec,
+    GammaCommonAnchorBasisSpec,
     gamma_sampled_k_route_contract,
 )
 from .projection_selection import (
@@ -54,13 +58,12 @@ from .projection_selection import (
     FrozenTargetWindow,
     TargetWindowSpec,
     evaluate_fixed_target_window,
-    projection_overlap_metrics,
     resolve_target_window,
 )
 from .selection_artifact import (
     SelectionInputIdentity,
     build_selection_policy_hash,
-    gamma_routed_ordered_q_identity_hash,
+    gamma_common_anchor_ordered_q_identity_hash,
     hash_frozen_target_window,
     hash_validation_k_indices,
 )
@@ -86,10 +89,15 @@ from .symmetry.joint_exactification import (
 )
 
 
-GAMMA_AUTO_PRODUCER_VERSION = "kp.gamma-auto-producer.v3"
-GAMMA_AUTO_CANDIDATE_SCHEMA = "kp.gamma-auto-candidate.v1"
-GAMMA_AUTO_METRIC_SCHEMA = "kp.candidate-metrics.v1"
-GAMMA_AUTO_ORDERING_RULE = "dimension-error-overlap-symmetry-v1"
+GAMMA_AUTO_PRODUCER_VERSION = "kp.gamma-auto-common-anchor-producer.v2"
+GAMMA_AUTO_CANDIDATE_SCHEMA = "kp.gamma-auto-common-anchor-candidate.v2"
+GAMMA_AUTO_METRIC_SCHEMA = "kp.gamma-candidate-metrics-pre-symmetry.v2"
+GAMMA_AUTO_ORDERING_RULE = "dimension-error-overlap-v2"
+GAMMA_AUTO_PUBLIC_POLICY_SCHEMA = "kp.gamma-auto-common-anchor.v2"
+
+_GAMMA_AUTO_DEFAULT_MAX_DIMENSION = 16
+_GAMMA_AUTO_DEFAULT_DEGENERACY_TOLERANCE_EV = 1.0e-5
+_GAMMA_AUTO_DEFAULT_VALIDATION_BANDS = 8
 
 
 def _require_exact_keys(
@@ -338,6 +346,254 @@ class GammaAutomaticSelectionConfig:
     candidate_seed_band_indices: tuple[tuple[int, ...], ...]
     reference_k_index: int
     downfold: GammaDownfoldConfig
+    max_dimension: int = _GAMMA_AUTO_DEFAULT_MAX_DIMENSION
+    degeneracy_tolerance: float = _GAMMA_AUTO_DEFAULT_DEGENERACY_TOLERANCE_EV
+    generated_candidate_envelope: bool = False
+
+    def __post_init__(self) -> None:
+        max_dimension = _strict_positive_integer(
+            self.max_dimension,
+            field="automatic Gamma max_dimension",
+        )
+        degeneracy_tolerance = _strict_real(
+            self.degeneracy_tolerance,
+            field="automatic Gamma degeneracy_tolerance",
+            nonnegative=True,
+        )
+        if type(self.generated_candidate_envelope) is not bool:
+            raise ValueError(
+                "automatic Gamma generated_candidate_envelope must be a strict bool"
+            )
+        if self.generated_candidate_envelope:
+            if self.candidate_seed_band_indices:
+                raise ValueError(
+                    "public automatic Gamma policy cannot contain "
+                    "candidate_seed_band_indices"
+                )
+            if int(self.reference_k_index) != -1:
+                raise ValueError(
+                    "public automatic Gamma policy cannot contain reference_k_index"
+                )
+        object.__setattr__(self, "max_dimension", max_dimension)
+        object.__setattr__(self, "degeneracy_tolerance", degeneracy_tolerance)
+
+    @classmethod
+    def from_normalized_project_config(
+        cls,
+        value: Any,
+    ) -> "GammaAutomaticSelectionConfig":
+        """Materialize the versioned universal policy from public project input.
+
+        Candidate bands and the reference point are deliberately absent here:
+        both depend on the actual case arrays and are resolved by
+        :func:`prepare_gamma_automatic_selection`.
+        """
+
+        if not isinstance(value, Mapping):
+            raise ValueError("automatic Gamma project config must be a mapping")
+        project = dict(value)
+        selection_raw = project.get("selection")
+        if not isinstance(selection_raw, Mapping):
+            raise ValueError("automatic Gamma project.selection must be a mapping")
+        selection_payload = dict(selection_raw)
+        allowed_selection_fields = {
+            "mode",
+            "edge",
+            "efermi",
+            "max_dimension",
+            "degeneracy_tolerance",
+            "validation_indices",
+            "validation_bands",
+            "thresholds",
+        }
+        unknown = sorted(set(selection_payload) - allowed_selection_fields)
+        if unknown:
+            raise ValueError(
+                "public automatic Gamma selection contains unsupported fields: "
+                + ", ".join(unknown)
+            )
+        if selection_payload.get("mode") != "auto":
+            raise ValueError("automatic Gamma selection mode must be exactly 'auto'")
+
+        project_edge = project.get("target")
+        selection_edge = selection_payload.get("edge")
+        if (
+            project_edge is not None
+            and selection_edge is not None
+            and str(project_edge).strip().lower()
+            != str(selection_edge).strip().lower()
+        ):
+            raise ValueError("project.target conflicts with project.selection.edge")
+        edge_raw = selection_edge if selection_edge is not None else project_edge
+        if edge_raw is None:
+            raise ValueError("automatic Gamma project.target is required")
+
+        project_efermi = project.get("efermi")
+        selection_efermi = selection_payload.get("efermi")
+        if project_efermi is not None and selection_efermi is not None:
+            project_efermi_value = _strict_real(
+                project_efermi, field="project.efermi"
+            )
+            selection_efermi_value = _strict_real(
+                selection_efermi, field="project.selection.efermi"
+            )
+            if project_efermi_value != selection_efermi_value:
+                raise ValueError(
+                    "project.efermi conflicts with project.selection.efermi"
+                )
+            energy_reference = project_efermi_value
+        elif selection_efermi is not None:
+            energy_reference = _strict_real(
+                selection_efermi, field="project.selection.efermi"
+            )
+        elif project_efermi is not None:
+            energy_reference = _strict_real(project_efermi, field="project.efermi")
+        else:
+            raise ValueError("automatic Gamma project.efermi is required")
+
+        max_dimension = _strict_positive_integer(
+            selection_payload.get(
+                "max_dimension", _GAMMA_AUTO_DEFAULT_MAX_DIMENSION
+            ),
+            field="project.selection.max_dimension",
+        )
+        degeneracy_tolerance = _strict_real(
+            selection_payload.get(
+                "degeneracy_tolerance",
+                _GAMMA_AUTO_DEFAULT_DEGENERACY_TOLERANCE_EV,
+            ),
+            field="project.selection.degeneracy_tolerance",
+            nonnegative=True,
+        )
+        validation_indices = _strict_indices(
+            selection_payload.get("validation_indices", (0,)),
+            field="project.selection.validation_indices",
+        )
+        validation_bands = _strict_positive_integer(
+            selection_payload.get(
+                "validation_bands", _GAMMA_AUTO_DEFAULT_VALIDATION_BANDS
+            ),
+            field="project.selection.validation_bands",
+        )
+
+        threshold_defaults = {
+            "band_rms_mev": 3.0,
+            "band_max_mev": 3.0,
+            "subspace_overlap": 0.05,
+        }
+        authored_thresholds = selection_payload.get("thresholds", {})
+        if not isinstance(authored_thresholds, Mapping):
+            raise ValueError("project.selection.thresholds must be a mapping")
+        unknown_thresholds = sorted(
+            set(authored_thresholds) - set(threshold_defaults)
+        )
+        if unknown_thresholds:
+            raise ValueError(
+                "project.selection.thresholds contains unsupported fields: "
+                + ", ".join(unknown_thresholds)
+            )
+        selection_thresholds = SelectionThresholds(
+            **{
+                name: _strict_real(
+                    authored_thresholds.get(name, default),
+                    field=f"project.selection.thresholds.{name}",
+                )
+                for name, default in threshold_defaults.items()
+            },
+            # Symmetry is materialized after public candidate selection.  Keep
+            # positive internal values only to satisfy the shared record type;
+            # they are neither authored nor applied by the public selector.
+            symmetry_residual=1.0,
+            symmetry_leakage=1.0,
+        )
+        select_projection_candidate(
+            (
+                CandidateMetrics(
+                    candidate_id="public-config-domain-probe",
+                    dimension=1,
+                    band_rms_mev=0.0,
+                    band_max_mev=0.0,
+                    subspace_overlap=1.0,
+                    symmetry_residual=0.0,
+                    symmetry_leakage=0.0,
+                ),
+            ),
+            selection_thresholds,
+        )
+
+        method = str(
+            project.get("downfold_method", project.get("method", "first_order"))
+        ).strip().lower()
+        e_ref = project.get("e_ref", project.get("E_ref"))
+        downfold = GammaDownfoldConfig.from_normalized_config(
+            {
+                "method": method,
+                "e_ref": e_ref,
+                "pole_warning_mev": project.get("pole_warning_mev", 10.0),
+                "pole_danger_mev": project.get("pole_danger_mev", 1.0),
+                "fail_on_near_pole": project.get("fail_on_near_pole", False),
+                "compute_pole_diagnostics": project.get(
+                    "compute_pole_diagnostics", False
+                ),
+                "compute_condition_number": project.get(
+                    "compute_condition_number", False
+                ),
+            }
+        )
+
+        routing = GammaRoutingThresholds(
+            energy_same_ev=1.0e-9,
+            energy_different_ev=1.0e-5,
+            capture_zero_fraction=1.0e-9,
+            capture_loss_max=1.0e-9,
+            local_action_isometry=1.0e-8,
+            off_route_leakage=1.0e-8,
+            closure_residual=1.0e-8,
+            route_zero_gap=1.0e-8,
+            route_covariance=1.0e-8,
+            projector_residual=1.0e-8,
+            anchor_sigma_min=1.0e-8,
+            max_rank=max_dimension,
+            max_iterations=20,
+        )
+        candidate_symmetry = CandidateSymmetryThresholds(
+            raw_h_leakage=1.0e-8,
+            exactification_distance=5.0e-3,
+            intertwining_residual=1.0e-8,
+            heff_covariance_residual=1.0e-8,
+            relation_residual=1.0e-8,
+            antiunitary_square_residual=1.0e-8,
+            exact_action_unitarity_residual=1.0e-8,
+            projection_orthonormality_residual=1.0e-8,
+            heff_hermiticity_residual=1.0e-8,
+            raw_h_action_unitarity_residual=1.0e-8,
+        )
+        return cls(
+            producer_integrity_thresholds=GammaProducerIntegrityThresholds(
+                source_hamiltonian_covariance_residual=1.0e-8,
+                # Retained solely because the legacy compatibility record still
+                # has this field.  The common-anchor public policy does not use
+                # or bind this former routed/model-frame gate.
+                routed_model_heff_covariance_residual=1.0,
+            ),
+            routing_thresholds=routing,
+            selection_thresholds=selection_thresholds,
+            candidate_symmetry_thresholds=candidate_symmetry,
+            exactification=JointExactificationConfig(),
+            target_window_spec=TargetWindowSpec(
+                edge=str(edge_raw),
+                band_count=validation_bands,
+                validation_k_indices=validation_indices,
+                energy_reference_ev=energy_reference,
+                degeneracy_tolerance_mev=degeneracy_tolerance * 1000.0,
+            ),
+            candidate_seed_band_indices=(),
+            reference_k_index=-1,
+            downfold=downfold,
+            max_dimension=max_dimension,
+            degeneracy_tolerance=degeneracy_tolerance,
+            generated_candidate_envelope=True,
+        )
 
     @classmethod
     def from_normalized_config(
@@ -508,9 +764,58 @@ class GammaAutomaticSelectionConfig:
             candidate_seed_band_indices=seeds,
             reference_k_index=reference,
             downfold=GammaDownfoldConfig.from_normalized_config(payload["downfold"]),
+            max_dimension=routing.max_rank,
+            degeneracy_tolerance=(
+                target_spec.degeneracy_tolerance_mev / 1000.0
+            ),
+            generated_candidate_envelope=False,
         )
 
     def policy_payload(self) -> dict[str, Any]:
+        if self.generated_candidate_envelope:
+            return {
+                "schema": GAMMA_AUTO_PUBLIC_POLICY_SCHEMA,
+                "candidate_envelope": {
+                    "max_dimension": self.max_dimension,
+                    "degeneracy_tolerance_ev": self.degeneracy_tolerance,
+                    "construction": "representative-joint-spectrum-complete-clusters",
+                },
+                "selection_thresholds": {
+                    name: getattr(self.selection_thresholds, name)
+                    for name in (
+                        "band_rms_mev",
+                        "band_max_mev",
+                        "subspace_overlap",
+                    )
+                },
+                "symmetry": {"status": "post_selection_pending"},
+                "target_window": {
+                    "edge": self.target_window_spec.edge,
+                    "band_count": self.target_window_spec.band_count,
+                    "validation_k_indices": list(
+                        self.target_window_spec.validation_k_indices
+                    ),
+                    "energy_reference_ev": (
+                        self.target_window_spec.energy_reference_ev
+                    ),
+                    "degeneracy_tolerance_mev": (
+                        self.target_window_spec.degeneracy_tolerance_mev
+                    ),
+                },
+                "common_anchor_numerics": {
+                    "local_action_isometry": (
+                        self.routing_thresholds.local_action_isometry
+                    ),
+                    "off_route_leakage": self.routing_thresholds.off_route_leakage,
+                    "projector_residual": self.routing_thresholds.projector_residual,
+                    "anchor_sigma_min": self.routing_thresholds.anchor_sigma_min,
+                },
+                "exactification": {
+                    item.name: getattr(self.exactification, item.name)
+                    for item in fields(JointExactificationConfig)
+                },
+                "downfold": self.downfold.to_payload(),
+            }
         return {
             "schema": "kp.gamma-auto-policy-payload.v2",
             "producer_integrity_thresholds": (
@@ -613,6 +918,7 @@ class GammaAutomaticProducerInputs:
     tapw_source_basis_hash: str
     operations: tuple[GammaRawOperationSpec, ...]
     presentation: MagneticPresentation
+    external_target_band_spectra: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         hamiltonians = np.array(
@@ -664,6 +970,30 @@ class GammaAutomaticProducerInputs:
         )
         if set(names) != set(presentation_names):
             raise ValueError("Gamma raw operations must match the magnetic presentation")
+        target_spectra: np.ndarray | None
+        if self.external_target_band_spectra is None:
+            target_spectra = None
+        else:
+            target_spectra = np.array(
+                self.external_target_band_spectra,
+                dtype=np.float64,
+                copy=True,
+                order="C",
+            )
+            if (
+                target_spectra.ndim != 2
+                or target_spectra.shape[0] != len(k_indices)
+                or target_spectra.shape[1] <= 0
+                or not np.all(np.isfinite(target_spectra))
+            ):
+                raise ValueError(
+                    "external_target_band_spectra must be finite (Nk,Nband)"
+                )
+            if np.any(np.diff(target_spectra, axis=1) < 0.0):
+                raise ValueError(
+                    "external_target_band_spectra must be sorted in ascending energy"
+                )
+            target_spectra.setflags(write=False)
         hamiltonians.setflags(write=False)
         kpoints.setflags(write=False)
         for qset in qsets:
@@ -674,6 +1004,7 @@ class GammaAutomaticProducerInputs:
         object.__setattr__(self, "qsets", qsets)
         object.__setattr__(self, "tapw_source_basis_hash", basis_hash)
         object.__setattr__(self, "operations", operations)
+        object.__setattr__(self, "external_target_band_spectra", target_spectra)
 
 
 @dataclass(frozen=True)
@@ -686,8 +1017,8 @@ class GammaCandidateRejection:
 @dataclass(frozen=True)
 class GammaCandidateEvaluation:
     metrics: CandidateMetrics
-    handoff: GammaRoutedBasisSpec
-    symmetry_certificate: CandidateSymmetryCertificate
+    handoff: GammaCommonAnchorBasisSpec
+    symmetry_certificate: CandidateSymmetryCertificate | None
 
 
 @dataclass(frozen=True)
@@ -697,7 +1028,7 @@ class GammaAutomaticSelectionResult:
     rejected_candidates: tuple[GammaCandidateRejection, ...]
     evaluations: tuple[GammaCandidateEvaluation, ...]
     decision: SelectionDecision
-    handoff: GammaRoutedBasisSpec
+    handoff: GammaCommonAnchorBasisSpec
     frozen_target_window: FrozenTargetWindow
 
 
@@ -707,7 +1038,11 @@ class GammaAutomaticSelectionPreparation:
 
     inputs: GammaAutomaticProducerInputs
     config: GammaAutomaticSelectionConfig
+    reference_point: ReferencePoint
+    candidate_seed_band_indices: tuple[tuple[int, ...], ...]
+    effective_max_dimension: int
     layout: GammaRowLayout
+    common_anchor_gauge_config: AutoGaugeConfig
     certified_actions: tuple[GammaCertifiedRawAction, ...]
     operation_inputs: Mapping[str, CandidateOperationInput]
     required_pairs: Mapping[str, tuple[tuple[int, int], ...]]
@@ -716,7 +1051,6 @@ class GammaAutomaticSelectionPreparation:
     local_vectors: tuple[tuple[np.ndarray, ...], ...]
     frozen_target_window: FrozenTargetWindow
     target_values: np.ndarray
-    target_vectors: tuple[np.ndarray, ...]
     source_hamiltonian_hash: str
     selection_input: SelectionInputIdentity
 
@@ -726,10 +1060,17 @@ def _local_eigensystems(
     layout: GammaRowLayout,
     *,
     hermiticity_tolerance: float,
+    workers: int = 1,
 ) -> tuple[tuple[tuple[np.ndarray, ...], ...], tuple[tuple[np.ndarray, ...], ...]]:
-    values_by_k: list[tuple[np.ndarray, ...]] = []
-    vectors_by_k: list[tuple[np.ndarray, ...]] = []
-    for k_position, hamiltonian in enumerate(hamiltonians):
+    worker_count = min(
+        _strict_positive_integer(workers, field="local Gamma eigensystem workers"),
+        len(hamiltonians),
+    )
+
+    def solve_k(
+        item: tuple[int, np.ndarray],
+    ) -> tuple[tuple[np.ndarray, ...], tuple[np.ndarray, ...]]:
+        k_position, hamiltonian = item
         scale = max(1.0, float(np.linalg.norm(hamiltonian, ord="fro")))
         residual = float(
             np.linalg.norm(hamiltonian - hamiltonian.conj().T, ord="fro") / scale
@@ -748,34 +1089,178 @@ def _local_eigensystems(
             values, vectors = np.linalg.eigh(block)
             values_by_q.append(values)
             vectors_by_q.append(vectors)
-        values_by_k.append(tuple(values_by_q))
-        vectors_by_k.append(tuple(vectors_by_q))
-    return tuple(values_by_k), tuple(vectors_by_k)
+        return tuple(values_by_q), tuple(vectors_by_q)
 
+    indexed = tuple(enumerate(hamiltonians))
+    if worker_count == 1:
+        solved = tuple(solve_k(item) for item in indexed)
+    else:
+        from threadpoolctl import threadpool_limits
 
-def _target_eigensystems(
-    hamiltonians: np.ndarray,
-    *,
-    workers: int,
-) -> tuple[np.ndarray, tuple[np.ndarray, ...]]:
-    from threadpoolctl import threadpool_limits
-
-    requested_workers = _strict_positive_integer(
-        workers,
-        field="target eigensystem workers",
+        with threadpool_limits(limits=1, user_api="blas"):
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                solved = tuple(executor.map(solve_k, indexed))
+    return (
+        tuple(values for values, _vectors in solved),
+        tuple(vectors for _values, vectors in solved),
     )
-    effective_workers = min(requested_workers, len(hamiltonians))
-    with threadpool_limits(limits=1, user_api="blas"):
-        if effective_workers == 1:
-            eigensystems = tuple(
-                np.linalg.eigh(hamiltonian) for hamiltonian in hamiltonians
-            )
+
+
+def _geometric_reference_q_index(qset: np.ndarray) -> int:
+    """Choose the unique ordered-Q entry nearest the Gamma origin."""
+
+    coordinates = np.asarray(qset, dtype=np.float64)
+    if coordinates.ndim != 2 or not np.all(np.isfinite(coordinates)):
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "Gamma common-anchor reference Q coordinates must be finite",
+        )
+    squared_norms = np.einsum("qi,qi->q", coordinates, coordinates)
+    minimum = float(np.min(squared_norms))
+    scale = max(1.0, float(np.max(squared_norms)))
+    matches = np.flatnonzero(
+        np.isclose(squared_norms, minimum, rtol=1.0e-12, atol=1.0e-14 * scale)
+    )
+    if matches.size != 1:
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "automatic Gamma requires a unique geometric reference Q; "
+            "the minimum-norm Q must be unique",
+        )
+    return int(matches[0])
+
+
+def _resolved_reference_point(
+    inputs: GammaAutomaticProducerInputs,
+    config: GammaAutomaticSelectionConfig,
+    *,
+    reference_q_index: int,
+) -> ReferencePoint:
+    if config.generated_candidate_envelope:
+        k_position = int(np.argmin(np.linalg.norm(inputs.kpoints, axis=1)))
+        k_index = int(inputs.k_indices[k_position])
+    else:
+        if config.reference_k_index not in inputs.k_indices:
+            raise ValueError("reference_k_index is not in production k_indices")
+        k_index = int(config.reference_k_index)
+        k_position = inputs.k_indices.index(k_index)
+    q_index = int(reference_q_index)
+    return ReferencePoint(
+        k_index=k_index,
+        k_coordinate=tuple(float(value) for value in inputs.kpoints[k_position]),
+        q_indices=(q_index, q_index),
+        q_vectors=tuple(
+            tuple(float(value) for value in qset[q_index])
+            for qset in inputs.qsets
+        ),
+    )
+
+
+def _generated_candidate_seed_envelope(
+    values: np.ndarray,
+    config: GammaAutomaticSelectionConfig,
+    *,
+    max_dimension: int,
+) -> tuple[tuple[int, ...], ...]:
+    """Accumulate complete edge clusters at the actual representative fibre."""
+
+    eigenvalues = np.asarray(values, dtype=np.float64)
+    if eigenvalues.ndim != 1 or not np.all(np.isfinite(eigenvalues)):
+        raise ValueError("representative Gamma spectrum must be one finite vector")
+    edge = config.target_window_spec.edge
+    energy_reference = float(config.target_window_spec.energy_reference_ev)
+    if edge == "valence":
+        eligible = np.flatnonzero(eigenvalues <= energy_reference)
+        ordered = tuple(
+            sorted(eligible.tolist(), key=lambda index: (-eigenvalues[index], index))
+        )
+    else:
+        eligible = np.flatnonzero(eigenvalues >= energy_reference)
+        ordered = tuple(
+            sorted(eligible.tolist(), key=lambda index: (eigenvalues[index], index))
+        )
+
+    clusters: list[list[int]] = []
+    for band_index in ordered:
+        if not clusters:
+            clusters.append([int(band_index)])
+            continue
+        previous = clusters[-1][-1]
+        if (
+            abs(float(eigenvalues[band_index] - eigenvalues[previous]))
+            <= config.degeneracy_tolerance
+        ):
+            clusters[-1].append(int(band_index))
         else:
-            with ThreadPoolExecutor(max_workers=effective_workers) as executor:
-                eigensystems = tuple(executor.map(np.linalg.eigh, hamiltonians))
-    values = [eigensystem[0] for eigensystem in eigensystems]
-    vectors = [eigensystem[1] for eigensystem in eigensystems]
-    return np.stack(values, axis=0), tuple(vectors)
+            clusters.append([int(band_index)])
+
+    candidates: list[tuple[int, ...]] = []
+    accumulated: list[int] = []
+    for cluster in clusters:
+        if len(accumulated) + len(cluster) > int(max_dimension):
+            break
+        accumulated.extend(cluster)
+        candidates.append(tuple(sorted(accumulated)))
+    if not candidates:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.NO_CANDIDATES,
+            "automatic Gamma generated no complete candidate cluster within "
+            f"max_dimension={int(max_dimension)}",
+        )
+    return tuple(candidates)
+
+
+def _common_anchor_gauge_config(
+    *,
+    reference_q_index: int,
+    thresholds: GammaRoutingThresholds,
+) -> AutoGaugeConfig:
+    min_sigma = float(thresholds.anchor_sigma_min)
+    return AutoGaugeConfig(
+        min_sigma=min_sigma,
+        max_condition=max(1.0, 1.0 / min_sigma),
+        reference_q_index=int(reference_q_index),
+    )
+
+
+def _certify_candidate_seed_envelope(
+    *,
+    seed: Sequence[int],
+    local_values: Sequence[Sequence[np.ndarray]],
+    max_rank: int,
+    degeneracy_tolerance_mev: float,
+    k_indices: Sequence[int],
+) -> tuple[int, ...]:
+    """Reject oversized seeds and cuts through local energy clusters."""
+
+    joint = tuple(int(index) for index in seed)
+    if len(joint) > int(max_rank):
+        raise GammaRoutingError(
+            CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
+            f"Gamma candidate rank {len(joint)} exceeds max_rank {int(max_rank)}",
+        )
+    selected = set(joint)
+    tolerance_ev = float(degeneracy_tolerance_mev) / 1000.0
+    for position, values_by_q in enumerate(local_values):
+        for q_index, raw_values in enumerate(values_by_q):
+            values = np.asarray(raw_values, dtype=np.float64)
+            if any(index < 0 or index >= values.size for index in joint):
+                raise GammaRoutingError(
+                    CandidateRejectionReason.SYMMETRY_CLOSURE_FAILURE,
+                    "Gamma candidate seed lies outside a local eigensystem",
+                )
+            for boundary, gap in enumerate(np.diff(values), start=1):
+                if float(gap) > tolerance_ev:
+                    continue
+                if ((boundary - 1) in selected) == (boundary in selected):
+                    continue
+                raise GammaRoutingError(
+                    CandidateRejectionReason.AMBIGUOUS_ENERGY_CLUSTER,
+                    "Gamma candidate cuts a degenerate local energy cluster at "
+                    f"k={int(k_indices[position])}, q={q_index}, bands "
+                    f"{boundary - 1}/{boundary} (gap={float(gap) * 1000.0:.3e} meV)",
+                )
+    return joint
 
 
 def _certify_source_hamiltonian_covariance(
@@ -811,71 +1296,153 @@ def _certify_source_hamiltonian_covariance(
                 )
 
 
-def _edge_indices(values: np.ndarray, spec: TargetWindowSpec) -> np.ndarray:
-    if spec.edge == "valence":
-        eligible = np.flatnonzero(values <= spec.energy_reference_ev)
-        selected = eligible[-spec.band_count :]
-    else:
-        eligible = np.flatnonzero(values >= spec.energy_reference_ev)
-        selected = eligible[: spec.band_count]
-    if selected.size != spec.band_count:
-        raise CandidateRejected(
-            CandidateRejectionReason.INSUFFICIENT_TARGET_BANDS,
-            "spectrum does not contain the fixed target edge window",
-            required_band_count=spec.band_count,
-            available_band_count=int(eligible.size),
-        )
-    return selected
-
-
-def _canonical_candidate_id(
+def _canonical_common_candidate_id(
     *,
     joint_band_indices: Sequence[int],
-    closure_hashes: Sequence[str],
+    anchor_spec: GammaCommonAnchorSpec,
     layout: GammaRowLayout,
-    thresholds: GammaRoutingThresholds,
 ) -> str:
     identity = hash_mapping(
         {
             "schema": GAMMA_AUTO_CANDIDATE_SCHEMA,
             "joint_band_indices": list(joint_band_indices),
-            "closure_hashes": list(closure_hashes),
+            "anchor_spec_identity_hash": anchor_spec.identity_hash,
             "layout_hash": layout.layout_hash,
-            "routing_thresholds_hash": thresholds.identity_hash,
         }
     )
-    return "gamma-routed-" + identity[:24]
+    return "gamma-common-anchor-" + identity[:24]
 
 
-def _reference_anchor_frames(routed: GammaRoutedFrames) -> tuple[np.ndarray, ...]:
-    return tuple(
-        np.ascontiguousarray(np.column_stack(groups), dtype=np.complex128)
-        for groups in routed.reference_frames_by_q_group
-    )
-
-
-def _routing_certificate_hash(
+def _model_columns_for_q(
     *,
-    k_index: int,
-    routed: GammaRoutedFrames,
-    residuals: Sequence[tuple[str, int, float]],
-    actions: Sequence[GammaCertifiedRawAction],
+    q_index: int,
+    q_count: int,
+    model_group_ranks: Sequence[int],
+) -> np.ndarray:
+    """Return the established sector-orbital-Q model column order."""
+
+    return np.asarray(
+        [
+            q_count * sum(model_group_ranks[:group]) + orbital * q_count + q_index
+            for group, rank in enumerate(model_group_ranks)
+            for orbital in range(int(rank))
+        ],
+        dtype=np.intp,
+    )
+
+
+def _assemble_common_anchor_frame(
+    frames: GammaCommonAnchorFrames,
+    *,
     layout: GammaRowLayout,
-    thresholds: GammaRoutingThresholds,
-) -> str:
-    return hash_mapping(
-        {
-            "schema": "kp.gamma-routing-covariance-certificate.v1",
-            "k_index": int(k_index),
-            "layout_hash": layout.layout_hash,
-            "thresholds_hash": thresholds.identity_hash,
-            "frame_hash": routed.frame_hash,
-            "action_hashes": [action.action_hash for action in actions],
-            "residuals": [
-                [str(name), int(q_index), float(value)]
-                for name, q_index, value in residuals
-            ],
-        }
+) -> np.ndarray:
+    """Embed compact common-anchor fibres in the full TAPW row layout."""
+
+    if frames.layout_hash != layout.layout_hash:
+        raise ValueError("Gamma common-anchor frames do not match the row layout")
+    ranks = tuple(int(rank) for rank in frames.model_group_ranks)
+    local_rank = sum(ranks)
+    if len(frames.local_frames_by_q) != layout.q_count:
+        raise ValueError("Gamma common-anchor frames do not cover every ordered Q")
+    assembled = np.zeros(
+        (layout.full_dimension, layout.q_count * local_rank),
+        dtype=np.complex128,
+    )
+    for q_index, raw_frame in enumerate(frames.local_frames_by_q):
+        frame = np.asarray(raw_frame, dtype=np.complex128)
+        if frame.shape != (layout.same_q_dimension, local_rank):
+            raise ValueError("Gamma common-anchor local frame shape is invalid")
+        rows = layout.same_q_full_rows(q_index)
+        columns = _model_columns_for_q(
+            q_index=q_index,
+            q_count=layout.q_count,
+            model_group_ranks=ranks,
+        )
+        assembled[np.ix_(rows, columns)] = frame
+    return assembled
+
+
+def _common_anchor_projector_groups(
+    frames: GammaCommonAnchorFrames,
+    *,
+    layout: GammaRowLayout,
+    eigenvectors_by_q: Sequence[np.ndarray],
+) -> tuple[Any, Any]:
+    """Build block-sparse low/high groups without a dense global U_high."""
+
+    ranks = tuple(int(rank) for rank in frames.model_group_ranks)
+    local_rank = len(frames.joint_band_indices)
+    selected_indices = set(frames.joint_band_indices)
+    high_indices = np.asarray(
+        [
+            index
+            for index in range(layout.same_q_dimension)
+            if index not in selected_indices
+        ],
+        dtype=np.intp,
+    )
+    high_rank = int(high_indices.size)
+    block_rows: list[np.ndarray] = []
+    low_columns: list[np.ndarray] = []
+    high_columns: list[np.ndarray] = []
+    low_global_columns: list[np.ndarray] = []
+    high_global_columns: list[np.ndarray] = []
+    for q_index, (raw_low, raw_vectors) in enumerate(
+        zip(frames.local_frames_by_q, eigenvectors_by_q, strict=True)
+    ):
+        block_rows.append(layout.same_q_full_rows(q_index))
+        low_columns.append(np.asarray(raw_low, dtype=np.complex128))
+        high_columns.append(
+            np.asarray(raw_vectors, dtype=np.complex128)[:, high_indices]
+        )
+        low_global_columns.append(
+            _model_columns_for_q(
+                q_index=q_index,
+                q_count=layout.q_count,
+                model_group_ranks=ranks,
+            )
+        )
+        high_global_columns.append(
+            np.arange(
+                q_index * high_rank,
+                (q_index + 1) * high_rank,
+                dtype=np.intp,
+            )
+        )
+    return (
+        projector_groups_from_block_columns(
+            block_rows,
+            low_columns,
+            low_global_columns,
+            n_columns=layout.q_count * local_rank,
+        ),
+        projector_groups_from_block_columns(
+            block_rows,
+            high_columns,
+            high_global_columns,
+            n_columns=layout.q_count * high_rank,
+        ),
+    )
+
+
+def _freeze_validation_target_window(
+    target_values: np.ndarray,
+    spec: TargetWindowSpec,
+) -> FrozenTargetWindow:
+    """Resolve compact validation spectra while retaining physical k indices."""
+
+    compact_spec = TargetWindowSpec(
+        edge=spec.edge,
+        band_count=spec.band_count,
+        validation_k_indices=tuple(range(len(spec.validation_k_indices))),
+        energy_reference_ev=spec.energy_reference_ev,
+        degeneracy_tolerance_mev=spec.degeneracy_tolerance_mev,
+    )
+    compact = resolve_target_window(target_values, compact_spec)
+    return FrozenTargetWindow(
+        spec=spec,
+        target_band_ids=compact.target_band_ids,
+        target_energies_ev=compact.target_energies_ev,
     )
 
 
@@ -893,53 +1460,137 @@ def _exactified_candidate_actions(
     *,
     states: Mapping[int, CandidateProjectionState],
     operations: Mapping[str, CandidateOperationInput],
+    certified_actions: Sequence[GammaCertifiedRawAction],
+    layout: GammaRowLayout,
+    model_group_ranks: Sequence[int],
     presentation: MagneticPresentation,
     config: JointExactificationConfig,
     sigma_minimum: float,
+    off_route_tolerance: float,
+    uniformity_tolerance: float,
 ) -> dict[str, np.ndarray]:
-    route_actions: dict[str, BlockRouteAction] = {}
+    certified_by_name = {action.name: action for action in certified_actions}
+    generator_names = {generator.name for generator in presentation.generators}
+    if set(certified_by_name) != generator_names or set(operations) != generator_names:
+        raise GammaRoutingError(
+            CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+            "Gamma common-anchor symmetry packages disagree",
+        )
+    local_rank = sum(int(rank) for rank in model_group_ranks)
+    model_dimension = layout.q_count * local_rank
+    all_model_rows = np.arange(model_dimension, dtype=np.intp)
+    internal_actions: dict[str, BlockRouteAction] = {}
     for generator in presentation.generators:
         operation = operations[generator.name]
-        projected: list[np.ndarray] = []
+        certified = certified_by_name[generator.name]
+        internal_blocks: list[np.ndarray] = []
         for target_k, source_k in operation.pairs:
             target = states[target_k]
             source = states[source_k]
-            projected.append(
-                evaluate_projected_pair(
-                    d_full=operation.d_full,
-                    target_u_low=target.u_low,
-                    source_u_low=source.u_low,
-                    target_heff=None,
-                    source_heff=None,
-                    antiunitary=operation.antiunitary,
-                    compute_heff_covariance=False,
-                ).projected_action
+            projected = evaluate_projected_pair(
+                d_full=operation.d_full,
+                target_u_low=target.u_low,
+                source_u_low=source.u_low,
+                target_heff=None,
+                source_heff=None,
+                antiunitary=operation.antiunitary,
+                compute_heff_covariance=False,
+            ).projected_action
+            for source_q, target_q in enumerate(certified.q_permutation):
+                source_columns = _model_columns_for_q(
+                    q_index=source_q,
+                    q_count=layout.q_count,
+                    model_group_ranks=model_group_ranks,
+                )
+                target_columns = _model_columns_for_q(
+                    q_index=target_q,
+                    q_count=layout.q_count,
+                    model_group_ranks=model_group_ranks,
+                )
+                outside_target = np.setdiff1d(
+                    all_model_rows,
+                    target_columns,
+                    assume_unique=True,
+                )
+                leakage = float(
+                    np.linalg.norm(
+                        projected[np.ix_(outside_target, source_columns)],
+                        ord="fro",
+                    )
+                    / np.sqrt(max(1, local_rank))
+                )
+                if not np.isfinite(leakage) or leakage > off_route_tolerance:
+                    raise GammaRoutingError(
+                        CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+                        f"Gamma common-anchor operation {generator.name} has "
+                        f"off-route model-Q leakage {leakage:.3e}",
+                    )
+                internal_blocks.append(
+                    np.asarray(
+                        projected[np.ix_(target_columns, source_columns)],
+                        dtype=np.complex128,
+                    )
+                )
+        mean_internal = np.mean(np.stack(internal_blocks, axis=0), axis=0)
+        uniformity_residual = max(
+            float(
+                np.linalg.norm(block - mean_internal, ord="fro")
+                / np.sqrt(max(1, local_rank))
             )
-        mean_action = np.mean(np.stack(projected, axis=0), axis=0)
-        unitary = _polar_unitary(mean_action, sigma_minimum=sigma_minimum)
-        dimension = int(unitary.shape[0])
-        route_actions[generator.name] = BlockRouteAction(
+            for block in internal_blocks
+        )
+        if uniformity_residual > uniformity_tolerance:
+            raise GammaRoutingError(
+                CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+                f"Gamma common-anchor operation {generator.name} lacks a "
+                "Q-independent internal action: residual "
+                f"{uniformity_residual:.3e} exceeds {uniformity_tolerance:.3e}",
+            )
+        unitary = _polar_unitary(
+            mean_internal,
+            sigma_minimum=sigma_minimum,
+        )
+        internal_actions[generator.name] = BlockRouteAction(
             name=generator.name,
             antiunitary=generator.antiunitary,
             fiber_permutation=(0,),
-            fiber_dimensions=(dimension,),
+            fiber_dimensions=(local_rank,),
             route_blocks=(unitary,),
         )
     try:
-        certify_joint_block_actions(route_actions, presentation)
-        exact_actions = route_actions
+        certify_joint_block_actions(internal_actions, presentation)
+        exact_internal_actions = internal_actions
     except JointExactificationError:
-        exact_actions = dict(
+        exact_internal_actions = dict(
             joint_exactify_block_actions(
-                route_actions,
+                internal_actions,
                 presentation,
                 config=config,
             ).actions
         )
-    return {
-        name: materialize_block_route_action(action)
-        for name, action in exact_actions.items()
-    }
+    materialized: dict[str, np.ndarray] = {}
+    for name, internal_action in exact_internal_actions.items():
+        rho = materialize_block_route_action(internal_action)
+        full_action = np.zeros(
+            (model_dimension, model_dimension),
+            dtype=np.complex128,
+        )
+        for source_q, target_q in enumerate(
+            certified_by_name[name].q_permutation
+        ):
+            source_columns = _model_columns_for_q(
+                q_index=source_q,
+                q_count=layout.q_count,
+                model_group_ranks=model_group_ranks,
+            )
+            target_columns = _model_columns_for_q(
+                q_index=target_q,
+                q_count=layout.q_count,
+                model_group_ranks=model_group_ranks,
+            )
+            full_action[np.ix_(target_columns, source_columns)] = rho
+        materialized[name] = full_action
+    return materialized
 
 
 def _certificate_metrics(
@@ -975,13 +1626,6 @@ def _certificate_metrics(
     return (
         max(residual_values, default=0.0),
         max(leakage_values, default=0.0),
-    )
-
-
-def _normalized_frobenius_residual(matrix: Any, *, rank: int) -> float:
-    value = np.asarray(matrix, dtype=np.complex128)
-    return float(
-        np.linalg.norm(value, ord="fro") / np.sqrt(float(max(1, int(rank))))
     )
 
 
@@ -1029,90 +1673,145 @@ def _require_residual_gate(
         )
 
 
-def _certify_dual_frame_geometry(
-    *,
-    routed_low: np.ndarray,
-    routed_high: np.ndarray | None,
-    model_low: np.ndarray,
-    routed_frames_by_q: Sequence[np.ndarray],
-    model_frames_by_q: Sequence[np.ndarray],
-    layout: GammaRowLayout,
-    group_ranks: Sequence[int],
-    tolerance: float,
-    k_index: int,
-) -> np.ndarray:
-    model_dimension = int(model_low.shape[1])
-    identity = np.eye(model_dimension, dtype=np.complex128)
-    bridge = routed_low.conj().T @ model_low
+def _reference_candidate_metrics(
+    preparation: GammaAutomaticSelectionPreparation,
+    seed: tuple[int, ...],
+) -> CandidateMetrics:
+    """Score one branch at the representative k row without a handoff build."""
+
+    inputs = preparation.inputs
+    config = preparation.config
+    layout = preparation.layout
+    reference_position = inputs.k_indices.index(preparation.reference_point.k_index)
+    reference_q = preparation.common_anchor_gauge_config.reference_q_index
+    reference_values = preparation.local_values[reference_position][reference_q]
+    joint = _certify_candidate_seed_envelope(
+        seed=seed,
+        local_values=((reference_values,),),
+        max_rank=preparation.effective_max_dimension,
+        degeneracy_tolerance_mev=(
+            config.target_window_spec.degeneracy_tolerance_mev
+        ),
+        k_indices=(preparation.reference_point.k_index,),
+    )
+    anchor_spec = build_gamma_common_anchor_spec(
+        reference_eigenvalues_by_q=preparation.local_values[reference_position],
+        reference_eigenvectors_by_q=preparation.local_vectors[reference_position],
+        joint_band_indices=joint,
+        layout=layout,
+        gauge_config=preparation.common_anchor_gauge_config,
+        projector_tolerance=config.routing_thresholds.projector_residual,
+        orthonormality_tolerance=config.routing_thresholds.projector_residual,
+    )
+    frames = build_gamma_common_anchor_frames(
+        eigenvalues_by_q=preparation.local_values[reference_position],
+        eigenvectors_by_q=preparation.local_vectors[reference_position],
+        layout=layout,
+        anchor_spec=anchor_spec,
+    )
+    u_low = _assemble_common_anchor_frame(frames, layout=layout)
+    if config.downfold.options.method == "first_order":
+        downfolded = downfold_from_projectors(
+            inputs.source_hamiltonians[reference_position],
+            u_low,
+            None,
+            config.downfold.options,
+        )
+    else:
+        low_groups, high_groups = _common_anchor_projector_groups(
+            frames,
+            layout=layout,
+            eigenvectors_by_q=preparation.local_vectors[reference_position],
+        )
+        downfolded = downfold_from_projector_groups(
+            inputs.source_hamiltonians[reference_position],
+            low_groups,
+            high_groups,
+            config.downfold.options,
+        )
+    heff = np.asarray(downfolded.heff, dtype=np.complex128)
     _require_residual_gate(
         {
-            "routed_orthonormality": _normalized_frobenius_residual(
-                routed_low.conj().T @ routed_low - identity,
-                rank=model_dimension,
-            ),
-            "model_orthonormality": _normalized_frobenius_residual(
-                model_low.conj().T @ model_low - identity,
-                rank=model_dimension,
-            ),
-            "bridge_left_unitarity": _normalized_frobenius_residual(
-                bridge.conj().T @ bridge - identity,
-                rank=model_dimension,
-            ),
-            "bridge_right_unitarity": _normalized_frobenius_residual(
-                bridge @ bridge.conj().T - identity,
-                rank=model_dimension,
-            ),
-            "bridge_reconstruction": _normalized_frobenius_residual(
-                routed_low @ bridge - model_low,
-                rank=model_dimension,
-            ),
+            "reference_heff": max(
+                float(downfolded.hermiticity_residual),
+                _relative_frobenius_residual(heff, heff.conj().T),
+            )
         },
-        tolerance=tolerance,
-        context=f"Gamma dual-frame geometry gate failed at k={k_index}",
+        tolerance=float(
+            config.candidate_symmetry_thresholds.heff_hermiticity_residual
+        ),
+        context="Gamma representative-point downfold Hermiticity gate failed",
+    )
+    if inputs.external_target_band_spectra is None:
+        target_row = np.sort(
+            np.concatenate(preparation.local_values[reference_position])
+        )
+    else:
+        target_row = inputs.external_target_band_spectra[reference_position]
+    reference_target_spec = replace(
+        config.target_window_spec,
+        validation_k_indices=(0,),
+    )
+    reference_target = resolve_target_window(
+        np.asarray(target_row, dtype=np.float64)[np.newaxis, :],
+        reference_target_spec,
+    )
+    band_metrics = evaluate_fixed_target_window(
+        reference_target,
+        np.linalg.eigvalsh(heff)[np.newaxis, :],
+    )
+    coverage_sigma_min = float(
+        min(frames.alignment_singular_values_by_q[reference_q])
+    )
+    return CandidateMetrics(
+        candidate_id=_canonical_common_candidate_id(
+            joint_band_indices=joint,
+            anchor_spec=anchor_spec,
+            layout=layout,
+        ),
+        dimension=int(heff.shape[-1]),
+        band_rms_mev=band_metrics.rms_error_mev,
+        band_max_mev=band_metrics.maximum_abs_error_mev,
+        subspace_overlap=float(
+            np.clip(coverage_sigma_min * coverage_sigma_min, 0.0, 1.0)
+        ),
+        symmetry_residual=None,
+        symmetry_leakage=None,
     )
 
-    local_rank = sum(int(value) for value in group_ranks)
-    high_per_q = layout.same_q_dimension - local_rank
-    local_identity = np.eye(layout.same_q_dimension, dtype=np.complex128)
-    for q_index, (raw_routed_frame, raw_model_frame) in enumerate(
-        zip(routed_frames_by_q, model_frames_by_q, strict=True)
-    ):
-        routed_frame = np.asarray(raw_routed_frame, dtype=np.complex128)
-        model_frame = np.asarray(raw_model_frame, dtype=np.complex128)
-        residuals = {
-            "projector": _normalized_frobenius_residual(
-                routed_frame @ routed_frame.conj().T
-                - model_frame @ model_frame.conj().T,
-                rank=local_rank,
+
+def _select_public_reference_seed(
+    preparation: GammaAutomaticSelectionPreparation,
+) -> tuple[int, ...]:
+    """Return the first complete representative branch passing local metrics."""
+
+    attempted_ids: list[str] = []
+    structural_failures: list[tuple[str, str]] = []
+    for seed in preparation.candidate_seed_band_indices:
+        try:
+            metrics = _reference_candidate_metrics(preparation, seed)
+        except CandidateRejected as error:
+            label = "bands-" + "-".join(str(index) for index in seed)
+            structural_failures.append((label, str(error)))
+            continue
+        attempted_ids.append(metrics.candidate_id)
+        try:
+            select_projection_candidate(
+                (metrics,),
+                preparation.config.selection_thresholds,
+                allow_pending_symmetry=True,
             )
-        }
-        if routed_high is not None:
-            rows = layout.same_q_full_rows(q_index)
-            high_columns = np.arange(
-                q_index * high_per_q,
-                (q_index + 1) * high_per_q,
-                dtype=np.intp,
-            )
-            local_high = routed_high[np.ix_(rows, high_columns)]
-            complete = np.column_stack((model_frame, local_high))
-            residuals.update(
-                {
-                    "gram_completeness": _normalized_frobenius_residual(
-                        complete.conj().T @ complete - local_identity,
-                        rank=layout.same_q_dimension,
-                    ),
-                    "cogram_completeness": _normalized_frobenius_residual(
-                        complete @ complete.conj().T - local_identity,
-                        rank=layout.same_q_dimension,
-                    ),
-                }
-            )
-        _require_residual_gate(
-            residuals,
-            tolerance=tolerance,
-            context=f"Gamma dual-frame local gate failed at k={k_index}, q={q_index}",
-        )
-    return bridge
+        except CandidateSelectionError as error:
+            if error.failure_code is CandidateSelectionFailureCode.HARD_METRIC_FAILED:
+                continue
+            raise
+        return tuple(seed)
+    raise CandidateSelectionError(
+        CandidateSelectionFailureCode.HARD_METRIC_FAILED,
+        "no representative-point Gamma branch passed the local projection metrics",
+        candidate_ids=tuple(attempted_ids),
+        structural_failures=tuple(structural_failures),
+    )
 
 
 def _evaluate_candidate(
@@ -1121,6 +1820,7 @@ def _evaluate_candidate(
     inputs: GammaAutomaticProducerInputs,
     config: GammaAutomaticSelectionConfig,
     layout: GammaRowLayout,
+    common_anchor_gauge_config: AutoGaugeConfig,
     certified_actions: tuple[GammaCertifiedRawAction, ...],
     operation_inputs: Mapping[str, CandidateOperationInput],
     required_pairs: Mapping[str, tuple[tuple[int, int], ...]],
@@ -1128,278 +1828,172 @@ def _evaluate_candidate(
     local_values: tuple[tuple[np.ndarray, ...], ...],
     local_vectors: tuple[tuple[np.ndarray, ...], ...],
     frozen_target: FrozenTargetWindow,
-    target_values: np.ndarray,
-    target_vectors: tuple[np.ndarray, ...],
     source_hamiltonian_hash: str,
+    reference_k_index: int,
+    candidate_max_rank: int,
 ) -> GammaCandidateEvaluation:
-    actions_by_name = {action.name: action for action in certified_actions}
-    operation_names = {operation.name for operation in inputs.operations}
-    if set(actions_by_name) != operation_names:
-        raise ValueError(
-            "certified Gamma actions do not match the routed operation package"
-        )
-    little_group_actions_by_k = {
-        k_index: tuple(
-            actions_by_name[operation.name]
-            for operation in inputs.operations
-            if (k_index, k_index) in operation.pairs
-        )
-        for k_index in inputs.k_indices
-    }
-    closures = tuple(
-        close_gamma_projector_clusters(
-            local_values[position],
-            local_vectors[position],
-            layout=layout,
-            seed_band_indices=tuple(seed for _ in range(layout.q_count)),
-            actions=little_group_actions_by_k[k_index],
-            thresholds=config.routing_thresholds,
-        )
-        for position, k_index in enumerate(inputs.k_indices)
+    """Materialize one common-anchor candidate without eigenstate routing."""
+
+    reference_position = inputs.k_indices.index(int(reference_k_index))
+    if config.generated_candidate_envelope:
+        reference_q = common_anchor_gauge_config.reference_q_index
+        certification_values = ((local_values[reference_position][reference_q],),)
+        certification_k_indices = (int(reference_k_index),)
+    else:
+        certification_values = local_values
+        certification_k_indices = inputs.k_indices
+    joint = _certify_candidate_seed_envelope(
+        seed=seed,
+        local_values=certification_values,
+        max_rank=candidate_max_rank,
+        degeneracy_tolerance_mev=(
+            config.target_window_spec.degeneracy_tolerance_mev
+        ),
+        k_indices=certification_k_indices,
     )
-    joint = closures[0].band_indices_by_q[0]
-    if any(
-        bands != joint
-        for closure in closures
-        for bands in closure.band_indices_by_q
-    ):
-        raise GammaRoutingError(
-            CandidateRejectionReason.SOURCE_GROUP_RANK_CHANGE,
-            "Gamma candidate closure band set changes across production k/Q",
-        )
-    closure_hashes = tuple(closure.closure_hash for closure in closures)
-    candidate_id = _canonical_candidate_id(
-        joint_band_indices=joint,
-        closure_hashes=closure_hashes,
-        layout=layout,
-        thresholds=config.routing_thresholds,
-    )
-    reference_position = inputs.k_indices.index(config.reference_k_index)
-    reference = build_gamma_routed_frames(
-        local_values[reference_position],
-        local_vectors[reference_position],
-        joint_band_indices=joint,
-        layout=layout,
-        thresholds=config.routing_thresholds,
-        require_complete_clusters=True,
-    )
-    anchors = _reference_anchor_frames(reference)
-    model_anchor_spec = build_gamma_model_anchor_spec(
+    anchor_spec = build_gamma_common_anchor_spec(
         reference_eigenvalues_by_q=local_values[reference_position],
         reference_eigenvectors_by_q=local_vectors[reference_position],
         joint_band_indices=joint,
-        group_ranks=reference.group_dimensions,
         layout=layout,
-        gauge_config=None,
+        gauge_config=common_anchor_gauge_config,
         projector_tolerance=config.routing_thresholds.projector_residual,
         orthonormality_tolerance=config.routing_thresholds.projector_residual,
     )
-    validate_gamma_model_anchor_reference(
-        reference_eigenvalues_by_q=local_values[reference_position],
-        reference_eigenvectors_by_q=local_vectors[reference_position],
+    candidate_id = _canonical_common_candidate_id(
+        joint_band_indices=joint,
+        anchor_spec=anchor_spec,
         layout=layout,
-        anchor_spec=model_anchor_spec,
     )
-    reference_columns = np.asarray(joint, dtype=np.intp)
-    reference_joint_frame = np.asarray(
-        local_vectors[reference_position][model_anchor_spec.reference_q_index],
-        dtype=np.complex128,
-    )[:, reference_columns]
-    model_reference_projector = (
-        reference_joint_frame @ reference_joint_frame.conj().T
+    common_frames = tuple(
+        build_gamma_common_anchor_frames(
+            eigenvalues_by_q=local_values[position],
+            eigenvectors_by_q=local_vectors[position],
+            layout=layout,
+            anchor_spec=anchor_spec,
+        )
+        for position in range(len(inputs.k_indices))
     )
-    if hash_array(model_reference_projector) != model_anchor_spec.reference_projector_hash:
-        raise GammaRoutingError(
-            CandidateRejectionReason.HANDOFF_IDENTITY,
-            "Gamma model reference projector differs from its SCDM anchor identity",
-        )
-    routed_by_position: list[GammaRoutedFrames] = []
-    model_frames_by_position = []
-    routing_hashes: list[str] = []
-    for position, k_index in enumerate(inputs.k_indices):
-        little_group_actions = little_group_actions_by_k[k_index]
-        routed = build_gamma_routed_frames(
-            local_values[position],
-            local_vectors[position],
-            joint_band_indices=joint,
-            layout=layout,
-            thresholds=config.routing_thresholds,
-            anchor_frames=anchors,
-            require_complete_clusters=True,
-        )
-        residuals = certify_routed_covariance(
-            routed.routed_projectors_by_q,
-            layout=layout,
-            actions=little_group_actions,
-            thresholds=config.routing_thresholds,
-        )
-        routed_by_position.append(routed)
-        model_frames_by_position.append(
-            build_gamma_model_frames(
-                eigenvalues_by_q=local_values[position],
-                eigenvectors_by_q=local_vectors[position],
-                layout=layout,
-                anchor_spec=model_anchor_spec,
-            )
-        )
-        routing_hashes.append(
-            _routing_certificate_hash(
-                k_index=k_index,
-                routed=routed,
-                residuals=residuals,
-                actions=little_group_actions,
-                layout=layout,
-                thresholds=config.routing_thresholds,
-            )
-        )
 
-    heff_covariance_tolerance = float(
-        config.producer_integrity_thresholds.routed_model_heff_covariance_residual
-    )
-    if (
-        not np.isfinite(heff_covariance_tolerance)
-        or heff_covariance_tolerance <= 0.0
-    ):
-        raise GammaRoutingError(
-            CandidateRejectionReason.HANDOFF_IDENTITY,
-            "Gamma routed/model Heff covariance gate requires a finite positive tolerance",
-        )
     u_low_by_position: list[np.ndarray] = []
-    routed_heff: list[np.ndarray] = []
     authoritative_heff: list[np.ndarray] = []
-    for position, (routed, model_frames) in enumerate(
-        zip(routed_by_position, model_frames_by_position, strict=True)
-    ):
-        include_high = config.downfold.options.method != "first_order"
-        routed_low, routed_high = assemble_gamma_routed_projectors(
-            routed,
-            layout=layout,
-            thresholds=config.routing_thresholds,
-            include_high=include_high,
-        )
-        model_low = assemble_gamma_model_frame(model_frames, layout=layout)
-        bridge = _certify_dual_frame_geometry(
-            routed_low=routed_low,
-            routed_high=routed_high,
-            model_low=model_low,
-            routed_frames_by_q=routed.local_frames_by_q,
-            model_frames_by_q=model_frames.local_frames_by_q,
-            layout=layout,
-            group_ranks=routed.group_dimensions,
-            tolerance=config.routing_thresholds.projector_residual,
-            k_index=inputs.k_indices[position],
-        )
-        routed_result = downfold_from_projectors(
-            inputs.source_hamiltonians[position],
-            routed_low,
-            routed_high,
-            config.downfold.options,
-        )
-        model_result = downfold_from_projectors(
-            inputs.source_hamiltonians[position],
-            model_low,
-            routed_high,
-            config.downfold.options,
-        )
-        routed_matrix = np.asarray(routed_result.heff, dtype=np.complex128)
-        model_matrix = np.asarray(model_result.heff, dtype=np.complex128)
-        if not (
-            np.all(np.isfinite(routed_matrix))
-            and np.all(np.isfinite(model_matrix))
-        ):
-            raise ValueError(
-                "automatic Gamma routed/model downfold produced nonfinite Heff"
+    include_high = config.downfold.options.method != "first_order"
+    for position, frames in enumerate(common_frames):
+        u_low = _assemble_common_anchor_frame(frames, layout=layout)
+        if include_high:
+            low_groups, high_groups = _common_anchor_projector_groups(
+                frames,
+                layout=layout,
+                eigenvectors_by_q=local_vectors[position],
             )
-        hermiticity_tolerance = float(
-            config.candidate_symmetry_thresholds.heff_hermiticity_residual
-        )
+            result = downfold_from_projector_groups(
+                inputs.source_hamiltonians[position],
+                low_groups,
+                high_groups,
+                config.downfold.options,
+            )
+        else:
+            result = downfold_from_projectors(
+                inputs.source_hamiltonians[position],
+                u_low,
+                None,
+                config.downfold.options,
+            )
+        heff = np.asarray(result.heff, dtype=np.complex128)
+        if not np.all(np.isfinite(heff)):
+            raise ValueError("automatic Gamma common-anchor downfold produced nonfinite Heff")
         _require_residual_gate(
             {
-                "routed_heff": max(
-                    float(routed_result.hermiticity_residual),
-                    _relative_frobenius_residual(
-                        routed_matrix, routed_matrix.conj().T
-                    ),
-                ),
-                "model_heff": max(
-                    float(model_result.hermiticity_residual),
-                    _relative_frobenius_residual(
-                        model_matrix, model_matrix.conj().T
-                    ),
-                ),
+                "common_anchor_heff": max(
+                    float(result.hermiticity_residual),
+                    _relative_frobenius_residual(heff, heff.conj().T),
+                )
             },
-            tolerance=hermiticity_tolerance,
+            tolerance=float(
+                config.candidate_symmetry_thresholds.heff_hermiticity_residual
+            ),
             context=(
-                "Gamma routed/model downfold Hermiticity gate failed at "
+                "Gamma common-anchor downfold Hermiticity gate failed at "
                 f"k={inputs.k_indices[position]}"
             ),
         )
-        expected_model_matrix = bridge.conj().T @ routed_matrix @ bridge
-        covariance_residual = _relative_frobenius_residual(
-            model_matrix, expected_model_matrix
+        u_low_by_position.append(u_low)
+        authoritative_heff.append(heff)
+
+    heff_tensor = np.stack(authoritative_heff, axis=0)
+    certificate: CandidateSymmetryCertificate | None = None
+    if not config.generated_candidate_envelope:
+        states = {
+            k_index: CandidateProjectionState(
+                u_low=u_low_by_position[position],
+                heff=heff_tensor[position],
+            )
+            for position, k_index in enumerate(inputs.k_indices)
+        }
+        exactified_actions = _exactified_candidate_actions(
+            states=states,
+            operations=operation_inputs,
+            certified_actions=certified_actions,
+            layout=layout,
+            model_group_ranks=anchor_spec.model_group_ranks,
+            presentation=inputs.presentation,
+            config=config.exactification,
+            sigma_minimum=config.routing_thresholds.anchor_sigma_min,
+            off_route_tolerance=config.routing_thresholds.off_route_leakage,
+            uniformity_tolerance=(
+                config.candidate_symmetry_thresholds.exactification_distance
+            ),
         )
+        certificate = certify_candidate_symmetries(
+            candidate_id=candidate_id,
+            states=states,
+            operations=operation_inputs,
+            exactified_actions=exactified_actions,
+            presentation=inputs.presentation,
+            required_pairs=required_pairs,
+            thresholds=config.candidate_symmetry_thresholds,
+            required_state_k_indices=inputs.k_indices,
+        )
+        if certificate.status is not CandidateSymmetryStatus.CERTIFIED:
+            raise GammaRoutingError(
+                CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+                "Gamma automatic candidate symmetry failed: "
+                + ", ".join(certificate.failures),
+            )
         if (
-            not np.isfinite(covariance_residual)
-            or covariance_residual > heff_covariance_tolerance
+            candidate_action_package_hash(certificate.input_identity_payload)
+            != raw_action_package_hash
         ):
             raise GammaRoutingError(
                 CandidateRejectionReason.HANDOFF_IDENTITY,
-                "Gamma routed/model Heff covariance residual at "
-                f"k={inputs.k_indices[position]} is {covariance_residual:.3e}, "
-                f"exceeding {heff_covariance_tolerance:.3e}",
+                "candidate certificate raw-action package differs from preselection input",
             )
-        u_low_by_position.append(model_low)
-        routed_heff.append(routed_matrix)
-        authoritative_heff.append(model_matrix)
-    routed_heff_tensor = np.stack(routed_heff, axis=0)
-    heff_tensor = np.stack(authoritative_heff, axis=0)
-    states = {
-        k_index: CandidateProjectionState(
-            u_low=u_low_by_position[position],
-            heff=heff_tensor[position],
-        )
-        for position, k_index in enumerate(inputs.k_indices)
-    }
-    exactified_actions = _exactified_candidate_actions(
-        states=states,
-        operations=operation_inputs,
-        presentation=inputs.presentation,
-        config=config.exactification,
-        sigma_minimum=config.routing_thresholds.anchor_sigma_min,
-    )
-    certificate = certify_candidate_symmetries(
-        candidate_id=candidate_id,
-        states=states,
-        operations=operation_inputs,
-        exactified_actions=exactified_actions,
-        presentation=inputs.presentation,
-        required_pairs=required_pairs,
-        thresholds=config.candidate_symmetry_thresholds,
-        required_state_k_indices=inputs.k_indices,
-    )
-    if certificate.status is not CandidateSymmetryStatus.CERTIFIED:
-        raise GammaRoutingError(
-            CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
-            "Gamma automatic candidate symmetry failed: "
-            + ", ".join(certificate.failures),
-        )
-    certified_raw_action_package_hash = candidate_action_package_hash(
-        certificate.input_identity_payload
-    )
-    if certified_raw_action_package_hash != raw_action_package_hash:
-        raise GammaRoutingError(
-            CandidateRejectionReason.HANDOFF_IDENTITY,
-            "candidate certificate raw-action package differs from preselection input",
-        )
 
-    model_dim = int(heff_tensor.shape[-1])
-    model_frame_tensor = np.stack(
-        [
-            np.stack(model_frames.local_frames_by_q, axis=0)
-            for model_frames in model_frames_by_position
-        ],
+    if certificate is None:
+        pending_symmetry_input_hash = hash_mapping(
+            {
+                "schema": "kp.gamma-post-selection-symmetry-input.v1",
+                "candidate_id": candidate_id,
+                "raw_action_package_hash": raw_action_package_hash,
+            }
+        )
+        pending_symmetry_certificate_hash = hash_mapping(
+            {
+                "schema": "kp.gamma-post-selection-symmetry-pending.v1",
+                "input_identity_hash": pending_symmetry_input_hash,
+                "status": "pending",
+            }
+        )
+    else:
+        pending_symmetry_input_hash = certificate.input_identity_hash
+        pending_symmetry_certificate_hash = certificate.certificate_hash
+
+    local_frame_tensor = np.stack(
+        [np.stack(frames.local_frames_by_q, axis=0) for frames in common_frames],
         axis=0,
     )
+    model_dim = int(heff_tensor.shape[-1])
+    anchor_payload = anchor_spec.to_payload()
     artifact_identity = build_projection_basis_identity(
         qset1=inputs.qsets[0],
         qset2=inputs.qsets[1],
@@ -1408,92 +2002,73 @@ def _evaluate_candidate(
         mode="Gamma",
         energy_scale=1.0,
         nlow_state_list={
-            "projection_basis_kind": "gamma_routed",
+            "projection_basis_kind": "gamma_common_anchor",
             "joint_band_indices": list(joint),
+            "owner_specs": anchor_payload["owner_specs"],
         },
-        resolved_norb_fix_list=model_anchor_spec.resolved_norb_fix_list,
-        gauge_mode="auto_scdm",
+        resolved_norb_fix_list=anchor_payload["resolved_reference_terms"],
+        gauge_mode="auto_common_anchor",
         num_layer_list=list(layout.num_layer_list),
         num_orb_per_layer_list=[
-            [layout.uniform_orbital_count] * count
-            for count in layout.num_layer_list
+            list(group) for group in inputs.num_orb_per_layer_list
         ],
         orbital_block_dim=layout.same_q_dimension,
         model_dim=model_dim,
         k_indices=inputs.k_indices,
-        gauge_frame_hash=hash_array(model_frame_tensor),
+        gauge_frame_hash=hash_array(local_frame_tensor),
     )
-    handoff = certify_gamma_routed_basis_spec(
+    handoff = GammaCommonAnchorBasisSpec.create(
         candidate_id=candidate_id,
         artifact_identity=artifact_identity,
         layout=layout,
-        thresholds=config.routing_thresholds,
+        anchor_spec=anchor_spec,
         k_indices=inputs.k_indices,
-        kpoints=inputs.kpoints,
-        routed_frames=tuple(routed_by_position),
-        model_reference_k_index=config.reference_k_index,
-        model_anchor_spec=model_anchor_spec,
-        model_frames=tuple(model_frames_by_position),
-        model_reference_projector=model_reference_projector,
-        routed_heff=routed_heff_tensor,
-        heff_covariance_tolerance=heff_covariance_tolerance,
+        local_frames=local_frame_tensor,
         authoritative_heff=heff_tensor,
-        heff_k_indices=inputs.k_indices,
-        closure_certificate_hashes=closure_hashes,
-        routing_certificate_hashes=tuple(routing_hashes),
+        kpoints=inputs.kpoints,
         source_hamiltonian_hash=source_hamiltonian_hash,
-        ordered_q_hashes=layout.ordered_qset_hashes,
-        raw_action_package_hash=raw_action_package_hash,
-        operations=operation_inputs,
-        exactified_actions=exactified_actions,
-        presentation=inputs.presentation,
-        required_pairs=required_pairs,
-        candidate_thresholds=config.candidate_symmetry_thresholds,
-        certified_gamma_actions=certified_actions,
+        action_package_hash=raw_action_package_hash,
+        candidate_certificate_hash=pending_symmetry_certificate_hash,
+        candidate_input_identity_hash=pending_symmetry_input_hash,
     )
 
     candidate_eigenvalues: list[np.ndarray] = []
-    model_basis: list[np.ndarray] = []
-    target_basis: list[np.ndarray] = []
-    for position, heff in enumerate(heff_tensor):
-        values, vectors = np.linalg.eigh(heff)
+    for heff in heff_tensor:
+        values = np.linalg.eigvalsh(heff)
         candidate_eigenvalues.append(values)
-        model_indices = (
-            np.arange(model_dim - config.target_window_spec.band_count, model_dim)
-            if config.target_window_spec.edge == "valence"
-            else np.arange(config.target_window_spec.band_count)
-        )
-        model_basis.append(
-            np.ascontiguousarray(
-                u_low_by_position[position] @ vectors[:, model_indices]
-            )
-        )
-        target_indices = _edge_indices(
-            target_values[position], config.target_window_spec
-        )
-        target_basis.append(
-            np.ascontiguousarray(target_vectors[position][:, target_indices])
-        )
     band_metrics = evaluate_fixed_target_window(
         frozen_target,
         np.stack(candidate_eigenvalues, axis=0),
     )
-    overlap = projection_overlap_metrics(
-        np.stack(model_basis, axis=0),
-        np.stack(target_basis, axis=0),
-        validation_k_indices=config.target_window_spec.validation_k_indices,
-        projection_basis=np.stack(u_low_by_position, axis=0),
+    # Candidate selection is defined at the same representative fibre that
+    # fixes the common-anchor pattern.  Other (k, Q) fibres still pass through
+    # ``build_gamma_common_anchor_frames``, whose ``min_sigma`` gate certifies
+    # numerical full rank, but their conditioning is diagnostic rather than a
+    # second physical candidate-selection rule.
+    reference_frames = common_frames[reference_position]
+    coverage_sigma_min = float(
+        min(
+            reference_frames.alignment_singular_values_by_q[
+                common_anchor_gauge_config.reference_q_index
+            ]
+        )
     )
-    symmetry_residual, symmetry_leakage = _certificate_metrics(certificate)
+    common_anchor_coverage = float(
+        np.clip(coverage_sigma_min * coverage_sigma_min, 0.0, 1.0)
+    )
+    symmetry_residual: float | None
+    symmetry_leakage: float | None
+    if certificate is None:
+        symmetry_residual = None
+        symmetry_leakage = None
+    else:
+        symmetry_residual, symmetry_leakage = _certificate_metrics(certificate)
     metrics = CandidateMetrics(
         candidate_id=candidate_id,
         dimension=model_dim,
         band_rms_mev=band_metrics.rms_error_mev,
         band_max_mev=band_metrics.maximum_abs_error_mev,
-        subspace_overlap=min(
-            overlap.minimum_principal_overlap_squared,
-            overlap.target_capture,
-        ),
+        subspace_overlap=common_anchor_coverage,
         symmetry_residual=symmetry_residual,
         symmetry_leakage=symmetry_leakage,
     )
@@ -1516,9 +2091,9 @@ def prepare_gamma_automatic_selection(
         raise TypeError("inputs must be GammaAutomaticProducerInputs")
     if not isinstance(config, GammaAutomaticSelectionConfig):
         raise TypeError("config must be GammaAutomaticSelectionConfig")
-    target_workers = _strict_positive_integer(
+    _strict_positive_integer(
         workers,
-        field="target eigensystem workers",
+        field="automatic Gamma producer workers",
     )
     expected_k_indices = tuple(range(len(inputs.k_indices)))
     if inputs.k_indices != expected_k_indices:
@@ -1526,7 +2101,10 @@ def prepare_gamma_automatic_selection(
             "automatic Gamma v1 requires contiguous positional k_indices "
             f"{expected_k_indices}; got {inputs.k_indices}"
         )
-    if config.reference_k_index not in inputs.k_indices:
+    if (
+        not config.generated_candidate_envelope
+        and config.reference_k_index not in inputs.k_indices
+    ):
         raise ValueError("reference_k_index is not in production k_indices")
     if max(config.target_window_spec.validation_k_indices) >= len(inputs.k_indices):
         raise ValueError("target validation k indices exceed production k coverage")
@@ -1537,12 +2115,53 @@ def prepare_gamma_automatic_selection(
         spin_convention="all",
         source_basis_hash=inputs.tapw_source_basis_hash,
     )
+    if config.generated_candidate_envelope:
+        effective_max_dimension = min(
+            config.max_dimension,
+            layout.same_q_dimension,
+        )
+        effective_routing_thresholds = replace(
+            config.routing_thresholds,
+            max_rank=effective_max_dimension,
+        )
+    else:
+        effective_max_dimension = config.routing_thresholds.max_rank
+        effective_routing_thresholds = config.routing_thresholds
+    if not np.allclose(
+        inputs.qsets[0],
+        inputs.qsets[1],
+        rtol=0.0,
+        atol=1.0e-12,
+    ):
+        raise GammaRoutingError(
+            CandidateRejectionReason.GAMMA_Q_ROUTE_MISMATCH,
+            "automatic Gamma common-anchor fibres require the two ordered Q sets "
+            "to match coordinate-by-coordinate",
+        )
+    try:
+        reference_q_index = _geometric_reference_q_index(inputs.qsets[0])
+    except GammaRoutingError as error:
+        if config.generated_candidate_envelope:
+            raise ValueError(str(error)) from error
+        raise
+    reference_point = _resolved_reference_point(
+        inputs,
+        config,
+        reference_q_index=reference_q_index,
+    )
+    common_anchor_gauge = _common_anchor_gauge_config(
+        reference_q_index=reference_q_index,
+        thresholds=effective_routing_thresholds,
+    )
     if inputs.source_hamiltonians.shape[1:] != (
         layout.full_dimension,
         layout.full_dimension,
     ):
         raise ValueError("source Hamiltonian dimension does not match Gamma layout")
-    if config.routing_thresholds.max_rank > layout.same_q_dimension:
+    if (
+        not config.generated_candidate_envelope
+        and effective_max_dimension > layout.same_q_dimension
+    ):
         raise ValueError("routing max_rank exceeds Gamma local dimension")
     certified_actions = tuple(
         certify_gamma_raw_action(
@@ -1552,7 +2171,7 @@ def prepare_gamma_automatic_selection(
             q_permutations=operation.q_permutations,
             sector_map=operation.sector_map,
             antiunitary=operation.antiunitary,
-            thresholds=config.routing_thresholds,
+            thresholds=effective_routing_thresholds,
             tapw_source_basis_hash=inputs.tapw_source_basis_hash,
         )
         for operation in inputs.operations
@@ -1564,7 +2183,7 @@ def prepare_gamma_automatic_selection(
         route_contract = gamma_certified_action_route_contract(
             certified_action,
             layout=layout,
-            thresholds=config.routing_thresholds,
+            thresholds=effective_routing_thresholds,
             full_action=operation.full_action,
         )
         route_contract["sampled_k_route"] = gamma_sampled_k_route_contract(
@@ -1586,51 +2205,141 @@ def prepare_gamma_automatic_selection(
         presentation=inputs.presentation,
         required_pairs=required_pairs,
     )
-    _certify_source_hamiltonian_covariance(
-        inputs,
-        threshold=(
-            config.producer_integrity_thresholds
-            .source_hamiltonian_covariance_residual
-        ),
-    )
+    # The public common-anchor path certifies the symmetry on each materialized
+    # low-energy candidate below.  A full-source covariance gate is both
+    # redundant and physically too strong: harmless high-energy TAPW noise must
+    # not veto an otherwise covariant low-energy model.  Keep the legacy gate
+    # only for callers that explicitly supplied the legacy producer policy.
+    if not config.generated_candidate_envelope:
+        _certify_source_hamiltonian_covariance(
+            inputs,
+            threshold=(
+                config.producer_integrity_thresholds
+                .source_hamiltonian_covariance_residual
+            ),
+        )
     local_values, local_vectors = _local_eigensystems(
         inputs.source_hamiltonians,
         layout,
         hermiticity_tolerance=config.candidate_symmetry_thresholds.heff_hermiticity_residual,
+        workers=workers,
     )
-    target_values, target_vectors = _target_eigensystems(
-        inputs.source_hamiltonians,
-        workers=target_workers,
+    if config.generated_candidate_envelope:
+        reference_position = inputs.k_indices.index(reference_point.k_index)
+        candidate_seed_band_indices = _generated_candidate_seed_envelope(
+            local_values[reference_position][reference_q_index],
+            config,
+            max_dimension=effective_max_dimension,
+        )
+    else:
+        candidate_seed_band_indices = config.candidate_seed_band_indices
+    validation_positions = config.target_window_spec.validation_k_indices
+    if inputs.external_target_band_spectra is None:
+        # Compatibility for small pure-array callers that predate the runtime
+        # band-file handoff.  This combines the already-computed local spectra;
+        # it never diagonalizes the full source Hamiltonian.
+        target_values = np.stack(
+            [
+                np.sort(
+                    np.concatenate(
+                        [local_values[position][q] for q in range(layout.q_count)]
+                    )
+                )
+                for position in validation_positions
+            ],
+            axis=0,
+        )
+    else:
+        target_values = np.asarray(
+            inputs.external_target_band_spectra[
+                np.asarray(validation_positions, dtype=np.intp)
+            ],
+            dtype=np.float64,
+        )
+    frozen_target = _freeze_validation_target_window(
+        target_values,
+        config.target_window_spec,
     )
-    frozen_target = resolve_target_window(target_values, config.target_window_spec)
     source_hamiltonian_hash = hash_array(inputs.source_hamiltonians)
 
-    hard_thresholds: dict[str, float] = {
-        **{
+    producer_hard_thresholds = (
+        {}
+        if config.generated_candidate_envelope
+        else {
             f"producer_integrity.{name}": float(value)
             for name, value in config.producer_integrity_thresholds.to_payload().items()
-        },
+        }
+    )
+    routing_hard_thresholds = (
+        {
+            "common_anchor.local_action_isometry": float(
+                effective_routing_thresholds.local_action_isometry
+            ),
+            "common_anchor.off_route_leakage": float(
+                effective_routing_thresholds.off_route_leakage
+            ),
+            "common_anchor.projector_residual": float(
+                effective_routing_thresholds.projector_residual
+            ),
+            "common_anchor.anchor_sigma_min": float(
+                effective_routing_thresholds.anchor_sigma_min
+            ),
+            "candidate_envelope.effective_max_dimension": float(
+                effective_max_dimension
+            ),
+        }
+        if config.generated_candidate_envelope
+        else {
+            f"routing.{name}": float(value)
+            for name, value in effective_routing_thresholds.to_payload().items()
+            if name != "schema"
+        }
+    )
+    hard_thresholds: dict[str, float] = {
+        **producer_hard_thresholds,
         **{
             f"selection.{item.name}": float(
                 getattr(config.selection_thresholds, item.name)
             )
             for item in fields(SelectionThresholds)
+            if (
+                not config.generated_candidate_envelope
+                or item.name
+                in {"band_rms_mev", "band_max_mev", "subspace_overlap"}
+            )
         },
-        **{
-            f"routing.{name}": float(value)
-            for name, value in config.routing_thresholds.to_payload().items()
-            if name != "schema"
-        },
+        **routing_hard_thresholds,
         **{
             f"candidate_symmetry.{item.name}": float(
                 getattr(config.candidate_symmetry_thresholds, item.name)
             )
             for item in fields(CandidateSymmetryThresholds)
+            if not config.generated_candidate_envelope
         },
     }
+    policy_payload = config.policy_payload()
+    policy_payload["common_anchor"] = {
+        "reference_q_index": common_anchor_gauge.reference_q_index,
+        "min_sigma": common_anchor_gauge.min_sigma,
+        "max_condition": common_anchor_gauge.max_condition,
+    }
+    if config.generated_candidate_envelope:
+        policy_payload["generated_candidate_envelope"] = {
+            "schema": "kp.gamma-auto-generated-candidate-envelope.v1",
+            "reference_k_index": reference_point.k_index,
+            "reference_k_coordinate": list(reference_point.k_coordinate),
+            "reference_q_indices": list(reference_point.q_indices),
+            "reference_q_vectors": [
+                list(vector) for vector in reference_point.q_vectors
+            ],
+            "candidate_seed_band_indices": [
+                list(seed) for seed in candidate_seed_band_indices
+            ],
+            "effective_max_dimension": effective_max_dimension,
+        }
     policy_hash = build_selection_policy_hash(
         hard_thresholds=hard_thresholds,
-        candidate_envelope_config=config.policy_payload(),
+        candidate_envelope_config=policy_payload,
         candidate_generator_version=GAMMA_AUTO_PRODUCER_VERSION,
         candidate_schema_version=GAMMA_AUTO_CANDIDATE_SCHEMA,
         metric_schema_version=GAMMA_AUTO_METRIC_SCHEMA,
@@ -1638,7 +2347,7 @@ def prepare_gamma_automatic_selection(
     )
     ordered_q_hash = hash_mapping(
         {
-            "schema": "kp.gamma-routed-ordered-q-identity.v1",
+            "schema": "kp.gamma-common-anchor-ordered-q-identity.v1",
             "ordered_q_hashes": list(layout.ordered_qset_hashes),
         }
     )
@@ -1658,12 +2367,14 @@ def prepare_gamma_automatic_selection(
     for by_k in (*local_values, *local_vectors):
         for value in by_k:
             value.setflags(write=False)
-    for value in target_vectors:
-        value.setflags(write=False)
     return GammaAutomaticSelectionPreparation(
         inputs=inputs,
         config=config,
+        reference_point=reference_point,
+        candidate_seed_band_indices=candidate_seed_band_indices,
+        effective_max_dimension=effective_max_dimension,
         layout=layout,
+        common_anchor_gauge_config=common_anchor_gauge,
         certified_actions=certified_actions,
         operation_inputs=MappingProxyType(dict(operation_inputs)),
         required_pairs=MappingProxyType(dict(required_pairs)),
@@ -1672,7 +2383,6 @@ def prepare_gamma_automatic_selection(
         local_vectors=local_vectors,
         frozen_target_window=frozen_target,
         target_values=target_values,
-        target_vectors=target_vectors,
         source_hamiltonian_hash=source_hamiltonian_hash,
         selection_input=selection_input,
     )
@@ -1690,7 +2400,12 @@ def evaluate_gamma_automatic_selection(
 
     evaluations: list[GammaCandidateEvaluation] = []
     rejections: list[GammaCandidateRejection] = []
-    for seed in config.candidate_seed_band_indices:
+    seeds_to_materialize = (
+        (_select_public_reference_seed(preparation),)
+        if config.generated_candidate_envelope
+        else preparation.candidate_seed_band_indices
+    )
+    for seed in seeds_to_materialize:
         try:
             evaluations.append(
                 _evaluate_candidate(
@@ -1698,6 +2413,9 @@ def evaluate_gamma_automatic_selection(
                     inputs=inputs,
                     config=config,
                     layout=preparation.layout,
+                    common_anchor_gauge_config=(
+                        preparation.common_anchor_gauge_config
+                    ),
                     certified_actions=preparation.certified_actions,
                     operation_inputs=preparation.operation_inputs,
                     required_pairs=preparation.required_pairs,
@@ -1705,9 +2423,9 @@ def evaluate_gamma_automatic_selection(
                     local_values=preparation.local_values,
                     local_vectors=preparation.local_vectors,
                     frozen_target=preparation.frozen_target_window,
-                    target_values=preparation.target_values,
-                    target_vectors=preparation.target_vectors,
                     source_hamiltonian_hash=preparation.source_hamiltonian_hash,
+                    reference_k_index=preparation.reference_point.k_index,
+                    candidate_max_rank=preparation.effective_max_dimension,
                 )
             )
         except CandidateRejected as error:
@@ -1718,39 +2436,40 @@ def evaluate_gamma_automatic_selection(
                     diagnostic=str(error),
                 )
             )
-        except (TypeError, ValueError, np.linalg.LinAlgError) as error:
-            rejections.append(
-                GammaCandidateRejection(
-                    seed_band_indices=seed,
-                    reason=CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
-                    diagnostic=str(error),
-                )
-            )
     if not evaluations:
         details = "; ".join(
             f"{item.seed_band_indices}: {item.reason.value}: {item.diagnostic}"
             for item in rejections
         )
+        reason = (
+            rejections[0].reason
+            if len(rejections) == 1
+            else CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED
+        )
         raise GammaRoutingError(
-            CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+            reason,
             "all automatic Gamma candidates were rejected" + (
                 " (" + details + ")" if details else ""
             ),
         )
     metrics = tuple(evaluation.metrics for evaluation in evaluations)
-    decision = select_projection_candidate(metrics, config.selection_thresholds)
+    decision = select_projection_candidate(
+        metrics,
+        config.selection_thresholds,
+        allow_pending_symmetry=config.generated_candidate_envelope,
+    )
     selected = next(
         evaluation
         for evaluation in evaluations
         if evaluation.metrics.candidate_id == decision.selected.candidate_id
     )
     if (
-        gamma_routed_ordered_q_identity_hash(selected.handoff)
+        gamma_common_anchor_ordered_q_identity_hash(selected.handoff)
         != preparation.selection_input.ordered_q_hash
     ):
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
-            "selected routed handoff Q identity differs from preselection input",
+            "selected common-anchor handoff Q identity differs from preselection input",
         )
     return GammaAutomaticSelectionResult(
         selection_input=preparation.selection_input,

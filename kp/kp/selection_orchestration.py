@@ -8,6 +8,7 @@ the selection identity.
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
@@ -19,6 +20,7 @@ from .low_energy_selection import (
     select_projection_candidate,
 )
 from .selection_artifact import (
+    CertificationEvidence,
     CertificationStatus,
     ResolvedCandidateIdentity,
     SelectionArtifact,
@@ -27,8 +29,12 @@ from .selection_artifact import (
     SelectionBindingError,
     SelectionFailureCode,
     SelectionIdentity,
+    SelectionMetricEvidence,
     SelectionInputIdentity,
+    build_certified_generic_selection_identity,
     build_certified_gamma_selection_identity,
+    validate_pending_generic_symmetry_payload,
+    validate_pending_gamma_symmetry_payload,
 )
 
 
@@ -44,6 +50,11 @@ class CaseSelectionInputs:
     payloads: tuple[tuple[str, bytes], ...]
     diagnostic: str | None
     preview_only: bool
+    generic_certificate_hash: str | None
+    generic_certificate_input_identity_hash: str | None
+    pending_symmetry_payload: Mapping[str, Any] | None
+    allow_pending_symmetry: bool
+    diagnostic_metric_names: tuple[str, ...]
 
     @classmethod
     def auto(
@@ -54,6 +65,8 @@ class CaseSelectionInputs:
         thresholds: SelectionThresholds,
         projection_handoff: Any | None,
         payloads: Mapping[str, bytes],
+        pending_symmetry_payload: Mapping[str, Any] | None = None,
+        diagnostic_metric_names: Sequence[str] = (),
     ) -> "CaseSelectionInputs":
         if selection_input.selection_mode != "auto":
             raise ValueError("automatic selection requires auto input identity")
@@ -71,6 +84,57 @@ class CaseSelectionInputs:
             payloads=frozen_payloads,
             diagnostic=None,
             preview_only=False,
+            generic_certificate_hash=None,
+            generic_certificate_input_identity_hash=None,
+            pending_symmetry_payload=(
+                None if pending_symmetry_payload is None else dict(pending_symmetry_payload)
+            ),
+            allow_pending_symmetry=False,
+            diagnostic_metric_names=tuple(diagnostic_metric_names),
+        )
+
+    @classmethod
+    def generic_auto(
+        cls,
+        *,
+        selection_input: SelectionInputIdentity,
+        candidates: Sequence[CandidateMetrics],
+        thresholds: SelectionThresholds,
+        resolved_candidate: ResolvedCandidateIdentity,
+        certificate_hash: str,
+        certificate_input_identity_hash: str,
+        payloads: Mapping[str, bytes],
+        pending_symmetry_payload: Mapping[str, Any] | None = None,
+        allow_pending_symmetry: bool = False,
+        diagnostic_metric_names: Sequence[str] = (),
+    ) -> "CaseSelectionInputs":
+        if selection_input.selection_mode != "auto":
+            raise ValueError("generic automatic selection requires auto input identity")
+        if resolved_candidate.selection_mode != "auto":
+            raise ValueError("generic automatic candidate must retain auto mode")
+        if not isinstance(payloads, Mapping):
+            raise TypeError("selection payloads must be a mapping")
+        return cls(
+            selection_input=selection_input,
+            candidates=tuple(candidates),
+            thresholds=thresholds,
+            projection_handoff=None,
+            resolved_candidate=resolved_candidate,
+            payloads=tuple(
+                (str(name), bytes(content))
+                for name, content in sorted(payloads.items())
+            ),
+            diagnostic=None,
+            preview_only=False,
+            generic_certificate_hash=str(certificate_hash),
+            generic_certificate_input_identity_hash=str(
+                certificate_input_identity_hash
+            ),
+            pending_symmetry_payload=(
+                None if pending_symmetry_payload is None else dict(pending_symmetry_payload)
+            ),
+            allow_pending_symmetry=bool(allow_pending_symmetry),
+            diagnostic_metric_names=tuple(diagnostic_metric_names),
         )
 
     @classmethod
@@ -96,6 +160,11 @@ class CaseSelectionInputs:
             payloads=(),
             diagnostic=diagnostic.strip(),
             preview_only=False,
+            generic_certificate_hash=None,
+            generic_certificate_input_identity_hash=None,
+            pending_symmetry_payload=None,
+            allow_pending_symmetry=False,
+            diagnostic_metric_names=(),
         )
 
     @classmethod
@@ -112,6 +181,11 @@ class CaseSelectionInputs:
             payloads=(),
             diagnostic=None,
             preview_only=True,
+            generic_certificate_hash=None,
+            generic_certificate_input_identity_hash=None,
+            pending_symmetry_payload=None,
+            allow_pending_symmetry=False,
+            diagnostic_metric_names=(),
         )
 
 
@@ -264,9 +338,28 @@ def resolve_case_selection(
                 diagnostic="automatic selection is missing hard thresholds",
             )
         try:
+            from .projection_handoff import GammaCommonAnchorBasisSpec
+
+            symmetry_pending = (
+                (
+                    isinstance(
+                        canonical_inputs.projection_handoff,
+                        GammaCommonAnchorBasisSpec,
+                    )
+                    or canonical_inputs.allow_pending_symmetry
+                )
+                and bool(canonical_inputs.candidates)
+                and all(
+                    candidate.symmetry_residual is None
+                    and candidate.symmetry_leakage is None
+                    for candidate in canonical_inputs.candidates
+                )
+            )
             decision = select_projection_candidate(
                 canonical_inputs.candidates,
                 thresholds,
+                allow_pending_symmetry=symmetry_pending,
+                diagnostic_metric_names=canonical_inputs.diagnostic_metric_names,
             )
         except CandidateSelectionError as error:
             return _publish_auto_failure(
@@ -280,20 +373,91 @@ def resolve_case_selection(
                 reason=SelectionFailureCode.STRUCTURAL_REJECTION,
                 diagnostic=str(error),
             )
-        if canonical_inputs.projection_handoff is None:
+        if canonical_inputs.projection_handoff is None and (
+            canonical_inputs.resolved_candidate is None
+            or canonical_inputs.generic_certificate_hash is None
+            or canonical_inputs.generic_certificate_input_identity_hash is None
+        ):
             return _publish_auto_failure(
                 session,
                 reason=SelectionFailureCode.CANDIDATE_CERTIFICATE_FAILED,
                 diagnostic=(
-                    "automatic certification requires a real routed Gamma handoff"
+                    "automatic certification requires a routed Gamma handoff or "
+                    "a materialized generic project certificate"
                 ),
             )
         try:
-            identity = build_certified_gamma_selection_identity(
-                selection_input=canonical_inputs.selection_input,
-                handoff=canonical_inputs.projection_handoff,
-                metrics=decision.selected,
-            )
+            pending_payload: dict[str, Any] | None = None
+            if canonical_inputs.projection_handoff is not None:
+                identity = build_certified_gamma_selection_identity(
+                    selection_input=canonical_inputs.selection_input,
+                    handoff=canonical_inputs.projection_handoff,
+                    metrics=decision.selected,
+                )
+                if symmetry_pending:
+                    if canonical_inputs.pending_symmetry_payload is None:
+                        raise SelectionBindingError(
+                            "pending Gamma symmetry requires structured handoff evidence"
+                        )
+                    pending_payload = validate_pending_gamma_symmetry_payload(
+                        payload=canonical_inputs.pending_symmetry_payload,
+                        selection_input=canonical_inputs.selection_input,
+                        identity=identity,
+                        handoff=canonical_inputs.projection_handoff,
+                    )
+            elif symmetry_pending:
+                if canonical_inputs.pending_symmetry_payload is None:
+                    raise SelectionBindingError(
+                        "pending generic symmetry requires structured recomputable evidence"
+                    )
+                pending_payload = validate_pending_generic_symmetry_payload(
+                    payload=canonical_inputs.pending_symmetry_payload,
+                    selection_input=canonical_inputs.selection_input,
+                    resolved_candidate=canonical_inputs.resolved_candidate,
+                    metrics=decision.selected,
+                    certificate_hash=canonical_inputs.generic_certificate_hash,
+                    certificate_input_identity_hash=(
+                        canonical_inputs.generic_certificate_input_identity_hash
+                    ),
+                )
+                metric_evidence = SelectionMetricEvidence.create(
+                    candidate_id=decision.selected.candidate_id,
+                    frozen_target_window_hash=(
+                        canonical_inputs.selection_input.frozen_target_window_hash
+                    ),
+                    validation_k_indices_hash=(
+                        canonical_inputs.selection_input.validation_k_indices_hash
+                    ),
+                    basis_handoff_hash=(
+                        canonical_inputs.resolved_candidate.basis_handoff_hash
+                    ),
+                    metrics=decision.selected,
+                )
+                evidence = CertificationEvidence.create(
+                    metric_evidence=metric_evidence,
+                    symmetry_certificate_hash=canonical_inputs.generic_certificate_hash,
+                    symmetry_input_identity_hash=(
+                        canonical_inputs.generic_certificate_input_identity_hash
+                    ),
+                )
+                identity = SelectionIdentity.create(
+                    selection_input=canonical_inputs.selection_input,
+                    selection_policy_hash=(
+                        canonical_inputs.selection_input.selection_policy_hash
+                    ),
+                    resolved_candidate=canonical_inputs.resolved_candidate,
+                    certification_evidence=evidence,
+                )
+            else:
+                identity = build_certified_generic_selection_identity(
+                    selection_input=canonical_inputs.selection_input,
+                    resolved_candidate=canonical_inputs.resolved_candidate,
+                    metrics=decision.selected,
+                    certificate_hash=canonical_inputs.generic_certificate_hash,
+                    certificate_input_identity_hash=(
+                        canonical_inputs.generic_certificate_input_identity_hash
+                    ),
+                )
         except (SelectionBindingError, TypeError, ValueError) as error:
             return _publish_auto_failure(
                 session,
@@ -306,19 +470,31 @@ def resolve_case_selection(
                 reason=SelectionFailureCode.PERSISTENCE_FAILURE,
                 diagnostic="automatic certification requires persisted payloads",
             )
-        payload_manifest_hash = session.transaction.stage_payloads(
-            dict(canonical_inputs.payloads)
-        )
-        artifact = SelectionArtifact.certified(
-            transaction_id=session.pending.transaction_id,
-            identity=identity,
-            payload_manifest_hash=payload_manifest_hash,
-            projection_handoff=canonical_inputs.projection_handoff,
+        staged_payloads = dict(canonical_inputs.payloads)
+        if pending_payload is not None:
+            staged_payloads["pending_symmetry.json"] = (
+                json.dumps(pending_payload, sort_keys=True, separators=(",", ":"))
+                .encode("utf-8")
+            )
+        payload_manifest_hash = session.transaction.stage_payloads(staged_payloads)
+        artifact = (
+            SelectionArtifact.pending_symmetry(
+                transaction_id=session.pending.transaction_id,
+                identity=identity,
+                payload_manifest_hash=payload_manifest_hash,
+            )
+            if symmetry_pending
+            else SelectionArtifact.certified(
+                transaction_id=session.pending.transaction_id,
+                identity=identity,
+                payload_manifest_hash=payload_manifest_hash,
+                projection_handoff=canonical_inputs.projection_handoff,
+            )
         )
         session.transaction.publish(artifact)
         return ResolvedProjectionSelection(
             selection_input=canonical_inputs.selection_input,
-            status=CertificationStatus.CERTIFIED,
+            status=artifact.certification_status,
             identity=identity,
             artifact=artifact,
             decision=decision,

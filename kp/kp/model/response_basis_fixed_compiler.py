@@ -1163,6 +1163,9 @@ def compile_generator_fixed_vocabulary_from_actions(
             lower=False,
             check_finite=False,
         )
+        # Ambient column-error bounds enter the orthonormal physical frame
+        # through the same right-side metric whitening as the vocabulary.
+        whitening_gain = float(np.linalg.norm(inverse_lower_transpose, ord=2))
         local_action_objects = []
         physical_action_representations: dict[str, np.ndarray] = {}
         local_action_error_bound = 0.0
@@ -1205,6 +1208,7 @@ def compile_generator_fixed_vocabulary_from_actions(
                             column_bounds[name][columns]
                             * inverse_column_scales
                         )
+                        * whitening_gain
                     ),
                 )
         fixed = solve_generator_fixed_subspace(

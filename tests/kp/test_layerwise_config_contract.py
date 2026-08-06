@@ -141,6 +141,65 @@ def test_model_infers_n_orb_from_gamma_routed_group_ranks(
     assert cfg.raw["model"]["n_orb_resolution"]["input_kind"] == "projection_qset"
 
 
+def test_model_infers_n_orb_from_gamma_common_anchor_continuum_sector_ranks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[2, 1, 1])
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"].pop("n_orb")
+    raw["model"].pop("nlow_state")
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_common_anchor"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_common_anchor_basis_spec",
+        lambda path: SimpleNamespace(continuum_sector_ranks=(2, 2)),
+    )
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (2, 2)
+    assert cfg.nlow_state == [2, 2]
+    assert cfg.raw["model"]["n_orb_resolution"]["source"] == (
+        "projection_gamma_common_anchor"
+    )
+    assert cfg.raw["model"]["n_orb_resolution"]["input_kind"] == "projection_qset"
+
+
+def test_model_places_single_common_anchor_owner_in_its_source_qset_slot(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    cfg_path = _write_minimal_layerwise_model(tmp_path, n_orb=[2, 1, 1])
+    raw = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
+    raw["model"].pop("n_orb")
+    raw["model"].pop("nlow_state")
+    cfg_path.write_text(yaml.safe_dump(raw, sort_keys=False), encoding="utf-8")
+    projection_dir = tmp_path / "outputs" / "K1" / "q06" / "projection"
+    np.savez(
+        projection_dir / "basis.npz",
+        projection_basis_kind=np.asarray("gamma_common_anchor"),
+    )
+    monkeypatch.setattr(
+        pipeline_module,
+        "load_gamma_common_anchor_basis_spec",
+        lambda path: SimpleNamespace(continuum_sector_ranks=(0, 2)),
+    )
+
+    cfg = load_model_config(cfg_path)
+
+    assert cfg.n_orb == (0, 2)
+    assert cfg.nlow_state == [0, 2]
+    assert cfg.raw["model"]["n_orb_resolution"]["source"] == (
+        "projection_gamma_common_anchor"
+    )
+
+
 def test_model_accepts_matching_layerwise_n_orb_for_gamma_routed_basis(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

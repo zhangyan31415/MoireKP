@@ -856,7 +856,7 @@ def test_canonical_writer_drops_unvalidated_raw_h_record(tmp_path):
 
 def test_c3_covariance_validation_uses_raw_h_action_with_periodic_gauge(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)
-    runner.structure = SimpleNamespace(spin=False)
+    runner.structure = SimpleNamespace(spin=False, reciprocal_Tmat=np.eye(3))
     valley_ctx = symmetry_analysis.ValleyContext(
         valley=1,
         valley_label="K1",
@@ -1648,7 +1648,7 @@ def test_candidate_row_shortcuts_identity_without_raw_h_projection(tmp_path):
     assert calls == []
 
 
-def test_candidate_row_uses_raw_projected_h_for_c3_covariance(tmp_path, monkeypatch):
+def test_candidate_row_uses_mapped_raw_projected_h_for_c3_covariance(tmp_path, monkeypatch):
     runner = _make_runner(tmp_path)
     runner.structure = SimpleNamespace(spin=False, reciprocal_Tmat=np.eye(3))
     valley_ctx = symmetry_analysis.ValleyContext(
@@ -1671,19 +1671,47 @@ def test_candidate_row_uses_raw_projected_h_for_c3_covariance(tmp_path, monkeypa
             dtype=np.complex128,
         )
     )
-    h_target = np.array([[1.0, 0.25], [0.25, 1.0]], dtype=np.complex128)
+    q_target = np.array([0.2, -0.1, 0.0], dtype=float)
+    q_source = np.array([0.1, 0.2, 0.0], dtype=float)
+    h_source = np.array([[1.0, 0.25], [0.25, 2.0]], dtype=np.complex128)
+    h_target = transport @ h_source @ transport.conj().T
+    s_source = np.array([[1.0, 0.0], [0.0, 1.5]], dtype=np.complex128)
+    s_target = transport @ s_source @ transport.conj().T
     raw_calls = []
+    transport_calls = []
+    runner.sr_supercell = object()
 
     runner._valley_context_for_valley = MethodType(lambda self, valley: valley_ctx, runner)
-    runner._build_transport = MethodType(lambda self, candidate, valley, q_target, q_source: transport, runner)
+
+    def _fake_map_inverse_q(self, candidate, requested_q_target):
+        np.testing.assert_allclose(requested_q_target, q_target)
+        return q_source
+
+    runner._map_inverse_q = MethodType(_fake_map_inverse_q, runner)
+
+    def _fake_build_transport(self, candidate, valley, requested_q_target, requested_q_source):
+        transport_calls.append(
+            (
+                tuple(np.asarray(requested_q_target, dtype=float)),
+                tuple(np.asarray(requested_q_source, dtype=float)),
+            )
+        )
+        return transport
+
+    runner._build_transport = MethodType(_fake_build_transport, runner)
     runner._calculator_for_valley = MethodType(
         lambda self, valley: (_ for _ in ()).throw(AssertionError("C3 validation must not use the legacy C3 orbit")),
         runner,
     )
 
     def _fake_raw_projected_hs(self, valley, q_local):
-        raw_calls.append(tuple(np.asarray(q_local, dtype=float)))
-        return h_target, None
+        q_key = tuple(np.asarray(q_local, dtype=float))
+        raw_calls.append(q_key)
+        if np.allclose(q_local, q_target):
+            return h_target, s_target
+        if np.allclose(q_local, q_source):
+            return h_source, s_source
+        raise AssertionError(f"unexpected C3 covariance momentum {q_key}")
 
     runner._raw_projected_hs = MethodType(_fake_raw_projected_hs, runner)
     monkeypatch.setattr(
@@ -1707,14 +1735,16 @@ def test_candidate_row_uses_raw_projected_h_for_c3_covariance(tmp_path, monkeypa
         },
         valley=1,
         valley_label="K1",
-        q_label="Gamma",
-        q_target=np.zeros(3),
+        q_label="q1",
+        q_target=q_target,
         tolerance=1.0e-2,
     )
 
     assert row["residual_H_raw"] == 0.0
+    assert row["residual_S_raw"] == 0.0
     assert row["status"] == "exact"
-    assert raw_calls == [(0.0, 0.0, 0.0)]
+    assert raw_calls == [tuple(q_target), tuple(q_source)]
+    assert transport_calls == [(tuple(q_target), tuple(q_source))]
 
 
 def test_source_pin_matrix_is_identity_for_zero_source_shift():

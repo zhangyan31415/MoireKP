@@ -402,11 +402,68 @@ def _coefficient_residual(
     )
 
 
+def _coefficient_adjoint_residual(
+    actual: Mapping[tuple[int, int], np.ndarray | sparse.spmatrix],
+    representative: Mapping[tuple[int, int], np.ndarray | sparse.spmatrix],
+) -> float:
+    """Return ``||actual - representative^dagger||`` without copying a map."""
+
+    keys = set(actual)
+    keys.update((int(s), int(r)) for r, s in representative)
+    shape = next(
+        (matrix.shape for matrix in (*actual.values(), *representative.values())),
+        None,
+    )
+    if shape is None:
+        return 0.0
+    use_sparse = any(
+        sparse.issparse(value)
+        for value in (*actual.values(), *representative.values())
+    )
+    if use_sparse:
+        zero = sparse.csr_matrix(shape, dtype=np.complex128)
+        total = 0.0
+        for r_value, s_value in keys:
+            direct = sparse.csr_matrix(
+                actual.get((r_value, s_value), zero),
+                dtype=np.complex128,
+            )
+            source = sparse.csr_matrix(
+                representative.get((s_value, r_value), zero),
+                dtype=np.complex128,
+            )
+            total += _matrix_frobenius_norm(direct - source.getH()) ** 2
+        return float(np.sqrt(total))
+    zero_dense = np.zeros(shape, dtype=np.complex128)
+    return float(
+        np.sqrt(
+            sum(
+                _matrix_frobenius_norm(
+                    np.asarray(
+                        actual.get((r_value, s_value), zero_dense),
+                        dtype=np.complex128,
+                    )
+                    - np.asarray(
+                        representative.get((s_value, r_value), zero_dense),
+                        dtype=np.complex128,
+                    ).conj().T
+                )
+                ** 2
+                for r_value, s_value in keys
+            )
+        )
+    )
+
+
 def certify_joint_adjoint_coefficients(
     canonicalization: JointAdjointCanonicalization,
-    coefficients_by_seed: Mapping[str, Mapping[tuple[int, int], np.ndarray]],
+    coefficients_by_seed: Mapping[
+        str,
+        Mapping[tuple[int, int], np.ndarray | sparse.spmatrix],
+    ],
     *,
-    absolute_error_bound: float,
+    absolute_error_bound: float | None = None,
+    absolute_error_bounds_by_seed: Mapping[str, float] | None = None,
     relative_tolerance: float = 32.0 * np.finfo(np.float64).eps,
 ) -> JointAdjointCanonicalization:
     """Certify metadata adjoint orbits against global raw coefficient tensors.
@@ -415,30 +472,69 @@ def certify_joint_adjoint_coefficients(
     drop a partner or classify a self-adjoint imaginary channel as structural zero.
     """
 
-    if absolute_error_bound < 0.0 or relative_tolerance < 0.0:
+    if (absolute_error_bound is None) == (absolute_error_bounds_by_seed is None):
+        raise ValueError(
+            "raw adjoint certification requires exactly one absolute error-bound mode"
+        )
+    if relative_tolerance < 0.0:
         raise ValueError("adjoint certification tolerances must be non-negative")
-    validated = {
-        str(seed_id): _validated_coefficient_map(coefficients)
+    if absolute_error_bound is not None and absolute_error_bound < 0.0:
+        raise ValueError("adjoint certification tolerances must be non-negative")
+    raw_coefficients = {
+        str(seed_id): coefficients
         for seed_id, coefficients in coefficients_by_seed.items()
     }
+    required_seed_ids = {
+        seed_id
+        for orbit in canonicalization.orbits
+        for seed_id in orbit.member_seed_ids
+    }
+    if absolute_error_bounds_by_seed is not None:
+        per_seed_bounds = {
+            str(seed_id): float(value)
+            for seed_id, value in absolute_error_bounds_by_seed.items()
+        }
+        if set(per_seed_bounds) != required_seed_ids:
+            raise ValueError(
+                "per-seed raw adjoint error bounds must cover every orbit member exactly"
+            )
+        if any(
+            not np.isfinite(value) or value < 0.0
+            for value in per_seed_bounds.values()
+        ):
+            raise ValueError("adjoint certification tolerances must be finite and non-negative")
+    else:
+        per_seed_bounds = None
     certified_orbits: list[JointAdjointOrbit] = []
     certified_mappings: list[AdjointChannelMapping] = []
+    representative_by_seed_id = {
+        seed_id: orbit.representative_seed_id
+        for orbit in canonicalization.orbits
+        for seed_id in orbit.member_seed_ids
+    }
     mappings_by_orbit = {
-        orbit.representative_seed_id: [
-            mapping
-            for mapping in canonicalization.mappings
-            if mapping.seed_id in orbit.member_seed_ids
-        ]
+        orbit.representative_seed_id: []
         for orbit in canonicalization.orbits
     }
+    for mapping in canonicalization.mappings:
+        mappings_by_orbit[representative_by_seed_id[mapping.seed_id]].append(
+            mapping
+        )
     for orbit in canonicalization.orbits:
-        missing = [seed_id for seed_id in orbit.member_seed_ids if seed_id not in validated]
+        missing = [
+            seed_id
+            for seed_id in orbit.member_seed_ids
+            if seed_id not in raw_coefficients
+        ]
         if missing:
             raise AdjointCertificationError(
                 f"missing raw polynomial coefficients for adjoint orbit members {missing}"
             )
+        validated = {
+            seed_id: _validated_coefficient_map(raw_coefficients[seed_id])
+            for seed_id in orbit.member_seed_ids
+        }
         representative = validated[orbit.representative_seed_id]
-        expected = _coefficient_adjoint(representative)
         if orbit.self_adjoint:
             actual = representative
         else:
@@ -448,9 +544,16 @@ def certify_joint_adjoint_coefficients(
                 if seed_id != orbit.representative_seed_id
             )
             actual = validated[partner_id]
-        scale = max(_coefficient_norm(actual), _coefficient_norm(expected))
-        bound = float(absolute_error_bound + relative_tolerance * scale)
-        residual = _coefficient_residual(actual, expected)
+        scale = max(_coefficient_norm(actual), _coefficient_norm(representative))
+        orbit_absolute_bound = (
+            float(absolute_error_bound)
+            if per_seed_bounds is None
+            else float(
+                sum(per_seed_bounds[seed_id] for seed_id in orbit.member_seed_ids)
+            )
+        )
+        bound = float(orbit_absolute_bound + relative_tolerance * scale)
+        residual = _coefficient_adjoint_residual(actual, representative)
         if residual > bound:
             raise AdjointCertificationError(
                 f"raw coefficient adjoint residual {residual:.6e} for orbit "

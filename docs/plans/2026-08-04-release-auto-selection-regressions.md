@@ -4,7 +4,7 @@
 
 **Goal:** Restore fast, physically valid automatic projection for the release Gamma and partial-sector K examples without weakening full-sector structural certification.
 
-**Architecture:** Gamma chooses a low-energy fibre at one representative `(k, Q)` and uses the generic 10/30 meV adequacy thresholds before materializing the full Q model once. Non-Gamma partial-sector candidates retain structural, anchor, identity, and symmetry gates, while full-system band RMS/max are recorded only as diagnostics because the target contains branches outside the modeled sector.
+**Architecture:** Gamma chooses a low-energy fibre at one representative `(k, Q)` and uses shared 3/3 meV adequacy thresholds before materializing the full Q model once. Non-Gamma partial-sector candidates retain structural, anchor, identity, and symmetry gates, while full-system band RMS/max are recorded only as diagnostics because the target contains branches outside the modeled sector.
 
 **Tech stack:** Python, NumPy/SciPy, pytest, MoireKP CLI, remote big-memory validation on `bigmem001` and `bigmem003`.
 
@@ -16,9 +16,9 @@
 - Modify: `tests/kp/test_gamma_bare_auto_selection.py`
 - Modify: `kp/kp/gamma_auto_producer.py`
 
-1. Change the focused test to require the generic automatic-selection defaults: 10 meV RMS and 30 meV maximum error.
+1. Change the focused test to require 3 meV RMS and 3 meV maximum error, which jointly preserve the audited MgI2 and AAB Gamma fibres.
 2. Run the focused test and confirm it fails against the current 1/3 meV constants.
-3. Change only the Gamma defaults to 10/30 meV.
+3. Change only the Gamma defaults to 3/3 meV.
 4. Run the focused Gamma producer and bare-auto tests and confirm they pass.
 
 ### Task 2: Support diagnostic-only band metrics

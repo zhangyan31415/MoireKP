@@ -90,8 +90,8 @@ class CandidateMetrics:
     band_rms_mev: float
     band_max_mev: float
     subspace_overlap: float
-    symmetry_residual: float
-    symmetry_leakage: float
+    symmetry_residual: float | None
+    symmetry_leakage: float | None
     structural_failure: str | None = None
 
 
@@ -114,6 +114,7 @@ class SelectionDecision:
     violations_by_candidate: tuple[
         tuple[str, tuple[ThresholdViolation, ...]], ...
     ]
+    diagnostic_metric_names: tuple[str, ...] = ()
 
 
 class CandidateSelectionFailureCode(str, Enum):
@@ -191,6 +192,36 @@ _SELECTION_THRESHOLD_NAMES = (
     "symmetry_leakage",
 )
 
+_DIAGNOSTIC_ELIGIBLE_METRIC_NAMES = (
+    "band_rms_mev",
+    "band_max_mev",
+)
+
+
+def _normalized_diagnostic_metric_names(
+    metric_names: Sequence[str],
+) -> tuple[str, ...]:
+    if (
+        isinstance(metric_names, np.ndarray)
+        or isinstance(metric_names, (str, bytes, bytearray))
+        or not isinstance(metric_names, Sequence)
+    ):
+        raise ValueError("diagnostic metric names must be a Python sequence")
+    authored = tuple(metric_names)
+    if any(
+        not isinstance(name, str)
+        or name not in _DIAGNOSTIC_ELIGIBLE_METRIC_NAMES
+        for name in authored
+    ):
+        raise ValueError(
+            "diagnostic metrics may contain only band_rms_mev and band_max_mev"
+        )
+    if len(set(authored)) != len(authored):
+        raise ValueError("diagnostic metric names must be unique")
+    return tuple(
+        name for name in _DIAGNOSTIC_ELIGIBLE_METRIC_NAMES if name in authored
+    )
+
 
 def _normalized_thresholds(thresholds: SelectionThresholds) -> SelectionThresholds:
     if not isinstance(thresholds, SelectionThresholds):
@@ -237,6 +268,8 @@ def _candidate_envelope(
 
 def _normalized_candidates(
     candidates: Sequence[CandidateMetrics],
+    *,
+    allow_pending_symmetry: bool = False,
 ) -> tuple[CandidateMetrics, ...]:
     candidates = _candidate_envelope(candidates)
     if any(not isinstance(candidate, CandidateMetrics) for candidate in candidates):
@@ -300,12 +333,38 @@ def _normalized_candidates(
             candidate_ids=invalid_structural_failures,
         )
 
+    mixed_symmetry_metric_ids = tuple(
+        candidate.candidate_id
+        for candidate in candidates
+        if (candidate.symmetry_residual is None)
+        != (candidate.symmetry_leakage is None)
+    )
+    if mixed_symmetry_metric_ids:
+        raise CandidateSelectionError(
+            CandidateSelectionFailureCode.STRUCTURAL_REJECTION,
+            "candidate symmetry_residual and symmetry_leakage must both be present "
+            "or both be pending",
+            candidate_ids=mixed_symmetry_metric_ids,
+        )
+
     invalid_metric_types = tuple(
         candidate.candidate_id
         for candidate in candidates
         if any(
-            not isinstance(getattr(candidate, metric_name), Real)
-            or isinstance(getattr(candidate, metric_name), (bool, np.bool_))
+            (
+                getattr(candidate, metric_name) is None
+                and not (
+                    allow_pending_symmetry
+                    and metric_name in {"symmetry_residual", "symmetry_leakage"}
+                )
+            )
+            or (
+                getattr(candidate, metric_name) is not None
+                and (
+                    not isinstance(getattr(candidate, metric_name), Real)
+                    or isinstance(getattr(candidate, metric_name), (bool, np.bool_))
+                )
+            )
             for metric_name in _CANDIDATE_METRIC_NAMES
         )
     )
@@ -316,12 +375,16 @@ def _normalized_candidates(
             candidate_ids=invalid_metric_types,
         )
 
-    normalized_metrics_by_id: dict[str, tuple[float, ...]] = {}
+    normalized_metrics_by_id: dict[str, tuple[float | None, ...]] = {}
     unrepresentable_ids: list[str] = []
     for candidate in candidates:
         try:
             normalized_metrics_by_id[candidate.candidate_id] = tuple(
-                float(getattr(candidate, metric_name))
+                (
+                    None
+                    if getattr(candidate, metric_name) is None
+                    else float(getattr(candidate, metric_name))
+                )
                 for metric_name in _CANDIDATE_METRIC_NAMES
             )
         except (OverflowError, TypeError, ValueError):
@@ -337,7 +400,7 @@ def _normalized_candidates(
         candidate.candidate_id
         for candidate in candidates
         if any(
-            not np.isfinite(value)
+            value is not None and not np.isfinite(value)
             for value in normalized_metrics_by_id[candidate.candidate_id]
         )
     )
@@ -352,7 +415,8 @@ def _normalized_candidates(
         candidate.candidate_id
         for candidate in candidates
         if any(
-            normalized_metrics_by_id[candidate.candidate_id][index] < 0.0
+            normalized_metrics_by_id[candidate.candidate_id][index] is not None
+            and normalized_metrics_by_id[candidate.candidate_id][index] < 0.0
             for index in (0, 1, 3, 4)
         )
         or not 0.0 <= normalized_metrics_by_id[candidate.candidate_id][2] <= 1.0
@@ -387,6 +451,8 @@ def _normalized_candidates(
 def _candidate_violations(
     candidate: CandidateMetrics,
     thresholds: SelectionThresholds,
+    *,
+    allow_pending_symmetry: bool = False,
 ) -> tuple[ThresholdViolation, ...]:
     violations: list[ThresholdViolation] = []
     upper_bounds = (
@@ -396,6 +462,8 @@ def _candidate_violations(
         ("symmetry_leakage", candidate.symmetry_leakage, thresholds.symmetry_leakage),
     )
     for metric, value, threshold in upper_bounds:
+        if value is None and allow_pending_symmetry and metric.startswith("symmetry_"):
+            continue
         if not np.isfinite(value) or value > threshold:
             normalized = np.inf if not np.isfinite(value) else (value - threshold) / threshold
             violations.append(
@@ -428,6 +496,9 @@ def _candidate_violations(
 def select_projection_candidate(
     candidates: Sequence[CandidateMetrics],
     thresholds: SelectionThresholds,
+    *,
+    allow_pending_symmetry: bool = False,
+    diagnostic_metric_names: Sequence[str] = (),
 ) -> SelectionDecision:
     candidates = _candidate_envelope(candidates)
     if not candidates:
@@ -436,7 +507,13 @@ def select_projection_candidate(
             "no projection candidates were provided",
         )
     thresholds = _normalized_thresholds(thresholds)
-    candidates = _normalized_candidates(candidates)
+    diagnostic_metric_names = _normalized_diagnostic_metric_names(
+        diagnostic_metric_names
+    )
+    candidates = _normalized_candidates(
+        candidates,
+        allow_pending_symmetry=allow_pending_symmetry,
+    )
 
     structural_failures = tuple(
         (candidate.candidate_id, str(candidate.structural_failure))
@@ -456,7 +533,15 @@ def select_projection_candidate(
         candidate.candidate_id: (
             ()
             if candidate.structural_failure is not None
-            else _candidate_violations(candidate, thresholds)
+            else tuple(
+                violation
+                for violation in _candidate_violations(
+                    candidate,
+                    thresholds,
+                    allow_pending_symmetry=allow_pending_symmetry,
+                )
+                if violation.metric not in diagnostic_metric_names
+            )
         )
         for candidate in candidates
     }
@@ -470,7 +555,11 @@ def select_projection_candidate(
                 candidate.dimension,
                 candidate.band_rms_mev,
                 1.0 - candidate.subspace_overlap,
-                candidate.symmetry_residual,
+                (
+                    candidate.symmetry_residual
+                    if candidate.symmetry_residual is not None
+                    else 0.0
+                ),
                 candidate.candidate_id,
             ),
         )
@@ -485,6 +574,7 @@ def select_projection_candidate(
                 (candidate.candidate_id, violations_by_id[candidate.candidate_id])
                 for candidate in candidates
             ),
+            diagnostic_metric_names=diagnostic_metric_names,
         )
 
     raise CandidateSelectionError(
@@ -758,6 +848,9 @@ def build_selection_report(
     return {
         "status": str(decision.status),
         "selected_candidate": selected_id,
+        "diagnostic_metric_names": [
+            str(name) for name in decision.diagnostic_metric_names
+        ],
         "selection_scope": "fixed band indices applied unchanged to every Q and every k",
         "reference": {
             "k_index": int(reference.k_index),

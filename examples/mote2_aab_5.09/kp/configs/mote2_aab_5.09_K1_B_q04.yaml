@@ -15,15 +15,35 @@ project:
   q_shell: 4
   efermi: -4.182383738673
   target: valence
-  nlow_state_list: [[], [], [22]]
+  selection: auto
+  # Audited automatic result. Uncommenting this list makes selection explicit.
+  # nlow_state_list:
+  #   - []
+  #   - []
+  #   - [22]
   e_ref: -4.55
   workers: 64
 
 symmetry: {}
 
+bands:
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 20
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
+  compare_to_heff: true
+  band_slice: [0, 18]
+  plot:
+    top_bands: 8
+    align: top
+    figsize: [3.2, 5.8]
+    ylim: [-0.36, 0.04]
+
 model:
   target_bands: top
-  harmonics: {intralayer: 3, interlayer: 0}
   max_order: {kinetic: 12, intralayer: 2, interlayer: 0}
   fit:
     method: linear
@@ -31,11 +51,3 @@ model:
     bands: 8
     one_sided_weight: 0.0
     two_sided_weight: 0.0
-  bands:
-    compare_to_heff: true
-    band_slice: [0, 18]
-    plot:
-      top_bands: 8
-      align: top
-      figsize: [3.2, 5.8]
-      ylim: [-0.36, 0.04]
