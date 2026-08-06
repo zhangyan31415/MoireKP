@@ -30,7 +30,11 @@ from .response_basis import (
     _monomial_pullback_table,
     _propagated_error_components,
 )
-from .response_basis_factorized import compile_factorized_group_element_actions
+from .response_basis_factorized import (
+    FactorizedTermActionError,
+    compile_factorized_group_element_actions,
+    compile_factorized_raw_seed_action,
+)
 from .response_basis_adjoint import (
     JointAdjointSeed,
     JointAdjointSeedKey,
@@ -43,6 +47,14 @@ from .response_basis_symmetry_first import (
     _seed_symbolic_atoms,
     _symbolic_reynolds_batch,
     _validate_seeds,
+    build_raw_real_vocabulary,
+)
+from .response_basis_local_fixed import (
+    LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
+    LOCAL_REYNOLDS_ALGORITHM_V1,
+    LocalGeneratorNullspaceUnavailable,
+    build_exact_joint_components,
+    solve_local_reynolds_component_blocked,
 )
 
 
@@ -234,45 +246,62 @@ def _physical_seed_digest(
     *,
     coordinate: PolynomialCoordinateBasis,
 ) -> str:
-    """Hash a complete physical polynomial direction, excluding provenance."""
+    """Hash one complete polynomial direction using canonical CSR buffers.
 
-    entries: list[tuple[int, int, int, int, complex]] = []
+    Two seeds receive the same digest exactly when their coefficient stacks
+    differ only by one nonzero complex scalar.  Monomials and sparse structure
+    are encoded explicitly, while whole CSR buffers are hashed at once rather
+    than iterating over every nonzero in Python.
+    """
+
+    matrices: list[tuple[tuple[int, int], sparse.csr_matrix]] = []
+    leading: complex | None = None
     for monomial in coordinate.monomials:
-        matrix = sparse.csr_matrix(
-            seed.coefficients.get(
-                monomial,
-                sparse.csr_matrix((seed.dim, seed.dim), dtype=np.complex128),
-            ),
-            dtype=np.complex128,
-        )
-        matrix.sum_duplicates()
-        matrix.eliminate_zeros()
-        matrix.sort_indices()
-        coo = matrix.tocoo()
-        entries.extend(
-            (
-                int(monomial[0]),
-                int(monomial[1]),
-                int(row),
-                int(col),
-                complex(data),
-            )
-            for row, col, data in zip(coo.row, coo.col, coo.data)
-        )
+        raw_matrix = seed.coefficients.get(monomial)
+        if raw_matrix is None:
+            continue
+        matrix = sparse.csr_matrix(raw_matrix, dtype=np.complex128, copy=False)
+        if (
+            not bool(matrix.has_canonical_format)
+            or not bool(matrix.has_sorted_indices)
+            or np.any(matrix.data == 0.0j)
+        ):
+            matrix = sparse.csr_matrix(matrix, dtype=np.complex128, copy=True)
+            matrix.sum_duplicates()
+            matrix.eliminate_zeros()
+            matrix.sort_indices()
+        if matrix.nnz == 0:
+            continue
+        if leading is None:
+            leading = complex(matrix.data[0])
+            if (
+                leading == 0.0j
+                or not np.isfinite(leading.real)
+                or not np.isfinite(leading.imag)
+            ):
+                raise GradedCompilationUnavailable(
+                    f"seed {seed.seed_id!r} has an invalid physical leading coefficient",
+                    certificate={"seed_id": str(seed.seed_id)},
+                )
+        matrices.append((monomial, matrix))
+
     digest = hashlib.sha256()
+    digest.update(b"physical-polynomial-direction-csr-v2")
     digest.update(np.asarray((seed.dim, seed.dim), dtype="<i8").tobytes())
-    if not entries:
+    if leading is None:
         digest.update(b"zero-polynomial-direction")
         return digest.hexdigest()
-    leading = entries[0][4]
-    if leading == 0.0j:
-        raise GradedCompilationUnavailable(
-            f"seed {seed.seed_id!r} has an invalid physical leading coefficient",
-            certificate={"seed_id": str(seed.seed_id)},
+
+    for monomial, matrix in matrices:
+        digest.update(
+            np.asarray(
+                (int(monomial[0]), int(monomial[1]), int(matrix.nnz)),
+                dtype="<i8",
+            ).tobytes()
         )
-    for r, s, row, col, data in entries:
-        digest.update(np.asarray((r, s, row, col), dtype="<i8").tobytes())
-        normalized = np.asarray([data / leading], dtype="<c16").copy()
+        digest.update(np.asarray(matrix.indptr, dtype="<i8").tobytes())
+        digest.update(np.asarray(matrix.indices, dtype="<i8").tobytes())
+        normalized = np.asarray(matrix.data / leading, dtype="<c16").copy()
         normalized.real[normalized.real == 0.0] = 0.0
         normalized.imag[normalized.imag == 0.0] = 0.0
         digest.update(normalized.tobytes())
@@ -412,6 +441,7 @@ def build_structural_compilation_plan(
     internal_actions_by_word: Mapping[tuple[str, ...], sparse.spmatrix],
     maximum_action_error_bound: float = 0.0,
     descriptors: Sequence[FilteredSeedDescriptor] | None = None,
+    compute_cyclic_orbits: bool = True,
 ) -> StructuralCompilationPlan:
     """Deduplicate physical seeds and close actual support fibers into orbits.
 
@@ -476,6 +506,31 @@ def build_structural_compilation_plan(
             structural_orbits=(),
             zero_seed_indices=tuple(zero_seed_indices),
             structural_probe_seed_indices=(),
+            family_degree_limits=dict(sorted(family_degree_limits.items())),
+        )
+
+    if not bool(compute_cyclic_orbits):
+        return StructuralCompilationPlan(
+            representative_seed_indices=representative_indices,
+            duplicate_seed_groups=duplicate_groups,
+            structural_orbits=tuple(
+                StructuralOrbit(
+                    orbit_index=orbit_index,
+                    support_ids=(support_id,),
+                    representative_seed_indices=tuple(
+                        sorted(support_seed_indices[support_id])
+                    ),
+                )
+                for orbit_index, support_id in enumerate(support_ids)
+            ),
+            zero_seed_indices=tuple(zero_seed_indices),
+            structural_probe_seed_indices=tuple(
+                min(
+                    support_seed_indices[support_id],
+                    key=lambda index: (described[index].nominal_degree, index),
+                )
+                for support_id in support_ids
+            ),
             family_degree_limits=dict(sorted(family_degree_limits.items())),
         )
 
@@ -1490,7 +1545,629 @@ def _select_filtered_independent_column_blocks(
     return selection, tuple(int(value) for value in source_owner_indices), artifact
 
 
-def compile_graded_candidate_group(
+def _joint_adjoint_key_artifact(key: JointAdjointSeedKey) -> dict[str, Any]:
+    return {
+        "sector_from": str(key.sector_from),
+        "sector_to": str(key.sector_to),
+        "orbital_from": int(key.orbital_from),
+        "orbital_to": int(key.orbital_to),
+        "monomial": [int(value) for value in key.monomial],
+        "center": {
+            "serialized_little_endian_hex": str(
+                key.center.serialized_little_endian_hex
+            ),
+            "coordinate_convention": str(key.center.coordinate_convention),
+        },
+        "harmonic_id": str(key.harmonic_id),
+        "adjoint_harmonic_id": str(key.adjoint_harmonic_id),
+    }
+
+
+def _certified_hermitian_owner_action(
+    certified_raw_adjoint: Any,
+    *,
+    physical_seeds: Sequence[RawPolynomialSeed],
+) -> sparse.csc_matrix:
+    """Compile raw adjunction in the physical real/imag owner vocabulary."""
+
+    seeds = tuple(physical_seeds)
+    index_by_seed_id = {
+        str(seed.seed_id): index for index, seed in enumerate(seeds)
+    }
+    if len(index_by_seed_id) != len(seeds):
+        raise ValueError("physical adjoint seed ids must be unique")
+    rows: list[int] = []
+    columns: list[int] = []
+    values: list[float] = []
+    covered_seed_ids: set[str] = set()
+    for orbit in certified_raw_adjoint.orbits:
+        if bool(orbit.requires_numeric_certification):
+            raise LocalGeneratorNullspaceUnavailable(
+                "uncertified_adjoint_route",
+                certificate={
+                    "representative_seed_id": str(orbit.representative_seed_id),
+                    "certification_status": str(orbit.certification_status),
+                },
+            )
+        member_ids = tuple(str(value) for value in orbit.member_seed_ids)
+        if any(seed_id not in index_by_seed_id for seed_id in member_ids):
+            raise LocalGeneratorNullspaceUnavailable(
+                "adjoint_route_missing_physical_seed",
+                certificate={"member_seed_ids": member_ids},
+            )
+        covered_seed_ids.update(member_ids)
+        if bool(orbit.self_adjoint):
+            if len(member_ids) != 1:
+                raise RuntimeError("self-adjoint orbit must contain exactly one seed")
+            source = index_by_seed_id[member_ids[0]]
+            rows.extend((2 * source, 2 * source + 1))
+            columns.extend((2 * source, 2 * source + 1))
+            values.extend((1.0, -1.0))
+            continue
+        if len(member_ids) != 2:
+            raise RuntimeError("non-self-adjoint orbit must contain exactly two seeds")
+        left = index_by_seed_id[member_ids[0]]
+        right = index_by_seed_id[member_ids[1]]
+        rows.extend((2 * right, 2 * left, 2 * right + 1, 2 * left + 1))
+        columns.extend((2 * left, 2 * right, 2 * left + 1, 2 * right + 1))
+        values.extend((1.0, 1.0, -1.0, -1.0))
+    if covered_seed_ids != set(index_by_seed_id):
+        raise LocalGeneratorNullspaceUnavailable(
+            "adjoint_routes_incomplete",
+            certificate={
+                "missing_seed_ids": tuple(sorted(set(index_by_seed_id) - covered_seed_ids)),
+            },
+        )
+    dimension = 2 * len(seeds)
+    action = sparse.coo_matrix(
+        (
+            np.asarray(values, dtype=np.float64),
+            (
+                np.asarray(rows, dtype=np.int64),
+                np.asarray(columns, dtype=np.int64),
+            ),
+        ),
+        shape=(dimension, dimension),
+    ).tocsc()
+    action.sum_duplicates()
+    action.eliminate_zeros()
+    action.sort_indices()
+    column_nnz = np.diff(action.indptr)
+    if not np.array_equal(column_nnz, np.ones(dimension, dtype=column_nnz.dtype)):
+        raise RuntimeError("certified adjoint action is not a signed permutation")
+    involution = (action @ action - sparse.eye(dimension, format="csc")).tocsc()
+    involution.eliminate_zeros()
+    if involution.nnz:
+        raise RuntimeError("certified adjoint action does not square to identity")
+    return action
+
+
+def _fixed_column_error_components(
+    coordinates: np.ndarray,
+    *,
+    component_owner_indices: Sequence[int],
+    error_components_by_seed: Sequence[Mapping[str, float]],
+    absolute_errors_by_seed: Sequence[float],
+) -> tuple[dict[str, float], ...]:
+    owner_indices = tuple(int(value) for value in component_owner_indices)
+    matrix = np.asarray(coordinates, dtype=np.float64)
+    records: list[dict[str, float]] = []
+    for fixed_index in range(matrix.shape[1]):
+        record: dict[str, float] = {}
+        for local_index, owner in enumerate(owner_indices):
+            weight = abs(float(matrix[local_index, fixed_index]))
+            if weight == 0.0:
+                continue
+            seed_index = owner // 2
+            source_components = error_components_by_seed[seed_index]
+            source_total = float(sum(source_components.values()))
+            source_envelope = float(absolute_errors_by_seed[seed_index])
+            for name, value in source_components.items():
+                record[str(name)] = record.get(str(name), 0.0) + weight * float(value)
+            if source_envelope > source_total:
+                record["duplicate_source_envelope"] = (
+                    record.get("duplicate_source_envelope", 0.0)
+                    + weight * (source_envelope - source_total)
+                )
+        records.append(dict(sorted(record.items())))
+    return tuple(records)
+
+
+def _compile_graded_candidate_group_local_fixed(
+    seeds: Sequence[RawPolynomialSeed],
+    *,
+    coordinate: PolynomialCoordinateBasis,
+    group: Any,
+    factorized_actions: Mapping[str, Any],
+    internal_actions_by_word: Mapping[tuple[str, ...], sparse.spmatrix] | None,
+    factorized_group_artifact: Mapping[str, Any] | None,
+    joint_adjoint_keys: Mapping[str, JointAdjointSeedKey] | None,
+) -> CandidateResponseSet:
+    """Compile the graded physical space from local generator/H fixed spaces."""
+
+    function_started = time.perf_counter()
+    ordered = _validate_seeds(seeds)
+    descriptors = tuple(
+        describe_filtered_seed(seed, coordinate=coordinate, seed_index=index)
+        for index, seed in enumerate(ordered)
+    )
+    action_started = time.perf_counter()
+    if internal_actions_by_word is None:
+        internal_actions, action_artifact = compile_factorized_group_element_actions(
+            group=group,
+            factorized_generators=factorized_actions,
+        )
+    else:
+        if factorized_group_artifact is None:
+            raise LocalGeneratorNullspaceUnavailable(
+                "missing_factorized_group_artifact",
+                certificate={"check": "factorized_group_artifact"},
+            )
+        internal_actions = {
+            tuple(str(value) for value in word): sparse.csr_matrix(matrix)
+            for word, matrix in internal_actions_by_word.items()
+        }
+        action_artifact = dict(factorized_group_artifact)
+    action_seconds = time.perf_counter() - action_started
+    internal_error = float(action_artifact.get("maximum_action_error_bound", 0.0))
+
+    error_started = time.perf_counter()
+    error_components_by_seed: list[dict[str, float]] = []
+    absolute_errors_by_seed: list[float] = []
+    raw_adjoint_errors_by_seed: list[float] = []
+    for seed in ordered:
+        raw_norm = _coefficient_norm(seed.coefficients)
+        components = _propagated_error_components(
+            raw_norm,
+            dim=seed.dim,
+            degree=coordinate.max_degree,
+            group=group,
+        )
+        raw_adjoint_errors_by_seed.append(
+            float(
+                sum(components.values())
+                + float(seed.metadata.get("coordinate_conversion_error_bound", 0.0))
+            )
+        )
+        if internal_error > 0.0:
+            components["factorized_internal_action"] = float(
+                (2.0 * internal_error + internal_error**2)
+                * max(raw_norm, np.finfo(float).tiny)
+            )
+        error_components_by_seed.append(components)
+        absolute_errors_by_seed.append(float(sum(components.values())))
+    error_seconds = time.perf_counter() - error_started
+
+    structural_started = time.perf_counter()
+    structural_plan = build_structural_compilation_plan(
+        ordered,
+        coordinate=coordinate,
+        group=group,
+        internal_actions_by_word=internal_actions,
+        maximum_action_error_bound=internal_error,
+        descriptors=descriptors,
+        compute_cyclic_orbits=False,
+    )
+    structural_seconds = time.perf_counter() - structural_started
+    if not structural_plan.representative_seed_indices:
+        raise LocalGeneratorNullspaceUnavailable(
+            "empty_physical_seed_vocabulary",
+            certificate={"zero_seed_indices": structural_plan.zero_seed_indices},
+        )
+    if joint_adjoint_keys is None:
+        raise LocalGeneratorNullspaceUnavailable(
+            "missing_certified_adjoint_routes",
+            certificate={"physical_seed_count": len(structural_plan.representative_seed_indices)},
+        )
+
+    adjoint_started = time.perf_counter()
+    ordered_seed_ids = {str(seed.seed_id) for seed in ordered}
+    if {str(seed_id) for seed_id in joint_adjoint_keys} != ordered_seed_ids:
+        raise ValueError("graded joint-adjoint keys must cover every authored seed exactly")
+    physical_seed_indices = tuple(
+        int(indices[0]) for indices in structural_plan.duplicate_seed_groups
+    )
+    physical_seeds = tuple(ordered[index] for index in physical_seed_indices)
+    provisional_raw_adjoint = canonicalize_joint_adjoint_seeds(
+        [
+            JointAdjointSeed(
+                str(seed.seed_id),
+                joint_adjoint_keys[str(seed.seed_id)],
+            )
+            for seed in physical_seeds
+        ]
+    )
+    certified_raw_adjoint = certify_joint_adjoint_coefficients(
+        provisional_raw_adjoint,
+        {str(seed.seed_id): seed.coefficients for seed in physical_seeds},
+        absolute_error_bounds_by_seed={
+            str(ordered[index].seed_id): float(raw_adjoint_errors_by_seed[index])
+            for index in physical_seed_indices
+        },
+    )
+    hermitian_action = _certified_hermitian_owner_action(
+        certified_raw_adjoint,
+        physical_seeds=physical_seeds,
+    )
+    adjoint_seconds = time.perf_counter() - adjoint_started
+
+    vocabulary_started = time.perf_counter()
+    vocabulary = build_raw_real_vocabulary(physical_seeds, coordinate=coordinate)
+    owner_indices = tuple(
+        owner
+        for seed_index in physical_seed_indices
+        for owner in (2 * seed_index, 2 * seed_index + 1)
+    )
+    nominal_degrees = tuple(
+        degree
+        for seed_index in physical_seed_indices
+        for degree in (
+            descriptors[seed_index].nominal_degree,
+            descriptors[seed_index].nominal_degree,
+        )
+    )
+    duplicates_by_representative = {
+        int(indices[0]): tuple(int(value) for value in indices)
+        for indices in structural_plan.duplicate_seed_groups
+    }
+    column_error_bounds = np.asarray(
+        [
+            max(absolute_errors_by_seed[index] for index in duplicates_by_representative[seed_index])
+            for seed_index in physical_seed_indices
+            for _component in ("real", "imag")
+        ],
+        dtype=np.float64,
+    )
+    provenance_by_owner = {
+        owner: {
+            "owner": owner,
+            "seed_index": owner // 2,
+            "component": ("real", "imag")[owner % 2],
+            "seed_id": str(ordered[owner // 2].seed_id),
+            "term_index": descriptors[owner // 2].term_index,
+            "nominal_degree": descriptors[owner // 2].nominal_degree,
+            "harmonic_adjoint": _joint_adjoint_key_artifact(
+                joint_adjoint_keys[str(ordered[owner // 2].seed_id)]
+            ),
+        }
+        for owner in owner_indices
+    }
+    vocabulary_seconds = time.perf_counter() - vocabulary_started
+
+    generator_started = time.perf_counter()
+    generator_actions: dict[str, sparse.csc_matrix] = {}
+    antiunitary_parities: dict[str, bool] = {}
+    generator_error_bounds: dict[str, float] = {}
+    if factorized_actions:
+        for name in sorted(str(value) for value in factorized_actions):
+            action = factorized_actions[name]
+            try:
+                generator_actions[name] = compile_factorized_raw_seed_action(
+                    seeds=physical_seeds,
+                    factorized_action=action,
+                )
+            except FactorizedTermActionError as error:
+                raise LocalGeneratorNullspaceUnavailable(
+                    "missing_certified_generator_route",
+                    certificate={"generator": name, "message": str(error)},
+                ) from error
+            antiunitary_parities[name] = bool(action.antiunitary)
+            generator_error_bounds[name] = float(
+                max(
+                    internal_error,
+                    getattr(action, "matrix_certification_bound", 0.0),
+                    getattr(action, "phase_certification_bound", 0.0),
+                )
+            )
+    elif len(tuple(group.elements)) == 1 and not bool(group.elements[0].antiunitary):
+        generator_actions["identity"] = sparse.eye(
+            len(owner_indices), format="csc", dtype=np.float64
+        )
+        antiunitary_parities["identity"] = False
+        generator_error_bounds["identity"] = 0.0
+    else:
+        raise LocalGeneratorNullspaceUnavailable(
+            "missing_certified_generator_routes",
+            certificate={"group_element_count": len(tuple(group.elements))},
+        )
+    generator_seconds = time.perf_counter() - generator_started
+
+    component_started = time.perf_counter()
+    components = build_exact_joint_components(
+        vocabulary.matrix,
+        nominal_degrees=nominal_degrees,
+        logical_owner_indices=owner_indices,
+        provenance_by_owner=provenance_by_owner,
+        generator_actions=generator_actions,
+        generator_error_bounds=generator_error_bounds,
+        antiunitary_parities=antiunitary_parities,
+        hermitian_action=hermitian_action,
+        column_absolute_error_bounds=column_error_bounds,
+    )
+    component_seconds = time.perf_counter() - component_started
+    group_words = tuple(
+        tuple(str(value) for value in element.canonical_word)
+        for element in group.elements
+    )
+
+    local_solve_started = time.perf_counter()
+    fixed_block_records: list[dict[str, Any]] = []
+    component_artifacts: list[dict[str, Any]] = []
+    total_fixed_rank = 0
+    total_fixed_nnz = 0
+    for component in components:
+        solve_started = time.perf_counter()
+        result = solve_local_reynolds_component_blocked(
+            component,
+            group_words=group_words,
+        )
+        solve_seconds = time.perf_counter() - solve_started
+        component_artifacts.append(
+            {
+                "component_index": int(component.component_index),
+                "raw_dimension": len(component.logical_owner_indices),
+                "independent_dimension": int(
+                    result.certification_metadata["independent_dimension"]
+                ),
+                "fixed_rank": int(result.fixed_rank),
+                "exact_support_row_count": len(component.exact_support_rows),
+                "generator_action_nnz": dict(
+                    result.certification_metadata["generator_action_nnz"]
+                ),
+                "action_block_count": int(
+                    result.certification_metadata["action_block_count"]
+                ),
+                "maximum_action_block_dimension": int(
+                    result.certification_metadata["maximum_action_block_dimension"]
+                ),
+                "solve_seconds": float(solve_seconds),
+                "fallback_reason": None,
+            }
+        )
+        if result.fixed_rank == 0:
+            continue
+        fixed_coordinates = sparse.csc_matrix(
+            np.asarray(result.fixed_vocabulary_coordinates, dtype=np.float64)
+        )
+        fixed_columns = (component.ambient_columns @ fixed_coordinates).tocsc()
+        fixed_columns.sum_duplicates()
+        fixed_columns.eliminate_zeros()
+        fixed_columns.sort_indices()
+        fixed_error_components = _fixed_column_error_components(
+            np.asarray(result.fixed_vocabulary_coordinates, dtype=np.float64),
+            component_owner_indices=component.logical_owner_indices,
+            error_components_by_seed=error_components_by_seed,
+            absolute_errors_by_seed=absolute_errors_by_seed,
+        )
+        selected_owners = tuple(int(value) for value in result.selected_global_owner_indices)
+        fixed_block_records.append(
+            {
+                "component_index": int(component.component_index),
+                "projected": fixed_columns,
+                "owner_indices": selected_owners,
+                "nominal_degrees": np.asarray(
+                    [descriptors[owner // 2].nominal_degree for owner in selected_owners],
+                    dtype=np.int64,
+                ),
+                "error_bounds": np.asarray(
+                    [sum(values.values()) for values in fixed_error_components],
+                    dtype=np.float64,
+                ),
+                "error_components": fixed_error_components,
+                "fixed_coordinates": np.asarray(
+                    result.fixed_vocabulary_coordinates, dtype=np.float64
+                ),
+                "component_owner_indices": component.logical_owner_indices,
+                "result": result,
+            }
+        )
+        total_fixed_rank += int(result.fixed_rank)
+        total_fixed_nnz += int(fixed_columns.nnz)
+    local_solve_seconds = time.perf_counter() - local_solve_started
+    if not fixed_block_records:
+        raise LocalGeneratorNullspaceUnavailable(
+            "empty_local_fixed_space",
+            certificate={"component_count": len(components)},
+        )
+
+    row_degrees = projected_row_degrees(coordinate=coordinate, dim=ordered[0].dim)
+    global_started = time.perf_counter()
+    global_selection, global_owner_map, global_owner_artifact = (
+        _select_filtered_independent_column_blocks(
+            [record["projected"] for record in fixed_block_records],
+            owner_index_blocks=[record["owner_indices"] for record in fixed_block_records],
+            nominal_degree_blocks=[record["nominal_degrees"] for record in fixed_block_records],
+            error_bound_blocks=[record["error_bounds"] for record in fixed_block_records],
+            row_degrees=row_degrees,
+        )
+    )
+    global_seconds = time.perf_counter() - global_started
+    location_by_owner: dict[int, tuple[dict[str, Any], int]] = {}
+    for record in fixed_block_records:
+        for local_index, owner in enumerate(record["owner_indices"]):
+            if int(owner) in location_by_owner:
+                raise RuntimeError("local fixed owner selected by more than one component")
+            location_by_owner[int(owner)] = (record, int(local_index))
+    selected_global_owners = tuple(
+        int(global_owner_map[index])
+        for index in global_selection.selected_owner_indices
+    )
+
+    policy = NullClassificationPolicy()
+    channel_ids = tuple(
+        f"{seed.seed_id}:{component}"
+        for seed in ordered
+        for component in ("real", "imag")
+    )
+    materialize_started = time.perf_counter()
+    channels: list[ResponseChannel] = []
+    for owner in selected_global_owners:
+        record, local_index = location_by_owner[owner]
+        seed_index = owner // 2
+        component_name = ("real", "imag")[owner % 2]
+        seed = ordered[seed_index]
+        column = record["projected"][:, local_index].tocsc()
+        coefficients = _coefficient_vector_to_response_map(
+            column,
+            coordinate=coordinate,
+            dim=seed.dim,
+        )
+        response_norm = _coefficient_norm(coefficients)
+        components_error = dict(record["error_components"][local_index])
+        error_bound = float(sum(components_error.values()))
+        fixed_coordinate_column = np.asarray(
+            record["fixed_coordinates"][:, local_index], dtype=np.float64
+        )
+        source_provenance: list[dict[str, Any]] = []
+        source_coordinates: list[dict[str, Any]] = []
+        for local_owner, coefficient in zip(
+            record["component_owner_indices"], fixed_coordinate_column
+        ):
+            value = float(coefficient)
+            if value == 0.0:
+                continue
+            source_seed_index = int(local_owner) // 2
+            source_coordinates.append(
+                {
+                    "owner": int(local_owner),
+                    "channel_id": channel_ids[int(local_owner)],
+                    "coefficient": value,
+                }
+            )
+            source_provenance.extend(
+                _seed_provenance(ordered[index], descriptors[index])
+                for index in duplicates_by_representative[source_seed_index]
+            )
+        channels.append(
+            ResponseChannel(
+                channel_id=channel_ids[owner],
+                seed_id=str(seed.seed_id),
+                component=component_name,
+                coefficients=coefficients,
+                unnormalized_norm=response_norm,
+                propagated_error_bound=error_bound,
+                classification=policy.classify(response_norm, error_bound),
+                response_scale=response_norm,
+                support_component=str(seed.support_component),
+                metadata={
+                    **dict(seed.metadata),
+                    "symbolic_atom_compiler": LOCAL_REYNOLDS_ALGORITHM_V1,
+                    "graded_nominal_degree": int(descriptors[seed_index].nominal_degree),
+                    "graded_structural_support_id": str(
+                        descriptors[seed_index].structural_support_id
+                    ),
+                    "graded_source_provenance": source_provenance,
+                    "local_fixed_owner_coordinates": source_coordinates,
+                    "local_fixed_component_index": int(record["component_index"]),
+                },
+                error_bound_components=components_error,
+            )
+        )
+    materialize_seconds = time.perf_counter() - materialize_started
+
+    all_rank_proofs = tuple(
+        {
+            **dict(proof),
+            "selection_scope": str(global_owner_artifact["strategy"]),
+            "local_to_global_owner_indices": [int(value) for value in global_owner_map],
+            "selected_global_owner_indices": [
+                int(global_owner_map[index])
+                for index in proof.get("selected_owner_indices", [])
+            ],
+        }
+        for proof in global_selection.degree_proofs
+    )
+    global_owner_artifact = {
+        **dict(global_owner_artifact),
+        "rank_proofs": list(all_rank_proofs),
+        "owner_column_materialization_policy": "local_fixed_selected_only_v1",
+        "materialized_owner_column_count": len(channels),
+        "avoided_owner_column_materialization_count": (
+            2 * len(physical_seed_indices) - len(channels)
+        ),
+    }
+    logical_count = 2 * len(ordered)
+    physical_real_count = 2 * len(physical_seed_indices)
+    adjoint_orbit_descriptor_count = int(len(certified_raw_adjoint.orbits))
+    hermitian_ambient_channel_count = int(
+        sum(len(orbit.channel_ids) for orbit in certified_raw_adjoint.orbits)
+    )
+    structural_support_count = len(
+        {
+            descriptors[index].structural_support_id
+            for index in structural_plan.representative_seed_indices
+        }
+    )
+    return CandidateResponseSet(
+        coordinate=coordinate,
+        channels=tuple(channels),
+        dim=int(ordered[0].dim),
+        group_artifact=group.artifact(),
+        null_policy=policy,
+        adjoint_artifact={
+            "certification": "local_small_matrix_reynolds_v1",
+            "local_fixed_algorithm": LOCAL_REYNOLDS_ALGORITHM_V1,
+            "local_fixed_gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
+            "logical_candidate_channel_count": int(logical_count),
+            "authored_ordered_seed_count": int(len(ordered)),
+            "physical_seed_count": int(len(physical_seed_indices)),
+            "physical_real_owner_count": int(physical_real_count),
+            "adjoint_orbit_descriptor_count": adjoint_orbit_descriptor_count,
+            "hermitian_ambient_channel_count": hermitian_ambient_channel_count,
+            "physically_materialized_projected_channel_count": len(channels),
+            "physically_compiled_representative_channel_count": len(channels),
+            "adjoint_certified_dropped_channel_count": int(
+                logical_count - hermitian_ambient_channel_count
+            ),
+            "structural_support_count": int(structural_support_count),
+            "structural_orbit_count": int(len(structural_plan.structural_orbits)),
+            "duplicate_seed_groups": [
+                [int(value) for value in values]
+                for values in structural_plan.duplicate_seed_groups
+            ],
+            "zero_seed_indices": [int(value) for value in structural_plan.zero_seed_indices],
+            "local_components": component_artifacts,
+            "local_component_count": len(component_artifacts),
+            "maximum_local_component_raw_dimension": max(
+                (record["raw_dimension"] for record in component_artifacts), default=0
+            ),
+            "maximum_local_component_independent_dimension": max(
+                (record["independent_dimension"] for record in component_artifacts), default=0
+            ),
+            "maximum_local_action_block_dimension": max(
+                (
+                    record["maximum_action_block_dimension"]
+                    for record in component_artifacts
+                ),
+                default=0,
+            ),
+            "local_fixed_rank_before_global_tail": int(total_fixed_rank),
+            "local_fixed_nonzero_count_before_global_tail": int(total_fixed_nnz),
+            "retained_real_column_count": len(channels),
+            "reynolds_columns_avoided": int(physical_real_count),
+            "omitted_reynolds_columns": int(physical_real_count - len(channels)),
+            "global_filtered_owner_certificate": global_owner_artifact,
+            "rank_proofs": list(all_rank_proofs),
+            "factorized_group_actions": dict(action_artifact),
+            "fallback_used": False,
+            "timings_seconds": {
+                "factorized_group_actions": float(action_seconds),
+                "error_bound_construction": float(error_seconds),
+                "structural_plan": float(structural_seconds),
+                "raw_adjoint_certification": float(adjoint_seconds),
+                "raw_vocabulary": float(vocabulary_seconds),
+                "generator_actions": float(generator_seconds),
+                "exact_joint_components": float(component_seconds),
+                "local_fixed_solve": float(local_solve_seconds),
+                "small_global_tail_certificate": float(global_seconds),
+                "channel_materialization": float(materialize_seconds),
+                "function_body": float(time.perf_counter() - function_started),
+            },
+        },
+    )
+
+
+def _compile_graded_candidate_group_reynolds(
     seeds: Sequence[RawPolynomialSeed],
     *,
     coordinate: PolynomialCoordinateBasis,
@@ -2034,6 +2711,40 @@ def compile_graded_candidate_group(
                 ),
             },
         },
+    )
+
+
+def compile_graded_candidate_group(
+    seeds: Sequence[RawPolynomialSeed],
+    *,
+    coordinate: PolynomialCoordinateBasis,
+    group: Any,
+    factorized_actions: Mapping[str, Any],
+    internal_actions_by_word: Mapping[tuple[str, ...], sparse.spmatrix] | None = None,
+    factorized_group_artifact: Mapping[str, Any] | None = None,
+    joint_adjoint_keys: Mapping[str, JointAdjointSeedKey] | None = None,
+    force_reynolds: bool = False,
+) -> CandidateResponseSet:
+    """Compile p=0 by local Reynolds; route finite-p directly to the legacy path."""
+
+    if bool(force_reynolds) or joint_adjoint_keys is None:
+        return _compile_graded_candidate_group_reynolds(
+            seeds,
+            coordinate=coordinate,
+            group=group,
+            factorized_actions=factorized_actions,
+            internal_actions_by_word=internal_actions_by_word,
+            factorized_group_artifact=factorized_group_artifact,
+            joint_adjoint_keys=joint_adjoint_keys,
+        )
+    return _compile_graded_candidate_group_local_fixed(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions=factorized_actions,
+        internal_actions_by_word=internal_actions_by_word,
+        factorized_group_artifact=factorized_group_artifact,
+        joint_adjoint_keys=joint_adjoint_keys,
     )
 
 

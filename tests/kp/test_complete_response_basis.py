@@ -3657,7 +3657,8 @@ def test_complete_policy_enumerates_ordered_pairs_and_reduces_in_coefficient_spa
     assert basis.candidate_artifact["adjoint_certified_dropped_channel_count"] == 4
     assert len(basis.channels) == 4
     assert all(
-        proof["block_rule"] == "filtered_degree_residual_owner_pivots"
+        proof["block_rule"]
+        == "exact_joint_components__logical_owner_pivots__global_degree_tail"
         for proof in basis.reduction_proofs
     )
 
@@ -3687,11 +3688,11 @@ def test_complete_p0_model_routes_through_graded_symbolic_compiler(
     basis = compile_model_response_basis(model, config, reduce=True)
     assert calls == 1
     assert any(
-        proof["solver"] == "graded_filtered_symbolic_p0_reynolds_v1"
+        proof["solver"] == "local_generator_fixed_p0_v1"
         for proof in basis.reduction_proofs
     )
     identity_artifact = basis.candidate_artifact["adjoint"]["groups"][0]
-    assert identity_artifact["certification"] == "graded_filtered_reynolds_v1"
+    assert identity_artifact["certification"] == "local_generator_fixed_v1"
     outer_timings = basis.candidate_artifact["adjoint"]["outer_timings_seconds"]
     for key in (
         "certified_group_actions",
@@ -4447,13 +4448,13 @@ def test_model_basis_persistent_cache_survives_memory_cache_clear(
     assert str(config.output_dir) not in str(second.artifact())
 
 
-def test_model_basis_persistent_cache_v52_cannot_bypass_v53_structural_generators(
+def test_model_basis_persistent_cache_v54_cannot_bypass_v55_local_fixed_response(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_response_basis_cache()
     assert response_basis_module.COMPILER_VERSION == (
-        "complete-response-basis-v2-structural-generators-v53"
+        "complete-response-basis-v2-local-fixed-response-v55"
     )
     config = _complete_onsite_config()
     config.output_dir = tmp_path / "model"
@@ -4461,18 +4462,18 @@ def test_model_basis_persistent_cache_v52_cannot_bypass_v53_structural_generator
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-graded-finite-p-v52",
+        "complete-response-basis-v2-local-fixed-response-v54",
     )
     compile_model_response_basis(build_model(config), config, reduce=True)
     cache_dir = Path(config.output_dir) / ".compiled_response_basis_cache"
-    v52_files = set(cache_dir.glob("*.npz"))
-    assert len(v52_files) == 1
+    v54_files = set(cache_dir.glob("*.npz"))
+    assert len(v54_files) == 1
 
     clear_response_basis_cache()
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-structural-generators-v53",
+        "complete-response-basis-v2-local-fixed-response-v55",
     )
     cold_calls = 0
     original_cold_compile = response_basis_module._compile_model_response_basis_uncached
@@ -4490,9 +4491,49 @@ def test_model_basis_persistent_cache_v52_cannot_bypass_v53_structural_generator
     compile_model_response_basis(build_model(config), config, reduce=True)
 
     assert cold_calls == 1
-    v53_files = set(cache_dir.glob("*.npz"))
-    assert len(v53_files) == 2
-    assert v52_files < v53_files
+    v55_files = set(cache_dir.glob("*.npz"))
+    assert len(v55_files) == 2
+    assert v54_files < v55_files
+
+
+def test_model_basis_persistent_cache_local_fixed_policy_change_invalidates(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    clear_response_basis_cache()
+    config = _complete_onsite_config()
+    config.output_dir = tmp_path / "model"
+
+    compile_model_response_basis(build_model(config), config, reduce=True)
+    cache_dir = Path(config.output_dir) / ".compiled_response_basis_cache"
+    original_files = set(cache_dir.glob("*.npz"))
+    assert len(original_files) == 1
+
+    clear_response_basis_cache()
+    monkeypatch.setattr(
+        response_basis_module,
+        "LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1",
+        response_basis_module.LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1 + 1,
+    )
+    cold_calls = 0
+    original_cold_compile = response_basis_module._compile_model_response_basis_uncached
+
+    def counted_cold_compile(*args: object, **kwargs: object):
+        nonlocal cold_calls
+        cold_calls += 1
+        return original_cold_compile(*args, **kwargs)
+
+    monkeypatch.setattr(
+        response_basis_module,
+        "_compile_model_response_basis_uncached",
+        counted_cold_compile,
+    )
+    compile_model_response_basis(build_model(config), config, reduce=True)
+
+    assert cold_calls == 1
+    changed_files = set(cache_dir.glob("*.npz"))
+    assert len(changed_files) == 2
+    assert original_files < changed_files
 
 
 def test_model_basis_persistent_cache_corruption_fails_closed(

@@ -15,6 +15,22 @@ from scipy import sparse
 
 from ..identity import hash_array
 from ..symmetry.joint_exactification import materialize_block_route_action
+from .response_basis_fixed_subspace import REAL_LINEAR_ACTION_CONVENTION_V1
+from .response_basis_local_fixed import (
+    LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
+    LOCAL_FIXED_ALGORITHM_V1,
+    LOCAL_FIXED_BLOCK_BACKEND_V2,
+    LOCAL_FIXED_COLUMN_SCALING_V1,
+    LOCAL_FIXED_COMPONENT_POLICY_V1,
+    LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1,
+    LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
+    LOCAL_FIXED_MATERIALIZATION_POLICY_V1,
+    LOCAL_FIXED_OWNER_POLICY_V1,
+    LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
+    LOCAL_FIXED_REDUCE_POLICY_V1,
+    LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
+    LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
+)
 
 
 COMPLETE_LINEAR_V2 = "complete_linear_v2"
@@ -31,7 +47,7 @@ FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4 = (
     "real_physical_coefficient_gram_whitened_minimum_norm_svd_v4"
 )
 FIT_SOLVER_POLICY_LEGACY = "legacy_real_qr_machine_tolerance_v0"
-COMPILER_VERSION = "complete-response-basis-v2-structural-generators-v53"
+COMPILER_VERSION = "complete-response-basis-v2-local-reynolds-response-v56"
 TARGET_SPECTRAL_WEIGHTING_V1 = "target_spectral_linear_v1"
 TARGET_SPECTRAL_TRACE_NORMALIZATION_V1 = "global_mean_trace_per_dimension_v1"
 NORMALIZED_LOW_ENERGY_LINEAR_V1 = "normalized-low-energy-linear-v1"
@@ -4372,40 +4388,47 @@ def _coefficient_vector_to_response_map(
 ) -> dict[tuple[int, int], sparse.csr_matrix]:
     if sparse.issparse(vector):
         column = sparse.coo_matrix(vector, dtype=np.float64)
+        column.sum_duplicates()
         block = len(coordinate.monomials) * int(dim) * int(dim)
         if column.shape != (2 * block, 1):
             raise ValueError(
                 f"global real coefficient vector has shape {column.shape}, expected {(2 * block, 1)}"
             )
-        entries: dict[tuple[int, int], dict[tuple[int, int], complex]] = {}
-        for raw_row, raw_value in zip(column.row, column.data):
-            coefficient_row = int(raw_row)
-            is_imaginary = coefficient_row >= block
-            local_row = coefficient_row - block if is_imaginary else coefficient_row
-            monomial_index, matrix_offset = divmod(local_row, int(dim) * int(dim))
-            matrix_row, matrix_col = divmod(matrix_offset, int(dim))
-            monomial = coordinate.monomials[monomial_index]
-            value = (1.0j if is_imaginary else 1.0) * float(raw_value)
-            by_entry = entries.setdefault(monomial, {})
-            matrix_key = (matrix_row, matrix_col)
-            by_entry[matrix_key] = by_entry.get(matrix_key, 0.0j) + value
+        if column.nnz == 0:
+            return {
+                (0, 0): sparse.csr_matrix((dim, dim), dtype=np.complex128)
+            }
+        coefficient_rows = np.asarray(column.row, dtype=np.int64)
+        imaginary = coefficient_rows >= block
+        local_rows = coefficient_rows.copy()
+        local_rows[imaginary] -= block
+        matrix_size = int(dim) * int(dim)
+        monomial_indices, matrix_offsets = np.divmod(
+            local_rows,
+            matrix_size,
+        )
+        matrix_rows, matrix_columns = np.divmod(matrix_offsets, int(dim))
+        complex_values = np.asarray(column.data, dtype=np.complex128)
+        if np.any(imaginary):
+            complex_values = complex_values.copy()
+            complex_values[imaginary] *= 1.0j
+
         coefficients: dict[tuple[int, int], sparse.csr_matrix] = {}
-        for monomial, by_entry in entries.items():
-            nonzero = [
-                (row, col, value)
-                for (row, col), value in by_entry.items()
-                if value != 0.0j
-            ]
-            if not nonzero:
-                continue
-            rows, cols, values = zip(*nonzero)
-            coefficients[monomial] = _canonical_csr(
+        for monomial_index in np.unique(monomial_indices):
+            index = int(monomial_index)
+            mask = monomial_indices == index
+            matrix = _canonical_csr(
                 sparse.coo_matrix(
-                    (values, (rows, cols)),
+                    (
+                        complex_values[mask],
+                        (matrix_rows[mask], matrix_columns[mask]),
+                    ),
                     shape=(dim, dim),
                     dtype=np.complex128,
                 )
             )
+            if matrix.nnz:
+                coefficients[coordinate.monomials[index]] = matrix
         return coefficients or {
             (0, 0): sparse.csr_matrix((dim, dim), dtype=np.complex128)
         }
@@ -6385,6 +6408,134 @@ def _support_masks_from_seeds(
     return masks, policy_artifact
 
 
+def _local_fixed_joint_key_cache_artifact(key: Any) -> dict[str, Any]:
+    return {
+        "sector_from": str(key.sector_from),
+        "sector_to": str(key.sector_to),
+        "orbital_from": int(key.orbital_from),
+        "orbital_to": int(key.orbital_to),
+        "monomial": [int(value) for value in key.monomial],
+        "center": {
+            "serialized_little_endian_hex": str(
+                key.center.serialized_little_endian_hex
+            ),
+            "coordinate_convention": str(key.center.coordinate_convention),
+        },
+        "harmonic_id": str(key.harmonic_id),
+        "adjoint_harmonic_id": str(key.adjoint_harmonic_id),
+    }
+
+
+def _local_fixed_cache_identity(
+    *,
+    coordinate: PolynomialCoordinateBasis,
+    groups: Sequence[FiniteGroup],
+    seeds_by_group: Sequence[Sequence[RawPolynomialSeed]],
+    factorized_actions_by_group: Sequence[Mapping[str, Any] | None],
+) -> dict[str, Any]:
+    if not (
+        len(groups)
+        == len(seeds_by_group)
+        == len(factorized_actions_by_group)
+    ):
+        raise ValueError("local-fixed cache identity group layout is inconsistent")
+    joint_records_by_group: list[dict[str, Any]] = []
+    generator_parities_by_group: list[dict[str, bool]] = []
+    for group, seeds, factorized_actions in zip(
+        groups,
+        seeds_by_group,
+        factorized_actions_by_group,
+    ):
+        eligible_zero_seeds: list[RawPolynomialSeed] = []
+        for seed in seeds:
+            term_key = seed.metadata.get("term_key")
+            if not isinstance(term_key, Mapping):
+                raise ValueError(
+                    f"seed {seed.seed_id!r} lacks term_key cache provenance"
+                )
+            p_vector = np.asarray(term_key.get("p"), dtype=np.float64)
+            if p_vector.shape != (2,) or not np.all(np.isfinite(p_vector)):
+                raise ValueError(
+                    f"seed {seed.seed_id!r} has invalid cache harmonic vector"
+                )
+            if (
+                np.all(p_vector == 0.0)
+                and str(seed.metadata.get("term_space_policy", ""))
+                != "orbit_representative"
+            ):
+                eligible_zero_seeds.append(seed)
+        if eligible_zero_seeds:
+            joint_keys = _zero_harmonic_joint_adjoint_keys(
+                eligible_zero_seeds,
+                coordinate=coordinate,
+            )
+            joint_records = [
+                {
+                    "seed_id": str(seed.seed_id),
+                    "key": _local_fixed_joint_key_cache_artifact(
+                        joint_keys[str(seed.seed_id)]
+                    ),
+                }
+                for seed in sorted(
+                    eligible_zero_seeds,
+                    key=lambda value: str(value.seed_id),
+                )
+            ]
+        else:
+            joint_records = []
+        joint_records_by_group.append(
+            {
+                "eligible_zero_seed_count": len(eligible_zero_seeds),
+                "joint_adjoint_keys": joint_records,
+            }
+        )
+
+        active_actions = dict(factorized_actions or {})
+        if active_actions:
+            generator_parities_by_group.append(
+                {
+                    str(name): bool(action.antiunitary)
+                    for name, action in sorted(active_actions.items())
+                }
+            )
+        elif (
+            len(tuple(group.elements)) == 1
+            and not bool(group.elements[0].antiunitary)
+        ):
+            generator_parities_by_group.append({"identity": False})
+        else:
+            generator_parities_by_group.append({})
+
+    origin_array = np.asarray(coordinate.origin, dtype="<f8")
+    return {
+        "algorithm": LOCAL_FIXED_ALGORITHM_V1,
+        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION_V1,
+        "block_backend": LOCAL_FIXED_BLOCK_BACKEND_V2,
+        "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
+        "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
+        "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
+        "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
+        "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
+        "column_scaling_policy": LOCAL_FIXED_COLUMN_SCALING_V1,
+        "component_policy": LOCAL_FIXED_COMPONENT_POLICY_V1,
+        "dense_component_cutoff": LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1,
+        "owner_policy": LOCAL_FIXED_OWNER_POLICY_V1,
+        "materialization_policy": LOCAL_FIXED_MATERIALIZATION_POLICY_V1,
+        "reduce_policy": LOCAL_FIXED_REDUCE_POLICY_V1,
+        "generator_antiunitary_parities_by_group": (
+            generator_parities_by_group
+        ),
+        "q_center": {
+            "serialized_little_endian_hex": (
+                np.ascontiguousarray(origin_array).tobytes().hex()
+            ),
+            "coordinate_convention": str(coordinate.coordinate_convention),
+            "dimensionless_scale": float(coordinate.scale),
+        },
+        "harmonic_adjoint_provenance_by_group": joint_records_by_group,
+    }
+
+
 def _basis_layout_identity(
     config: Any,
     groups: Sequence[FiniteGroup],
@@ -6506,6 +6657,27 @@ _PERSISTENT_CACHE_INPUT_FIELDS = frozenset(
         "seeds",
     }
 )
+_LOCAL_FIXED_CACHE_IDENTITY_FIELDS = frozenset(
+    {
+        "algorithm",
+        "real_linear_action_convention",
+        "block_backend",
+        "structural_plan_policy",
+        "physical_seed_digest",
+        "absolute_tolerance",
+        "relative_tolerance",
+        "gray_zone_factor",
+        "column_scaling_policy",
+        "component_policy",
+        "dense_component_cutoff",
+        "owner_policy",
+        "materialization_policy",
+        "reduce_policy",
+        "generator_antiunitary_parities_by_group",
+        "q_center",
+        "harmonic_adjoint_provenance_by_group",
+    }
+)
 _PERSISTENT_CACHE_IDENTITY_FIELDS = frozenset(
     {
         "basis_layout",
@@ -6529,6 +6701,7 @@ _PERSISTENT_CACHE_IDENTITY_FIELDS = frozenset(
         "compiler_version",
         "term_templates",
         "structural_preselection",
+        "local_fixed_response_compiler",
     }
 )
 
@@ -6565,6 +6738,76 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
             "complete_linear_v2 persistent cache input identity has unexpected fields: "
             + ", ".join(str(value) for value in unexpected_identity)
         )
+    local_fixed_identity = identity.get("local_fixed_response_compiler")
+    if (
+        not isinstance(local_fixed_identity, Mapping)
+        or set(local_fixed_identity) != _LOCAL_FIXED_CACHE_IDENTITY_FIELDS
+    ):
+        raise ValueError(
+            "complete_linear_v2 persistent cache local-fixed identity is incomplete"
+        )
+    expected_local_fixed_values = {
+        "algorithm": LOCAL_FIXED_ALGORITHM_V1,
+        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION_V1,
+        "block_backend": LOCAL_FIXED_BLOCK_BACKEND_V2,
+        "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
+        "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
+        "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
+        "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
+        "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
+        "column_scaling_policy": LOCAL_FIXED_COLUMN_SCALING_V1,
+        "component_policy": LOCAL_FIXED_COMPONENT_POLICY_V1,
+        "dense_component_cutoff": LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1,
+        "owner_policy": LOCAL_FIXED_OWNER_POLICY_V1,
+        "materialization_policy": LOCAL_FIXED_MATERIALIZATION_POLICY_V1,
+        "reduce_policy": LOCAL_FIXED_REDUCE_POLICY_V1,
+    }
+    for field_name, expected_value in expected_local_fixed_values.items():
+        if local_fixed_identity.get(field_name) != expected_value:
+            raise ValueError(
+                "complete_linear_v2 persistent cache local-fixed policy mismatch: "
+                f"{field_name}"
+            )
+    q_center = local_fixed_identity.get("q_center")
+    if not isinstance(q_center, Mapping) or set(q_center) != {
+        "serialized_little_endian_hex",
+        "coordinate_convention",
+        "dimensionless_scale",
+    }:
+        raise ValueError(
+            "complete_linear_v2 persistent cache local-fixed q_center is invalid"
+        )
+    center_hex = str(q_center["serialized_little_endian_hex"])
+    try:
+        center_payload = bytes.fromhex(center_hex)
+    except ValueError as error:
+        raise ValueError(
+            "complete_linear_v2 persistent cache local-fixed q_center hex is invalid"
+        ) from error
+    if len(center_payload) != 16 or center_payload.hex() != center_hex:
+        raise ValueError(
+            "complete_linear_v2 persistent cache local-fixed q_center hex is invalid"
+        )
+    if (
+        str(q_center["coordinate_convention"]) != COORDINATE_CONVENTION_V1
+        or not np.isfinite(float(q_center["dimensionless_scale"]))
+        or float(q_center["dimensionless_scale"]) <= 0.0
+    ):
+        raise ValueError(
+            "complete_linear_v2 persistent cache local-fixed q_center metadata is invalid"
+        )
+    generator_parities = local_fixed_identity.get(
+        "generator_antiunitary_parities_by_group"
+    )
+    harmonic_provenance = local_fixed_identity.get(
+        "harmonic_adjoint_provenance_by_group"
+    )
+    if not isinstance(generator_parities, list) or not isinstance(
+        harmonic_provenance, list
+    ):
+        raise ValueError(
+            "complete_linear_v2 persistent cache local-fixed group metadata is invalid"
+        )
     coordinate = input_record.get("coordinate")
     if not isinstance(coordinate, Mapping) or not coordinate:
         raise ValueError("complete_linear_v2 persistent cache input coordinate must be a non-empty mapping")
@@ -6582,6 +6825,85 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
         raise ValueError(
             "complete_linear_v2 persistent cache input group_internal_u must match groups"
         )
+    if len(generator_parities) != len(groups) or len(harmonic_provenance) != len(groups):
+        raise ValueError(
+            "complete_linear_v2 persistent cache local-fixed group layout must match groups"
+        )
+    for group_index, parity_record in enumerate(generator_parities):
+        if not isinstance(parity_record, Mapping) or any(
+            not isinstance(name, str)
+            or not name
+            or not isinstance(parity, bool)
+            for name, parity in parity_record.items()
+        ):
+            raise ValueError(
+                "complete_linear_v2 persistent cache local-fixed parity record "
+                f"for group {group_index} is invalid"
+            )
+    joint_key_fields = {
+        "sector_from",
+        "sector_to",
+        "orbital_from",
+        "orbital_to",
+        "monomial",
+        "center",
+        "harmonic_id",
+        "adjoint_harmonic_id",
+    }
+    for group_index, provenance_record in enumerate(harmonic_provenance):
+        if not isinstance(provenance_record, Mapping) or set(provenance_record) != {
+            "eligible_zero_seed_count",
+            "joint_adjoint_keys",
+        }:
+            raise ValueError(
+                "complete_linear_v2 persistent cache local-fixed harmonic record "
+                f"for group {group_index} is invalid"
+            )
+        key_records = provenance_record["joint_adjoint_keys"]
+        if (
+            not isinstance(provenance_record["eligible_zero_seed_count"], int)
+            or int(provenance_record["eligible_zero_seed_count"]) < 0
+            or not isinstance(key_records, list)
+            or int(provenance_record["eligible_zero_seed_count"])
+            != len(key_records)
+        ):
+            raise ValueError(
+                "complete_linear_v2 persistent cache local-fixed harmonic count "
+                f"for group {group_index} is invalid"
+            )
+        previous_seed_id: str | None = None
+        for key_index, key_record in enumerate(key_records):
+            if not isinstance(key_record, Mapping) or set(key_record) != {
+                "seed_id",
+                "key",
+            }:
+                raise ValueError(
+                    "complete_linear_v2 persistent cache local-fixed harmonic key "
+                    f"{group_index}:{key_index} is invalid"
+                )
+            seed_id = key_record["seed_id"]
+            key = key_record["key"]
+            if (
+                not isinstance(seed_id, str)
+                or not seed_id
+                or (previous_seed_id is not None and seed_id <= previous_seed_id)
+                or not isinstance(key, Mapping)
+                or set(key) != joint_key_fields
+            ):
+                raise ValueError(
+                    "complete_linear_v2 persistent cache local-fixed harmonic key "
+                    f"{group_index}:{key_index} is invalid"
+                )
+            previous_seed_id = seed_id
+            center = key["center"]
+            if not isinstance(center, Mapping) or set(center) != {
+                "serialized_little_endian_hex",
+                "coordinate_convention",
+            }:
+                raise ValueError(
+                    "complete_linear_v2 persistent cache local-fixed harmonic center "
+                    f"{group_index}:{key_index} is invalid"
+                )
     if not isinstance(input_record.get("seeds"), list) or not input_record["seeds"]:
         raise ValueError("complete_linear_v2 persistent cache input seeds must be a non-empty list")
 
@@ -7045,8 +7367,17 @@ def _compile_model_response_basis_uncached(
                     outer_timings_seconds["p0_complete_compile"] += (
                         time.perf_counter() - p0_complete_started
                     )
-                    zero_solver = "graded_filtered_symbolic_p0_reynolds_v1"
-                    zero_block_rule = "filtered_degree_residual_owner_pivots"
+                    if (
+                        complete_zero_candidates.adjoint_artifact.get("certification")
+                        == "local_generator_fixed_v1"
+                    ):
+                        zero_solver = "local_generator_fixed_p0_v1"
+                        zero_block_rule = (
+                            "exact_joint_components__logical_owner_pivots__global_degree_tail"
+                        )
+                    else:
+                        zero_solver = "graded_filtered_symbolic_p0_reynolds_v1"
+                        zero_block_rule = "filtered_degree_residual_owner_pivots"
                 except GradedCompilationUnavailable as graded_error:
                     from .response_basis_symmetry_first import (
                         compile_symbolic_atom_candidate_group,
@@ -7624,6 +7955,12 @@ def compile_model_response_basis(
     identity_payload = {
         **dict(identity_payload),
         "structural_preselection": structural_preselection,
+        "local_fixed_response_compiler": _local_fixed_cache_identity(
+            coordinate=coordinate,
+            groups=groups,
+            seeds_by_group=seeds_by_group,
+            factorized_actions_by_group=factorized_actions_by_group,
+        ),
     }
     input_record = {
         "identity": identity_payload,

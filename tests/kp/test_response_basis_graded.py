@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 from scipy import sparse
 
 import kp.model.response_basis as response_basis
@@ -121,6 +122,8 @@ def _seed(
     family: str,
     term_index: int,
     lower: dict[tuple[int, int], np.ndarray] | None = None,
+    orbital_from: int = 1,
+    orbital_to: int = 1,
 ) -> RawPolynomialSeed:
     coefficients = {
         key: sparse.csr_matrix(value, dtype=np.complex128)
@@ -141,8 +144,8 @@ def _seed(
                 "Mz_star": monomial[1],
                 "layer_from": 1,
                 "layer_to": 1,
-                "orbital_from": 1,
-                "orbital_to": 1,
+                "orbital_from": int(orbital_from),
+                "orbital_to": int(orbital_to),
                 "p": [0.0, 0.0],
             },
         },
@@ -617,6 +620,129 @@ def test_global_owner_certificate_removes_shared_tail_across_top_orbits() -> Non
         orbit["candidate_nonzero_count"]
         for orbit in compiled.adjoint_artifact["structural_orbits"]
     )
+
+
+def test_local_fixed_fast_path_matches_forced_reynolds_without_projecting_seeds(
+    monkeypatch,
+) -> None:
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=0,
+    )
+    e00 = np.asarray(((1.0, 0.0), (0.0, 0.0)), dtype=np.complex128)
+    e11 = np.asarray(((0.0, 0.0), (0.0, 1.0)), dtype=np.complex128)
+    seeds = (
+        _seed(
+            "onsite-0",
+            monomial=(0, 0),
+            top=e00,
+            family="onsite",
+            term_index=0,
+        ),
+        _seed(
+            "onsite-1",
+            monomial=(0, 0),
+            top=e11,
+            family="onsite",
+            term_index=1,
+            orbital_from=2,
+            orbital_to=2,
+        ),
+    )
+    group = identity_finite_group(2, q_size=1, sector_size=1)
+    joint_keys = response_basis._zero_harmonic_joint_adjoint_keys(
+        seeds,
+        coordinate=coordinate,
+    )
+    oracle = graded.compile_graded_candidate_group(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions={},
+        joint_adjoint_keys=joint_keys,
+        force_reynolds=True,
+    )
+
+    def forbidden_reynolds(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("fast path constructed a Reynolds batch")
+
+    monkeypatch.setattr(graded, "_symbolic_reynolds_batch", forbidden_reynolds)
+    fast = graded.compile_graded_candidate_group(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions={},
+        joint_adjoint_keys=joint_keys,
+    )
+
+    fast_vectors = _candidate_vectors(fast)
+    oracle_vectors = _candidate_vectors(oracle)
+    np.testing.assert_allclose(
+        fast_vectors @ np.linalg.pinv(fast_vectors),
+        oracle_vectors @ np.linalg.pinv(oracle_vectors),
+        atol=1.0e-12,
+    )
+    assert fast.adjoint_artifact["certification"] == "local_generator_fixed_v1"
+    assert not fast.adjoint_artifact["fallback_used"]
+    assert fast.adjoint_artifact["reynolds_columns_avoided"] == 4
+    assert fast.adjoint_artifact["retained_real_column_count"] == 2
+
+
+def test_typed_local_unavailability_invokes_reynolds_fallback() -> None:
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=0,
+    )
+    seed = _seed(
+        "onsite",
+        monomial=(0, 0),
+        top=np.asarray(((1.0,),), dtype=np.complex128),
+        family="onsite",
+        term_index=0,
+    )
+    compiled = graded.compile_graded_candidate_group(
+        [seed],
+        coordinate=coordinate,
+        group=identity_finite_group(1, q_size=1, sector_size=1),
+        factorized_actions={},
+    )
+
+    assert compiled.adjoint_artifact["fallback_used"]
+    assert compiled.adjoint_artifact["fallback_reason"] == (
+        "missing_certified_adjoint_routes"
+    )
+    assert compiled.adjoint_artifact["certification"] == "graded_filtered_reynolds_v1"
+
+
+def test_unexpected_local_runtime_error_propagates(monkeypatch) -> None:
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=0,
+    )
+    seed = _seed(
+        "onsite",
+        monomial=(0, 0),
+        top=np.asarray(((1.0,),), dtype=np.complex128),
+        family="onsite",
+        term_index=0,
+    )
+
+    def fail(*args, **kwargs):
+        del args, kwargs
+        raise RuntimeError("programming defect")
+
+    monkeypatch.setattr(graded, "_compile_graded_candidate_group_local_fixed", fail)
+    with pytest.raises(RuntimeError, match="programming defect"):
+        graded.compile_graded_candidate_group(
+            [seed],
+            coordinate=coordinate,
+            group=identity_finite_group(1, q_size=1, sector_size=1),
+            factorized_actions={},
+        )
 
 
 def test_structural_batches_preserve_single_global_filtered_owner_ids(

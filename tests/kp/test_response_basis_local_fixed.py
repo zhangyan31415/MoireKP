@@ -58,6 +58,25 @@ def _compilation(**overrides: object):
     return api.LocalFixedCompilation(**values)
 
 
+def test_numeric_buffers_are_byte_backed_and_cannot_be_reenabled() -> None:
+    component = _component()
+    result = _compilation()
+
+    for array in (
+        component.generator_actions["C3"],
+        component.hermitian_action,
+        component.ambient_columns.data,
+        component.ambient_columns.indices,
+        component.ambient_columns.indptr,
+        result.fixed_vocabulary_coordinates,
+        result.logical_projection_coordinates,
+        result.singular_values,
+    ):
+        assert not array.flags.writeable
+        with pytest.raises(ValueError, match="WRITEABLE"):
+            array.setflags(write=True)
+
+
 def test_valid_local_component_normalizes_storage_and_deep_freezes_metadata() -> None:
     provenance = {
         2: {"source": "constant", "path": ["seed", 0]},
@@ -250,3 +269,363 @@ def test_zero_rank_local_compilation_has_canonical_empty_shapes() -> None:
 
     assert result.fixed_vocabulary_coordinates.shape == (2, 0)
     assert result.logical_projection_coordinates.shape == (0, 2)
+
+
+def _build_components(
+    ambient: np.ndarray,
+    *,
+    actions: dict[str, np.ndarray] | None = None,
+    hermitian: np.ndarray | None = None,
+    owners: tuple[int, ...] | None = None,
+):
+    api = _api()
+    dimension = int(ambient.shape[1])
+    owner_indices = owners or tuple(range(dimension))
+    generator_actions = actions or {"identity": np.eye(dimension)}
+    return api.build_exact_joint_components(
+        sparse.csc_matrix(ambient, dtype=np.float64),
+        nominal_degrees=tuple(0 for _ in owner_indices),
+        logical_owner_indices=owner_indices,
+        provenance_by_owner={owner: {"owner": owner} for owner in owner_indices},
+        generator_actions=generator_actions,
+        generator_error_bounds={name: 0.0 for name in generator_actions},
+        antiunitary_parities={name: False for name in generator_actions},
+        hermitian_action=(
+            np.eye(dimension) if hermitian is None else hermitian
+        ),
+        column_absolute_error_bounds=np.zeros(dimension),
+    )
+
+
+def test_exact_joint_components_split_disjoint_action_adjoint_and_support() -> None:
+    components = _build_components(np.eye(3))
+
+    assert tuple(component.logical_owner_indices for component in components) == (
+        (0,),
+        (1,),
+        (2,),
+    )
+
+
+def test_exact_joint_components_merge_shared_ambient_lower_tail() -> None:
+    ambient = np.asarray(
+        [
+            [1.0, 0.0],
+            [0.0, 1.0],
+            [2.0, -3.0],
+        ]
+    )
+
+    components = _build_components(ambient)
+
+    assert tuple(component.logical_owner_indices for component in components) == (
+        (0, 1),
+    )
+
+
+def test_exact_joint_components_merge_hermitian_partner() -> None:
+    ambient = np.eye(2)
+    hermitian = np.asarray([[0.0, 1.0], [1.0, 0.0]])
+
+    components = _build_components(ambient, hermitian=hermitian)
+
+    assert tuple(component.logical_owner_indices for component in components) == (
+        (0, 1),
+    )
+
+
+def test_local_fixed_space_matches_independent_dense_reynolds_projector() -> None:
+    from kp.model.response_basis_fixed_subspace import (
+        real_linear_generator_from_complex,
+    )
+
+    unitary = real_linear_generator_from_complex(
+        "C2",
+        np.diag([1.0, -1.0]),
+        antiunitary=False,
+    ).matrix
+    antiunitary = real_linear_generator_from_complex(
+        "T",
+        np.eye(2),
+        antiunitary=True,
+    ).matrix
+    components = _build_components(
+        np.eye(4),
+        actions={"C2": unitary, "T": antiunitary},
+    )
+    api = _api()
+
+    result = api.solve_local_fixed_component(components[0])
+    physical = np.asarray(
+        components[0].ambient_columns @ result.fixed_vocabulary_coordinates
+    )
+    fast_projector = physical @ physical.T
+    dense_reynolds = 0.25 * (
+        np.eye(4)
+        + unitary
+        + antiunitary
+        + unitary @ antiunitary
+    )
+
+    assert result.fixed_rank == 1
+    np.testing.assert_allclose(fast_projector, dense_reynolds, atol=1.0e-12)
+
+
+def test_local_reynolds_block_solver_matches_dense_group_average() -> None:
+    from kp.model.response_basis_fixed_subspace import (
+        real_linear_generator_from_complex,
+    )
+
+    unitary = real_linear_generator_from_complex(
+        "C2",
+        np.diag([1.0, -1.0]),
+        antiunitary=False,
+    ).matrix
+    antiunitary = real_linear_generator_from_complex(
+        "T",
+        np.eye(2),
+        antiunitary=True,
+    ).matrix
+    component = _build_components(
+        np.eye(4),
+        actions={"C2": unitary, "T": antiunitary},
+    )[0]
+    api = _api()
+
+    result = api.solve_local_reynolds_component_blocked(
+        component,
+        group_words=((), ("C2",), ("T",), ("C2", "T")),
+    )
+    physical = np.asarray(
+        component.ambient_columns @ result.fixed_vocabulary_coordinates
+    )
+    physical_q = np.linalg.qr(physical)[0]
+    dense_reynolds = 0.25 * (
+        np.eye(4)
+        + unitary
+        + antiunitary
+        + antiunitary @ unitary
+    )
+
+    assert result.fixed_rank == 1
+    assert result.certification_metadata["algorithm"] == (
+        "exact_action_block__small_matrix_reynolds_v1"
+    )
+    np.testing.assert_allclose(
+        physical_q @ physical_q.T,
+        dense_reynolds,
+        atol=1.0e-12,
+    )
+
+
+def test_local_fixed_solver_filters_duplicate_and_nonorthogonal_vocabulary() -> None:
+    ambient = np.asarray(
+        [
+            [1.0, 2.0, 1.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    component = _build_components(ambient)[0]
+    api = _api()
+
+    result = api.solve_local_fixed_component(component)
+    physical = np.asarray(
+        component.ambient_columns @ result.fixed_vocabulary_coordinates
+    )
+
+    assert result.fixed_rank == 2
+    assert result.selected_global_owner_indices == (0, 2)
+    np.testing.assert_allclose(physical, ambient[:, [0, 2]], atol=1.0e-12)
+    physical_q = np.linalg.qr(physical)[0]
+    ambient_q = np.linalg.qr(ambient[:, [0, 2]])[0]
+    np.testing.assert_allclose(
+        physical_q @ physical_q.T,
+        ambient_q @ ambient_q.T,
+        atol=1.0e-12,
+    )
+
+
+def test_local_fixed_solver_accepts_dense_two_by_two_complex_route_block() -> None:
+    from kp.model.response_basis_fixed_subspace import (
+        real_linear_generator_from_complex,
+    )
+
+    dense_c3 = np.asarray(
+        [[0.0, 1.0], [-1.0, 0.0]], dtype=np.complex128
+    )
+    c3_real = real_linear_generator_from_complex(
+        "C3",
+        dense_c3,
+        antiunitary=False,
+    ).matrix
+    component = _build_components(
+        np.eye(4),
+        actions={"C3": c3_real},
+    )[0]
+    api = _api()
+
+    result = api.solve_local_fixed_component(component)
+
+    assert result.fixed_rank == 0
+    assert result.certification_metadata["generator_action_nnz"]["C3"] == 4
+
+
+def test_local_fixed_solver_fails_closed_on_fixed_rank_gray_zone() -> None:
+    action = np.diag([1.0, 1.0 + 5.0e-11])
+    component = _build_components(
+        np.eye(2),
+        actions={"near": action},
+    )[-1]
+    api = _api()
+
+    with pytest.raises(
+        api.LocalGeneratorNullspaceUnavailable,
+        match="fixed_rank_gray_zone",
+    ):
+        api.solve_local_fixed_component(component)
+
+
+def test_local_fixed_solver_uses_typed_fallback_for_oversize_component() -> None:
+    dimension = 513
+    component = _build_components(
+        np.ones((1, dimension)),
+    )[0]
+    api = _api()
+
+    with pytest.raises(
+        api.LocalGeneratorNullspaceUnavailable,
+        match="oversize_component",
+    ):
+        api.solve_local_fixed_component(component, dense_component_cutoff=512)
+
+
+def test_block_backend_solves_oversized_full_rank_component_by_action_blocks() -> None:
+    dimension = 5
+    ambient = np.vstack(
+        [
+            np.ones((1, dimension), dtype=np.float64),
+            np.eye(dimension, dtype=np.float64),
+        ]
+    )
+    component = _build_components(ambient)[0]
+    api = _api()
+
+    blocked = api.solve_local_fixed_component_blocked(
+        component,
+        dense_component_cutoff=4,
+    )
+    dense = api.solve_local_fixed_component(
+        component,
+        dense_component_cutoff=8,
+    )
+    blocked_physical = np.asarray(
+        component.ambient_columns @ blocked.fixed_vocabulary_coordinates
+    )
+    dense_physical = np.asarray(
+        component.ambient_columns @ dense.fixed_vocabulary_coordinates
+    )
+    blocked_q = np.linalg.qr(blocked_physical)[0]
+    dense_q = np.linalg.qr(dense_physical)[0]
+
+    assert blocked.fixed_rank == dense.fixed_rank == dimension
+    assert blocked.certification_metadata["action_block_count"] == dimension
+    assert blocked.certification_metadata["maximum_action_block_dimension"] == 1
+    assert blocked.certification_metadata[
+        "global_vocabulary_full_rank_certified"
+    ]
+    np.testing.assert_allclose(
+        blocked_q @ blocked_q.T,
+        dense_q @ dense_q.T,
+        atol=1.0e-11,
+    )
+
+
+def test_block_backend_fails_closed_on_cross_block_vocabulary_dependency() -> None:
+    dimension = 5
+    ambient = np.vstack(
+        [
+            np.ones((1, dimension), dtype=np.float64),
+            np.eye(dimension, dtype=np.float64),
+        ]
+    )
+    ambient[:, -1] = ambient[:, 0]
+    component = _build_components(ambient)[0]
+    api = _api()
+
+    with pytest.raises(
+        api.LocalGeneratorNullspaceUnavailable,
+        match="oversize_vocabulary_rank_deficient",
+    ):
+        api.solve_local_fixed_component_blocked(
+            component,
+            dense_component_cutoff=4,
+        )
+
+
+def test_block_backend_uses_typed_fallback_for_oversized_action_block() -> None:
+    dimension = 5
+    cycle = np.zeros((dimension, dimension), dtype=np.float64)
+    for column in range(dimension):
+        cycle[(column + 1) % dimension, column] = 1.0
+    component = _build_components(
+        np.eye(dimension, dtype=np.float64),
+        actions={"cycle": cycle},
+    )[0]
+    api = _api()
+
+    with pytest.raises(
+        api.LocalGeneratorNullspaceUnavailable,
+        match="oversize_irreducible_action_block",
+    ):
+        api.solve_local_fixed_component_blocked(
+            component,
+            dense_component_cutoff=4,
+        )
+
+
+def test_generator_order_is_canonicalized_without_changing_components() -> None:
+    ambient = np.eye(2)
+    canonical = _build_components(
+        ambient,
+        actions={"C3": np.eye(2), "T": np.eye(2)},
+    )
+    shuffled = _build_components(
+        ambient,
+        actions={"T": np.eye(2), "C3": np.eye(2)},
+    )
+
+    assert tuple(component.logical_owner_indices for component in canonical) == tuple(
+        component.logical_owner_indices for component in shuffled
+    )
+    assert tuple(canonical[0].generator_actions) == ("C3", "T")
+    assert tuple(shuffled[0].generator_actions) == ("C3", "T")
+
+
+def test_component_order_and_owner_selection_ignore_input_shuffle() -> None:
+    ambient = np.asarray(
+        [
+            [1.0, 1.0, 0.0],
+            [0.0, 0.0, 1.0],
+        ]
+    )
+    canonical = _build_components(ambient, owners=(2, 5, 8))
+    permutation = np.asarray([2, 0, 1], dtype=np.int64)
+    shuffled = _build_components(
+        ambient[:, permutation],
+        owners=(8, 2, 5),
+    )
+    api = _api()
+
+    canonical_result = tuple(
+        api.solve_local_fixed_component(component) for component in canonical
+    )
+    shuffled_result = tuple(
+        api.solve_local_fixed_component(component) for component in shuffled
+    )
+
+    assert tuple(c.logical_owner_indices for c in canonical) == tuple(
+        c.logical_owner_indices for c in shuffled
+    )
+    assert tuple(r.selected_global_owner_indices for r in canonical_result) == tuple(
+        r.selected_global_owner_indices for r in shuffled_result
+    )
