@@ -8862,8 +8862,17 @@ def _band_refinement_metrics(
     *,
     band_slice: tuple[int, int],
     align: str,
+    eigenvalues: np.ndarray | None = None,
 ) -> dict[str, float]:
-    eig = np.linalg.eigvalsh(hamiltonians)
+    eig = (
+        np.linalg.eigvalsh(hamiltonians)
+        if eigenvalues is None
+        else np.asarray(eigenvalues, dtype=float)
+    )
+    if eig.shape != target_eig.shape:
+        raise ValueError(
+            f"model eigenvalues have shape {eig.shape}, expected {target_eig.shape}"
+        )
     start, stop = band_slice
     model_sel = eig[:, start:stop]
     target_sel = target_eig[:, start:stop]
@@ -9788,6 +9797,7 @@ def _evaluate_harmonic_ablation_candidate(
         target,
         band_slice=(int(primary_slice[0]), int(primary_slice[1])),
         align=target_bands,
+        eigenvalues=candidate_eig,
     )
     plot_band = _band_refinement_metrics(
         candidate,
@@ -9795,6 +9805,7 @@ def _evaluate_harmonic_ablation_candidate(
         target,
         band_slice=(int(plot_slice[0]), int(plot_slice[1])),
         align=target_bands,
+        eigenvalues=candidate_eig,
     )
     target_basis = target_vec[:, :, primary_slice[0] : primary_slice[1]]
     candidate_basis = candidate_vec[:, :, primary_slice[0] : primary_slice[1]]

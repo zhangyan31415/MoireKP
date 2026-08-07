@@ -248,24 +248,33 @@ def _one_sided_projector_bound(
     projected_count = 0
     for source_index, channel_id in enumerate(source_channel_ids):
         source_column = source.getcol(source_index)
+        source_norm_squared = float(source_gram[source_index, source_index])
         matching_index = target_position.get(channel_id)
         if matching_index is not None:
             target_column = target.getcol(matching_index)
             overlap = float((target_column.T @ source_column).toarray()[0, 0])
-            sign = 1.0 if overlap >= 0.0 else -1.0
-            residual = source_column - sign * target_column
-            residual_squared_sum += float(residual.power(2).sum())
+            target_norm_squared = float(
+                target_gram[matching_index, matching_index]
+            )
+            residual_squared_sum += max(
+                0.0,
+                source_norm_squared + target_norm_squared - 2.0 * abs(overlap),
+            )
             matched_count += 1
             continue
-        cross = np.asarray(target.T @ source_column).reshape(-1)
+        cross = np.asarray(
+            (target.T @ source_column).toarray(),
+            dtype=np.float64,
+        ).reshape(-1)
         coefficients = scipy.linalg.cho_solve(
             target_factor,
             cross,
             check_finite=False,
         )
-        projected = np.asarray(target @ coefficients).reshape(-1)
-        residual = source_column.toarray().reshape(-1) - projected
-        residual_squared_sum += float(residual @ residual)
+        residual_squared_sum += max(
+            0.0,
+            source_norm_squared - float(cross @ coefficients),
+        )
         projected_count += 1
     minimum_singular_value, backward_error = _certified_minimum_singular_value(
         source_gram

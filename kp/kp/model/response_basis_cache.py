@@ -120,12 +120,12 @@ class PersistentResponseBasisCache:
         self._corrupt_load_count_by_key: dict[str, int] = {}
 
     def _path_for_key(self, key: str) -> Path:
-        if _CACHE_KEY_PATTERN.fullmatch(key) is None:
+        if not isinstance(key, str) or _CACHE_KEY_PATTERN.fullmatch(key) is None:
             raise ValueError(f"invalid response-basis cache key: {key!r}")
         return self.cache_directory / f"{key}.npz"
 
-    def path_for(self, compiler_input: Mapping[str, Any]) -> Path:
-        return self._path_for_key(target_independent_basis_key(compiler_input))
+    def path_for(self, key: str) -> Path:
+        return self._path_for_key(key)
 
     @contextmanager
     def _key_lock(self, key: str):
@@ -150,15 +150,15 @@ class PersistentResponseBasisCache:
 
     def store(
         self,
-        compiler_input: Mapping[str, Any],
+        key: str,
         basis: CompiledResponseBasis,
     ) -> Path:
-        key = target_independent_basis_key(compiler_input)
+        self._path_for_key(key)
         self._validate_basis(basis)
         with self._key_lock(key):
             destination = self._path_for_key(key)
             if destination.is_file():
-                existing = self.load(compiler_input)
+                existing = self.load(key)
                 if existing.basis_hash != basis.basis_hash:
                     raise ResponseBasisCacheCorruptionError(
                         "response-basis cache key already contains a different basis hash"
@@ -208,8 +208,7 @@ class PersistentResponseBasisCache:
         finally:
             os.close(descriptor)
 
-    def load(self, compiler_input: Mapping[str, Any]) -> CompiledResponseBasis:
-        key = target_independent_basis_key(compiler_input)
+    def load(self, key: str) -> CompiledResponseBasis:
         path = self._path_for_key(key)
         if not path.is_file():
             raise FileNotFoundError(path)
@@ -264,24 +263,24 @@ class PersistentResponseBasisCache:
 
     def get_or_compile(
         self,
-        compiler_input: Mapping[str, Any],
+        key: str,
         compiler: Callable[[], CompiledResponseBasis],
     ) -> CompiledResponseBasis:
-        key = target_independent_basis_key(compiler_input)
+        self._path_for_key(key)
         try:
-            return self.load(compiler_input)
+            return self.load(key)
         except FileNotFoundError:
             pass
         with self._key_lock(key):
             try:
-                return self.load(compiler_input)
+                return self.load(key)
             except FileNotFoundError:
                 self._increment(self._cold_compile_count_by_key, key)
                 basis = compiler()
                 self._validate_basis(basis)
                 destination = self._path_for_key(key)
                 if destination.is_file():
-                    existing = self.load(compiler_input)
+                    existing = self.load(key)
                     if existing.basis_hash != basis.basis_hash:
                         raise ResponseBasisCacheCorruptionError(
                             "response-basis cache key already contains a different basis hash"

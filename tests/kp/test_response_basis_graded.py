@@ -421,6 +421,21 @@ def test_single_sign_harmonic_generates_virtual_adjoint_closure_without_fallback
     assert compiled.adjoint_artifact["certification"] == "graded_filtered_reynolds_v1"
     assert compiled.adjoint_artifact["structural_support_count"] == 1
     assert compiled.adjoint_artifact["closed_structural_direction_count"] == 2
+    assert compiled.adjoint_artifact["structural_route_closure_diagnostic"] == {
+        "schema_version": "structural-route-closure-diagnostic-v1",
+        "exact_closed_owner_actions_available": False,
+        "authored_real_owner_count": 2,
+        "closed_structural_direction_count": 2,
+        "virtual_structural_direction_count": 1,
+        "structural_block_count": 1,
+        "authored_real_owner_block_dimensions": [2],
+        "maximum_authored_real_owner_block_dimension": 2,
+        "closed_real_owner_upper_bound_block_dimensions": [4],
+        "maximum_closed_real_owner_upper_bound_block_dimension": 4,
+        "closed_real_owner_upper_bound": 4,
+        "monomial_route_nonzero_count": 1,
+        "lower_degree_monomial_route_edge_count": 0,
+    }
     assert any(
         support_id.startswith("virtual:")
         for orbit in compiled.adjoint_artifact["structural_orbits"]
@@ -668,7 +683,30 @@ def test_local_fixed_fast_path_matches_forced_reynolds_without_projecting_seeds(
         del args, kwargs
         raise AssertionError("fast path constructed a Reynolds batch")
 
+    def forbidden_ambient_components(*args, **kwargs):
+        del args, kwargs
+        raise AssertionError("fast path constructed ambient local components")
+
+    rank_certificate_calls = 0
+    original_rank_certificate = graded._select_filtered_independent_column_blocks
+
+    def counted_rank_certificate(*args, **kwargs):
+        nonlocal rank_certificate_calls
+        rank_certificate_calls += 1
+        return original_rank_certificate(*args, **kwargs)
+
     monkeypatch.setattr(graded, "_symbolic_reynolds_batch", forbidden_reynolds)
+    monkeypatch.setattr(
+        graded,
+        "_select_filtered_independent_column_blocks",
+        counted_rank_certificate,
+    )
+    monkeypatch.setattr(
+        graded,
+        "build_exact_joint_components",
+        forbidden_ambient_components,
+        raising=False,
+    )
     fast = graded.compile_graded_candidate_group(
         seeds,
         coordinate=coordinate,
@@ -684,10 +722,52 @@ def test_local_fixed_fast_path_matches_forced_reynolds_without_projecting_seeds(
         oracle_vectors @ np.linalg.pinv(oracle_vectors),
         atol=1.0e-12,
     )
-    assert fast.adjoint_artifact["certification"] == "local_generator_fixed_v1"
+    assert fast.adjoint_artifact["certification"] == "local_small_matrix_reynolds_v1"
     assert not fast.adjoint_artifact["fallback_used"]
     assert fast.adjoint_artifact["reynolds_columns_avoided"] == 4
     assert fast.adjoint_artifact["retained_real_column_count"] == 2
+    assert rank_certificate_calls == 1
+
+
+def test_dependent_raw_owner_vocabulary_selects_ambient_reynolds_backend() -> None:
+    coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=(0.0, 0.0),
+        reciprocal_basis=((1.0, 0.0), (0.0, 1.0)),
+        max_degree=0,
+    )
+    e00 = np.asarray(((1.0, 0.0), (0.0, 0.0)), dtype=np.complex128)
+    e11 = np.asarray(((0.0, 0.0), (0.0, 1.0)), dtype=np.complex128)
+    seeds = (
+        _seed("owner-0", monomial=(0, 0), top=e00, family="f0", term_index=0),
+        _seed("owner-1", monomial=(0, 0), top=e11, family="f1", term_index=1),
+        _seed(
+            "owner-2",
+            monomial=(0, 0),
+            top=e00 + e11,
+            family="f2",
+            term_index=2,
+        ),
+    )
+    group = identity_finite_group(2, q_size=1, sector_size=1)
+
+    compiled = graded.compile_graded_candidate_group(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions={},
+        joint_adjoint_keys=response_basis._zero_harmonic_joint_adjoint_keys(
+            seeds,
+            coordinate=coordinate,
+        ),
+    )
+
+    assert compiled.adjoint_artifact["certification"] == (
+        "graded_filtered_reynolds_v1"
+    )
+    assert compiled.adjoint_artifact["fallback_used"]
+    assert compiled.adjoint_artifact["fallback_reason"] == (
+        "raw_owner_vocabulary_not_injective"
+    )
 
 
 def test_typed_local_unavailability_invokes_reynolds_fallback() -> None:
@@ -742,6 +822,10 @@ def test_unexpected_local_runtime_error_propagates(monkeypatch) -> None:
             coordinate=coordinate,
             group=identity_finite_group(1, q_size=1, sector_size=1),
             factorized_actions={},
+            joint_adjoint_keys=response_basis._zero_harmonic_joint_adjoint_keys(
+                [seed],
+                coordinate=coordinate,
+            ),
         )
 
 

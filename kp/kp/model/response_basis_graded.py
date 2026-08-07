@@ -9,7 +9,7 @@ profiles.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import time
 from typing import Any, Mapping, Sequence
@@ -52,9 +52,10 @@ from .response_basis_symmetry_first import (
 from .response_basis_local_fixed import (
     LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
     LOCAL_REYNOLDS_ALGORITHM_V1,
-    LocalGeneratorNullspaceUnavailable,
-    build_exact_joint_components,
-    solve_local_reynolds_component_blocked,
+    LocalResponseCompilationError,
+    build_local_action_blocks,
+    summarize_local_action_blocks,
+    solve_local_reynolds_block,
 )
 
 
@@ -667,6 +668,78 @@ def build_structural_compilation_plan(
         ),
         family_degree_limits=dict(sorted(family_degree_limits.items())),
     )
+
+
+def _structural_route_closure_diagnostic(
+    structural_plan: StructuralCompilationPlan,
+    *,
+    descriptors: Sequence[FilteredSeedDescriptor],
+    coordinate: PolynomialCoordinateBasis,
+    contexts: Sequence[_SymbolicGroupContext],
+) -> dict[str, Any]:
+    """Return conservative closed-owner block bounds without building actions."""
+
+    described = tuple(descriptors)
+    authored_support_ids = {
+        described[index].structural_support_id
+        for index in structural_plan.representative_seed_indices
+    }
+    closed_direction_count = int(
+        sum(len(orbit.support_ids) for orbit in structural_plan.structural_orbits)
+    )
+    authored_block_dimensions: list[int] = []
+    closed_upper_block_dimensions: list[int] = []
+    for orbit in structural_plan.structural_orbits:
+        seed_indices = tuple(int(value) for value in orbit.representative_seed_indices)
+        authored_block_dimensions.append(2 * len(seed_indices))
+        maximum_degree = max(
+            (described[index].nominal_degree for index in seed_indices),
+            default=0,
+        )
+        monomial_count = sum(
+            int(sum(monomial) <= maximum_degree)
+            for monomial in coordinate.monomials
+        )
+        closed_upper_block_dimensions.append(
+            2 * len(orbit.support_ids) * monomial_count
+        )
+
+    monomial_route_nonzero_count = 0
+    lower_degree_edge_count = 0
+    for context in contexts:
+        for source, targets in context.monomial_pullbacks.items():
+            source_degree = int(sum(source))
+            for target, coefficient in targets.items():
+                if complex(coefficient) == 0.0j:
+                    continue
+                monomial_route_nonzero_count += 1
+                lower_degree_edge_count += int(sum(target) < source_degree)
+
+    return {
+        "schema_version": "structural-route-closure-diagnostic-v1",
+        "exact_closed_owner_actions_available": False,
+        "authored_real_owner_count": int(
+            2 * len(structural_plan.representative_seed_indices)
+        ),
+        "closed_structural_direction_count": closed_direction_count,
+        "virtual_structural_direction_count": int(
+            closed_direction_count - len(authored_support_ids)
+        ),
+        "structural_block_count": int(len(structural_plan.structural_orbits)),
+        "authored_real_owner_block_dimensions": authored_block_dimensions,
+        "maximum_authored_real_owner_block_dimension": int(
+            max(authored_block_dimensions, default=0)
+        ),
+        "closed_real_owner_upper_bound_block_dimensions": (
+            closed_upper_block_dimensions
+        ),
+        "maximum_closed_real_owner_upper_bound_block_dimension": int(
+            max(closed_upper_block_dimensions, default=0)
+        ),
+        "closed_real_owner_upper_bound": int(sum(closed_upper_block_dimensions)),
+        "monomial_route_nonzero_count": int(monomial_route_nonzero_count),
+        "lower_degree_monomial_route_edge_count": int(lower_degree_edge_count),
+    }
 
 
 def _homogeneous_action_certificates(
@@ -1582,7 +1655,7 @@ def _certified_hermitian_owner_action(
     covered_seed_ids: set[str] = set()
     for orbit in certified_raw_adjoint.orbits:
         if bool(orbit.requires_numeric_certification):
-            raise LocalGeneratorNullspaceUnavailable(
+            raise LocalResponseCompilationError(
                 "uncertified_adjoint_route",
                 certificate={
                     "representative_seed_id": str(orbit.representative_seed_id),
@@ -1591,7 +1664,7 @@ def _certified_hermitian_owner_action(
             )
         member_ids = tuple(str(value) for value in orbit.member_seed_ids)
         if any(seed_id not in index_by_seed_id for seed_id in member_ids):
-            raise LocalGeneratorNullspaceUnavailable(
+            raise LocalResponseCompilationError(
                 "adjoint_route_missing_physical_seed",
                 certificate={"member_seed_ids": member_ids},
             )
@@ -1612,7 +1685,7 @@ def _certified_hermitian_owner_action(
         columns.extend((2 * left, 2 * right, 2 * left + 1, 2 * right + 1))
         values.extend((1.0, 1.0, -1.0, -1.0))
     if covered_seed_ids != set(index_by_seed_id):
-        raise LocalGeneratorNullspaceUnavailable(
+        raise LocalResponseCompilationError(
             "adjoint_routes_incomplete",
             certificate={
                 "missing_seed_ids": tuple(sorted(set(index_by_seed_id) - covered_seed_ids)),
@@ -1699,7 +1772,7 @@ def _compile_graded_candidate_group_local_fixed(
         )
     else:
         if factorized_group_artifact is None:
-            raise LocalGeneratorNullspaceUnavailable(
+            raise LocalResponseCompilationError(
                 "missing_factorized_group_artifact",
                 certificate={"check": "factorized_group_artifact"},
             )
@@ -1750,12 +1823,12 @@ def _compile_graded_candidate_group_local_fixed(
     )
     structural_seconds = time.perf_counter() - structural_started
     if not structural_plan.representative_seed_indices:
-        raise LocalGeneratorNullspaceUnavailable(
+        raise LocalResponseCompilationError(
             "empty_physical_seed_vocabulary",
             certificate={"zero_seed_indices": structural_plan.zero_seed_indices},
         )
     if joint_adjoint_keys is None:
-        raise LocalGeneratorNullspaceUnavailable(
+        raise LocalResponseCompilationError(
             "missing_certified_adjoint_routes",
             certificate={"physical_seed_count": len(structural_plan.representative_seed_indices)},
         )
@@ -1834,6 +1907,34 @@ def _compile_graded_candidate_group_local_fixed(
     }
     vocabulary_seconds = time.perf_counter() - vocabulary_started
 
+    raw_rank_started = time.perf_counter()
+    row_degrees = projected_row_degrees(
+        coordinate=coordinate,
+        dim=ordered[0].dim,
+    )
+    raw_owner_selection, raw_owner_map, raw_owner_artifact = (
+        _select_filtered_independent_column_blocks(
+            (vocabulary.matrix,),
+            owner_index_blocks=(owner_indices,),
+            nominal_degree_blocks=(nominal_degrees,),
+            error_bound_blocks=(column_error_bounds,),
+            row_degrees=row_degrees,
+        )
+    )
+    if len(raw_owner_selection.selected_owner_indices) != len(owner_indices):
+        raise LocalResponseCompilationError(
+            "raw_owner_vocabulary_not_injective",
+            certificate={
+                "raw_owner_count": len(owner_indices),
+                "certified_rank": len(raw_owner_selection.selected_owner_indices),
+                "selected_owner_indices": tuple(
+                    int(raw_owner_map[index])
+                    for index in raw_owner_selection.selected_owner_indices
+                ),
+            },
+        )
+    raw_rank_seconds = time.perf_counter() - raw_rank_started
+
     generator_started = time.perf_counter()
     generator_actions: dict[str, sparse.csc_matrix] = {}
     antiunitary_parities: dict[str, bool] = {}
@@ -1847,7 +1948,7 @@ def _compile_graded_candidate_group_local_fixed(
                     factorized_action=action,
                 )
             except FactorizedTermActionError as error:
-                raise LocalGeneratorNullspaceUnavailable(
+                raise LocalResponseCompilationError(
                     "missing_certified_generator_route",
                     certificate={"generator": name, "message": str(error)},
                 ) from error
@@ -1866,24 +1967,22 @@ def _compile_graded_candidate_group_local_fixed(
         antiunitary_parities["identity"] = False
         generator_error_bounds["identity"] = 0.0
     else:
-        raise LocalGeneratorNullspaceUnavailable(
+        raise LocalResponseCompilationError(
             "missing_certified_generator_routes",
             certificate={"group_element_count": len(tuple(group.elements))},
         )
     generator_seconds = time.perf_counter() - generator_started
 
     component_started = time.perf_counter()
-    components = build_exact_joint_components(
-        vocabulary.matrix,
+    action_blocks = build_local_action_blocks(
         nominal_degrees=nominal_degrees,
         logical_owner_indices=owner_indices,
-        provenance_by_owner=provenance_by_owner,
         generator_actions=generator_actions,
         generator_error_bounds=generator_error_bounds,
         antiunitary_parities=antiunitary_parities,
         hermitian_action=hermitian_action,
-        column_absolute_error_bounds=column_error_bounds,
     )
+    action_block_diagnostic = summarize_local_action_blocks(action_blocks)
     component_seconds = time.perf_counter() - component_started
     group_words = tuple(
         tuple(str(value) for value in element.canonical_word)
@@ -1895,31 +1994,29 @@ def _compile_graded_candidate_group_local_fixed(
     component_artifacts: list[dict[str, Any]] = []
     total_fixed_rank = 0
     total_fixed_nnz = 0
-    for component in components:
+    owner_position = {
+        int(owner): position for position, owner in enumerate(owner_indices)
+    }
+    for block in action_blocks:
         solve_started = time.perf_counter()
-        result = solve_local_reynolds_component_blocked(
-            component,
+        result = solve_local_reynolds_block(
+            block,
             group_words=group_words,
         )
         solve_seconds = time.perf_counter() - solve_started
         component_artifacts.append(
             {
-                "component_index": int(component.component_index),
-                "raw_dimension": len(component.logical_owner_indices),
+                "component_index": int(block.block_index),
+                "raw_dimension": len(block.owner_indices),
                 "independent_dimension": int(
                     result.certification_metadata["independent_dimension"]
                 ),
                 "fixed_rank": int(result.fixed_rank),
-                "exact_support_row_count": len(component.exact_support_rows),
                 "generator_action_nnz": dict(
                     result.certification_metadata["generator_action_nnz"]
                 ),
-                "action_block_count": int(
-                    result.certification_metadata["action_block_count"]
-                ),
-                "maximum_action_block_dimension": int(
-                    result.certification_metadata["maximum_action_block_dimension"]
-                ),
+                "action_block_count": 1,
+                "maximum_action_block_dimension": len(block.owner_indices),
                 "solve_seconds": float(solve_seconds),
                 "fallback_reason": None,
             }
@@ -1929,20 +2026,26 @@ def _compile_graded_candidate_group_local_fixed(
         fixed_coordinates = sparse.csc_matrix(
             np.asarray(result.fixed_vocabulary_coordinates, dtype=np.float64)
         )
-        fixed_columns = (component.ambient_columns @ fixed_coordinates).tocsc()
+        positions = np.asarray(
+            [owner_position[int(owner)] for owner in block.owner_indices],
+            dtype=np.int64,
+        )
+        fixed_columns = (
+            vocabulary.matrix[:, positions] @ fixed_coordinates
+        ).tocsc()
         fixed_columns.sum_duplicates()
         fixed_columns.eliminate_zeros()
         fixed_columns.sort_indices()
         fixed_error_components = _fixed_column_error_components(
             np.asarray(result.fixed_vocabulary_coordinates, dtype=np.float64),
-            component_owner_indices=component.logical_owner_indices,
+            component_owner_indices=block.owner_indices,
             error_components_by_seed=error_components_by_seed,
             absolute_errors_by_seed=absolute_errors_by_seed,
         )
         selected_owners = tuple(int(value) for value in result.selected_global_owner_indices)
         fixed_block_records.append(
             {
-                "component_index": int(component.component_index),
+                "component_index": int(block.block_index),
                 "projected": fixed_columns,
                 "owner_indices": selected_owners,
                 "nominal_degrees": np.asarray(
@@ -1957,7 +2060,7 @@ def _compile_graded_candidate_group_local_fixed(
                 "fixed_coordinates": np.asarray(
                     result.fixed_vocabulary_coordinates, dtype=np.float64
                 ),
-                "component_owner_indices": component.logical_owner_indices,
+                "component_owner_indices": block.owner_indices,
                 "result": result,
             }
         )
@@ -1965,33 +2068,18 @@ def _compile_graded_candidate_group_local_fixed(
         total_fixed_nnz += int(fixed_columns.nnz)
     local_solve_seconds = time.perf_counter() - local_solve_started
     if not fixed_block_records:
-        raise LocalGeneratorNullspaceUnavailable(
+        raise LocalResponseCompilationError(
             "empty_local_fixed_space",
-            certificate={"component_count": len(components)},
+            certificate={"component_count": len(action_blocks)},
         )
 
-    row_degrees = projected_row_degrees(coordinate=coordinate, dim=ordered[0].dim)
-    global_started = time.perf_counter()
-    global_selection, global_owner_map, global_owner_artifact = (
-        _select_filtered_independent_column_blocks(
-            [record["projected"] for record in fixed_block_records],
-            owner_index_blocks=[record["owner_indices"] for record in fixed_block_records],
-            nominal_degree_blocks=[record["nominal_degrees"] for record in fixed_block_records],
-            error_bound_blocks=[record["error_bounds"] for record in fixed_block_records],
-            row_degrees=row_degrees,
-        )
-    )
-    global_seconds = time.perf_counter() - global_started
     location_by_owner: dict[int, tuple[dict[str, Any], int]] = {}
     for record in fixed_block_records:
         for local_index, owner in enumerate(record["owner_indices"]):
             if int(owner) in location_by_owner:
                 raise RuntimeError("local fixed owner selected by more than one component")
             location_by_owner[int(owner)] = (record, int(local_index))
-    selected_global_owners = tuple(
-        int(global_owner_map[index])
-        for index in global_selection.selected_owner_indices
-    )
+    selected_global_owners = tuple(sorted(location_by_owner))
 
     policy = NullClassificationPolicy()
     channel_ids = tuple(
@@ -2065,26 +2153,25 @@ def _compile_graded_candidate_group_local_fixed(
         )
     materialize_seconds = time.perf_counter() - materialize_started
 
-    all_rank_proofs = tuple(
+    raw_rank_proofs = tuple(
         {
             **dict(proof),
-            "selection_scope": str(global_owner_artifact["strategy"]),
-            "local_to_global_owner_indices": [int(value) for value in global_owner_map],
+            "selection_scope": "raw_owner_injectivity",
+            "local_to_global_owner_indices": [int(value) for value in raw_owner_map],
             "selected_global_owner_indices": [
-                int(global_owner_map[index])
+                int(raw_owner_map[index])
                 for index in proof.get("selected_owner_indices", [])
             ],
         }
-        for proof in global_selection.degree_proofs
+        for proof in raw_owner_selection.degree_proofs
     )
-    global_owner_artifact = {
-        **dict(global_owner_artifact),
-        "rank_proofs": list(all_rank_proofs),
-        "owner_column_materialization_policy": "local_fixed_selected_only_v1",
-        "materialized_owner_column_count": len(channels),
-        "avoided_owner_column_materialization_count": (
-            2 * len(physical_seed_indices) - len(channels)
-        ),
+    raw_owner_artifact = {
+        **dict(raw_owner_artifact),
+        "certificate": "full_column_rank",
+        "raw_owner_count": len(owner_indices),
+        "certified_rank": len(raw_owner_selection.selected_owner_indices),
+        "rank_proofs": list(raw_rank_proofs),
+        "post_projection_rank_reduction_performed": False,
     }
     logical_count = 2 * len(ordered)
     physical_real_count = 2 * len(physical_seed_indices)
@@ -2141,13 +2228,14 @@ def _compile_graded_candidate_group_local_fixed(
                 ),
                 default=0,
             ),
-            "local_fixed_rank_before_global_tail": int(total_fixed_rank),
-            "local_fixed_nonzero_count_before_global_tail": int(total_fixed_nnz),
+            "local_action_block_diagnostic": action_block_diagnostic,
+            "local_fixed_rank": int(total_fixed_rank),
+            "local_fixed_nonzero_count": int(total_fixed_nnz),
             "retained_real_column_count": len(channels),
             "reynolds_columns_avoided": int(physical_real_count),
             "omitted_reynolds_columns": int(physical_real_count - len(channels)),
-            "global_filtered_owner_certificate": global_owner_artifact,
-            "rank_proofs": list(all_rank_proofs),
+            "raw_owner_injectivity_certificate": raw_owner_artifact,
+            "rank_proofs": list(raw_rank_proofs),
             "factorized_group_actions": dict(action_artifact),
             "fallback_used": False,
             "timings_seconds": {
@@ -2156,10 +2244,10 @@ def _compile_graded_candidate_group_local_fixed(
                 "structural_plan": float(structural_seconds),
                 "raw_adjoint_certification": float(adjoint_seconds),
                 "raw_vocabulary": float(vocabulary_seconds),
+                "raw_owner_injectivity_certificate": float(raw_rank_seconds),
                 "generator_actions": float(generator_seconds),
-                "exact_joint_components": float(component_seconds),
+                "action_block_construction": float(component_seconds),
                 "local_fixed_solve": float(local_solve_seconds),
-                "small_global_tail_certificate": float(global_seconds),
                 "channel_materialization": float(materialize_seconds),
                 "function_body": float(time.perf_counter() - function_started),
             },
@@ -2272,6 +2360,12 @@ def _compile_graded_candidate_group_reynolds(
         descriptors=descriptors,
     )
     structural_seconds = time.perf_counter() - structural_started
+    structural_route_closure_diagnostic = _structural_route_closure_diagnostic(
+        structural_plan,
+        descriptors=descriptors,
+        coordinate=coordinate,
+        contexts=contexts,
+    )
     certified_raw_adjoint = None
     raw_adjoint_seconds = 0.0
     if joint_adjoint_keys is not None:
@@ -2614,6 +2708,9 @@ def _compile_graded_candidate_group_reynolds(
                     for orbit in structural_plan.structural_orbits
                 )
             ),
+            "structural_route_closure_diagnostic": (
+                structural_route_closure_diagnostic
+            ),
             "structural_orbit_count": int(len(structural_plan.structural_orbits)),
             "structural_probe_seed_indices": [
                 int(value)
@@ -2727,8 +2824,10 @@ def compile_graded_candidate_group(
 ) -> CandidateResponseSet:
     """Compile p=0 by local Reynolds; route finite-p directly to the legacy path."""
 
-    if bool(force_reynolds) or joint_adjoint_keys is None:
-        return _compile_graded_candidate_group_reynolds(
+    def ambient_reynolds(
+        fallback_reason: str | None = None,
+    ) -> CandidateResponseSet:
+        compiled = _compile_graded_candidate_group_reynolds(
             seeds,
             coordinate=coordinate,
             group=group,
@@ -2737,15 +2836,47 @@ def compile_graded_candidate_group(
             factorized_group_artifact=factorized_group_artifact,
             joint_adjoint_keys=joint_adjoint_keys,
         )
-    return _compile_graded_candidate_group_local_fixed(
-        seeds,
-        coordinate=coordinate,
-        group=group,
-        factorized_actions=factorized_actions,
-        internal_actions_by_word=internal_actions_by_word,
-        factorized_group_artifact=factorized_group_artifact,
-        joint_adjoint_keys=joint_adjoint_keys,
-    )
+        if fallback_reason is None:
+            return compiled
+        return replace(
+            compiled,
+            adjoint_artifact={
+                **dict(compiled.adjoint_artifact),
+                "fallback_used": True,
+                "fallback_reason": str(fallback_reason),
+            },
+        )
+
+    if bool(force_reynolds):
+        return ambient_reynolds()
+    if joint_adjoint_keys is None:
+        return ambient_reynolds("missing_certified_adjoint_routes")
+    if (
+        not factorized_actions
+        and not (
+            len(tuple(group.elements)) == 1
+            and not bool(group.elements[0].antiunitary)
+        )
+    ):
+        return ambient_reynolds("missing_certified_generator_routes")
+    try:
+        return _compile_graded_candidate_group_local_fixed(
+            seeds,
+            coordinate=coordinate,
+            group=group,
+            factorized_actions=factorized_actions,
+            internal_actions_by_word=internal_actions_by_word,
+            factorized_group_artifact=factorized_group_artifact,
+            joint_adjoint_keys=joint_adjoint_keys,
+        )
+    except LocalResponseCompilationError as error:
+        if error.reason not in {
+            "missing_certified_generator_route",
+            "missing_certified_generator_routes",
+            "raw_owner_vocabulary_not_injective",
+        }:
+            raise
+        return ambient_reynolds(error.reason)
 
 
 __all__ = [

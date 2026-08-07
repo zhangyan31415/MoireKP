@@ -3658,7 +3658,7 @@ def test_complete_policy_enumerates_ordered_pairs_and_reduces_in_coefficient_spa
     assert len(basis.channels) == 4
     assert all(
         proof["block_rule"]
-        == "exact_joint_components__logical_owner_pivots__global_degree_tail"
+        == "action_graph_blocks__logical_owner_pivots__raw_owner_injectivity"
         for proof in basis.reduction_proofs
     )
 
@@ -3688,11 +3688,11 @@ def test_complete_p0_model_routes_through_graded_symbolic_compiler(
     basis = compile_model_response_basis(model, config, reduce=True)
     assert calls == 1
     assert any(
-        proof["solver"] == "local_generator_fixed_p0_v1"
+        proof["solver"] == "local_small_matrix_reynolds_p0_v1"
         for proof in basis.reduction_proofs
     )
     identity_artifact = basis.candidate_artifact["adjoint"]["groups"][0]
-    assert identity_artifact["certification"] == "local_generator_fixed_v1"
+    assert identity_artifact["certification"] == "local_small_matrix_reynolds_v1"
     outer_timings = basis.candidate_artifact["adjoint"]["outer_timings_seconds"]
     for key in (
         "certified_group_actions",
@@ -4448,13 +4448,13 @@ def test_model_basis_persistent_cache_survives_memory_cache_clear(
     assert str(config.output_dir) not in str(second.artifact())
 
 
-def test_model_basis_persistent_cache_v54_cannot_bypass_v55_local_fixed_response(
+def test_model_basis_persistent_cache_v56_cannot_bypass_v57_action_block_reynolds(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_response_basis_cache()
     assert response_basis_module.COMPILER_VERSION == (
-        "complete-response-basis-v2-local-fixed-response-v55"
+        "complete-response-basis-v2-action-block-reynolds-v57"
     )
     config = _complete_onsite_config()
     config.output_dir = tmp_path / "model"
@@ -4462,18 +4462,18 @@ def test_model_basis_persistent_cache_v54_cannot_bypass_v55_local_fixed_response
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-local-fixed-response-v54",
+        "complete-response-basis-v2-local-fixed-response-v56",
     )
     compile_model_response_basis(build_model(config), config, reduce=True)
     cache_dir = Path(config.output_dir) / ".compiled_response_basis_cache"
-    v54_files = set(cache_dir.glob("*.npz"))
-    assert len(v54_files) == 1
+    v56_files = set(cache_dir.glob("*.npz"))
+    assert len(v56_files) == 1
 
     clear_response_basis_cache()
     monkeypatch.setattr(
         response_basis_module,
         "COMPILER_VERSION",
-        "complete-response-basis-v2-local-fixed-response-v55",
+        "complete-response-basis-v2-action-block-reynolds-v57",
     )
     cold_calls = 0
     original_cold_compile = response_basis_module._compile_model_response_basis_uncached
@@ -4491,12 +4491,12 @@ def test_model_basis_persistent_cache_v54_cannot_bypass_v55_local_fixed_response
     compile_model_response_basis(build_model(config), config, reduce=True)
 
     assert cold_calls == 1
-    v55_files = set(cache_dir.glob("*.npz"))
-    assert len(v55_files) == 2
-    assert v54_files < v55_files
+    v57_files = set(cache_dir.glob("*.npz"))
+    assert len(v57_files) == 2
+    assert v56_files < v57_files
 
 
-def test_model_basis_persistent_cache_local_fixed_policy_change_invalidates(
+def test_model_basis_persistent_cache_local_reynolds_policy_change_invalidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4512,8 +4512,8 @@ def test_model_basis_persistent_cache_local_fixed_policy_change_invalidates(
     clear_response_basis_cache()
     monkeypatch.setattr(
         response_basis_module,
-        "LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1",
-        response_basis_module.LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1 + 1,
+        "LOCAL_REYNOLDS_OWNER_POLICY_V1",
+        response_basis_module.LOCAL_REYNOLDS_OWNER_POLICY_V1 + "-changed",
     )
     cold_calls = 0
     original_cold_compile = response_basis_module._compile_model_response_basis_uncached
@@ -4695,6 +4695,33 @@ def test_model_basis_persistent_cache_is_warm_in_second_python_process(
     assert "response basis cold compile" in first.stdout
     assert "response basis persistent cache load" in second.stdout
     assert "response basis cold compile" not in second.stdout
+
+
+def test_model_basis_computes_cache_key_once_per_lookup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import kp.model.response_basis_cache as cache_module
+
+    clear_response_basis_cache()
+    original = cache_module.target_independent_basis_key
+    key_calls = 0
+
+    def counted_key(compiler_input: dict[str, object]) -> str:
+        nonlocal key_calls
+        key_calls += 1
+        return original(compiler_input)
+
+    monkeypatch.setattr(cache_module, "target_independent_basis_key", counted_key)
+    config = _complete_onsite_config()
+    config.output_dir = tmp_path / "model"
+
+    compile_model_response_basis(build_model(config), config, reduce=True)
+    assert key_calls == 1
+
+    clear_response_basis_cache()
+    compile_model_response_basis(build_model(config), config, reduce=True)
+    assert key_calls == 2
 
 
 def test_model_basis_same_key_concurrent_processes_compile_once(tmp_path: Path) -> None:

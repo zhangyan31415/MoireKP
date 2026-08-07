@@ -18,18 +18,16 @@ from ..symmetry.joint_exactification import materialize_block_route_action
 from .response_basis_fixed_subspace import REAL_LINEAR_ACTION_CONVENTION_V1
 from .response_basis_local_fixed import (
     LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
-    LOCAL_FIXED_ALGORITHM_V1,
-    LOCAL_FIXED_BLOCK_BACKEND_V2,
-    LOCAL_FIXED_COLUMN_SCALING_V1,
-    LOCAL_FIXED_COMPONENT_POLICY_V1,
-    LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1,
     LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
-    LOCAL_FIXED_MATERIALIZATION_POLICY_V1,
-    LOCAL_FIXED_OWNER_POLICY_V1,
     LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
-    LOCAL_FIXED_REDUCE_POLICY_V1,
     LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
     LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
+    LOCAL_REYNOLDS_ALGORITHM_V1,
+    LOCAL_REYNOLDS_BLOCK_BACKEND_V1,
+    LOCAL_REYNOLDS_COMPONENT_POLICY_V1,
+    LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1,
+    LOCAL_REYNOLDS_OWNER_POLICY_V1,
+    LOCAL_REYNOLDS_REDUCE_POLICY_V1,
 )
 
 
@@ -47,7 +45,7 @@ FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4 = (
     "real_physical_coefficient_gram_whitened_minimum_norm_svd_v4"
 )
 FIT_SOLVER_POLICY_LEGACY = "legacy_real_qr_machine_tolerance_v0"
-COMPILER_VERSION = "complete-response-basis-v2-local-reynolds-response-v56"
+COMPILER_VERSION = "complete-response-basis-v2-action-block-reynolds-v57"
 TARGET_SPECTRAL_WEIGHTING_V1 = "target_spectral_linear_v1"
 TARGET_SPECTRAL_TRACE_NORMALIZATION_V1 = "global_mean_trace_per_dimension_v1"
 NORMALIZED_LOW_ENERGY_LINEAR_V1 = "normalized-low-energy-linear-v1"
@@ -6426,7 +6424,7 @@ def _local_fixed_joint_key_cache_artifact(key: Any) -> dict[str, Any]:
     }
 
 
-def _local_fixed_cache_identity(
+def _local_reynolds_cache_identity(
     *,
     coordinate: PolynomialCoordinateBasis,
     groups: Sequence[FiniteGroup],
@@ -6508,20 +6506,18 @@ def _local_fixed_cache_identity(
 
     origin_array = np.asarray(coordinate.origin, dtype="<f8")
     return {
-        "algorithm": LOCAL_FIXED_ALGORITHM_V1,
+        "algorithm": LOCAL_REYNOLDS_ALGORITHM_V1,
         "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION_V1,
-        "block_backend": LOCAL_FIXED_BLOCK_BACKEND_V2,
+        "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND_V1,
         "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
         "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
         "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
         "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
         "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
-        "column_scaling_policy": LOCAL_FIXED_COLUMN_SCALING_V1,
-        "component_policy": LOCAL_FIXED_COMPONENT_POLICY_V1,
-        "dense_component_cutoff": LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1,
-        "owner_policy": LOCAL_FIXED_OWNER_POLICY_V1,
-        "materialization_policy": LOCAL_FIXED_MATERIALIZATION_POLICY_V1,
-        "reduce_policy": LOCAL_FIXED_REDUCE_POLICY_V1,
+        "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY_V1,
+        "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY_V1,
+        "materialization_policy": LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1,
+        "reduce_policy": LOCAL_REYNOLDS_REDUCE_POLICY_V1,
         "generator_antiunitary_parities_by_group": (
             generator_parities_by_group
         ),
@@ -6657,7 +6653,7 @@ _PERSISTENT_CACHE_INPUT_FIELDS = frozenset(
         "seeds",
     }
 )
-_LOCAL_FIXED_CACHE_IDENTITY_FIELDS = frozenset(
+_LOCAL_REYNOLDS_CACHE_IDENTITY_FIELDS = frozenset(
     {
         "algorithm",
         "real_linear_action_convention",
@@ -6667,9 +6663,7 @@ _LOCAL_FIXED_CACHE_IDENTITY_FIELDS = frozenset(
         "absolute_tolerance",
         "relative_tolerance",
         "gray_zone_factor",
-        "column_scaling_policy",
         "component_policy",
-        "dense_component_cutoff",
         "owner_policy",
         "materialization_policy",
         "reduce_policy",
@@ -6701,7 +6695,7 @@ _PERSISTENT_CACHE_IDENTITY_FIELDS = frozenset(
         "compiler_version",
         "term_templates",
         "structural_preselection",
-        "local_fixed_response_compiler",
+        "local_reynolds_response_compiler",
     }
 )
 
@@ -6738,37 +6732,35 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
             "complete_linear_v2 persistent cache input identity has unexpected fields: "
             + ", ".join(str(value) for value in unexpected_identity)
         )
-    local_fixed_identity = identity.get("local_fixed_response_compiler")
+    local_reynolds_identity = identity.get("local_reynolds_response_compiler")
     if (
-        not isinstance(local_fixed_identity, Mapping)
-        or set(local_fixed_identity) != _LOCAL_FIXED_CACHE_IDENTITY_FIELDS
+        not isinstance(local_reynolds_identity, Mapping)
+        or set(local_reynolds_identity) != _LOCAL_REYNOLDS_CACHE_IDENTITY_FIELDS
     ):
         raise ValueError(
-            "complete_linear_v2 persistent cache local-fixed identity is incomplete"
+            "complete_linear_v2 persistent cache local-Reynolds identity is incomplete"
         )
-    expected_local_fixed_values = {
-        "algorithm": LOCAL_FIXED_ALGORITHM_V1,
+    expected_local_reynolds_values = {
+        "algorithm": LOCAL_REYNOLDS_ALGORITHM_V1,
         "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION_V1,
-        "block_backend": LOCAL_FIXED_BLOCK_BACKEND_V2,
+        "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND_V1,
         "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
         "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
         "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
         "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
         "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
-        "column_scaling_policy": LOCAL_FIXED_COLUMN_SCALING_V1,
-        "component_policy": LOCAL_FIXED_COMPONENT_POLICY_V1,
-        "dense_component_cutoff": LOCAL_FIXED_DENSE_COMPONENT_CUTOFF_V1,
-        "owner_policy": LOCAL_FIXED_OWNER_POLICY_V1,
-        "materialization_policy": LOCAL_FIXED_MATERIALIZATION_POLICY_V1,
-        "reduce_policy": LOCAL_FIXED_REDUCE_POLICY_V1,
+        "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY_V1,
+        "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY_V1,
+        "materialization_policy": LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1,
+        "reduce_policy": LOCAL_REYNOLDS_REDUCE_POLICY_V1,
     }
-    for field_name, expected_value in expected_local_fixed_values.items():
-        if local_fixed_identity.get(field_name) != expected_value:
+    for field_name, expected_value in expected_local_reynolds_values.items():
+        if local_reynolds_identity.get(field_name) != expected_value:
             raise ValueError(
-                "complete_linear_v2 persistent cache local-fixed policy mismatch: "
+                "complete_linear_v2 persistent cache local-Reynolds policy mismatch: "
                 f"{field_name}"
             )
-    q_center = local_fixed_identity.get("q_center")
+    q_center = local_reynolds_identity.get("q_center")
     if not isinstance(q_center, Mapping) or set(q_center) != {
         "serialized_little_endian_hex",
         "coordinate_convention",
@@ -6796,10 +6788,10 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
         raise ValueError(
             "complete_linear_v2 persistent cache local-fixed q_center metadata is invalid"
         )
-    generator_parities = local_fixed_identity.get(
+    generator_parities = local_reynolds_identity.get(
         "generator_antiunitary_parities_by_group"
     )
-    harmonic_provenance = local_fixed_identity.get(
+    harmonic_provenance = local_reynolds_identity.get(
         "harmonic_adjoint_provenance_by_group"
     )
     if not isinstance(generator_parities, list) or not isinstance(
@@ -7369,11 +7361,11 @@ def _compile_model_response_basis_uncached(
                     )
                     if (
                         complete_zero_candidates.adjoint_artifact.get("certification")
-                        == "local_generator_fixed_v1"
+                        == "local_small_matrix_reynolds_v1"
                     ):
-                        zero_solver = "local_generator_fixed_p0_v1"
+                        zero_solver = "local_small_matrix_reynolds_p0_v1"
                         zero_block_rule = (
-                            "exact_joint_components__logical_owner_pivots__global_degree_tail"
+                            "action_graph_blocks__logical_owner_pivots__raw_owner_injectivity"
                         )
                     else:
                         zero_solver = "graded_filtered_symbolic_p0_reynolds_v1"
@@ -7955,7 +7947,7 @@ def compile_model_response_basis(
     identity_payload = {
         **dict(identity_payload),
         "structural_preselection": structural_preselection,
-        "local_fixed_response_compiler": _local_fixed_cache_identity(
+        "local_reynolds_response_compiler": _local_reynolds_cache_identity(
             coordinate=coordinate,
             groups=groups,
             seeds_by_group=seeds_by_group,
@@ -7982,8 +7974,9 @@ def compile_model_response_basis(
             for seed in seeds
         ],
     }
-    _validate_persistent_cache_input_record(input_record)
-    cache_key = hashlib.sha256(_canonical_json(input_record).encode("utf-8")).hexdigest()
+    from .response_basis_cache import target_independent_basis_key
+
+    cache_key = target_independent_basis_key(input_record)
     _response_progress(
         progress_callback,
         "response basis input fingerprint done "
@@ -8008,7 +8001,7 @@ def compile_model_response_basis(
             "response basis persistent cache lookup start",
             state="start",
         )
-        cache_path = persistent_cache.path_for(input_record)
+        cache_path = persistent_cache.path_for(cache_key)
         if cache_path.is_file():
             _response_progress(
                 progress_callback,
@@ -8017,7 +8010,7 @@ def compile_model_response_basis(
                 state="done",
             )
             load_started = time.perf_counter()
-            basis = persistent_cache.load(input_record)
+            basis = persistent_cache.load(cache_key)
             _RESPONSE_BASIS_CACHE[cache_key] = basis
             _response_progress(
                 progress_callback,
@@ -8065,7 +8058,7 @@ def compile_model_response_basis(
 
     if persistent_cache is not None:
         cache_started = time.perf_counter()
-        basis = persistent_cache.get_or_compile(input_record, cold_compile)
+        basis = persistent_cache.get_or_compile(cache_key, cold_compile)
         action = "cold compile+store total" if compiled_here else "load done after lock"
         _response_progress(
             progress_callback,

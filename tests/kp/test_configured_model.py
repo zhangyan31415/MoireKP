@@ -4923,6 +4923,42 @@ def test_harmonic_ablation_selects_smallest_acceptable_support() -> None:
     assert too_small["plot_rms_mev"] > 10.0
 
 
+def test_harmonic_ablation_candidate_reuses_its_full_eigensystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    heff = np.asarray(
+        [
+            [
+                [0.0, 0.2, 0.0, 0.0],
+                [0.2, 1.0, 0.1, 0.0],
+                [0.0, 0.1, 2.0, 0.3],
+                [0.0, 0.0, 0.3, 3.0],
+            ]
+        ],
+        dtype=np.complex128,
+    )
+    target_eig, target_vec = np.linalg.eigh(heff)
+
+    def forbidden_eigvalsh(*_args: object, **_kwargs: object) -> np.ndarray:
+        raise AssertionError("candidate metrics recomputed eigenvalues")
+
+    monkeypatch.setattr(pipeline_module.np.linalg, "eigvalsh", forbidden_eigvalsh)
+
+    metrics = pipeline_module._evaluate_harmonic_ablation_candidate(
+        heff,
+        np.ones((4, 4), dtype=bool),
+        target_bands="bottom",
+        primary_bands=2,
+        plot_bands=3,
+        target_eig=target_eig,
+        target_vec=target_vec,
+    )
+
+    assert metrics["primary_rms_mev"] == pytest.approx(0.0)
+    assert metrics["plot_rms_mev"] == pytest.approx(0.0)
+    assert metrics["subspace_mean_overlap"] == pytest.approx(1.0)
+
+
 def test_harmonic_selection_default_thresholds_are_conservative() -> None:
     thresholds = _harmonic_selection_threshold_values({})
 

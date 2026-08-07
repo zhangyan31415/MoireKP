@@ -5,7 +5,9 @@ import json
 from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
+import numpy as np
 import pytest
+from scipy import sparse
 
 
 RUNNER_PATH = (
@@ -14,6 +16,13 @@ RUNNER_PATH = (
     / "benchmarks"
     / "kp"
     / "bench_response_compile.py"
+)
+COMPARATOR_PATH = (
+    Path(__file__).resolve().parents[2]
+    / "devtools"
+    / "benchmarks"
+    / "kp"
+    / "compare_response_compilers.py"
 )
 
 
@@ -24,6 +33,52 @@ def _load_runner():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_comparator():
+    spec = importlib.util.spec_from_file_location(
+        "compare_response_compilers",
+        COMPARATOR_PATH,
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_projector_bound_never_densifies_an_ambient_column(monkeypatch) -> None:
+    comparator = _load_comparator()
+    target = sparse.csc_matrix(
+        (np.ones(2), ([0, 1], [0, 1])),
+        shape=(100, 2),
+    )
+    source = sparse.csc_matrix(
+        (
+            np.asarray([2.0**-0.5, 2.0**-0.5]),
+            (np.asarray([0, 2]), np.asarray([0, 0])),
+        ),
+        shape=(100, 1),
+    )
+    original_toarray = sparse.csc_matrix.toarray
+
+    def reject_ambient_dense(matrix, *args, **kwargs):
+        if matrix.shape[0] == 100:
+            raise AssertionError("ambient sparse column was densified")
+        return original_toarray(matrix, *args, **kwargs)
+
+    monkeypatch.setattr(sparse.csc_matrix, "toarray", reject_ambient_dense)
+    bound, _error, matched, projected = comparator._one_sided_projector_bound(
+        source,
+        target,
+        source_channel_ids=("source",),
+        target_channel_ids=("target-0", "target-1"),
+        source_gram=np.eye(1),
+        target_gram=np.eye(2),
+    )
+
+    assert matched == 0
+    assert projected == 1
+    assert bound == pytest.approx(2.0**-0.5)
 
 
 def _write_cache_artifact(

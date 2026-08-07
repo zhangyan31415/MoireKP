@@ -10,6 +10,7 @@ import numpy as np
 import pytest
 from scipy import sparse
 
+import kp.model.response_basis as response_basis_module
 from kp.model.response_basis import (
     CompiledResponseBasis,
     PolynomialCoordinateBasis,
@@ -56,6 +57,12 @@ def _toy_basis(*, value: float = 1.0) -> CompiledResponseBasis:
 
 
 def _compile_identity(*, marker: int = 1) -> dict[str, object]:
+    coordinate_basis = PolynomialCoordinateBasis.from_reciprocal_basis(
+        origin=[0.0, 0.0],
+        reciprocal_basis=[[1.0, 0.0], [0.0, 1.0]],
+        max_degree=0,
+    )
+    identity_group = identity_finite_group(2)
     identity_u = np.eye(2, dtype=np.complex128)
     element = {
         "canonical_word": [],
@@ -68,13 +75,7 @@ def _compile_identity(*, marker: int = 1) -> dict[str, object]:
         "alternate_word_residual": 0.0,
         "unitarity_residual": 0.0,
     }
-    coordinate = {
-        "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
-        "origin": [0.0, 0.0],
-        "scale": 1.0,
-        "max_degree": 0,
-        "monomial_ordering": [[0, 0]],
-    }
+    coordinate = coordinate_basis.metadata()
     return {
         "identity": {
             "basis_layout": {"order": "toy", "dim": 2},
@@ -102,6 +103,18 @@ def _compile_identity(*, marker: int = 1) -> dict[str, object]:
             "regularization_normalization": "ridge_on_dimensionless_response_amplitude_v1",
             "compiler_version": "cache-test-v1",
             "term_templates": [],
+            "structural_preselection": {
+                "compiler": "cache-test-v1",
+                "groups": [],
+            },
+            "local_reynolds_response_compiler": (
+                response_basis_module._local_reynolds_cache_identity(
+                    coordinate=coordinate_basis,
+                    groups=[identity_group],
+                    seeds_by_group=[[]],
+                    factorized_actions_by_group=[{}],
+                )
+            ),
         },
         "coordinate": coordinate,
         "groups": [{
@@ -234,6 +247,7 @@ def test_persistent_cache_cold_compiles_once_then_warm_loads_frozen_basis(
 ) -> None:
     basis = _toy_basis()
     payload = _compile_identity()
+    key = target_independent_basis_key(payload)
     compile_calls = 0
 
     def compile_basis() -> CompiledResponseBasis:
@@ -242,7 +256,7 @@ def test_persistent_cache_cold_compiles_once_then_warm_loads_frozen_basis(
         return basis
 
     cold_cache = PersistentResponseBasisCache(tmp_path / "basis-cache")
-    cold = cold_cache.get_or_compile(payload, compile_basis)
+    cold = cold_cache.get_or_compile(key, compile_basis)
 
     assert cold.basis_hash == basis.basis_hash
     assert compile_calls == 1
@@ -251,7 +265,7 @@ def test_persistent_cache_cold_compiles_once_then_warm_loads_frozen_basis(
 
     warm_cache = PersistentResponseBasisCache(tmp_path / "basis-cache")
     warm = warm_cache.get_or_compile(
-        payload,
+        key,
         lambda: pytest.fail("a persistent warm hit must not invoke the compiler"),
     )
 
@@ -262,14 +276,13 @@ def test_persistent_cache_cold_compiles_once_then_warm_loads_frozen_basis(
     )
     assert warm_cache.stats()["cold_compile_count"] == 0
     assert warm_cache.stats()["warm_load_count"] == 1
-    key = target_independent_basis_key(payload)
     assert warm_cache.stats()["warm_load_count_by_key"] == {key: 1}
 
 
 def test_cache_artifact_contains_no_cache_directory_or_machine_path(tmp_path: Path) -> None:
     cache_dir = tmp_path / "host-specific" / "basis-cache"
     cache = PersistentResponseBasisCache(cache_dir)
-    path = cache.store(_compile_identity(), _toy_basis())
+    path = cache.store(target_independent_basis_key(_compile_identity()), _toy_basis())
 
     with np.load(path, allow_pickle=False) as archive:
         metadata = json.loads(str(np.asarray(archive["cache_metadata_json"]).item()))
@@ -286,7 +299,8 @@ def test_cache_rejects_semantics_or_basis_hash_mismatch(
 ) -> None:
     cache = PersistentResponseBasisCache(tmp_path / "basis-cache")
     payload = _compile_identity()
-    path = cache.store(payload, _toy_basis())
+    key = target_independent_basis_key(payload)
+    path = cache.store(key, _toy_basis())
 
     def corrupt(arrays: dict[str, np.ndarray]) -> None:
         metadata = json.loads(str(np.asarray(arrays["cache_metadata_json"]).item()))
@@ -301,13 +315,14 @@ def test_cache_rejects_semantics_or_basis_hash_mismatch(
     _rewrite_archive(path, corrupt)
 
     with pytest.raises(ResponseBasisCacheCorruptionError, match=tamper.replace("_", " ")):
-        cache.load(payload)
+        cache.load(key)
 
 
 def test_corrupt_cache_fails_closed_without_recompiling(tmp_path: Path) -> None:
     cache = PersistentResponseBasisCache(tmp_path / "basis-cache")
     payload = _compile_identity()
-    path = cache.store(payload, _toy_basis())
+    key = target_independent_basis_key(payload)
+    path = cache.store(key, _toy_basis())
     path.write_bytes(b"not-an-npz")
     compile_calls = 0
 
@@ -317,7 +332,7 @@ def test_corrupt_cache_fails_closed_without_recompiling(tmp_path: Path) -> None:
         return _toy_basis()
 
     with pytest.raises(ResponseBasisCacheCorruptionError, match="could not be read"):
-        cache.get_or_compile(payload, must_not_compile)
+        cache.get_or_compile(key, must_not_compile)
 
     assert compile_calls == 0
     assert cache.stats()["corrupt_load_count"] == 1
@@ -329,8 +344,9 @@ def test_failed_atomic_rewrite_preserves_previous_valid_cache(
 ) -> None:
     cache = PersistentResponseBasisCache(tmp_path / "basis-cache")
     payload = _compile_identity()
+    key = target_independent_basis_key(payload)
     basis = _toy_basis()
-    cache.store(payload, basis)
+    cache.store(key, basis)
 
     import kp.model.response_basis_cache as cache_module
 
@@ -341,9 +357,9 @@ def test_failed_atomic_rewrite_preserves_previous_valid_cache(
     monkeypatch.setattr(cache_module.np, "savez_compressed", fail_during_write)
 
     with pytest.raises(OSError, match="interrupted write"):
-        cache.store(payload, basis)
+        cache.store(key, basis)
 
-    restored = cache.load(payload)
+    restored = cache.load(key)
     assert restored.basis_hash == basis.basis_hash
     assert not list((tmp_path / "basis-cache").glob("*.tmp*"))
 
@@ -351,15 +367,16 @@ def test_failed_atomic_rewrite_preserves_previous_valid_cache(
 def test_existing_same_key_with_different_basis_hash_fails_closed(tmp_path: Path) -> None:
     cache = PersistentResponseBasisCache(tmp_path / "basis-cache")
     payload = _compile_identity()
+    key = target_independent_basis_key(payload)
     first = _toy_basis(value=1.0)
     conflicting = _toy_basis(value=2.0)
     assert first.basis_hash != conflicting.basis_hash
-    cache.store(payload, first)
+    cache.store(key, first)
 
     with pytest.raises(ResponseBasisCacheCorruptionError, match="different basis hash"):
-        cache.store(payload, conflicting)
+        cache.store(key, conflicting)
 
-    assert cache.load(payload).basis_hash == first.basis_hash
+    assert cache.load(key).basis_hash == first.basis_hash
 
 
 def test_same_key_concurrent_processes_cold_compile_once(tmp_path: Path) -> None:
@@ -370,7 +387,10 @@ def test_same_key_concurrent_processes_cold_compile_once(tmp_path: Path) -> None
         import time
         from pathlib import Path
         from tests.kp.test_response_basis_cache import _compile_identity, _toy_basis
-        from kp.model.response_basis_cache import PersistentResponseBasisCache
+        from kp.model.response_basis_cache import (
+            PersistentResponseBasisCache,
+            target_independent_basis_key,
+        )
 
         cache = PersistentResponseBasisCache({str(cache_dir)!r})
         count_path = Path({str(count_path)!r})
@@ -379,7 +399,9 @@ def test_same_key_concurrent_processes_cold_compile_once(tmp_path: Path) -> None
                 handle.write("compile\\n")
             time.sleep(0.5)
             return _toy_basis()
-        cache.get_or_compile(_compile_identity(), compile_basis)
+        cache.get_or_compile(
+            target_independent_basis_key(_compile_identity()), compile_basis
+        )
         """
     )
     processes = [
