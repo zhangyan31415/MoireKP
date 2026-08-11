@@ -66,6 +66,9 @@ ENV/
 /.codex/
 /.worktrees/
 /.learnings/
+/devtools/
+/docs/
+/tests/
 kp/.codex_remote_logs/
 **/.ipynb_checkpoints/
 **/.pytest_cache/
