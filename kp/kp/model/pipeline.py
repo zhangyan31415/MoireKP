@@ -4324,10 +4324,9 @@ _AUTO_VALLEY_HARMONIC_PROFILES: dict[tuple[str, str], dict[str, Any]] = {
         "seeds": ["q1", "-2.0 * q1", "q1 + bM2", "2.0 * bM2 + q3"],
     },
     ("M", "inter"): {
-        "selection_rule": "M_inter_geometry",
-        "variables": {"m_q1": "0.5 * norm(bM1) * [1.0, 0.0]"},
-        "orbit_generators": [{"name": "C2", "type": "reflection", "axis_deg": 0.0}],
-        "seeds": ["m_q1", "bM2 - m_q1", "bM2 + m_q1", "bM1 + m_q1", "bM2 - 3.0 * m_q1"],
+        "selection_rule": "M_inter_qset_support",
+        "generation": "qset_support_symmetry_orbit",
+        "first_selected_source": "qset_offset",
     },
     ("K", "intra"): {
         "selection_rule": "K_intra_geometry",
@@ -4393,17 +4392,44 @@ def _candidate_orbits_from_valley_profile(
 
 def _auto_valley_harmonics(
     *,
+    raw: Any,
     kind: str,
     count: int,
     valley_model: Mapping[str, Any] | None,
+    sectors: Sequence[Mapping[str, Any]],
+    Q_set1: np.ndarray,
+    Q_set2: np.ndarray,
     bM1: np.ndarray,
     bM2: np.ndarray,
     variables: Mapping[str, Any],
+    symmetry_operations: Sequence[Mapping[str, Any]],
 ) -> tuple[dict[int, np.ndarray], dict[str, Any]] | None:
     valley_type = str((valley_model or {}).get("valley_type", ""))
     profile = _AUTO_VALLEY_HARMONIC_PROFILES.get((valley_type, kind))
     if profile is None:
         return None
+    if profile.get("generation") == "qset_support_symmetry_orbit":
+        model_q_sectors = [
+            {**dict(sector), "q_offset": [0.0, 0.0]}
+            for sector in sectors
+        ]
+        harmonic_map, diagnostics = _auto_harmonics_from_support(
+            raw=raw,
+            kind=kind,
+            count=count,
+            sectors=model_q_sectors,
+            Q_set1=Q_set1,
+            Q_set2=Q_set2,
+            bM1=bM1,
+            bM2=bM2,
+            symmetry_operations=symmetry_operations,
+        )
+        diagnostics["selection_rule"] = str(profile["selection_rule"])
+        diagnostics["q_convention"] = "model_qsets_no_additional_sector_offset"
+        selected = diagnostics.get("selected", [])
+        if selected and profile.get("first_selected_source") is not None:
+            selected[0]["source"] = str(profile["first_selected_source"])
+        return harmonic_map, diagnostics
     profile_variables = {**dict(variables), "bM1": np.asarray(bM1, dtype=float), "bM2": np.asarray(bM2, dtype=float)}
     b_norm = max(float(np.linalg.norm(bM1)), float(np.linalg.norm(bM2)), 1.0)
     tol = max(1.0e-8, b_norm * 1.0e-8)
@@ -4474,12 +4500,17 @@ def _resolve_harmonics_maps(
                 )
             else:
                 valley_harmonics = _auto_valley_harmonics(
+                    raw=raw,
                     kind=kind,
                     count=count,
                     valley_model=valley_model,
+                    sectors=sectors or [],
+                    Q_set1=Q_set1,
+                    Q_set2=Q_set2,
                     bM1=bM1,
                     bM2=bM2,
                     variables=variables,
+                    symmetry_operations=list((symmetry_map or {}).get(kind, [])),
                 )
                 if valley_harmonics is not None:
                     maps[kind], diagnostics[kind] = valley_harmonics
@@ -4891,12 +4922,40 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         bM1=bM1,
         bM2=bM2,
     )
-    preliminary_symmetry_map = _enrich_symmetry_map(
-        config.symmetry_map,
-        {},
-        rotation_deg=config.rotation_deg,
-        require_action_metadata=False,
+    expected_dim = len(Q_set1) * config.n_orb[0] + len(Q_set2) * config.n_orb[1]
+    loaded_symmetry = load_symmetry_source(
+        config.symmetry_source_config,
+        base=config.path.parent,
+        expected_dim=expected_dim,
     )
+    source_type = str(config.symmetry_source_config.get("type", "none"))
+    if source_type == "kp_symm_output" and _requires_model_side_exactification(
+        loaded_symmetry.metadata
+    ):
+        raise ValueError(
+            "kp_symm_output must provide exactified continuum matrices. "
+            "Rerun `kp symm` so the manifest contains matrix_kind='continuum_internal_rep_exact' "
+            "and matrix_source='kp_symm_exactified_action'."
+        )
+    if config.symmetry_source_metadata:
+        loaded_symmetry.metadata = {
+            **config.symmetry_source_metadata,
+            **loaded_symmetry.metadata,
+        }
+        if hasattr(loaded_symmetry.generator, "metadata") and isinstance(
+            loaded_symmetry.generator.metadata,
+            dict,
+        ):
+            loaded_symmetry.generator.metadata.update(
+                config.symmetry_source_metadata
+            )
+    config.symmetry_source_metadata = loaded_symmetry.metadata
+    enriched_symmetry_map = _enrich_symmetry_map(
+        config.symmetry_map,
+        loaded_symmetry.metadata,
+        rotation_deg=config.rotation_deg,
+    )
+    config.symmetry_map = enriched_symmetry_map
     intra, inter, harmonics_diagnostics = _resolve_harmonics_maps(
         harmonics,
         variables,
@@ -4906,7 +4965,7 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         bM2=bM2,
         sectors=sectors,
         valley_model=config.valley_model,
-        symmetry_map=preliminary_symmetry_map,
+        symmetry_map=enriched_symmetry_map,
     )
     config.harmonics_diagnostics = harmonics_diagnostics
     case_generator = config.term_template_metadata.get("generator")
@@ -4970,19 +5029,6 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
     kpoints_all = _load_kpoints(config)
     band_kpoints = _select_rows(kpoints_all, config.band_indices)
     fit_kpoints = _select_rows(kpoints_all, config.fit_indices)
-    expected_dim = len(Q_set1) * config.n_orb[0] + len(Q_set2) * config.n_orb[1]
-    loaded_symmetry = load_symmetry_source(config.symmetry_source_config, base=config.path.parent, expected_dim=expected_dim)
-    source_type = str(config.symmetry_source_config.get("type", "none"))
-    if source_type == "kp_symm_output" and _requires_model_side_exactification(loaded_symmetry.metadata):
-        raise ValueError(
-            "kp_symm_output must provide exactified continuum matrices. "
-            "Rerun `kp symm` so the manifest contains matrix_kind='continuum_internal_rep_exact' "
-            "and matrix_source='kp_symm_exactified_action'."
-        )
-    if config.symmetry_source_metadata:
-        loaded_symmetry.metadata = {**config.symmetry_source_metadata, **loaded_symmetry.metadata}
-        if hasattr(loaded_symmetry.generator, "metadata") and isinstance(loaded_symmetry.generator.metadata, dict):
-            loaded_symmetry.generator.metadata.update(config.symmetry_source_metadata)
     config.model_basis_gauge = getattr(
         loaded_symmetry.generator,
         "model_basis_gauge",
@@ -4992,13 +5038,6 @@ def build_moire_config_from_file(path: str | Path) -> tuple[MoireConfig, Configu
         fit_heff_list,
         config.model_basis_gauge,
     )
-    config.symmetry_source_metadata = loaded_symmetry.metadata
-    enriched_symmetry_map = _enrich_symmetry_map(
-        config.symmetry_map,
-        loaded_symmetry.metadata,
-        rotation_deg=config.rotation_deg,
-    )
-    config.symmetry_map = enriched_symmetry_map
 
     moire_config = MoireConfig(
         Q_set1=Q_set1,
