@@ -16,7 +16,12 @@ import numpy as np
 import yaml
 
 from .config.case import normalize_case_config
-from .identity import exactified_operation_provenance_is_complete
+from .identity import (
+    PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+    exactified_operation_provenance_is_complete,
+    load_projection_artifact_identity,
+    require_matching_identity,
+)
 from .io.tapw_loader import load_Q_sets
 from .symmetry.exactify_representation import build_basis_labels
 from .symmetry.geometry import bM_candidates_from_q_distances, canonical_bM_pair_from_candidates
@@ -269,19 +274,39 @@ def _load_operations(path: Path) -> tuple[list[KpSymmetryOperation], dict[str, A
         text = _metadata_text(payload)
         if text:
             metadata = json.loads(text)
+        operations_declared = "operations" in metadata
+        raw_records = metadata.get("operations", [])
+        if operations_declared and not isinstance(raw_records, list):
+            raise ValueError("Symmetry metadata operations must be a list.")
         records_by_key: dict[str, Mapping[str, Any]] = {}
-        for item in metadata.get("operations", []) if isinstance(metadata.get("operations"), list) else []:
+        for item in raw_records if operations_declared else []:
             if not isinstance(item, Mapping):
-                continue
+                raise ValueError("Each symmetry metadata operation must be a mapping.")
             name = str(item.get("name") or item.get("operation") or item.get("matrix_array_key") or "").strip()
             key = str(item.get("matrix_array_key") or name).strip()
-            if key:
-                records_by_key[key] = item
+            if not key:
+                raise ValueError("Each symmetry metadata operation requires a matrix array key or name.")
+            if key in records_by_key:
+                raise ValueError(f"Duplicate symmetry operation matrix array key: {key!r}.")
+            records_by_key[key] = item
+        if operations_declared:
+            missing = sorted(set(records_by_key).difference(payload.files))
+            if missing:
+                raise ValueError(
+                    "Symmetry representation pack is missing declared matrix arrays: "
+                    + ", ".join(missing)
+                )
         operations: list[KpSymmetryOperation] = []
         for key in payload.files:
             if key in _METADATA_KEYS:
                 continue
+            if operations_declared and key not in records_by_key:
+                continue
             matrix = np.asarray(payload[key], dtype=np.complex128)
+            if matrix.ndim != 2 or matrix.shape[0] != matrix.shape[1]:
+                raise ValueError(
+                    f"Symmetry operation matrix {key!r} must be square, got {matrix.shape}."
+                )
             record = records_by_key.get(key, {})
             name = str(record.get("name") or record.get("operation") or key).strip()
             antiunitary = bool(record.get("antiunitary", _infer_antiunitary(name)))
@@ -373,6 +398,68 @@ def _point_to_model_linear_from_metadata(metadata: Mapping[str, Any]) -> np.ndar
     return np.array([[c, -s], [s, c]], dtype=float)
 
 
+def _model_fractional_points_from_projection(
+    request: KpSymmRepRequest,
+    metadata: Mapping[str, Any],
+    reciprocal_basis: np.ndarray | None,
+) -> dict[str, np.ndarray] | None:
+    kpoints_path = request.projection_dir / "kpoints.npy"
+    if not kpoints_path.is_file():
+        return None
+    projection_identity = load_projection_artifact_identity(request.projection_dir)
+    symmetry_identity = metadata.get("artifact_identity")
+    if not isinstance(symmetry_identity, Mapping):
+        raise ValueError(
+            "Symmetry metadata must contain artifact_identity when "
+            "projection/kpoints.npy is present."
+        )
+    require_matching_identity(
+        projection_identity,
+        symmetry_identity,
+        PROJECTION_ARTIFACT_IDENTITY_FIELDS,
+        "kp symm-rep projection/symmetry artifacts",
+    )
+    if reciprocal_basis is None:
+        raise ValueError(
+            "Persisted projection/kpoints.npy requires a model reciprocal basis "
+            "(kp_symm_exactification.bM1/bM2) in symmetry metadata."
+        )
+    linear = _point_to_model_linear_from_metadata(metadata)
+    if linear is None:
+        raise ValueError(
+            "Persisted projection/kpoints.npy requires an explicit frame.k_transform "
+            "in symmetry metadata."
+        )
+    source_cartesian = np.asarray(
+        np.load(kpoints_path, allow_pickle=False),
+        dtype=float,
+    )
+    if source_cartesian.ndim != 2 or source_cartesian.shape[1] != 2:
+        raise ValueError(
+            f"projection/kpoints.npy must have shape (Nk, 2), got "
+            f"{source_cartesian.shape}."
+        )
+    heff_rows = int(
+        np.load(request.heff_path, mmap_mode="r", allow_pickle=False).shape[0]
+    )
+    if int(source_cartesian.shape[0]) != heff_rows:
+        raise ValueError(
+            "projection kpoints/Heff row mismatch: "
+            f"{source_cartesian.shape[0]} != {heff_rows}."
+        )
+    basis = np.asarray(reciprocal_basis, dtype=float).reshape(2, 2)
+    out: dict[str, np.ndarray] = {}
+    for label, index in request.point_indices.items():
+        if index < 0 or index >= source_cartesian.shape[0]:
+            raise IndexError(
+                f"Resolved point {label!r} to k-point row {index}, outside "
+                f"projection/kpoints.npy rows 0..{source_cartesian.shape[0] - 1}."
+            )
+        model_cartesian = linear @ source_cartesian[int(index)]
+        out[str(label)] = np.linalg.solve(basis.T, model_cartesian)
+    return out
+
+
 def _coords_to_model_fractional(
     coords: Sequence[float],
     *,
@@ -424,30 +511,70 @@ def _operation_target_shift(
     reciprocal_basis: np.ndarray | None,
     source_reciprocal_basis: np.ndarray | None = None,
     point_to_model_linear: np.ndarray | None = None,
+    model_fractional_points: Mapping[str, Sequence[float]] | None = None,
     tol: float = 5.0e-5,
 ) -> tuple[str, np.ndarray] | None:
+    production = model_fractional_points is not None
+    if production and not operation.k_map:
+        raise ValueError(
+            f"Production symmetry operation {operation.name!r} requires explicit k_map metadata."
+        )
+    linear = (
+        _linear_matrix_from_k_map(operation.k_map)
+        if operation.k_map
+        else None
+    )
+    if production and linear is None:
+        raise ValueError(
+            f"Production symmetry operation {operation.name!r} has an unsupported k_map: "
+            f"{operation.k_map!r}."
+        )
     if operation.validated_same_k_indices is not None and int(heff_index) not in operation.validated_same_k_indices:
         return None
     if not operation.k_map:
         return source_point, np.zeros(2, dtype=int)
-    linear = _linear_matrix_from_k_map(operation.k_map)
-    if linear is None or reciprocal_basis is None:
+    if linear is None:
         return source_point, np.zeros(2, dtype=int)
-    source_frac = _coords_to_model_fractional(
-        coords,
-        model_reciprocal_basis=reciprocal_basis,
-        source_reciprocal_basis=source_reciprocal_basis,
-        point_to_model_linear=point_to_model_linear,
-    )
-    mapped_frac = np.linalg.solve(reciprocal_basis.T, linear @ (source_frac @ reciprocal_basis))
-    best: tuple[float, str, np.ndarray] | None = None
-    for label, target_coords in points.items():
-        target_frac = _coords_to_model_fractional(
-            target_coords,
+    if reciprocal_basis is None:
+        if model_fractional_points is not None:
+            raise ValueError(
+                "Persisted model-frame k-points require a model reciprocal basis."
+            )
+        return source_point, np.zeros(2, dtype=int)
+    if model_fractional_points is not None:
+        if source_point not in model_fractional_points:
+            raise KeyError(
+                f"Missing persisted model-frame k-point for {source_point!r}."
+            )
+        source_frac = np.asarray(
+            model_fractional_points[source_point], dtype=float
+        )[:2]
+    else:
+        source_frac = _coords_to_model_fractional(
+            coords,
             model_reciprocal_basis=reciprocal_basis,
             source_reciprocal_basis=source_reciprocal_basis,
             point_to_model_linear=point_to_model_linear,
         )
+    mapped_frac = np.linalg.solve(
+        reciprocal_basis.T,
+        linear @ (source_frac @ reciprocal_basis),
+    )
+    best: tuple[float, str, np.ndarray] | None = None
+    for label, target_coords in points.items():
+        if model_fractional_points is not None:
+            if label not in model_fractional_points:
+                continue
+            target_frac = np.asarray(
+                model_fractional_points[label], dtype=float
+            )[:2]
+        else:
+            target_frac = _coords_to_model_fractional(
+                target_coords,
+                model_reciprocal_basis=reciprocal_basis,
+                source_reciprocal_basis=source_reciprocal_basis,
+                point_to_model_linear=point_to_model_linear,
+            )
         lattice_delta = mapped_frac - target_frac
         shift_to_mapped = np.rint(lattice_delta).astype(int)
         residual = float(np.linalg.norm(lattice_delta - shift_to_mapped))
@@ -855,6 +982,7 @@ def _write_summary(
     character_rows: Sequence[Mapping[str, Any]],
     operations: Sequence[KpSymmetryOperation],
     point_operations: Mapping[str, Sequence[str]],
+    model_fractional_points: Mapping[str, Sequence[float]] | None,
 ) -> None:
     chars_by_point: dict[str, list[Mapping[str, Any]]] = {}
     for row in character_rows:
@@ -871,16 +999,26 @@ def _write_summary(
         "",
     ]
     for point in request.points:
-        lines.extend(
+        point_lines = [
+            f"## {point}",
+            "",
+            f"- fractional coordinate: `{request.points[point]}`",
+        ]
+        if model_fractional_points is not None and point in model_fractional_points:
+            model_coords = tuple(
+                float(value) for value in model_fractional_points[point][:2]
+            )
+            point_lines.append(
+                f"- model fractional coordinate: `{model_coords}`"
+            )
+        point_lines.extend(
             [
-                f"## {point}",
-                "",
-                f"- fractional coordinate: `{request.points[point]}`",
                 f"- heff row: `{request.point_indices[point]}`",
                 f"- little-group operations: {', '.join(point_operations.get(point, [])) or 'none'}",
                 "",
             ]
         )
+        lines.extend(point_lines)
         lines.extend(
             [
                 "### Symmetry Representations",
@@ -914,6 +1052,11 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
     reciprocal_basis = _reciprocal_basis_from_metadata(metadata)
     source_reciprocal_basis = _source_reciprocal_basis_from_request(request)
     point_to_model_linear = _point_to_model_linear_from_metadata(metadata)
+    model_fractional_points = _model_fractional_points_from_projection(
+        request,
+        metadata,
+        reciprocal_basis,
+    )
     model_basis_labels = _load_model_basis_labels(request, metadata)
     spin_operator_stack = _load_spin_operator(
         request.projection_dir / "wavefunctions.npz",
@@ -966,6 +1109,7 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
                 reciprocal_basis=reciprocal_basis,
                 source_reciprocal_basis=source_reciprocal_basis,
                 point_to_model_linear=point_to_model_linear,
+                model_fractional_points=model_fractional_points,
             )
             if target is None:
                 continue
@@ -987,6 +1131,10 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
         )
         selected = np.unique(np.concatenate([indices for indices in selections.values() if len(indices)]))
         wave_payload[f"{_safe_key(point)}__coords"] = np.asarray(coords, dtype=float)
+        if model_fractional_points is not None:
+            wave_payload[f"{_safe_key(point)}__model_fractional_coords"] = (
+                np.asarray(model_fractional_points[point], dtype=float)
+            )
         wave_payload[f"{_safe_key(point)}__heff_index"] = np.asarray(index, dtype=np.int64)
         wave_payload[f"{_safe_key(point)}__energies"] = energies
         wave_payload[f"{_safe_key(point)}__eigenvectors"] = vectors
@@ -1066,6 +1214,7 @@ def run_configured_symm_rep(config_path: str | Path, *, overrides: Mapping[str, 
         character_rows=character_rows,
         operations=operations,
         point_operations=point_operations,
+        model_fractional_points=model_fractional_points,
     )
     elapsed = time.perf_counter() - t0
     print("=" * 72)
