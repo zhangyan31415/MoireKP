@@ -229,6 +229,11 @@ def _cleanup_canonical_model_output(model_output_dir: str | Path) -> None:
         "harmonic_recommendation_bands.png",
         "hamiltonian_element_comparison.png",
         "hamiltonian_element_comparison.pdf",
+        "model.toml",
+        "terms.csv",
+        "q_points.csv",
+        "physical_model.py",
+        "symmetry.toml",
     }
     root = Path(model_output_dir)
     if not root.exists():
@@ -4126,6 +4131,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 force=True,
                 debug_files=False,
                 operator_data=operator_data,
+                compiled_runtime=compiled_runtime,
             )
             if _config_path_uses_canonical_case(args.config):
                 _cleanup_canonical_model_output(model_cfg.output_dir)

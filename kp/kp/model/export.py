@@ -46,6 +46,7 @@ class _StandaloneExport:
     readme: str
     model_doc: str
     evaluate_py: str
+    physical_files: dict[str, str]
     debug_files: dict[str, bytes | str]
 
 
@@ -56,6 +57,7 @@ def export_standalone_model(
     force: bool = False,
     debug_files: bool = False,
     operator_data: Mapping[str, Any] | None = None,
+    compiled_runtime: Any | None = None,
 ) -> Path:
     """Export a fitted configured model as a minimal NumPy-only standalone package."""
     model_output = Path(model_output_dir).resolve()
@@ -76,6 +78,7 @@ def export_standalone_model(
         model_output,
         include_debug=debug_files,
         operator_data=operator_data,
+        compiled_runtime=compiled_runtime,
     )
     _assert_clean_text("README.md", package.readme)
     _assert_clean_text("MODEL.md", package.model_doc)
@@ -84,6 +87,8 @@ def export_standalone_model(
     (out / "MODEL.md").write_text(package.model_doc, encoding="utf-8")
     (out / "evaluate.py").write_text(package.evaluate_py, encoding="utf-8")
     _write_npz(out / "model_data.npz", package.model_data)
+    for filename, payload in package.physical_files.items():
+        (out / filename).write_text(payload, encoding="utf-8")
 
     if debug_files:
         for rel, payload in package.debug_files.items():
@@ -95,7 +100,12 @@ def export_standalone_model(
                 path.write_text(payload, encoding="utf-8")
 
     if not in_place:
-        extra = {path.name for path in out.iterdir()} - DEFAULT_TOP_LEVEL_FILES - ({"debug"} if debug_files else set())
+        extra = (
+            {path.name for path in out.iterdir()}
+            - DEFAULT_TOP_LEVEL_FILES
+            - set(package.physical_files)
+            - ({"debug"} if debug_files else set())
+        )
         if extra:
             raise RuntimeError(f"unexpected files in standalone export: {sorted(extra)}")
     return out
@@ -146,6 +156,7 @@ def _build_standalone_export(
     *,
     include_debug: bool,
     operator_data: Mapping[str, Any] | None = None,
+    compiled_runtime: Any | None = None,
 ) -> _StandaloneExport:
     clear_symmetry_caches()
     _ORBIT_RECORD_CACHE.clear()
@@ -174,12 +185,20 @@ def _build_standalone_export(
     semantic_terms, runtime_terms = _runtime_terms_from_active_terms(active_terms, moire_config)
     response_semantics = "legacy_frozen_v1"
     frozen_response_data: dict[str, np.ndarray] | None = None
+    frozen_runtime: Any | None = None
+    if compiled_runtime is not None:
+        response_semantics = "complete_linear_v2"
     if operator_data is not None and "response_semantics" in operator_data:
         response_semantics = str(np.asarray(operator_data["response_semantics"]).item())
     if response_semantics == "complete_linear_v2":
         from .response_basis import CompiledResponseRuntime
 
-        frozen_runtime = CompiledResponseRuntime.from_frozen_arrays(operator_data or {})
+        if compiled_runtime is None:
+            frozen_runtime = CompiledResponseRuntime.from_frozen_arrays(
+                operator_data or {}
+            )
+        else:
+            frozen_runtime = compiled_runtime
         if int(frozen_runtime.basis.dim) != int(dim):
             raise ValueError(
                 "complete_linear_v2 frozen basis dimension does not match the configured model: "
@@ -386,6 +405,30 @@ def _build_standalone_export(
             "model_data_arrays_combined_sha256": combined_array_hash,
         },
     }
+    physical_files = _physical_files_from_complete_runtime(
+        model_name=model_id,
+        response_semantics=response_semantics,
+        frozen_response_data=frozen_response_data,
+        qsets=qsets,
+        reciprocal_basis=reciprocal_basis,
+        sectors=_portable_sectors(getattr(moire_config, "sectors", [])),
+        symmetry_operations=operations,
+        energy_unit=str(
+            model_config.source_raw.get("material", {}).get("energy_unit", "eV")
+        ),
+        compiled_runtime=frozen_runtime,
+        n_orb_by_qset=n_orb_by_qset,
+    )
+    if physical_files:
+        model_json["physical_export"] = {
+            "schema_version": "moirekp-physical-v1",
+            "authority_files": ["model.toml", "terms.csv"],
+            "default_realization": "q_points.csv",
+            "runtime": "physical_model.py",
+            "symmetry": (
+                "symmetry.toml" if "symmetry.toml" in physical_files else None
+            ),
+        }
     model_json["hashes"]["model_json_canonical_sha256"] = _canonical_json_hash(
         _model_json_for_hash(model_json)
     )
@@ -410,7 +453,66 @@ def _build_standalone_export(
         readme=readme,
         model_doc=model_doc,
         evaluate_py=_evaluate_py_template(model_json),
+        physical_files=physical_files,
         debug_files=debug_payloads,
+    )
+
+
+def _physical_files_from_complete_runtime(
+    *,
+    model_name: str,
+    response_semantics: str,
+    frozen_response_data: Mapping[str, np.ndarray] | None,
+    qsets: Mapping[str, np.ndarray],
+    reciprocal_basis: np.ndarray,
+    sectors: Sequence[Mapping[str, Any]],
+    symmetry_operations: Sequence[Mapping[str, Any]],
+    energy_unit: str,
+    compiled_runtime: Any | None = None,
+    n_orb_by_qset: Mapping[str, int] | None = None,
+) -> dict[str, str]:
+    if response_semantics != "complete_linear_v2" or frozen_response_data is None:
+        return {}
+    from .physical_export import (
+        build_physical_export_files,
+        physical_terms_from_polynomial_coefficients,
+    )
+    if compiled_runtime is None:
+        from .response_basis import CompiledResponseRuntime
+
+        compiled_runtime = CompiledResponseRuntime.from_frozen_arrays(
+            frozen_response_data
+        )
+    coordinate = compiled_runtime.basis.coordinate
+    resolved_n_orb = dict(n_orb_by_qset or {})
+    if not resolved_n_orb:
+        resolved_n_orb = {
+            str(sector["qset"]): int(sector["n_orb"])
+            for sector in sectors
+        }
+    physical_terms = physical_terms_from_polynomial_coefficients(
+        polynomial_coefficients=compiled_runtime.polynomial_coefficients,
+        coordinate_origin=coordinate.origin,
+        coordinate_scale=coordinate.scale,
+        qsets=qsets,
+        n_orb_by_qset=resolved_n_orb,
+        reciprocal_basis=reciprocal_basis,
+        sectors=sectors,
+        tolerance=1.0e-8,
+    )
+
+    return build_physical_export_files(
+        model_name=model_name,
+        basis_metadata={"channels": []},
+        fitted_coefficients=np.asarray([], dtype=float),
+        qsets=qsets,
+        reciprocal_basis=reciprocal_basis,
+        sectors=sectors,
+        symmetry_operations=symmetry_operations,
+        energy_unit=energy_unit,
+        momentum_unit="1/angstrom",
+        tolerance=1.0e-8,
+        physical_terms=physical_terms,
     )
 
 
@@ -885,6 +987,7 @@ def _portable_sectors(sectors: Any) -> list[dict[str, Any]]:
             "qset": str(item.get("qset", "")),
             "q_offset": [float(x) for x in np.asarray(item.get("q_offset", [0.0, 0.0]), dtype=float).ravel()[:2]],
             "n_orb": int(item.get("n_orb", 0)),
+            "_q_offset_inferred": bool(item.get("_q_offset_inferred", False)),
         }
         rows.append(row)
     return rows
@@ -1533,16 +1636,47 @@ def _portable_operations(model_config: Any, exactified: Mapping[str, np.ndarray]
         if not name or name not in exactified:
             continue
         raw_operation = str(item.get("source_operation", item.get("operation", raw_name)))
+        antiunitary_value = item.get("antiunitary")
+        if antiunitary_value is None:
+            for action_key in (
+                "internal_resolved_action",
+                "declared_model_action",
+                "model_action",
+            ):
+                action = item.get(action_key)
+                if isinstance(action, Mapping) and "antiunitary" in action:
+                    antiunitary_value = action["antiunitary"]
+                    break
+        if antiunitary_value is None:
+            antiunitary_value = name in {"C2T", "TR"}
         rows.append(
             {
                 "name": name,
                 "family": "T" if name == "TR" else name,
                 "aliases": _operation_aliases(name, raw_operation),
                 "operation": raw_operation,
-                "antiunitary": bool(item.get("antiunitary", False)),
+                "antiunitary": bool(antiunitary_value),
                 "k_map": _json_safe(item.get("k_map", item.get("internal_resolved_action", {}).get("k_map"))),
-                "q_map": _json_safe(item.get("q_map", item.get("internal_resolved_action", {}).get("q_map"))),
-                "sector_map": _json_safe(item.get("sector_map", item.get("internal_resolved_action", {}).get("sector_map"))),
+                "q_map": _json_safe(
+                    item.get(
+                        "q_map",
+                        item.get("internal_resolved_action", {}).get(
+                            "q_map",
+                            item.get("declared_model_action", {}).get("q_map"),
+                        ),
+                    )
+                ),
+                "sector_map": _json_safe(
+                    item.get(
+                        "sector_map",
+                        item.get("internal_resolved_action", {}).get(
+                            "sector_map",
+                            item.get("declared_model_action", {}).get(
+                                "sector_map"
+                            ),
+                        ),
+                    )
+                ),
                 "matrix_array_key": f"exactified_{name}",
                 "matrix_kind": str(item.get("matrix_kind", "continuum_internal_rep_exact")),
                 "target_role": str(item.get("target_role", "continuum_internal_rep")),
@@ -1749,6 +1883,15 @@ Hermitian completion at each k-point.
 
 def _render_readme(model: Mapping[str, Any]) -> str:
     name = model["model_id"]
+    physical = model.get("physical_export")
+    physical_files = ""
+    if isinstance(physical, Mapping):
+        physical_files = """
+- `model.toml` + `terms.csv`: authoritative expandable physical model
+- `q_points.csv`: validated default finite Q realization
+- `physical_model.py`: NumPy route evaluator (`load_model('.')`)
+- `symmetry.toml`: sector-aware affine Q actions, when available
+"""
     return f"""# {name}
 
 This directory contains a NumPy-only evaluator for `{name}`.
@@ -1786,6 +1929,7 @@ Open `evaluate.py` and edit:
 - `evaluate.py`: standalone evaluator
 - `model_data.npz`: arrays used by the evaluator
 - `MODEL.md`: model formula and basis notes
+{physical_files}
 """
 
 
@@ -2223,7 +2367,42 @@ def _render_model_doc(model: Mapping[str, Any], model_data: Mapping[str, np.ndar
         fit_section = "\n".join(fit_lines) + "\n\n"
     else:
         fit_section = ""
-    if response_semantics == "complete_linear_v2":
+    physical_export = model.get("physical_export")
+    if isinstance(physical_export, Mapping):
+        runtime_recipe_text = r"""The authoritative expandable model is defined by
+`model.toml` and `terms.csv`. For a row-sector integer label $n_i$, each term
+routes to
+
+$$
+n_j=n_i-g_\mu,
+$$
+
+and contributes
+
+$$
+H_{ij}(k) \mathrel{+}= \beta_\mu
+[(k_x-Q_{i,x})+i(k_y-Q_{i,y})]^{M_z}
+[(k_x-Q_{i,x})-i(k_y-Q_{i,y})]^{M_{z^*}}.
+$$
+
+`q_points.csv` is the validated default finite realization; it is not the
+authority for the abstract model. `physical_model.py` can enlarge the basis
+with `set_q_shell(shell)`. The frozen `model_data.npz` response arrays remain a
+reference cache used for exact export validation and legacy workflows."""
+        files_description = (
+            "readable physical authority files, a default integer-Q realization, "
+            "frozen validation arrays, and exactified symmetry matrices"
+        )
+        term_runtime_note = (
+            "The terms in `terms.csv` are obtained by a deterministic row-centered "
+            "re-expansion of the already compiled Hamiltonian polynomial; no fit, "
+            "projection, or frozen-matrix inverse is performed during export."
+        )
+        folded_runtime_arrays = "the authoritative `terms.csv` route table"
+        limitations_runtime_note = (
+            "physical runtime evaluation uses integer Q routes from `model.toml` and `terms.csv`"
+        )
+    elif response_semantics == "complete_linear_v2":
         runtime_recipe_text = r"""The exported Hamiltonian consumes the frozen compiled response basis directly:
 
 $$
