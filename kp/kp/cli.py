@@ -2219,7 +2219,7 @@ def _spin_consistent_non_gamma_reference_rows(
     edge: str,
     band_count: int,
     pair_tolerance_mev: float,
-    pair_isolation_ratio: float = 0.25,
+    pair_isolation_ratio: float = 0.5,
 ) -> tuple[np.ndarray, ...]:
     """Collapse a certified doubled spin target without diagonalizing full H."""
 
@@ -2287,6 +2287,7 @@ def _monotone_spin_reference_subset(
     band_count: int,
     energy_reference_ev: float,
     cost_margin_mev: float = 0.1,
+    source_degeneracy_tolerance_mev: float = 1.0e-3,
 ) -> np.ndarray:
     """Match one fixed ordered full-spin subset to a selected-spin guide."""
 
@@ -2310,6 +2311,26 @@ def _monotone_spin_reference_subset(
         guide = guide[:count]
     else:
         raise ValueError("spin target edge must be valence or conduction")
+    degeneracy_tolerance_mev = float(source_degeneracy_tolerance_mev)
+    if not np.isfinite(degeneracy_tolerance_mev) or degeneracy_tolerance_mev <= 0.0:
+        raise ValueError(
+            "spin_mapping_source_degeneracy_tolerance_mev must be finite and positive"
+        )
+    degeneracy_tolerance_ev = degeneracy_tolerance_mev / 1000.0
+    degenerate_clusters: list[list[float]] = []
+    for energy in eligible:
+        if (
+            degenerate_clusters
+            and float(energy) - degenerate_clusters[-1][0]
+            <= degeneracy_tolerance_ev
+        ):
+            degenerate_clusters[-1].append(float(energy))
+        else:
+            degenerate_clusters.append([float(energy)])
+    eligible = np.asarray(
+        [float(np.mean(cluster)) for cluster in degenerate_clusters],
+        dtype=float,
+    )
     if eligible.size < count:
         raise CandidateRejected(
             CandidateRejectionReason.INSUFFICIENT_TARGET_BANDS,
@@ -2377,6 +2398,7 @@ def _envelope_matched_non_gamma_target(
     energy_reference_ev: float,
     degeneracy_tolerance_mev: float,
     cost_margin_mev: float = 0.1,
+    source_degeneracy_tolerance_mev: float = 1.0e-3,
 ):
     matched_rows = [
         _monotone_spin_reference_subset(
@@ -2386,6 +2408,7 @@ def _envelope_matched_non_gamma_target(
             band_count=band_count,
             energy_reference_ev=energy_reference_ev,
             cost_margin_mev=cost_margin_mev,
+            source_degeneracy_tolerance_mev=source_degeneracy_tolerance_mev,
         )
         for k_index in validation_k_indices
     ]
@@ -2743,7 +2766,7 @@ def _evaluate_non_gamma_automatic_candidates(
             selection_cfg.get("spin_pair_tolerance_mev", 2.0)
         ),
         pair_isolation_ratio=float(
-            selection_cfg.get("spin_pair_isolation_ratio", 0.25)
+            selection_cfg.get("spin_pair_isolation_ratio", 0.5)
         ),
     )
     target_degeneracy_tolerance_mev = float(
@@ -2851,6 +2874,12 @@ def _evaluate_non_gamma_automatic_candidates(
             degeneracy_tolerance_mev=target_degeneracy_tolerance_mev,
             cost_margin_mev=float(
                 selection_cfg.get("spin_mapping_cost_margin_mev", 0.1)
+            ),
+            source_degeneracy_tolerance_mev=float(
+                selection_cfg.get(
+                    "spin_mapping_source_degeneracy_tolerance_mev",
+                    1.0e-3,
+                )
             ),
         )
 

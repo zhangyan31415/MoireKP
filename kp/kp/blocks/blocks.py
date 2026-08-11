@@ -3127,7 +3127,10 @@ def _non_gamma_candidate_from_kind(
             references = _order_gamma_references_for_model_basis(references, segments=segments)
             warnings.extend(completion_warnings)
             reference_score_mode = "spin_chiral_adjacent_pair_high_row_model_frame"
-        elif kind == "spin_chiral_high_row_lower_template":
+        elif kind in {
+            "spin_chiral_high_row_lower_template",
+            "spin_chiral_high_row_lower_template_model_frame",
+        }:
             if template_references is None:
                 references, completion_details, completion_warnings = _complete_adjacent_chiral_reference_terms(
                     u_low,
@@ -3536,17 +3539,22 @@ def resolve_project_gauge_anchor_candidates(
         candidate_defs = [
             ("local_completed_overlap_assignment", "best_overlap", 1),
             ("local_spin_chiral_high_row_lower_template_assignment", "spin_chiral_high_row_lower_template", 2),
-            ("local_spin_chiral_high_row_model_frame_assignment", "spin_chiral_high_row_model_frame", 3),
+            (
+                "local_spin_chiral_high_row_lower_template_model_frame_assignment",
+                "spin_chiral_high_row_lower_template_model_frame",
+                3,
+            ),
+            ("local_spin_chiral_high_row_model_frame_assignment", "spin_chiral_high_row_model_frame", 4),
             (
                 "local_spin_chiral_high_row_conjugate_model_frame_assignment",
                 "spin_chiral_high_row_conjugate_model_frame",
-                4,
+                5,
             ),
-            ("local_spin_chiral_high_row_assignment", "spin_chiral_high_row", 5),
-            ("local_spin_chiral_high_row_conjugate_assignment", "spin_chiral_high_row_conjugate", 6),
-            ("local_spin_chiral_assignment", "spin_chiral", 7),
-            ("local_spin_chiral_conjugate_assignment", "spin_chiral_conjugate", 8),
-            ("qrcp_delta_overlap_assignment", "raw", 9),
+            ("local_spin_chiral_high_row_assignment", "spin_chiral_high_row", 6),
+            ("local_spin_chiral_high_row_conjugate_assignment", "spin_chiral_high_row_conjugate", 7),
+            ("local_spin_chiral_assignment", "spin_chiral", 8),
+            ("local_spin_chiral_conjugate_assignment", "spin_chiral_conjugate", 9),
+            ("qrcp_delta_overlap_assignment", "raw", 10),
         ]
         for candidate_id, kind, priority in candidate_defs:
             try:
