@@ -44,8 +44,3 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 tapw = ["templates/*.yaml", "templates/*.in"]
-
-[tool.moirekp.release]
-metadata_status = "pending"
-data_manifest = "examples/data-manifest.yaml"
-release_blockers = ["dataset_license", "doi", "data_url"]

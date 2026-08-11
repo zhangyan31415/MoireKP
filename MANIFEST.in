@@ -3,8 +3,6 @@ include COPYING
 include COPYING.LESSER
 include COPYRIGHT
 include README.md
-include RELEASE_BLOCKERS.md
-include RELEASE_VALIDATION.md
 include environment.yml
 include pytest.ini
 include pyproject.toml

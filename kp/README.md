@@ -1,58 +1,106 @@
 # kp package
 
-Python package for projecting TAPW Hamiltonians and fitting moire k.p continuum models.
+The `kp` package projects TAPW Hamiltonians and symmetry actions into selected
+low-energy spaces, fits moiré continuum models, and exports standalone NumPy
+evaluators.
 
-## Install
+## Installation
 
 Install from the repository root:
 
 ```bash
-pip install -e .
+conda env create -f environment.yml
+conda activate moirekp
 ```
 
-## Clean-Clone Smoke
+For an existing compatible environment, editable installation is also
+available with `pip install -e .`.
 
-These commands do not require external TAPW arrays:
+## Quick check
+
+The CLI can be checked without external TAPW arrays:
 
 ```bash
-kp --help  # clean-clone
-python -m pytest examples/minimal_synthetic -q  # clean-clone
+python -c "import kp"
+kp --help
 ```
 
-## External-Data Examples
+## Workflow
 
-Release examples are under the repository-level `examples/` directory. Start with:
+Example configs are under the repository-level `examples/` directory. A
+complete KP workflow is:
 
 ```bash
-kp inspect -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
-kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
-kp symm    -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
-kp symm-rep -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
-kp model   -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_q06.yaml
+CFG=examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml
+kp inspect  -c "$CFG"  # optional source-spectrum diagnostic
+kp project  -c "$CFG"
+kp symm     -c "$CFG"
+kp model    -c "$CFG"
+kp symm-rep -c "$CFG"  # optional band representations
 ```
 
-These commands require external TAPW arrays listed in `examples/data-manifest.yaml`.
-See `examples/README.md` for the full input/output workflow and the meaning of
-`nlow_state_list`.
+These commands have distinct roles:
 
-The release CLI exposes only `kp inspect`, `kp project`, `kp symm`,
-`kp symm-rep`, and `kp model`. `kp symm-rep` reads the configured
-`projection/heff.npy` and `symmetry/representations.npz`, diagonalizes the
-selected high-symmetry Heff rows, and writes `summary.md`,
-`high_symmetry_wavefunctions.npz`, `band_representations.npz`,
-`characters.csv`, and `bands.csv` under the canonical `symm_rep/` output
-directory. Add an optional `symm_rep` section to the case config to override
-`points`, `valence_count`, `conduction_count`, `degeneracy_tol`, or
-`output_dir`; otherwise the command uses `material.efermi` and infers points
-from `kpath.coordinates`.
+- `kp inspect` plots the TAPW bands and reference Q-block spectrum.
+- `kp project` selects and downfolds the low-energy subspace and writes Heff.
+- `kp symm` projects and exactifies the symmetry generators required by the
+  continuum model.
+- `kp model` selects or loads harmonic support, fits the configured model, and
+  exports the standalone evaluator.
+- `kp symm-rep` optionally analyzes high-symmetry band blocks after
+  `kp project` and `kp symm`.
 
-`kp model` writes the standalone evaluator directly into the canonical
-`model/` output directory.
+The scientific runs require external arrays that are not committed to the
+source repository. `examples/README.md` describes the tracked case configs and
+automatic low-energy and harmonic selection.
 
-## Package Layout
+## Band representations
 
-- `kp/io`: load TAPW Hamiltonians and Q sets
-- `kp/blocks`: assemble Q blocks and project low-energy effective Hamiltonians
-- `kp/symmetry`: symmetry operators and symmetry projection helpers
-- `kp/model`: continuum-model building blocks
+`kp symm-rep` reads `projection/heff.npy`, `projection/kpoints.npy`, and
+`symmetry/representations.npz`. It validates their shared artifact identity,
+uses the persisted projected k-points to determine the little group and
+reciprocal sewing shift, and writes:
+
+```text
+symm_rep/
+  summary.md
+  bands.csv
+  characters.csv
+  high_symmetry_wavefunctions.npz
+  band_representations.npz
+```
+
+The output preserves each raw projected block, its raw unitarity residual, and
+the distance to the reported polar-unitary block. A poor raw block remains
+marked as such; polar decomposition is not a replacement for the diagnostic.
+
+An optional top-level `symm_rep` section may override `points`,
+`valence_count`, `conduction_count`, `degeneracy_tol`, or `output_dir`.
+Otherwise the command uses `project.efermi` and the configured `bands.kpath`.
+
+## Model export
+
+`kp model` writes directly to the `model/` directory. The standalone files
+include:
+
+```text
+model/
+  README.md
+  MODEL.md
+  evaluate.py
+  physical_model.py
+  model_data.npz
+  model.toml
+  symmetry.toml
+  terms.csv
+```
+
+There is no separate `kp export` command.
+
+## Package layout
+
+- `kp/io`: TAPW Hamiltonian and Q-set loading
+- `kp/blocks`: Q-block assembly and low-energy projection
+- `kp/symmetry`: projected symmetry actions and exactification
+- `kp/model`: continuum-model construction, fitting, and export
 - `kp/viz`: plotting utilities
