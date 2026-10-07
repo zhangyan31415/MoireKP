@@ -240,7 +240,7 @@ def _phase_from_overlap(overlap, eps=1e-14):
 
 
 def compute_berry_flux_single_band(band_grid, band_index, eps=1e-14):
-    """FHS plaquette phase for a single band on a rectangular vertex grid."""
+    """Berry flux for A=i<u|du>; forward-overlap plaquette phase has opposite sign."""
     band_slice = band_grid[:, :, :, band_index]
     v_k = band_slice[:-1, :-1]
     v_k1 = band_slice[1:, :-1]
@@ -258,11 +258,11 @@ def compute_berry_flux_single_band(band_grid, band_index, eps=1e-14):
     uy_at_k1 = _phase_from_overlap(overlap_k2_at_k1, eps=eps)
 
     plaquette = ux * uy_at_k1 / (ux_at_k2 * uy)
-    return np.angle(plaquette)
+    return -np.angle(plaquette)
 
 
 def compute_berry_flux_multiband(band_grid, band_indices, eps=1e-14):
-    """FHS plaquette phase for an occupied subspace on a rectangular vertex grid."""
+    """Subspace Berry flux for A=i<u|du> on a rectangular vertex grid."""
     band_sub = band_grid[:, :, :, band_indices]
     v_k = band_sub[:-1, :-1]
     v_k1 = band_sub[1:, :-1]
@@ -283,7 +283,7 @@ def compute_berry_flux_multiband(band_grid, band_indices, eps=1e-14):
     uy_at_k1 = _phase_from_overlap(det_k2_at_k1, eps=eps)
 
     plaquette = ux * uy_at_k1 / (ux_at_k2 * uy)
-    return np.angle(plaquette)
+    return -np.angle(plaquette)
 
 
 def berry_flux_to_cartesian_density(berry_flux, b_phys_2d, delta_kappa1, delta_kappa2):
@@ -369,7 +369,7 @@ def compute_qgt_fields(band_grid, band_indices, delta_kappa1, delta_kappa2):
             g11_frac[out_i, out_j] = (num_occ - trace_k1_pm.real) / (4.0 * delta_kappa1 * delta_kappa1)
             g12_frac[out_i, out_j] = trace_cross.real / (8.0 * delta_kappa1 * delta_kappa2)
             g22_frac[out_i, out_j] = (num_occ - trace_k2_pm.real) / (4.0 * delta_kappa2 * delta_kappa2)
-            omega12_frac[out_i, out_j] = (-1j * trace_commutator / (4.0 * delta_kappa1 * delta_kappa2)).real
+            omega12_frac[out_i, out_j] = (1j * trace_commutator / (4.0 * delta_kappa1 * delta_kappa2)).real
 
     return {
         "g11_frac": g11_frac,

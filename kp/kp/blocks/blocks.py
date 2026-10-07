@@ -4457,7 +4457,9 @@ def project_heff_full(
     """Project full H(k) to Heff(k).
 
     一阶：Heff = U_low^† H U_low
-    二阶（Löwdin/SW 下折）：Heff = H00 + H01 (E_ref I - H11)^{-1} H10
+    fixed_schur：Heff = H00 + H01 (E_ref I - H11)^{-1} H10
+    默认 linearized_lowdin：令 R=(E_ref I-H11)^{-1}, B=I+H01 R^2 H10,
+    A=H00+H01 R H10+E_ref(B-I)，则 Heff=B^{-1/2} A B^{-1/2}。
 
     参数
     - hamk_full: (N, N) 该 k 点的全空间厄米矩阵
@@ -4467,8 +4469,8 @@ def project_heff_full(
     - spin: 'up'|'down'|'all'（影响索引映射）
     - bands: 每个 Q 选取的“低能带”索引（可平铺或嵌套）；长度 = m_bands
     - comps: 每个低能带希望对齐的“参考全局轨道”索引（与 bands 对应；可选）
-    - second_order: False 则一阶；True 则按二阶下折
-    - E_ref: 二阶中的参考能量，若 None 则取 H00 本征值均值
+    - second_order: 未指定 downfold_method 时，False 则一阶，True 则 linearized_lowdin
+    - E_ref: 降维中的参考能量；fixed_schur 和 linearized_lowdin 必须显式提供
 
     返回
     - Heff(k) (M, M)；其本征值 heig (M,) 与本征矢 hvec (M, M)
@@ -4551,7 +4553,7 @@ def project_heff_full(
                         same_q_index = same_q_index + hamk_full.shape[0] // 2
                     idx_list.append(same_q_index)
 
-    method = (downfold_method or ("fixed_schur" if second_order else "first_order")).lower()
+    method = (downfold_method or ("linearized_lowdin" if second_order else "first_order")).lower()
     include_high = method != "first_order"
 
     if Qlayer_list is None:

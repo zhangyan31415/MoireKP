@@ -1,66 +1,129 @@
+prune examples
+prune scripts
 include .gitignore
 include COPYING
 include COPYING.LESSER
 include COPYRIGHT
 include README.md
+include README.zh.md
+include RELEASE_VALIDATION.md
+include docs/abacus_input.md
+include RELEASE_BLOCKERS.md
 include environment.yml
 include pytest.ini
 include pyproject.toml
 include kp/README.md
 include tapw/README.md
-recursive-include scripts *.sh
-
-recursive-include examples *.md *.yaml *.yml *.json *.txt *.csv *.py *.in *.out
-recursive-include examples/tapw/*/openmx/soc band_info.json openmx.dat_rigid
+graft kp/kp
+graft tapw/tapw
+include scripts/README.md
+include scripts/README.zh.md
+include scripts/build_openmx_symm_hs.sh
+include scripts/openmx_analysis_symm_hs.cpp
+include scripts/openmx_symmetrize_hs.py
+include scripts/openmx_symm_hs_python.py
+include scripts/openmx_symm_hs_scfout.py
+recursive-include scripts/openmx *.py *.cpp *.sh *.md
+recursive-include scripts/abacus *.py *.md
+include scripts/abacus/_vendor/LICENSE.GPL-3.0
+recursive-include scripts/siesta *.py *.md
+recursive-include scripts/common *.py *.md
+recursive-include scripts/legacy *.py *.md
+include scripts/benchmark_physical_export.py
+include scripts/benchmark_physical_export_suite.py
+include scripts/benchmarks/benchmark_physical_export.py
+include scripts/benchmarks/benchmark_physical_export_suite.py
+include scripts/release_gate.sh
+include scripts/release/release_gate.sh
+include scripts/release/build_distribution.py
+include examples/README.md
+include examples/data-manifest.yaml
 recursive-include tests *.py *.yaml *.yml *.json *.txt
-recursive-include tests/fixtures *.txt *.yaml *.yml *.json *.npy *.npz
-recursive-include docs *.md
-recursive-include tapw/tapw/templates *.yaml *.in
-
-prune .codex
+recursive-include tests/fixtures *.npy *.npz
+include examples/mgi2_3.89/README.md
+include examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+include examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
+include examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+include examples/mgi2_3.89/openmx/soc/POSCAR_rigid
+include examples/mgi2_3.89/openmx/soc/openmx.dat_rigid
+include examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+include examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
+include examples/mote2_3.89/README.md
+include examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml
+include examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml
+include examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_tuned_q06.yaml
+include examples/mote2_3.89/openmx/soc/POSCAR_rigid
+include examples/mote2_3.89/openmx/soc/openmx.dat_rigid
+include examples/mote2_3.89/tapw/configs/mote2_3.89_K1_paper_20261001_q06.yaml
+include examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml
+include examples/mote2_aab_5.09/README.md
+include examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+include examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml
+include examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml
+include examples/mote2_aab_5.09/openmx/soc/POSCAR_rigid
+include examples/mote2_aab_5.09/openmx/soc/openmx.dat_rigid
+include examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+include examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_K1_spinful_q04.yaml
+include examples/ptse2_7.34/README.md
+include examples/ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+include examples/ptse2_7.34/openmx/soc/POSCAR_rigid
+include examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+include examples/zrs2_3.15/README.md
+include examples/zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+include examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinful_q07.yaml
+include examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinless_q07.yaml
+include examples/zrs2_3.15/openmx/soc/POSCAR_rigid
+include examples/zrs2_3.15/openmx/soc/openmx.dat_rigid
+include examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+include examples/zrs2_3.15/tapw/configs/zrs2_3.15_M1_spinful_q07.yaml
+include examples/zrs2_3.89/README.md
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_km_neighbors.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_one_sided_only.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_two_sided_only.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_unweighted.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_weighted_strict.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_linearized_q07.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_q07.yaml
+include examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinless_q07.yaml
+include examples/zrs2_3.89/openmx/soc/openmx.dat_rigid
+include examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+include examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_km_neighbors.yaml
+include examples/zrs2_3.89/tapw/configs/zrs2_3.89_M1_spinful_q07.yaml
 prune .git
+prune .codex
 prune .learnings
 prune build
-prune context
 prune dist
 prune moirekp.egg-info
+prune devtools
+prune dev_archive
 prune review_bundles
 prune review_outputs
 prune review_packages
-prune runs
 prune results
 prune validation_runs
-prune dev_archive
-prune devtools
-prune docs/internal
-prune docs/plans
+prune runs
+prune output
+prune tmp
 prune paper
 prune manuscript
 prune cpc_submission
-prune kp/.tmp_*
-prune kp/context
-prune examples/garbage
-prune examples/toZY
-prune examples/bitei
-prune examples/mgi2_3.89/kp/outputs
-prune examples/mgi2_3.89/kp/runs
-prune examples/mgi2_3.89/tapw/outputs
-prune examples/mote2_3.89/kp/outputs
-prune examples/mote2_3.89/kp/runs
-prune examples/mote2_3.89/tapw/outputs
-prune examples/mote2_aab_5.09/tapw/outputs
-prune examples/ptse2_7.34/tapw/outputs
-prune examples/zrs2_3.15/tapw/outputs
-
+prune docs/internal
+prune docs/plans
 global-exclude __pycache__/*
 global-exclude *.py[cod]
 global-exclude *.so
 global-exclude .DS_Store
-global-exclude *.egg-info/*
-global-exclude openmx.out
 global-exclude *.log
 global-exclude *.err
 global-exclude *.npy
 global-exclude *.npz
-
+global-exclude openmx.out
 recursive-include tests/fixtures *.npy *.npz
+exclude tests/test_native_overlap_cluster_scores.py
+exclude tests/test_full_window_statistics.py
+exclude tests/test_paper_publication.py
+exclude tests/test_single_paper_manuscript.py
+exclude tests/test_quadratic_top6_experiment.py
+exclude tests/kp/test_response_compile_benchmark.py

@@ -6,6 +6,7 @@ from typing import Any, Sequence
 
 import numpy as np
 import scipy.linalg
+import warnings as warning_control
 
 
 MEV_PER_EV = 1000.0
@@ -18,7 +19,7 @@ class NearPoleError(RuntimeError):
 
 @dataclass(frozen=True)
 class DownfoldingOptions:
-    method: str = "fixed_schur"
+    method: str = "linearized_lowdin"
     e_ref: float | None = None
     pole_warning_mev: float = 10.0
     pole_danger_mev: float = 1.0
@@ -56,29 +57,6 @@ class _ProjectorGroups:
     groups: tuple[_ProjectorGroup, ...]
 
 
-# Reporting-only helpers kept here for reference, but intentionally not part of
-# the active downfolding core.
-#
-# import csv
-# import json
-# from pathlib import Path
-# from typing import Iterable, Mapping, Sequence
-#
-# @dataclass(frozen=True)
-# class TopNMetric:
-#     n: int
-#     rms_mev: float
-#     max_abs_mev: float
-#     mean_mev: float
-#
-#
-# @dataclass(frozen=True)
-# class SweepRow:
-#     e_ref: float
-#     global_pole_distance_min_mev: float | None
-#     metrics: Mapping[int, TopNMetric]
-
-
 def _hermitize(matrix: np.ndarray) -> np.ndarray:
     mat = np.asarray(matrix, dtype=np.complex128)
     return 0.5 * (mat + mat.conj().T)
@@ -114,7 +92,13 @@ def _shifted_hamiltonian_matrix(h_hh: np.ndarray, e_ref: float) -> np.ndarray:
 def _solve_hermitian_shifted(h_hh: np.ndarray, rhs: np.ndarray, e_ref: float) -> np.ndarray:
     a = _shifted_hamiltonian_matrix(h_hh, e_ref)
     with _bounded_blas_threads():
-        return np.linalg.solve(a, rhs)
+        try:
+            result = np.linalg.solve(a, rhs)
+        except np.linalg.LinAlgError as exc:
+            raise NearPoleError(f"singular downfolding resolvent at E_ref={e_ref}") from exc
+    if not np.isfinite(result).all():
+        raise NearPoleError(f"non-finite downfolding solve at E_ref={e_ref}")
+    return result
 
 
 def _pole_diagnostics(
@@ -408,6 +392,8 @@ def downfold_blocks(
     """
     method = options.method.lower()
     h_pp = np.asarray(h_pp, dtype=np.complex128) if assume_hermitian_blocks else _hermitize(h_pp)
+    if not np.isfinite(h_pp).all():
+        raise ValueError("downfolding requires finite Hamiltonian blocks")
 
     if method == "first_order":
         heff = _hermitize(h_pp)
@@ -427,6 +413,8 @@ def downfold_blocks(
     h_hh = np.asarray(h_hh, dtype=np.complex128) if assume_hermitian_blocks else _hermitize(h_hh)
     h_hp = h_ph.conj().T
     e_ref = float(options.e_ref)
+    if not np.isfinite(e_ref) or not np.isfinite(h_ph).all() or not np.isfinite(h_hh).all():
+        raise ValueError("downfolding requires finite blocks and reference energy")
     pole_min, pole_cond, near, danger, warnings = _pole_diagnostics(
         e_ref,
         h_hh,
@@ -440,6 +428,8 @@ def downfold_blocks(
         y = _solve_hermitian_shifted(h_hh, h_hp, e_ref)
         with _bounded_blas_threads():
             heff = _hermitize(h_pp + h_ph @ y)
+        if not np.isfinite(heff).all():
+            raise ValueError("downfolding effective Hamiltonian is not finite")
         return DownfoldingResult(
             heff=heff,
             method=method,
@@ -454,20 +444,29 @@ def downfold_blocks(
 
     if method == "linearized_lowdin":
         a = _shifted_hamiltonian_matrix(h_hh, e_ref)
-        with _bounded_blas_threads():
-            lu, piv = scipy.linalg.lu_factor(a, check_finite=False, overwrite_a=True)
-            y = scipy.linalg.lu_solve((lu, piv), h_hp, check_finite=False)
-            sigma0 = h_ph @ y
+        try:
+            with _bounded_blas_threads(), warning_control.catch_warnings():
+                warning_control.simplefilter("error", scipy.linalg.LinAlgWarning)
+                lu, piv = scipy.linalg.lu_factor(a, check_finite=False, overwrite_a=True)
+                y = scipy.linalg.lu_solve((lu, piv), h_hp, check_finite=False)
+        except (scipy.linalg.LinAlgWarning, np.linalg.LinAlgError) as exc:
+            raise NearPoleError(f"singular downfolding resolvent at E_ref={e_ref}") from exc
+        if not np.isfinite(y).all():
+            raise NearPoleError(f"non-finite downfolding solve at E_ref={e_ref}")
         # d/dE (E I - H_HH)^(-1) = - (E I - H_HH)^(-2).
-        # Therefore Sigma1 = dSigma/dE = -H_PH A^{-2} H_HP.
+        # For Hermitian H_HH, Sigma1 = -X^dagger X with X=A^{-1}H_HP.
         with _bounded_blas_threads():
-            y2 = scipy.linalg.lu_solve((lu, piv), y, check_finite=False)
-            sigma1 = -(h_ph @ y2)
+            sigma0 = h_ph @ y
+            sigma1 = -(y.conj().T @ y)
         big_a = _hermitize(h_pp + sigma0 - e_ref * sigma1)
         big_b = _hermitize(np.eye(h_pp.shape[0], dtype=np.complex128) - sigma1)
+        if not np.isfinite(big_a).all() or not np.isfinite(big_b).all():
+            raise ValueError("linearized downfolding matrices are not finite")
         with _bounded_blas_threads():
             b_eigs, b_vecs = np.linalg.eigh(big_b)
         b_min = float(np.min(b_eigs))
+        if not np.isfinite(b_eigs).all():
+            raise ValueError("linearized downfolding metric spectrum is not finite")
         if b_min <= 0.0:
             msg = f"linearized_lowdin B is not positive definite; min eig={b_min:.6e}"
             if options.fail_on_near_pole:
@@ -481,6 +480,8 @@ def downfold_blocks(
         with _bounded_blas_threads():
             inv_sqrt = (b_vecs * (1.0 / np.sqrt(b_eigs))) @ b_vecs.conj().T
             heff = _hermitize(inv_sqrt @ big_a @ inv_sqrt)
+        if not np.isfinite(heff).all():
+            raise ValueError("downfolding effective Hamiltonian is not finite")
         return DownfoldingResult(
             heff=heff,
             method=method,

@@ -8,6 +8,7 @@ explicit polynomial orders 8/2/3, and a target-weighted linear fit with
 `two_sided_weight: 300.0`.
 
 ```bash
+# external-data
 tapw run  -c examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml
 tapw symm -c examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml
 kp project -c examples/zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml

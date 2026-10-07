@@ -1,0 +1,477 @@
+schema_version: 2
+status: pending
+release_blockers:
+- dataset_license
+- doi
+- data_url
+metadata:
+  license: null
+  doi: null
+  data_url: null
+notes: The source release contains audited configs and small structural inputs for
+  six material families. Dataset license, DOI, and public archive URL values must
+  be supplied before an archival release. The software license does not automatically
+  cover external OpenMX matrices or generated scientific data.
+external_data:
+  marker: pending_external
+  description: Large OpenMX H/S matrices and generated TAPW/KP arrays are intentionally
+    absent from a clean source clone and will be provided by the public data archive
+    once its provenance metadata is finalized.
+  paths:
+  - examples/mote2_3.89/openmx/soc/H.npz
+  - examples/mote2_3.89/openmx/soc/S.npz
+  - examples/mote2_3.89/tapw/outputs
+  - examples/mgi2_3.89/openmx/soc/H.npz
+  - examples/mgi2_3.89/openmx/soc/S.npz
+  - examples/mgi2_3.89/tapw/outputs
+  - examples/mote2_aab_5.09/openmx/soc/H.npz
+  - examples/mote2_aab_5.09/openmx/soc/S.npz
+  - examples/mote2_aab_5.09/tapw/outputs
+  - examples/ptse2_7.34/openmx/soc/H.npz
+  - examples/ptse2_7.34/openmx/soc/S.npz
+  - examples/ptse2_7.34/tapw/outputs
+  - examples/zrs2_3.15/openmx/soc/H.npz
+  - examples/zrs2_3.15/openmx/soc/S.npz
+  - examples/zrs2_3.15/tapw/outputs
+  - examples/zrs2_3.89/openmx/soc/H_symm.npz
+  - examples/zrs2_3.89/openmx/soc/S_symm.npz
+  - examples/zrs2_3.89/tapw/outputs
+clean_clone_smoke:
+  runtime_class: clean-clone
+  description: Safe checks that do not require external scientific datasets.
+  commands:
+  - id: release-contract-tests
+    command: python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py
+      -q
+    runtime_class: clean-clone
+    expected_outputs:
+    - Release contracts pass.
+  - id: tapw-help
+    command: tapw --help
+    runtime_class: clean-clone
+    expected_outputs:
+    - TAPW CLI help exits with status 0.
+  - id: kp-help
+    command: kp --help
+    runtime_class: clean-clone
+    expected_outputs:
+    - KP CLI help exits with status 0.
+datasets:
+- id: mote2-3.89-k
+  path: examples/mote2_3.89
+  description: Bilayer MoTe2 K1 q06 spinful TAPW input and spinful/spinless automatic
+    KP models.
+  runtime_class: external-data
+  license: null
+  doi: null
+  data_url: null
+  required_files:
+  - path: examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml
+    kind: file
+    size_bytes: 832
+    sha256: 7f0514fab8f3ece68c463330bae27579e6a155a3801ca6aed09dc29622157536
+  - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml
+    kind: file
+    size_bytes: 1039
+    sha256: 22f00b6640f3c7f65c8efef5a1afbf34d94eed5bbaa2dbdd501a31dc6c65f142
+  - path: examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml
+    kind: file
+    size_bytes: 1011
+    sha256: f36730e2258c464aaf7d0319f69286ee71fb3f3af6935387f232f6033bb35371
+  - path: examples/mote2_3.89/openmx/soc/H.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX Hamiltonian is not tracked.
+  - path: examples/mote2_3.89/openmx/soc/S.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX overlap matrix is not tracked.
+  commands:
+  - id: tapw-k1-spinful
+    command: tapw run -c examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml
+      && tapw symm -c examples/mote2_3.89/tapw/configs/mote2_3.89_K1_spinful_q06.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_3.89/tapw/outputs/K1/q06/band/hamiltonian_k.npy
+      status: generated
+    - path: examples/mote2_3.89/tapw/outputs/K1/q06/symmetry
+      status: generated
+  - id: kp-k1-spinful
+    command: kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml
+      && kp symm -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml
+      && kp model -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinful_q06.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_3.89/kp/outputs/k1_spinful/K1/q06/model/model_data.npz
+      status: generated
+  - id: kp-k1-spinless
+    command: kp project -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml
+      && kp symm -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml
+      && kp model -c examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_3.89/kp/outputs/k1_spinless/K1/q06/model/model_data.npz
+      status: generated
+- id: mgi2-3.89-gamma-m
+  path: examples/mgi2_3.89
+  description: Bilayer MgI2 Gamma q04 and M1 q07 automatic KP models.
+  runtime_class: external-data
+  license: null
+  doi: null
+  data_url: null
+  required_files:
+  - path: examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1173
+    sha256: cf9168b68eb7fb9f0e1205ddce68dba23c634b498fa0c4dc01572ef31449c58f
+  - path: examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
+    kind: file
+    size_bytes: 1016
+    sha256: e7282ddbf09ad58c1cb54bbb3d44232bb543aeccbaf784242642263e1d97810e
+  - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1730
+    sha256: dff5691dc72380924b61d68948d4b8d748203d763229e901381f2a1d2b9b3157
+  - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
+    kind: file
+    size_bytes: 1043
+    sha256: cdb3805a81831f2effe5ba68fbf4b53e42c103bf51597223e42c26096c08abad
+  - path: examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+    kind: file
+    size_bytes: 1032
+    sha256: 8da9a3efdb82d5bad0434228c588b3bd1ccdadc4c5ad7013352715a0c10ff8cc
+  - path: examples/mgi2_3.89/openmx/soc/H.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX Hamiltonian is not tracked.
+  - path: examples/mgi2_3.89/openmx/soc/S.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX overlap matrix is not tracked.
+  commands:
+  - id: tapw-gamma-spinful
+    command: tapw run -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+      && tapw symm -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mgi2_3.89/tapw/outputs/Gamma/q04/band/hamiltonian_k.npy
+      status: generated
+  - id: tapw-m1-spinful
+    command: tapw run -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
+      && tapw symm -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mgi2_3.89/tapw/outputs/M1/q07/band/hamiltonian_k.npy
+      status: generated
+  - id: kp-gamma-spinful
+    command: kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+      && kp symm -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+      && kp model -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mgi2_3.89/kp/outputs/gamma_spinful/Gamma/q04/model/model_data.npz
+      status: generated
+  - id: kp-m1-spinful
+    command: kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
+      && kp symm -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml &&
+      kp model -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mgi2_3.89/kp/outputs/m1_spinful/M1/q07/model/model_data.npz
+      status: generated
+  - id: kp-m1-spinless
+    command: kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+      && kp symm -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml &&
+      kp model -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mgi2_3.89/kp/outputs/m1_spinless/M1/q07/model/model_data.npz
+      status: generated
+- id: mote2-aab-5.09
+  path: examples/mote2_aab_5.09
+  description: Historical large-basis AAB H/S with strict rigid TAPW coordinates;
+    unweighted KA/KB/Gamma (10/4/5,10/2/0,8/2/6) models.
+  runtime_class: external-data
+  license: null
+  doi: null
+  data_url: null
+  required_files:
+  - path: examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 933
+    sha256: af027148a1ef62cd8db243b11ca591eadb4e1ce1b12269cc9e1714ce057218cb
+  - path: examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_K1_spinful_q04.yaml
+    kind: file
+    size_bytes: 927
+    sha256: 5712861ff819d708c79f46b906e78e6274526634a5479f49ad45dad9274c5bc5
+  - path: examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1385
+    sha256: a8a5f441e540c18cc2a2fbd5830b4bab446224273170b9ef129043a89d6f3583
+  - path: examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml
+    kind: file
+    size_bytes: 1363
+    sha256: 06542500edf32239e0ccdcf35c14568a3d5deb9737e798925e7aeeefaf283838
+  - path: examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml
+    kind: file
+    size_bytes: 1361
+    sha256: 825ffcd22d42a9465684323ebfe6eac1509fc386b3c00ebda696560958e2a6c5
+  - path: examples/mote2_aab_5.09/openmx/soc/H_symm.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX Hamiltonian is not tracked.
+  - path: examples/mote2_aab_5.09/openmx/soc/S_symm.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX overlap matrix is not tracked.
+  - path: examples/mote2_aab_5.09/openmx/soc/POSCAR_rigid
+    kind: file
+    external:
+      marker: pending_external
+      reason: Reconstructed strict rigid coordinates accompany the scientific dataset;
+        not a new DFT geometry.
+  commands:
+  - id: tapw-gamma-spinful
+    command: tapw run -c examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+      && tapw symm -c examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_aab_5.09/tapw/outputs_selected_20260929/Gamma/q04/band/hamiltonian_k.npy
+      status: generated
+  - id: tapw-k1-spinful
+    command: tapw run -c examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_K1_spinful_q04.yaml
+      && tapw symm -c examples/mote2_aab_5.09/tapw/configs/mote2_aab_5.09_K1_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_aab_5.09/tapw/outputs_selected_20260929/K1/q04/band/hamiltonian_k.npy
+      status: generated
+  - id: kp-gamma-spinful
+    command: kp project -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+      && kp symm -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+      && kp model -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_aab_5.09/kp/outputs_selected_20260929/gamma_spinful/Gamma/q04/model/model_data.npz
+      status: generated
+  - id: kp-k1-a
+    command: kp project -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml
+      && kp symm -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml
+      && kp model -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_aab_5.09/kp/outputs_selected_20260929/k1_a/K1/q04/model/model_data.npz
+      status: generated
+  - id: kp-k1-b
+    command: kp project -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml
+      && kp symm -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml
+      && kp model -c examples/mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/mote2_aab_5.09/kp/outputs_selected_20260929/k1_b/K1/q04/model/model_data.npz
+      status: generated
+- id: ptse2-7.34-gamma
+  path: examples/ptse2_7.34
+  description: Bilayer PtSe2 Gamma q04 automatic nonlinear KP model.
+  runtime_class: external-data
+  license: null
+  doi: null
+  data_url: null
+  required_files:
+  - path: examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1165
+    sha256: 87b743289448249255e64ea0b6912e5e6f7248145f99cf0414f386b9d333d11e
+  - path: examples/ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1123
+    sha256: ccc154faa829bb726592c64ff820933b6a23c3143eb3cfb08cb190a030084847
+  - path: examples/ptse2_7.34/openmx/soc/H.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX Hamiltonian is not tracked.
+  - path: examples/ptse2_7.34/openmx/soc/S.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX overlap matrix is not tracked.
+  commands:
+  - id: tapw-gamma-spinful
+    command: tapw run -c examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+      && tapw symm -c examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/ptse2_7.34/tapw/outputs/Gamma/q04/band/hamiltonian_k.npy
+      status: generated
+  - id: kp-gamma-spinful
+    command: kp project -c examples/ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+      && kp symm -c examples/ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+      && kp model -c examples/ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/ptse2_7.34/kp/outputs/gamma_spinful/Gamma/q04/model/model_data.npz
+      status: generated
+- id: zrs2-3.15
+  path: examples/zrs2_3.15
+  description: AA-centered bilayer ZrS2 Gamma q04 and M1 q07 automatic linear KP models.
+  runtime_class: external-data
+  license: null
+  doi: null
+  data_url: null
+  required_files:
+  - path: examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1168
+    sha256: 09987ef257d3f4f6e8be68050597451071ec54a51be6b7d23ba1aeb1271cbe4a
+  - path: examples/zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1073
+    sha256: 92e0187bcd4f2f6b684ecb0139c385cf333b1cb34f789e92f00e66a967e0e8b4
+  - path: examples/zrs2_3.15/tapw/configs/zrs2_3.15_M1_spinful_q07.yaml
+    kind: file
+    size_bytes: 1015
+    sha256: c521751e28201a232f5c58998714f3d0843d3072de5b0c14fa03bb9e576744f2
+  - path: examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinful_q07.yaml
+    kind: file
+    size_bytes: 1082
+    sha256: c0fc3b963d2bbefb1d6cf39e3dd4ffce22aa80604df3a8b1d9ae0a3f55fdcb35
+  - path: examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinless_q07.yaml
+    kind: file
+    size_bytes: 1126
+    sha256: b81a00106b9ced72b3b00ca1e03530975e703c885942c7e22e074fed46d99408
+  - path: examples/zrs2_3.15/openmx/soc/H.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX Hamiltonian is not tracked.
+  - path: examples/zrs2_3.15/openmx/soc/S.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large OpenMX overlap matrix is not tracked.
+  commands:
+  - id: tapw-gamma-spinful
+    command: tapw run -c examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+      && tapw symm -c examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.15/tapw/outputs/Gamma/q04/band/hamiltonian_k.npy
+      status: generated
+  - id: kp-gamma-spinful
+    command: kp project -c examples/zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+      && kp symm -c examples/zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+      && kp model -c examples/zrs2_3.15/kp/configs/zrs2_3.15_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.15/kp/outputs/gamma_spinful/Gamma/q04/model/model_data.npz
+      status: generated
+  - id: tapw-m1-spinful
+    command: tapw run -c examples/zrs2_3.15/tapw/configs/zrs2_3.15_M1_spinful_q07.yaml
+      && tapw symm -c examples/zrs2_3.15/tapw/configs/zrs2_3.15_M1_spinful_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.15/tapw/outputs/M1/q07/band/hamiltonian_k.npy
+      status: generated
+  - id: kp-m1-spinful
+    command: kp project -c examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinful_q07.yaml
+      && kp symm -c examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinful_q07.yaml &&
+      kp model -c examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinful_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.15/kp/outputs/m1_spinful/M1/q07/model/model_data.npz
+      status: generated
+  - id: kp-m1-spinless
+    command: kp project -c examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinless_q07.yaml
+      && kp symm -c examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinless_q07.yaml &&
+      kp model -c examples/zrs2_3.15/kp/configs/zrs2_3.15_M1_spinless_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.15/kp/outputs/m1_spinless/M1/q07/model/model_data.npz
+      status: generated
+- id: zrs2-3.89
+  path: examples/zrs2_3.89
+  description: AB-dataset bilayer ZrS2 Gamma q04 and M1 q07 automatic linear KP models.
+  runtime_class: external-data
+  license: null
+  doi: null
+  data_url: null
+  required_files:
+  - path: examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1355
+    sha256: 1b683653b1a29be3f849d509aa962884e042fda37099c90275a25bab03be57ed
+  - path: examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+    kind: file
+    size_bytes: 1113
+    sha256: f6b3c6f80d5b7fc836aca0fde09aa735367a8b528def938a8ecb2c0bcd356941
+  - path: examples/zrs2_3.89/tapw/configs/zrs2_3.89_M1_spinful_q07.yaml
+    kind: file
+    size_bytes: 1021
+    sha256: 68f437bee3d918f1610e8d137d4892a3d07a5a368db1ccd052910bc78da251c7
+  - path: examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_q07.yaml
+    kind: file
+    size_bytes: 1078
+    sha256: 2478e9fd47aec77f3580421cb91f7ba9735b6a9f4da758c4f703c10a57e6d5c6
+  - path: examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinless_q07.yaml
+    kind: file
+    size_bytes: 1069
+    sha256: b0de76a7cbefa0c7c620168a36e71b4b39071a4955b87e384df1a8f0b5319e20
+  - path: examples/zrs2_3.89/openmx/soc/H_symm.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large symmetry-restored OpenMX Hamiltonian is not tracked.
+  - path: examples/zrs2_3.89/openmx/soc/S_symm.npz
+    kind: file
+    external:
+      marker: pending_external
+      reason: Large symmetry-restored OpenMX overlap matrix is not tracked.
+  - path: examples/zrs2_3.89/openmx/soc/openmx.dat_rigid
+    kind: file
+    size_bytes: 114408
+    sha256: 69810963bf5c21e80fccd4f09195a1a0aace4416ac9821bf31eda4c4e7959e64
+  commands:
+  - id: tapw-gamma-spinful
+    command: tapw run -c examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+      && tapw symm -c examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.89/tapw/outputs/Gamma/q04/band/hamiltonian_k.npy
+      status: generated
+  - id: kp-gamma-spinful
+    command: kp project -c examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+      && kp symm -c examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+      && kp model -c examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.89/kp/outputs/gamma_spinful/Gamma/q04/model/model_data.npz
+      status: generated
+  - id: tapw-m1-spinful
+    command: tapw run -c examples/zrs2_3.89/tapw/configs/zrs2_3.89_M1_spinful_q07.yaml
+      && tapw symm -c examples/zrs2_3.89/tapw/configs/zrs2_3.89_M1_spinful_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.89/tapw/outputs/M1/q07/band/hamiltonian_k.npy
+      status: generated
+  - id: kp-m1-spinful
+    command: kp project -c examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_q07.yaml
+      && kp symm -c examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_q07.yaml &&
+      kp model -c examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.89/kp/outputs/m1_spinful/M1/q07/model/model_data.npz
+      status: generated
+  - id: kp-m1-spinless
+    command: kp project -c examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinless_q07.yaml
+      && kp symm -c examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinless_q07.yaml &&
+      kp model -c examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinless_q07.yaml
+    runtime_class: external-data
+    expected_outputs:
+    - path: examples/zrs2_3.89/kp/outputs/m1_spinless/M1/q07/model/model_data.npz
+      status: generated

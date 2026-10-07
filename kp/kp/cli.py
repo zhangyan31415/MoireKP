@@ -1405,7 +1405,7 @@ def _normalize_nlow_state_list(project_cfg: dict[str, Any]) -> list[list[int]]:
 
 
 def _downfold_method(project_cfg: dict[str, Any]) -> str:
-    return str(project_cfg.get("downfold_method", project_cfg.get("method", "fixed_schur"))).lower()
+    return str(project_cfg.get("downfold_method", project_cfg.get("method", "linearized_lowdin"))).lower()
 
 
 def _e_ref_from_project_cfg(project_cfg: dict[str, Any]) -> float | None:
@@ -3685,7 +3685,8 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
     nlow_state_list = _normalize_nlow_state_list(project_cfg)
     norb_fix_list = project_cfg["norb_fix_list"] if "norb_fix_list" in project_cfg else None
 
-    print(f"[kp] Sweep downfold_method = fixed_schur")
+    method = _downfold_method(project_cfg)
+    print(f"[kp] Sweep downfold_method = {method}")
     print(f"[kp] active indices = {_active_indices_from_project_cfg(project_cfg)}")
     print(f"[kp] E_ref values = {e_ref_values}")
     # print(f"[kp] top-N list = {top_n_list}")
@@ -3736,7 +3737,7 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
                 "num_orb_per_layer_list": num_orb_per_layer_list,
                 "nlow_state_list": nlow_state_list,
                 "norb_fix_list": norb_fix_list,
-                "downfold_method": "fixed_schur",
+                "downfold_method": method,
                 "E_ref": float(e_ref),
                 "pole_warning_mev": pole_warning_mev,
                 "pole_danger_mev": pole_danger_mev,

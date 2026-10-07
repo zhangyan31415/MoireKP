@@ -130,6 +130,9 @@ class KPathGenerator:
                 ) / self.segment_points
                 for j in range(self.segment_points):
                     if iseg > 0 and j == 0:
+                        # The shared endpoint was written by the previous segment.
+                        # Advance to this segment's first new point.
+                        x += delta
                         continue
                     fraction = float(j) / float(self.segment_points)
                     interpolated_point = (1.0 - fraction) * start + fraction * stop

@@ -26,6 +26,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+siesta = [
+    "sisl>=0.16,<0.18",
+]
 slepc = [
     "petsc4py",
     "slepc4py",
@@ -44,3 +47,17 @@ include-package-data = true
 
 [tool.setuptools.package-data]
 tapw = ["templates/*.yaml", "templates/*.in"]
+
+[tool.setuptools.data-files]
+"share/moirekp/docs" = ["docs/abacus_input.md"]
+"share/moirekp/scripts" = ["scripts/README.md", "scripts/README.zh.md"]
+"share/moirekp/scripts/openmx" = ["scripts/openmx/*.py", "scripts/openmx/*.cpp", "scripts/openmx/*.sh", "scripts/openmx/README.md"]
+"share/moirekp/scripts/abacus" = ["scripts/abacus/prepare_hs.py", "scripts/abacus/README.md"]
+"share/moirekp/scripts/abacus/_vendor" = ["scripts/abacus/_vendor/analysis_abacus.py", "scripts/abacus/_vendor/LICENSE.GPL-3.0", "scripts/abacus/_vendor/NOTICE.md"]
+"share/moirekp/scripts/siesta" = ["scripts/siesta/*.py", "scripts/siesta/README.md"]
+"share/moirekp/scripts/common" = ["scripts/common/*.py", "scripts/common/README.md"]
+"share/moirekp/scripts/legacy" = ["scripts/legacy/README.md"]
+"share/moirekp/scripts/legacy/openmx" = ["scripts/legacy/openmx/*.py"]
+
+[tool.moirekp.release]
+release_blockers = ["dataset_license", "doi", "data_url"]

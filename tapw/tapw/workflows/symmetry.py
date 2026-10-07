@@ -1832,6 +1832,7 @@ def collect_spglib_spatial_operations(structure, symprec: float = 1.0e-3):
                 "translation_frac": translation_frac,
                 "rotation_cart": rotation_cart,
                 "translation_cart": translation_cart,
+                "atom_mapping_tolerance_angstrom": float(symprec),
             }
         )
     return operations
@@ -2000,6 +2001,14 @@ def _sorted_structure_df(structure):
 
 def _build_atom_mapping(structure, operation, tol: float = 5.0e-6):
     lattice = np.asarray(structure.Tmat, dtype=float)
+    cartesian_tol = operation.get("atom_mapping_tolerance_angstrom")
+    if cartesian_tol is not None:
+        cartesian_tol = float(cartesian_tol)
+        if not np.isfinite(cartesian_tol) or cartesian_tol <= 0:
+            raise ValueError("atom_mapping_tolerance_angstrom must be finite and positive")
+        # Candidate search is fractional; final acceptance below is Cartesian,
+        # using the same units and tolerance as the spatial symmetry detection.
+        tol = cartesian_tol / float(np.linalg.svd(lattice, compute_uv=False)[-1])
     df = _sorted_structure_df(structure)
     positions_cart = df[["x", "y", "z"]].to_numpy(dtype=float)
     positions_frac = _cartesian_positions_to_fractional(lattice, positions_cart)
@@ -2082,6 +2091,10 @@ def _build_atom_mapping(structure, operation, tol: float = 5.0e-6):
                     target_index = int(tiled_target_indices[match_index])
                     if target_index in used_targets_local:
                         continue
+                    if cartesian_tol is not None:
+                        residual = (transformed[local_row] - tiled_positions[match_index]) @ lattice
+                        if np.linalg.norm(residual) > cartesian_tol:
+                            continue
                     picked = (target_index, tiled_shifts[match_index].astype(int))
                     break
                 if picked is None:

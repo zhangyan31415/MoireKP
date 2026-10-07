@@ -1,7 +1,7 @@
 system:
   name: MoTe2
   output: ../outputs/k1_spinful
-  tapw_output: ../../tapw/outputs
+  tapw_output: ../../tapw/outputs_legacy_20260930
   layers: [1, 1]
   spin: all
   orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2

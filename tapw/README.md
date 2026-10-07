@@ -10,6 +10,8 @@ band-representation post-processing, and topology.
 - K, K-prime, Gamma, and M valley calculations where supported.
 - Structure input through POSCAR, CIF, and other ASE-readable formats.
 - Orbital definitions in YAML rather than an OpenMX structure input file.
+- SIESTA HSX v1/v2 import through optional sisl, including orbital phases and spin ordering.
+- OpenMX/ABACUS/SIESTA preparation with common raw H/S and optional separate symmetry outputs.
 - MPI, PETSc, and SLEPc solver support through the provided environment.
 
 ## Installation
@@ -33,6 +35,16 @@ tapw init --help
 ```
 
 ## Basic usage
+
+Use `tapw prepare-hs BACKEND --help` for the common DFT input interface, with
+`BACKEND` set to `openmx`, `abacus` or `siesta`. See
+[preparation tools](../scripts/README.md) and the
+[example configurations](../examples/README.md).
+
+For SIESTA input, install `moirekp[siesta]` and run
+`tapw import-siesta siesta.HSX --output siesta_import`.
+The generated YAML is an input fragment; supply the actual moire geometry and
+workflow settings before running TAPW. See [SIESTA input](../docs/siesta_input.md).
 
 Create a starter working directory:
 

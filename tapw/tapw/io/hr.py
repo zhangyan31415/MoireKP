@@ -44,6 +44,9 @@ def read_sparse_npz_metadata(payload, *, source="<npz>"):
     dimension = metadata.get("basis_dimension")
     if not isinstance(dimension, int) or isinstance(dimension, bool) or dimension <= 0:
         raise ValueError(f"Invalid sparse NPZ basis_dimension={dimension!r} in {source}.")
+    basis_order = metadata.get("basis_order")
+    if basis_order is not None and basis_order not in {"source", "tapw"}:
+        raise ValueError(f"Invalid sparse NPZ basis_order={basis_order!r} in {source}.")
     return metadata
 
 
@@ -141,25 +144,31 @@ class HrSparseHandler:
 
         npz_file_name = self.file_name.replace('.dat', '.npz')
         saved_basis_dimension = nwann if self.A is None else int(self.A.shape[0])
-        self.save_to_npz(npz_file_name, basis_dimension=saved_basis_dimension)
+        self.save_to_npz(
+            npz_file_name,
+            basis_dimension=saved_basis_dimension,
+            basis_order="tapw" if self.A is not None else "source",
+        )
 
-    def save_to_npz(self, file_path, *, basis_dimension=None):
+    def save_to_npz(self, file_path, *, basis_dimension=None, basis_order=None):
         dimension = getattr(self, "nwann", None) if basis_dimension is None else basis_dimension
         if not isinstance(dimension, (int, np.integer)) or isinstance(dimension, bool) or int(dimension) <= 0:
             raise ValueError(
                 "Writing a sparse NPZ requires an exact positive basis dimension; "
                 "set handler.nwann or pass basis_dimension."
             )
+        if basis_order is not None and basis_order not in {"source", "tapw"}:
+            raise ValueError("basis_order must be 'source' or 'tapw' when provided.")
+        metadata = {
+            "basis_dimension": int(dimension),
+            "schema": SPARSE_NPZ_SCHEMA,
+            "schema_version": SPARSE_NPZ_SCHEMA_VERSION,
+        }
+        if basis_order is not None:
+            metadata["basis_order"] = basis_order
         storable_data = {
             SPARSE_NPZ_METADATA_KEY: np.asarray(
-                json.dumps(
-                    {
-                        "basis_dimension": int(dimension),
-                        "schema": SPARSE_NPZ_SCHEMA,
-                        "schema_version": SPARSE_NPZ_SCHEMA_VERSION,
-                    },
-                    sort_keys=True,
-                ),
+                json.dumps(metadata, sort_keys=True),
                 dtype=str,
             )
         }
@@ -305,8 +314,13 @@ class HrSparseHandler:
         else:
             npz_file_name = self.npz_file_name
         if self.read_from_npz or os.path.exists(self.npz_file_name) or os.path.exists(npz_file_name):
-            if self._is_symm_npz(npz_file_name):
+            with np.load(npz_file_name, allow_pickle=False) as payload:
+                metadata = read_sparse_npz_metadata(payload, source=npz_file_name)
+            basis_order = None if metadata is None else metadata.get("basis_order")
+            if basis_order == "source" or (basis_order is None and self._is_symm_npz(npz_file_name)):
                 self._load_npz_common(npz_file_name)
+            elif basis_order == "tapw":
+                self.load_from_npz(npz_file_name)
             elif 'deeph-pack' in self.npz_file_name or 'DeepH-pack' in self.npz_file_name or _INTERNAL_OPENMX_TAPW_BAND_TAG in self.npz_file_name or "Z.hr_sr_mat_openmx_recalc_from_relaxed_str" in self.npz_file_name:
                 self.load_from_npz_new(npz_file_name)
             else:

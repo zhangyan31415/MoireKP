@@ -1,5 +1,5 @@
 system:
-  output: ../outputs
+  output: ../outputs_legacy_20260930
   structure: ../../openmx/soc/POSCAR_rigid
   hamiltonian: ../../openmx/soc/H_symm.npz
   overlap: ../../openmx/soc/S_symm.npz

@@ -4,6 +4,7 @@ This spinful Gamma q04 config uses automatic low-energy and harmonic selection
 followed by one nonlinear model fit. Its polynomial orders are 10/8/8.
 
 ```bash
+# external-data
 tapw run  -c examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml
 tapw symm -c examples/ptse2_7.34/tapw/configs/ptse2_7.34_Gamma_spinful_q04.yaml
 kp project -c examples/ptse2_7.34/kp/configs/ptse2_7.34_Gamma_spinful_q04.yaml

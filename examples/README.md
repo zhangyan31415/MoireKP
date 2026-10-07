@@ -1,80 +1,45 @@
-# MoireKP examples
+# Examples
 
-The repository includes five material directories and ten KP case configs:
+Configs and small structural inputs are supplied for six material families. Numerical runs require the external H/S matrices and TAPW arrays listed in [data-manifest.yaml](data-manifest.yaml).
 
-| Directory | KP cases | Full workflow |
-| --- | --- | --- |
-| `mote2_3.89` | K1 spinful and spinless | tested |
-| `mgi2_3.89` | Gamma spinful; M1 spinful and spinless | tested |
-| `mote2_aab_5.09` | Gamma spinful; K1-A and K1-B single-spin sectors | tested |
-| `zrs2_3.15` | Gamma spinful | tested |
-| `ptse2_7.34` | Gamma spinful | not yet tested |
+## Paper models
 
-Configs, structure files, and small templates are tracked. Large OpenMX
-matrices, TAPW arrays, symmetry exports, and generated KP outputs are external
-and are not committed to the source repository.
+| Material | Valley | KP configuration |
+|---|---|---|
+| AA MoTe2, 3.89° | K | `mote2_3.89/kp/configs/mote2_3.89_K1_spinless_tuned_q06.yaml` |
+| AB ZrS2, 3.89° | M1 | `zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_linearized_q07.yaml` |
+| AB ZrS2, 3.89° | Gamma | `zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml` |
+| A–AB MoTe2, 5.09° | KA | `mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_A_q04.yaml` |
+| A–AB MoTe2, 5.09° | KB | `mote2_aab_5.09/kp/configs/mote2_aab_5.09_K1_B_q04.yaml` |
+| A–AB MoTe2, 5.09° | Gamma | `mote2_aab_5.09/kp/configs/mote2_aab_5.09_Gamma_spinful_q04.yaml` |
 
-## Workflow
+The six models use linear coefficient fits and energy-linearized Löwdin reduction. ZrS2 Gamma uses a closed Gamma–M–K–Gamma path, rows `[5,20,40,55]`, orders 8/4/4 and weights 2.25/22.5 on the highest 20 states. The other five fits are unweighted. Material READMEs specify the matching TAPW configuration.
 
-Run the material's TAPW calculation and source-symmetry export first. Then use
-the same KP YAML for projection, symmetry exactification, optional
-band-representation analysis, and model fitting:
+## Other examples
 
-```bash
-tapw run      -c examples/<material>/tapw/configs/<case>.yaml
-tapw symm     -c examples/<material>/tapw/configs/<case>.yaml
-tapw symm-rep -c examples/<material>/tapw/configs/<case>.yaml  # optional
+[MoTe2](mote2_3.89/README.md), [A–AB MoTe2](mote2_aab_5.09/README.md), [ZrS2 3.89°](zrs2_3.89/README.md), [ZrS2 3.15°](zrs2_3.15/README.md), [MgI2](mgi2_3.89/README.md) and [PtSe2](ptse2_7.34/README.md) provide additional spin/valley variants. PtSe2 is a supplied configuration whose full workflow has not been validated. Historical outputs and searches are excluded from the source distribution.
 
-kp project    -c examples/<material>/kp/configs/<case>.yaml
-kp symm       -c examples/<material>/kp/configs/<case>.yaml
-kp model      -c examples/<material>/kp/configs/<case>.yaml
-kp symm-rep   -c examples/<material>/kp/configs/<case>.yaml    # optional
-```
+## Run
 
-`kp project` writes the selected low-energy space and Heff. `kp symm`
-exactifies the symmetry package required by `kp model`. `kp inspect` remains
-an optional source-spectrum diagnostic.
-
-## Automatic low-energy selection
-
-KP configs use:
-
-```yaml
-project:
-  selection: auto
-  # Uncommenting this list makes the saved selection explicit.
-  # nlow_state_list:
-  #   - [...]
-```
-
-The commented list records the selected result where available. An explicit
-`nlow_state_list` takes precedence and bypasses the search.
-
-## Automatic harmonic counts
-
-The configs omit `model.harmonics`. `kp model` enumerates the available
-intra/inter Q-difference support, removes symmetry-equivalent duplicates,
-performs low-cost Heff harmonic ablation, and fits the selected model once.
-Polynomial cutoffs remain explicit under `model.max_order`. Experts may add
-`model.harmonics` to bypass automatic selection.
-
-The eight MoTe2/MgI2/A-AB configs use unweighted linear fits. The ZrS2 Gamma
-config uses a linear fit with `two_sided_weight: 300.0`. The PtSe2 config
-specifies a weighted nonlinear fit but has not yet been tested.
-
-## Inline k path
-
-TAPW and KP configs define the plotted path under `bands.kpath` with labels,
-points per segment, and fractional coordinates. These examples do not require
-`KPATH.in` for their standard Gamma-M-K-G plots.
-
-## Installation check
-
-Scientific runs require external data. The installed interfaces can be checked
-without those files:
+From the repository root, after supplying the data (external-data):
 
 ```bash
-python -c "import tapw, kp"
+# external-data
+TAPW_CFG=examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+KP_CFG=examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+tapw run  -c "$TAPW_CFG"
+tapw symm -c "$TAPW_CFG"
+kp project -c "$KP_CFG"
+kp symm    -c "$KP_CFG"
+kp model   -c "$KP_CFG"
+```
+
+`kp symm` is required before `kp model`. Configured `project.selection`, reference vectors, harmonic support, fit rows and weights define the selected case; an explicit choice overrides its automatic search.
+
+Interface checks require no example matrices (clean-clone):
+
+```bash
+# clean-clone
 tapw --help
 kp --help
 ```

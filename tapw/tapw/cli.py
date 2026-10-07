@@ -658,6 +658,8 @@ def build_main_parser():
     )
     subparsers = parser.add_subparsers(dest="command", metavar="command")
     subparsers.add_parser("init", help="Generate TAPW configuration files")
+    subparsers.add_parser("import-siesta", help="Import SIESTA HSX matrices and orbital metadata")
+    subparsers.add_parser("prepare-hs", help="Prepare OpenMX, ABACUS or SIESTA H/S with optional symmetry")
     subparsers.add_parser("run", help="Run TAPW band calculations")
     subparsers.add_parser("symm", help="Run TAPW source-symmetry analysis")
     subparsers.add_parser("symm-rep", help="Post-process TAPW symmetry representations")
@@ -692,6 +694,14 @@ def main(argv=None):
         build_main_parser().parse_args(argv)
 
     command, rest = argv[0], argv[1:]
+    if command == "prepare-hs":
+        from .io.preparation import dispatch
+
+        return dispatch(rest)
+    if command == "import-siesta":
+        from .io import siesta
+
+        return siesta.main(rest, prog="tapw import-siesta")
     if command == "init":
         from . import config_generator
 

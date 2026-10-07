@@ -3067,10 +3067,10 @@ def _berry_and_qgt_from_projectors(projectors, b1_values, b2_values):
             p = projectors[i, j]
             dp1 = _finite_difference(projectors, b1_values, 0, (i, j))
             dp2 = _finite_difference(projectors, b2_values, 1, (i, j))
-            berry[i, j] = float(-2.0 * np.imag(np.trace(p @ dp1 @ dp2)))
-            g11 = float(np.real(np.trace(dp1 @ dp1)))
-            g22 = float(np.real(np.trace(dp2 @ dp2)))
-            g12 = float(np.real(np.trace(dp1 @ dp2)))
+            berry[i, j] = float(np.real(1j * np.trace(p @ (dp1 @ dp2 - dp2 @ dp1))))
+            g11 = float(0.5 * np.real(np.trace(dp1 @ dp1)))
+            g22 = float(0.5 * np.real(np.trace(dp2 @ dp2)))
+            g12 = float(0.5 * np.real(np.trace(dp1 @ dp2)))
             qgt[i, j] = [g11 + g22, g11, g22, g12]
     return berry, qgt
 

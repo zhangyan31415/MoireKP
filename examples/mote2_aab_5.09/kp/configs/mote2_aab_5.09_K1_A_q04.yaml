@@ -1,53 +1,85 @@
 system:
   name: 1+2 A-AB MoTe2 A
-  output: ../outputs/k1_a
-  tapw_output: ../../tapw/outputs
-  layers: [1, 2]
-  spin: down
-  orbital_order: Te-s3p2d2,Mo-s3p2d1,Te-s3p2d2
+  output: ../outputs_selected_20260929/k1_a
+  tapw_output: ../../tapw/outputs_selected_20260929
+  layers:
+  - 1
+  - 2
+  spin: up
+  orbital_order: Te-s3p2d2f1,Mo-s3p2d2,Te-s3p2d2f1
   cell:
-    - [40.0469757906, 0.0, 0.0]
-    - [-20.0234878953, 34.6816948077, 0.0]
-    - [0.0, 0.0, 27.0]
-
+  - - 39.711376453122256
+    - 0.0
+    - 0.0
+  - - -19.855688226561128
+    - 34.391060827651046
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 35.02052290507311
 project:
   valley: K1
   q_shell: 4
-  efermi: -4.182383738673
+  efermi: -4.182383731612424
   target: valence
   selection: auto
-  # Audited automatic result. Uncommenting this list makes selection explicit.
+  # Audited automatic selection for the retained historical H/S.
   # nlow_state_list:
   #   - [22]
   #   - [22]
   #   - []
-  e_ref: -4.55
-  workers: 64
-
+  downfold_method: linearized_lowdin
+  e_ref: -4.634856482379999
+  workers: 10
+  blas_threads: 8
 symmetry: {}
-
 bands:
   kpath:
-    labels: [G, M, K, G]
+    labels:
+    - G
+    - M
+    - K
+    - G
     points_per_segment: 20
     coordinates:
-      G: [0.0, 0.0]
-      M: [0.5, 0.0]
-      K: [0.3333333333, 0.3333333333]
+      G:
+      - 0.0
+      - 0.0
+      M:
+      - 0.5
+      - 0.0
+      K:
+      - 0.3333333333
+      - 0.3333333333
   compare_to_heff: true
-  band_slice: [0, 36]
+  band_slice:
+  - 0
+  - 36
   plot:
     top_bands: 12
     align: top
-    figsize: [3.2, 5.8]
-    ylim: [-0.32, 0.04]
-
+    figsize:
+    - 3.2
+    - 5.8
+    ylim:
+    - -0.32
+    - 0.04
 model:
   target_bands: top
-  max_order: {kinetic: 12, intralayer: 5, interlayer: 5}
+  max_order:
+    kinetic: 10
+    intralayer: 4
+    interlayer: 5
   fit:
     method: linear
-    kpoints: [0, 10, 20, 30, 40, 50, 60]
+    kpoints:
+    - 10
+    - 50
     bands: 12
     one_sided_weight: 0.0
     two_sided_weight: 0.0
+  harmonics:
+    intra:
+      count: 2
+    inter:
+      count: 2

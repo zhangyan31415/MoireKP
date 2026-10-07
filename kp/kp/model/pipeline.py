@@ -21,6 +21,12 @@ import scipy.optimize
 import scipy.sparse
 import yaml
 
+from .band_degeneracy import (
+    BandDegeneracyGuard,
+    DEFAULT_DEGENERACY_TOL_EV,
+    retain_coefficients_on_degeneracy,
+)
+
 from .schema import (
     canonical_operation_name_for_valley,
     canonical_source_operation_name_for_valley,
@@ -273,7 +279,7 @@ def _canonical_public_fit_method(
         "two_sided_weight",
     }
     if method == "nonlinear":
-        allowed.update({"band_kpoints", "band_loss_weight", "max_steps"})
+        allowed.update({"band_kpoints", "band_loss_weight", "max_steps", "degeneracy_tol_ev"})
     unsupported = sorted(str(key) for key in fit if key not in allowed)
     if unsupported:
         raise ValueError(
@@ -319,6 +325,9 @@ def _canonical_public_fit_method(
     band_kpoints: list[int] | None = None
     band_loss_weight: float | None = None
     max_steps: int | None = None
+    degeneracy_tol_ev = float(fit.get("degeneracy_tol_ev", DEFAULT_DEGENERACY_TOL_EV))
+    if not np.isfinite(degeneracy_tol_ev) or degeneracy_tol_ev <= 0.0:
+        raise ValueError("fit.degeneracy_tol_ev must be positive and finite")
     if method == "nonlinear":
         raw_band_kpoints = fit.get("band_kpoints")
         if isinstance(raw_band_kpoints, str) and raw_band_kpoints.strip().lower() == "all":
@@ -338,6 +347,7 @@ def _canonical_public_fit_method(
         "two_sided_weight": two_sided_weight,
         "band_loss_weight": band_loss_weight,
         "max_steps": max_steps,
+        **({"degeneracy_tol_ev": degeneracy_tol_ev} if "degeneracy_tol_ev" in fit else {}),
         "normalization": "dimension_mean_square_v1",
     }
 
@@ -2563,6 +2573,8 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
                 "two_sided_weight": float(fit_method_config["two_sided_weight"]),
                 "band_loss_weight": float(fit_method_config["band_loss_weight"]),
                 "max_steps": int(fit_method_config["max_steps"]),
+                **({"degeneracy_tol_ev": float(fit_method_config["degeneracy_tol_ev"])}
+                   if "degeneracy_tol_ev" in fit_method_config else {}),
             }
 
     return ConfiguredModel(
@@ -8961,6 +8973,7 @@ def _band_refinement_eigenvalue_jacobian(
     normalize: bool,
     edge_band_weights: np.ndarray | None = None,
     band_weights: np.ndarray | None = None,
+    point_mask: np.ndarray | None = None,
 ) -> np.ndarray:
     """Analytic Jacobian of the selected eigenvalue residual.
 
@@ -8987,6 +9000,8 @@ def _band_refinement_eigenvalue_jacobian(
         selected = selected - selected[0:1, 0:1, :]
     elif align not in {"none", ""}:
         raise ValueError(f"fit.refine_bands.align currently supports 'top', 'bottom', or 'none', got {align!r}")
+    if point_mask is not None:
+        selected = selected[np.asarray(point_mask, dtype=bool)]
     selected = selected / float(band_sigma)
     if normalize and selected.size:
         selected = selected / np.sqrt(float(selected.shape[0] * selected.shape[1]))
@@ -12188,6 +12203,7 @@ def _public_band_residual_and_jacobian(
     evaluator: _PublicBandResponseEvaluator | None = None,
     weighting: Any | None = None,
     target_eigenvalues: np.ndarray | None = None,
+    degeneracy_guard: BandDegeneracyGuard | None = None,
 ) -> tuple[np.ndarray, np.ndarray, tuple[int, ...]]:
     """Evaluate the public eigenvalue residual and analytic Jacobian."""
 
@@ -12221,24 +12237,32 @@ def _public_band_residual_and_jacobian(
                 two_sided_weight=0.0,
             ),
         )
+    selected_mask = resolved_weighting.selected_mask
+    active_points = np.ones(len(points), dtype=bool)
+    if degeneracy_guard is not None:
+        degeneracy_guard.check(model_eigenvalues)
+        active_points = degeneracy_guard.active_points
+        selected_mask = selected_mask & active_points[:, None]
     if evaluator is None:
         raw_jacobian = _compiled_response_band_jacobian(
             basis,
             indices,
             points,
             model_eigenvectors,
-            resolved_weighting.selected_mask,
+            selected_mask,
         )
     else:
         raw_jacobian = evaluator.band_jacobian(
             model_eigenvectors,
-            resolved_weighting.selected_mask,
+            selected_mask,
         )
     residual_parts: list[np.ndarray] = []
     jacobian_parts: list[np.ndarray] = []
     offset = 0
-    n_kpoints = max(1, int(points.shape[0]))
+    n_kpoints = max(1, int(np.count_nonzero(active_points)))
     for k_index, count in enumerate(resolved_weighting.selected_counts):
+        if not active_points[k_index]:
+            continue
         mask = resolved_weighting.selected_mask[k_index]
         scale = np.sqrt(float(band_loss_weight) / (n_kpoints * int(count)))
         residual_parts.append(
@@ -12253,10 +12277,12 @@ def _public_band_residual_and_jacobian(
     return (
         np.concatenate(residual_parts),
         np.vstack(jacobian_parts),
-        tuple(int(value) for value in resolved_weighting.selected_counts),
+        tuple(int(value) if active_points[i] else 0
+              for i, value in enumerate(resolved_weighting.selected_counts)),
     )
 
 
+@retain_coefficients_on_degeneracy
 def _refine_public_nonlinear_complete_response(
     moire_config: MoireConfig,
     model_config: ConfiguredModel,
@@ -12329,6 +12355,13 @@ def _refine_public_nonlinear_complete_response(
         indices,
         band_points,
     )
+    band_guard = BandDegeneracyGuard(
+        band_target_eigenvalues,
+        np.linalg.eigvalsh(band_response_evaluator.base_hamiltonians),
+        band_weighting.selected_mask,
+        tolerance_ev=raw_cfg.get("degeneracy_tol_ev", DEFAULT_DEGENERACY_TOL_EV),
+    )
+    band_guard.require_usable()
     band_response_seconds = float(time.perf_counter() - band_response_start)
     band_response_message = (
         "nonlinear band response backend: "
@@ -12356,6 +12389,7 @@ def _refine_public_nonlinear_complete_response(
             evaluator=band_response_evaluator,
             weighting=band_weighting,
             target_eigenvalues=band_target_eigenvalues,
+            degeneracy_guard=band_guard,
         )
     )
 
@@ -12380,6 +12414,7 @@ def _refine_public_nonlinear_complete_response(
                 evaluator=band_response_evaluator,
                 weighting=band_weighting,
                 target_eigenvalues=band_target_eigenvalues,
+                degeneracy_guard=band_guard,
             )
             evaluation_cache.update(
                 {
@@ -12425,6 +12460,7 @@ def _refine_public_nonlinear_complete_response(
         evaluator=band_response_evaluator,
         weighting=band_weighting,
         target_eigenvalues=band_target_eigenvalues,
+        degeneracy_guard=band_guard,
     )
     coefficients = coefficients0.copy()
     coefficients[indices] = final_y
@@ -12456,6 +12492,7 @@ def _refine_public_nonlinear_complete_response(
         "one_sided_weight": one_sided_weight,
         "two_sided_weight": two_sided_weight,
         "band_loss_weight": band_loss_weight,
+        "degeneracy_guard": band_guard.report(),
         "band_response_backend": band_response_evaluator.backend,
         "band_response_support_entries": int(band_response_evaluator.support.size),
         "band_response_cache_bytes": int(band_response_evaluator.cache_bytes),
@@ -12524,6 +12561,7 @@ def _refinement_initial_fitted_model(
     }
 
 
+@retain_coefficients_on_degeneracy
 def _refine_complete_response_basis(
     moire_config: MoireConfig,
     model_config: ConfiguredModel,
@@ -12862,7 +12900,9 @@ def _refine_complete_response_basis(
         return base_h + np.tensordot(np.asarray(y, dtype=float) - y0, responses, axes=(0, 0))
 
     def aligned_selected_eigs(hamiltonians: np.ndarray) -> np.ndarray:
-        selected = np.linalg.eigvalsh(hamiltonians)[:, band_slice[0] : band_slice[1]]
+        eigenvalues = np.linalg.eigvalsh(hamiltonians)
+        band_guard.check(eigenvalues)
+        selected = eigenvalues[:, band_slice[0] : band_slice[1]]
         if align == "top":
             selected = selected + (target_slice[0, -1] - selected[0, -1])
         elif align == "bottom":
@@ -12874,11 +12914,22 @@ def _refine_complete_response_basis(
             )
         return selected
 
+    selected_mask = np.zeros_like(heff_eig, dtype=bool)
+    selected_mask[:, band_slice[0]:band_slice[1]] = True
+    band_guard = BandDegeneracyGuard(
+        heff_eig, np.linalg.eigvalsh(base_h), selected_mask,
+        tolerance_ev=raw_cfg.get("degeneracy_tol_ev", DEFAULT_DEGENERACY_TOL_EV),
+        alignment=align,
+    )
+    band_guard.require_usable()
+    active_band_points = band_guard.active_points
     response_scales = basis.response_scales[indices]
 
     def objective(y: np.ndarray) -> np.ndarray:
         hamiltonians = h_from_y(y)
-        chunks = [(aligned_selected_eigs(hamiltonians) - target_slice).reshape(-1) / band_sigma]
+        band_delta = (aligned_selected_eigs(hamiltonians)[active_band_points]
+                      - target_slice[active_band_points])
+        chunks = [band_delta.reshape(-1) / band_sigma]
         if matrix_weight > 0.0:
             matrix_delta = hamiltonians - heff_all
             matrix_scale = np.sqrt(matrix_weight) / (matrix_sigma * np.sqrt(max(1, matrix_delta.size)))
@@ -12905,6 +12956,7 @@ def _refine_complete_response_basis(
         candidate_y=candidate_y,
         h_from_y=h_from_y,
     )
+    band_guard.check(np.linalg.eigvalsh(h_from_y(accepted_y)))
     coefficients = coefficients0.copy()
     coefficients[indices] = accepted_y
     refined_fit = fitted.with_coefficients(
@@ -12935,6 +12987,7 @@ def _refine_complete_response_basis(
         "solver": "compiled_response_least_squares",
         "initialization": initialization_report,
         "reference": target_reference,
+        "degeneracy_guard": band_guard.report(),
         "fit_kpoints": fit_kpoints_report,
         "band_slice": [int(band_slice[0]), int(band_slice[1])],
         "align": align,
@@ -12976,6 +13029,7 @@ def _refine_complete_response_basis(
     }
 
 
+@retain_coefficients_on_degeneracy
 def refine_band_coefficients(
     moire_config: MoireConfig,
     model_config: ConfiguredModel,
@@ -13323,7 +13377,11 @@ def refine_band_coefficients(
     def h_from_y(y: np.ndarray) -> np.ndarray:
         return base_h + np.tensordot(np.asarray(y, dtype=float) - y0, basis, axes=(0, 0))
 
+    band_guard = None
+
     def aligned_selected_eigs(eig: np.ndarray) -> np.ndarray:
+        if band_guard is not None:
+            band_guard.check(eig)
         selected = eig[:, band_slice[0] : band_slice[1]]
         if align == "top":
             selected = selected + (target_slice[0, -1] - selected[0, -1])
@@ -13557,6 +13615,16 @@ def refine_band_coefficients(
             "variables": variable_report,
         }
 
+    selected_mask = np.zeros_like(heff_eig, dtype=bool)
+    selected_mask[:, band_slice[0]:band_slice[1]] = True
+    band_guard = BandDegeneracyGuard(
+        heff_eig, np.linalg.eigvalsh(base_h), selected_mask,
+        tolerance_ev=raw_cfg.get("degeneracy_tol_ev", DEFAULT_DEGENERACY_TOL_EV),
+        alignment=align,
+    )
+    band_guard.require_usable()
+    active_band_points = band_guard.active_points
+
     jacobian_mode = str(raw_cfg.get("jacobian", "auto")).strip().lower()
     if jacobian_mode in {"", "true"}:
         jacobian_mode = "auto"
@@ -13659,15 +13727,15 @@ def refine_band_coefficients(
         else:
             model_selected = selected_eigs_from_y(y)
         band_resid = _band_refinement_band_residual(
-            model_selected,
-            target_slice,
+            model_selected[active_band_points],
+            target_slice[active_band_points],
             band_sigma=band_sigma,
             normalize=normalize_band_loss,
         )
         if edge_band_weights is not None:
             band_resid = band_resid * np.sqrt(edge_band_weights.reshape(1, -1))
         if band_weights is not None:
-            band_resid = band_resid * np.sqrt(np.asarray(band_weights, dtype=float))
+            band_resid = band_resid * np.sqrt(np.asarray(band_weights, dtype=float)[active_band_points])
         parts = [band_resid.ravel()]
         if subspace_loss_cfg is not None:
             assert vec is not None
@@ -13730,6 +13798,7 @@ def refine_band_coefficients(
             raise RuntimeError("analytic band-refinement Jacobian is not enabled")
         h_current = h_from_y(y)
         _eig, vec = np.linalg.eigh(h_current)
+        band_guard.check(_eig)
         band_jacobian = _band_refinement_eigenvalue_jacobian(
             vec,
             basis,
@@ -13738,7 +13807,8 @@ def refine_band_coefficients(
             band_sigma=band_sigma,
             normalize=normalize_band_loss,
             edge_band_weights=edge_band_weights,
-            band_weights=band_weights,
+            band_weights=None if band_weights is None else np.asarray(band_weights)[active_band_points],
+            point_mask=active_band_points,
         )
         if matrix_jacobian is not None:
             parts = [scipy.sparse.csr_matrix(band_jacobian), matrix_jacobian]
@@ -13909,6 +13979,7 @@ def refine_band_coefficients(
         candidate_y=current_y,
         h_from_y=h_from_y,
     )
+    band_guard.check(np.linalg.eigvalsh(h_from_y(current_y)))
     for (term, component), value in zip(kept_variables, current_y):
         _set_term_component_value(term, component, float(value))
 
@@ -13995,6 +14066,7 @@ def refine_band_coefficients(
     return {
         "enabled": True,
         "reference": target_reference,
+        "degeneracy_guard": band_guard.report(),
         "fit_kpoints": fit_kpoints_report,
         "band_slice": [int(band_slice[0]), int(band_slice[1])],
         "align": align,
@@ -14170,7 +14242,12 @@ def _run_model_pipeline(
                     enabled=progress,
                 )
             guard = refinement.get("acceptance_guard", {})
-            if str(refinement.get("mode", "")) == "public_nonlinear_v1":
+            if refinement.get("skipped"):
+                _progress_line(
+                    f"nonlinear refinement skipped: {refinement.get('reason', 'unspecified')}; input coefficients retained",
+                    enabled=progress,
+                )
+            elif str(refinement.get("mode", "")) == "public_nonlinear_v1":
                 _progress_line(
                     "nonlinear band loss: "
                     f"{float(refinement['linear_initial_band_loss']):.6g} -> "

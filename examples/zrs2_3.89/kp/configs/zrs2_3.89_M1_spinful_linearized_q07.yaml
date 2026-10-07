@@ -1,0 +1,51 @@
+# Selected manuscript M1 model: spinful 88D, linearized reduction,
+# orders 6/4/6 and two matrix samples at Gamma and M.
+system:
+  name: ZrS2
+  output: ../outputs/m1_spinful_linearized
+  tapw_output: ../../tapw/outputs
+  layers: [1, 1]
+  spin: all
+  orbital_order: S-s2p2d1,Zr-s3p2d1,S-s2p2d1
+  cell:
+    - [54.0532327003, 0.0, 0.0]
+    - [-27.0266163518, 46.8114726752, 0.0]
+    - [0.0, 0.0, 22.9186134249]
+
+project:
+  valley: M1
+  q_shell: 7
+  efermi: -5.71304
+  target: conduction
+  selection: auto
+  downfold_method: linearized_lowdin
+  e_ref: -5.22
+  workers: 64
+
+symmetry: {}
+
+bands:
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 20
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
+  compare_to_heff: true
+  band_slice: [0, 16]
+  plot:
+    bottom_bands: 8
+    align: bottom
+    figsize: [3.0, 5.0]
+    num_bands: 16
+
+model:
+  target_bands: bottom
+  max_order: {kinetic: 6, intralayer: 4, interlayer: 6}
+  fit:
+    method: linear
+    kpoints: [0, 20]
+    bands: 16
+    one_sided_weight: 0.0
+    two_sided_weight: 0.0

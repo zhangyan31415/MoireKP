@@ -5,6 +5,7 @@ KP models. The M1 spinless model selects one spin sector of the spinful TAPW
 calculation.
 
 ```bash
+# external-data
 tapw run  -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
 tapw symm -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
 tapw run  -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
