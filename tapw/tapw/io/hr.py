@@ -12,8 +12,6 @@ import psutil
 import json
 from datetime import datetime
 from functools import wraps
-Hartree = 27.21138602435532
-_INTERNAL_OPENMX_TAPW_BAND_TAG = "A.tapw_band_from_" + "li" + "jh"
 SPARSE_NPZ_SCHEMA = "tapw.sparse-realspace.v1"
 SPARSE_NPZ_SCHEMA_VERSION = 1
 SPARSE_NPZ_METADATA_KEY = "__tapw_sparse_metadata_json__"
@@ -186,18 +184,6 @@ class HrSparseHandler:
             raise ValueError(f"Invalid NPZ real-space key: {key_tuple_str}")
         return tuple(int(part) for part in parts)
 
-    def _scale_npz_values(self, file_path, values):
-        file_path = str(file_path)
-        if 'deeph-pack' in file_path and 'H.npz' in file_path:
-            return values
-        if 'DeepH-pack' in file_path and 'H.npz' in file_path:
-            return values * Hartree
-        if _INTERNAL_OPENMX_TAPW_BAND_TAG in file_path and 'H.dat' not in file_path:
-            return values * Hartree
-        if "Z.hr_sr_mat_openmx_recalc_from_relaxed_str" in file_path and 'H.npz' in file_path:
-            return values * Hartree
-        return values
-
     @staticmethod
     def _is_symm_npz(file_path):
         name = os.path.basename(str(file_path))
@@ -262,7 +248,7 @@ class HrSparseHandler:
                     data[key_tuple]['col'] = np.asarray(loaded_data[key], dtype=np.int64)
                 elif attribute == 'val':
                     data[key_tuple]['val'] = np.asarray(
-                        self._scale_npz_values(file_path, loaded_data[key]),
+                        loaded_data[key],
                         dtype=np.complex128,
                     )
 
@@ -295,10 +281,7 @@ class HrSparseHandler:
                 elif attribute == 'col':
                     data[key_tuple]['col'] = loaded_data[key]
                 elif attribute == 'val':
-                    if ('deeph-pack' in str(file_path) or 'DeepH-pack' in str(file_path)) and 'H.npz' in str(file_path):
-                        data[key_tuple]['val'] = loaded_data[key] * Hartree
-                    else:
-                        data[key_tuple]['val'] = loaded_data[key]
+                    data[key_tuple]['val'] = loaded_data[key]
         basis_dimension = None if metadata is None else int(metadata["basis_dimension"])
         self._validate_sparse_indices(data, basis_dimension, source=file_path)
         self.basis_dimension = basis_dimension
@@ -321,8 +304,6 @@ class HrSparseHandler:
                 self._load_npz_common(npz_file_name)
             elif basis_order == "tapw":
                 self.load_from_npz(npz_file_name)
-            elif 'deeph-pack' in self.npz_file_name or 'DeepH-pack' in self.npz_file_name or _INTERNAL_OPENMX_TAPW_BAND_TAG in self.npz_file_name or "Z.hr_sr_mat_openmx_recalc_from_relaxed_str" in self.npz_file_name:
-                self.load_from_npz_new(npz_file_name)
             else:
                 self.load_from_npz(npz_file_name)
         else:

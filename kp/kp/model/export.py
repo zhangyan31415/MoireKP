@@ -2645,6 +2645,8 @@ CALC_BERRY_CURVATURE = True
 CALC_QUANTUM_GEOMETRY = True
 CALC_WCC = False
 WCC_LOOP = "b2"
+WCC_BOUNDARY_SINGULAR_VALUE_TOL = 1.0e-8
+WCC_BOUNDARY_ISOMETRY_TOL = 1.0e-3
 TOPOLOGY_OUTPUT_DIR = "outputs/topology"
 
 # End user-editable settings
@@ -3158,7 +3160,7 @@ def _sewing_permutation(model, shift):
     orbital = np.asarray(model.data["basis_orbital"], dtype=np.int64)
     qvec = np.asarray(model.data["basis_q_vector"], dtype=float)
     shift = np.asarray(shift, dtype=float)
-    target_by_source = np.empty(model.dim, dtype=np.int64)
+    target_by_source = np.full(model.dim, -1, dtype=np.int64)
     used = set()
     for source in range(model.dim):
         wanted = qvec[source] + shift
@@ -3167,9 +3169,11 @@ def _sewing_permutation(model, shift):
             & (orbital == orbital[source])
             & (np.linalg.norm(qvec - wanted[None, :], axis=1) < 1.0e-7)
         )[0]
+        if matches.size == 0:
+            continue
         if matches.size != 1:
             raise ValueError(
-                f"WCC boundary sewing failed for row {{source}} with shift={{shift.tolist()}}; matched {{matches.size}} rows"
+                f"WCC boundary sewing is ambiguous for row {{source}} with shift={{shift.tolist()}}"
             )
         target = int(matches[0])
         if target in used:
@@ -3181,48 +3185,65 @@ def _sewing_permutation(model, shift):
 
 def _apply_sewing(matrix, target_by_source):
     out = np.zeros_like(matrix)
-    out[target_by_source, :] = matrix
+    supported = np.asarray(target_by_source) >= 0
+    out[np.asarray(target_by_source)[supported], :] = matrix[supported, :]
     return out
+
+
+def _wilson_link(overlap, *, boundary=False):
+    overlap = np.asarray(overlap, dtype=np.complex128)
+    if not np.isfinite(overlap).all():
+        raise ValueError("WCC overlap contains nonfinite values")
+    left, singular_values, right_h = np.linalg.svd(overlap, full_matrices=False)
+    minimum = float(np.min(singular_values)) if singular_values.size else 0.0
+    if minimum <= 0 or minimum < float(WCC_BOUNDARY_SINGULAR_VALUE_TOL):
+        label = "boundary link" if boundary else "Wilson link"
+        raise ValueError(
+            f"WCC {{label}} is rank deficient: minimum singular value={{minimum:.6e}}, "
+            f"required>={{float(WCC_BOUNDARY_SINGULAR_VALUE_TOL):.6e}}"
+        )
+    if boundary:
+        error = float(np.max(np.abs(singular_values - 1.0)))
+        if error > float(WCC_BOUNDARY_ISOMETRY_TOL):
+            raise ValueError(
+                "WCC boundary link is not isometric in the selected band subspace: "
+                f"max|sigma-1|={{error:.6e}}, required<={{float(WCC_BOUNDARY_ISOMETRY_TOL):.6e}}. "
+                "Increase the Q cutoff or revise the selected band subspace."
+            )
+    return left @ right_h
 
 
 def _wilson_wcc(model, eigvecs, band_indices, loop):
     loop = str(loop).strip().lower()
+    if loop not in {{"b1", "b2"}}:
+        raise ValueError(f"WCC_LOOP must be 'b1' or 'b2', got {{loop!r}}")
+    for tolerance in (WCC_BOUNDARY_SINGULAR_VALUE_TOL, WCC_BOUNDARY_ISOMETRY_TOL):
+        if not np.isfinite(tolerance) or float(tolerance) <= 0:
+            raise ValueError("WCC link tolerances must be finite and positive")
+    axis = 0 if loop == "b1" else 1
+    loop_range = TOPO_RANGE_B1 if axis == 0 else TOPO_RANGE_B2
+    span = float(loop_range[1]) - float(loop_range[0])
+    if not np.isfinite(span) or span == 0 or not np.isclose(span, np.rint(span), rtol=0, atol=1.0e-12):
+        raise ValueError("WCC loop endpoints must differ by a nonzero integer reciprocal period")
     reciprocal_basis = _model_reciprocal_basis(model)
-    if loop == "b1":
-        shift = reciprocal_basis[0]
-        target_by_source = _sewing_permutation(model, shift)
-        sweep_count = eigvecs.shape[1]
-        branches = []
-        for j in range(sweep_count):
-            product = np.eye(len(band_indices), dtype=np.complex128)
-            for i in range(eigvecs.shape[0] - 1):
-                u0 = eigvecs[i, j][:, band_indices]
-                u1 = eigvecs[i + 1, j][:, band_indices]
-                product = (u1.conj().T @ u0) @ product
-            u_start = eigvecs[0, j][:, band_indices]
-            u_end = _apply_sewing(eigvecs[-1, j, :, :], target_by_source)[:, band_indices]
-            product = (u_start.conj().T @ u_end) @ product
-            phases = np.sort((np.angle(np.linalg.eigvals(product)) / (2.0 * np.pi)) % 1.0)
-            branches.append(phases)
-        return np.asarray(branches, dtype=float)
-    if loop == "b2":
-        shift = reciprocal_basis[1]
-        target_by_source = _sewing_permutation(model, shift)
-        sweep_count = eigvecs.shape[0]
-        branches = []
-        for i in range(sweep_count):
-            product = np.eye(len(band_indices), dtype=np.complex128)
-            for j in range(eigvecs.shape[1] - 1):
-                u0 = eigvecs[i, j][:, band_indices]
-                u1 = eigvecs[i, j + 1][:, band_indices]
-                product = (u1.conj().T @ u0) @ product
-            u_start = eigvecs[i, 0][:, band_indices]
-            u_end = _apply_sewing(eigvecs[i, -1, :, :], target_by_source)[:, band_indices]
-            product = (u_start.conj().T @ u_end) @ product
-            phases = np.sort((np.angle(np.linalg.eigvals(product)) / (2.0 * np.pi)) % 1.0)
-            branches.append(phases)
-        return np.asarray(branches, dtype=float)
-    raise ValueError(f"WCC_LOOP must be 'b1' or 'b2', got {{loop!r}}")
+    # H uses k-Q: an endpoint channel Q maps to Q-(k_end-k_start).
+    target_by_source = _sewing_permutation(model, -span * reciprocal_basis[axis])
+    paths = np.moveaxis(np.asarray(eigvecs), axis, 0)
+    if paths.shape[0] < 2:
+        raise ValueError("WCC requires at least two loop vertices")
+    branches = []
+    for fixed in range(paths.shape[1]):
+        frames = paths[:, fixed, :, :][..., band_indices]
+        product = np.eye(len(band_indices), dtype=np.complex128)
+        for index in range(len(frames) - 1):
+            overlap = frames[index + 1].conj().T @ frames[index]
+            product = _wilson_link(overlap) @ product
+        endpoint = _apply_sewing(frames[-1], target_by_source)
+        closing_overlap = frames[0].conj().T @ endpoint
+        product = _wilson_link(closing_overlap, boundary=True) @ product
+        phases = np.sort((np.angle(np.linalg.eigvals(product)) / (2.0 * np.pi)) % 1.0)
+        branches.append(phases)
+    return np.asarray(branches, dtype=float)
 
 
 def _plot_wcc(path, sweep_values, branches):

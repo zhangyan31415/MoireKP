@@ -15,7 +15,7 @@ bands:
   q_shell: 6
   efermi: -4.6
   num_processes: 61
-  blas_threads: 4
+  blas_threads: 1
   num_bands: 100
   save_hamiltonian: true
   save_wavefunctions: false
@@ -48,6 +48,7 @@ topology:
   q_shell: 6
   efermi: -4.6
   num_processes: 61
+  blas_threads: 1
   num_bands: 100
   save_wavefunctions: true
 

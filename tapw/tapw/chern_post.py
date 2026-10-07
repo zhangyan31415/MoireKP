@@ -233,10 +233,45 @@ def reshape_wavefunction_grid(band_vec, num_k1, num_k2):
 
 
 def _phase_from_overlap(overlap, eps=1e-14):
-    phase = np.ones_like(overlap, dtype=np.complex128)
-    mask = np.abs(overlap) >= eps
-    phase[mask] = overlap[mask] / np.abs(overlap[mask])
-    return phase
+    overlap = np.asarray(overlap, dtype=np.complex128)
+    eps = float(eps)
+    if not np.isfinite(eps) or eps < 0:
+        raise ValueError("Berry link tolerance must be finite and nonnegative")
+    magnitude = np.abs(overlap)
+    invalid = ~np.isfinite(overlap) | (magnitude == 0) | (magnitude < eps)
+    if np.any(invalid):
+        index = tuple(np.argwhere(invalid)[0])
+        raise ValueError(
+            f"Berry link overlap is zero, nonfinite or below tolerance at index {index}: "
+            f"magnitude={magnitude[index]:.6e}, required>={eps:.6e}. "
+            "Refine the mesh or revise the selected band subspace."
+        )
+    return overlap / magnitude
+
+
+def _phase_from_overlap_matrix(overlap, eps=1e-14):
+    """Determinant phase with a singular-value guard, without determinant underflow."""
+    overlap = np.asarray(overlap, dtype=np.complex128)
+    eps = float(eps)
+    if not np.isfinite(eps) or eps < 0:
+        raise ValueError("Berry link tolerance must be finite and nonnegative")
+    if overlap.ndim < 2 or overlap.shape[-1] != overlap.shape[-2] or overlap.shape[-1] == 0:
+        raise ValueError("Berry link overlap matrices must be nonempty and square")
+    if not np.isfinite(overlap).all():
+        raise ValueError("Berry link overlap matrix contains nonfinite values")
+    minimum = np.linalg.svd(overlap, compute_uv=False)[..., -1]
+    invalid = (minimum == 0) | (minimum < eps)
+    if np.any(invalid):
+        index = tuple(np.argwhere(invalid)[0])
+        raise ValueError(
+            f"Berry link overlap matrix is rank deficient at index {index}: "
+            f"minimum singular value={minimum[index]:.6e}, required>={eps:.6e}. "
+            "Refine the mesh or revise the selected band subspace."
+        )
+    phase, log_magnitude = np.linalg.slogdet(overlap)
+    if not np.isfinite(log_magnitude).all():
+        raise ValueError("Berry link determinant is singular or nonfinite")
+    return _phase_from_overlap(phase, eps=0.0)
 
 
 def compute_berry_flux_single_band(band_grid, band_index, eps=1e-14):
@@ -272,15 +307,10 @@ def compute_berry_flux_multiband(band_grid, band_indices, eps=1e-14):
     def overlap(v1, v2):
         return np.einsum("...ia,...ib->...ab", np.conj(v1), v2)
 
-    det_k1 = np.linalg.det(overlap(v_k, v_k1))
-    det_k2 = np.linalg.det(overlap(v_k, v_k2))
-    det_k1_at_k2 = np.linalg.det(overlap(v_k2, v_k1k2))
-    det_k2_at_k1 = np.linalg.det(overlap(v_k1, v_k1k2))
-
-    ux = _phase_from_overlap(det_k1, eps=eps)
-    uy = _phase_from_overlap(det_k2, eps=eps)
-    ux_at_k2 = _phase_from_overlap(det_k1_at_k2, eps=eps)
-    uy_at_k1 = _phase_from_overlap(det_k2_at_k1, eps=eps)
+    ux = _phase_from_overlap_matrix(overlap(v_k, v_k1), eps=eps)
+    uy = _phase_from_overlap_matrix(overlap(v_k, v_k2), eps=eps)
+    ux_at_k2 = _phase_from_overlap_matrix(overlap(v_k2, v_k1k2), eps=eps)
+    uy_at_k1 = _phase_from_overlap_matrix(overlap(v_k1, v_k1k2), eps=eps)
 
     plaquette = ux * uy_at_k1 / (ux_at_k2 * uy)
     return -np.angle(plaquette)
