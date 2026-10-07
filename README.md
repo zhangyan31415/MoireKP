@@ -56,22 +56,18 @@ Optional calculations use `tapw topo`, `tapw symm-rep`, `kp inspect` and `kp sym
 |---|---|
 | `tapw/tapw/`, `kp/kp/` | Installable package code |
 | `scripts/openmx/`, `abacus/`, `siesta/`, `common/` | Input preparation tools |
-| `scripts/release/` | Package checks and paper-bundle entry points |
+| `scripts/release/` | Software distribution builder |
 | `examples/` | Six material families, current configs and input requirements |
-| `tests/` | Package regressions and small fixtures |
-| `devtools/` | Author analysis and historical experiments; excluded from software distributions |
-| `paper/`, `results/`, `validation_runs/` | Manuscript and generated research records; excluded from software distributions |
 
 The [example index](examples/README.md) identifies the six models used in the paper. The software distribution contains source and small inputs; the paper reproduction bundle separately contains frozen exports and figure arrays. Public data archive metadata is recorded in the data manifest.
 
-## Check and build
+## Build
 
 ```bash
-bash scripts/release_gate.sh
 python scripts/release/build_distribution.py --output dist
 ```
 
-The default gate checks the software and example contracts. `bash scripts/release_gate.sh --final` additionally requires complete public dataset metadata. See [RELEASE_VALIDATION.md](RELEASE_VALIDATION.md).
+The builder checks the wheel against the source and excludes local research files from the source archive.
 
 ## License
 

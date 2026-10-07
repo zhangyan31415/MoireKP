@@ -41,6 +41,7 @@ tapw = "tapw.cli:main"
 [tool.setuptools.packages.find]
 where = ["kp", "tapw"]
 include = ["kp*", "tapw*"]
+exclude = ["kp.experimental*"]
 
 [tool.setuptools]
 include-package-data = true
@@ -49,7 +50,6 @@ include-package-data = true
 tapw = ["templates/*.yaml", "templates/*.in"]
 
 [tool.setuptools.data-files]
-"share/moirekp/docs" = ["docs/abacus_input.md"]
 "share/moirekp/scripts" = ["scripts/README.md", "scripts/README.zh.md"]
 "share/moirekp/scripts/openmx" = ["scripts/openmx/*.py", "scripts/openmx/*.cpp", "scripts/openmx/*.sh", "scripts/openmx/README.md"]
 "share/moirekp/scripts/abacus" = ["scripts/abacus/prepare_hs.py", "scripts/abacus/README.md"]
@@ -58,6 +58,3 @@ tapw = ["templates/*.yaml", "templates/*.in"]
 "share/moirekp/scripts/common" = ["scripts/common/*.py", "scripts/common/README.md"]
 "share/moirekp/scripts/legacy" = ["scripts/legacy/README.md"]
 "share/moirekp/scripts/legacy/openmx" = ["scripts/legacy/openmx/*.py"]
-
-[tool.moirekp.release]
-release_blockers = ["dataset_license", "doi", "data_url"]

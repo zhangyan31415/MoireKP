@@ -49,8 +49,8 @@ basis ordering. Output includes H/S in NPZ and DAT, `structure.extxyz`,
 `system.fragment.yaml`, `abacus_import.json` and `preparation.json`.
 The destination must not exist. `prepare_hs.py` is an equivalent wrapper;
 `--symmetrize` writes separate symmetry results without changing raw H/S.
-See the [common guide](../README.md) and
-[basis/spin conventions](../../docs/abacus_input.md).
+See the [common guide](../README.md). Basis and spin conventions are recorded
+in the emitted metadata.
 
 The `_vendor` directory contains the separately licensed GPL-3.0 CSR
 converter, its license, and a notice documenting the local sparse-support

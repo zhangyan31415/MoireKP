@@ -6,11 +6,7 @@ include COPYING.LESSER
 include COPYRIGHT
 include README.md
 include README.zh.md
-include RELEASE_VALIDATION.md
-include docs/abacus_input.md
-include RELEASE_BLOCKERS.md
 include environment.yml
-include pytest.ini
 include pyproject.toml
 include kp/README.md
 include tapw/README.md
@@ -29,17 +25,9 @@ include scripts/abacus/_vendor/LICENSE.GPL-3.0
 recursive-include scripts/siesta *.py *.md
 recursive-include scripts/common *.py *.md
 recursive-include scripts/legacy *.py *.md
-include scripts/benchmark_physical_export.py
-include scripts/benchmark_physical_export_suite.py
-include scripts/benchmarks/benchmark_physical_export.py
-include scripts/benchmarks/benchmark_physical_export_suite.py
-include scripts/release_gate.sh
-include scripts/release/release_gate.sh
 include scripts/release/build_distribution.py
 include examples/README.md
 include examples/data-manifest.yaml
-recursive-include tests *.py *.yaml *.yml *.json *.txt
-recursive-include tests/fixtures *.npy *.npz
 include examples/mgi2_3.89/README.md
 include examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
 include examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
@@ -109,8 +97,6 @@ prune tmp
 prune paper
 prune manuscript
 prune cpc_submission
-prune docs/internal
-prune docs/plans
 global-exclude __pycache__/*
 global-exclude *.py[cod]
 global-exclude *.so
@@ -120,10 +106,14 @@ global-exclude *.err
 global-exclude *.npy
 global-exclude *.npz
 global-exclude openmx.out
-recursive-include tests/fixtures *.npy *.npz
-exclude tests/test_native_overlap_cluster_scores.py
-exclude tests/test_full_window_statistics.py
-exclude tests/test_paper_publication.py
-exclude tests/test_single_paper_manuscript.py
-exclude tests/test_quadratic_top6_experiment.py
-exclude tests/kp/test_response_compile_benchmark.py
+prune docs
+prune tests
+prune kp/kp/experimental
+prune scripts/benchmarks
+exclude RELEASE_BLOCKERS.md
+exclude RELEASE_VALIDATION.md
+exclude pytest.ini
+exclude scripts/release_gate.sh
+exclude scripts/release/release_gate.sh
+exclude scripts/benchmark_physical_export.py
+exclude scripts/benchmark_physical_export_suite.py

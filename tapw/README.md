@@ -44,7 +44,7 @@ Use `tapw prepare-hs BACKEND --help` for the common DFT input interface, with
 For SIESTA input, install `moirekp[siesta]` and run
 `tapw import-siesta siesta.HSX --output siesta_import`.
 The generated YAML is an input fragment; supply the actual moire geometry and
-workflow settings before running TAPW. See [SIESTA input](../docs/siesta_input.md).
+workflow settings before running TAPW. See [SIESTA input](../scripts/siesta/README.md).
 
 Create a starter working directory:
 

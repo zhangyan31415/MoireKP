@@ -24,4 +24,4 @@ Use a new output directory. Add layer, twist, valley, Fermi energy and k-path se
 
 `--symmetrize` writes separate symmetry-averaged matrices. `common/symmetrize_hs.py` processes an existing prepared input. Spinful nonmagnetic symmetry processing uses `--assume-nonmagnetic`; magnetic inputs require their site moments. Details and conventions are in each backend guide.
 
-The per-backend `prepare_hs.py` files and top-level OpenMX launchers preserve existing commands. Maintained import and symmetry algorithms live in `tapw.io`; historical implementations are under `legacy/`. Release tools are under `release/`, and export benchmarks under `benchmarks/`. Author paper-analysis scripts are under `devtools/paper_analysis/` and are excluded from the software distribution.
+The per-backend `prepare_hs.py` files and top-level OpenMX launchers preserve existing commands. Maintained import and symmetry algorithms live in `tapw.io`; historical implementations are under `legacy/`. The distribution builder is under `release/`.

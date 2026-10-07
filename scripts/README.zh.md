@@ -24,4 +24,4 @@ tapw prepare-hs siesta --input work/system.HSX --output prepared/siesta --format
 
 `--symmetrize` 另外写出对称平均矩阵；已有导入结果可用 `common/symmetrize_hs.py` 处理。非磁性自旋输入使用 `--assume-nonmagnetic`；磁性输入需提供逐原子磁矩。参数和基底约定见各后端指南。
 
-实际算法集中在 `tapw.io`。各后端 `prepare_hs.py` 和顶层 OpenMX 脚本是兼容入口；旧实现保存在 `legacy/`。`release/` 放发布工具，`benchmarks/` 放导出性能检查。论文分析与试算脚本收拢到 `devtools/paper_analysis/`，不进入软件发布包。
+实际算法集中在 `tapw.io`。各后端 `prepare_hs.py` 和顶层 OpenMX 脚本是兼容入口；旧实现保存在 `legacy/`，打包工具位于 `release/`。

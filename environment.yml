@@ -21,6 +21,5 @@ dependencies:
   - slepc=*=*complex*
   - petsc4py
   - slepc4py
-  - pytest
   - pip:
       - -e .

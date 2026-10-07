@@ -42,20 +42,16 @@ TAPW 输出 `band/`、`symmetry/`、`symm_rep/`、`topology/`；KP 输出 `inspe
 ## 目录与发布
 
 - `tapw/tapw/`、`kp/kp/`：正式软件源码。
-- `scripts/`：后端准备工具、兼容入口和发布检查。
+- `scripts/`：后端准备工具、兼容入口和打包工具。
 - `examples/`：六种材料的配置、结构小文件及数据要求。
-- `tests/`：回归检查和小型输入。
-- `devtools/`：作者分析及历史试算，不进入软件安装包。
-- `paper/`、`results/`、`validation_runs/`：论文和研究产物，不进入软件安装包。
 
 [示例索引](examples/README.md)列出论文使用的六个模型。软件包提供源码和小型输入；论文复现包另外提供冻结模型和图源数组。公开数据归档信息见数据清单。
 
 ```bash
-bash scripts/release_gate.sh
 python scripts/release/build_distribution.py --output dist
 ```
 
-默认检查软件和配置；`bash scripts/release_gate.sh --final` 还要求公开数据的许可、标识和链接完整。检查说明见 [RELEASE_VALIDATION.md](RELEASE_VALIDATION.md)。
+打包工具核对安装包与源码，并排除本地研究文件。
 
 ## 许可证
 

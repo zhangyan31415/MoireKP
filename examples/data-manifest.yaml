@@ -40,12 +40,6 @@ clean_clone_smoke:
   runtime_class: clean-clone
   description: Safe checks that do not require external scientific datasets.
   commands:
-  - id: release-contract-tests
-    command: python -m pytest tests/test_release_contract.py tests/kp/test_example_dependency_contract.py
-      -q
-    runtime_class: clean-clone
-    expected_outputs:
-    - Release contracts pass.
   - id: tapw-help
     command: tapw --help
     runtime_class: clean-clone

@@ -31,6 +31,8 @@ def main():
     with zipfile.ZipFile(wheel) as archive:
         for package in ['kp', 'tapw']:
             for path in (ROOT / package / package).rglob('*.py'):
+                if path.relative_to(ROOT / package / package).parts[0] == 'experimental':
+                    continue
                 name = path.relative_to(ROOT / package).as_posix()
                 if archive.read(name) != path.read_bytes():
                     raise ValueError(f'Wheel/source mismatch: {name}')
@@ -42,8 +44,14 @@ def main():
                     matches = [name for name in archive.namelist() if name.endswith(suffix)]
                     if len(matches) != 1 or archive.read(matches[0]) != path.read_bytes():
                         raise ValueError(f'Wheel tool/resource mismatch: {path.relative_to(ROOT)}')
+        invalid = [name for name in archive.namelist()
+                   if name.startswith(('tests/', 'docs/', 'devtools/', 'kp/experimental/'))
+                   or '/share/moirekp/docs/' in name]
+        if invalid:
+            raise ValueError(f'Internal files in wheel: {invalid}')
     forbidden = {'paper', 'results', 'validation_runs', 'devtools', 'review_bundles',
-                 'review_outputs', 'review_packages', 'build', 'dist', 'tmp', 'output'}
+                 'review_outputs', 'review_packages', 'build', 'dist', 'tmp', 'output',
+                 'docs', 'tests'}
     with tarfile.open(source) as archive:
         members = [m.name.split('/', 1)[1] for m in archive.getmembers()
                    if m.isfile() and '/' in m.name]
@@ -55,6 +63,11 @@ def main():
                                             'unweighted_search_', 'runs'))
                           for part in Path(name).parts)
                    or name.endswith(('.log', '.pyc', '.so'))
+                   or name.startswith(('kp/kp/experimental/', 'scripts/benchmarks/'))
+                   or name in {'RELEASE_BLOCKERS.md', 'RELEASE_VALIDATION.md', 'pytest.ini',
+                               'scripts/release_gate.sh', 'scripts/release/release_gate.sh',
+                               'scripts/benchmark_physical_export.py',
+                               'scripts/benchmark_physical_export_suite.py'}
                    or (name.startswith('examples/') and name not in example_inputs)]
         if invalid:
             raise ValueError(f'Generated/author files in source distribution: {invalid}')
