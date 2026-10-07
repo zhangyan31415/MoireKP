@@ -20,7 +20,7 @@ kp --help
 
 `tapw prepare-hs openmx|abacus|siesta` 读取已完成的 DFT 输出，写出以 eV 为单位的 H(R)、无量纲 S(R)、结构与轨道/自旋信息。[输入准备指南](scripts/README.zh.md)说明各后端的文件和命令。
 
-数值示例需要 [data-manifest.yaml](examples/data-manifest.yaml) 列出的外部矩阵。以下命令从仓库根目录运行：
+数值示例需要外部 H/S 矩阵，部分示例还需要匹配的结构文件。[各材料说明](examples/README.md)列出所需输入和运行命令。以下命令从仓库根目录运行：
 
 ```bash
 # external-data
@@ -45,7 +45,7 @@ TAPW 输出 `band/`、`symmetry/`、`symm_rep/`、`topology/`；KP 输出 `inspe
 - `scripts/`：后端准备工具、兼容入口和打包工具。
 - `examples/`：六种材料的配置、结构小文件及数据要求。
 
-[示例索引](examples/README.md)列出论文使用的六个模型。软件包提供源码和小型输入；论文复现包另外提供冻结模型和图源数组。公开数据归档信息见数据清单。
+[示例索引](examples/README.md)列出论文使用的六个模型。软件包提供源码和小型输入；论文复现包另外提供冻结模型和图源数组。
 
 ```bash
 python scripts/release/build_distribution.py --output dist

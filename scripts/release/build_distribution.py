@@ -3,10 +3,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import subprocess
 import sys
+import tempfile
 import tarfile
 import tomllib
 import zipfile
@@ -19,15 +19,31 @@ def main():
     args = parser.parse_args()
     out = args.output.resolve()
     out.mkdir(parents=True, exist_ok=True)
-    subprocess.run([sys.executable, '-m', 'pip', 'wheel', str(ROOT), '--no-deps',
-                    '--no-build-isolation', '--wheel-dir', str(out)], check=True,
-                   cwd=ROOT)
-    # Run the PEP 517 backend outside the project so build/ cannot shadow a tool.
-    script = 'import os; os.chdir({root!r}); from setuptools.build_meta import build_sdist; build_sdist({out!r})'
-    subprocess.run([sys.executable, '-c', script.format(root=str(ROOT), out=str(out))],
-                   check=True, cwd=out)
-    wheel = next(out.glob('moirekp-*.whl'))
-    source = next(out.glob('moirekp-*.tar.gz'))
+    with tempfile.TemporaryDirectory(prefix='.moirekp-build-', dir=out) as temporary:
+        stage = Path(temporary)
+        subprocess.run([sys.executable, '-m', 'pip', 'wheel', str(ROOT), '--no-deps',
+                        '--no-build-isolation', '--wheel-dir', str(stage)], check=True,
+                       cwd=ROOT)
+        # Build the source archive outside the checkout so build/ cannot shadow a tool.
+        script = 'import os; os.chdir({root!r}); from setuptools.build_meta import build_sdist; build_sdist({out!r})'
+        subprocess.run([sys.executable, '-c', script.format(root=str(ROOT), out=str(stage))],
+                       check=True, cwd=stage)
+        wheels = list(stage.glob('moirekp-*.whl'))
+        sources = list(stage.glob('moirekp-*.tar.gz'))
+        if len(wheels) != 1 or len(sources) != 1:
+            raise ValueError('The build must produce exactly one wheel and one source archive')
+        wheel, source = wheels[0], sources[0]
+        source_files = verify_distributions(wheel, source)
+        wheel = wheel.replace(out / wheel.name)
+        source = source.replace(out / source.name)
+    result = dict(status='passed', python=sys.executable, source_files=source_files,
+                  artifacts={p.name: dict(bytes=p.stat().st_size,
+                             sha256=hashlib.sha256(p.read_bytes()).hexdigest())
+                             for p in [wheel, source]})
+    (out / 'build_summary.json').write_text(json.dumps(result, indent=2) + '\n')
+    print(json.dumps(result, indent=2))
+
+def verify_distributions(wheel, source):
     with zipfile.ZipFile(wheel) as archive:
         for package in ['kp', 'tapw']:
             for path in (ROOT / package / package).rglob('*.py'):
@@ -64,10 +80,12 @@ def main():
                           for part in Path(name).parts)
                    or name.endswith(('.log', '.pyc', '.so'))
                    or name.startswith(('kp/kp/experimental/', 'scripts/benchmarks/'))
+                   or (name.startswith('examples/zrs2_3.89/') and '_gmkg_' in Path(name).name)
                    or name in {'RELEASE_BLOCKERS.md', 'RELEASE_VALIDATION.md', 'pytest.ini',
                                'scripts/release_gate.sh', 'scripts/release/release_gate.sh',
                                'scripts/benchmark_physical_export.py',
-                               'scripts/benchmark_physical_export_suite.py'}
+                               'scripts/benchmark_physical_export_suite.py',
+                               'examples/data-manifest.yaml', 'tapw/environment.yml'}
                    or (name.startswith('examples/') and name not in example_inputs)]
         if invalid:
             raise ValueError(f'Generated/author files in source distribution: {invalid}')
@@ -77,16 +95,11 @@ def main():
                                    or Path(member.name).name == 'PKG-INFO'):
                 if b'\x00' in archive.extractfile(member).read():
                     raise ValueError(f'Invalid text file in source distribution: {member.name}')
-        for name in ['README.md', 'README.zh.md', 'examples/data-manifest.yaml',
+        for name in ['README.md', 'README.zh.md',
                      'examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml']:
             if name not in members:
                 raise ValueError(f'Missing source file: {name}')
-    result = dict(status='passed', python=sys.executable, source_files=len(members),
-                  artifacts={p.name: dict(bytes=p.stat().st_size,
-                             sha256=hashlib.sha256(p.read_bytes()).hexdigest())
-                             for p in [wheel, source]})
-    (out / 'build_summary.json').write_text(json.dumps(result, indent=2) + '\n')
-    print(json.dumps(result, indent=2))
+    return len(members)
 
 if __name__ == '__main__':
     main()

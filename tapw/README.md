@@ -52,51 +52,8 @@ Create a starter working directory:
 tapw init -o workdir
 ```
 
-The generated `workdir/config.yaml` uses the current `system` input:
+The generated `workdir/config.yaml` contains the input and workflow settings.
 
-```yaml
-system:
-  output: outputs
-  structure: POSCAR
-  hamiltonian: H.npz
-  overlap: S.npz
-  orbitals: {Mo: s3p2d1, Te: s3p2d2}
-  twist_index: 8
-  layers: [1, 1]
-  spin: true
-
-bands:
-  valley: K1
-  q_shell: 6
-  efermi: -4.10
-  save_hamiltonian: true
-  kpath:
-    labels: [G, M, K, G]
-    points_per_segment: 20
-    coordinates:
-      G: [0.0, 0.0]
-      M: [0.5, 0.0]
-      K: [0.3333333333, 0.3333333333]
-
-symmetry:
-  valley: K1
-  q_shell: 6
-  efermi: -4.10
-  representation:
-    points:
-      G: [0.0, 0.0]
-      M: [0.5, 0.0]
-      K: [0.3333333333, 0.3333333333]
-
-topology:
-  valley: K1
-  q_shell: 6
-  mesh:
-    n_b1: 31
-    n_b2: 31
-    range_b1: [-0.5, 0.5]
-    range_b2: [-0.5, 0.5]
-```
 
 `system.structure` and `system.orbitals` replace the old use of an OpenMX
 input file for structure and orbital metadata. The Hamiltonian and optional
@@ -153,22 +110,8 @@ partial grids do not overwrite one another, for example
 high-symmetry points, groups the selected states by energy degeneracy, and
 projects unitary and antiunitary raw-H actions into each band block.
 
-Configure the reported points under `symmetry.representation`:
+Set the reported points in the configuration under `symmetry.representation`.
 
-```yaml
-symmetry:
-  valley: Gamma
-  q_shell: 4
-  efermi: -4.055365
-  representation:
-    points:
-      Gamma: [0.0, 0.0]
-      M: [0.5, 0.0]
-      K: [0.3333333333, 0.3333333333]
-    valence_count: 20
-    conduction_count: 20
-    degeneracy_tol: 2.0e-3
-```
 
 ## Examples
 

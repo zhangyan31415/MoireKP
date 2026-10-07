@@ -1,29 +1,22 @@
-# Bilayer MgI2 3.89 Degree Gamma And M Valleys
+# Bilayer MgI2
 
-This directory contains Gamma spinful q04, M1 spinful q07, and M1 spinless q07
-KP models. The M1 spinless model selects one spin sector of the spinful TAPW
-calculation.
+This directory provides additional Gamma- and M-valley examples.
+
+Supply the matching `H_symm.npz` and `S_symm.npz` in
+`examples/mgi2_3.89/openmx/soc/`. The matching structure is included.
+Large matrices and generated TAPW arrays are not included in the source repository.
+
+Run from the repository root after supplying the inputs:
 
 ```bash
-# external-data
-tapw run  -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
-tapw symm -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
-tapw run  -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
-tapw symm -c examples/mgi2_3.89/tapw/configs/mgi2_3.89_M1_spinful_q07.yaml
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
-kp symm   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
-kp symm-rep -c examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml # optional
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
-kp symm   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
-kp symm-rep -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml   # optional
-kp project -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
-kp symm   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
-kp model   -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml
-kp symm-rep -c examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinless_q07.yaml  # optional
+TAPW_CFG=examples/mgi2_3.89/tapw/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+KP_CFG=examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
+tapw run  -c "$TAPW_CFG"
+tapw symm -c "$TAPW_CFG"
+kp project -c "$KP_CFG"
+kp symm    -c "$KP_CFG"
+kp model   -c "$KP_CFG"
 ```
 
-All three KP models use automatic low-energy and harmonic selection, explicit
-polynomial orders, and one final linear fit. Commented low-state lists record
-the equivalent explicit selections.
+For the M valley, use the M1 configuration under `tapw/configs/` and the
+matching spinful or spinless configuration under `kp/configs/`.

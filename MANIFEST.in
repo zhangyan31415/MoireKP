@@ -27,7 +27,6 @@ recursive-include scripts/common *.py *.md
 recursive-include scripts/legacy *.py *.md
 include scripts/release/build_distribution.py
 include examples/README.md
-include examples/data-manifest.yaml
 include examples/mgi2_3.89/README.md
 include examples/mgi2_3.89/kp/configs/mgi2_3.89_Gamma_spinful_q04.yaml
 include examples/mgi2_3.89/kp/configs/mgi2_3.89_M1_spinful_q07.yaml
@@ -66,17 +65,11 @@ include examples/zrs2_3.15/tapw/configs/zrs2_3.15_Gamma_spinful_q04.yaml
 include examples/zrs2_3.15/tapw/configs/zrs2_3.15_M1_spinful_q07.yaml
 include examples/zrs2_3.89/README.md
 include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
-include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_km_neighbors.yaml
-include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_one_sided_only.yaml
-include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_two_sided_only.yaml
-include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_unweighted.yaml
-include examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_weighted_strict.yaml
 include examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_linearized_q07.yaml
 include examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinful_q07.yaml
 include examples/zrs2_3.89/kp/configs/zrs2_3.89_M1_spinless_q07.yaml
 include examples/zrs2_3.89/openmx/soc/openmx.dat_rigid
 include examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
-include examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04_gmkg_km_neighbors.yaml
 include examples/zrs2_3.89/tapw/configs/zrs2_3.89_M1_spinful_q07.yaml
 prune .git
 prune .codex
@@ -117,3 +110,7 @@ exclude scripts/release_gate.sh
 exclude scripts/release/release_gate.sh
 exclude scripts/benchmark_physical_export.py
 exclude scripts/benchmark_physical_export_suite.py
+exclude examples/data-manifest.yaml
+exclude tapw/environment.yml
+exclude examples/zrs2_3.89/kp/configs/*_gmkg_*.yaml
+exclude examples/zrs2_3.89/tapw/configs/*_gmkg_*.yaml

@@ -31,7 +31,7 @@ Preparation writes H(R) in eV, dimensionless S(R), structure and orbital/spin me
 
 ## Run a model
 
-Numerical examples require the external matrices listed in [examples/data-manifest.yaml](examples/data-manifest.yaml). Each material README identifies its input and configuration. From the repository root:
+Numerical examples require external H/S matrices and, for some cases, matching structure files. Each [material README](examples/README.md) lists the required inputs and commands. From the repository root:
 
 ```bash
 # external-data
@@ -59,7 +59,7 @@ Optional calculations use `tapw topo`, `tapw symm-rep`, `kp inspect` and `kp sym
 | `scripts/release/` | Software distribution builder |
 | `examples/` | Six material families, current configs and input requirements |
 
-The [example index](examples/README.md) identifies the six models used in the paper. The software distribution contains source and small inputs; the paper reproduction bundle separately contains frozen exports and figure arrays. Public data archive metadata is recorded in the data manifest.
+The [example index](examples/README.md) identifies the six models used in the paper. The software distribution contains source and small inputs; the paper reproduction bundle separately contains frozen exports and figure arrays.
 
 ## Build
 
