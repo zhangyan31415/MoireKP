@@ -1,74 +1,14 @@
-#
-#      File Name      
-#
+# Rigid coordinate/basis reference for TAPW.
+# Run DFT with ../scf/openmx.dat on the supplied relaxed structure.
 
-System.CurrrentDirectory         ./    # default=./
-System.Name openmx
-DATA.PATH                       /data/home/zy/software/openmx3.9/DFT_DATA19   # default=../DFT_DATA19
-#DATA.PATH                   /public/home/xtz/software/openmx3.9/DFT_DATA19
-level.of.stdout                   1    # default=1 (1-3)
-level.of.fileout                  0    # default=1 (0-2)
-HS.fileout                   on       # on|off, default=off
-
-#
-# SCF or Electronic System
-#
-
-scf.XcType                  GGA-PBE    # LDA|LSDA-CA|LSDA-PW|GGA-PBE
 scf.SpinPolarization NC
 scf.SpinOrbit.Coupling on
-scf.ElectronicTemperature  300.0       # default=300 (K)
-scf.energycutoff           300.0       # default=150 (Ry)
-scf.maxIter 1
-scf.EigenvalueSolver        Band      # DC|GDC|Cluster|Band
-scf.Kgrid                  1 1 1       # means 4x4x4
-scf.Mixing.Type           rmm-diis     # Simple|Rmm-Diis|Gr-Pulay|Kerker|Rmm-Diisk
-scf.Init.Mixing.Weight     0.10        # default=0.30 
-scf.Min.Mixing.Weight      0.001       # default=0.001 
-scf.Max.Mixing.Weight      0.050       # default=0.40 
-scf.Mixing.History          35          # default=5
-scf.Mixing.StartPulay       50          # default=6
-scf.criterion             1.0e-7      # default=1.0e-6 (Hartree)
-scf.lapack.dste            dstevx      # dstevx|dstedc|dstegr,default=dstevx
-scf.eigen.lib      elpa2    # elpa1|elpa2, default=elpa1
-scf.restart.filename               openmx
-scf.restart c2n
 
-#
-# MD or Geometry Optimization
-#
-
-MD.Type Nomd
-MD.maxIter 1
-MD.TimeStep                   1        # default=0.5 (fs)
-MD.Opt.criterion         1.0e-5        # default=1.0e-4 (Hartree/bohr)
-
-#
-# MO output
-#
-
-MO.fileout                  off        # on|off, default=off
-num.HOMOs                    2         # default=1
-num.LUMOs                    2         # default=1
-
-#
-# DOS and PDOS
-#
-
-Dos.fileout                  off       # on|off, default=off
-Dos.Erange              -10.0  10.0    # default = -20 20 
-Dos.Kgrid                 1  1  1      # default = Kgrid1 Kgrid2 Kgrid3
-#
-# Definition of Atomic Species
-#
 Species.Number       2
 <Definition.of.Atomic.Species
 Te   Te7.0-s3p2d2f1     Te_PBE19
 Mo   Mo7.0-s3p2d2       Mo_PBE19
 Definition.of.Atomic.Species>
-
-#
-# Atoms
 
 Atoms.Number 1143
 Atoms.SpeciesAndCoordinates.Unit   Ang # Ang|AU
@@ -1217,6 +1157,7 @@ Atoms.SpeciesAndCoordinates.Unit   Ang # Ang|AU
 1142 Mo 35.4899100574786459 3.3405721034212883 22.4598059567573607 7.00 7.00
 1143 Mo 38.6167900931575545 1.7157975761306870 22.4598059567573607 7.00 7.00
 Atoms.SpeciesAndCoordinates>
+
 Atoms.UnitVectors.Unit             Ang #  Ang|AU
 <Atoms.UnitVectors
 39.7113764531222557 0.0000000000000000 0.0000000000000000

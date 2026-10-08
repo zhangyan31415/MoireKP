@@ -31,10 +31,9 @@ Preparation writes H(R) in eV, dimensionless S(R), structure and orbital/spin me
 
 ## Run a model
 
-Numerical examples require external H/S matrices and, for some cases, matching structure files. Each [material README](examples/README.md) lists the required inputs and commands. From the repository root:
+The [paper examples](examples/README.md) include relaxed OpenMX SCF inputs, rigid TAPW references and commands to regenerate H/S and build the six models. Large matrices are generated locally. From the repository root:
 
 ```bash
-# external-data
 TAPW_CFG=examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
 KP_CFG=examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
 tapw run  -c "$TAPW_CFG"
@@ -59,7 +58,7 @@ Optional calculations use `tapw topo`, `tapw symm-rep`, `kp inspect` and `kp sym
 | `scripts/release/` | Software distribution builder |
 | `examples/` | Six material families, current configs and input requirements |
 
-The [example index](examples/README.md) identifies the six models used in the paper. The software distribution contains source and small inputs; the paper reproduction bundle separately contains frozen exports and figure arrays.
+The [example index](examples/README.md) identifies the six models used in the paper. The software distribution contains the source, first-principles inputs and model configurations.
 
 ## Build
 

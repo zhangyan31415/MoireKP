@@ -40,3 +40,29 @@ retain their original symmetrized-output behavior; implementations are in
 `scripts/legacy/openmx/`.
 The per-backend `prepare_hs.py` accepts the same options as the installed CLI.
 See [common options and TAPW continuation](../README.md).
+
+## Paper examples
+
+The [bilayer MoTe2](../../examples/mote2_3.89/README.md),
+[bilayer ZrS2](../../examples/zrs2_3.89/README.md) and
+[trilayer MoTe2](../../examples/mote2_aab_5.09/README.md) directories provide
+fixed-geometry SCF inputs on the relaxed structures and separate rigid
+references for TAPW. These SCF inputs start without prior restart files and
+write `openmx.scfout`. The coordinate references are not SCF inputs.
+
+After installing OpenMX with its DFT_DATA19 database, build the reader from
+the repository root and set the executable/database paths:
+
+```bash
+bash scripts/openmx/build_openmx_symm_hs.sh /absolute/openmx3.9/source build/openmx_import_hs
+export OPENMX=/absolute/openmx3.9/source/openmx
+export OPENMX_DATA=/absolute/openmx3.9/DFT_DATA19
+export OPENMX_READER="$PWD/build/openmx_import_hs/analysis_symm_hs"
+export NPROCS=61
+```
+
+Use the MPI rank count assigned to your calculation. Each material README
+connects SCF, relaxed-coordinate H/S symmetry averaging, TAPW and KP.
+The database must contain the PAO and PBE19 VPS files named by the supplied
+input. See the [OpenMX input specification](https://www.openmx-square.org/openmx_man3.9/node21.html)
+and [restart documentation](https://www.openmx-square.org/openmx_man3.9/node44.html).

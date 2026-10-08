@@ -20,10 +20,9 @@ kp --help
 
 `tapw prepare-hs openmx|abacus|siesta` 读取已完成的 DFT 输出，写出以 eV 为单位的 H(R)、无量纲 S(R)、结构与轨道/自旋信息。[输入准备指南](scripts/README.zh.md)说明各后端的文件和命令。
 
-数值示例需要外部 H/S 矩阵，部分示例还需要匹配的结构文件。[各材料说明](examples/README.md)列出所需输入和运行命令。以下命令从仓库根目录运行：
+[论文算例](examples/README.md)提供 relaxed 结构上的 OpenMX 自洽输入、独立的 rigid TAPW 参考结构，以及重新生成 H/S 和构造六个模型的命令。大矩阵由读者在本地生成。以下命令从仓库根目录运行：
 
 ```bash
-# external-data
 TAPW_CFG=examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
 KP_CFG=examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
 tapw run  -c "$TAPW_CFG"
@@ -45,7 +44,7 @@ TAPW 输出 `band/`、`symmetry/`、`symm_rep/`、`topology/`；KP 输出 `inspe
 - `scripts/`：后端准备工具、兼容入口和打包工具。
 - `examples/`：六种材料的配置、结构小文件及数据要求。
 
-[示例索引](examples/README.md)列出论文使用的六个模型。软件包提供源码和小型输入；论文复现包另外提供冻结模型和图源数组。
+[示例索引](examples/README.md)列出论文使用的六个模型。软件包提供源码、第一性原理输入和模型配置。
 
 ```bash
 python scripts/release/build_distribution.py --output dist

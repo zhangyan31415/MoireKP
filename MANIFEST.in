@@ -114,3 +114,12 @@ exclude examples/data-manifest.yaml
 exclude tapw/environment.yml
 exclude examples/zrs2_3.89/kp/configs/*_gmkg_*.yaml
 exclude examples/zrs2_3.89/tapw/configs/*_gmkg_*.yaml
+
+# First-principles inputs and matching projection references for the paper
+include examples/mote2_3.89/openmx/scf/openmx.dat
+include examples/mote2_3.89/openmx/scf/relaxed.extxyz
+include examples/mote2_aab_5.09/openmx/scf/openmx.dat
+include examples/mote2_aab_5.09/openmx/scf/relaxed.extxyz
+include examples/zrs2_3.89/openmx/scf/openmx.dat
+include examples/zrs2_3.89/openmx/scf/relaxed.extxyz
+include examples/mote2_3.89/openmx/selected_20261001/rigid.extxyz

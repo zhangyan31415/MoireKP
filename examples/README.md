@@ -1,8 +1,10 @@
 # Examples
 
 The source repository provides configurations and small structural inputs.
-Each material README lists the external input files needed to run its examples.
-Large H/S matrices and generated arrays are not included.
+The three paper-system directories include relaxed OpenMX SCF inputs and
+rigid TAPW references. Their READMEs give the commands to regenerate H/S and
+construct the six continuum models. Large matrices and generated arrays are
+produced locally.
 
 ## Paper examples
 
@@ -13,6 +15,8 @@ Large H/S matrices and generated arrays are not included.
 | A–AB trilayer MoTe2 | KA, KB, Gamma | [Trilayer MoTe2](mote2_aab_5.09/README.md) |
 
 ## Additional examples
+
+These extra configurations require their matching external inputs.
 
 - [MgI2](mgi2_3.89/README.md)
 - [ZrS2](zrs2_3.15/README.md)
