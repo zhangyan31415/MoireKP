@@ -1,0 +1,78 @@
+system:
+  name: MoTe2
+  output: output/kp/K
+  tapw_output: output/tapw
+  layers:
+  - 1
+  - 1
+  spin: up
+  orbital_order: Te-s3p2d2f1,Mo-s3p2d2,Te-s3p2d2f1
+  cell:
+  - - 51.89513680529178
+    - 0.0
+    - 0.0
+  - - -25.947568402645885
+    - 44.94250680625151
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 80.0
+project:
+  valley: K1
+  q_shell: 6
+  efermi: -4.103803081270156
+  target: valence
+  selection: auto
+  downfold_method: linearized_lowdin
+  e_ref: -4.614105470129998
+  workers: 10
+  blas_threads: 8
+symmetry: {}
+bands:
+  kpath:
+    labels:
+    - G
+    - M
+    - K
+    - G
+    points_per_segment: 20
+    coordinates:
+      G:
+      - 0.0
+      - 0.0
+      M:
+      - 0.5
+      - 0.0
+      K:
+      - 0.3333333333
+      - 0.3333333333
+  compare_to_heff: true
+  band_slice:
+  - 46
+  - 54
+  plot:
+    top_bands: 8
+    align: top
+    figsize:
+    - 3.0
+    - 5.0
+model:
+  target_bands: top
+  max_order:
+    kinetic: 10
+    intralayer: 5
+    interlayer: 5
+  fit:
+    method: linear
+    kpoints:
+    - 0
+    - 2
+    - 20
+    bands: 8
+    one_sided_weight: 0.0
+    two_sided_weight: 0.0
+  harmonics:
+    intra:
+      count: 2
+    inter:
+      count: 3

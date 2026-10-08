@@ -46,9 +46,12 @@ See [common options and TAPW continuation](../README.md).
 The [bilayer MoTe2](../../examples/mote2_3.89/README.md),
 [bilayer ZrS2](../../examples/zrs2_3.89/README.md) and
 [trilayer MoTe2](../../examples/mote2_aab_5.09/README.md) directories provide
-fixed-geometry SCF inputs on the relaxed structures and separate rigid
-references for TAPW. These SCF inputs start without prior restart files and
-write `openmx.scfout`. The coordinate references are not SCF inputs.
+paired NSOC/SOC inputs and `POSCAR_relaxed` / `POSCAR_rigid`. Run NSOC to
+convergence on the relaxed structure, then one SOC iteration reading its
+restart files (`scf.restart c2n`). Both inputs run in the same directory: NSOC
+writes `nsoc_rst/`; SOC reads that directory and writes `soc.scfout`. The same
+relaxed coordinates are embedded in both OpenMX inputs; TAPW uses the rigid
+POSCAR reference.
 
 After installing OpenMX with its DFT_DATA19 database, build the reader from
 the repository root and set the executable/database paths:
@@ -62,7 +65,8 @@ export NPROCS=61
 ```
 
 Use the MPI rank count assigned to your calculation. Each material README
-connects SCF, relaxed-coordinate H/S symmetry averaging, TAPW and KP.
+connects NSOC, one-step SOC, relaxed-coordinate H/S symmetry averaging,
+TAPW and KP.
 The database must contain the PAO and PBE19 VPS files named by the supplied
 input. See the [OpenMX input specification](https://www.openmx-square.org/openmx_man3.9/node21.html)
 and [restart documentation](https://www.openmx-square.org/openmx_man3.9/node44.html).

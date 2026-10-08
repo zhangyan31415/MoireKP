@@ -135,10 +135,12 @@ examples/kp_canonical_smoke/data/band_energies.txt
 /examples/zrs2_3.89/kp/configs/*_gmkg_*.yaml
 /examples/zrs2_3.89/tapw/configs/*_gmkg_*.yaml
 
-# Locally regenerated first-principles outputs
-examples/**/openmx/scf/DFT_DATA19
-examples/**/openmx/scf/*_rst/
-examples/**/openmx/scf/*.dat#
-examples/**/openmx/scf/*.md
-examples/**/openmx/scf/*.cif
-examples/**/openmx/prepared/
+# Locally generated example outputs
+examples/*/DFT_DATA19
+examples/*/*_rst/
+examples/*/output/
+examples/*/prepared*/
+examples/*/*.dat#
+examples/*/*.cif
+examples/*/nsoc.*
+examples/*/soc.*

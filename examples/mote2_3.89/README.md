@@ -1,11 +1,11 @@
 # Bilayer MoTe2
 
-This directory supplies the relaxed first-principles input and the separate
-rigid TAPW reference for the paper example.
+The first-principles inputs are:
 
-- `openmx/scf/openmx.dat`: fixed-geometry, from-scratch OpenMX SCF input.
-- `openmx/scf/relaxed.extxyz`: the relaxed structure in the SCF input.
-- `openmx/selected_20261001/rigid.extxyz`: the reference used by TAPW.
+- `openmx_nsoc.dat`: NSOC self-consistent calculation on the relaxed structure.
+- `openmx_soc.dat`: one SOC iteration using the converged NSOC restart files.
+- `POSCAR_relaxed`: the structure used by both OpenMX calculations.
+- `POSCAR_rigid`: the separate reference used by TAPW.
 
 ## Generate H/S
 
@@ -15,33 +15,42 @@ Set `OPENMX`, `OPENMX_DATA`, `OPENMX_READER` and `NPROCS` as shown there.
 Run from the repository root:
 
 ```bash
-CASE=examples/mote2_3.89/openmx
-ln -s "$OPENMX_DATA" "$CASE/scf/DFT_DATA19"
-(cd "$CASE/scf" && mpirun -np "$NPROCS" "$OPENMX" openmx.dat -nt 1 > openmx.stdout.log)
+CASE=examples/mote2_3.89
+ln -s "$OPENMX_DATA" "$CASE/DFT_DATA19"
+(cd "$CASE" && mpirun -np "$NPROCS" "$OPENMX" openmx_nsoc.dat -nt 1 > nsoc.stdout.log)
 ```
 
-Check that the SCF reached convergence before continuing. If it reaches its
-iteration limit, continue the SCF calculation to convergence before exporting H/S.
-Use the relaxed SCF input for importing and symmetry averaging:
+Check that NSOC reached convergence before continuing. If it reaches its
+iteration limit, continue NSOC to convergence first. Keep `nsoc_rst/` in this
+directory, then run the one-step SOC calculation with the same MPI rank count:
 
 ```bash
-tapw prepare-hs openmx --input "$CASE/scf/openmx.scfout" \
-  --structure "$CASE/scf/openmx.dat" --binary "$OPENMX_READER" \
-  --output "$CASE/prepared" --format npz --symmetrize \
-  --symprec 0.05 --threads 1 --assume-nonmagnetic
-cp "$CASE/prepared/symmetrized/H_symm.npz" "$CASE/selected_20261001/H_symm.npz"
-cp "$CASE/prepared/symmetrized/S_symm.npz" "$CASE/selected_20261001/S_symm.npz"
+test -f "$CASE/nsoc_rst/nsoc.crst_check"
+(cd "$CASE" && mpirun -np "$NPROCS" "$OPENMX" openmx_soc.dat -nt 1 > soc.stdout.log)
 ```
 
-`prepared` must be a new output directory. The matrices are regenerated locally;
-they are not included in the source repository. Use the supplied rigid reference
-for the following TAPW steps.
+The SOC input reads `nsoc_rst/` with `scf.restart c2n` and writes `soc.scfout`.
+Check the SOC log for successful restart loading before importing H/S.
+This is one-step SOC on the converged NSOC density.
+
+```bash
+tapw prepare-hs openmx --input "$CASE/soc.scfout" \
+  --structure "$CASE/openmx_soc.dat" --binary "$OPENMX_READER" \
+  --output "$CASE/prepared" --format npz --symmetrize \
+  --symprec 0.05 --threads 1 --assume-nonmagnetic
+cp "$CASE/prepared/symmetrized/H_symm.npz" "$CASE/H_symm.npz"
+cp "$CASE/prepared/symmetrized/S_symm.npz" "$CASE/S_symm.npz"
+```
+
+`prepared` must be a new output directory. The matrices are generated locally.
+Import and symmetry averaging use the relaxed OpenMX geometry; TAPW uses
+`POSCAR_rigid` with the same atom order and orbital basis.
 
 ## Construct the models
 
 ```bash
-TAPW_CFG=examples/mote2_3.89/tapw/configs/mote2_3.89_K1_paper_20261001_q06.yaml
-KP_CFG=examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_tuned_q06.yaml
+TAPW_CFG=examples/mote2_3.89/tapw_K.yaml
+KP_CFG=examples/mote2_3.89/kp_K.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"
@@ -49,6 +58,6 @@ kp symm    -c "$KP_CFG"
 kp model   -c "$KP_CFG"
 ```
 
-The YAML files contain the model settings and output locations.
+Results are written under `output/tapw/` and `output/kp/`.
 For geometry and topology, use `tapw topo --help` or the generated
 `model/evaluate.py` topology settings.

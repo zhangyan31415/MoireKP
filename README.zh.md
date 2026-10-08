@@ -20,11 +20,11 @@ kp --help
 
 `tapw prepare-hs openmx|abacus|siesta` 读取已完成的 DFT 输出，写出以 eV 为单位的 H(R)、无量纲 S(R)、结构与轨道/自旋信息。[输入准备指南](scripts/README.zh.md)说明各后端的文件和命令。
 
-[论文算例](examples/README.md)提供 relaxed 结构上的 OpenMX 自洽输入、独立的 rigid TAPW 参考结构，以及重新生成 H/S 和构造六个模型的命令。大矩阵由读者在本地生成。以下命令从仓库根目录运行：
+[论文算例](examples/README.md)提供配套的 NSOC 自洽／一步 SOC 输入，以及 `POSCAR_relaxed` 和 `POSCAR_rigid`，以及重新生成 H/S 和构造六个模型的命令。大矩阵由读者在本地生成。以下命令从仓库根目录运行：
 
 ```bash
-TAPW_CFG=examples/zrs2_3.89/tapw/configs/zrs2_3.89_Gamma_spinful_q04.yaml
-KP_CFG=examples/zrs2_3.89/kp/configs/zrs2_3.89_Gamma_spinful_q04.yaml
+TAPW_CFG=examples/zrs2_3.89/tapw_Gamma.yaml
+KP_CFG=examples/zrs2_3.89/kp_Gamma.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"
@@ -42,7 +42,7 @@ TAPW 输出 `band/`、`symmetry/`、`symm_rep/`、`topology/`；KP 输出 `inspe
 
 - `tapw/tapw/`、`kp/kp/`：正式软件源码。
 - `scripts/`：后端准备工具、兼容入口和打包工具。
-- `examples/`：六种材料的配置、结构小文件及数据要求。
+- `examples/`：三个论文算例的输入文件和运行说明。
 
 [示例索引](examples/README.md)列出论文使用的六个模型。软件包提供源码、第一性原理输入和模型配置。
 
