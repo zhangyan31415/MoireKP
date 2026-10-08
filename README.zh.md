@@ -23,8 +23,8 @@ kp --help
 [论文算例](examples/README.md)提供配套的 NSOC 自洽／一步 SOC 输入，以及 `POSCAR_relaxed` 和 `POSCAR_rigid`，以及重新生成 H/S 和构造六个模型的命令。大矩阵由读者在本地生成。以下命令从仓库根目录运行：
 
 ```bash
-TAPW_CFG=examples/zrs2_3.89/tapw_Gamma.yaml
-KP_CFG=examples/zrs2_3.89/kp_Gamma.yaml
+TAPW_CFG=examples/zrs2_3.89/tapw/tapw_Gamma.yaml
+KP_CFG=examples/zrs2_3.89/kp/kp_Gamma.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"

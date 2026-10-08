@@ -1,6 +1,9 @@
 # A–AB trilayer MoTe2
 
-The first-principles inputs are:
+`openmx/` contains the first-principles inputs; `tapw/` and `kp/` contain
+the corresponding model configurations.
+
+The OpenMX inputs are:
 
 - `openmx_nsoc.dat`: NSOC self-consistent calculation on the relaxed structure.
 - `openmx_soc.dat`: one SOC iteration using the converged NSOC restart files.
@@ -15,7 +18,7 @@ Set `OPENMX`, `OPENMX_DATA`, `OPENMX_READER` and `NPROCS` as shown there.
 Run from the repository root:
 
 ```bash
-CASE=examples/mote2_aab_5.09
+CASE=examples/mote2_aab_5.09/openmx
 ln -s "$OPENMX_DATA" "$CASE/DFT_DATA19"
 (cd "$CASE" && mpirun -np "$NPROCS" "$OPENMX" openmx_nsoc.dat -nt 1 > nsoc.stdout.log)
 ```
@@ -50,15 +53,15 @@ Import and symmetry averaging use the relaxed OpenMX geometry; TAPW uses
 
 | Model | TAPW input | KP input |
 |---|---|---|
-| KA | `tapw_K.yaml` | `kp_KA.yaml` |
-| KB | `tapw_K.yaml` | `kp_KB.yaml` |
-| Gamma | `tapw_Gamma.yaml` | `kp_Gamma.yaml` |
+| KA | `tapw/tapw_K.yaml` | `kp/kp_KA.yaml` |
+| KB | `tapw/tapw_K.yaml` | `kp/kp_KB.yaml` |
+| Gamma | `tapw/tapw_Gamma.yaml` | `kp/kp_Gamma.yaml` |
 
 Run the commands for each matching pair.
 
 ```bash
-TAPW_CFG=examples/mote2_aab_5.09/tapw_K.yaml
-KP_CFG=examples/mote2_aab_5.09/kp_KA.yaml
+TAPW_CFG=examples/mote2_aab_5.09/tapw/tapw_K.yaml
+KP_CFG=examples/mote2_aab_5.09/kp/kp_KA.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"

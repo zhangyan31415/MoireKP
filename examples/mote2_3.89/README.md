@@ -1,6 +1,9 @@
 # Bilayer MoTe2
 
-The first-principles inputs are:
+`openmx/` contains the first-principles inputs; `tapw/` and `kp/` contain
+the corresponding model configurations.
+
+The OpenMX inputs are:
 
 - `openmx_nsoc.dat`: NSOC self-consistent calculation on the relaxed structure.
 - `openmx_soc.dat`: one SOC iteration using the converged NSOC restart files.
@@ -15,7 +18,7 @@ Set `OPENMX`, `OPENMX_DATA`, `OPENMX_READER` and `NPROCS` as shown there.
 Run from the repository root:
 
 ```bash
-CASE=examples/mote2_3.89
+CASE=examples/mote2_3.89/openmx
 ln -s "$OPENMX_DATA" "$CASE/DFT_DATA19"
 (cd "$CASE" && mpirun -np "$NPROCS" "$OPENMX" openmx_nsoc.dat -nt 1 > nsoc.stdout.log)
 ```
@@ -49,8 +52,8 @@ Import and symmetry averaging use the relaxed OpenMX geometry; TAPW uses
 ## Construct the models
 
 ```bash
-TAPW_CFG=examples/mote2_3.89/tapw_K.yaml
-KP_CFG=examples/mote2_3.89/kp_K.yaml
+TAPW_CFG=examples/mote2_3.89/tapw/tapw_K.yaml
+KP_CFG=examples/mote2_3.89/kp/kp_K.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"

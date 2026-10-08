@@ -1,8 +1,8 @@
 system:
-  output: output/tapw
-  structure: POSCAR_rigid
-  hamiltonian: H_symm.npz
-  overlap: S_symm.npz
+  output: ../output/tapw
+  structure: ../openmx/POSCAR_rigid
+  hamiltonian: ../openmx/H_symm.npz
+  overlap: ../openmx/S_symm.npz
   orbitals:
     Zr: s3p2d1
     S: s2p2d1

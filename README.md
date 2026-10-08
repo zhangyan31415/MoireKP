@@ -34,8 +34,8 @@ Preparation writes H(R) in eV, dimensionless S(R), structure and orbital/spin me
 The [paper examples](examples/README.md) include NSOC/SOC OpenMX inputs, relaxed and rigid POSCAR files and commands to regenerate H/S and build the six models. Large matrices are generated locally. From the repository root:
 
 ```bash
-TAPW_CFG=examples/zrs2_3.89/tapw_Gamma.yaml
-KP_CFG=examples/zrs2_3.89/kp_Gamma.yaml
+TAPW_CFG=examples/zrs2_3.89/tapw/tapw_Gamma.yaml
+KP_CFG=examples/zrs2_3.89/kp/kp_Gamma.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"

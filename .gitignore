@@ -136,11 +136,11 @@ examples/kp_canonical_smoke/data/band_energies.txt
 /examples/zrs2_3.89/tapw/configs/*_gmkg_*.yaml
 
 # Locally generated example outputs
-examples/*/DFT_DATA19
-examples/*/*_rst/
 examples/*/output/
-examples/*/prepared*/
-examples/*/*.dat#
-examples/*/*.cif
-examples/*/nsoc.*
-examples/*/soc.*
+examples/*/openmx/DFT_DATA19
+examples/*/openmx/*_rst/
+examples/*/openmx/prepared*/
+examples/*/openmx/*.dat#
+examples/*/openmx/*.cif
+examples/*/openmx/nsoc.*
+examples/*/openmx/soc.*

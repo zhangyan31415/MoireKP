@@ -80,6 +80,6 @@ system:
   - 2
   name: 1+2 A-AB MoTe2 Gamma
   orbital_order: Te-s3p2d2f1,Mo-s3p2d2,Te-s3p2d2f1
-  output: output/kp/Gamma
+  output: ../output/kp/Gamma
   spin: all
-  tapw_output: output/tapw
+  tapw_output: ../output/tapw

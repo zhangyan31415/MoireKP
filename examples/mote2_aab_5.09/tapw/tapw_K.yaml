@@ -1,22 +1,22 @@
 system:
-  output: output/tapw
-  structure: POSCAR_rigid
-  hamiltonian: H_symm.npz
-  overlap: S_symm.npz
+  output: ../output/tapw
+  structure: ../openmx/POSCAR_rigid
+  hamiltonian: ../openmx/H_symm.npz
+  overlap: ../openmx/S_symm.npz
   orbitals:
-    Te: s3p2d2f1
     Mo: s3p2d2
-  twist_index: 8
+    Te: s3p2d2f1
+  twist_index: 6
   layers:
   - 1
-  - 1
+  - 2
   spin: true
 bands:
   valley: K1
-  q_shell: 6
-  efermi: -4.103803081270156
-  num_processes: 61
-  blas_threads: 1
+  q_shell: 4
+  efermi: -4.182383731612424
+  num_processes: 5
+  blas_threads: 16
   num_bands: 100
   save_hamiltonian: true
   save_wavefunctions: false
@@ -39,12 +39,12 @@ bands:
       - 0.3333333333
 symmetry:
   valley: K1
-  q_shell: 6
-  efermi: -4.103803081270156
-  num_processes: 61
-  blas_threads: 1
+  q_shell: 4
+  efermi: -4.182383731612424
+  num_processes: 5
+  blas_threads: 16
   tolerance: 0.02
-  spglib_symprec: 0.005
+  spglib_symprec: 0.05
   debug: false
   developer_outputs: false
 field:

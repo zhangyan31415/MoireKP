@@ -1,7 +1,8 @@
 # Paper examples
 
-Each directory contains the NSOC/SOC OpenMX inputs, `POSCAR_relaxed`,
-`POSCAR_rigid`, TAPW/KP YAML inputs and a README with the commands to run them.
+Each example has `openmx/` for the NSOC/SOC inputs and relaxed/rigid POSCAR
+files, `tapw/` and `kp/` for the model configurations, and a top-level README
+with the commands to run them.
 NSOC is run to convergence before one-step SOC. Large H/S matrices and
 subsequent results are generated locally.
 

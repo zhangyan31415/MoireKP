@@ -2,8 +2,8 @@
 # orders 6/4/6 and two matrix samples at Gamma and M.
 system:
   name: ZrS2
-  output: output/kp/M
-  tapw_output: output/tapw
+  output: ../output/kp/M
+  tapw_output: ../output/tapw
   layers: [1, 1]
   spin: all
   orbital_order: S-s2p2d1,Zr-s3p2d1,S-s2p2d1

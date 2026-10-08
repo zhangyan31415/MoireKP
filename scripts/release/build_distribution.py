@@ -96,7 +96,7 @@ def verify_distributions(wheel, source):
                 if b'\x00' in archive.extractfile(member).read():
                     raise ValueError(f'Invalid text file in source distribution: {member.name}')
         for name in ['README.md', 'README.zh.md',
-                     'examples/zrs2_3.89/kp_Gamma.yaml']:
+                     'examples/zrs2_3.89/kp/kp_Gamma.yaml']:
             if name not in members:
                 raise ValueError(f'Missing source file: {name}')
     return len(members)

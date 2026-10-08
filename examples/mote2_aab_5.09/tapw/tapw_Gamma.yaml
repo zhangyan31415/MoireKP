@@ -1,8 +1,8 @@
 system:
-  output: output/tapw
-  structure: POSCAR_rigid
-  hamiltonian: H_symm.npz
-  overlap: S_symm.npz
+  output: ../output/tapw
+  structure: ../openmx/POSCAR_rigid
+  hamiltonian: ../openmx/H_symm.npz
+  overlap: ../openmx/S_symm.npz
   orbitals:
     Mo: s3p2d2
     Te: s3p2d2f1
@@ -12,7 +12,7 @@ system:
   - 2
   spin: true
 bands:
-  valley: K1
+  valley: Gamma
   q_shell: 4
   efermi: -4.182383731612424
   num_processes: 5
@@ -38,7 +38,7 @@ bands:
       - 0.3333333333
       - 0.3333333333
 symmetry:
-  valley: K1
+  valley: Gamma
   q_shell: 4
   efermi: -4.182383731612424
   num_processes: 5

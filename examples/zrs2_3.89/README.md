@@ -1,6 +1,9 @@
 # AB bilayer ZrS2
 
-The first-principles inputs are:
+`openmx/` contains the first-principles inputs; `tapw/` and `kp/` contain
+the corresponding model configurations.
+
+The OpenMX inputs are:
 
 - `openmx_nsoc.dat`: NSOC self-consistent calculation on the relaxed structure.
 - `openmx_soc.dat`: one SOC iteration using the converged NSOC restart files.
@@ -15,7 +18,7 @@ Set `OPENMX`, `OPENMX_DATA`, `OPENMX_READER` and `NPROCS` as shown there.
 Run from the repository root:
 
 ```bash
-CASE=examples/zrs2_3.89
+CASE=examples/zrs2_3.89/openmx
 ln -s "$OPENMX_DATA" "$CASE/DFT_DATA19"
 (cd "$CASE" && mpirun -np "$NPROCS" "$OPENMX" openmx_nsoc.dat -nt 1 > nsoc.stdout.log)
 ```
@@ -50,14 +53,14 @@ Import and symmetry averaging use the relaxed OpenMX geometry; TAPW uses
 
 | Model | TAPW input | KP input |
 |---|---|---|
-| Gamma | `tapw_Gamma.yaml` | `kp_Gamma.yaml` |
-| M | `tapw_M.yaml` | `kp_M.yaml` |
+| Gamma | `tapw/tapw_Gamma.yaml` | `kp/kp_Gamma.yaml` |
+| M | `tapw/tapw_M.yaml` | `kp/kp_M.yaml` |
 
 Run the commands for each matching pair.
 
 ```bash
-TAPW_CFG=examples/zrs2_3.89/tapw_Gamma.yaml
-KP_CFG=examples/zrs2_3.89/kp_Gamma.yaml
+TAPW_CFG=examples/zrs2_3.89/tapw/tapw_Gamma.yaml
+KP_CFG=examples/zrs2_3.89/kp/kp_Gamma.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"
