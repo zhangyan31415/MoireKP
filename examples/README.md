@@ -8,6 +8,8 @@ produced locally.
 
 ## Paper examples
 
+Inputs and workflows: commit [4d12c65](https://github.com/zhangyan31415/MoireKP/commit/4d12c6507d726a010c25568142c5fcbded34d070).
+
 | Material | Valleys | Instructions |
 |---|---|---|
 | AA bilayer MoTe2 | K | [MoTe2](mote2_3.89/README.md) |
