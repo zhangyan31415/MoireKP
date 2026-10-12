@@ -43,7 +43,7 @@ kp symm    -c "$KP_CFG"
 kp model   -c "$KP_CFG"
 ```
 
-`kp project` selects the low-energy space under the configured policy and applies energy-linearized Löwdin reduction by default. `kp symm` supplies the symmetry package consumed by `kp model`. The model fit and optional nonlinear refinement are separate from the reduction.
+`kp project` selects the low-energy space under the configured policy and applies energy-linearized Löwdin reduction by default. `kp symm` supplies the symmetry matrices used by `kp model` to determine the continuum-model coefficients.
 
 TAPW writes `band/`, `symmetry/`, `symm_rep/` and `topology/`. KP writes `inspect/`, `projection/`, `symmetry/`, `symm_rep/` and `model/`. Run the generated `model/evaluate.py` to evaluate an exported model without the MoireKP package.
 
@@ -66,8 +66,6 @@ The [example index](examples/README.md) identifies the six models used in the pa
 python scripts/release/build_distribution.py --output dist
 ```
 
-The builder checks the wheel against the source and excludes local research files from the source archive.
-
 ## License
 
-Software, repository-authored documentation and small configurations use `LGPL-3.0-or-later`; see [COPYRIGHT](COPYRIGHT), [COPYING.LESSER](COPYING.LESSER) and [COPYING](COPYING). This license does not automatically cover external datasets or DFT inputs. The separately licensed ABACUS CSR utility includes its own notice.
+Software, repository-authored documentation and small configurations use `LGPL-3.0-or-later`; see [COPYRIGHT](COPYRIGHT), [COPYING.LESSER](COPYING.LESSER) and [COPYING](COPYING).

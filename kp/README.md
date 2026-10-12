@@ -1,7 +1,7 @@
 # kp package
 
 The `kp` package projects TAPW Hamiltonians and symmetry actions into selected
-low-energy spaces, fits moiré continuum models, and exports standalone NumPy
+low-energy spaces, constructs moiré continuum models, and exports standalone NumPy
 evaluators.
 
 ## Installation
@@ -31,8 +31,8 @@ Example configs are under the repository-level `examples/` directory. A
 complete KP workflow is:
 
 ```bash
-CFG=examples/mote2_3.89/kp/configs/mote2_3.89_K1_spinless_q06.yaml
-kp inspect  -c "$CFG"  # optional source-spectrum diagnostic
+CFG=examples/mote2_3.89/kp/kp_K.yaml
+kp inspect  -c "$CFG"  # optional band plots
 kp project  -c "$CFG"
 kp symm     -c "$CFG"
 kp model    -c "$CFG"
@@ -45,20 +45,20 @@ These commands have distinct roles:
 - `kp project` selects and downfolds the low-energy subspace and writes Heff.
 - `kp symm` projects and exactifies the symmetry generators required by the
   continuum model.
-- `kp model` selects or loads harmonic support, fits the configured model, and
+- `kp model` selects or loads harmonics, determines the model coefficients, and
   exports the standalone evaluator.
 - `kp symm-rep` optionally analyzes high-symmetry band blocks after
   `kp project` and `kp symm`.
 
-The scientific runs require external arrays that are not committed to the
-source repository. `examples/README.md` describes the tracked case configs and
-automatic low-energy and harmonic selection.
+The [paper examples](../examples/README.md) provide first-principles inputs and
+commands to regenerate the large H/S arrays, run TAPW, and construct the six
+models. The arrays are generated locally.
 
 ## Band representations
 
 `kp symm-rep` reads `projection/heff.npy`, `projection/kpoints.npy`, and
-`symmetry/representations.npz`. It validates their shared artifact identity,
-uses the persisted projected k-points to determine the little group and
+`symmetry/representations.npz`. It checks that these inputs belong to the same
+projection, uses the saved k-points to determine the little group and
 reciprocal sewing shift, and writes:
 
 ```text
@@ -70,9 +70,8 @@ symm_rep/
   band_representations.npz
 ```
 
-The output preserves each raw projected block, its raw unitarity residual, and
-the distance to the reported polar-unitary block. A poor raw block remains
-marked as such; polar decomposition is not a replacement for the diagnostic.
+The output includes each projected block, its unitarity residual, and the
+change introduced by polar decomposition.
 
 An optional top-level `symm_rep` section may override `points`,
 `valence_count`, `conduction_count`, `degeneracy_tol`, or `output_dir`.
@@ -102,5 +101,5 @@ There is no separate `kp export` command.
 - `kp/io`: TAPW Hamiltonian and Q-set loading
 - `kp/blocks`: Q-block assembly and low-energy projection
 - `kp/symmetry`: projected symmetry actions and exactification
-- `kp/model`: continuum-model construction, fitting, and export
+- `kp/model`: continuum-model construction, coefficient extraction, and export
 - `kp/viz`: plotting utilities

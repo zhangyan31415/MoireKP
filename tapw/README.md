@@ -115,6 +115,6 @@ Set the reported points in the configuration under `symmetry.representation`.
 
 ## Examples
 
-Tracked TAPW case configs live under
-`examples/<material>/tapw/configs/`. Their large matrices and generated arrays
-are external and are not committed to the source repository.
+The [paper examples](../examples/README.md) provide TAPW configurations under
+`examples/<material>/tapw/` and commands to regenerate the H/S matrices from
+the supplied first-principles inputs.

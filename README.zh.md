@@ -20,7 +20,7 @@ kp --help
 
 `tapw prepare-hs openmx|abacus|siesta` 读取已完成的 DFT 输出，写出以 eV 为单位的 H(R)、无量纲 S(R)、结构与轨道/自旋信息。[输入准备指南](scripts/README.zh.md)说明各后端的文件和命令。
 
-[论文算例](examples/README.md)提供配套的 NSOC 自洽／一步 SOC 输入，以及 `POSCAR_relaxed` 和 `POSCAR_rigid`，以及重新生成 H/S 和构造六个模型的命令。大矩阵由读者在本地生成。以下命令从仓库根目录运行：
+[论文算例](examples/README.md)提供配套的 NSOC 自洽／一步 SOC 输入、`POSCAR_relaxed` 和 `POSCAR_rigid`，以及重新生成 H/S 和构造六个模型的命令。大矩阵由读者在本地生成。以下命令从仓库根目录运行：
 
 ```bash
 TAPW_CFG=examples/zrs2_3.89/tapw/tapw_Gamma.yaml
@@ -32,7 +32,7 @@ kp symm    -c "$KP_CFG"
 kp model   -c "$KP_CFG"
 ```
 
-`kp project` 按配置选择低能空间，默认使用能量线性化 Löwdin 下折叠。`kp symm` 生成模型构造所需的对称包；`kp model` 拟合并导出模型。下折叠与后续系数拟合是两个步骤。
+`kp project` 按配置选择低能空间，默认使用能量线性化 Löwdin 下折叠。`kp symm` 生成对称矩阵，`kp model` 据此确定连续模型的系数并导出模型。
 
 TAPW 输出 `band/`、`symmetry/`、`symm_rep/`、`topology/`；KP 输出 `inspect/`、`projection/`、`symmetry/`、`symm_rep/`、`model/`。导出后运行 `model/evaluate.py`，无需安装 MoireKP 即可求值。
 
@@ -50,8 +50,6 @@ TAPW 输出 `band/`、`symmetry/`、`symm_rep/`、`topology/`；KP 输出 `inspe
 python scripts/release/build_distribution.py --output dist
 ```
 
-打包工具核对安装包与源码，并排除本地研究文件。
-
 ## 许可证
 
-软件、仓库编写的文档和小型配置采用 `LGPL-3.0-or-later`，条款见 [COPYRIGHT](COPYRIGHT)、[COPYING.LESSER](COPYING.LESSER) 和 [COPYING](COPYING)。软件许可不会自动覆盖外部数据或 DFT 输入；ABACUS CSR 工具附有独立许可声明。
+软件、仓库编写的文档和小型配置采用 `LGPL-3.0-or-later`，条款见 [COPYRIGHT](COPYRIGHT)、[COPYING.LESSER](COPYING.LESSER) 和 [COPYING](COPYING)。
