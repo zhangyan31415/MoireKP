@@ -158,7 +158,7 @@ def test_model_compiler_materializes_only_selected_adjoint_generator(
         "kp_symm_exactification": {
             "polynomial_coordinate": {
                 "coordinate_convention": (
-                    "right_handed_model_cartesian_reciprocal"
+                    "right_handed_model_cartesian_reciprocal_v1"
                 ),
                 "origin": [0.0, 0.0],
                 "origin_role": (

@@ -2741,6 +2741,32 @@ class SymmetryProjectionCliTests(unittest.TestCase):
                 "exactified_valley_expansion_origin_in_model_cartesian",
             )
             self.assertEqual(polynomial_coordinate["valley"], "K1")
+            # Consume the actual producer metadata, rather than duplicating its
+            # format discriminator in a synthetic model fixture.
+            from kp.model.response_basis import (
+                COORDINATE_CONVENTION,
+                PolynomialCoordinateBasis,
+                _exactified_polynomial_origin,
+            )
+
+            origin = _exactified_polynomial_origin(
+                SimpleNamespace(symmetry_source_metadata=summary)
+            )
+            np.testing.assert_array_equal(origin, [0.0, 0.0])
+            coordinate = PolynomialCoordinateBasis.from_reciprocal_basis(
+                origin=origin,
+                reciprocal_basis=(
+                    summary["kp_symm_exactification"]["bM1"],
+                    summary["kp_symm_exactification"]["bM2"],
+                ),
+                max_degree=0,
+            )
+            self.assertEqual(
+                coordinate.metadata()["coordinate_convention"],
+                polynomial_coordinate["coordinate_convention"],
+            )
+            self.assertEqual(COORDINATE_CONVENTION, polynomial_coordinate["coordinate_convention"])
+
 
     def test_symm_auto_frame_uses_reflection_axis_when_rotation_is_not_configured(self):
         with tempfile.TemporaryDirectory() as td:

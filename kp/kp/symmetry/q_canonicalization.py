@@ -10,6 +10,8 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
+# Single current on-disk coordinate discriminator shared by producer and model.
+COORDINATE_CONVENTION = "right_handed_model_cartesian_reciprocal_v1"
 CANONICAL_Q_VERSION = "constrained_group_action_projection_v1"
 
 

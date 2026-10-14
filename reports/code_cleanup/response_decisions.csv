@@ -26,7 +26,7 @@ kp/kp/model/response_basis.py,LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,rename,LOCAL_FIX
 kp/kp/model/response_basis.py,LOCAL_FIXED_RELATIVE_TOLERANCE_V1,rename,LOCAL_FIXED_RELATIVE_TOLERANCE,Mathematical identity without development revision,response family and model callers
 kp/kp/model/response_basis.py,LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,rename,LOCAL_FIXED_GRAY_ZONE_FACTOR,Mathematical identity without development revision,response family and model callers
 kp/kp/model/response_basis.py,complete_linear_v2,rename,complete_linear,Mathematical policy unchanged; current identity only,response family metadata and cache identity
-kp/kp/model/response_basis.py,right_handed_model_cartesian_reciprocal_v1,rename,right_handed_model_cartesian_reciprocal,Mathematical policy unchanged; current identity only,response family metadata and cache identity
+kp/kp/model/response_basis.py,right_handed_model_cartesian_reciprocal_v1,retain,COORDINATE_CONVENTION from symmetry.q_canonicalization,Single current on-disk tag shared by actual producer and response consumer; no alternate tags accepted,response family metadata and cache identity
 kp/kp/model/response_basis.py,reynolds_mean__hermitian_half_sum__dimensionless_k_v1,rename,reynolds_mean__hermitian_half_sum__dimensionless_k,Mathematical policy unchanged; current identity only,response family metadata and cache identity
 kp/kp/model/response_basis.py,response_amplitude_abs_c_times_s_v1,rename,response_amplitude_abs_c_times_s,Mathematical policy unchanged; current identity only,response family metadata and cache identity
 kp/kp/model/response_basis.py,coefficient_response_norm__energy_1eV_v1,rename,coefficient_response_norm__energy_1eV,Mathematical policy unchanged; current identity only,response family metadata and cache identity
@@ -176,3 +176,4 @@ kp/kp/model/response_basis_graded.py,except FactorizedTermActionError at line 19
 kp/kp/model/response_basis_local_fixed.py,"except (TypeError, ValueError) at line 81",retain,,Narrow domain/input validation or error context; mathematical certification failure propagates,Owned response family
 kp/kp/model/response_basis_local_fixed.py,except TypeError at line 96,retain,,Narrow domain/input validation or error context; mathematical certification failure propagates,Owned response family
 kp/kp/model/response_basis_local_fixed.py,except TypeError at line 111,retain,,Narrow domain/input validation or error context; mathematical certification failure propagates,Owned response family
+kp/kp/symmetry/q_canonicalization.py,COORDINATE_CONVENTION,centralize,right_handed_model_cartesian_reciprocal_v1,Own the single current serialized geometry convention; producer and consumer import directly,projection.py and response_basis.py

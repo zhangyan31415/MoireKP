@@ -2793,7 +2793,7 @@ def _complete_onsite_config(*, q_shift: float = 0.0) -> MoireConfig:
             "kp_symm_exactification": {
                 "status": "exactified",
                 "polynomial_coordinate": {
-                    "coordinate_convention": "right_handed_model_cartesian_reciprocal",
+                    "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
                     "origin": [0.0, 0.0],
                     "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
                     "valley": "Gamma",
@@ -3206,7 +3206,7 @@ def _gamma_gauge_covariance_config(
                 "status": "exactified",
                 "polynomial_coordinate": {
                     "coordinate_convention": (
-                        "right_handed_model_cartesian_reciprocal"
+                        "right_handed_model_cartesian_reciprocal_v1"
                     ),
                     "origin": [0.0, 0.0],
                     "origin_role": (
@@ -4546,7 +4546,7 @@ def test_model_basis_persistent_cache_is_warm_in_second_python_process(
                 "kp_symm_exactification": {{
                     "status": "exactified",
                     "polynomial_coordinate": {{
-                        "coordinate_convention": "right_handed_model_cartesian_reciprocal",
+                        "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
                         "origin": [0.0, 0.0],
                         "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
                         "valley": "Gamma",

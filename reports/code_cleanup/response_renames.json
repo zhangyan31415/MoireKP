@@ -35,7 +35,6 @@
   },
   "strings": {
     "complete_linear_v2": "complete_linear",
-    "right_handed_model_cartesian_reciprocal_v1": "right_handed_model_cartesian_reciprocal",
     "reynolds_mean__hermitian_half_sum__dimensionless_k_v1": "reynolds_mean__hermitian_half_sum__dimensionless_k",
     "response_amplitude_abs_c_times_s_v1": "response_amplitude_abs_c_times_s",
     "coefficient_response_norm__energy_1eV_v1": "coefficient_response_norm__energy_1eV",

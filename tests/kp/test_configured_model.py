@@ -1347,7 +1347,7 @@ def _write_symm_frame_manifest(
         "frame": {"q_transform": {"rotation_deg": float(rotation_deg)}}, "operations": [],
         "exactification_owner": "kp_symm", "requires_model_exactification": False,
         "kp_symm_exactification": {"polynomial_coordinate": {
-            "coordinate_convention": "right_handed_model_cartesian_reciprocal",
+            "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
             "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
             "origin": [0.0, 0.0],
         }},

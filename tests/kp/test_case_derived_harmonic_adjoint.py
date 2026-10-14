@@ -90,7 +90,7 @@ def test_literal_harmonic_adjoint_provenance_reaches_candidate_term_metadata() -
                 "status": "exactified",
                 "polynomial_coordinate": {
                     "coordinate_convention": (
-                        "right_handed_model_cartesian_reciprocal"
+                        "right_handed_model_cartesian_reciprocal_v1"
                     ),
                     "origin": [0.0, 0.0],
                     "origin_role": (

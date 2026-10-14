@@ -132,7 +132,7 @@ def _write_symm_frame_manifest(
         "raw_q_hash": q_hash, "canonical_q_hash": q_hash,
     }}
     manifest["kp_symm_exactification"] = {"polynomial_coordinate": {
-        "coordinate_convention": "right_handed_model_cartesian_reciprocal",
+        "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
         "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
         "origin": [0.0, 0.0],
     }}

@@ -111,7 +111,7 @@ from .joint_exactification import (
     materialize_block_route_action,
     phase_preserving_joint_source as _phase_preserving_joint_source,
 )
-from .q_canonicalization import CanonicalQResult, canonicalize_q_geometry
+from .q_canonicalization import COORDINATE_CONVENTION, CanonicalQResult, canonicalize_q_geometry
 from .structure_certificate import (
     CertificationStatus,
     FiberSectorLayout,
@@ -6969,7 +6969,7 @@ def _exactify_and_write_projection_summary(
         "n_orb": [int(n_orb[0]), int(n_orb[1])],
         "sectors": sectors,
         "polynomial_coordinate": {
-            "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
+            "coordinate_convention": COORDINATE_CONVENTION,
             "origin": [0.0, 0.0],
             "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
             "valley": str(ctx.config.valley),

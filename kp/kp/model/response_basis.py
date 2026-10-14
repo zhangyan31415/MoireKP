@@ -15,6 +15,7 @@ from scipy import sparse
 
 from ..identity import hash_array
 from ..symmetry.joint_exactification import materialize_block_route_action
+from ..symmetry.q_canonicalization import COORDINATE_CONVENTION
 from .response_basis_fixed_subspace import REAL_LINEAR_ACTION_CONVENTION
 from .response_basis_local_fixed import (
     LOCAL_FIXED_ABSOLUTE_TOLERANCE,
@@ -32,7 +33,6 @@ from .response_basis_local_fixed import (
 
 
 RESPONSE_SEMANTICS = "complete_linear"
-COORDINATE_CONVENTION = "right_handed_model_cartesian_reciprocal"
 RESPONSE_NORMALIZATION = "reynolds_mean__hermitian_half_sum__dimensionless_k"
 COEFFICIENT_NORMALIZATION = "response_amplitude_abs_c_times_s"
 REGULARIZATION_NORMALIZATION = "coefficient_response_norm__energy_1eV"
