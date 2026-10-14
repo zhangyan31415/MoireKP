@@ -53,5 +53,3 @@ python scripts/release/build_distribution.py --output dist
 ## 许可证
 
 软件、仓库编写的文档和小型配置采用 `LGPL-3.0-or-later`，条款见 [COPYRIGHT](COPYRIGHT)、[COPYING.LESSER](COPYING.LESSER) 和 [COPYING](COPYING)。
-
-软件许可证不会自动覆盖外部第一性原理数据集；数据来源与许可单独记录在 `examples/data-manifest.yaml`。

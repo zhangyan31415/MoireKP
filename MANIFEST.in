@@ -85,16 +85,8 @@ include examples/zrs2_3.89/tapw/tapw_M.yaml
 include examples/zrs2_3.89/kp/kp_Gamma.yaml
 include examples/zrs2_3.89/kp/kp_M.yaml
 
-recursive-include tests *.py *.yaml *.yml *.json *.txt
-include pytest.ini
-include RELEASE_VALIDATION.md
-include RELEASE_BLOCKERS.md
-include examples/data-manifest.yaml
-include scripts/release/release_gate.sh
+prune tests
 prune reports
-exclude tests/test_paper_publication.py
-exclude tests/test_single_paper_manuscript.py
-exclude tests/test_quadratic_top6_experiment.py
-exclude tests/test_full_window_statistics.py
-exclude tests/test_native_overlap_cluster_scores.py
-exclude tests/kp/test_fixed_spin.py
+exclude pytest.ini
+exclude examples/data-manifest.yaml
+exclude scripts/release/release_gate.sh

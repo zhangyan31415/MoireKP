@@ -69,5 +69,3 @@ python scripts/release/build_distribution.py --output dist
 ## License
 
 Software, repository-authored documentation and small configurations use `LGPL-3.0-or-later`; see [COPYRIGHT](COPYRIGHT), [COPYING.LESSER](COPYING.LESSER) and [COPYING](COPYING).
-
-The software license does not automatically cover external first-principles datasets. See `examples/data-manifest.yaml` for the separately recorded data provenance.

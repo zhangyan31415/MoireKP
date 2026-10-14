@@ -61,7 +61,7 @@ def verify_distributions(wheel, source):
                     if len(matches) != 1 or archive.read(matches[0]) != path.read_bytes():
                         raise ValueError(f'Wheel tool/resource mismatch: {path.relative_to(ROOT)}')
         invalid = [name for name in archive.namelist()
-                   if name.startswith(('tests/', 'docs/', 'devtools/', 'kp/experimental/'))
+                   if name.startswith(('tests/', 'reports/', 'docs/', 'devtools/', 'kp/experimental/'))
                    or '/share/moirekp/docs/' in name
                    or '/share/moirekp/scripts/legacy/' in name
                    or name in {'tapw/chern_post_lijh.py', 'tapw/plot_band_01.py'}]
@@ -69,25 +69,23 @@ def verify_distributions(wheel, source):
             raise ValueError(f'Internal files in wheel: {invalid}')
     forbidden = {'paper', 'results', 'validation_runs', 'devtools', 'review_bundles',
                  'review_outputs', 'review_packages', 'build', 'dist', 'tmp', 'output',
-                 'docs', 'reports'}
+                 'docs', 'reports', 'tests'}
     with tarfile.open(source) as archive:
         members = [m.name.split('/', 1)[1] for m in archive.getmembers()
                    if m.isfile() and '/' in m.name]
         example_inputs = {line.removeprefix('include ').strip()
                           for line in (ROOT / 'MANIFEST.in').read_text().splitlines()
                           if line.startswith('include examples/')}
-        excluded_tests = {line.removeprefix('exclude ').strip()
-                          for line in (ROOT / 'MANIFEST.in').read_text().splitlines()
-                          if line.startswith('exclude tests/')}
         invalid = [name for name in members if Path(name).parts[0] in forbidden
                    or any(part.startswith(('outputs', 'stability_', 'current_flow_',
                                             'unweighted_search_', 'runs'))
                           for part in Path(name).parts)
                    or name.endswith(('.log', '.pyc', '.so'))
                    or name.startswith(('kp/kp/experimental/', 'scripts/benchmarks/', 'scripts/legacy/'))
-                   or name in excluded_tests
                    or (name.startswith('examples/zrs2_3.89/') and '_gmkg_' in Path(name).name)
-                   or name in {'scripts/release_gate.sh',
+                   or name in {'pytest.ini', 'RELEASE_BLOCKERS.md', 'RELEASE_VALIDATION.md',
+                               'examples/data-manifest.yaml', 'scripts/release/release_gate.sh',
+                               'scripts/release_gate.sh',
                                'scripts/benchmark_physical_export.py',
                                'scripts/benchmark_physical_export_suite.py',
                                'tapw/environment.yml', 'tapw/tapw/chern_post_lijh.py',
@@ -104,9 +102,6 @@ def verify_distributions(wheel, source):
                 if b'\x00' in archive.extractfile(member).read():
                     raise ValueError(f'Invalid text file in source distribution: {member.name}')
         for name in ['README.md', 'README.zh.md',
-                     'pytest.ini', 'tests/test_release_contract.py',
-                     'tests/kp/test_example_dependency_contract.py',
-                     'scripts/release/release_gate.sh',
                      'examples/zrs2_3.89/kp/kp_Gamma.yaml']:
             if name not in members:
                 raise ValueError(f'Missing source file: {name}')
