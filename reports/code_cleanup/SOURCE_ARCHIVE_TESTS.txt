@@ -1,9 +1,11 @@
-Actual final3 source archive regression
+Current committed source archive full fast regression
+Commit: cb47436a216719e08f4cefea3cf7a2e0922e0ade
 Node: test001
 Environment: /data/home/zy/mambaforge/envs/moirekp
-Root: /data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/source-archive-final3-20261014/moirekp-0.1.0
-Imports: kp/tapw both asserted inside the extracted archive.
+Root: /data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/source-archive-cb47436/moirekp-0.1.0
+Imports: kp/tapw both asserted inside the extracted current archive.
+Layout: one test process; OMP/MKL/OpenBLAS/NumExpr threads=1.
 Command: python -m pytest -p no:cacheprovider -m "not slow and not external_data" -q
-Result: 2556 passed, 3 skipped, 21 deselected in 277.67s; foreground exit 0.
-Log: /data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/logs/archive-full-tests-final3-20261014.log
+Result: 2556 passed, 3 skipped, 21 deselected in 304.51s; foreground exit 0.
+Log: /data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/logs/archive-full-tests-cb47436.log
 Scope: package small regressions; not a real material production result.

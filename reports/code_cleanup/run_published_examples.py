@@ -9,9 +9,11 @@ or TAPW H(k). Existing published exports are comparison oracles only.
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ProcessPoolExecutor
 import hashlib
 import importlib.util
 import json
+import multiprocessing as mp
 import os
 from pathlib import Path
 import socket
@@ -74,6 +76,61 @@ def metrics(actual, expected):
             "rms_ev": float(np.sqrt(np.mean(np.abs(delta) ** 2)))}
 
 
+_PHYSICAL_VERIFICATION_MODEL = None
+_FROZEN_VERIFICATION_MODEL = None
+
+
+def _initialize_physical_verification_worker(model_root):
+    """Load the two independent exported implementations once per worker."""
+    for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+        os.environ[key] = "1"
+    model_root = Path(model_root)
+    global _PHYSICAL_VERIFICATION_MODEL, _FROZEN_VERIFICATION_MODEL
+    _PHYSICAL_VERIFICATION_MODEL = imported(
+        model_root / "physical_model.py", "physical_verification_export"
+    ).load_model(model_root)
+    _FROZEN_VERIFICATION_MODEL = imported(
+        model_root / "evaluate.py", "frozen_verification_export"
+    ).load_model(model_root)
+
+
+def _physical_verification_point(kpoint):
+    return metrics(
+        _PHYSICAL_VERIFICATION_MODEL.hamiltonian(kpoint),
+        _FROZEN_VERIFICATION_MODEL.hamiltonian(kpoint),
+    )
+
+
+def physical_export_metrics(output, points, *, workers=8):
+    """Compare ordered momenta using spawn workers and one BLAS thread each.
+
+    Import this script normally as ``run_published_examples`` when calling it
+    from another script so the module-level worker functions remain picklable.
+    """
+    if workers < 1:
+        raise ValueError("Physical verification worker count must be positive")
+    thread_keys = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS")
+    previous = {key: os.environ.get(key) for key in thread_keys}
+    # Spawn imports the caller before invoking the initializer. Set these here
+    # so even a caller that imports NumPy at module scope starts workers at 1.
+    for key in thread_keys:
+        os.environ[key] = "1"
+    try:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=mp.get_context("spawn"),
+            initializer=_initialize_physical_verification_worker,
+            initargs=(str(Path(output) / "model"),),
+        ) as pool:
+            return list(pool.map(_physical_verification_point, points, chunksize=1))
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def input_identity(parent, valley, shell):
     import numpy as np
     channel = parent / valley / shell
@@ -94,7 +151,7 @@ def input_identity(parent, valley, shell):
     return files
 
 
-def validate(output, baseline, name):
+def validate(output, baseline, name, *, physical_workers=8):
     import numpy as np
     required = ("projection/heff.npy", "projection/basis.npz",
                 "projection/selection_artifact.json", "symmetry/representations.npz",
@@ -118,10 +175,7 @@ def validate(output, baseline, name):
     hermiticity_max = max(float(np.max(np.abs((h := evaluator.hamiltonian(k)) - h.conj().T))) for k in points)
     if hermiticity_max > 1e-8:
         raise ValueError(f"Exported Hamiltonian is not Hermitian: {hermiticity_max}")
-    physical = imported(output / "model/physical_model.py", "published_physical_" + name).load_model(output / "model")
-    matrix_errors = []
-    for k in points:
-        matrix_errors.append(metrics(physical.hamiltonian(k), evaluator.hamiltonian(k)))
+    matrix_errors = physical_export_metrics(output, points, workers=physical_workers)
     physical_max = max(row["max_abs_ev"] for row in matrix_errors)
     if physical_max > 1e-8:
         raise ValueError(f"Independent physical text export differs from frozen evaluator: {physical_max}")
@@ -130,7 +184,10 @@ def validate(output, baseline, name):
               "heff_shape": list(heff.shape), "standalone_vs_saved_bands": self_check,
               "export_hermiticity_max_ev": hermiticity_max,
               "physical_text_vs_frozen_matrix": {"points": 61, "max_abs_ev": physical_max,
-                                                 "per_point": matrix_errors},
+                                                 "per_point": matrix_errors,
+                                                 "process_layout": {"workers": physical_workers,
+                                                                    "blas_threads_per_worker": 1,
+                                                                    "start_method": "spawn"}},
               "selection_status": selection.get("certification_status"),
               "selection_metrics": selection.get("metrics"),
               "baseline": {"path": str(baseline), "comparison_scope": "Historical published oracle; spectral comparisons are gauge invariant. Matrix comparisons are diagnostics and require the same basis for interpretation."}}
@@ -156,12 +213,13 @@ def main():
     parser.add_argument("--cases", nargs="+", choices=tuple(CASES), default=list(CASES))
     parser.add_argument("--workers", type=int, default=8)
     parser.add_argument("--blas-threads", type=int, default=1)
+    parser.add_argument("--physical-workers", type=int, default=8)
     parser.add_argument("--prepare-only", action="store_true")
     args = parser.parse_args()
     python = Path(args.python).absolute()
     if python != Path(sys.executable).absolute():
         os.execv(str(python), [str(python), str(Path(__file__).resolve()), *sys.argv[1:]])
-    if args.workers < 1 or args.blas_threads < 1:
+    if args.workers < 1 or args.blas_threads < 1 or args.physical_workers < 1:
         parser.error("Worker and BLAS thread counts must be positive")
     import yaml
     root, run = args.root.resolve(strict=True), args.run_root.resolve()
@@ -181,7 +239,9 @@ def main():
     report = {"status": "preparing", "hostname": socket.gethostname(), "cwd": str(run),
               "environment_prefix": sys.prefix, "python": sys.executable, "installed_modules": installed,
               "source_commit": subprocess.check_output(["git", "-C", str(root), "rev-parse", "HEAD"], text=True).strip(),
-              "command": [sys.executable, *sys.argv], "process_layout": {"sequential_cases": True, "project_workers": args.workers, "blas_threads_per_worker": args.blas_threads},
+              "command": [sys.executable, *sys.argv], "process_layout": {"sequential_cases": True, "project_workers": args.workers, "blas_threads_per_worker": args.blas_threads,
+                                                                      "physical_verification_workers": args.physical_workers, "physical_verification_blas_threads": 1,
+                                                                      "physical_verification_start_method": "spawn"},
               "scope": "Published physical recipes; full 61-point KP project -> symm -> model from real cached TAPW inputs. DFT/TAPW matrices are not regenerated.",
               "cases": {}}
     summary = run / "published_examples.json"
@@ -237,7 +297,10 @@ def main():
                     raise subprocess.CalledProcessError(completed.returncode, command)
             current["status"] = "verifying"
             write(summary, report)
-            current["verification"] = validate(output_root / valley / shell, root / golden, name)
+            current["verification"] = validate(
+                output_root / valley / shell, root / golden, name,
+                physical_workers=args.physical_workers,
+            )
             current["status"] = "passed"
             write(case_root / "verification.json", current)
             write(summary, report)

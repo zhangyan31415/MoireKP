@@ -1,5 +1,6 @@
 {
-  "status": "final3_snapshot_verified_pending_committed_delivery_build",
+  "status": "passed",
+  "source_commit": "cb47436a216719e08f4cefea3cf7a2e0922e0ade",
   "node": "test001",
   "build": {
     "status": "passed",
@@ -7,33 +8,147 @@
     "source_files": 305,
     "artifacts": {
       "moirekp-0.1.0-py3-none-any.whl": {
-        "bytes": 1152824,
-        "sha256": "0df5bad5a1afe6788fc600bfbf297bd83d325faf41e04612f15f4798aa39ecf3"
+        "bytes": 1152389,
+        "sha256": "068d23e8476442365d1d3d5873218758d17d94eb4eba84e8121d8dc6ef3a7c16"
       },
       "moirekp-0.1.0.tar.gz": {
-        "bytes": 1962774,
-        "sha256": "b6c805574d454c488a998b221286fa4160e6810f903afaddf67204a0f8e81b94"
+        "bytes": 1960091,
+        "sha256": "1e4f63fc4caff0b417c7cac978edf234ed6c4d9e9db2f0a07456b54debf83a8f"
       }
     }
   },
   "installation": {
     "status": "passed",
-    "python": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3/bin/python",
-    "environment_prefix": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3",
+    "source_commit": "cb47436a216719e08f4cefea3cf7a2e0922e0ade",
+    "python": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-model-cb47436/bin/python",
+    "environment_prefix": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-model-cb47436",
     "installed_modules": {
-      "kp": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3/lib/python3.11/site-packages/kp/__init__.py",
-      "tapw": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3/lib/python3.11/site-packages/tapw/__init__.py"
+      "kp": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-model-cb47436/lib/python3.11/site-packages/kp/__init__.py",
+      "tapw": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-model-cb47436/lib/python3.11/site-packages/tapw/__init__.py"
     },
-    "wheel": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/wheels-final3-20261014/moirekp-0.1.0-py3-none-any.whl",
-    "wheel_sha256": "0df5bad5a1afe6788fc600bfbf297bd83d325faf41e04612f15f4798aa39ecf3",
-    "source_fingerprints": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/packaging-source-final3-20261014.json"
+    "wheel": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/moirekp-0.1.0-py3-none-any.whl",
+    "wheel_sha256": "068d23e8476442365d1d3d5873218758d17d94eb4eba84e8121d8dc6ef3a7c16",
+    "exact_current_core_files": 113,
+    "source_archive_root": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/delivery-source-cb47436"
   },
-  "archive_contract": {
-    "passed": 26,
-    "elapsed_s": 0.24,
-    "log": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/logs/archive-contract-final3-20261014.log"
+  "committed_delivery_checks": {
+    "producer_consumer_and_cache": {
+      "passed": 271,
+      "elapsed_s": 8.47,
+      "exit_code": 0,
+      "tests": [
+        "tests/kp/test_symm_projection.py",
+        "tests/kp/test_canonical_q_artifact.py",
+        "tests/kp/test_complete_response_basis.py",
+        "tests/kp/test_response_basis_cache.py"
+      ],
+      "log": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/logs/model-contract-cb47436.log"
+    },
+    "release_contract": {
+      "passed": 26,
+      "elapsed_s": 0.26,
+      "exit_code": 0,
+      "log": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/logs/release-contract-cb47436.log"
+    },
+    "cli_help": {
+      "kp": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/logs/kp-help-cb47436.log",
+      "tapw": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/logs/tapw-help-cb47436.log"
+    },
+    "core_byte_equality": "All 113 public core files agree between installed package, wheel, commit archive, and current checkout.",
+    "current_coordinate_contract": "Producer and consumer import one COORDINATE_CONVENTION definition, exactly right_handed_model_cartesian_reciprocal_v1; installed identity was checked."
+  },
+  "previous_delivery": {
+    "source_commit": "a4271046a2a7887f352a4114d32e890d580ca0c9",
+    "build": {
+      "status": "passed",
+      "python": "/data/home/zy/mambaforge/envs/moirekp/bin/python",
+      "source_files": 305,
+      "artifacts": {
+        "moirekp-0.1.0-py3-none-any.whl": {
+          "bytes": 1152283,
+          "sha256": "d3d2680782f1c8783de376e76d777dfc73f8547f35142b2a2e242e091bdc1fb8"
+        },
+        "moirekp-0.1.0.tar.gz": {
+          "bytes": 1959804,
+          "sha256": "a3f2dcf495261692e1686359b9418d85e03c6393dd3bc7184b5cecc9e1a9a856"
+        }
+      }
+    },
+    "installation": {
+      "status": "passed",
+      "source_commit": "a4271046a2a7887f352a4114d32e890d580ca0c9",
+      "python": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-delivery-a427104/bin/python",
+      "environment_prefix": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-delivery-a427104",
+      "installed_modules": {
+        "kp": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-delivery-a427104/lib/python3.11/site-packages/kp/__init__.py",
+        "tapw": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-delivery-a427104/lib/python3.11/site-packages/tapw/__init__.py"
+      },
+      "wheel": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/moirekp-0.1.0-py3-none-any.whl",
+      "wheel_sha256": "d3d2680782f1c8783de376e76d777dfc73f8547f35142b2a2e242e091bdc1fb8",
+      "exact_current_core_files": 113,
+      "source_archive_root": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/delivery-source-a427104"
+    },
+    "committed_delivery_checks": {
+      "passed": 54,
+      "elapsed_s": 2.13,
+      "exit_code": 0,
+      "log": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/logs/delivery-checks-a427104.log",
+      "tests": [
+        "tests/test_release_contract.py",
+        "tests/kp/test_example_dependency_contract.py",
+        "tests/kp/test_response_basis_cache.py"
+      ],
+      "cli_help": {
+        "kp": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/logs/kp-help-delivery-a427104.log",
+        "tapw": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/logs/tapw-help-delivery-a427104.log"
+      },
+      "core_byte_equality": "All 113 public core files agree between installed package, wheel, commit archive, and current checkout."
+    },
+    "source_equivalence": {
+      "path": "/data/work/zy/software/1.tapw_code/moirekp-release/reports/code_cleanup/final_source_equivalence.json",
+      "status": "passed",
+      "checked_files": 113,
+      "meaning": "Every public core AST matches the final3 source archive tested with the full 2556-case suite; only whitespace changed. Cache checks on the committed wheel passed."
+    },
+    "artifacts": {
+      "moirekp-0.1.0-py3-none-any.whl": {
+        "path": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/moirekp-0.1.0-py3-none-any.whl",
+        "bytes": 1152283,
+        "sha256": "d3d2680782f1c8783de376e76d777dfc73f8547f35142b2a2e242e091bdc1fb8"
+      },
+      "moirekp-0.1.0.tar.gz": {
+        "path": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/moirekp-0.1.0.tar.gz",
+        "bytes": 1959804,
+        "sha256": "a3f2dcf495261692e1686359b9418d85e03c6393dd3bc7184b5cecc9e1a9a856"
+      }
+    }
   },
   "archive_source_suite": {
+    "source_commit": "cb47436a216719e08f4cefea3cf7a2e0922e0ade",
+    "passed": 2556,
+    "skipped": 3,
+    "deselected": 21,
+    "elapsed_s": 304.51,
+    "exit_code": 0,
+    "python": "/data/home/zy/mambaforge/envs/moirekp/bin/python",
+    "root": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/source-archive-cb47436/moirekp-0.1.0",
+    "log": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/logs/archive-full-tests-cb47436.log",
+    "scope": "Actual committed source archive; kp/tapw imports asserted inside extracted archive; includes final coordinate producer/consumer contract and current test fixtures."
+  },
+  "artifacts": {
+    "moirekp-0.1.0-py3-none-any.whl": {
+      "path": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/moirekp-0.1.0-py3-none-any.whl",
+      "bytes": 1152389,
+      "sha256": "068d23e8476442365d1d3d5873218758d17d94eb4eba84e8121d8dc6ef3a7c16"
+    },
+    "moirekp-0.1.0.tar.gz": {
+      "path": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/cb47436/moirekp-0.1.0.tar.gz",
+      "bytes": 1960091,
+      "sha256": "1e4f63fc4caff0b417c7cac978edf234ed6c4d9e9db2f0a07456b54debf83a8f"
+    }
+  },
+  "limitations": "Packaging and small regression checks passed for the current cb47436 commit. These results do not stand in for the real published-material KP replays, which are recorded separately.",
+  "previous_archive_source_suite": {
     "passed": 2556,
     "skipped": 3,
     "deselected": 21,
@@ -41,9 +156,8 @@
     "exit_code": 0,
     "python": "/data/home/zy/mambaforge/envs/moirekp/bin/python",
     "root": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/source-archive-final3-20261014/moirekp-0.1.0",
-    "log": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/logs/archive-full-tests-final3-20261014.log",
-    "scope": "Actual source archive, with kp/tapw imports asserted inside extracted archive; no original checkout or installed numerical package used."
-  },
-  "source_fingerprints": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/packaging-source-final3-20261014.json",
-  "limitations": "These are packaging and small regression checks; real published-material KP replays are recorded separately."
+    "log": "/data/work/zy/software/1.tapw_code/moirekp-release/validation_runs/code_cleanup_20261014/distributions/logs/archive-full-tests-final3-20261014.log",
+    "scope": "Actual source archive, with kp/tapw imports asserted inside extracted archive; no original checkout or installed numerical package used.",
+    "applies_to": "final3 source snapshot and a427104 semantic-equivalent cleanup commit, before the cb47436 producer/consumer contract fix"
+  }
 }
