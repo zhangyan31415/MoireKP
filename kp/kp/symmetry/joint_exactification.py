@@ -25,6 +25,10 @@ class JointExactificationError(ValueError):
     """Input data cannot define a certified joint symmetry action."""
 
 
+class JointExactificationFeasibilityError(JointExactificationError):
+    """Measured blocks cannot satisfy declared numerical exactification gates."""
+
+
 class JointExactificationBranchError(JointExactificationError):
     """A relation logarithm is not separated from its branch boundary."""
 
@@ -404,7 +408,7 @@ class MagneticGenerator:
         object.__setattr__(self, "antiunitary", bool(self.antiunitary))
 
 
-def _v1_central_phase(value: Any, *, label: str) -> complex:
+def _binary_central_phase(value: Any, *, label: str) -> complex:
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         parts = tuple(value)
         if len(parts) != 2:
@@ -418,7 +422,7 @@ def _v1_central_phase(value: Any, *, label: str) -> complex:
         raise JointExactificationError(f"{label} must be finite")
     if phase not in {complex(1.0, 0.0), complex(-1.0, 0.0)}:
         raise JointExactificationError(
-            f"{label} must be an explicitly declared V1 central phase +1 or -1, "
+            f"{label} must be an explicitly declared central phase +1 or -1, "
             f"got {phase}"
         )
     return phase
@@ -441,7 +445,7 @@ class MagneticRelation:
         rhs = tuple(str(value).strip() for value in self.rhs)
         if any(not value for value in (*lhs, *rhs)):
             raise JointExactificationError("magnetic relation words must name generators")
-        phase = _v1_central_phase(
+        phase = _binary_central_phase(
             self.central_phase,
             label=f"magnetic relation {name!r} central phase",
         )
@@ -482,7 +486,7 @@ class MagneticPresentation:
                     f"generators {sorted(unknown)}"
                 )
         central_phases = tuple(
-            _v1_central_phase(value, label="presentation central phase")
+            _binary_central_phase(value, label="presentation central phase")
             for value in self.central_phases
         )
         if (
@@ -696,7 +700,7 @@ def _manifest_power_phase(record: Mapping[str, Any], *, name: str) -> complex:
         raise JointExactificationError(
             f"operation {name!r} power relation must use power {expected_power}"
         )
-    return _v1_central_phase(
+    return _binary_central_phase(
         relation.get("phase"),
         label=f"operation {name!r} power phase",
     )
@@ -1372,9 +1376,6 @@ def project_u1_relations(
         "post_relation_residuals": post_table,
         "post_relation_residual_max": post_maximum,
     }
-    # #region debug-point D:u1-relation-solver
-    import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "D", "location": "kp/symmetry/joint_exactification.py:project_u1_relations", "msg": "[DEBUG] U1 joint relation solve", "data": {"generator_names": generator_names, "fiber_count": fiber_count, "constraint_matrix": constraint_matrix.tolist(), "target_vector": target_vector.tolist(), "angle_vector": angle_vector.tolist(), "principal_residual": principal_residual.tolist(), "correction": correction.tolist(), "projected_angles": projected_angles.tolist(), "report": report}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
-    # #endregion
     return projected, report
 
 
@@ -1643,9 +1644,6 @@ def derive_closest_cyclotomic_u1_gauge(
             fiber_indices=action.fiber_indices,
         )
 
-    # #region debug-point B:cyclotomic-branch-selection
-    _dbg_cyclotomic_relations, _dbg_cyclotomic_max = _relation_residual_summary(canonical, presentation); import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "B", "location": "kp/symmetry/joint_exactification.py:derive_closest_cyclotomic_u1_gauge", "msg": "[DEBUG] Independently nearest cyclotomic branch before certification", "data": {"root_order": root_order, "root_exponents": root_exponents, "nearest_distances": nearest_distances, "branch_margins": branch_margins, "relation_residuals": _dbg_cyclotomic_relations, "relation_residual_max": _dbg_cyclotomic_max, "using_external_reference": reference_actions is not actions}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
-    # #endregion
     relation_certification = certify_joint_block_actions(canonical, presentation)
     rows: list[np.ndarray] = []
     targets: list[float] = []
@@ -4944,7 +4942,7 @@ def _select_central_transitions(
                 separation = float(distances[order[1]] - distances[order[0]])
                 separations.append(separation)
                 if separation <= minimum_separation:
-                    raise JointExactificationError(
+                    raise JointExactificationFeasibilityError(
                         "central transition separation does not satisfy the configured "
                         f"margin: generator={generator.name!r}, source={source}, "
                         f"separation={separation:.6e}, required={minimum_separation:.6e}"
@@ -4967,7 +4965,7 @@ def _select_central_transitions(
                 source,
             )
             if lhs != relation.central_phase * rhs:
-                raise JointExactificationError(
+                raise JointExactificationFeasibilityError(
                     "selected central transition table violates associativity/"
                     f"presentation relation {relation.name!r} at source {source}: "
                     f"lhs={lhs}, rhs={relation.central_phase * rhs}"
@@ -5444,7 +5442,7 @@ def synchronize_free_orbit(
     return route_blocks, report
 
 
-JOINT_BLOCK_REPRESENTATION_V1 = "joint_block_representation_v1"
+JOINT_BLOCK_REPRESENTATION_SCHEMA = "joint_block_representation_v1"
 
 
 @dataclass(frozen=True)
@@ -5808,7 +5806,7 @@ def _build_joint_artifact(
             }
         )
     metadata: dict[str, Any] = {
-        "version": JOINT_BLOCK_REPRESENTATION_V1,
+        "version": JOINT_BLOCK_REPRESENTATION_SCHEMA,
         "status": "certified",
         "presentation": _presentation_metadata(presentation),
         "actions": action_records,
@@ -6225,7 +6223,7 @@ def load_joint_exactification_artifact(
     """Load, hash-check, and re-certify an in-memory joint artifact."""
 
     root = dict(metadata)
-    if root.get("version") != JOINT_BLOCK_REPRESENTATION_V1:
+    if root.get("version") != JOINT_BLOCK_REPRESENTATION_SCHEMA:
         raise JointExactificationError(
             f"unsupported joint artifact version {root.get('version')!r}"
         )
@@ -6394,9 +6392,6 @@ def phase_preserving_joint_source(
             "phase-preserving polar route correction exceeds the joint budget: "
             f"{polar_max:.6e} > {config.max_route_correction:.6e}"
         )
-    # #region debug-point B-C:phase-preserving-polar
-    _dbg_relation_table, _dbg_relation_maximum = _relation_residual_summary(polar_actions, presentation); import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "B-C", "location": "kp/symmetry/joint_exactification.py:phase_preserving_joint_source", "msg": "[DEBUG] Phase-preserving polar actions before joint solve", "data": {"relation_residuals": _dbg_relation_table, "relation_residual_max": _dbg_relation_maximum, "polar_correction_rms_by_operation": polar_rms_by_operation, "polar_correction_max_by_operation": polar_max_by_operation, "off_route_relative_by_operation": off_route_relative_by_operation, "off_route_max_entry_by_operation": off_route_max_entry_by_operation, "fiber_permutations": {name: list(action.fiber_permutation) for name, action in polar_actions.items()}, "fiber_dimensions": {name: list(action.fiber_dimensions) for name, action in polar_actions.items()}, "u1_angles": {name: _u1_angles(polar_actions, names)[name].tolist() for name in names}}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
-    # #endregion
     result = joint_exactify_block_actions(
         polar_actions,
         presentation,
@@ -6431,9 +6426,10 @@ __all__ = [
     "ActionOrbit",
     "BlockRouteAction",
     "FreeOrbitReport",
-    "JOINT_BLOCK_REPRESENTATION_V1",
+    "JOINT_BLOCK_REPRESENTATION_SCHEMA",
     "JointExactificationBranchError",
     "JointExactificationError",
+    "JointExactificationFeasibilityError",
     "JointExactificationConfig",
     "JointExactificationResult",
     "MagneticGenerator",

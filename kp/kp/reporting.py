@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Iterable, Mapping, Sequence, TextIO
 
+from tapw.reporting import write_report_field
+
 
 class KpReporter:
     """Render concise scientific CLI output without owning workflow state."""
@@ -73,33 +75,17 @@ class KpReporter:
             return
         width = max(len(label) for label, _ in entries)
         for label, value in entries:
-            self._field(label, value, width=width)
+            write_report_field(self, label, value, width=width)
 
-    def _field(
-        self,
-        label: str,
-        value: object,
-        *,
-        width: int | None = None,
-        value_style: str | None = None,
-    ) -> None:
-        label_width = len(label) if width is None else int(width)
-        lines = str(value).splitlines() or [""]
-        rendered = self._style(lines[0], value_style) if value_style else lines[0]
-        self.line(f"  {label:<{label_width}}  {rendered}")
-        continuation = " " * (label_width + 4)
-        for line in lines[1:]:
-            rendered = self._style(line, value_style) if value_style else line
-            self.line(f"{continuation}{rendered}")
 
     def path(self, label: str, value: str | Path, *, width: int | None = None) -> None:
-        self._field(str(label), value, width=width, value_style="2")
+        write_report_field(self, str(label), value, width=width, value_style="2")
 
     def field(self, label: str, value: object, *, width: int | None = None) -> None:
-        self._field(str(label), value, width=width)
+        write_report_field(self, str(label), value, width=width)
 
     def metric(self, label: str, value: object) -> None:
-        self._field(str(label), value, value_style="33")
+        write_report_field(self, str(label), value, value_style="33")
 
     def table(
         self,

@@ -1,0 +1,14 @@
+............................                                             [100%]
+=============================== warnings summary ===============================
+tests/tapw/test_openmx_symmetrize_hs_cli.py: 6 warnings
+tests/tapw/test_openmx_symm_hs_native.py: 4 warnings
+  /data/home/zy/mambaforge/envs/moirekp/lib/python3.11/site-packages/spglib/spg.py:354: DeprecationWarning: Set OLD_ERROR_HANDLING to false and catch the errors directly.
+    _set_no_error()
+
+tests/tapw/test_openmx_symmetrize_hs_cli.py: 768 warnings
+tests/tapw/test_openmx_symm_hs_native.py: 768 warnings
+  /data/home/zy/mambaforge/envs/moirekp/lib/python3.11/site-packages/mpmath/libmp/libintmath.py:75: DeprecationWarning: bitcount function is deprecated
+    warnings.warn("bitcount function is deprecated",
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+28 passed, 1546 warnings in 43.47s

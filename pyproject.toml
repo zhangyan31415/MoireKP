@@ -56,5 +56,6 @@ tapw = ["templates/*.yaml", "templates/*.in"]
 "share/moirekp/scripts/abacus/_vendor" = ["scripts/abacus/_vendor/analysis_abacus.py", "scripts/abacus/_vendor/LICENSE.GPL-3.0", "scripts/abacus/_vendor/NOTICE.md"]
 "share/moirekp/scripts/siesta" = ["scripts/siesta/*.py", "scripts/siesta/README.md"]
 "share/moirekp/scripts/common" = ["scripts/common/*.py", "scripts/common/README.md"]
-"share/moirekp/scripts/legacy" = ["scripts/legacy/README.md"]
-"share/moirekp/scripts/legacy/openmx" = ["scripts/legacy/openmx/*.py"]
+
+[tool.moirekp.release]
+release_blockers = ["dataset_license", "doi", "data_url"]

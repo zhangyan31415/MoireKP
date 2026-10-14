@@ -1,8 +1,9 @@
-"""Experimental generator fixed-subspace primitives.
+"""Generator fixed-subspace primitives.
 
 This module deliberately stops at target-independent real coefficient space.  It
-does not consume Heff, a fit grid, band windows, or solver pivots, and it is not
-wired into the public ``complete_linear_v2`` pipeline yet.
+does not consume Heff, a fit grid, band windows, or solver pivots. The response
+compiler uses it to certify invariant coefficient components and their common
+generator fixed spaces.
 
 The intended integration point is after construction of the joint
 Hermitian/adjoint coefficient vocabulary and before expansion into sparse
@@ -20,15 +21,15 @@ import numpy as np
 import scipy.linalg
 
 
-REAL_LINEAR_ACTION_CONVENTION_V1 = "real_then_imag__linear_or_M_conjugate_v1"
-DETERMINISTIC_BASIS_CONVENTION_V1 = (
-    "projector_columns__pivoted_qr__first_significant_positive_v2"
+REAL_LINEAR_ACTION_CONVENTION = "real_then_imag__linear_or_M_conjugate"
+PROJECTOR_PIVOTED_QR_CONVENTION = (
+    "projector_columns__pivoted_qr__first_significant_positive"
 )
-FIXED_SUBSPACE_ALGORITHM_V1 = "stacked_generator_minus_identity__svd_v1"
-FIXED_SUBSPACE_CERTIFICATION_POLICY_V1 = (
-    "absolute_relative_threshold__100x_gray_zone__generator_residual_v1"
+FIXED_SUBSPACE_ALGORITHM = "stacked_generator_minus_identity__svd"
+FIXED_SUBSPACE_CERTIFICATION_POLICY = (
+    "absolute_relative_threshold__100x_gray_zone__generator_residual"
 )
-FIXED_SUBSPACE_GRAY_ZONE_FACTOR_V1 = 100.0
+FIXED_SUBSPACE_GRAY_ZONE_FACTOR = 100.0
 
 
 class NonInvariantComponentError(ValueError):
@@ -223,7 +224,7 @@ def _svd_fixed_space(
     scale = max(1.0, float(singular_values[0]) if singular_values.size else 0.0)
     tolerance = absolute_tolerance + relative_tolerance * scale
     fixed = singular_values <= tolerance
-    gray_upper = FIXED_SUBSPACE_GRAY_ZONE_FACTOR_V1 * tolerance
+    gray_upper = FIXED_SUBSPACE_GRAY_ZONE_FACTOR * tolerance
     gray = singular_values[(singular_values > tolerance) & (singular_values < gray_upper)]
     if gray.size:
         raise FixedSubspaceCertificationError(
@@ -410,9 +411,9 @@ def solve_generator_fixed_subspace(
         else np.zeros(0, dtype=np.float64)
     )
     metadata: dict[str, Any] = {
-        "algorithm": FIXED_SUBSPACE_ALGORITHM_V1,
-        "basis_convention": DETERMINISTIC_BASIS_CONVENTION_V1,
-        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION_V1,
+        "algorithm": FIXED_SUBSPACE_ALGORITHM,
+        "basis_convention": PROJECTOR_PIVOTED_QR_CONVENTION,
+        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION,
         "vocabulary_dimension": dimension,
         "generator_names": [action.name for action in actions],
         "antiunitary_parities": {
@@ -423,10 +424,10 @@ def solve_generator_fixed_subspace(
         "relative_tolerance": float(relative_tolerance),
         "component_labels": [component.label for component in components],
         "component_ranks": component_ranks,
-        "component_policy": "actual_generator_invariance_certified_v1",
+        "component_policy": "actual_generator_invariance_certified",
         "fixed_subspace_certification": {
-            "policy": FIXED_SUBSPACE_CERTIFICATION_POLICY_V1,
-            "gray_zone_factor": FIXED_SUBSPACE_GRAY_ZONE_FACTOR_V1,
+            "policy": FIXED_SUBSPACE_CERTIFICATION_POLICY,
+            "gray_zone_factor": FIXED_SUBSPACE_GRAY_ZONE_FACTOR,
             "engineering_policy": True,
             "mathematical_constant": False,
             "components": component_certifications,
@@ -447,11 +448,11 @@ def solve_generator_fixed_subspace(
 
 
 __all__ = [
-    "DETERMINISTIC_BASIS_CONVENTION_V1",
-    "FIXED_SUBSPACE_ALGORITHM_V1",
-    "FIXED_SUBSPACE_CERTIFICATION_POLICY_V1",
-    "FIXED_SUBSPACE_GRAY_ZONE_FACTOR_V1",
-    "REAL_LINEAR_ACTION_CONVENTION_V1",
+    "PROJECTOR_PIVOTED_QR_CONVENTION",
+    "FIXED_SUBSPACE_ALGORITHM",
+    "FIXED_SUBSPACE_CERTIFICATION_POLICY",
+    "FIXED_SUBSPACE_GRAY_ZONE_FACTOR",
+    "REAL_LINEAR_ACTION_CONVENTION",
     "FixedSubspaceResult",
     "FixedSubspaceCertificationError",
     "InvariantComponent",

@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from kp.model import pipeline as pipeline_module
+from kp.model.configuration import _load_model_q_sets
 from kp.symmetry import projection as projection_module
 from kp.symmetry.q_canonicalization import canonicalize_q_geometry, q_geometry_hash
 
@@ -122,7 +122,7 @@ def test_canonical_writer_packs_raw_and_production_q_arrays(tmp_path: Path) -> N
     assert metadata["q_model"]["canonicalization"]["status"] == "certified"
 
 
-def test_complete_v2_prefers_canonical_q_arrays_from_symmetry_package(tmp_path: Path) -> None:
+def test_complete_linear_prefers_canonical_q_arrays_from_symmetry_package(tmp_path: Path) -> None:
     symmetry_dir = tmp_path / "symmetry"
     symmetry_dir.mkdir()
     raw_q1 = np.array([[1.0, 0.0], [-1.0 + 1.0e-12, 0.0]], dtype=float)
@@ -138,20 +138,20 @@ def test_complete_v2_prefers_canonical_q_arrays_from_symmetry_package(tmp_path: 
     )
     config = SimpleNamespace(
         symmetry_source_config={"type": "kp_symm_output", "path": str(symmetry_dir)},
-        response_semantics="complete_linear_v2",
+        response_semantics="complete_linear",
         path=tmp_path / "model.yaml",
         qset1_file=tmp_path / "missing-q1.npy",
         qset2_file=tmp_path / "missing-q2.npy",
         rotation_deg=0.0,
     )
 
-    q1, q2 = pipeline_module._load_model_q_sets(config)
+    q1, q2 = _load_model_q_sets(config)
 
     np.testing.assert_array_equal(q1, canonical_q1)
     np.testing.assert_array_equal(q2, canonical_q2)
 
 
-def test_complete_v2_rejects_symmetry_package_without_canonical_q(tmp_path: Path) -> None:
+def test_complete_linear_rejects_symmetry_package_without_canonical_q(tmp_path: Path) -> None:
     symmetry_dir = tmp_path / "symmetry"
     symmetry_dir.mkdir()
     np.savez(
@@ -165,7 +165,7 @@ def test_complete_v2_rejects_symmetry_package_without_canonical_q(tmp_path: Path
     np.save(q2_path, np.zeros((1, 2), dtype=float))
     config = SimpleNamespace(
         symmetry_source_config={"type": "kp_symm_output", "path": str(symmetry_dir)},
-        response_semantics="complete_linear_v2",
+        response_semantics="complete_linear",
         path=tmp_path / "model.yaml",
         qset1_file=q1_path,
         qset2_file=q2_path,
@@ -173,4 +173,39 @@ def test_complete_v2_rejects_symmetry_package_without_canonical_q(tmp_path: Path
     )
 
     with pytest.raises(ValueError, match="rerun `kp symm`"):
-        pipeline_module._load_model_q_sets(config)
+        _load_model_q_sets(config)
+
+
+def test_raw_diagnostic_q_files_cannot_replace_required_canonical_package(tmp_path: Path) -> None:
+    symmetry_dir = tmp_path / "symmetry"
+    symmetry_dir.mkdir()
+    raw_q = np.asarray([[1.0, 0.0], [-1.0 + 1.0e-12, 0.0]])
+    np.save(symmetry_dir / "q_model_layer1.npy", raw_q)
+    np.save(symmetry_dir / "q_model_layer2.npy", raw_q)
+    metadata = {
+        "q_model": {
+            "role": "raw_model_q",
+            "production_role": "symmetry_canonical_q",
+            "files": {"layer1": "q_model_layer1.npy", "layer2": "q_model_layer2.npy"},
+        }
+    }
+    (symmetry_dir / "manifest.json").write_text(json.dumps(metadata))
+    np.savez(symmetry_dir / "representations.npz", C2=np.eye(2),
+             __metadata_json__=np.asarray(json.dumps(metadata)))
+    config = SimpleNamespace(
+        symmetry_source_config={"type": "kp_symm_output", "path": str(symmetry_dir)},
+        response_semantics="complete_linear", path=tmp_path / "model.yaml",
+        qset1_file=symmetry_dir / "q_model_layer1.npy",
+        qset2_file=symmetry_dir / "q_model_layer2.npy", rotation_deg=0.0,
+    )
+    with pytest.raises(ValueError, match="canonical Q.*rerun `kp symm`"):
+        _load_model_q_sets(config)
+
+
+def test_packed_symmetry_without_metadata_cannot_invent_operations_or_frame(tmp_path: Path) -> None:
+    from kp.model.configuration import _load_symmetry_manifest
+
+    np.savez(tmp_path / "representations.npz", C2=np.eye(2))
+    raw = {"symmetry_source": {"type": "kp_symm_output", "path": str(tmp_path)}}
+    with pytest.raises(ValueError, match="metadata.*rerun `kp symm`"):
+        _load_symmetry_manifest(raw, base=tmp_path)

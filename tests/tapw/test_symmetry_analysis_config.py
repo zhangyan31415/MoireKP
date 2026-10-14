@@ -78,7 +78,7 @@ def test_release_band_config_loads_default_symmetry_section(tmp_path):
     assert config.symmetry_analysis.developer_outputs is False
     assert not hasattr(config.symmetry_analysis, "operation_species_phases_deg")
     assert config.compute.use_sparse_dot_mkl is True
-    assert config.output_layout.style == "canonical_v1"
+    assert config.output_layout.style == "canonical"
 
 
 def test_release_symmetry_config_defaults_to_strict_validation(tmp_path):

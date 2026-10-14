@@ -20,7 +20,7 @@ from typing import Any
 import numpy as np
 
 from .response_basis import (
-    COMPLETE_LINEAR_V2,
+    RESPONSE_SEMANTICS,
     CompiledResponseBasis,
     _canonical_json,
     _validate_persistent_cache_input_record,
@@ -142,9 +142,9 @@ class PersistentResponseBasisCache:
     def _validate_basis(basis: CompiledResponseBasis) -> None:
         if not isinstance(basis, CompiledResponseBasis):
             raise TypeError("persistent response-basis cache accepts only CompiledResponseBasis")
-        if basis.response_semantics != COMPLETE_LINEAR_V2:
+        if basis.response_semantics != RESPONSE_SEMANTICS:
             raise ValueError(
-                "persistent response-basis cache accepts only complete_linear_v2; "
+                "persistent response-basis cache accepts only complete_linear; "
                 f"got {basis.response_semantics!r}"
             )
 
@@ -219,7 +219,7 @@ class PersistentResponseBasisCache:
         except ResponseBasisCacheCorruptionError:
             self._increment(self._corrupt_load_count_by_key, key)
             raise
-        except Exception as exc:
+        except (OSError, ValueError, KeyError, TypeError, EOFError) as exc:
             self._increment(self._corrupt_load_count_by_key, key)
             raise ResponseBasisCacheCorruptionError(
                 f"response-basis cache {path.name!r} could not be read and will not be recompiled"
@@ -236,13 +236,13 @@ class PersistentResponseBasisCache:
             raise ResponseBasisCacheCorruptionError("cache metadata is missing")
         try:
             metadata = json.loads(str(np.asarray(arrays["cache_metadata_json"]).item()))
-        except Exception as exc:
+        except (ValueError, TypeError) as exc:
             raise ResponseBasisCacheCorruptionError("cache metadata is invalid") from exc
         if metadata.get("cache_format_version") != CACHE_FORMAT_VERSION:
             raise ResponseBasisCacheCorruptionError("cache format version mismatch")
         if metadata.get("compiler_input_key") != expected_key:
             raise ResponseBasisCacheCorruptionError("cache compiler input key mismatch")
-        if metadata.get("response_semantics") != COMPLETE_LINEAR_V2:
+        if metadata.get("response_semantics") != RESPONSE_SEMANTICS:
             raise ResponseBasisCacheCorruptionError("cache response semantics mismatch")
         basis_arrays = {
             name[len("basis_") :]: value
@@ -251,11 +251,11 @@ class PersistentResponseBasisCache:
         }
         try:
             basis = CompiledResponseBasis.from_frozen(basis_arrays)
-        except Exception as exc:
+        except (ValueError, KeyError, TypeError) as exc:
             raise ResponseBasisCacheCorruptionError(
                 "cached frozen basis failed internal hash certification"
             ) from exc
-        if basis.response_semantics != COMPLETE_LINEAR_V2:
+        if basis.response_semantics != RESPONSE_SEMANTICS:
             raise ResponseBasisCacheCorruptionError("frozen basis response semantics mismatch")
         if metadata.get("basis_hash") != basis.basis_hash:
             raise ResponseBasisCacheCorruptionError("cache basis hash mismatch")

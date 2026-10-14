@@ -49,7 +49,7 @@ def hash_mapping(mapping: Mapping[str, Any]) -> str:
     if not isinstance(mapping, Mapping):
         raise TypeError("hash_mapping expects a mapping")
     encoded = json.dumps(
-        _canonical_value(mapping),
+        canonical_json_value(mapping),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,
@@ -111,26 +111,26 @@ def _metadata_scalar(value: Any, *, field: str, context: str) -> Any:
     return value
 
 
-def _canonical_value(value: Any) -> Any:
+def canonical_json_value(value: Any) -> Any:
     if isinstance(value, Mapping):
         output: dict[str, Any] = {}
         for key, item in value.items():
             if not isinstance(key, str):
                 raise TypeError("identity mapping keys must be strings")
-            output[key] = _canonical_value(item)
+            output[key] = canonical_json_value(item)
         return output
     if isinstance(value, np.ndarray):
         if value.dtype.hasobject:
             raise TypeError("object-dtype arrays cannot be used for artifact identity")
-        return _canonical_value(value.tolist())
+        return canonical_json_value(value.tolist())
     if isinstance(value, np.generic):
-        return _canonical_value(value.item())
+        return canonical_json_value(value.item())
     if isinstance(value, Path):
         return str(value)
     if isinstance(value, bytes):
         return {"__bytes__": value.hex()}
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
-        return [_canonical_value(item) for item in value]
+        return [canonical_json_value(item) for item in value]
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
     raise TypeError(f"Unsupported identity value type: {type(value).__name__}")

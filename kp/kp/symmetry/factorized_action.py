@@ -11,7 +11,7 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-FACTORIZED_RESPONSE_ACTION_V1 = "factorized_response_action_v1"
+FACTORIZED_RESPONSE_ACTION_SCHEMA = "factorized_response_action_v1"
 
 
 class FactorizedActionCertificationError(ValueError):
@@ -104,7 +104,7 @@ class FactorizedSymmetryAction:
     q_certification_bound: float
     unitarity_certification_bound: float
     artifact_hash: str
-    version: str = FACTORIZED_RESPONSE_ACTION_V1
+    version: str = FACTORIZED_RESPONSE_ACTION_SCHEMA
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -217,7 +217,7 @@ def _factorized_action_hash(
     orbital_blocks: Sequence[np.ndarray],
 ) -> str:
     digest = hashlib.sha256()
-    digest.update(FACTORIZED_RESPONSE_ACTION_V1.encode("utf-8"))
+    digest.update(FACTORIZED_RESPONSE_ACTION_SCHEMA.encode("utf-8"))
     digest.update(_canonical_metadata_json(metadata))
     for block in orbital_blocks:
         _array_digest_update(digest, np.asarray(block), dtype="<c16")
@@ -254,7 +254,7 @@ def _action_hash_metadata_from_record(record: Mapping[str, Any]) -> dict[str, An
 
 def _package_hash(metadata_without_hash: Mapping[str, Any]) -> str:
     digest = hashlib.sha256()
-    digest.update(FACTORIZED_RESPONSE_ACTION_V1.encode("utf-8"))
+    digest.update(FACTORIZED_RESPONSE_ACTION_SCHEMA.encode("utf-8"))
     digest.update(_canonical_metadata_json(metadata_without_hash))
     return digest.hexdigest()
 
@@ -277,7 +277,7 @@ def pack_factorized_actions(
             keys.append(key)
         records.append(action.metadata(array_keys=keys))
     root = {
-        "version": FACTORIZED_RESPONSE_ACTION_V1,
+        "version": FACTORIZED_RESPONSE_ACTION_SCHEMA,
         "status": "certified",
         "basis_ordering": "sector__orbital__q_v1",
         "actions": records,
@@ -291,7 +291,7 @@ def load_factorized_actions(
 ) -> dict[str, FactorizedSymmetryAction]:
     """Load and hash-verify factorized actions from a canonical package."""
 
-    if str(metadata.get("version", "")) != FACTORIZED_RESPONSE_ACTION_V1:
+    if str(metadata.get("version", "")) != FACTORIZED_RESPONSE_ACTION_SCHEMA:
         raise FactorizedActionCertificationError("unsupported factorized action package version")
     if str(metadata.get("status", "")) != "certified":
         raise FactorizedActionCertificationError("factorized action package is not certified")
@@ -601,7 +601,7 @@ def certify_factorized_action(
         )
 
     metadata_without_hash = {
-        "version": FACTORIZED_RESPONSE_ACTION_V1,
+        "version": FACTORIZED_RESPONSE_ACTION_SCHEMA,
         "name": str(name),
         "antiunitary": bool(antiunitary),
         "k_forward": forward.tolist(),
@@ -646,7 +646,7 @@ def certify_factorized_action(
 
 
 __all__ = [
-    "FACTORIZED_RESPONSE_ACTION_V1",
+    "FACTORIZED_RESPONSE_ACTION_SCHEMA",
     "FactorizedActionCertificationError",
     "FactorizedSymmetryAction",
     "certify_factorized_action",

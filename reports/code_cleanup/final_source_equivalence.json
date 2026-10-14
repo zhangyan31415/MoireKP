@@ -1,0 +1,685 @@
+{
+  "status": "passed",
+  "scope": "Every public core Python source compared with the final3 installed-wheel build snapshot; whitespace normalization preserves all ASTs, including every string value. No changes to running prefixes. Compiler content fingerprints can change after cosmetic source normalization.",
+  "checked_files": 113,
+  "rows": [
+    {
+      "path": "kp/kp/__init__.py",
+      "wheel_source_sha256": "2b65f38f2588b600e717d86d4134f8aaf9df68ea75fd0de7356b422d02a81367",
+      "commit_source_sha256": "2b65f38f2588b600e717d86d4134f8aaf9df68ea75fd0de7356b422d02a81367",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/analysis/__init__.py",
+      "wheel_source_sha256": "465c78ffd6b4563fea2fe4898be9dfd3e8c8701553cd6a4ff6a730b7e715cf35",
+      "commit_source_sha256": "465c78ffd6b4563fea2fe4898be9dfd3e8c8701553cd6a4ff6a730b7e715cf35",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/analysis/orbital_selection.py",
+      "wheel_source_sha256": "003938b3fafcd9541a576b99103346782814809a8de47057090c3c7ea6c4007f",
+      "commit_source_sha256": "003938b3fafcd9541a576b99103346782814809a8de47057090c3c7ea6c4007f",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/basis/__init__.py",
+      "wheel_source_sha256": "64851f8adf9103625b1db73bcb0a1c1056b23a31f221c82fc7c89e8bd6513e63",
+      "commit_source_sha256": "64851f8adf9103625b1db73bcb0a1c1056b23a31f221c82fc7c89e8bd6513e63",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/basis/selection.py",
+      "wheel_source_sha256": "eac3dfa675908bcbfe3c7e262d7d13cd2338318de421330d01242df26017d67b",
+      "commit_source_sha256": "eac3dfa675908bcbfe3c7e262d7d13cd2338318de421330d01242df26017d67b",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/basis/symmetry_gauge.py",
+      "wheel_source_sha256": "e9b079703fb42da812b551edcd45e9ef096be48b930ddaadbcdeb877eccc6a8e",
+      "commit_source_sha256": "e9b079703fb42da812b551edcd45e9ef096be48b930ddaadbcdeb877eccc6a8e",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/blocks/__init__.py",
+      "wheel_source_sha256": "2bdbc7f78cb25e090d90a81a968aa11fce9ee1a9cc00198185750d27aa36799a",
+      "commit_source_sha256": "2bdbc7f78cb25e090d90a81a968aa11fce9ee1a9cc00198185750d27aa36799a",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/blocks/blocks.py",
+      "wheel_source_sha256": "65f947ce77ec138827a9a5a880ffa7b065aa811a5994e99514106caa785acebb",
+      "commit_source_sha256": "65f947ce77ec138827a9a5a880ffa7b065aa811a5994e99514106caa785acebb",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/blocks/downfold.py",
+      "wheel_source_sha256": "acc2161169218b992e0e5077c36e8ed5bd760e8e1c08f3e22b896485daccc621",
+      "commit_source_sha256": "acc2161169218b992e0e5077c36e8ed5bd760e8e1c08f3e22b896485daccc621",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/blocks/gamma_layout.py",
+      "wheel_source_sha256": "4b9268578258e8c6dab5ef0ae918c3562c9e4dc9b06807968630c6c1c8ef374f",
+      "commit_source_sha256": "4b9268578258e8c6dab5ef0ae918c3562c9e4dc9b06807968630c6c1c8ef374f",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/cli.py",
+      "wheel_source_sha256": "27ac0d39ac31f430d68616c217d3a7df6789278fc08239ad7be33a662f82120f",
+      "commit_source_sha256": "27ac0d39ac31f430d68616c217d3a7df6789278fc08239ad7be33a662f82120f",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/config/__init__.py",
+      "wheel_source_sha256": "bfb871c52c031acb1c9a31a89c1415e929fcbeae3911ad47ff5ca722c49b8d92",
+      "commit_source_sha256": "bfb871c52c031acb1c9a31a89c1415e929fcbeae3911ad47ff5ca722c49b8d92",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/config/case.py",
+      "wheel_source_sha256": "1556ae4440a1e30c8269d3a932ac4237d885cd1072606132a933f90667632869",
+      "commit_source_sha256": "1556ae4440a1e30c8269d3a932ac4237d885cd1072606132a933f90667632869",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/config/schemas.py",
+      "wheel_source_sha256": "5b271492ae6ebdb519ae221a61ea6437a2d75f69970e66002111a23a70c99736",
+      "commit_source_sha256": "5b271492ae6ebdb519ae221a61ea6437a2d75f69970e66002111a23a70c99736",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/gamma_auto_producer.py",
+      "wheel_source_sha256": "7d1db14bf9aaf75e15a928dde90c6406f72f487514994d377851717bf28c5506",
+      "commit_source_sha256": "7d1db14bf9aaf75e15a928dde90c6406f72f487514994d377851717bf28c5506",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/gamma_auto_runtime.py",
+      "wheel_source_sha256": "67b0d1371d7de85445d9c59a68c93278275cc2fd5d57038a135fbef421af19d2",
+      "commit_source_sha256": "67b0d1371d7de85445d9c59a68c93278275cc2fd5d57038a135fbef421af19d2",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/identity.py",
+      "wheel_source_sha256": "22c52a8b70ae9b96cb314e628f91eba8b9b5f500da6a6a6a8d7dcd4633cc87c0",
+      "commit_source_sha256": "22c52a8b70ae9b96cb314e628f91eba8b9b5f500da6a6a6a8d7dcd4633cc87c0",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/io/__init__.py",
+      "wheel_source_sha256": "4b4a273c62c4f73ee4df02527c228b94a961873db3a7d483d1f22d9cbf160aa3",
+      "commit_source_sha256": "4b4a273c62c4f73ee4df02527c228b94a961873db3a7d483d1f22d9cbf160aa3",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/io/tapw_loader.py",
+      "wheel_source_sha256": "92c99a58ed9713fe02ffb90157fcded35e5206d23df24edfa6ffbe4e32a93ddd",
+      "commit_source_sha256": "92c99a58ed9713fe02ffb90157fcded35e5206d23df24edfa6ffbe4e32a93ddd",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/kmesh/__init__.py",
+      "wheel_source_sha256": "4e1cc2f19a7310946d2cd413075743cc4b6f18b4f48133aa2994896e02646880",
+      "commit_source_sha256": "4e1cc2f19a7310946d2cd413075743cc4b6f18b4f48133aa2994896e02646880",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/kmesh/kpath.py",
+      "wheel_source_sha256": "bc7c3c5aa23d5bc3021db29266fc1ab47f4eb9f5b01816048ce907989937c782",
+      "commit_source_sha256": "bc7c3c5aa23d5bc3021db29266fc1ab47f4eb9f5b01816048ce907989937c782",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/low_energy_selection.py",
+      "wheel_source_sha256": "560d45446ec7e935634c58442584318c6b649d2697eddc3f883f6fb4e111a176",
+      "commit_source_sha256": "560d45446ec7e935634c58442584318c6b649d2697eddc3f883f6fb4e111a176",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/__init__.py",
+      "wheel_source_sha256": "0c3e295d22f7dfc446d5a3f01b8da4da5ae8a0dafb62a9517c5655e5c2e9befd",
+      "commit_source_sha256": "0c3e295d22f7dfc446d5a3f01b8da4da5ae8a0dafb62a9517c5655e5c2e9befd",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/artifacts.py",
+      "wheel_source_sha256": "1cab5197683021aefd7f583b7a3b57f8493c82a5c8ae7eb8e74125ba4b88c7ac",
+      "commit_source_sha256": "c7c57b4a792ff1bc3a90b97d6a3492f4f998e9e28960ec2a2a062fb8a92de5be",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/band_degeneracy.py",
+      "wheel_source_sha256": "d9e824bf7986871957c189171cd6c56a05560e25b2bf280eaf57056a21661e1e",
+      "commit_source_sha256": "d9e824bf7986871957c189171cd6c56a05560e25b2bf280eaf57056a21661e1e",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/candidates.py",
+      "wheel_source_sha256": "b02f361d97b19969bf3cdef5750d229eaeacc262ffc112d8c54a4def63bfcea2",
+      "commit_source_sha256": "7b96831ab7b416d45cf01b4582066e038e1cda8730eebf1b36bd5cd3568f8648",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/configuration.py",
+      "wheel_source_sha256": "12a97e2082684e36cf67b7c3757a45e040ba2978edea9dd2c31683671e493bff",
+      "commit_source_sha256": "15dfe413a9448f05f406fa34b010177cdeac8b751ec427b85e2509bbd4ef46e3",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/constants.py",
+      "wheel_source_sha256": "9d62446ca36716fd051bafeba597efb49338028c76327a266c91304d486dd65b",
+      "commit_source_sha256": "9d62446ca36716fd051bafeba597efb49338028c76327a266c91304d486dd65b",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/core.py",
+      "wheel_source_sha256": "824d79d904569151eabb3dcc859d88ced6a62a919a8cef23edb307b6074282ff",
+      "commit_source_sha256": "f465bbaa57927fe356ae89dccf36298524b381ad5ab241476445c9c765b273ff",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/export.py",
+      "wheel_source_sha256": "3070e7ffdbcf3c0e64ce3ec8af18b706d119a7660f90cbb51e3487b5d33d9037",
+      "commit_source_sha256": "3070e7ffdbcf3c0e64ce3ec8af18b706d119a7660f90cbb51e3487b5d33d9037",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/fit_sampling.py",
+      "wheel_source_sha256": "838e4a4989f6b4ae5387bb1ac543a60514857cf1c50941d22f65586b2f1fadf2",
+      "commit_source_sha256": "7eb7b488b913d94ba2913a9d5a775d2b705e11a4e1b3bb0e81f8c48ebb48de63",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/harmonic_selection.py",
+      "wheel_source_sha256": "8d994dedebf76032b398a32adfdb46487aa755fbe301249afc1e3b678cb2c51b",
+      "commit_source_sha256": "394646f4da92bda25259890bf91bab9ddde5b6b764fa71f7efe7966756dc3602",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/logging_utils.py",
+      "wheel_source_sha256": "26abec7dca3fc9e2793eeab159a2e3f22f2dcf843b85f1b0ea676d52d60eb3c2",
+      "commit_source_sha256": "26abec7dca3fc9e2793eeab159a2e3f22f2dcf843b85f1b0ea676d52d60eb3c2",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/model_selection.py",
+      "wheel_source_sha256": "b3a617881f4e6ffce6bfbf077069c83b31c6169ec6b2195a2db7f54fbb0708f3",
+      "commit_source_sha256": "b3a617881f4e6ffce6bfbf077069c83b31c6169ec6b2195a2db7f54fbb0708f3",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/operator_runtime.py",
+      "wheel_source_sha256": "40677c0c9e86ead4f78ca56d733b77f8df0435f7302daf506b20433a2b3c46dd",
+      "commit_source_sha256": "40677c0c9e86ead4f78ca56d733b77f8df0435f7302daf506b20433a2b3c46dd",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/physical_export.py",
+      "wheel_source_sha256": "c18d1440658a450d63f0d4136561bed1a69c2c6434bff03707d3b1f48bf17275",
+      "commit_source_sha256": "c18d1440658a450d63f0d4136561bed1a69c2c6434bff03707d3b1f48bf17275",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/physical_runtime.py",
+      "wheel_source_sha256": "eb0d93a160e0d149314467f7b1fb0c8218784366810a577e5ece70d72fc31333",
+      "commit_source_sha256": "eb0d93a160e0d149314467f7b1fb0c8218784366810a577e5ece70d72fc31333",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/pipeline.py",
+      "wheel_source_sha256": "fafcdedc6208dca9fccc13177012200fea1aef89756f84d2bd0e713942368f28",
+      "commit_source_sha256": "fafcdedc6208dca9fccc13177012200fea1aef89756f84d2bd0e713942368f28",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/refinement.py",
+      "wheel_source_sha256": "c11e822165f589118995791ebd24a9e1ede63dd49dcff26738ff79a000a21911",
+      "commit_source_sha256": "1bc0e81243ff9a2c2aee9a626907d3ddbcecfe8f801ea7eba02f5e3c99b22d46",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis.py",
+      "wheel_source_sha256": "098e671967150ce360def927790621a402735ed37b18c1eba64d6f9b2a5698dd",
+      "commit_source_sha256": "098e671967150ce360def927790621a402735ed37b18c1eba64d6f9b2a5698dd",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_adjoint.py",
+      "wheel_source_sha256": "c9d8e30d96e027152521f174bd7c8d2629084624c059a4bf21248d306d88724f",
+      "commit_source_sha256": "c9d8e30d96e027152521f174bd7c8d2629084624c059a4bf21248d306d88724f",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_cache.py",
+      "wheel_source_sha256": "06504b180735bc821297cee225ae478359aaa393ac20e151aba47a1b514319e4",
+      "commit_source_sha256": "06504b180735bc821297cee225ae478359aaa393ac20e151aba47a1b514319e4",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_factorized.py",
+      "wheel_source_sha256": "9d8cc897f91edb37b82afd96684b2946b10d1f0fc62fdbb32103105a7dc03d3a",
+      "commit_source_sha256": "9d8cc897f91edb37b82afd96684b2946b10d1f0fc62fdbb32103105a7dc03d3a",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_fixed_compiler.py",
+      "wheel_source_sha256": "da32e133a3e478a107338153c837ec7bcc40441ce4e99bc0e76e56b3a5751513",
+      "commit_source_sha256": "da32e133a3e478a107338153c837ec7bcc40441ce4e99bc0e76e56b3a5751513",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_fixed_subspace.py",
+      "wheel_source_sha256": "a7ffd23ec2f14d1d6448bf810969e794686c618eba0b1a850801bce2fc745e6e",
+      "commit_source_sha256": "a7ffd23ec2f14d1d6448bf810969e794686c618eba0b1a850801bce2fc745e6e",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_graded.py",
+      "wheel_source_sha256": "8fcf1dedb0a736775a947489b1f0be5aa867d98355ba7c76b797e04655588cd0",
+      "commit_source_sha256": "8fcf1dedb0a736775a947489b1f0be5aa867d98355ba7c76b797e04655588cd0",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_local_fixed.py",
+      "wheel_source_sha256": "b3285260e305f0da0abd670afe8846cb90c6d842c5b7c00553568e0b0f5ccc25",
+      "commit_source_sha256": "b3285260e305f0da0abd670afe8846cb90c6d842c5b7c00553568e0b0f5ccc25",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_oracle.py",
+      "wheel_source_sha256": "3564a117173d806ec3128b2ee638d1fe1c9483ceb0c5ee177b99bcfa991c78ad",
+      "commit_source_sha256": "3564a117173d806ec3128b2ee638d1fe1c9483ceb0c5ee177b99bcfa991c78ad",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_structural.py",
+      "wheel_source_sha256": "7735f19fe46508e45d7eea3bc3ed9c2151a6cc84a6ddc8a1cffd8844e54c0869",
+      "commit_source_sha256": "7735f19fe46508e45d7eea3bc3ed9c2151a6cc84a6ddc8a1cffd8844e54c0869",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/response_basis_symmetry_first.py",
+      "wheel_source_sha256": "e059e7c5c79d0b169c12da0817ddba805bc74de907c04688292875df932e958f",
+      "commit_source_sha256": "e059e7c5c79d0b169c12da0817ddba805bc74de907c04688292875df932e958f",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/schema.py",
+      "wheel_source_sha256": "4356841aef2757d635b3cc94e853e283ba3608d640c0ba323bbdfea3fdb91565",
+      "commit_source_sha256": "4356841aef2757d635b3cc94e853e283ba3608d640c0ba323bbdfea3fdb91565",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/symmetry.py",
+      "wheel_source_sha256": "c94126d5aa714a8e63ef6b7b8571aa701aa9d4891df289a24d29f21e63fb7fd3",
+      "commit_source_sha256": "c94126d5aa714a8e63ef6b7b8571aa701aa9d4891df289a24d29f21e63fb7fd3",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/model/validation.py",
+      "wheel_source_sha256": "0c0b7a5e34f6f13f7a5530066a8aff7da253baa5b3449d064b2b1fd39116f72f",
+      "commit_source_sha256": "98aff2ddfd7eff7f2b707deb5f0d09f8046402f49c40dd6525ac57b4a715cb00",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/non_gamma_selection.py",
+      "wheel_source_sha256": "aef04abdfb5c1f15a618cf949e4ffe6f06d9d1fc8c8a16e3c9e81a612a1cf04b",
+      "commit_source_sha256": "aef04abdfb5c1f15a618cf949e4ffe6f06d9d1fc8c8a16e3c9e81a612a1cf04b",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/orbitals.py",
+      "wheel_source_sha256": "140bc8ef73d22268369dc677e969a45cfd31d3ad4b863f7e1b6901f7db921cba",
+      "commit_source_sha256": "140bc8ef73d22268369dc677e969a45cfd31d3ad4b863f7e1b6901f7db921cba",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/plot_style.py",
+      "wheel_source_sha256": "5a21a018dfcbeb3ddccec253c88478ce4b7a964724cc5eda2fa27c5af7320b2e",
+      "commit_source_sha256": "5a21a018dfcbeb3ddccec253c88478ce4b7a964724cc5eda2fa27c5af7320b2e",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/projection_handoff.py",
+      "wheel_source_sha256": "15fd6e7bafe80da86ebfbc5030bbac83985bb599d884f411b2f070d470a21f97",
+      "commit_source_sha256": "15fd6e7bafe80da86ebfbc5030bbac83985bb599d884f411b2f070d470a21f97",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/projection_selection.py",
+      "wheel_source_sha256": "c4d1755396c437d0ea3b43d9fbbd0ff81d641a329e7b1b23788369787b192fc6",
+      "commit_source_sha256": "c4d1755396c437d0ea3b43d9fbbd0ff81d641a329e7b1b23788369787b192fc6",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/reporting.py",
+      "wheel_source_sha256": "cfd4de8f2ad952257b08dfe35452face9bf8cf740ac2db9035dc278367770aa2",
+      "commit_source_sha256": "cfd4de8f2ad952257b08dfe35452face9bf8cf740ac2db9035dc278367770aa2",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/selection_artifact.py",
+      "wheel_source_sha256": "c5de5bb6722fb268ef996f0c261ee815714ecb17336aef4af7e6e12a7dd09f49",
+      "commit_source_sha256": "c5de5bb6722fb268ef996f0c261ee815714ecb17336aef4af7e6e12a7dd09f49",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/selection_orchestration.py",
+      "wheel_source_sha256": "66da407d1667b53986148086c03abaff8ba3e0bdb2d86a035ad679c309af25ce",
+      "commit_source_sha256": "66da407d1667b53986148086c03abaff8ba3e0bdb2d86a035ad679c309af25ce",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symm_rep.py",
+      "wheel_source_sha256": "10d73e9235e01287dc9eb7cfecf2a6dc1fc71ca18a5f5a94c0fa132256b19093",
+      "commit_source_sha256": "10d73e9235e01287dc9eb7cfecf2a6dc1fc71ca18a5f5a94c0fa132256b19093",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/__init__.py",
+      "wheel_source_sha256": "73e54636db0960100010675bd76439b614e52102e723d27f295501e9c7555be9",
+      "commit_source_sha256": "73e54636db0960100010675bd76439b614e52102e723d27f295501e9c7555be9",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/action_schema.py",
+      "wheel_source_sha256": "b4d3e2db262793f6bc2efeb7efe0b6edaf4d7b576cf2d0c2decc8f6180008761",
+      "commit_source_sha256": "b4d3e2db262793f6bc2efeb7efe0b6edaf4d7b576cf2d0c2decc8f6180008761",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/candidate_certificate.py",
+      "wheel_source_sha256": "6e1ab7cb1bc7043207f198d6373ce1de35e3fce45b77cc4c2982041e976b7dec",
+      "commit_source_sha256": "6e1ab7cb1bc7043207f198d6373ce1de35e3fce45b77cc4c2982041e976b7dec",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/canonical_target.py",
+      "wheel_source_sha256": "2383ba89e0d6245d4210fca1b30e63417821629abb174ae771ec6ffe312cfd9a",
+      "commit_source_sha256": "2383ba89e0d6245d4210fca1b30e63417821629abb174ae771ec6ffe312cfd9a",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/checks.py",
+      "wheel_source_sha256": "0974a0aaf34a32d5edf5e1235d0ebd511a90d5753592ecd39edeaa06b84afa68",
+      "commit_source_sha256": "0974a0aaf34a32d5edf5e1235d0ebd511a90d5753592ecd39edeaa06b84afa68",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/exactify_representation.py",
+      "wheel_source_sha256": "8f5c5a327a4f971bf345b9c4c82febf894b9e42767ac487e90473b93f9b9331b",
+      "commit_source_sha256": "8f5c5a327a4f971bf345b9c4c82febf894b9e42767ac487e90473b93f9b9331b",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/factorized_action.py",
+      "wheel_source_sha256": "4c11ad7fb404f9a282e3fe7425008dab32bc08e30ca3dd30b49692ff5e2c37dc",
+      "commit_source_sha256": "4c11ad7fb404f9a282e3fe7425008dab32bc08e30ca3dd30b49692ff5e2c37dc",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/generator.py",
+      "wheel_source_sha256": "a619d378704197225fec75d5128a2a074cd02d08cd5aceb16e3672a6cdf26b8a",
+      "commit_source_sha256": "a619d378704197225fec75d5128a2a074cd02d08cd5aceb16e3672a6cdf26b8a",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/geometry.py",
+      "wheel_source_sha256": "094072f02cd1fa53e2d3bc72e825dc874d3a24d2effd965929beddcf7b7c605f",
+      "commit_source_sha256": "094072f02cd1fa53e2d3bc72e825dc874d3a24d2effd965929beddcf7b7c605f",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/joint_exactification.py",
+      "wheel_source_sha256": "1200d90679a69fcdb4fe0d7617c611450022494b27f360e14f818d4ee63a20a7",
+      "commit_source_sha256": "1200d90679a69fcdb4fe0d7617c611450022494b27f360e14f818d4ee63a20a7",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/projection.py",
+      "wheel_source_sha256": "d23dd1c76c82b5e88d97b289dd810cc968d2e5534880f41ce891d7cba4d5c374",
+      "commit_source_sha256": "d23dd1c76c82b5e88d97b289dd810cc968d2e5534880f41ce891d7cba4d5c374",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/q_canonicalization.py",
+      "wheel_source_sha256": "f19ff3b5406af21a9ed7c7dd91ae1be6de76a301945c933cf6a9d35665b4d16d",
+      "commit_source_sha256": "f19ff3b5406af21a9ed7c7dd91ae1be6de76a301945c933cf6a9d35665b4d16d",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/structure_certificate.py",
+      "wheel_source_sha256": "24e5818826b1c0ff0ba1445ac8717d08997f14490a467d2211988b59c13006a0",
+      "commit_source_sha256": "24e5818826b1c0ff0ba1445ac8717d08997f14490a467d2211988b59c13006a0",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/symmetry/structure_recovery.py",
+      "wheel_source_sha256": "42cf74501c5878dfcb75eb9aff3c6a319f04621c38abd5966ec0909bb76266aa",
+      "commit_source_sha256": "42cf74501c5878dfcb75eb9aff3c6a319f04621c38abd5966ec0909bb76266aa",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/viz/__init__.py",
+      "wheel_source_sha256": "67dd7617e4f4714ae09757bfeedaeb4e3b42c3cfb72344704079bef27c734ccc",
+      "commit_source_sha256": "67dd7617e4f4714ae09757bfeedaeb4e3b42c3cfb72344704079bef27c734ccc",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/viz/bands.py",
+      "wheel_source_sha256": "c7db4d02f38387dab2bb3ed581de9f6890f36b7461f1772491089d48d26e9451",
+      "commit_source_sha256": "c7db4d02f38387dab2bb3ed581de9f6890f36b7461f1772491089d48d26e9451",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/viz/model_diagnostics.py",
+      "wheel_source_sha256": "ef9d64e86e5ca061c9bd7a45eaf75b243cc454f7e05881c039eb4a95ec00474b",
+      "commit_source_sha256": "ea425a64eebb338c9ac4720d1b07d19403e017e000e5eea317ad8d24a6735bbc",
+      "ast_identical": true
+    },
+    {
+      "path": "kp/kp/viz/projections.py",
+      "wheel_source_sha256": "040721a5bf61800cae6cbb35a86db3f9e43953d9d1a132f24f19a329f7113d43",
+      "commit_source_sha256": "040721a5bf61800cae6cbb35a86db3f9e43953d9d1a132f24f19a329f7113d43",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/__init__.py",
+      "wheel_source_sha256": "af9a5ab070e3f826101d27f7a8795fb05d90f6ed6961cb798bd9a19698c53dc3",
+      "commit_source_sha256": "af9a5ab070e3f826101d27f7a8795fb05d90f6ed6961cb798bd9a19698c53dc3",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/artifacts.py",
+      "wheel_source_sha256": "03e6a71db574720d99294db4a4fc8f81d659a8ec1a9aa85cb1c532646eebc657",
+      "commit_source_sha256": "03e6a71db574720d99294db4a4fc8f81d659a8ec1a9aa85cb1c532646eebc657",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/chern_post.py",
+      "wheel_source_sha256": "d84494fb337ffe2284d29d9b7a031403041b98d1ec2ea7a966b7b745e58776e6",
+      "commit_source_sha256": "d84494fb337ffe2284d29d9b7a031403041b98d1ec2ea7a966b7b745e58776e6",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/cli.py",
+      "wheel_source_sha256": "136e136c4127875cbfc8fd00c56ba9a9431810f545f3458a157fd9737df5cb01",
+      "commit_source_sha256": "040396e99653a79c67c1eace57363c8ecd9a503a0077ab15d4e9c8435caf2892",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/config/__init__.py",
+      "wheel_source_sha256": "e39262cb416e983a8ed97fd6bb907b2b97787bc8a5229f28330bc0dce131b7ff",
+      "commit_source_sha256": "e39262cb416e983a8ed97fd6bb907b2b97787bc8a5229f28330bc0dce131b7ff",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/config/schema.py",
+      "wheel_source_sha256": "9c11b0d9de13de3298b6af7ce694b6b9d711eb4da9b5ba4403330b930a5dd5e0",
+      "commit_source_sha256": "71fbe03f87b6ffc249830717b3a174d4bb0cc27a956610d8c31033142a09cdf0",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/config_generator.py",
+      "wheel_source_sha256": "d625d5d383b6a90eaa60d4510847d58620a80eadcfc2af30bbd00cd936fc88ec",
+      "commit_source_sha256": "d625d5d383b6a90eaa60d4510847d58620a80eadcfc2af30bbd00cd936fc88ec",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/geometry/__init__.py",
+      "wheel_source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "commit_source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/geometry/rotations.py",
+      "wheel_source_sha256": "c553e904230456814e79c2c535665d094431990ab7b67fdb0f6e4b99b015c93e",
+      "commit_source_sha256": "c553e904230456814e79c2c535665d094431990ab7b67fdb0f6e4b99b015c93e",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/identity.py",
+      "wheel_source_sha256": "e4c01c368b7539e6b271d76c9e415521f21aa2a80f295cfa13922f95dcc6c707",
+      "commit_source_sha256": "e4c01c368b7539e6b271d76c9e415521f21aa2a80f295cfa13922f95dcc6c707",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/__init__.py",
+      "wheel_source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "commit_source_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/abacus.py",
+      "wheel_source_sha256": "e773e0c6404bf83fdc22acd04db88e543618c90f72251349bad3e4fc22bd048e",
+      "commit_source_sha256": "e773e0c6404bf83fdc22acd04db88e543618c90f72251349bad3e4fc22bd048e",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/hr.py",
+      "wheel_source_sha256": "0e170429d3aa3c4be2653e11f4e83a3b232f2262861d86b8b193afacb6b1a54d",
+      "commit_source_sha256": "0e170429d3aa3c4be2653e11f4e83a3b232f2262861d86b8b193afacb6b1a54d",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/hs_symmetry.py",
+      "wheel_source_sha256": "b8c821c45bbbb6d0ecf63b357cc0786882ef24a9ac4c2239caec95789f1c4267",
+      "commit_source_sha256": "b8c821c45bbbb6d0ecf63b357cc0786882ef24a9ac4c2239caec95789f1c4267",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/kpath.py",
+      "wheel_source_sha256": "7afa0cb46ce46e3bf1b59f25447197df440fa66f6037baac48576c95dfe800eb",
+      "commit_source_sha256": "e14c69659e68cd87704565da563dc91f3ae4bec1d2c2998830d609fe354ee1f2",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/openmx.py",
+      "wheel_source_sha256": "5f41f12ff873d25952e3238522bf1cecf36344ffffbba19f9bb5e54cd06a49be",
+      "commit_source_sha256": "5f41f12ff873d25952e3238522bf1cecf36344ffffbba19f9bb5e54cd06a49be",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/preparation.py",
+      "wheel_source_sha256": "bdab6413a2bba4c3b350c36e35e29cd5d057241d3526a92d1011cf40788e695b",
+      "commit_source_sha256": "bdab6413a2bba4c3b350c36e35e29cd5d057241d3526a92d1011cf40788e695b",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/siesta.py",
+      "wheel_source_sha256": "0d766327bcdbc20e102dac1d3a554a0a3f4e0e4e53bf7b0c08425a889f725f39",
+      "commit_source_sha256": "0d766327bcdbc20e102dac1d3a554a0a3f4e0e4e53bf7b0c08425a889f725f39",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/io/structure.py",
+      "wheel_source_sha256": "f2ba8257b23b5e84ccaccbc7777300102dd25373bbff1bd1e679c70164c5f9eb",
+      "commit_source_sha256": "3f37c47116effeaa96b06dea1ff426adce3073a490315cdfe81c8af522701c27",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/orbital_analysis_tool.py",
+      "wheel_source_sha256": "b9ab4008f1c858ab1b7b2bd21446ad6e4cd80df091d00412ca7db57cdb3cc724",
+      "commit_source_sha256": "117b490092c7afeca1818d78f0b0c60b115d08b256ddf0613f723c89a0427a3a",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/plot_band.py",
+      "wheel_source_sha256": "32c7d141bbd57da2f660c43ecb711fb233def61a68264018fd9d374c900cf395",
+      "commit_source_sha256": "08e8f8c52a0fbeca70a3eb2663a5b5cd4312c7f11de972807c58b70bb28debc8",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/plot_orbital_tool.py",
+      "wheel_source_sha256": "ba20757a95cd2a03b56e426c20341099ad1c2a4376b3bdd68304794455b04155",
+      "commit_source_sha256": "3cd84d520837096b1fa235f2f19087ee461daddbbd2719ea10c9954f4d513cef",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/postprocess_memmap.py",
+      "wheel_source_sha256": "b7e6b8097cdbe780d0d104351bf13a198663af45acdb7f8b58adeac7a9d1fd02",
+      "commit_source_sha256": "b7e6b8097cdbe780d0d104351bf13a198663af45acdb7f8b58adeac7a9d1fd02",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/reporting.py",
+      "wheel_source_sha256": "5e1429e44fed8938998fafe020821f677a97fab82ef1cc9a569a65a5ea4aebc9",
+      "commit_source_sha256": "5e1429e44fed8938998fafe020821f677a97fab82ef1cc9a569a65a5ea4aebc9",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/symm_rep.py",
+      "wheel_source_sha256": "d95ef818c53763ae79ea26d5269d9801847de4ec3c7f29cfaef64e7e556b0842",
+      "commit_source_sha256": "d95ef818c53763ae79ea26d5269d9801847de4ec3c7f29cfaef64e7e556b0842",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/symmetry/__init__.py",
+      "wheel_source_sha256": "8761acb909552b805953b675fa902ebb0eecf5fa226ba92fff8f272712a9871b",
+      "commit_source_sha256": "8761acb909552b805953b675fa902ebb0eecf5fa226ba92fff8f272712a9871b",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/symmetry/periodic_gauge.py",
+      "wheel_source_sha256": "3433be6cdac2a142f906c96be6a182b708e030e6f38ffd7b3ec046ef4d9a252b",
+      "commit_source_sha256": "3433be6cdac2a142f906c96be6a182b708e030e6f38ffd7b3ec046ef4d9a252b",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/symmetry/representations.py",
+      "wheel_source_sha256": "c94a9d22876513e8262e56128773cc77a9e8cfbdc269c8a11b5bc6d8990a80bf",
+      "commit_source_sha256": "a3ddc138df65bb9badce80212f9a9985f49e2a9d40865f815cdda374ea365eab",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/utils.py",
+      "wheel_source_sha256": "3d535367729a0a44d6a7bd98602803471dc85dce32e55adf98a963c811ba56c8",
+      "commit_source_sha256": "3d535367729a0a44d6a7bd98602803471dc85dce32e55adf98a963c811ba56c8",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/workflows/__init__.py",
+      "wheel_source_sha256": "595b015722d8855c5a3e8bfa6720d72438832582d4ea06a579dd066f401d2a93",
+      "commit_source_sha256": "595b015722d8855c5a3e8bfa6720d72438832582d4ea06a579dd066f401d2a93",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/workflows/band.py",
+      "wheel_source_sha256": "076c14ce4d1744fb65084553df5fc23e63740cb72947724674bc48b911a9f05e",
+      "commit_source_sha256": "419b56c86317f06657ddb5b2083b4144df2f528c857c094001b712af6ff99180",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/workflows/symm_rep.py",
+      "wheel_source_sha256": "fa9c8cda5f1f8eb073c8fe0f9cf47f8ea723220660bf10869695b69fb0c790ce",
+      "commit_source_sha256": "fa9c8cda5f1f8eb073c8fe0f9cf47f8ea723220660bf10869695b69fb0c790ce",
+      "ast_identical": true
+    },
+    {
+      "path": "tapw/tapw/workflows/symmetry.py",
+      "wheel_source_sha256": "909e50e087d16abb6f315b1406d20a7109525294a2a1dce4ffc809c308756b78",
+      "commit_source_sha256": "909e50e087d16abb6f315b1406d20a7109525294a2a1dce4ffc809c308756b78",
+      "ast_identical": true
+    }
+  ]
+}

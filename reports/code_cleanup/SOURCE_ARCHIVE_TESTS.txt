@@ -1,0 +1,9 @@
+Actual final3 source archive regression
+Node: test001
+Environment: /data/home/zy/mambaforge/envs/moirekp
+Root: /data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/source-archive-final3-20261014/moirekp-0.1.0
+Imports: kp/tapw both asserted inside the extracted archive.
+Command: python -m pytest -p no:cacheprovider -m "not slow and not external_data" -q
+Result: 2556 passed, 3 skipped, 21 deselected in 277.67s; foreground exit 0.
+Log: /data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/logs/archive-full-tests-final3-20261014.log
+Scope: package small regressions; not a real material production result.

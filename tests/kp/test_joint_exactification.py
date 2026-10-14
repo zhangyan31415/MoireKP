@@ -10,6 +10,7 @@ from kp.symmetry.joint_exactification import (
     BlockRouteAction,
     FreeOrbitReport,
     JointExactificationError,
+    JointExactificationFeasibilityError,
     JointExactificationConfig,
     MagneticGenerator,
     MagneticPresentation,
@@ -2475,3 +2476,36 @@ def test_joint_artifact_is_rebuilt_and_recertified_after_common_gauge() -> None:
             gauged[name].route_blocks,
         ):
             np.testing.assert_array_equal(actual, expected)
+
+
+@pytest.fixture(autouse=True)
+def forbid_diagnostic_http(monkeypatch):
+    """Scientific projection and exactification must not send diagnostic HTTP."""
+    import urllib.request
+
+    requests = []
+
+    def reject_http(*args, **kwargs):
+        requests.append((args, kwargs))
+        raise AssertionError("unexpected HTTP request from symmetry calculation")
+
+    monkeypatch.setattr(urllib.request, "urlopen", reject_http)
+    yield
+    assert not requests, "symmetry calculation attempted diagnostic HTTP"
+
+
+def test_inconsistent_nearest_central_branches_are_a_numerical_rejection():
+    identity = np.eye(2, dtype=complex)
+    actions = {
+        "TR": BlockRouteAction("TR", True, (1, 0, 3, 2), (2,)*4,
+            (identity, -identity, -identity, identity)),
+        "C2": BlockRouteAction("C2", False, (2, 3, 0, 1), (2,)*4,
+            (identity, identity, -identity, -identity)),
+    }
+    presentation = compile_continuum_magnetic_presentation([_tr(phase=-1), _c2(phase=-1)])
+    # Source/target layout and quotient relations are valid; the measured
+    # central signs satisfy the squares but anticommute rather than commute.
+    validate_presentation_action_relations(actions, presentation)
+    orbit = compile_action_orbits(actions, presentation)[0]
+    with pytest.raises(JointExactificationFeasibilityError, match="TR_C2_commute"):
+        synchronize_free_orbit(actions, presentation, orbit, config=JointExactificationConfig())

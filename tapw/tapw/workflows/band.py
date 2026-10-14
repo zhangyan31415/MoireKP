@@ -47,14 +47,9 @@ from ..symmetry.representations import (
 from tqdm import tqdm
 from ..config import ComputeConfig, normalize_symmetrize_hamiltonian
 from ..artifacts import (
-    array_output_filename,
-    band_output_filename,
     canonical_band_filename,
     canonical_topology_band_label,
     canonical_topology_grid_name,
-    chern_flux_filename,
-    chern_summary_filename,
-    gvec_output_filename,
     raw_memmap_filename,
 )
 from ..chern_post import (
@@ -67,8 +62,8 @@ from ..io.kpath import KPathGenerator
 from ..geometry.rotations import get_any_rot_orb_twostep
 from ..reporting import ensure_reporter
 from ..utils import (
-    timing_decorator_factory, rotate_vector, unique_sorted, 
-    check_hermitian, is_positive_definite, print_sparse_matrix_info, 
+    timing_decorator_factory, rotate_vector, unique_sorted,
+    check_hermitian, is_positive_definite, print_sparse_matrix_info,
     check_sparsity, HARTREE
 )
 import re
@@ -76,53 +71,10 @@ import re
 np.set_printoptions(precision=6)
 
 
-def _is_canonical_output_layout(config) -> bool:
-    layout = getattr(config, "output_layout", None)
-    return str(getattr(layout, "style", "")).lower() == "canonical_v1"
 
 
-def _write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
 
-def _update_canonical_manifests(workflow_dir: Path, workflow: str) -> None:
-    target_dir = workflow_dir.parent
-    if len(target_dir.parents) < 2:
-        return
-    profile_dir = target_dir.parent
-    root_dir = profile_dir.parent
-    workflows = sorted(
-        child.name
-        for child in target_dir.iterdir()
-        if child.is_dir() and (child / "manifest.json").exists()
-    )
-    _write_json(
-        target_dir / "manifest.json",
-        {
-            "schema": "tapw_target_outputs/v1",
-            "profile": profile_dir.name,
-            "q_shell": target_dir.name,
-            "workflows": workflows,
-        },
-    )
-    targets = []
-    for profile_path in sorted(root_dir.iterdir()):
-        if not profile_path.is_dir():
-            continue
-        for q_path in sorted(profile_path.iterdir()):
-            if q_path.is_dir() and (q_path / "manifest.json").exists():
-                targets.append(
-                    {
-                        "profile": profile_path.name,
-                        "q_shell": q_path.name,
-                        "path": f"{profile_path.name}/{q_path.name}",
-                    }
-                )
-    _write_json(
-        root_dir / "manifest.json",
-        {"schema": "tapw_outputs/v1", "updated_workflow": workflow, "targets": targets},
-    )
 
 
 def _remove_canonical_manifest_files(workflow_dir: Path) -> None:
@@ -153,7 +105,7 @@ _normalize_mkl_interface_layer_for_sparse_dot_mkl()
 try:
     from sparse_dot_mkl import dot_product_mkl  # type: ignore
     _HAS_SPARSE_DOT_MKL = True
-except Exception:  # pragma: no cover
+except (ImportError, OSError, RuntimeError):  # pragma: no cover
     dot_product_mkl = None
     _HAS_SPARSE_DOT_MKL = False
 
@@ -1441,7 +1393,7 @@ def _set_thread_limits(nthreads: int | None) -> None:
         return
     try:
         n = int(nthreads)
-    except Exception:
+    except (TypeError, ValueError):
         return
     if n <= 0:
         return
@@ -1475,7 +1427,7 @@ def _maybe_pin_current_worker(slot_width: int | None, worker_count: int | None) 
     try:
         width = int(slot_width)
         nworkers = int(worker_count)
-    except Exception:
+    except (TypeError, ValueError):
         return
     if width <= 0 or nworkers <= 1:
         return
@@ -1494,7 +1446,7 @@ def _maybe_pin_current_worker(slot_width: int | None, worker_count: int | None) 
 
     try:
         allowed_cpus = sorted(os.sched_getaffinity(0))
-    except Exception:
+    except OSError:
         return
     if not allowed_cpus:
         return
@@ -1510,7 +1462,7 @@ def _maybe_pin_current_worker(slot_width: int | None, worker_count: int | None) 
     try:
         os.sched_setaffinity(0, set(cpu_chunk))
         _AFFINITY_PINNED_PIDS.add(pid)
-    except Exception:
+    except OSError:
         return
 
 
@@ -1525,7 +1477,7 @@ def _solve_eigs_slepc(hamk, samk, cfg: ComputeConfig) -> np.ndarray:
     try:
         from petsc4py import PETSc  # type: ignore
         from slepc4py import SLEPc  # type: ignore
-    except Exception as e:  # pragma: no cover
+    except (ImportError, OSError, RuntimeError) as e:  # pragma: no cover
         raise ImportError(
             "eigensolver='slepc' requested but petsc4py/slepc4py is not available. "
             "Install them into the active environment (tapw-mkl) and retry. "
@@ -1703,10 +1655,10 @@ def _pick_available_slepc_factor_backend() -> str:
             ksp.setUp()
             _SLEPC_FACTOR_PROBE_CACHE[key] = candidate
             return candidate
-        except Exception:
+        except PETSc.Error:
             continue
         finally:
-            with suppress(Exception):
+            with suppress(PETSc.Error):
                 ksp.destroy()
 
     _SLEPC_FACTOR_PROBE_CACHE[key] = "petsc"
@@ -1768,7 +1720,7 @@ def _mp_kpoint_worker(args: tuple[int, np.ndarray]) -> tuple[int, bool, str | No
     try:
         # Safety: in case the Pool initializer was not used for some reason.
         _set_thread_limits(getattr(cfg, "blas_threads", None))
-        eig, vec, hamk, samk = calc.calculate_band_01(kpoint, i)
+        eig, vec, hamk, samk = calc.calculate_band(kpoint, i)
 
         if use_memmap and eig_path is not None:
             eig_mm = _get_memmap(str(eig_path))
@@ -1789,7 +1741,7 @@ def _mp_kpoint_worker(args: tuple[int, np.ndarray]) -> tuple[int, bool, str | No
 
 class TAPW_parameters:
     """TAPW parameters for twisted material calculations"""
-    
+
     def __init__(self, structure: StructureProcessorSpglib, config: ComputeConfig, reporter=None):
         self.config = config
         self.n_g = self.config.n_g
@@ -1857,7 +1809,7 @@ class TAPW_parameters:
             z0 = df.loc[mask, 'z'].mean()
         else:
             z0 = 0.0
-        
+
         z = df['z'].values
         delta_z = z - z0
         onsite = np.zeros_like(z, dtype=np.float64)
@@ -1883,9 +1835,9 @@ class TAPW_parameters:
             m_g_unitvec_1 = -self.structure.reciprocal_Tmat[0][:2]
         else:
             m_g_unitvec_1 = self.structure.reciprocal_Tmat[0][:2]
-        
+
         n_moire = self.structure.twist_index
-        
+
         if n_moire == 0:
             self.reporter.kv("n_moire=0 note", "only for non-twisted heterostructures")
             reciprocal_Tmat_layer1 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]-1]
@@ -1923,17 +1875,17 @@ class TAPW_parameters:
                 m_X2 = 0.5 * g2
             m_M1 = 0.5 * (g1 - g2)
             m_M2 = 0.5 * (g1 + g2)
-            
+
             # Valley-dependent reciprocal-space offsets (commensurate indexing)
             offset_Gamma = np.zeros(2)
             # offset_X = n_moire * g1
             # offset_Y = n_moire * g2
             # offset_M = n_moire * (g1 + g2)
-            
+
             # offset_X = 0.5 * n_moire * (g1 + g2)
             # offset_Y = 0.5 * n_moire * (-g1 + g2)
             offset_M = n_moire * g1
-            
+
             self.reporter.section("Valley center setup")
             self.reporter.kv("g1", g1)
             self.reporter.kv("g2", g2)
@@ -1988,7 +1940,7 @@ class TAPW_parameters:
 
         m_K1 = -1/3 * m_g_unitvec_1 + 2/3 * m_g_unitvec_2
         m_K2 = -2/3 * m_g_unitvec_1 + 1/3 * m_g_unitvec_2
-        
+
         if n_moire % 2 == 1:
             offset_1 = (n_moire + 1) * (m_g_unitvec_1 + m_g_unitvec_2) / 2
             offset_2 = rotate_vector(offset_1, 120)
@@ -2014,13 +1966,13 @@ class TAPW_parameters:
             32: (rotate_vector(m_M1 + offset_1, 120), rotate_vector(m_M2 + offset_1, 120)),
             33: (rotate_vector(m_M1 + offset_1, 240), rotate_vector(m_M2 + offset_1, 240)),
         }
-        
+
         offset_dict = {
-            1: offset, 2: -offset, 11: rotate_vector(offset, 120), 
+            1: offset, 2: -offset, 11: rotate_vector(offset, 120),
             12: rotate_vector(offset, 240), 5: np.zeros(2),
             31: offset_1, 32: rotate_vector(offset_1, 120), 33: rotate_vector(offset_1, 240)
         }
-        
+
         mK_dict = {
             1: (m_K1, m_K2), 2: (-m_K1, -m_K2),
             11: (rotate_vector(m_K1, 120), rotate_vector(m_K2, 120)),
@@ -2059,7 +2011,7 @@ class TAPW_parameters:
         g_vec_list = []
         g_3 = -m_g_unitvec_1 - m_g_unitvec_2
         num_add = 2
-        
+
         for i in range(self.n_g + num_add):
             for j in range(self.n_g + num_add):
                 g_vec_list.append(i * m_g_unitvec_1 + j * m_g_unitvec_2)
@@ -2076,19 +2028,19 @@ class TAPW_parameters:
         o_g_vec_list_m_K1 = o_g_vec_list - m_K1
         o_g_vec_list_m_K2 = o_g_vec_list - m_K2
 
-        K1_distance = unique_sorted(np.linalg.norm(o_g_vec_list_m_K1, axis=1), 
+        K1_distance = unique_sorted(np.linalg.norm(o_g_vec_list_m_K1, axis=1),
                                    tolerance=0.1 * np.linalg.norm(m_g_unitvec_1))
-        K2_distance = unique_sorted(np.linalg.norm(o_g_vec_list_m_K2, axis=1), 
+        K2_distance = unique_sorted(np.linalg.norm(o_g_vec_list_m_K2, axis=1),
                                    tolerance=0.1 * np.linalg.norm(m_g_unitvec_1))
 
         g_vec_list_K1 = []
         g_vec_list_K2 = []
         n_g = self.n_g - 0 if self.valley == 5 else self.n_g
-        
+
         for i, vec in enumerate(o_g_vec_list_m_K1):
             if np.linalg.norm(vec) < K1_distance[n_g - 1] + 0.001:
                 g_vec_list_K1.append(o_g_vec_list[i] + offset)
-        
+
         for i, vec in enumerate(o_g_vec_list_m_K2):
             if np.linalg.norm(vec) < K2_distance[n_g - 1] + 0.001:
                 g_vec_list_K2.append(o_g_vec_list[i] + offset)
@@ -2125,17 +2077,17 @@ class TAPW_parameters:
                 "structure.df must contain 'phys_layer' column. "
                 "Please use StructureProcessorSpglib with the new multi-group support."
             )
-        
+
         # Get unique twist groups (sorted)
         unique_groups = sorted(self.structure.df['twist_group'].unique())
         n_groups = len(unique_groups)
-        
+
         # Validate twist_group is continuous 0..n_groups-1
         if unique_groups != list(range(n_groups)):
             raise ValueError(
                 f"twist_group must be continuous 0..{n_groups-1}, got {unique_groups}"
             )
-        
+
         # Assign g_vec_list: even groups -> K1, odd groups -> K2
         g_vec_list = []
         for group_id in range(n_groups):
@@ -2145,7 +2097,7 @@ class TAPW_parameters:
             else:
                 g_vec_list.append(self.g_vec_list_K2)
                 self.reporter.kv(f"Source orientation group {group_id}", f"uses K2 G-vector set (count={len(self.g_vec_list_K2)})")
-        
+
         self.reporter.kv("Source orientation groups", n_groups)
         self.g_matrix = self.generate_gr_matrix_cpu(self.structure.df, g_vec_list, spin=self.structure.spin, reporter=self.reporter)
         if scipy.sparse.issparse(self.g_matrix):
@@ -2168,7 +2120,7 @@ class TAPW_parameters:
         )
         if max_dev > 1.0e-2:
             raise Exception(f"g_matrix row norms deviate too much: max|norm^2-1|={max_dev:.3e}")
-        
+
     @staticmethod
     def generate_gr_matrix_cpu(structure_df, g_vec_list, spin=None, reporter=None):
         """Generate gr_matrix (sparse) using twist_group assignment (generalized for n_groups >= 2).
@@ -2388,7 +2340,7 @@ class TAPW_parameters:
             return orbitals
 
         from ..symmetry.representations import generate_direct_sum_params
-        
+
         # Determine per-group atom-type ordering consistent with generate_gr_matrix_cpu:
         # atom_type_list is sorted unique over the whole df.
         atom_type_list_global = np.unique(df_temp['atom_type'].values)
@@ -2428,7 +2380,7 @@ class TAPW_parameters:
 
         # Direct sum across groups in gid order; this matches gr_matrix row block ordering.
         C3_all_rep = direct_sum(*C3_blocks)
-        
+
         # Spin is applied at the very end (after direct_sum), matching original C3_MoTe2_all implementation
         if self.structure.spin:
             C3_all_rep = np.kron(C3spin, C3_all_rep)
@@ -2448,7 +2400,7 @@ class TAPW_parameters:
 
         self.reporter.kv("Combined C3 matrix", f"shape={self.C3_matrix.shape}, nnz={self.C3_matrix.nnz}")
         return self.C3_matrix
-        
+
     def generate_C3_matrix1(self):
         """Generate the C3_matrix (only supports bilayer n_groups=2)."""
         # Check number of groups
@@ -2461,11 +2413,11 @@ class TAPW_parameters:
                 f"Current n_groups={n_groups}. Multi-group representation is outside the supported contract; "
                 f"using it would be incorrect."
             )
-        
+
         df_temp = self.structure.df.copy()
-        
+
         atom_type_list = np.unique(df_temp['atom_type'].values)
-        
+
         # Use twist_group instead of layer for grouping
         atom_twist_group_list = np.array([
             np.unique(df_temp[df_temp['atom_type'] == atom_type]['twist_group'].values)[0]
@@ -2476,17 +2428,17 @@ class TAPW_parameters:
             np.unique(df_temp[df_temp['atom_type'] == atom_type]['layer'].values)[0]
             for atom_type in atom_type_list
         ])
-        
+
         atom_orb_name_list = np.array([
             np.unique(df_temp[df_temp['atom_type'] == atom_type]['orb_name'].values)[0]
             for atom_type in atom_type_list
         ])
-        
+
         species_str_1layer = atom_orb_name_list[np.where(atom_layer_list == 0)[0]]
         species_str_2layer = atom_orb_name_list[np.where(atom_layer_list == 1)[0]]
         species_1layer = {}
         species_2layer = {}
-        
+
         for idx, item in enumerate(species_str_1layer, start=1):
             # 使用'-'分割字符串，得到原子部分和轨道部分
             try:
@@ -2494,7 +2446,7 @@ class TAPW_parameters:
             except ValueError:
                 self.reporter.kv("C3 orbital parse warning", f"cannot split item: {item}")
                 continue
-            
+
             # 使用正则表达式提取原子符号（假设原子符号由字母组成）
             atom_match = re.match(r'([A-Za-z]+)', atom_part)
             if atom_match:
@@ -2502,14 +2454,14 @@ class TAPW_parameters:
             else:
                 self.reporter.kv("C3 orbital parse warning", f"cannot extract atom symbol: {atom_part}")
                 continue
-            
+
             # 使用正则表达式提取轨道类型和对应的数量
             orbitals = {}
             for orb, count in re.findall(r'([spdf])(\d+)', orb_part):
                 orbitals[orb] = int(count)
-            
+
             species_1layer[idx] = {"atom": atom, "orbitals": orbitals}
-        
+
         for idx, item in enumerate(species_str_2layer, start=1):
             # 使用'-'分割字符串，得到原子部分和轨道部分
             try:
@@ -2517,7 +2469,7 @@ class TAPW_parameters:
             except ValueError:
                 self.reporter.kv("C3 orbital parse warning", f"cannot split item: {item}")
                 continue
-            
+
             # 使用正则表达式提取原子符号（假设原子符号由字母组成）
             atom_match = re.match(r'([A-Za-z]+)', atom_part)
             if atom_match:
@@ -2525,34 +2477,34 @@ class TAPW_parameters:
             else:
                 self.reporter.kv("C3 orbital parse warning", f"cannot extract atom symbol: {atom_part}")
                 continue
-            
+
             # 使用正则表达式提取轨道类型和对应的数量
             orbitals = {}
             for orb, count in re.findall(r'([spdf])(\d+)', orb_part):
                 orbitals[orb] = int(count)
-            
+
             species_2layer[idx] = {"atom": atom, "orbitals": orbitals}
-        
+
         self.reporter.kv("C3 species layer 1", species_1layer)
         self.reporter.kv("C3 species layer 2", species_2layer)
-        
+
         C3_G_rep_1layer, C3_G_rep_2layer = C3_G_matrix(
-            self.g_vec_list_K1, self.g_vec_list_K2, 
-            self.structure.reciprocal_Tmat, self.structure.twist_index, 
+            self.g_vec_list_K1, self.g_vec_list_K2,
+            self.structure.reciprocal_Tmat, self.structure.twist_index,
             valley=self.valley
         )
-        
+
         C3_MoTe2_rep = C3_MoTe2_all(
             C3_G_rep_1layer, C3_G_rep_2layer,
             atoms_species_1layer=species_1layer,
             atoms_species_2layer=species_2layer,
             spin=self.structure.spin
         )
-        
+
         self.C3_matrix = scipy.sparse.csr_matrix(C3_MoTe2_rep)
         C3_matrix_2 = self.C3_matrix @ self.C3_matrix
         np.save("C3_matrix",C3_MoTe2_rep)
-        
+
         self.symm_matrix = [
             scipy.sparse.csr_matrix(np.eye(self.C3_matrix.shape[0])),
             self.C3_matrix, C3_matrix_2
@@ -2562,7 +2514,7 @@ class TAPW_parameters:
             self.C3_matrix.conj().T, C3_matrix_2.conj().T
         ]
         return self.C3_matrix
-    
+
 
 
     def generate_g_symm_matrix(self):
@@ -2600,7 +2552,7 @@ class TAPW_parameters:
 
 class BandStructureCalculator:
     """Band structure and Chern number calculator for twisted materials"""
-    
+
     # Valley mapping
     VALLEY_MAP = {
         1: "K1", 2: "K2", 11: "K1_120", 12: "K1_240", 5: "Gamma",
@@ -2624,7 +2576,7 @@ class BandStructureCalculator:
         self.config = config
         self.kpath_config = kpath_config
         self.reporter = ensure_reporter(reporter)
-        
+
         self.result = {}
         self._progress_dir: str | None = None
         # Validate valley configuration
@@ -2651,14 +2603,14 @@ class BandStructureCalculator:
         self._m_valley_c2_reference_symmetry: SimpleNamespace | None = None
         self._m_valley_c2_reference_transport: scipy.sparse.csr_matrix | None = None
         self._m_valley_c2_reference_linear_map: np.ndarray | None = None
-        
+
         # Cache for (orbital-expanded) Wannier coordinates used by Getk_super_gauge_sparse.
         # This avoids rebuilding `sorted_wann` for every rvec loop and every k-point.
         self._sorted_wann: np.ndarray | None = None
         self._num_wann: int | None = None
         self._ef_onsite_orb: np.ndarray | None = None
         self._realspace_block_cache: dict[int, SimpleNamespace] = {}
-        
+
         if self.config.TAPW:
             if self.use_M_valley_threefold_symm:
                 self.use_single_valley_c3 = False
@@ -3153,85 +3105,81 @@ class BandStructureCalculator:
         """Split bands into VBM and CBM parts based on energy E"""
         # Sort each k-point's energies
         energies = np.sort(energies, axis=1)
-        
+
         filtered, pivot_col = self.align_bands_by_index(energies, E)
         vbm = filtered[:, :pivot_col] if pivot_col > 0 else np.array([]).reshape(energies.shape[0], 0)
         cbm = filtered[:, pivot_col:] if pivot_col < filtered.shape[1] else np.array([]).reshape(energies.shape[0], 0)
-        
+
         return filtered, vbm, cbm, pivot_col
-    
+
     def split_vbm_cbm_with_vec(self, energies, vecs, E):
         """Split bands and corresponding eigenvectors into VBM and CBM parts"""
         # energies: (n_kpoints, n_bands)
         # vecs: (n_kpoints, n_orbitals, n_bands) or list of (n_orbitals, n_bands)
-        
+
         # Sort each k-point's energies and get sorting indices
         sort_indices = np.argsort(energies, axis=1)
         energies_sorted = np.sort(energies, axis=1)
-        
+
         filtered_energies, pivot_col = self.align_bands_by_index(energies_sorted, E)
-        
+
         # Split energies
         vbm_energies = filtered_energies[:, :pivot_col] if pivot_col > 0 else np.array([]).reshape(energies.shape[0], 0)
         cbm_energies = filtered_energies[:, pivot_col:] if pivot_col < filtered_energies.shape[1] else np.array([]).reshape(energies.shape[0], 0)
-        
+
         # Split eigenvectors if provided
         vbm_vecs = None
         cbm_vecs = None
-        
+
         if vecs is not None and len(vecs) > 0:
             # Handle case where vecs is a list or array
             if isinstance(vecs, list):
                 vecs_array = np.array(vecs)  # (n_kpoints, n_orbitals, n_bands)
             else:
                 vecs_array = vecs
-            
+
             # Get the alignment indices for each k-point
             first_indices = self.find_first_above_energy(energies_sorted, E)
             min_index = int(np.min(first_indices))
             max_index = int(np.max(first_indices))
             n_keep = energies.shape[1] - (max_index - min_index)
-            
+
             if n_keep > 0:
                 # Sort eigenvectors according to energy sorting
                 vecs_sorted = np.zeros_like(vecs_array)
                 for k in range(vecs_array.shape[0]):
                     vecs_sorted[k] = vecs_array[k][:, sort_indices[k]]
-                
+
                 # Align eigenvectors
                 vecs_filtered = np.zeros((vecs_array.shape[0], vecs_array.shape[1], n_keep), dtype=vecs_array.dtype)
                 for k in range(vecs_array.shape[0]):
                     start = first_indices[k] - min_index
                     end = start + n_keep
                     vecs_filtered[k] = vecs_sorted[k][:, start:end]
-                
+
                 # Split eigenvectors
                 if pivot_col > 0:
                     vbm_vecs = vecs_filtered[:, :, :pivot_col]
                 if pivot_col < vecs_filtered.shape[2]:
                     cbm_vecs = vecs_filtered[:, :, pivot_col:]
-        
+
         return filtered_energies, vbm_energies, cbm_energies, pivot_col, vbm_vecs, cbm_vecs
 
     def save_band_static_metadata(self, path):
-        metadata_path = os.path.join(path, "band") if _is_canonical_output_layout(self.config) else path
+        metadata_path = os.path.join(path, "band")
         os.makedirs(metadata_path, exist_ok=True)
         if self.config.TAPW:
             np.save(
                 os.path.join(
                     metadata_path,
-                    canonical_band_filename("g_vectors", 1)
-                    if _is_canonical_output_layout(self.config)
-                    else gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=1),
+                    canonical_band_filename("g_vectors", 1),
                 ),
                 self.TAPW_parameters.g_vec_list_K1,
             )
             np.save(
                 os.path.join(
                     metadata_path,
-                    canonical_band_filename("g_vectors", 2)
-                    if _is_canonical_output_layout(self.config)
-                    else gvec_output_filename(n_g=self.config.n_g, valley_flag=self.valley_flag, layer=2),
+                    canonical_band_filename("g_vectors", 2),
                 ),
                 self.TAPW_parameters.g_vec_list_K2,
             )
@@ -3252,7 +3200,7 @@ class BandStructureCalculator:
         # Create output directories
         os.makedirs(path, exist_ok=True)
         # os.makedirs(os.path.join(path, "band_wave"), exist_ok=True)
-        
+
         # Use provided k-points or generate from k-path
         if kpoints is None:
             if self.kpath_config is None:
@@ -3286,10 +3234,10 @@ class BandStructureCalculator:
             )
         else:
             kpoint_indices = list(range(nk_total))
-        
+
         self.save_band_static_metadata(path)
         # Calculate bands
-        self.parallel_calculate_band_01(
+        self.parallel_calculate_band(
             kpoints,
             kpoint_indices=kpoint_indices,
             nk_total=nk_total,
@@ -3327,29 +3275,23 @@ class BandStructureCalculator:
                 f"raw memmap slices written; run postprocess after all {chunk_count} chunks complete",
             )
             return
-        
+
         # Save results
         band_data = self.result['eig']
         # 在chern模式下，添加num_chern标识
-        canonical_layout = _is_canonical_output_layout(self.config)
         if mode == "chern":
-            if canonical_layout:
-                num_k1, num_k2 = self._resolve_topology_mesh(*self.config.get_chern_grid_shape())[:2]
-                _, _, range_k1, range_k2 = self._resolve_topology_mesh(num_k1, num_k2)
-                out_path = os.path.join(
-                    path,
-                    "topology",
-                    canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2),
-                )
-            else:
-                os.makedirs(os.path.join(path, "topo"), exist_ok=True)
-                out_path = os.path.join(path, "topo")
+            num_k1, num_k2 = self._resolve_topology_mesh(*self.config.get_chern_grid_shape())[:2]
+            _, _, range_k1, range_k2 = self._resolve_topology_mesh(num_k1, num_k2)
+            out_path = os.path.join(
+                path,
+                "topology",
+                canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2),
+            )
         else:
             out_path = os.path.join(path, "band")
         os.makedirs(out_path, exist_ok=True)
-        if canonical_layout:
-            np.save(os.path.join(out_path, canonical_band_filename("kpoints", None)), np.asarray(kpoints_all))
-        
+        np.save(os.path.join(out_path, canonical_band_filename("kpoints", None)), np.asarray(kpoints_all))
+
         # Split bands and eigenvectors by fermi energy
         band_type = str(getattr(self.config, "band_type", "")).upper()
         want_vbm = band_type not in {"CBM"}
@@ -3383,18 +3325,14 @@ class BandStructureCalculator:
             if want_vbm and vbm.shape[1] > 0:
                 vbm_path = os.path.join(
                     out_path,
-                    canonical_band_filename("wavefunctions", "vbm")
-                    if canonical_layout
-                    else array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("wavefunctions", "vbm"),
                 )
                 _ensure_memmap_file(vbm_path, np.complex128, (energies.shape[0], vec_data.shape[1], vbm.shape[1]))
                 vbm_mm = open_memmap(vbm_path, mode="r+")
             if want_cbm and cbm.shape[1] > 0:
                 cbm_path = os.path.join(
                     out_path,
-                    canonical_band_filename("wavefunctions", "cbm")
-                    if canonical_layout
-                    else array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("wavefunctions", "cbm"),
                 )
                 _ensure_memmap_file(cbm_path, np.complex128, (energies.shape[0], vec_data.shape[1], cbm.shape[1]))
                 cbm_mm = open_memmap(cbm_path, mode="r+")
@@ -3421,42 +3359,36 @@ class BandStructureCalculator:
         else:
             filtered, vbm, cbm, pivot_col, vbm_vecs, cbm_vecs = self.split_vbm_cbm_with_vec(
                 band_data, vec_data, self.config.efermi)
-        
+
         # Save VBM data if exists
         if want_vbm and vbm.size > 0:
             np.savetxt(
                 os.path.join(
                     out_path,
-                    canonical_band_filename("energies", "vbm")
-                    if canonical_layout
-                    else band_output_filename("VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("energies", "vbm"),
                 ),
                 vbm,
                 fmt='%15.11f',
             )
-        
-        # Save CBM data if exists  
+
+        # Save CBM data if exists
         if want_cbm and cbm.size > 0:
             np.savetxt(
                 os.path.join(
                     out_path,
-                    canonical_band_filename("energies", "cbm")
-                    if canonical_layout
-                    else band_output_filename("CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("energies", "cbm"),
                 ),
                 cbm,
                 fmt='%15.11f',
             )
-        
+
         # Save eigenvectors if calculated
         if self.config.eig_vec_cal:
             if want_vbm and vbm_vecs is not None and vbm_vecs.size > 0:
                 np.save(
                     os.path.join(
                         out_path,
-                        canonical_band_filename("wavefunctions", "vbm")
-                        if canonical_layout
-                        else array_output_filename("vec_VBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                        canonical_band_filename("wavefunctions", "vbm"),
                     ),
                     vbm_vecs,
                 )
@@ -3464,25 +3396,21 @@ class BandStructureCalculator:
                 np.save(
                     os.path.join(
                         out_path,
-                        canonical_band_filename("wavefunctions", "cbm")
-                        if canonical_layout
-                        else array_output_filename("vec_CBM", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                        canonical_band_filename("wavefunctions", "cbm"),
                     ),
                     cbm_vecs,
                 )
-        
+
         # Save Hamiltonian if requested
         if self.config.hamk_save:
             np.save(
                 os.path.join(
                     out_path,
-                    canonical_band_filename("hamiltonian", None)
-                    if canonical_layout
-                    else array_output_filename("hamk", valley_flag=self.valley_flag, suffix=suffix, tapw=self.config.TAPW),
+                    canonical_band_filename("hamiltonian", None),
                 ),
                 self.result['hamk'],
             )
-        if canonical_layout and mode != "chern":
+        if mode != "chern":
             _remove_canonical_manifest_files(Path(out_path))
 
     def _write_boundary_sewing_artifact(self, topology_dir: Path) -> Path:
@@ -3590,7 +3518,7 @@ class BandStructureCalculator:
         kpoints = self.generate_kmesh(num_k1, num_k2)
         reporter = ensure_reporter(getattr(self, "reporter", None))
         reporter.kv("Chern k-points shape", kpoints.shape)
-        
+
         # Calculate band structure on the mesh
         self.calculate_band_structure(path, kpoints)
 
@@ -3623,33 +3551,19 @@ class BandStructureCalculator:
         if not resolved_band_indices:
             raise ValueError("compute.chern_band_indices must not be empty.")
 
-        canonical_layout = _is_canonical_output_layout(self.config)
-        if canonical_layout:
-            grid_name = canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2)
-            topo_path = os.path.join(os.fspath(path), "topology", grid_name)
-        else:
-            topo_path = os.path.join(os.fspath(path), "topo")
+        grid_name = canonical_topology_grid_name(num_k1, num_k2, range_b1=range_k1, range_b2=range_k2)
+        topo_path = os.path.join(os.fspath(path), "topology", grid_name)
         os.makedirs(topo_path, exist_ok=True)
         boundary_sewing_path = None
-        if canonical_layout:
-            boundary_sewing_path = self._write_boundary_sewing_artifact(Path(topo_path))
+        boundary_sewing_path = self._write_boundary_sewing_artifact(Path(topo_path))
         band_type = str(getattr(self.config, "band_type", "BOTH")).upper()
         suffix = self.config.get_chern_grid_suffix()
         entries = []
         files: dict[str, str] = {}
         for raw_band_index, band_index in zip(raw_band_indices, resolved_band_indices):
             berry_flux = compute_berry_flux_single_band(band_vec_grid, band_index)
-            if canonical_layout:
-                label = canonical_topology_band_label([raw_band_index])
-                filename = None
-            else:
-                filename = chern_flux_filename(
-                    band_type=band_type,
-                    valley_flag=self.valley_flag,
-                    suffix=suffix,
-                    band_label=f"band{band_index}",
-                )
-                np.save(os.path.join(topo_path, filename), berry_flux)
+            label = canonical_topology_band_label([raw_band_index])
+            filename = None
             entries.append(
                 {
                     "band_indices": [raw_band_index],
@@ -3661,18 +3575,8 @@ class BandStructureCalculator:
 
         if len(resolved_band_indices) > 1:
             berry_flux = compute_berry_flux_multiband(band_vec_grid, resolved_band_indices)
-            if canonical_layout:
-                label = canonical_topology_band_label(raw_band_indices)
-                filename = None
-            else:
-                label = "bands" + "_".join(str(index) for index in resolved_band_indices)
-                filename = chern_flux_filename(
-                    band_type=band_type,
-                    valley_flag=self.valley_flag,
-                    suffix=suffix,
-                    band_label=label,
-                )
-                np.save(os.path.join(topo_path, filename), berry_flux)
+            label = canonical_topology_band_label(raw_band_indices)
+            filename = None
             entries.append(
                 {
                     "band_indices": raw_band_indices,
@@ -3700,24 +3604,16 @@ class BandStructureCalculator:
             summary["boundary_sewing_file"] = boundary_sewing_path.name
         summary_filename = (
             "chern_summary.json"
-            if canonical_layout
-            else chern_summary_filename(
-                band_type=band_type,
-                valley_flag=self.valley_flag,
-                suffix=suffix,
-                tapw=self.config.TAPW,
-            )
         )
         summary["summary_file"] = summary_filename
         with open(os.path.join(topo_path, summary_filename), "w", encoding="utf-8") as handle:
             json.dump(summary, handle, indent=2, sort_keys=True)
             handle.write("\n")
-        if canonical_layout:
-            topology_dir = Path(os.fspath(path)) / "topology"
-            for stale in (Path(topo_path) / "manifest.json", topology_dir / "manifest.json"):
-                if stale.exists():
-                    stale.unlink()
-            _remove_canonical_manifest_files(topology_dir)
+        topology_dir = Path(os.fspath(path)) / "topology"
+        for stale in (Path(topo_path) / "manifest.json", topology_dir / "manifest.json"):
+            if stale.exists():
+                stale.unlink()
+        _remove_canonical_manifest_files(topology_dir)
 
         reporter.kv(
             "Chern number",
@@ -3761,7 +3657,7 @@ class BandStructureCalculator:
     def Getk_super_gauge_sparse_symm(self, Hr, k, force_sparse_dot: bool = False):
         """Get k-space Hamiltonian with symmetry operations"""
         kvec = self.get_kvec(k)
-        
+
         # Build sorted_wann array
         sorted_wann_x = self.structure.df['x'].values
         sorted_wann_y = self.structure.df['y'].values
@@ -3770,13 +3666,13 @@ class BandStructureCalculator:
                                self.structure.df['orb_num'].values, axis=0)
         sorted_layer_index = np.repeat(np.array(self.structure.df['layer']),
                                       self.structure.df['orb_num'].values, axis=0)
-        
+
         if self.structure.spin:
             sorted_wann = np.concatenate([sorted_wann, sorted_wann], axis=0)
             sorted_layer_index = np.concatenate([sorted_layer_index, sorted_layer_index], axis=0)
-        
+
         num_wann = len(sorted_wann)
-        
+
         # Setup K points
         K1 = self.TAPW_parameters.K1
         K2 = self.TAPW_parameters.K2
@@ -3791,7 +3687,7 @@ class BandStructureCalculator:
         kvec_K1 = [self.rot(kvec + K1, angle) - K1 for angle in rotations]
         kvec_K2 = [self.rot(kvec + K2, angle) - K2 for angle in rotations]
 
-        mk_list = [np.zeros((self.TAPW_parameters.g_matrix.shape[0], 
+        mk_list = [np.zeros((self.TAPW_parameters.g_matrix.shape[0],
                             self.TAPW_parameters.g_matrix.shape[0]), dtype=np.complex128) for _ in range(3)]
 
         for i in range(3):
@@ -3805,7 +3701,7 @@ class BandStructureCalculator:
                 mask_row_2 = ~mask_row_1
                 mask_col_1 = sorted_layer_index[col_index] == 0
                 mask_col_2 = ~mask_col_1
-                
+
                 row_coords_1 = sorted_wann[row_index[mask_row_1]]
                 row_coords_2 = sorted_wann[row_index[mask_row_2]]
                 col_coords_1 = sorted_wann[col_index[mask_col_1]]
@@ -3827,7 +3723,7 @@ class BandStructureCalculator:
 
                 phase_factors = phase_m * phase_n
                 data_values = val * phase_factors
-                partial_mk += scipy.sparse.csr_matrix((data_values, (row_index, col_index)), 
+                partial_mk += scipy.sparse.csr_matrix((data_values, (row_index, col_index)),
                                                      shape=(num_wann, num_wann))
 
             temp = self.cal_TAPW_hamiltonian_k_cpu(
@@ -3838,7 +3734,7 @@ class BandStructureCalculator:
 
         return mk_list
 
-    @timing_decorator_factory(process_id=0) 
+    @timing_decorator_factory(process_id=0)
     def Getk_super_gauge_sparse_final_HS(self, Hr, Sr, k):
         """Get final Hamiltonian for orthogonal or non-orthogonal basis (no symmetry)"""
         phase_ctx = self._build_getk_phase_context(k)
@@ -3860,7 +3756,7 @@ class BandStructureCalculator:
             else:
                 return Hk, Sk
 
-    
+
     @timing_decorator_factory(process_id=0)
     def C3_symm(self, hamk, hamk_C1, hamk_C2, C3_matrix):
         """Apply C3 symmetry to Hamiltonian"""
@@ -3869,14 +3765,14 @@ class BandStructureCalculator:
     def C3_symm_cpu(self, hamk, hamk_C1, hamk_C2, C3_matrix):
         """CPU version of C3 symmetry"""
         C3_matrix_2 = C3_matrix @ C3_matrix
-        return (hamk + C3_matrix @ hamk_C1 @ C3_matrix.conj().T + 
+        return (hamk + C3_matrix @ hamk_C1 @ C3_matrix.conj().T +
                 C3_matrix_2 @ hamk_C2 @ C3_matrix_2.conj().T) / 3
 
     @timing_decorator_factory(process_id=0)
     def gen_H_new(self, hamk, samk):
         """Generate new Hamiltonian from overlap matrix"""
         return self.gen_H_new_cpu(hamk, samk)
-    
+
     @timing_decorator_factory(process_id=0)
     def gen_H_new_cpu(self, hamk, samk):
         """CPU version of Hamiltonian transformation"""
@@ -3930,7 +3826,7 @@ class BandStructureCalculator:
         out[half:, :half] = uminvud @ hamk[half:, :half] @ uminvud
         out[half:, half:] = uminvud @ hamk[half:, half:] @ uminvud
         return out
-    
+
     @timing_decorator_factory(process_id=0)
     def cal_TAPW_hamiltonian_k(self, hamk):
         return self.cal_TAPW_hamiltonian_k_cpu(hamk)
@@ -4236,7 +4132,7 @@ class BandStructureCalculator:
         hamk = transport_matrix_between_m_valleys(h_ref_sym, transport)
         samk = None if s_ref_sym is None else transport_matrix_between_m_valleys(s_ref_sym, transport)
         return self._finalize_tapw_projected_hs(hamk, samk, mpi_index)
-    
+
     @timing_decorator_factory(process_id=0)
     def Getk_super_gauge_sparse_symm_final_HS(self, Hr, Sr, symm_matrix, symm_matrix_inv, k):
         """Get final Hamiltonian for orthogonal or non-orthogonal basis (with symmetry)"""
@@ -4260,7 +4156,7 @@ class BandStructureCalculator:
                 return Hk_new, None
 
     @timing_decorator_factory(process_id=0)
-    def calculate_band_01(self, kpoints, i):
+    def calculate_band(self, kpoints, i):
         """Calculate band structure for a single k-point"""
         if self.config.TAPW:
             self._set_progress_stage(i, "build_hs")
@@ -4268,8 +4164,8 @@ class BandStructureCalculator:
                 hamk, samk = self._calculate_m_valley_threefold_hs(kpoints[:3])
             elif self.use_single_valley_c3:
                 hamk, samk = self.Getk_super_gauge_sparse_symm_final_HS(
-                    self.hr_supercell, self.sr_supercell, 
-                    self.TAPW_parameters.symm_matrix, self.TAPW_parameters.symm_matrix_inv, 
+                    self.hr_supercell, self.sr_supercell,
+                    self.TAPW_parameters.symm_matrix, self.TAPW_parameters.symm_matrix_inv,
                     kpoints[:3]
                 )
             else:
@@ -4280,7 +4176,7 @@ class BandStructureCalculator:
             self._set_progress_stage(i, "solve")
             if self.config.orthogonal_basis:
                 if self.config.eigsh_cal:
-                    w = eigsh(hamk, k=self.config.num_bands_cal, sigma=self.config.efermi, 
+                    w = eigsh(hamk, k=self.config.num_bands_cal, sigma=self.config.efermi,
                               which='LM', return_eigenvectors=self.config.eig_vec_cal)
                 else:
                     a = hamk.toarray() if scipy.sparse.issparse(hamk) else hamk
@@ -4288,11 +4184,11 @@ class BandStructureCalculator:
             else:
                 if self.config.eigsh_cal:
                     if self.config.ge:
-                        w = eigsh(hamk, k=self.config.num_bands_cal, M=samk, 
-                                 sigma=self.config.efermi, which='LM', 
+                        w = eigsh(hamk, k=self.config.num_bands_cal, M=samk,
+                                 sigma=self.config.efermi, which='LM',
                                  return_eigenvectors=self.config.eig_vec_cal)
                     else:
-                        w = eigsh(hamk, k=self.config.num_bands_cal, sigma=self.config.efermi, 
+                        w = eigsh(hamk, k=self.config.num_bands_cal, sigma=self.config.efermi,
                                  which='LM', return_eigenvectors=self.config.eig_vec_cal)
                 else:
                     a = hamk.toarray() if scipy.sparse.issparse(hamk) else hamk
@@ -4331,7 +4227,7 @@ class BandStructureCalculator:
         return eig, vec, hamk, samk
 
     @timing_decorator_factory(process_id=0)
-    def parallel_calculate_band_01(self, kpoints, kpoint_indices=None, nk_total=None, out_dir=None, suffix=""):
+    def parallel_calculate_band(self, kpoints, kpoint_indices=None, nk_total=None, out_dir=None, suffix=""):
         """Calculate band structure for all k-points in parallel.
 
         Key performance points:
@@ -4414,7 +4310,7 @@ class BandStructureCalculator:
             try:
                 _maybe_pin_current_worker(blas_threads, num_processes)
                 _set_thread_limits(blas_threads)
-                eig, vec, hamk, samk = self.calculate_band_01(kpoint, i)
+                eig, vec, hamk, samk = self.calculate_band(kpoint, i)
 
                 if use_memmap and eig_path is not None:
                     eig_mm = _get_memmap(eig_path)
@@ -4552,98 +4448,26 @@ class BandStructureCalculator:
                 if vec is not None:
                     vec.flush()
 
-    def generate_indices(self, num_gn_all, num_Te, num_Mo, orbs_num):
-        """Generate indices for spin up/down components"""
-        up_index = np.concatenate((np.arange(num_Te), np.arange(num_Te) + num_Te * 2, 
-                                  np.arange(num_Mo) + num_Te * 4))
-        down_index = np.concatenate((np.arange(num_Te) + num_Te, np.arange(num_Te) + num_Te * 3, 
-                                    np.arange(num_Mo) + num_Te * 4 + num_Mo))
 
-        up_all_index = np.concatenate([up_index + orbs_num * 2 * i for i in range(num_gn_all)])
-        down_all_index = np.concatenate([down_index + orbs_num * 2 * i for i in range(num_gn_all)])
 
-        return up_all_index.astype(int), down_all_index.astype(int)
-
-    def write_wave_function_spin(self, path):
-        """Write wave function for all k-points and each spin to files"""
-        num_Te = self.structure.X_orb
-        num_Mo = self.structure.M_orb
-        n_g = self.config.n_g
-        valley_flag = self.config.valley_flag
-        
-        g_vec_list_K_1layer = np.load(
-            os.path.join(path, gvec_output_filename(n_g=n_g, valley_flag=valley_flag, layer=1))
-        )
-        g_vec_list_K_2layer = np.load(
-            os.path.join(path, gvec_output_filename(n_g=n_g, valley_flag=valley_flag, layer=2))
-        )
-
-        orb_num = self.structure.num_orbs_per_unit_cell
-        band_wave = self.result['vec']
-        self.reporter.kv("Band wavefunction shape", np.shape(band_wave))
-        
-        dir = os.path.join(path, f'{self.config.band_type}_{valley_flag}_valley')
-        os.makedirs(dir, exist_ok=True)
-        
-        num_gn_all = len(g_vec_list_K_1layer) * 2
-        up_all_index, down_all_index = self.generate_indices(num_gn_all, num_Te, num_Mo, orb_num)
-        self.reporter.kv("Spin-up indices", up_all_index)
-        self.reporter.kv("Spin-down indices", down_all_index)
-        self.reporter.kv("Band wavefunction shape", band_wave.shape)
-        
-        np.save(os.path.join(dir, f'{self.config.band_type}_{valley_flag}_valley_up.npy'), band_wave[:, up_all_index])
-        np.save(os.path.join(dir, f'{self.config.band_type}_{valley_flag}_valley_down.npy'), band_wave[:, down_all_index])
-
-    def write_hamk_spin(self, path):
-        """Write Hamiltonian matrix for all k-points and each spin to files"""
-        hamk = self.result['hamk']
-        dim_Hprime = np.shape(hamk[0])[0]
-
-        num_Te = self.structure.X_orb
-        num_Mo = self.structure.M_orb
-        n_g = self.config.n_g
-        valley_flag = self.config.valley_flag
-        orb_num = self.structure.num_orbs_per_unit_cell
-        
-        g_vec_list_K_1layer = np.load(
-            os.path.join(path, gvec_output_filename(n_g=n_g, valley_flag=valley_flag, layer=1))
-        )
-        num_gn_all = len(g_vec_list_K_1layer) * 2 
-        up_all_index, down_all_index = self.generate_indices(num_gn_all, num_Te, num_Mo, orb_num)
-        num_kpoints = len(self.kpath_config.kpoints)
-        
-        H_spin_kpoints = np.zeros((2, num_kpoints, int(dim_Hprime/2), int(dim_Hprime/2)), 
-                                 dtype=np.complex64)
-        
-        for i in tqdm(range(num_kpoints)):
-            gamma_hamk = hamk[i]
-            H_gamma_up = gamma_hamk[up_all_index][:, up_all_index]
-            H_gamma_down = gamma_hamk[down_all_index][:, down_all_index]
-            
-            H_spin_kpoints[0, i] = H_gamma_up
-            H_spin_kpoints[1, i] = H_gamma_down
-
-        os.makedirs(os.path.join(path, 'symm_Hprime_wave_npy'), exist_ok=True)
-        np.save(os.path.join(path, 'symm_Hprime_wave_npy', f'Hprime_up_down_{self.config.band_type}_{self.config.valley_flag}.npy'), 
-                H_spin_kpoints)
 
     def write_wave_2col(self, path, vec, g_vec_list_1layer, g_vec_list_2layer, orb_Te, orb_Mo):
         """Write wave function to 2-column format"""
         num_wann = len(vec)
         num_wann_perlayer = int(num_wann/2)
-        
+
         with open(path, "w") as f:
             arr1 = np.arange(1, orb_Te+1)
             arr2 = np.arange(1, orb_Mo+1)
 
             orb_index_num = np.concatenate((arr1, arr1, arr1, arr1, arr2, arr2))
-            orb_spin_index = np.concatenate((['up']*orb_Te, ['down']*orb_Te, ['up']*orb_Te, 
+            orb_spin_index = np.concatenate((['up']*orb_Te, ['down']*orb_Te, ['up']*orb_Te,
                                            ['down']*orb_Te, ['up']*orb_Mo, ['down']*orb_Mo))
             atoms_index = np.concatenate((['Te2']*orb_Te*2, ['Te1']*orb_Te*2, ['Mo']*orb_Mo*2))
             orb_all = orb_Te*4 + orb_Mo*2
-            
+
             f.write("#layer  gvec     gvec_x     gvec_y  atom  orb  spin     real       imag\n")
-            
+
             for i in range(num_wann):
                 if i < num_wann_perlayer:
                     g_vec_index = i // orb_all
@@ -4653,7 +4477,7 @@ class BandStructureCalculator:
                     g_vec_index = (i - int(num_wann_perlayer)) // orb_all
                     g_vec = g_vec_list_2layer[g_vec_index]
                     layer = 2
-                
+
                 f.write(f"{layer:>5d} {g_vec_index+1:>5d} {g_vec[0]:>12.6f} {g_vec[1]:>10.6f} "
                        f"{atoms_index[i%orb_all]:>4s} {orb_index_num[i%orb_all]:>4d} "
                        f"{orb_spin_index[i%orb_all]:>5s} {vec[i].real:>10.6f} {vec[i].imag:>10.6f}\n")

@@ -21,7 +21,7 @@ from ..identity import hash_array, hash_mapping
 
 try:
     from scipy import sparse as _sparse
-except Exception:  # pragma: no cover - dense inputs remain supported
+except ImportError:  # pragma: no cover - dense inputs remain supported
     _sparse = None
 
 from .joint_exactification import (

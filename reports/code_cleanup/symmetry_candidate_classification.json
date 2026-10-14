@@ -1,0 +1,533 @@
+{
+  "classification": "candidate-local numerical central-branch rejection; shared routes/presentation remain mandatory",
+  "node": "test001",
+  "working_directory": "/data/work/zy/software/1.tapw_code/moirekp-release",
+  "environment_prefix": "/data/home/zy/mambaforge/envs/moirekp",
+  "process_thread_layout": "one process per diagnostic, 4 BLAS/OMP threads; both SSH commands exited 0",
+  "config_path": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/published-validation/published_examples/zrs2_m/config.yaml",
+  "fixed_nlow_state_list": [
+    [
+      24,
+      25
+    ],
+    [
+      24,
+      25
+    ]
+  ],
+  "reason_for_fixed_nlow": "Matches failed published log and frozen projection artifact; this targeted check verifies gauge enumeration rather than redoing band-window selection. Full-CLI diagnostic also ran separately.",
+  "raw_source": {
+    "source_action_metrics": {
+      "TR_square": 8.95090418262362e-17,
+      "C2_square": 1.79212047759042e-11,
+      "TR_C2_commute": 3.4299584447750556e-05,
+      "unitarity": {
+        "TR": 8.95090418262362e-17,
+        "C2": 3.2991057293157523e-11
+      }
+    },
+    "candidate_count": 9
+  },
+  "candidates": [
+    {
+      "candidate_id": "qrcp_overlap_assignment",
+      "priority": 0,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.206711391014715e-10,
+        "C2_square": 3.0781510167930513e-13,
+        "TR_C2_commute": 4.613239040875869e-06,
+        "unitarity": {
+          "TR": 3.2067113910152826e-10,
+          "C2": 3.271272595547517e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 1.6288006920714133e-16,
+        "C2_square": 0.0,
+        "TR_C2_commute": 3.0943109561087094e-16,
+        "unitarity": {
+          "TR": 1.2081654677986756e-16,
+          "C2": 0.0
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 3.0943109561087094e-16,
+        "table": {
+          "TR^2": {
+            "rms": 1.628800692071413e-16,
+            "max": 1.628800692071413e-16,
+            "maximum_entry": 1.45466744133007e-16
+          },
+          "C2^2": {
+            "rms": 0.0,
+            "max": 0.0,
+            "maximum_entry": 0.0
+          },
+          "TR_C2_commute": {
+            "rms": 3.0943109561087094e-16,
+            "max": 3.0943109561087094e-16,
+            "maximum_entry": 2.4492935982947064e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 1.4142119572750123,
+          "C2": 4.4274119516083596e-09
+        }
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_high_row_lower_template_assignment",
+      "priority": 2,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.206714288851039e-10,
+        "C2_square": 3.07952875683373e-13,
+        "TR_C2_commute": 4.613239040909292e-06,
+        "unitarity": {
+          "TR": 3.2067142888518703e-10,
+          "C2": 3.2713363791028946e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 3.5327288426128624e-16,
+        "C2_square": 0.0,
+        "TR_C2_commute": 4.332556738895195e-16,
+        "unitarity": {
+          "TR": 2.1689756740395232e-16,
+          "C2": 0.0
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 4.332556738895194e-16,
+        "table": {
+          "TR^2": {
+            "rms": 3.5327288426128624e-16,
+            "max": 3.5327288426128624e-16,
+            "maximum_entry": 3.2454188665469974e-16
+          },
+          "C2^2": {
+            "rms": 0.0,
+            "max": 0.0,
+            "maximum_entry": 0.0
+          },
+          "TR_C2_commute": {
+            "rms": 4.332556738895194e-16,
+            "max": 4.332556738895194e-16,
+            "maximum_entry": 4.632871779400759e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 1.4142119572750118,
+          "C2": 4.066372883194581e-09
+        }
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_high_row_lower_template_model_frame_assignment",
+      "priority": 3,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.2067145330443945e-10,
+        "C2_square": 3.0795951881906787e-13,
+        "TR_C2_commute": 4.613239040895091e-06,
+        "unitarity": {
+          "TR": 3.2067145330452455e-10,
+          "C2": 3.2713259535493892e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 4.865244755680823e-16,
+        "C2_square": 5.551115123125783e-17,
+        "TR_C2_commute": 3.7223464593270914e-16,
+        "unitarity": {
+          "TR": 2.597618996937477e-16,
+          "C2": 0.0
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 4.865244755680823e-16,
+        "table": {
+          "TR^2": {
+            "rms": 4.865244755680823e-16,
+            "max": 4.865244755680823e-16,
+            "maximum_entry": 4.736637570118143e-16
+          },
+          "C2^2": {
+            "rms": 5.298039600758252e-17,
+            "max": 6.294823530292653e-17,
+            "maximum_entry": 6.294823530292655e-17
+          },
+          "TR_C2_commute": {
+            "rms": 3.7223464593270914e-16,
+            "max": 3.7326800507196464e-16,
+            "maximum_entry": 3.5202494805809774e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 2.5719633377669138e-06,
+          "C2": 2.924717099283043e-09
+        }
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_high_row_model_frame_assignment",
+      "priority": 4,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.2067132853037733e-10,
+        "C2_square": 3.079593016020944e-13,
+        "TR_C2_commute": 4.613239040870583e-06,
+        "unitarity": {
+          "TR": 3.2067132562320046e-10,
+          "C2": 3.2712450123066887e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 3.6337854798594267e-16,
+        "C2_square": 5.652972942169198e-16,
+        "TR_C2_commute": 1.003157246729685e-15,
+        "unitarity": {
+          "TR": 1.8809222064958604e-16,
+          "C2": 9.74049222452147e-16
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 9.976630767225898e-16,
+        "table": {
+          "TR^2": {
+            "rms": 3.6337854798594257e-16,
+            "max": 3.6337854798594257e-16,
+            "maximum_entry": 3.2454188665469974e-16
+          },
+          "C2^2": {
+            "rms": 6.029417792986845e-16,
+            "max": 6.029417792986846e-16,
+            "maximum_entry": 4.890707619125737e-16
+          },
+          "TR_C2_commute": {
+            "rms": 9.976630767225898e-16,
+            "max": 9.976630767225898e-16,
+            "maximum_entry": 7.86194711163136e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 0.8849326751913852,
+          "C2": 0.8856484559987972
+        }
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_high_row_conjugate_model_frame_assignment",
+      "priority": 5,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.206714751740062e-10,
+        "C2_square": 3.077085125179709e-13,
+        "TR_C2_commute": 4.613239040880306e-06,
+        "unitarity": {
+          "TR": 3.2067147169588323e-10,
+          "C2": 3.2712906849985407e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 2.6070697005407035e-16,
+        "C2_square": 3.2427523348173556e-16,
+        "TR_C2_commute": 4.706714065146528e-16,
+        "unitarity": {
+          "TR": 1.2389739743020203e-16,
+          "C2": 3.5679405347538917e-16
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 4.706714065146528e-16,
+        "table": {
+          "TR^2": {
+            "rms": 2.607069700540703e-16,
+            "max": 2.607069700540703e-16,
+            "maximum_entry": 2.301532672115592e-16
+          },
+          "C2^2": {
+            "rms": 3.1131975521722946e-16,
+            "max": 3.113197552172294e-16,
+            "maximum_entry": 2.389903027518116e-16
+          },
+          "TR_C2_commute": {
+            "rms": 4.706714065146527e-16,
+            "max": 4.706714065146528e-16,
+            "maximum_entry": 5.551115123125783e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 0.8874211081481546,
+          "C2": 0.8882026975596098
+        }
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_high_row_assignment",
+      "priority": 6,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.206712538434824e-10,
+        "C2_square": 3.078362260018724e-13,
+        "TR_C2_commute": 4.613239040810112e-06,
+        "unitarity": {
+          "TR": 3.2067125093631125e-10,
+          "C2": 3.271206231675068e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 4.551096274550505e-16,
+        "C2_square": 4.1666246987691117e-16,
+        "TR_C2_commute": 5.333971808454924e-16,
+        "unitarity": {
+          "TR": 4.646189149267167e-16,
+          "C2": 3.1405812852679556e-16
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 5.335579449971584e-16,
+        "table": {
+          "TR^2": {
+            "rms": 4.551096274550505e-16,
+            "max": 4.551096274550505e-16,
+            "maximum_entry": 3.9834585428736486e-16
+          },
+          "C2^2": {
+            "rms": 4.1665710930424295e-16,
+            "max": 4.1665710930424295e-16,
+            "maximum_entry": 5.763302464942266e-16
+          },
+          "TR_C2_commute": {
+            "rms": 5.335579449971584e-16,
+            "max": 5.335579449971584e-16,
+            "maximum_entry": 4.720552013236158e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 0.6482034275441627,
+          "C2": 0.6671298527339038
+        }
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_high_row_conjugate_assignment",
+      "priority": 7,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.206713944447181e-10,
+        "C2_square": 3.0759742214014617e-13,
+        "TR_C2_commute": 4.6132390408870335e-06,
+        "unitarity": {
+          "TR": 3.2067139096660845e-10,
+          "C2": 3.271272523804833e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 4.255767031553701e-16,
+        "C2_square": 0.0,
+        "TR_C2_commute": 2.0,
+        "unitarity": {
+          "TR": 2.237817985192381e-16,
+          "C2": 0.0
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 1.9999999999999998,
+        "table": {
+          "TR^2": {
+            "rms": 4.2557670315537017e-16,
+            "max": 4.255767031553701e-16,
+            "maximum_entry": 3.999436918116553e-16
+          },
+          "C2^2": {
+            "rms": 0.0,
+            "max": 0.0,
+            "maximum_entry": 0.0
+          },
+          "TR_C2_commute": {
+            "rms": 1.9999999999999998,
+            "max": 1.9999999999999998,
+            "maximum_entry": 2.0
+          }
+        }
+      },
+      "error": {
+        "type": "JointExactificationError",
+        "message": "selected central transition table violates associativity/presentation relation 'TR_C2_commute' at source 0: lhs=(1+0j), rhs=(-1+0j)"
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_assignment",
+      "priority": 8,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.20671406880311e-10,
+        "C2_square": 3.0774130300230293e-13,
+        "TR_C2_commute": 4.613239040870141e-06,
+        "unitarity": {
+          "TR": 3.206714107520962e-10,
+          "C2": 3.271261102479546e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 4.06652656252361e-16,
+        "C2_square": 3.252773710165521e-16,
+        "TR_C2_commute": 6.467785124048608e-16,
+        "unitarity": {
+          "TR": 6.256017756960531e-16,
+          "C2": 1.7611005404430318e-16
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 6.467785124048608e-16,
+        "table": {
+          "TR^2": {
+            "rms": 4.066526562523609e-16,
+            "max": 4.0665265625236094e-16,
+            "maximum_entry": 3.9834585428736476e-16
+          },
+          "C2^2": {
+            "rms": 3.2527689256283474e-16,
+            "max": 3.252768925628348e-16,
+            "maximum_entry": 4.2926695126970513e-16
+          },
+          "TR_C2_commute": {
+            "rms": 6.467785124048607e-16,
+            "max": 6.467785124048608e-16,
+            "maximum_entry": 6.959355157127118e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 1.2844762662477756,
+          "C2": 1.285748530699817
+        }
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_conjugate_assignment",
+      "priority": 9,
+      "derive_canonical_frame": false,
+      "raw_projected": {
+        "TR_square": 3.2067148360642673e-10,
+        "C2_square": 3.078884356744505e-13,
+        "TR_C2_commute": 4.613239040905662e-06,
+        "unitarity": {
+          "TR": 3.2067148360647435e-10,
+          "C2": 3.271324707787331e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 1.5082790636511064e-16,
+        "C2_square": 0.0,
+        "TR_C2_commute": 2.0,
+        "unitarity": {
+          "TR": 2.7457682170702444e-16,
+          "C2": 0.0
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 2.0,
+        "table": {
+          "TR^2": {
+            "rms": 1.508279063651106e-16,
+            "max": 1.5082790636511062e-16,
+            "maximum_entry": 1.4546674413300703e-16
+          },
+          "C2^2": {
+            "rms": 0.0,
+            "max": 0.0,
+            "maximum_entry": 0.0
+          },
+          "TR_C2_commute": {
+            "rms": 2.0,
+            "max": 2.0,
+            "maximum_entry": 2.0
+          }
+        }
+      },
+      "error": {
+        "type": "JointExactificationError",
+        "message": "selected central transition table violates associativity/presentation relation 'TR_C2_commute' at source 0: lhs=(1+0j), rhs=(-1+0j)"
+      }
+    },
+    {
+      "candidate_id": "local_spin_chiral_high_row_lower_template_model_frame_assignment",
+      "priority": 3,
+      "derive_canonical_frame": true,
+      "raw_projected": {
+        "TR_square": 3.2067145330443945e-10,
+        "C2_square": 3.0795951881906787e-13,
+        "TR_C2_commute": 4.613239040895091e-06,
+        "unitarity": {
+          "TR": 3.2067145330452455e-10,
+          "C2": 3.2713259535493892e-12
+        }
+      },
+      "stage_one": {
+        "TR_square": 4.865244755680823e-16,
+        "C2_square": 5.551115123125783e-17,
+        "TR_C2_commute": 3.7223464593270914e-16,
+        "unitarity": {
+          "TR": 2.597618996937477e-16,
+          "C2": 0.0
+        }
+      },
+      "stage_one_relations": {
+        "maximum": 4.865244755680823e-16,
+        "table": {
+          "TR^2": {
+            "rms": 4.865244755680823e-16,
+            "max": 4.865244755680823e-16,
+            "maximum_entry": 4.736637570118143e-16
+          },
+          "C2^2": {
+            "rms": 5.298039600758252e-17,
+            "max": 6.294823530292653e-17,
+            "maximum_entry": 6.294823530292655e-17
+          },
+          "TR_C2_commute": {
+            "rms": 3.7223464593270914e-16,
+            "max": 3.7326800507196464e-16,
+            "maximum_entry": 3.5202494805809774e-16
+          }
+        }
+      },
+      "result": {
+        "status": "evaluated",
+        "distances": {
+          "TR": 2.5719633377669138e-06,
+          "C2": 2.924717099283043e-09
+        }
+      }
+    }
+  ],
+  "verification": "489 passed in 9.02 s; analytical 4-fiber case reproduced generic fatal error before narrow exception change. Shared-group and programming-error propagation regressions pass.",
+  "selected_candidate_id": "local_spin_chiral_high_row_lower_template_model_frame_assignment",
+  "diagnostic_scripts": {
+    "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/symmetry_candidate_diagnostic.py": "0062d1a863a3f63423cede06c3c95d5270696aca5feaf60934ea922d732535ed",
+    "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/symmetry_direct_diagnostic.py": "69bdd0ba0d10cbf8943bd5b2cebd84ace8cc3721051f695c648c6edb6ac5401c"
+  }
+}

@@ -46,7 +46,7 @@ GAMMA_ROUTED_BASIS_HANDOFF_VERSION = "kp_project_gamma_routed_handoff_v3"
 GAMMA_COMMON_ANCHOR_BASIS_HANDOFF_VERSION = (
     "kp_project_gamma_common_anchor_handoff_v1"
 )
-EXPLICIT_LEGACY_BASIS_KIND = "explicit_legacy"
+EXPLICIT_LAYER_BASIS_KIND = "explicit_layer"
 GAMMA_ROUTED_BASIS_KIND = "gamma_routed"
 GAMMA_COMMON_ANCHOR_BASIS_KIND = "gamma_common_anchor"
 GAMMA_SAMPLED_K_MATCH_TOLERANCE = 1.0e-10
@@ -894,8 +894,8 @@ def _bound_common_anchor_basis_hash(
 
 
 @dataclass(frozen=True)
-class ExplicitLegacyBasisSpec:
-    """Versioned compatibility view of the explicit physical-layer basis."""
+class ExplicitLayerBasisSpec:
+    """Persisted basis for explicit physical-layer projectors."""
 
     artifact_identity: Mapping[str, Any]
     nlow_state_list: list[Any]
@@ -905,7 +905,7 @@ class ExplicitLegacyBasisSpec:
     model_dim: int
     frame: Any | None = None
 
-    projection_basis_kind: ClassVar[str] = EXPLICIT_LEGACY_BASIS_KIND
+    projection_basis_kind: ClassVar[str] = EXPLICIT_LAYER_BASIS_KIND
 
 
 @dataclass(frozen=True)
@@ -2344,7 +2344,7 @@ class GammaRoutedBasisSpec:
 
 
 ProjectionBasisSpec: TypeAlias = (
-    ExplicitLegacyBasisSpec | GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec
+    ExplicitLayerBasisSpec | GammaCommonAnchorBasisSpec | GammaRoutedBasisSpec
 )
 
 
@@ -2377,7 +2377,7 @@ def certify_gamma_routed_basis_spec(
     candidate_thresholds: Any,
     certified_gamma_actions: Sequence[GammaCertifiedRawAction] | None = None,
 ) -> GammaRoutedBasisSpec:
-    """Create a routed handoff only after Task-7 candidate certification.
+    """Create a routed handoff only after candidate symmetry certification.
 
     The certificate is evaluated from the exact assembled persisted frames and
     the same authoritative Heff tensor that will be written to ``basis.npz``.
@@ -2502,7 +2502,7 @@ def certify_gamma_routed_basis_spec(
     if certificate.status is not CandidateSymmetryStatus.CERTIFIED:
         raise _reject(
             CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
-            "routed Gamma candidate failed Task-7 symmetry certification: "
+            "routed Gamma candidate failed symmetry certification: "
             + ", ".join(certificate.failures),
         )
     certificate_envelope = candidate_certificate_envelope(certificate)
@@ -2514,7 +2514,7 @@ def certify_gamma_routed_basis_spec(
         raise _reject(
             CandidateRejectionReason.HANDOFF_IDENTITY,
             "routed Gamma raw action package hash does not match the certified "
-            "Task-7 candidate input",
+            "candidate symmetry input",
         )
     certified_identity = dict(provisional.artifact_identity)
     certified_identity["basis_hash"] = _bound_routed_basis_hash(
@@ -2948,12 +2948,10 @@ def load_gamma_routed_basis_spec(path: str | Path) -> GammaRoutedBasisSpec:
                     "projection basis discriminator is not gamma_routed",
                 )
             if version != GAMMA_ROUTED_BASIS_HANDOFF_VERSION:
-                detail = (
-                    "legacy v2 routed Gamma archives are unsupported; rerun kp project"
-                    if version == "kp_project_gamma_routed_handoff_v2"
-                    else f"unsupported routed Gamma handoff version {version!r}; rerun kp project"
+                raise _reject(
+                    CandidateRejectionReason.HANDOFF_IDENTITY,
+                    f"unsupported routed Gamma handoff format {version!r}; rerun kp project",
                 )
-                raise _reject(CandidateRejectionReason.HANDOFF_IDENTITY, detail)
             _require_exact_archive_keys(archive.files)
             payload = {
                 name: np.array(archive[name], copy=True)

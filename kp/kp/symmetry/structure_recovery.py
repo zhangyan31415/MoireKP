@@ -42,7 +42,7 @@ from .structure_certificate import (
 )
 
 
-STRUCTURE_RECOVERY_V1 = "equivariant_anchor_uniform_recovery_v1"
+STRUCTURE_RECOVERY_SCHEMA = "equivariant_anchor_uniform_recovery_v1"
 FIXED_TARGET_ALIGNMENT_VERSION = "fixed_target_common_gauge_alignment_v2"
 
 
@@ -61,7 +61,7 @@ class StructureRecoveryResult:
     certificate: JointStructureCertificate | None
     common_gauge_witness: CommonGaugeWitness | None
     report: Mapping[str, Any]
-    version: str = STRUCTURE_RECOVERY_V1
+    version: str = STRUCTURE_RECOVERY_SCHEMA
 
     def __post_init__(self) -> None:
         actions = None if self.actions is None else MappingProxyType(dict(self.actions))
@@ -137,7 +137,7 @@ def _unknown(reason: str, **details: Any) -> StructureRecoveryResult:
         certificate=None,
         common_gauge_witness=None,
         report={
-            "version": STRUCTURE_RECOVERY_V1,
+            "version": STRUCTURE_RECOVERY_SCHEMA,
             "status": CertificationStatus.UNKNOWN_OR_UNSUPPORTED.value,
             "selection_policy": "equivariant_anchor_schreier_intertwiner",
             "reason": str(reason),
@@ -754,7 +754,7 @@ def _finalize_uniform_recovery(
         )
     relation_certificate = certify_joint_block_actions(target, presentation)
     report = {
-        "version": STRUCTURE_RECOVERY_V1,
+        "version": STRUCTURE_RECOVERY_SCHEMA,
         "status": CertificationStatus.CERTIFIED.value,
         "grade": "uniform_internal",
         "canonicality": "canonical_up_to_continuous_stabilizer",
@@ -1077,7 +1077,7 @@ def recover_uniform_internal_action(
     scattered action still requires the equivariant-anchor Schreier proof.
 
     ``max_intertwiner_candidates`` is reserved as an explicit public bound for
-    future singular-nullspace tie branches.  V1 accepts only a nonsingular
+    future singular-nullspace tie branches.  The polar alignment accepts only a nonsingular
     closest projected intertwiner, so it never silently performs an unbounded
     search.
     """
@@ -1335,7 +1335,7 @@ def recover_uniform_internal_action(
             )
         relation_certificate = certify_joint_block_actions(target, presentation)
         report = {
-            "version": STRUCTURE_RECOVERY_V1,
+            "version": STRUCTURE_RECOVERY_SCHEMA,
             "status": CertificationStatus.CERTIFIED.value,
             "grade": "uniform_internal",
             "selection_policy": "equivariant_anchor_schreier_intertwiner",

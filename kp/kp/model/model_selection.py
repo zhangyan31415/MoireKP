@@ -16,6 +16,8 @@ from typing import Callable, Mapping, Sequence
 
 import numpy as np
 
+from tapw.identity import canonical_json_value
+
 
 @dataclass(frozen=True, order=True)
 class FamilyOrders:
@@ -652,7 +654,7 @@ def build_production_candidate_spec(
         "term_templates": [dict(template) for template in vocabulary.term_templates],
     }
     encoded = json.dumps(
-        payload,
+        canonical_json_value(payload),
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=True,

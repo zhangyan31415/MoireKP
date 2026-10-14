@@ -352,8 +352,8 @@ def hamiltonian_symmetrization_requested(value) -> bool:
     return normalize_symmetrize_hamiltonian(value) is not False
 
 
-def _coerce_legacy_num_chern(num_chern: _GridLike) -> Tuple[int, int]:
-    """Normalize legacy `num_chern` input to an explicit `(num_k1, num_k2)` pair."""
+def _square_or_rectangular_grid_shape(num_chern: _GridLike) -> Tuple[int, int]:
+    """Normalize the square or rectangular `num_chern` grid to an explicit `(num_k1, num_k2)` pair."""
     if isinstance(num_chern, (list, tuple)):
         if len(num_chern) != 2:
             raise ValueError("num_chern as a list/tuple must contain exactly two integers, e.g. [30, 50]")
@@ -364,13 +364,13 @@ def _coerce_legacy_num_chern(num_chern: _GridLike) -> Tuple[int, int]:
 def resolve_chern_grid_shape(num_chern: _GridLike, num_k1: Optional[int] = None, num_k2: Optional[int] = None) -> tuple:
     """Resolve the fractional Chern/Wilson-loop vertex grid dimensions.
 
-    `num_chern` accepts the legacy scalar square-grid form (`40`) and also a
+    `num_chern` accepts the scalar square-grid form (`40`) and also a
     two-entry list/tuple (`[30, 50]`). Explicit `num_k1`/`num_k2` still take
     precedence when present.
     """
-    legacy_k1, legacy_k2 = _coerce_legacy_num_chern(num_chern)
-    k1 = int(num_k1 if num_k1 is not None else legacy_k1)
-    k2 = int(num_k2 if num_k2 is not None else legacy_k2)
+    grid_k1, grid_k2 = _square_or_rectangular_grid_shape(num_chern)
+    k1 = int(num_k1 if num_k1 is not None else grid_k1)
+    k2 = int(num_k2 if num_k2 is not None else grid_k2)
     if k1 < 2 or k2 < 2:
         raise ValueError("Chern/Wilson-loop grids require num_k1 >= 2 and num_k2 >= 2")
     return k1, k2
@@ -478,7 +478,7 @@ class SymmetryAnalysisConfig:
 class OutputLayoutConfig:
     """Optional release-facing output layout."""
 
-    style: str = "legacy"
+    style: str = "canonical"
     root: str = ""
     profile: Optional[str] = None
     q_shell: Optional[str] = None
@@ -496,11 +496,11 @@ class OutputLayoutConfig:
             self.root = self._resolve_path(self.root, base_dir)
 
     def validate(self) -> None:
-        allowed = {"legacy", "canonical_v1"}
+        allowed = {"canonical"}
         if self.style not in allowed:
             raise ValueError(f"Invalid output_layout.style={self.style!r}. Must be one of {sorted(allowed)}")
-        if self.style == "canonical_v1" and not self.root:
-            raise ValueError("output_layout.root is required when output_layout.style=canonical_v1")
+        if self.style == "canonical" and not self.root:
+            raise ValueError("output_layout.root is required when output_layout.style=canonical")
 
 @dataclass
 class ComputeConfig:
@@ -678,7 +678,7 @@ class ComputeConfig:
         self.solve_flag = solve_flag[self.eigsh_cal]
         self.eq_flag = eq_flag[self.ge]
         self.symm_flag = symm_flag[self.symmetrize_hamiltonian is not False]
-        
+
 @dataclass
 class Config:
     """Main configuration class"""
@@ -696,6 +696,14 @@ class Config:
     cluster: ClusterConfig = field(default_factory=ClusterConfig)  # Use default values if not provided
     field_config: Dict[str, Any] = field(default_factory=dict)
     resolved_structure_input: Optional[Any] = field(default=None, init=False, repr=False, compare=False)
+
+    def __post_init__(self):
+        if self.output_layout is None:
+            self.output_layout = OutputLayoutConfig(
+                root=str(self.paths.output_dir),
+                q_shell=canonical_qshell_name(self.compute.n_g),
+            )
+        self.output_layout.validate()
 
     def apply_workflow_section(self, mode: Optional[str] = None) -> None:
         """Apply release-facing workflow section fields to the internal runtime config."""
@@ -718,7 +726,7 @@ class Config:
         if self.compute.valleys:
             self.compute.set_valley(self.compute.valleys[0])
         self.compute.validate()
-        if self.output_layout is not None and getattr(self.output_layout, "style", "") == "canonical_v1":
+        if self.output_layout is not None and getattr(self.output_layout, "style", "") == "canonical":
             self.output_layout.q_shell = canonical_qshell_name(self.compute.n_g)
 
     def validate(self) -> None:
@@ -831,7 +839,7 @@ class Config:
             )
 
         twist_raw = dict(config_dict.get('twist', {}) or {})
-        explicit_legacy_bravais = twist_raw.get("bravais") if "bravais" in twist_raw else None
+        openmx_bravais = twist_raw.get("bravais") if "bravais" in twist_raw else None
         if system_input is not None:
             twist_raw = {
                 "twist_index_m": system_input.twist_index,
@@ -869,7 +877,7 @@ class Config:
                 twist_index=int(twist_config.twist_index_m),
                 layers=tuple(int(value) for value in twist_config.twist_layer),
                 spin=bool(twist_config.spin),
-                explicit_bravais=None if explicit_legacy_bravais is None else str(explicit_legacy_bravais),
+                explicit_bravais=None if openmx_bravais is None else str(openmx_bravais),
             )
         if "orthogonal_basis" not in compute_raw and paths_raw.get("S_file") in (None, ""):
             compute_raw["orthogonal_basis"] = True
@@ -892,13 +900,13 @@ class Config:
                     symmetry_analysis_raw[key] = symmetry_raw[key]
         symmetry_analysis_config = SymmetryAnalysisConfig(**symmetry_analysis_raw)
         output_layout_config = OutputLayoutConfig(
-            style="canonical_v1",
+            style="canonical",
             root=str(paths_config.output_dir),
             q_shell=canonical_qshell_name(compute_config.n_g),
         )
         # Use default cluster config if not provided
         cluster_config = ClusterConfig(**config_dict.get('cluster', {})) if 'cluster' in config_dict else ClusterConfig()
-        
+
         config_obj = cls(
             twist=twist_config,
             paths=paths_config,

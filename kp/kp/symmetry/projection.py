@@ -48,7 +48,7 @@ from ..identity import (
 )
 from ..model.schema import M_EFFECTIVE_OPERATION_ALIASES
 from ..projection_handoff import (
-    ExplicitLegacyBasisSpec,
+    ExplicitLayerBasisSpec,
     GAMMA_SAMPLED_K_GRAY_TOLERANCE,
     GAMMA_SAMPLED_K_MATCH_TOLERANCE,
     GAMMA_ROUTED_ONLY_BASIS_FIELDS,
@@ -84,7 +84,7 @@ from .canonical_target import (
     load_canonical_target_artifact,
 )
 from .factorized_action import (
-    FACTORIZED_RESPONSE_ACTION_V1,
+    FACTORIZED_RESPONSE_ACTION_SCHEMA,
     FactorizedActionCertificationError,
     certify_factorized_action,
     explicit_linear_action_matrix,
@@ -99,6 +99,7 @@ from .joint_exactification import (
     _cyclotomic_root,
     BlockRouteAction,
     JointExactificationError,
+    JointExactificationFeasibilityError,
     JointExactificationConfig,
     JointExactificationResult,
     certify_fixed_target_joint_result,
@@ -128,7 +129,7 @@ from .structure_recovery import (
 
 try:
     import scipy.sparse as _sparse
-except Exception:  # pragma: no cover - scipy is optional for dense-only inputs
+except ImportError:  # pragma: no cover - scipy is optional for dense-only inputs
     _sparse = None
 
 
@@ -1470,14 +1471,10 @@ def _load_persisted_projection_basis_handoff(
     try:
         with np.load(basis_path, allow_pickle=False) as discriminator_payload:
             basis_files = frozenset(discriminator_payload.files)
-            basis_kind = (
-                _required_scalar_text(
-                    discriminator_payload,
-                    "projection_basis_kind",
-                    context=f"KP projection basis handoff {basis_path}",
-                )
-                if "projection_basis_kind" in discriminator_payload.files
-                else "explicit_legacy"
+            basis_kind = _required_scalar_text(
+                discriminator_payload,
+                "projection_basis_kind",
+                context=f"KP projection basis handoff {basis_path}",
             )
     except (KeyError, OSError, TypeError, ValueError) as error:
         raise GammaRoutingError(
@@ -1533,7 +1530,7 @@ def _load_persisted_projection_basis_handoff(
                 "routed Gamma wavefunction k mapping differs from basis handoff",
             )
         return routed
-    if basis_kind != ExplicitLegacyBasisSpec.projection_basis_kind:
+    if basis_kind != ExplicitLayerBasisSpec.projection_basis_kind:
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
             f"unsupported projection_basis_kind: {basis_kind!r}",
@@ -1544,14 +1541,12 @@ def _load_persisted_projection_basis_handoff(
     if forbidden_routed_fields:
         raise GammaRoutingError(
             CandidateRejectionReason.HANDOFF_IDENTITY,
-            "explicit legacy basis contains routed-only fields: "
+            "explicit physical-layer basis contains routed-only fields: "
             + ", ".join(forbidden_routed_fields),
         )
     artifact_identity = _load_project_artifact_identity(project_path)
     with np.load(basis_path, allow_pickle=True) as basis_payload:
         basis_context = f"KP projection basis handoff {basis_path}"
-        if "projection_basis_handoff_version" not in basis_payload.files:
-            return None
         basis_version = _required_scalar_text(
             basis_payload,
             "projection_basis_handoff_version",
@@ -1684,7 +1679,7 @@ def _load_persisted_projection_basis_handoff(
             "persisted project frame/model dimension mismatch: "
             f"{frame.full_unitary.shape} != {(model_dim, model_dim)}"
         )
-    return ExplicitLegacyBasisSpec(
+    return ExplicitLayerBasisSpec(
         artifact_identity=dict(artifact_identity),
         nlow_state_list=list(nlow_state_list),
         resolved_norb_fix_list=list(resolved_norb_fix_list),
@@ -2280,16 +2275,15 @@ def _load_matrix(path: Path) -> np.ndarray:
     if path.suffix == ".npy":
         return np.asarray(np.load(path), dtype=np.complex128)
     if path.suffix == ".npz":
-        try:
-            import scipy.sparse
-
-            return scipy.sparse.load_npz(path).tocsr()
-        except Exception:
-            data = np.load(path)
-            for key in ("matrix", "D", "representation", "arr_0"):
-                if key in data.files:
-                    return np.asarray(data[key], dtype=np.complex128)
-            raise ValueError(f"Cannot find matrix key in {path}; keys={data.files}")
+        with np.load(path, allow_pickle=False) as data:
+            if "format" not in data.files:
+                for key in ("matrix", "D", "representation", "arr_0"):
+                    if key in data.files:
+                        return np.asarray(data[key], dtype=np.complex128)
+                raise ValueError(f"Cannot find matrix key in {path}; keys={data.files}")
+        if _sparse is None:
+            raise ImportError("scipy is required to load a sparse representation archive")
+        return _sparse.load_npz(path).tocsr()
     raise ValueError(f"Unsupported representation file extension: {path}")
 
 
@@ -4559,9 +4553,6 @@ def _candidate_symmetry_metrics(
                 compute_heff_covariance=False,
             )
             raw_candidate_matrices[canonical_name] = np.asarray(raw_mats[0], dtype=np.complex128)
-            # #region debug-point A:projected-action
-            import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "A", "location": "kp/symmetry/projection.py:_candidate_symmetry_metrics", "msg": "[DEBUG] Projected symmetry action diagnostics", "data": {"candidate_id": candidate_id, "operation": canonical_name, "antiunitary": antiunitary, "pair_rows": _pair_rows, "matrix_shape": raw_candidate_matrices[canonical_name].shape, "matrix_fro": float(np.linalg.norm(raw_candidate_matrices[canonical_name], ord="fro"))}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
-            # #endregion
             operation_records.append(
                 {
                     "name": canonical_name,
@@ -4605,22 +4596,25 @@ def _candidate_symmetry_metrics(
             )
         )
         diagnostic_stage = "initial_exactification"
-        exact_matrices_candidate, exact_reports_candidate = exactify_loaded_symmetry_source(
-            loaded_metadata={"operations": operation_records},
-            matrices=raw_candidate_matrices,
-            Q_set1=ctx.q_model1,
-            Q_set2=ctx.q_model2,
-            sectors=sectors_candidate,
-            n_orb=n_orb_candidate,
-            bM1=bM1_candidate,
-            bM2=bM2_candidate,
-            raw_config={"exactification": exact_config_candidate},
-            rotation_deg=0.0,
-            output_dir=None,
-        )
-        # #region debug-point B:initial-joint-exactification
-        import json as _dbg_json, urllib.request as _dbg_request; _dbg_joint = exact_reports_candidate.get("__joint_exactification__", {}); _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "B", "location": "kp/symmetry/projection.py:_candidate_symmetry_metrics", "msg": "[DEBUG] Initial joint exactification report", "data": {"candidate_id": candidate_id, "derive_canonical_frame": derive_canonical_frame, "joint_report": _dbg_joint.get("report", {}), "operation_reports": {name: report.get("report", {}) for name, report in exact_reports_candidate.items() if name != "__joint_exactification__" and isinstance(report, Mapping)}}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
-        # #endregion
+        try:
+            exact_matrices_candidate, exact_reports_candidate = exactify_loaded_symmetry_source(
+                loaded_metadata={"operations": operation_records},
+                matrices=raw_candidate_matrices,
+                Q_set1=ctx.q_model1,
+                Q_set2=ctx.q_model2,
+                sectors=sectors_candidate,
+                n_orb=n_orb_candidate,
+                bM1=bM1_candidate,
+                bM2=bM2_candidate,
+                raw_config={"exactification": exact_config_candidate},
+                rotation_deg=0.0,
+                output_dir=None,
+            )
+        except JointExactificationFeasibilityError as exc:
+            raise CandidateRejected(
+                CandidateRejectionReason.CANDIDATE_SYMMETRY_FAILED,
+                str(exc),
+            ) from exc
         symmetry_adapted_frame: dict[str, Any] | None = None
         if derive_canonical_frame:
             diagnostic_stage = "selected_basis_frame_derivation"
@@ -4690,7 +4684,13 @@ def _candidate_symmetry_metrics(
                 },
             },
         )
-    except Exception as exc:
+    except CandidateRejected as exc:
+        if exc.reason in {
+            CandidateRejectionReason.HANDOFF_IDENTITY,
+            CandidateRejectionReason.HANDOFF_K_COVERAGE,
+            CandidateRejectionReason.INVALID_GAMMA_ROW_LAYOUT,
+        }:
+            raise
         return GaugeCandidateSymmetryMetrics(
             candidate_id=candidate_id,
             exactification_distance_by_op={},
@@ -4836,7 +4836,7 @@ def _resolved_gauge_for_symmetry(
     *,
     gauge_report: GaugeAnchorReport | None = None,
 ) -> tuple[ProjectGaugeAnchorCandidate, GaugeAnchorReport]:
-    """Use the gauge already selected by project, or resolve it for legacy callers."""
+    """Use the selected project gauge, or select it for a direct symmetry run."""
 
     if gauge_report is None:
         return _resolve_validated_projection_gauge(ctx)
@@ -4977,7 +4977,7 @@ def load_project_prepared_symmetry_package(
 
 
 def _gauge_report_from_persisted_handoff(
-    handoff: ExplicitLegacyBasisSpec,
+    handoff: ExplicitLayerBasisSpec,
 ) -> GaugeAnchorReport:
     """Build diagnostic summary data without re-running gauge selection."""
 
@@ -5150,12 +5150,12 @@ def _gauge_report_from_gamma_common_anchor_handoff(
 class _GenericSelectionBinding:
     store: SelectionArtifactStore
     artifact: SelectionArtifact
-    handoff: ExplicitLegacyBasisSpec
+    handoff: ExplicitLayerBasisSpec
 
 
 def _verify_generic_selection_handoff(
     artifact: SelectionArtifact,
-    handoff: ExplicitLegacyBasisSpec,
+    handoff: ExplicitLayerBasisSpec,
 ) -> None:
     """Bind one automatic K/M selection marker to its persisted project basis."""
 
@@ -5164,7 +5164,7 @@ def _verify_generic_selection_handoff(
     resolved = artifact.identity.resolved_candidate
     if (
         resolved.selection_mode != "auto"
-        or resolved.projection_basis_kind != ExplicitLegacyBasisSpec.projection_basis_kind
+        or resolved.projection_basis_kind != ExplicitLayerBasisSpec.projection_basis_kind
     ):
         raise SelectionBindingError(
             "automatic K/M selection does not describe an explicit project basis"
@@ -5187,7 +5187,7 @@ def _verify_generic_selection_handoff(
 
 def _load_current_generic_selection_binding(
     project_dir: str | Path,
-    handoff: ExplicitLegacyBasisSpec,
+    handoff: ExplicitLayerBasisSpec,
 ) -> _GenericSelectionBinding:
     """Load a current, basis-bound automatic K/M selection for kp symm."""
 
@@ -5649,20 +5649,6 @@ def _states_from_persisted_gamma_handoff(
     return states, states, states, first
 
 
-def _states_from_gamma_routed_handoff(
-    ctx: _ProjectionRunContext,
-    handoff: GammaRoutedBasisSpec,
-) -> tuple[
-    dict[int, ProjectionState],
-    dict[int, ProjectionState],
-    dict[int, ProjectionState],
-    ProjectionState,
-]:
-    """Compatibility wrapper for the legacy routed Gamma handoff."""
-
-    return _states_from_persisted_gamma_handoff(ctx, handoff)
-
-
 def _resolve_symmetry_project_identity(
     ctx: _ProjectionRunContext,
     *,
@@ -5827,7 +5813,7 @@ def _initial_projection_summary(
         else {}
     )
     projection_basis_kind = str(
-        report_metric.get("projection_basis_kind", "explicit_legacy")
+        report_metric.get("projection_basis_kind", "explicit_layer")
     )
     uses_persisted_gamma_layout = projection_basis_kind in (
         GammaCommonAnchorBasisSpec.projection_basis_kind,
@@ -6180,7 +6166,7 @@ def _factorized_response_action_package(
     except (KeyError, TypeError, ValueError) as error:
         return (
             {
-                "version": FACTORIZED_RESPONSE_ACTION_V1,
+                "version": FACTORIZED_RESPONSE_ACTION_SCHEMA,
                 "status": "unavailable",
                 "reason": str(error),
             },
@@ -6406,7 +6392,7 @@ def _factorized_response_action_package(
     if failures or len(actions) != len(matrices):
         return (
             {
-                "version": FACTORIZED_RESPONSE_ACTION_V1,
+                "version": FACTORIZED_RESPONSE_ACTION_SCHEMA,
                 "status": "unavailable",
                 "reason": "one_or_more_actions_not_factorizable",
                 "failures": failures,
@@ -7044,10 +7030,6 @@ def _exactify_and_write_projection_summary(
                 if project_frame_revalidation is None
                 else dict(project_frame_revalidation)
             ),
-            "legacy_aliases": {
-                "pre_gauge": "joint_exactification",
-                "post_gauge": "joint_exactification",
-            },
         }
     else:
         kp_symm_exactification["joint_block_representation"] = {
@@ -7319,7 +7301,7 @@ def run_symmetry_projection_from_config(
                     gamma_selection_binding.artifact.identity.selection_identity_hash
                 )
         elif (
-            isinstance(persisted_handoff, ExplicitLegacyBasisSpec)
+            isinstance(persisted_handoff, ExplicitLayerBasisSpec)
             and _automatic_project_selection_requested(run_cfg.project_cfg)
         ):
             generic_selection_binding = _load_current_generic_selection_binding(
@@ -7509,10 +7491,7 @@ def run_symmetry_projection_from_config(
                 "authoritative_frame": "model",
                 "routing_frame_role": "selection_rank_and_certificate_evidence",
                 "handoff_identity_hash": persisted_handoff.handoff_identity_hash,
-                "frame_hash": persisted_handoff.frame_hash,
-                "frame_hash_role": "legacy_alias_of_routed_frame_hash",
                 "routed_frame_hash": persisted_handoff.frame_hash,
-                "reference_frame_hash": persisted_handoff.reference_frame_hash,
                 "routed_reference_frame_hash": (
                     persisted_handoff.reference_frame_hash
                 ),

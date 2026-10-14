@@ -223,17 +223,9 @@ def select_anchor_rows_qrcp(
         candidate_rows=rows,
     )
     candidate_matrix = _weighted_rows(row_matrix, rows, weights)
-    warnings: list[str] = []
-    try:
-        _q, _r, pivots = scipy.linalg.qr(candidate_matrix.T, mode="economic", pivoting=True)
-        pivot_positions = [int(pos) for pos in pivots[:n_anchors]]
-        selected_rows = [int(rows[pos]) for pos in pivot_positions]
-        actual_method = "qrcp"
-    except Exception as exc:  # pragma: no cover - SciPy pivoted QR is expected.
-        warnings.append(f"QRCP failed ({exc}); used leverage fallback")
-        ordered = sorted(rows, key=lambda row: (-float(leverage[row]), int(row)))
-        selected_rows = ordered[:n_anchors]
-        actual_method = "leverage_fallback"
+    _q, _r, pivots = scipy.linalg.qr(candidate_matrix.T, mode="economic", pivoting=True)
+    pivot_positions = [int(pos) for pos in pivots[:n_anchors]]
+    selected_rows = [int(rows[pos]) for pos in pivot_positions]
 
     overlap_matrix = row_matrix[np.asarray(selected_rows, dtype=np.intp), :]
     singular_values = np.linalg.svd(overlap_matrix, compute_uv=False)
@@ -269,14 +261,14 @@ def select_anchor_rows_qrcp(
     ]
     return AutoGaugeSelection(
         selected_rows=selected_rows,
-        method=actual_method,
+        method="qrcp",
         singular_values=[float(x) for x in singular_values.tolist()],
         sigma_min=sigma_min,
         condition_number=condition,
         rank=rank,
         leverage_scores=[float(leverage[row]) for row in selected_rows],
         candidates=candidates,
-        warnings=warnings,
+        warnings=[],
     )
 
 

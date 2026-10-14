@@ -17,9 +17,9 @@ from typing import Any, Mapping, Sequence
 import numpy as np
 
 
-JOINT_STRUCTURE_CERTIFICATE_V1 = "joint_structure_certificate_v1"
-COMMON_FIBER_GAUGE_WITNESS_V1 = "common_fiber_gauge_witness_v1"
-STRUCTURE_TRANSITION_V1 = "joint_structure_transition_v1"
+JOINT_STRUCTURE_CERTIFICATE_SCHEMA = "joint_structure_certificate_v1"
+COMMON_FIBER_GAUGE_WITNESS_SCHEMA = "common_fiber_gauge_witness_v1"
+STRUCTURE_TRANSITION_SCHEMA = "joint_structure_transition_v1"
 
 
 class StructureGrade(IntEnum):
@@ -263,7 +263,7 @@ class JointStructureCertificate:
     operations: Mapping[str, OperationStructureCertificate]
     relation_certificate: Mapping[str, Any]
     certificate_hash: str
-    version: str = JOINT_STRUCTURE_CERTIFICATE_V1
+    version: str = JOINT_STRUCTURE_CERTIFICATE_SCHEMA
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "operations", MappingProxyType(dict(self.operations)))
@@ -309,7 +309,7 @@ class CommonGaugeWitness:
     gauge_unitarity_residual_max: float
     gauge_unitarity_certification_bound: float
     reason: str | None = None
-    version: str = COMMON_FIBER_GAUGE_WITNESS_V1
+    version: str = COMMON_FIBER_GAUGE_WITNESS_SCHEMA
 
     def __post_init__(self) -> None:
         object.__setattr__(
@@ -389,7 +389,7 @@ class StructureTransition:
     is_monotone: bool
     regressions: tuple[tuple[str, str], ...]
     reason: str | None = None
-    version: str = STRUCTURE_TRANSITION_V1
+    version: str = STRUCTURE_TRANSITION_SCHEMA
 
     def artifact(self) -> dict[str, Any]:
         return {
@@ -686,7 +686,7 @@ def certify_joint_structure(
 ) -> JointStructureCertificate:
     """Classify all exact route blocks in one shared continuum basis."""
 
-    from .joint_exactification import validate_presentation_action_relations
+    from .joint_exactification import JointExactificationError, validate_presentation_action_relations
 
     generator_names = tuple(generator.name for generator in presentation.generators)
     if set(actions) != set(generator_names):
@@ -704,7 +704,7 @@ def certify_joint_structure(
             )
     try:
         validate_presentation_action_relations(actions, presentation)
-    except Exception as exc:
+    except JointExactificationError as exc:
         # Present one stable public exception type from this independent
         # certificate layer while preserving the detailed validation message.
         raise ValueError(str(exc)) from exc
@@ -792,7 +792,7 @@ def certify_joint_structure(
     )
     actions_hash = _actions_hash(actions, presentation)
     payload = {
-        "version": JOINT_STRUCTURE_CERTIFICATE_V1,
+        "version": JOINT_STRUCTURE_CERTIFICATE_SCHEMA,
         "status": overall_status.value,
         "basis_frame_hash": layout.basis_frame_hash,
         "layout_hash": layout_hash,
@@ -821,7 +821,7 @@ def certify_joint_structure(
 
 def _gauge_hash(gauge: Sequence[np.ndarray]) -> str:
     digest = hashlib.sha256()
-    digest.update(COMMON_FIBER_GAUGE_WITNESS_V1.encode("utf-8"))
+    digest.update(COMMON_FIBER_GAUGE_WITNESS_SCHEMA.encode("utf-8"))
     for value in gauge:
         matrix = np.asarray(value, dtype="<c16", order="C")
         digest.update(np.asarray(matrix.shape, dtype="<i8").tobytes(order="C"))
@@ -884,7 +884,7 @@ def certify_common_fiber_gauge(
 ) -> CommonGaugeWitness:
     """Prove that one semilinear fiber gauge maps all actions to a candidate."""
 
-    from .joint_exactification import validate_presentation_action_relations
+    from .joint_exactification import JointExactificationError, validate_presentation_action_relations
 
     names = tuple(generator.name for generator in presentation.generators)
     for label, actions in (("source", before), ("target", after)):
@@ -906,7 +906,7 @@ def certify_common_fiber_gauge(
                 )
         try:
             validate_presentation_action_relations(actions, presentation)
-        except Exception as exc:
+        except JointExactificationError as exc:
             raise ValueError(f"{label} action validation failed: {exc}") from exc
     reference = before[names[0]]
     gauge = tuple(np.asarray(value, dtype=np.complex128) for value in fiber_gauge)

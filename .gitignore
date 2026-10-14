@@ -68,9 +68,7 @@ ENV/
 /.learnings/
 /devtools/
 /docs/
-/tests/
 /kp/kp/experimental/
-/pytest.ini
 /RELEASE_BLOCKERS.md
 /RELEASE_VALIDATION.md
 /scripts/release_gate.sh

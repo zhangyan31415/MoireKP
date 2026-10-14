@@ -32,7 +32,7 @@ class StructuralGeneratorPlan:
 
     def artifact(self) -> dict[str, Any]:
         return {
-            "compiler": "exact_structural_cyclic_generators_v1",
+            "compiler": "exact_structural_cyclic_generators",
             "full_structural_support_count": int(
                 self.full_structural_support_count
             ),

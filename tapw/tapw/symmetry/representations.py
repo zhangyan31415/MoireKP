@@ -35,7 +35,7 @@ def supports_single_valley_c3(bravais, valley):
 def get_g_vec_perlayer(m_g_vec,twisted_index_m):
     # K1 = twisted_index_m*m_g_vec[0] + 1/3*m_g_vec[0] + 1/3*m_g_vec[1]
     # K2 = twisted_index_m*m_g_vec[0] + 2/3*m_g_vec[0] - 1/3*m_g_vec[1]
-    
+
     K1 = twisted_index_m*m_g_vec[0] + 2/3*m_g_vec[0] - 1/3*m_g_vec[1]
     K2 = twisted_index_m*m_g_vec[0] + 1/3*m_g_vec[0] + 1/3*m_g_vec[1]
     K1 = K1[:2]
@@ -61,7 +61,7 @@ def direct_sum(*matrices):
     """
     # 计算直和矩阵的形状
     shape_sum = np.sum([matrix.shape for matrix in matrices], axis=0)
-    
+
     # 构造直和矩阵
     direct_sum_matrix = np.zeros(shape_sum,dtype=np.complex128)
     row_start = 0
@@ -98,7 +98,7 @@ def C3_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,m_g_vec,twisted_index_
     C3_1layer = np.zeros((num_gn,num_gn),dtype=np.complex128)
     C3_2layer = np.zeros((num_gn,num_gn),dtype=np.complex128)
 
-    K_1layer, K_2layer = legacy_single_valley_c3_layer_centers(
+    K_1layer, K_2layer = analytic_single_valley_c3_layer_centers(
         m_g_vec=m_g_vec,
         twisted_index_m=twisted_index_m,
         valley=valley,
@@ -106,7 +106,7 @@ def C3_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,m_g_vec,twisted_index_
     print("valley = ",valley)
     print("K_1layer = ",K_1layer)
     print("K_2layer = ",K_2layer)
-    
+
 
     value = 1
     for i in range(num_gn):
@@ -125,7 +125,7 @@ def C3_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,m_g_vec,twisted_index_
     return C3_1layer,C3_2layer
 
 
-def legacy_single_valley_c3_layer_centers(m_g_vec, twisted_index_m, valley):
+def analytic_single_valley_c3_layer_centers(m_g_vec, twisted_index_m, valley):
     reason = single_valley_c3_incompatibility_reason("hex", valley)
     if reason is not None:
         raise ValueError(f"{reason} Disable single-valley C3 symmetrization for this valley.")
@@ -146,7 +146,7 @@ def legacy_single_valley_c3_layer_centers(m_g_vec, twisted_index_m, valley):
         return rot(K1_1layer, 240), rot(K1_2layer, 240)
     if valley == 5:
         return np.zeros(2), np.zeros(2)
-    raise ValueError(f"Unsupported valley={valley} for legacy single-valley C3 layer centers.")
+    raise ValueError(f"Unsupported valley={valley} for analytic single-valley C3 layer centers.")
 
 def generate_direct_sum_params(orbitals, orbital_mapping):
     params = []
@@ -173,7 +173,7 @@ def C3_MoTe2_all(C3_Gn_1layer,C3_Gn_2layer,atoms_species_1layer=None,atoms_speci
 
     C3_s = get_any_rot_orb_twostep('s',C3_rot_matrix)
     C3_p = get_any_rot_orb_twostep('p',C3_rot_matrix)
-    C3_d = get_any_rot_orb_twostep('d',C3_rot_matrix) 
+    C3_d = get_any_rot_orb_twostep('d',C3_rot_matrix)
     C3_f = get_any_rot_orb_twostep('f',C3_rot_matrix)
 
     orbital_mapping = {
@@ -193,7 +193,7 @@ def C3_MoTe2_all(C3_Gn_1layer,C3_Gn_2layer,atoms_species_1layer=None,atoms_speci
 
     # C3_MX2_spin_rep = direct_sum(np.kron(C3spin,C3_X_rep),np.kron(C3spin,C3_X_rep),np.kron(C3spin,C3_M_rep))
     # C3_all_rep = np.kron(C3_Gn,C3_MX2_spin_rep)
-    
+
     C3_rep_matrices_1layer = []
     C3_rep_matrices_2layer = []
     for atom_index in atoms_species_1layer.keys():
@@ -260,7 +260,7 @@ def spin_reps(prep):
         if theta != 0:
             n[0] = prep[2,1]-prep[1,2]
             n[1] = prep[0,2]-prep[2,0]
-            n[2] = prep[1,0]-prep[0,1]               
+            n[2] = prep[1,0]-prep[0,1]
             if np.round(np.linalg.norm(n),5) == 0.: # theta = pi, that is C2 rotations
                 n = _axis_from_eigenvalue(prep, 1.0)
                 spin=np.round(D12(n[0],n[1],n[2],np.pi),15)
@@ -270,11 +270,11 @@ def spin_reps(prep):
         else: # case of unitiy
             spin=D12(0,0,0,0)
     elif det == -1.: #improper rotations and reflections
-        theta = np.arccos(np.clip(0.5*(tr+1.), -1.0, 1.0)) 
-        if np.round(theta,5) != np.round(np.pi,5):                 
+        theta = np.arccos(np.clip(0.5*(tr+1.), -1.0, 1.0))
+        if np.round(theta,5) != np.round(np.pi,5):
             n[0] = prep[2,1]-prep[1,2]
             n[1] = prep[0,2]-prep[2,0]
-            n[2] = prep[1,0]-prep[0,1]                
+            n[2] = prep[1,0]-prep[0,1]
             if np.round(np.linalg.norm(n),5)== 0.: # theta = 0 (reflection)
                 n = _axis_from_eigenvalue(prep, -1.0) # normal vector is eigenvector to eigenvalue -1
                 spin=np.round(D12(n[0],n[1],n[2],np.pi),15) #spin is a pseudovector!
@@ -309,7 +309,7 @@ def C2_G_matrix(g_vec_list_K1_1layer,g_vec_list_K1_2layer,axis):
                 C2[i,j+num_gn] = 1
                 C2[j+num_gn,i] = 1
                 # print("i = ",i,"j = ",j,g_vec_list_K1_1layer[i],g_vec_list_K1_2layer[j])
-    
+
 
                 # print("i = ",i+num_gn,"j = ",j+num_gn)
     print(" abs(C2 G matrix) = ",np.abs(C2).sum())
@@ -325,7 +325,7 @@ def C2_MoTe2_all(C2_Gn,axis):
     C2T_spin = C2_spin*1j*sigma_y
     C2_s = get_any_rot_orb_twostep('s',C2_rot_matrix)
     C2_p = get_any_rot_orb_twostep('p',C2_rot_matrix)
-    C2_d = get_any_rot_orb_twostep('d',C2_rot_matrix) 
+    C2_d = get_any_rot_orb_twostep('d',C2_rot_matrix)
 
     C2_Te_rep = direct_sum(C2_s,C2_s,C2_s,C2_p,C2_p,C2_d,C2_d)
     C2_Mo_rep = direct_sum(C2_s,C2_s,C2_s,C2_p,C2_p,C2_d)

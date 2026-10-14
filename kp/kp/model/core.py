@@ -48,54 +48,31 @@ from typing import Any, Callable, Dict, Iterable, List, Mapping, Sequence, Tuple
 
 # --- third-party ---
 import numpy as np
+from tapw.io.kpath import parse_kpath_in
 import scipy
 import scipy.linalg
 import psutil
 from scipy import sparse
 from tqdm import tqdm
 
-try:
-    from .constants import (
-        CANONICAL_P_TOL,
-        KZ_POW_CACHE,
-        SYMMETRIZE_COMPOSED_OP_CACHE,
-        SYMMETRIZE_COMPOSED_OP_VALIDATED,
-        SYMMETRIZE_GLOBAL_CACHE,
-        SYMMETRIZE_MONOMIAL_OP_CACHE,
-        SYMMETRIZE_MONOMIAL_OP_VALIDATED,
-        SYMMETRIZE_ORBIT_CACHE,
-        clear_symmetry_caches,
-        hartree,
-    )
-    from .logging_utils import (
-        logger,
-        setup_logging,
-        summarize_coefficients,
-        summarize_symmetry_ops,
-    )
-except ImportError:
-    _model_dir = str(Path(__file__).resolve().parent)
-    if _model_dir not in sys.path:
-        sys.path.insert(0, _model_dir)
-    from constants import (  # type: ignore[no-redef]
-        CANONICAL_P_TOL,
-        KZ_POW_CACHE,
-        SYMMETRIZE_COMPOSED_OP_CACHE,
-        SYMMETRIZE_COMPOSED_OP_VALIDATED,
-        SYMMETRIZE_GLOBAL_CACHE,
-        SYMMETRIZE_MONOMIAL_OP_CACHE,
-        SYMMETRIZE_MONOMIAL_OP_VALIDATED,
-        SYMMETRIZE_ORBIT_CACHE,
-        clear_symmetry_caches,
-        hartree,
-    )
-    from logging_utils import (  # type: ignore[no-redef]
-        logger,
-        setup_logging,
-        summarize_coefficients,
-        summarize_symmetry_ops,
-    )
-
+from .constants import (
+    CANONICAL_P_TOL,
+    KZ_POW_CACHE,
+    SYMMETRIZE_COMPOSED_OP_CACHE,
+    SYMMETRIZE_COMPOSED_OP_VALIDATED,
+    SYMMETRIZE_GLOBAL_CACHE,
+    SYMMETRIZE_MONOMIAL_OP_CACHE,
+    SYMMETRIZE_MONOMIAL_OP_VALIDATED,
+    SYMMETRIZE_ORBIT_CACHE,
+    clear_symmetry_caches,
+    hartree,
+)
+from .logging_utils import (
+    logger,
+    setup_logging,
+    summarize_coefficients,
+    summarize_symmetry_ops,
+)
 # Plotting is optional; imports are kept local to plotting section when possible.
 
 def timing_decorator_factory(process_id):
@@ -116,7 +93,7 @@ def timing_decorator_factory(process_id):
 
                 current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                 print(f"[{current_time}] Function '{func.__name__}' executed in {duration:.6f} seconds, Memory peak: {mem_peak:.6f} GB")
-                sys.stdout.flush() 
+                sys.stdout.flush()
             else:
                 result = func(*args, **kwargs)
             return result
@@ -150,7 +127,7 @@ class KPathGenerator:
         bstar = 2 * np.pi * np.cross(c, a) / vol
         cstar = 2 * np.pi * np.cross(a, b) / vol
         return astar, bstar, cstar
-    
+
     def generate_kpath_from_high_symmetry_points(
         self,
         high_symmetry_points: np.ndarray,
@@ -388,7 +365,7 @@ def make_hashable(obj: Any) -> Any:
     elif isinstance(obj, dict):
         return tuple(sorted((k, make_hashable(v)) for k, v in obj.items()))
     elif isinstance(obj, np.ndarray):
-        # 使用 tobytes() 保证数组的位表示是唯一的  
+        # 使用 tobytes() 保证数组的位表示是唯一的
         return obj.tobytes()
     elif isinstance(obj, ContinuumTerm):
         # 利用 term 的 key，该 key 需是可哈希的（比如 @dataclass(frozen=True)）
@@ -501,7 +478,7 @@ def truncate_Q_indices(Q_set1: np.ndarray, cutoff_shells: int) -> tuple[np.ndarr
     """
     keep1 = []
     remove1 = []
-    
+
     # 计算第一层各 Q 的径向距离，找到“壳”半径
     r1 = np.linalg.norm(Q_set1, axis=1)
     shells1 = np.sort(np.unique(np.round(r1, 6)))
@@ -541,7 +518,7 @@ class ContinuumTermKey:
     orbital_from: int
     orbital_to: int
     p: Tuple[float, float]
-    
+
     def __post_init__(self):
         # 但 dataclass(frozen=True) 下不能直接赋值；可以用 object.__setattr__
         p0 = round(float(self.p[0]) / CANONICAL_P_TOL) * CANONICAL_P_TOL
@@ -602,7 +579,7 @@ class MoireConfig:
     symmetry_source_metadata: Dict[str, Any] = field(default_factory=dict)
     sectors: List[Dict[str, Any]] = field(default_factory=list)
     term_templates: List[Dict[str, Any]] = field(default_factory=list)
-    response_semantics: str = "legacy_frozen_v1"
+    response_semantics: str = "complete_linear"
     bM_diagnostics: Dict[str, Any] = field(default_factory=dict)
 
     # --- k sampling / fitting ---
@@ -616,7 +593,7 @@ class MoireConfig:
     response_fit_indices: List[int] = field(default_factory=list)
     response_band_window: List[int] = field(default_factory=list)
     response_fit_objective: Dict[str, Any] = field(
-        default_factory=lambda: {"mode": "equal_matrix_v1"}
+        default_factory=lambda: {"mode": "equal_matrix"}
     )
 
     # --- band reduction (optional Schur complement) ---
@@ -852,7 +829,7 @@ class SymmetryGenerator:
             T_blocks.append(T_matrix_layer)
 
         return scipy.linalg.block_diag(*T_blocks)
-    
+
     def get_C2_operator(self, qtol: float | None = None) -> np.ndarray:
         """
         Construct a twofold layer-exchange unitary matrix.
@@ -961,7 +938,7 @@ class SymmetryGenerator:
             operator_name = f'C3z_{params}'  # 对于 C3z 操作，使用参数来区分
         else:
             operator_name = name
-        
+
         if operator_name not in self.cached_operators:
             if name == "C3z":
                 D = self.get_C3z_operator(params)
@@ -994,12 +971,12 @@ class ContinuumModel:
     """
     def __init__(self):
         self.terms: Dict[ContinuumTermKey, ContinuumTerm] = {}
-        # Preserve every authored seed independently of the legacy runtime
+        # Preserve every authored seed independently of the semantic term
         # dictionary.  Distinct templates can intentionally produce the same
-        # physical key; complete_linear_v2 must see those candidates before its
+        # physical key; complete_linear must see those candidates before its
         # target-independent coefficient-space reducer decides dependency.
         self.candidate_terms: List[ContinuumTerm] = []
-    
+
     def add_term(
         self,
         key: ContinuumTermKey,
@@ -1021,7 +998,7 @@ class ContinuumModel:
         )
         self.candidate_terms.append(term)
         self.terms[key] = term
-    
+
     def update_term_coefficients(self, key: ContinuumTermKey, r_real: complex, r_imag: complex):
         if key not in self.terms:
             raise ValueError(f"Term {key} does not exist.")
@@ -1078,7 +1055,7 @@ class ContinuumModelBuilder:
     _SYMM_USE_SPARSE_BASIS = True
     _SYMM_MONOMIAL_CLEANUP_TOL = 1.0e-8
     _SYMM_SPARSE_VALIDATED = False
-    
+
     def __init__(self, Q_set1: np.ndarray, Q_set2: np.ndarray,
                  n_orb1: int, n_orb2: int,
                  bM1: np.ndarray, bM2: np.ndarray,
@@ -1089,7 +1066,7 @@ class ContinuumModelBuilder:
                  symmetry_map: Dict[str, List[Dict[str, Any]]] = None,
                  term_templates: List[Dict[str, Any]] | None = None,
                  sectors: List[Dict[str, Any]] | None = None,
-                 response_semantics: str = "legacy_frozen_v1"):
+                 response_semantics: str = "complete_linear"):
         self.Q_set1 = Q_set1
         self.Q_set2 = Q_set2
         self.n_orb1 = n_orb1
@@ -1155,7 +1132,7 @@ class ContinuumModelBuilder:
             if len(names) == 2 and sector_map.get(names[0]) == names[1] and sector_map.get(names[1]) == names[0]:
                 return True
         return False
-    
+
     @staticmethod
     def make_Y_basis_function_(key: ContinuumTermKey,
                               Q_set1: np.ndarray, Q_set2: np.ndarray,
@@ -1218,8 +1195,8 @@ class ContinuumModelBuilder:
             #         for j, Qp in enumerate(Q_cols):
             #             if np.linalg.norm(Q - p_vec - Qp) < tol:
             #                 col_index = ContinuumModelBuilder.get_global_index(l2+1, j, a2, Q_set1, Q_set2, n_orb1, n_orb2)
-            #                 Y[row_index, col_index] = (kz**Mz) * (kz_star**Mz_star)            
-                        
+            #                 Y[row_index, col_index] = (kz**Mz) * (kz_star**Mz_star)
+
             if l1 == l2 and a1 == a2 and Mz != Mz_star and np.linalg.norm(p_vec) < tol:
                 return Y + Y.conj().T
             # elif l1 == l2 and a1 == a2 and np.linalg.norm(p_vec) > tol:
@@ -1342,7 +1319,7 @@ class ContinuumModelBuilder:
         Y_func._moire_basis_q_index = basis_q_index  # type: ignore[attr-defined]
         Y_func._moire_basis_orbital = basis_orbital  # type: ignore[attr-defined]
         return Y_func
-    
+
     @staticmethod
     def get_global_index(layer: int, q_index: int, orb: int,
                          Q_set1: np.ndarray, Q_set2: np.ndarray,
@@ -2301,7 +2278,7 @@ class ContinuumModelBuilder:
         """
         对给定 Y_basis 进行对称化，调用内部的 symmetry_gen
         """
-        return ContinuumModelBuilder.symmetrize_Y_basis_static(Y_basis, k, 
+        return ContinuumModelBuilder.symmetrize_Y_basis_static(Y_basis, k,
                                                                 sym_ops=[],  # 外部调用时每个 term 自带对称操作
                                                                 symmetry_gen=self.symmetry_gen)
 
@@ -2369,1083 +2346,6 @@ class ContinuumModelBuilder:
         )
         return orthonormal_matrices, including_list
 
-    def _fit_blocks_for_term_key(
-        self,
-        key: ContinuumTermKey,
-        k_points: Sequence[np.ndarray],
-        *,
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        k_signature = tuple(tuple(float(x) for x in np.asarray(k).ravel()) for k in k_points)
-        block_signature = self._fit_block_signature_for_key(key)
-        cache_key = ("fit_block", key, k_signature, block_signature)
-        if term_matrix_cache is not None:
-            cached = term_matrix_cache.get(cache_key)
-            if cached is not None:
-                return cached
-
-        idx_inc, idy_inc = self._fit_block_indices_for_key(key)
-        real_blocks = []
-        imag_blocks = []
-        term = self.model.terms[key]
-        for k in k_points:
-            mat_real, mat_imag = ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static(
-                term.Y_basis,
-                k,
-                term.symmetry_ops,
-                symmetry_gen=self.symmetry_gen,
-                term=term,
-            )
-            real_blocks.append(mat_real[np.ix_(idx_inc, idy_inc)])
-            imag_blocks.append(mat_imag[np.ix_(idx_inc, idy_inc)])
-
-        matrices = (
-            scipy.linalg.block_diag(*real_blocks),
-            scipy.linalg.block_diag(*imag_blocks),
-        )
-        if term_matrix_cache is not None:
-            term_matrix_cache[cache_key] = matrices
-        return matrices
-
-    def _initialterms_for_fit_keys(
-        self,
-        keys: List[ContinuumTermKey],
-        k_points: List[np.ndarray],
-        *,
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
-    ) -> np.ndarray:
-        if not keys:
-            return np.empty((0, 0, 0), dtype=np.complex128)
-
-        def _process_single_term(key):
-            mat_real, mat_imag = self._fit_blocks_for_term_key(
-                key,
-                k_points,
-                term_matrix_cache=term_matrix_cache,
-            )
-            return mat_real, mat_imag
-
-        time_start = time.time()
-        results = [_process_single_term(key) for key in tqdm(keys, desc="Processing terms")]
-        time_end = time.time()
-        print(f"Time elapsed for processing terms: {time_end - time_start:.2f} s")
-
-        initialterms = []
-        for mat_real, mat_imag in results:
-            initialterms.append(mat_real)
-            initialterms.append(mat_imag)
-        initialterms = np.array(initialterms)
-
-        subgroup_0 = self._fit_block_signature_for_key(keys[0])
-        for key in keys:
-            subgroup = self._fit_block_signature_for_key(key)
-            if subgroup != subgroup_0:
-                raise ValueError("Different fit block signatures in keys.")
-
-        return initialterms
-
-    def _initialterm_support_vectors_for_fit_keys(
-        self,
-        keys: Sequence[ContinuumTermKey],
-        k_points: Sequence[np.ndarray],
-        *,
-        support_idx: np.ndarray,
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
-    ) -> np.ndarray:
-        support_idx = np.asarray(support_idx, dtype=int)
-        if not keys:
-            return np.empty((0, support_idx.size), dtype=np.complex128)
-
-        vectors: List[np.ndarray] = []
-        for key in tqdm(keys, desc="Processing support vectors"):
-            mat_real, mat_imag = self._fit_blocks_for_term_key(
-                key,
-                k_points,
-                term_matrix_cache=term_matrix_cache,
-            )
-            flat_real = mat_real.reshape(-1)
-            flat_imag = mat_imag.reshape(-1)
-            vectors.append(flat_real[support_idx])
-            vectors.append(flat_imag[support_idx])
-
-        subgroup_0 = self._fit_block_signature_for_key(keys[0])
-        for key in keys:
-            subgroup = self._fit_block_signature_for_key(key)
-            if subgroup != subgroup_0:
-                raise ValueError("Different fit block signatures in keys.")
-
-        return np.asarray(vectors, dtype=np.complex128)
-
-    def _raw_initialterm_norms_for_fit_keys(
-        self,
-        keys: Sequence[ContinuumTermKey],
-        k_points: Sequence[np.ndarray],
-    ) -> np.ndarray:
-        if not keys:
-            return np.empty((0,), dtype=float)
-
-        norms: List[float] = []
-        for key in tqdm(keys, desc="Processing raw support norms"):
-            idx_inc, idy_inc = self._fit_block_indices_for_key(key)
-            term = self.model.terms[key]
-            raw_blocks = []
-            for k in k_points:
-                mat = term.Y_basis(k)
-                raw_blocks.append(mat[np.ix_(idx_inc, idy_inc)])
-            raw = scipy.linalg.block_diag(*raw_blocks)
-            raw_norm = float(np.linalg.norm(raw.reshape(-1)))
-            norms.append(raw_norm)
-            norms.append(raw_norm)
-        return np.asarray(norms, dtype=float)
-
-    @timing_decorator_factory(0)
-    def get_orthogonalized_terms_subset(self, keys: List[ContinuumTermKey], k_points: List[np.ndarray],
-                                        tol: float = 1e-8, tag: str = None,
-                                        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None) -> Tuple[List[ContinuumTermKey], List[np.ndarray], np.ndarray, np.ndarray, np.ndarray | None]:
-        """
-        对模型中指定 keys 的项，在 k_points 下采样后，
-        对于每个 term同时采样 real 与 imag 两部分（分别由 stack_Y_for_term 返回），
-        将这两部分都添加到 initialterms 中（顺序为 term1_real, term1_imag, term2_real, term2_imag, ...）。
-
-        拟合使用的 term 矩阵必须和后续组装/导出的 runtime term 矩阵一致；
-        因此这里不对特定 tag 做额外去迹或 residual 修正。
-
-        返回：
-        keys: 原 keys 列表（顺序不变）
-        initialterms: 每个 term 得到的 block_diag 拼接矩阵（总数为 2*N）
-        finalterms: 经过正交化后的矩阵数组
-        includinglist: 正交化中被认为是线性独立的矩阵的原始索引数组
-        """
-        initialterms = self._initialterms_for_fit_keys(
-            keys,
-            k_points,
-            term_matrix_cache=term_matrix_cache,
-        )
-        
-        # 正交化
-        finalterms, includinglist, support_idx = self._orthogonalize_hermitian_matrices_with_support(initialterms, tol=tol)
-        
-        # 更新每个 term 的 active 标志：如果该 term 对应的两个矩阵中至少有一个被保留，则 active 为 True
-        for i, key in enumerate(keys):
-            idx1, idx2 = 2 * i, 2 * i + 1
-            self.model.terms[key].active = (idx1 in includinglist or idx2 in includinglist)
-        
-        return keys, initialterms, finalterms, includinglist, support_idx
-    
-    
-    def compute_coeffs_extreme(self,finalterms, initialterms, includinglist, heff, support_idx: np.ndarray | None = None):
-        """
-        极致向量化实现：
-        transfermat[i, j] = trace(finalterms[i] @ initialterms[includinglist[j]])
-        rhs[i] = trace(heff @ finalterms[i])
-        
-        具体方法：
-        - 将 finalterms 重塑为 (m, n*n)
-        - 选取 initialterms[includinglist] 后对每个矩阵先取转置，再重塑为 (k, n*n)
-        - 利用 F @ I_T.T 计算 transfermat
-        - 利用 F @ (heff.T).ravel() 计算 rhs
-        
-        返回求解出的系数 coeffs。
-        """
-        m, n, _ = finalterms.shape
-        if support_idx is None:
-            init_included = initialterms[includinglist]  # shape (k, n, n)
-            F = finalterms.reshape(m, -1)
-            I_T = init_included.transpose(0, 2, 1).reshape(len(includinglist), -1)
-            transfermat = F @ I_T.T
-            H_T = heff.T.ravel()
-            rhs = F @ H_T
-        else:
-            support_idx = np.asarray(support_idx, dtype=int)
-            rows = support_idx // n
-            cols = support_idx % n
-            F = finalterms.reshape(m, -1)[:, support_idx]
-            I_T = initialterms[np.asarray(includinglist, dtype=int)[:, None], cols[None, :], rows[None, :]]
-            transfermat = F @ I_T.T
-            rhs = F @ heff[cols, rows]
-        # 求解线性方程组；rank selection 已经保证独立，fallback 只处理极端病态数值。
-        try:
-            coeffs = scipy.linalg.solve(transfermat, rhs, check_finite=False)
-        except scipy.linalg.LinAlgError:
-            coeffs = np.linalg.lstsq(transfermat, rhs, rcond=None)[0]
-        return coeffs
-
-    def _solve_coefficients_from_support_vectors(
-        self,
-        initialterms: np.ndarray,
-        heff: np.ndarray,
-        *,
-        tol: float = 1e-8,
-        support_idx: np.ndarray | None = None,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        initialterms = np.asarray(initialterms)
-        heff = np.asarray(heff)
-        if initialterms.ndim != 3 or initialterms.shape[1] != initialterms.shape[2]:
-            raise ValueError("initialterms must have shape (n_terms, dim, dim)")
-        if heff.shape != initialterms.shape[1:]:
-            raise ValueError("heff must have the same matrix shape as initialterms entries")
-
-        n_terms, dim, _ = initialterms.shape
-        if n_terms == 0:
-            return np.array([], dtype=float), np.array([], dtype=int), np.array([], dtype=int)
-
-        flat = initialterms.reshape(n_terms, -1)
-        if support_idx is None:
-            max_abs = float(np.max(np.abs(flat))) if flat.size else 0.0
-            support_tol = max(np.finfo(float).eps * max(max_abs, 1.0) * 100.0, float(tol) * 1.0e-4)
-            support_idx = np.flatnonzero(np.any(np.abs(flat) > support_tol, axis=0)).astype(int, copy=False)
-        else:
-            support_idx = np.asarray(support_idx, dtype=int)
-        if support_idx.size == 0:
-            return np.array([], dtype=float), np.array([], dtype=int), support_idx
-
-        design_complex = flat[:, support_idx].T
-        target_complex = heff.reshape(dim * dim)[support_idx]
-        design = np.vstack((design_complex.real, design_complex.imag))
-        target = np.concatenate((target_complex.real, target_complex.imag))
-
-        col_norms = np.linalg.norm(design, axis=0)
-        nonzero = np.flatnonzero(col_norms > tol)
-        if nonzero.size == 0:
-            return np.array([], dtype=float), np.array([], dtype=int), support_idx
-
-        qr_input = np.asfortranarray(design[:, nonzero])
-        _q, r, piv = scipy.linalg.qr(
-            qr_input,
-            mode="economic",
-            pivoting=True,
-            overwrite_a=True,
-            check_finite=False,
-        )
-        diag = np.abs(np.diag(r))
-        rank = int(np.count_nonzero(diag > tol))
-        includinglist = np.sort(nonzero[piv[:rank]].astype(int, copy=False))
-        if rank == 0:
-            return np.array([], dtype=float), np.array([], dtype=int), support_idx
-
-        coeffs, *_ = scipy.linalg.lstsq(
-            design[:, includinglist],
-            target,
-            check_finite=False,
-            lapack_driver="gelsy",
-        )
-        return np.asarray(coeffs, dtype=float), includinglist, support_idx
-
-    def _solve_coefficients_from_support_matrix(
-        self,
-        initial_vectors: np.ndarray,
-        target_vector: np.ndarray,
-        *,
-        tol: float = 1e-8,
-        null_channel_abs_tol: float = 0.0,
-        raw_channel_norms: np.ndarray | None = None,
-        null_channel_rel_tol: float = 0.0,
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        initial_vectors = np.asarray(initial_vectors)
-        target_vector = np.asarray(target_vector)
-        if initial_vectors.ndim != 2:
-            raise ValueError("initial_vectors must have shape (n_terms, n_support)")
-        if target_vector.ndim != 1 or target_vector.shape[0] != initial_vectors.shape[1]:
-            raise ValueError("target_vector must have shape (n_support,)")
-
-        n_terms = initial_vectors.shape[0]
-        if n_terms == 0 or initial_vectors.shape[1] == 0:
-            return np.array([], dtype=float), np.array([], dtype=int)
-
-        design_complex = initial_vectors.T
-        design = np.vstack((design_complex.real, design_complex.imag))
-        target = np.concatenate((target_vector.real, target_vector.imag))
-
-        col_norms = np.linalg.norm(design, axis=0)
-        nonzero_mask = col_norms > tol
-        null_channel_abs_tol = float(null_channel_abs_tol or 0.0)
-        null_channel_rel_tol = float(null_channel_rel_tol or 0.0)
-        if null_channel_abs_tol > 0.0 or null_channel_rel_tol > 0.0:
-            filtered_mask = np.zeros_like(nonzero_mask, dtype=bool)
-            abs_filtered = np.zeros_like(nonzero_mask, dtype=bool)
-            rel_filtered = np.zeros_like(nonzero_mask, dtype=bool)
-            ratios = None
-            if null_channel_abs_tol > 0.0:
-                abs_filtered = nonzero_mask & (col_norms <= max(tol, null_channel_abs_tol))
-                filtered_mask |= abs_filtered
-            if null_channel_rel_tol > 0.0 and raw_channel_norms is not None:
-                raw_channel_norms = np.asarray(raw_channel_norms, dtype=float)
-                if raw_channel_norms.shape != col_norms.shape:
-                    raise ValueError(
-                        "raw_channel_norms must have shape matching term columns, "
-                        f"got {raw_channel_norms.shape}, expected {col_norms.shape}"
-                    )
-                valid_raw = raw_channel_norms > tol
-                ratios = np.full_like(col_norms, np.inf, dtype=float)
-                ratios[valid_raw] = col_norms[valid_raw] / raw_channel_norms[valid_raw]
-                rel_filtered = nonzero_mask & valid_raw & (ratios < null_channel_rel_tol)
-                filtered_mask |= rel_filtered
-            keep_mask = nonzero_mask & ~filtered_mask
-            if np.any(filtered_mask):
-                filtered_norms = col_norms[filtered_mask]
-                report = {
-                    "abs_tol": null_channel_abs_tol,
-                    "rel_tol": null_channel_rel_tol,
-                    "filtered": int(filtered_norms.size),
-                    "filtered_by_abs": int(np.count_nonzero(abs_filtered)),
-                    "filtered_by_rel": int(np.count_nonzero(rel_filtered)),
-                    "candidate_columns": int(np.count_nonzero(nonzero_mask)),
-                    "min_filtered_norm": float(np.min(filtered_norms)),
-                    "max_filtered_norm": float(np.max(filtered_norms)),
-                }
-                if ratios is not None and np.any(rel_filtered):
-                    filtered_ratios = ratios[rel_filtered]
-                    report["min_filtered_ratio"] = float(np.min(filtered_ratios))
-                    report["max_filtered_ratio"] = float(np.max(filtered_ratios))
-                self._null_channel_filter_reports.append(report)
-            nonzero_mask = keep_mask
-        nonzero = np.flatnonzero(nonzero_mask)
-        if nonzero.size == 0:
-            return np.array([], dtype=float), np.array([], dtype=int)
-
-        qr_input = np.asfortranarray(design[:, nonzero])
-        _q, r, piv = scipy.linalg.qr(
-            qr_input,
-            mode="economic",
-            pivoting=True,
-            overwrite_a=True,
-            check_finite=False,
-        )
-        diag = np.abs(np.diag(r))
-        rank = int(np.count_nonzero(diag > tol))
-        includinglist = np.sort(nonzero[piv[:rank]].astype(int, copy=False))
-        if rank == 0:
-            return np.array([], dtype=float), np.array([], dtype=int)
-
-        coeffs, *_ = scipy.linalg.lstsq(
-            design[:, includinglist],
-            target,
-            check_finite=False,
-            lapack_driver="gelsy",
-        )
-        return np.asarray(coeffs, dtype=float), includinglist
-
-    @staticmethod
-    def _matrix_support_image(operator: np.ndarray, indices: np.ndarray, *, tol: float = 1e-10) -> np.ndarray:
-        if indices.size == 0:
-            return indices
-        if sparse.issparse(operator):
-            return np.unique(operator[:, indices].nonzero()[0]).astype(int, copy=False)
-        block = np.asarray(operator)[:, indices]
-        threshold = tol * max(float(np.max(np.abs(block))) if block.size else 0.0, 1.0)
-        return np.flatnonzero(np.any(np.abs(block) > threshold, axis=1)).astype(int, copy=False)
-
-    @staticmethod
-    def _uses_physical_time_reversal_fit_block(operation: Mapping[str, Any]) -> bool:
-        k_map = operation.get("k_map", {})
-        family = str(operation.get("name", operation.get("user_name", "")))
-        physics_level = str(operation.get("operation_physics_level") or ("effective" if family.endswith("_eff") else "physical"))
-        return (
-            bool(operation.get("antiunitary", False))
-            and isinstance(k_map, Mapping)
-            and str(k_map.get("type", "")).lower() == "negation"
-            and str(operation.get("sector_map", "identity")) == "identity"
-            and physics_level == "physical"
-        )
-
-    def _symmetry_support_closure(
-        self,
-        indices: np.ndarray,
-        operations: Sequence[Mapping[str, Any]],
-        *,
-        max_iter: int = 4,
-    ) -> np.ndarray:
-        current = np.unique(indices).astype(int, copy=False)
-        if not operations or self.symmetry_gen is None:
-            return current
-        for _ in range(max_iter):
-            parts = [current]
-            for operation in operations:
-                name = operation.get("name")
-                if not name:
-                    continue
-                operator = self.symmetry_gen.get_operator(str(name), operation.get("params", None))
-                parts.append(self._matrix_support_image(operator, current))
-            expanded = np.unique(np.concatenate(parts)).astype(int, copy=False)
-            if np.array_equal(expanded, current):
-                return current
-            current = expanded
-        return current
-
-    def _fit_block_indices_for_key(self, key: ContinuumTermKey) -> tuple[np.ndarray, np.ndarray]:
-        l1, l2, orb1, orb2 = key.layer_from, key.layer_to, key.orbital_from, key.orbital_to
-        Q_set1, Q_set2 = self.Q_set1, self.Q_set2
-        n_orb1, n_orb2 = self.n_orb1, self.n_orb2
-        Qlayer1 = Q_set1 if l1 == 1 else Q_set2
-        Qlayer2 = Q_set1 if l2 == 1 else Q_set2
-
-        idx_start = self.get_global_index(l1, 0, orb1 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
-        idx_end = self.get_global_index(l1, len(Qlayer1), orb1 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
-        idy_start = self.get_global_index(l2, 0, orb2 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
-        idy_end = self.get_global_index(l2, len(Qlayer2), orb2 - 1, Q_set1, Q_set2, n_orb1, n_orb2)
-
-        idx_inc = np.arange(idx_start, idx_end, dtype=int)
-        idy_inc = np.arange(idy_start, idy_end, dtype=int)
-        symm = self.model.terms[key].symmetry_ops
-        fit_block_ops = [op for op in symm if self._uses_physical_time_reversal_fit_block(op)]
-        idx_inc = self._symmetry_support_closure(idx_inc, fit_block_ops)
-        idy_inc = self._symmetry_support_closure(idy_inc, fit_block_ops)
-        idx_inc = np.sort(idx_inc)
-        idy_inc = np.sort(idy_inc)
-        if not np.array_equal(idx_inc, idy_inc):
-            combined = np.unique(np.concatenate((idx_inc, idy_inc)))
-            idx_inc = combined.copy()
-            idy_inc = combined.copy()
-        return idx_inc, idy_inc
-
-    def _fit_block_signature_for_key(self, key: ContinuumTermKey) -> tuple[tuple[int, ...], tuple[int, ...]]:
-        rows, cols = self._fit_block_indices_for_key(key)
-        return tuple(int(i) for i in rows), tuple(int(i) for i in cols)
-
-    def _term_fit_support_indices(
-        self,
-        key: ContinuumTermKey,
-        k_points: Sequence[np.ndarray],
-        *,
-        tol: float,
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
-    ) -> np.ndarray:
-        mat_real, mat_imag = self._fit_blocks_for_term_key(
-            key,
-            k_points,
-            term_matrix_cache=term_matrix_cache,
-        )
-        blocks = np.asarray([mat_real, mat_imag])
-        if blocks.size == 0:
-            return np.array([], dtype=int)
-        flat = blocks.reshape(blocks.shape[0], -1)
-        max_abs = float(np.max(np.abs(flat))) if flat.size else 0.0
-        support_tol = max(np.finfo(float).eps * max(max_abs, 1.0) * 100.0, float(tol) * 1.0e-4)
-        support = np.any(np.abs(flat) > support_tol, axis=0)
-        return np.flatnonzero(support).astype(int, copy=False)
-
-    def _support_connected_components_for_keys(
-        self,
-        keys: Sequence[ContinuumTermKey],
-        k_points: Sequence[np.ndarray],
-        *,
-        tol: float,
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
-    ) -> List[List[ContinuumTermKey]]:
-        return [
-            component_keys
-            for component_keys, _component_support in self._support_connected_components_with_support_for_keys(
-                keys,
-                k_points,
-                tol=tol,
-                term_matrix_cache=term_matrix_cache,
-            )
-        ]
-
-    def _support_connected_components_with_support_for_keys(
-        self,
-        keys: Sequence[ContinuumTermKey],
-        k_points: Sequence[np.ndarray],
-        *,
-        tol: float,
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
-    ) -> List[Tuple[List[ContinuumTermKey], np.ndarray]]:
-        keys_list = list(keys)
-        if not keys_list:
-            return []
-
-        parent = list(range(len(keys_list)))
-        rank = [0] * len(keys_list)
-
-        def find(index: int) -> int:
-            while parent[index] != index:
-                parent[index] = parent[parent[index]]
-                index = parent[index]
-            return index
-
-        def union(left: int, right: int) -> None:
-            root_left = find(left)
-            root_right = find(right)
-            if root_left == root_right:
-                return
-            if rank[root_left] < rank[root_right]:
-                parent[root_left] = root_right
-            elif rank[root_left] > rank[root_right]:
-                parent[root_right] = root_left
-            else:
-                parent[root_right] = root_left
-                rank[root_left] += 1
-
-        first_owner_by_support: Dict[int, int] = {}
-        support_by_key_index: List[np.ndarray] = []
-        for index, key in enumerate(keys_list):
-            support = self._term_fit_support_indices(
-                key,
-                k_points,
-                tol=tol,
-                term_matrix_cache=term_matrix_cache,
-            )
-            support_by_key_index.append(support)
-            for position in support.tolist():
-                owner = first_owner_by_support.get(int(position))
-                if owner is None:
-                    first_owner_by_support[int(position)] = index
-                else:
-                    union(index, owner)
-
-        grouped: Dict[int, List[int]] = {}
-        for index in range(len(keys_list)):
-            grouped.setdefault(find(index), []).append(index)
-        ordered_groups = sorted(grouped.values(), key=lambda values: values[0])
-        components: List[Tuple[List[ContinuumTermKey], np.ndarray]] = []
-        for group in ordered_groups:
-            component_keys = [keys_list[index] for index in group]
-            support_parts = [support_by_key_index[index] for index in group if support_by_key_index[index].size]
-            if support_parts:
-                component_support = np.unique(np.concatenate(support_parts)).astype(int, copy=False)
-            else:
-                component_support = np.array([], dtype=int)
-            components.append((component_keys, component_support))
-        return components
-
-    def _filter_duplicate_symmetry_seed_keys(
-        self,
-        keys: List[ContinuumTermKey],
-        k_points: List[np.ndarray],
-        *,
-        tol: float,
-        max_exact_group_size: int = 16,
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] | None = None,
-    ) -> List[ContinuumTermKey]:
-        signature_groups: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
-        for key in keys:
-            signature_groups.setdefault(self._fit_block_signature_for_key(key), []).append(key)
-
-        keep: set[ContinuumTermKey] = set()
-        dropped: List[ContinuumTermKey] = []
-        for group_keys in signature_groups.values():
-            if len(group_keys) > max_exact_group_size:
-                keep.update(group_keys)
-                continue
-
-            basis: List[np.ndarray] = []
-            for key in group_keys:
-                mat_real, mat_imag = self._fit_blocks_for_term_key(
-                    key,
-                    k_points,
-                    term_matrix_cache=term_matrix_cache,
-                )
-                is_new_seed = False
-                for block in (mat_real, mat_imag):
-                    vector = block.ravel()
-                    residual = vector.copy()
-                    for existing in basis:
-                        residual -= np.vdot(existing, vector) * existing
-                    norm = np.linalg.norm(residual)
-                    if norm > tol:
-                        basis.append(residual / norm)
-                        is_new_seed = True
-                if is_new_seed:
-                    keep.add(key)
-                else:
-                    dropped.append(key)
-                    self.model.terms[key].active = False
-                    self.model.terms[key].r_value_real = 0.0
-                    self.model.terms[key].r_value_imag = 0.0
-
-        if dropped:
-            print(f"  Dropped {len(dropped)} symmetry-duplicate seed terms before fitting.")
-        return [key for key in keys if key in keep]
-
-    # def get_mat_blocks(self, mat_list: List[np.ndarray], subgroup: Tuple[int, int, int, int], num_kpoints: int = 1) -> List[np.ndarray]:
-    def get_mat_blocks(self, mat_list: List[np.ndarray], key: ContinuumTermKey, num_kpoints: int = 1) -> List[np.ndarray]:
-        """
-        从 mat_list 中提取子块，子块的索引由 subgroup 指定。
-        subgroup 为 (layer_from, layer_to, orbital_from, orbital_to) 的一个 tuple。
-
-        如果是对角块（layer_from == layer_to 且 orbital_from == orbital_to），直接提取子块。
-        如果不是，则认为是非对角块，此时构造一个 2×2 的块矩阵：
-        [[0, A],
-        [B, 0]]
-        其中 A 是从 (layer_from, orbital_from) 到 (layer_to, orbital_to) 的子块，
-        而 B 则是 (layer_to, orbital_to) 到 (layer_from, orbital_from) 的子块。
-        """
-        Q_set1, Q_set2 = self.Q_set1, self.Q_set2
-        H_dim = len(Q_set1)*self.n_orb1 + len(Q_set2)*self.n_orb2
-        
-        if H_dim * num_kpoints != mat_list[0].shape[0]:
-            print(f"mat_list[0].shape[0]: {mat_list[0].shape[0]}, H_dim: {H_dim}, num_kpoints: {num_kpoints}")
-            raise ValueError("Mismatched matrix shape and H_dim.")
-
-        idx_inc, idy_inc = self._fit_block_indices_for_key(key)
-        mat_blocks = []
-        for mat in mat_list:
-            block_list = []
-            for k in range(num_kpoints):
-                # idx_start_k = idx_start + k*H_dim
-                # idx_end_k = idx_end + k*H_dim
-                # idy_start_k = idy_start + k*H_dim
-                # idy_end_k = idy_end + k*H_dim
-                # if l1 == l2 and orb1 == orb2:
-                #     # 对角块：直接截取
-                #     block = mat[idx_start_k:idx_end_k, idy_start_k:idy_end_k]
-                # else:
-                #     # 非对角块：需要组合两个方向的子块
-                #     # A：从 (l1,orb1) 到 (l2,orb2)
-                #     A = mat[idx_start_k:idx_end_k, idy_start_k:idy_end_k]
-                #     # B：从 (l2,orb2) 到 (l1,orb1)
-                #     B = mat[idy_start_k:idy_end_k, idx_start_k:idx_end_k]
-                #     block = np.block([[np.zeros_like(A), A], 
-                #                            [B, np.zeros_like(B)]])
-                idx_inc_k = idx_inc + k*H_dim
-                idy_inc_k = idy_inc + k*H_dim
-                block = mat[np.ix_(idx_inc_k, idy_inc_k)]
-                block_list.append(block)
-            mat_blocks.append(scipy.linalg.block_diag(*block_list))
-
-        return mat_blocks
-
-    def _requires_production_response_fit(self) -> bool:
-        for term in self.model.terms.values():
-            for operation in term.symmetry_ops:
-                if not self._uses_physical_time_reversal_fit_block(operation):
-                    return True
-        return False
-
-    def _dense_production_response_matrix(
-        self,
-        terms: Sequence[ContinuumTerm],
-        k_points: np.ndarray,
-    ) -> sparse.csc_matrix:
-        dim = len(self.Q_set1) * self.n_orb1 + len(self.Q_set2) * self.n_orb2
-        nk = int(k_points.shape[0])
-        block_dim = nk * dim
-        response_rows: List[np.ndarray] = []
-        response_cols: List[np.ndarray] = []
-        response_values: List[np.ndarray] = []
-        for term_index, term in enumerate(terms):
-            for k_index, kpoint in enumerate(k_points):
-                mat_real, mat_imag = ContinuumModelBuilder.symmetrize_Y_and_iY_basis_static(
-                    term.Y_basis,
-                    kpoint,
-                    term.symmetry_ops,
-                    symmetry_gen=self.symmetry_gen,
-                    term=term,
-                )
-                for channel, matrix in enumerate((mat_real, mat_imag)):
-                    local_rows, local_cols = np.nonzero(matrix)
-                    if local_rows.size == 0:
-                        continue
-                    global_rows = k_index * dim + local_rows
-                    global_cols = k_index * dim + local_cols
-                    response_rows.append(global_rows * block_dim + global_cols)
-                    response_cols.append(
-                        np.full(
-                            local_rows.shape,
-                            2 * term_index + channel,
-                            dtype=np.int64,
-                        )
-                    )
-                    response_values.append(matrix[local_rows, local_cols])
-        shape = (block_dim * block_dim, 2 * len(terms))
-        if not response_values:
-            return sparse.csc_matrix(shape, dtype=np.complex128)
-        response = sparse.coo_matrix(
-            (
-                np.concatenate(response_values),
-                (np.concatenate(response_rows), np.concatenate(response_cols)),
-            ),
-            shape=shape,
-            dtype=np.complex128,
-        ).tocsc()
-        response.sum_duplicates()
-        response.eliminate_zeros()
-        return response
-
-    def _production_response_matrix(
-        self,
-        terms: Sequence[ContinuumTerm],
-        k_points: np.ndarray,
-    ) -> tuple[sparse.csc_matrix, str]:
-        dim = len(self.Q_set1) * self.n_orb1 + len(self.Q_set2) * self.n_orb2
-        try:
-            from .operator_runtime import (
-                CompiledOperatorUnsupported,
-                compile_operator_recipe,
-                compiled_operator_response_matrix,
-            )
-
-            recipe = compile_operator_recipe(
-                terms,
-                SimpleNamespace(
-                    symmetry_gen=self.symmetry_gen,
-                    kpoints_fit=np.asarray(k_points, dtype=float),
-                ),
-                dim,
-            )
-            return (
-                compiled_operator_response_matrix(
-                    recipe,
-                    k_points,
-                    dim=dim,
-                    term_count=len(terms),
-                ),
-                "compiled",
-            )
-        except CompiledOperatorUnsupported:
-            return self._dense_production_response_matrix(terms, k_points), "dense"
-
-    @staticmethod
-    def _response_column_components(response: sparse.csc_matrix) -> List[np.ndarray]:
-        matrix = response.tocsc()
-        n_columns = int(matrix.shape[1])
-        parent = list(range(n_columns))
-        rank = [0] * n_columns
-
-        def find(index: int) -> int:
-            while parent[index] != index:
-                parent[index] = parent[parent[index]]
-                index = parent[index]
-            return index
-
-        def union(left: int, right: int) -> None:
-            root_left = find(left)
-            root_right = find(right)
-            if root_left == root_right:
-                return
-            if rank[root_left] < rank[root_right]:
-                parent[root_left] = root_right
-            elif rank[root_left] > rank[root_right]:
-                parent[root_right] = root_left
-            else:
-                parent[root_right] = root_left
-                rank[root_left] += 1
-
-        first_owner: Dict[int, int] = {}
-        live_columns: List[int] = []
-        for column in range(n_columns):
-            start = int(matrix.indptr[column])
-            stop = int(matrix.indptr[column + 1])
-            support = matrix.indices[start:stop]
-            if support.size == 0:
-                continue
-            live_columns.append(column)
-            for position in support.tolist():
-                owner = first_owner.get(int(position))
-                if owner is None:
-                    first_owner[int(position)] = column
-                else:
-                    union(column, owner)
-
-        grouped: Dict[int, List[int]] = {}
-        for column in live_columns:
-            grouped.setdefault(find(column), []).append(column)
-        return [
-            np.asarray(columns, dtype=int)
-            for columns in sorted(grouped.values(), key=lambda values: values[0])
-        ]
-
-    def _compute_coefficients_from_production_responses(
-        self,
-        heff: np.ndarray,
-        k_points: np.ndarray,
-        *,
-        tol: float,
-        progress_callback: Callable[..., None] | None,
-    ) -> Dict[str, Dict[Any, np.ndarray]]:
-        terms = list(self.model.terms.values())
-        coeffs_by_tag: Dict[str, Dict[Any, np.ndarray]] = {
-            tag: {}
-            for tag in dict.fromkeys(term.tag for term in terms)
-        }
-        response, response_source = self._production_response_matrix(terms, k_points)
-        target_matrix = np.asarray(heff, dtype=np.complex128)
-        if target_matrix.ndim == 3:
-            target_matrix = scipy.linalg.block_diag(*target_matrix)
-        if target_matrix.ndim != 2 or target_matrix.shape[0] != target_matrix.shape[1]:
-            raise ValueError(f"heff must be square or have shape (Nk, dim, dim), got {target_matrix.shape}")
-        target = target_matrix.reshape(-1)
-        if response.shape[0] != target.size:
-            raise ValueError(
-                "production response/heff size mismatch: "
-                f"{response.shape[0]} != {target.size}"
-            )
-
-        components = self._response_column_components(response)
-        coefficients = np.zeros(2 * len(terms), dtype=float)
-        retained_channels: set[int] = set()
-        raw_channel_norms = None
-        if float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0) > 0.0:
-            raw_channel_norms = self._raw_initialterm_norms_for_fit_keys(
-                [term.key for term in terms],
-                k_points,
-            )
-
-        for term in terms:
-            term.active = False
-            term.r_value_real = 0.0
-            term.r_value_imag = 0.0
-
-        total_components = len(components)
-        for component_index, columns in enumerate(components, start=1):
-            started = time.perf_counter()
-            support_parts = []
-            for column in columns:
-                start = int(response.indptr[int(column)])
-                stop = int(response.indptr[int(column) + 1])
-                support_parts.append(response.indices[start:stop])
-            support = np.unique(np.concatenate(support_parts)).astype(int, copy=False)
-            design = response[support, :][:, columns].toarray().T
-            component_raw_norms = (
-                None
-                if raw_channel_norms is None
-                else np.asarray(raw_channel_norms, dtype=float)[columns]
-            )
-            solved, included = self._solve_coefficients_from_support_matrix(
-                design,
-                target[support],
-                tol=tol,
-                null_channel_abs_tol=float(getattr(self, "null_channel_abs_tol", 0.0) or 0.0),
-                raw_channel_norms=component_raw_norms,
-                null_channel_rel_tol=float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0),
-            )
-            for value, local_column in zip(solved, included):
-                global_column = int(columns[int(local_column)])
-                coefficients[global_column] = float(value)
-                retained_channels.add(global_column)
-            if progress_callback is not None:
-                progress_callback(
-                    f"fit response component {component_index}/{total_components} "
-                    f"source={response_source} channels={len(columns)} variables={len(included)} "
-                    f"support_entries={len(support)} done in {time.perf_counter() - started:.2f} s",
-                    state="done",
-                )
-
-        for term_index, term in enumerate(terms):
-            real_channel = 2 * term_index
-            imag_channel = real_channel + 1
-            term.r_value_real = float(coefficients[real_channel])
-            term.r_value_imag = float(coefficients[imag_channel])
-            term.active = real_channel in retained_channels or imag_channel in retained_channels
-
-        for component_index, columns in enumerate(components):
-            term_indices = list(dict.fromkeys(int(column) // 2 for column in columns))
-            for tag in coeffs_by_tag:
-                tag_values = [
-                    complex(
-                        coefficients[2 * term_index],
-                        coefficients[2 * term_index + 1],
-                    )
-                    for term_index in term_indices
-                    if terms[term_index].tag == tag
-                ]
-                if tag_values:
-                    coeffs_by_tag[tag][("production_response_component", component_index)] = np.asarray(
-                        tag_values,
-                        dtype=np.complex128,
-                    )
-        return coeffs_by_tag
-
-    @timing_decorator_factory(0)
-    def compute_coefficients_by_tag(
-        self,
-        heff: np.ndarray,
-        k_points: List[np.ndarray],
-        tol: float = 1e-8,
-        progress_callback: Callable[..., None] | None = None,
-    ) -> Dict[str, Dict[Any, np.ndarray]]:
-        """
-        Fit all terms that share the same fit block together, then report the
-        fitted coefficients grouped by tag for diagnostics.
-
-        返回的字典结构为：
-        {
-            tag1: { subgroup1: coeffs_array, subgroup2: coeffs_array, ... },
-            tag2: { subgroup1: coeffs_array, ... },
-            ...
-        }
-        """
-        tag_groups: Dict[str, List[ContinuumTermKey]] = {}
-        for key, term in self.model.terms.items():
-            tag_groups.setdefault(term.tag, []).append(key)
-
-        coeffs_by_tag: Dict[str, Dict[Any, np.ndarray]] = {tag: {} for tag in tag_groups}
-        term_matrix_cache: Dict[Any, Tuple[np.ndarray, np.ndarray]] = {}
-        self._null_channel_filter_reports = []
-
-        k_points_array = np.asarray(k_points, dtype=float)
-        if self._requires_production_response_fit():
-            return self._compute_coefficients_from_production_responses(
-                heff,
-                k_points_array,
-                tol=tol,
-                progress_callback=progress_callback,
-            )
-
-        print("\n" + "="*100)
-        print(f"Processing joint fit blocks. Time: {time.strftime('%H:%M:%S', time.localtime())}")
-        for tag, keys in tag_groups.items():
-            symm = self.symmetry_map.get(tag, [])
-            print(f"  tag '{tag}': {len(keys)} terms, symmetry={summarize_symmetry_ops(symm)}")
-
-        keys = self._filter_duplicate_symmetry_seed_keys(
-            list(self.model.terms.keys()),
-            k_points,
-            tol=tol,
-            term_matrix_cache=term_matrix_cache,
-        )
-
-        subgroup_dict: Dict[Tuple[Tuple[int, ...], Tuple[int, ...]], List[ContinuumTermKey]] = {}
-        for key in keys:
-            subgroup = self._fit_block_signature_for_key(key)
-            subgroup_dict.setdefault(subgroup, []).append(key)
-
-        total_blocks = len(subgroup_dict)
-        for block_index, (subgroup, base_sub_keys) in enumerate(subgroup_dict.items(), start=1):
-            block_started = time.perf_counter()
-            base_tag_counts: Dict[str, int] = {}
-            for key in base_sub_keys:
-                tag = self.model.terms[key].tag
-                base_tag_counts[tag] = base_tag_counts.get(tag, 0) + 1
-            base_tag_summary = ", ".join(f"{tag}:{count}" for tag, count in sorted(base_tag_counts.items()))
-            if progress_callback is not None:
-                if len(base_tag_counts) == 1:
-                    tag_part = f"tag={next(iter(base_tag_counts))}"
-                else:
-                    tag_part = f"tags={base_tag_summary}"
-                progress_callback(
-                    f"fit block {block_index}/{total_blocks} {tag_part} "
-                    f"terms={len(base_sub_keys)} start",
-                    state="start",
-                )
-            print(
-                f"  Processing joint fit block with {len(base_sub_keys)} terms "
-                f"({base_tag_summary}). Time: {time.strftime('%H:%M:%S', time.localtime())}"
-            )
-
-            support_components = self._support_connected_components_with_support_for_keys(
-                base_sub_keys,
-                k_points,
-                tol=tol,
-                term_matrix_cache=term_matrix_cache,
-            )
-            if len(support_components) > 1:
-                print(f"    split into {len(support_components)} support components before orthogonalization.")
-
-            block_variables = 0
-            block_support_entries = 0
-            block_solved_components = 0
-            block_skipped_components = 0
-            for component_index, (sub_keys, component_support_idx) in enumerate(support_components):
-                tag_counts: Dict[str, int] = {}
-                for key in sub_keys:
-                    tag = self.model.terms[key].tag
-                    tag_counts[tag] = tag_counts.get(tag, 0) + 1
-                tag_summary = ", ".join(f"{tag}:{count}" for tag, count in sorted(tag_counts.items()))
-                if len(support_components) > 1:
-                    print(
-                        f"    Processing support component {component_index + 1}/{len(support_components)} "
-                        f"with {len(sub_keys)} terms ({tag_summary})."
-                    )
-
-                raw_subgroups_by_tag: Dict[str, set[tuple[int, int, int, int]]] = {}
-                for key in sub_keys:
-                    raw = (key.layer_from, key.layer_to, key.orbital_from, key.orbital_to)
-                    raw_subgroups_by_tag.setdefault(self.model.terms[key].tag, set()).add(raw)
-
-                if component_support_idx.size == 0:
-                    for key in sub_keys:
-                        self.model.terms[key].active = False
-                        self.model.terms[key].r_value_real = 0.0
-                        self.model.terms[key].r_value_imag = 0.0
-                    for tag, raw_subgroups in raw_subgroups_by_tag.items():
-                        diagnostics_key: Any = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
-                        if len(support_components) > 1:
-                            diagnostics_key = (diagnostics_key, ("support_component", component_index))
-                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
-                    print(f"  No support for subgroup {subgroup}; coefficients set to zero.")
-                    block_skipped_components += 1
-                    continue
-
-                support_vectors = self._initialterm_support_vectors_for_fit_keys(
-                    sub_keys,
-                    k_points,
-                    support_idx=component_support_idx,
-                    term_matrix_cache=term_matrix_cache,
-                )
-                raw_channel_norms = None
-                if float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0) > 0.0:
-                    raw_channel_norms = self._raw_initialterm_norms_for_fit_keys(sub_keys, k_points)
-                heff_block = self.get_mat_blocks([heff], sub_keys[0], len(k_points))[0]
-                target_vector = heff_block.reshape(-1)[component_support_idx]
-                coeffs, includinglist = self._solve_coefficients_from_support_matrix(
-                    support_vectors,
-                    target_vector,
-                    tol=tol,
-                    null_channel_abs_tol=float(getattr(self, "null_channel_abs_tol", 0.0) or 0.0),
-                    raw_channel_norms=raw_channel_norms,
-                    null_channel_rel_tol=float(getattr(self, "null_channel_rel_tol", 0.0) or 0.0),
-                )
-                fit_support_idx = component_support_idx
-                print(
-                    f"    {len(includinglist)} independent support-vector terms "
-                    f"(support={len(fit_support_idx)} entries). Time: {time.strftime('%H:%M:%S', time.localtime())}"
-                )
-                for i, key in enumerate(sub_keys):
-                    idx1, idx2 = 2 * i, 2 * i + 1
-                    self.model.terms[key].active = (idx1 in includinglist or idx2 in includinglist)
-
-                if len(includinglist) == 0 or np.asarray(support_vectors).size == 0:
-                    for key in sub_keys:
-                        self.model.terms[key].r_value_real = 0.0
-                        self.model.terms[key].r_value_imag = 0.0
-                    for tag, raw_subgroups in raw_subgroups_by_tag.items():
-                        diagnostics_key: Any = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
-                        if len(support_components) > 1:
-                            diagnostics_key = (diagnostics_key, ("support_component", component_index))
-                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array([], dtype=complex)
-                    print(f"  No independent terms for subgroup {subgroup}; coefficients set to zero.")
-                    block_skipped_components += 1
-                    continue
-
-                included = {idx: pos for pos, idx in enumerate(includinglist.tolist())}
-                coeffs_print = []
-                coeffs_print_by_tag: Dict[str, List[complex]] = {tag: [] for tag in raw_subgroups_by_tag}
-                for i in tqdm(range(len(sub_keys))):
-                    idx_real = included.get(2 * i)
-                    idx_imag = included.get(2 * i + 1)
-                    r_real = coeffs[idx_real] if idx_real is not None else 0.0
-                    r_imag = coeffs[idx_imag] if idx_imag is not None else 0.0
-                    r = r_real + 1j * r_imag
-                    coeffs_print.append(r)
-                    tag = self.model.terms[sub_keys[i]].tag
-                    coeffs_print_by_tag.setdefault(tag, []).append(r)
-                    self.model.terms[sub_keys[i]].r_value_real = r_real
-                    self.model.terms[sub_keys[i]].r_value_imag = r_imag
-
-                print(f"  Updated coefficients for subgroup {subgroup}: {summarize_coefficients(coeffs_print)}")
-                for tag, raw_subgroups in raw_subgroups_by_tag.items():
-                    diagnostics_key = next(iter(raw_subgroups)) if len(raw_subgroups) == 1 else subgroup
-                    if len(support_components) > 1:
-                        diagnostics_key = (diagnostics_key, ("support_component", component_index))
-                    if len(raw_subgroups_by_tag) == 1:
-                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs)
-                    else:
-                        coeffs_by_tag.setdefault(tag, {})[diagnostics_key] = np.array(coeffs_print_by_tag.get(tag, []))
-                block_variables += int(len(includinglist))
-                block_support_entries += int(len(fit_support_idx))
-                block_solved_components += 1
-            if progress_callback is not None:
-                progress_callback(
-                    f"fit block {block_index}/{total_blocks} done in {time.perf_counter() - block_started:.2f} s | "
-                    f"variables={block_variables} support_components={block_solved_components} "
-                    f"skipped_empty={block_skipped_components} support_entries={block_support_entries}",
-                    state="done",
-                )
-        print("="*100)
-        return coeffs_by_tag
-
-
     def _default_term_templates(self) -> List[Dict[str, Any]]:
         return [
             {"name": "kinetic", "source": "diagonal_kp", "sector_pairs": "same", "orbital_pairs": "diagonal", "max_order": self.max_order.get("Kinect", 0), "term_space_policy": "explicit_reduced"},
@@ -3494,10 +2394,10 @@ class ContinuumModelBuilder:
         n_from = self.n_orb1 if l_from == 1 else self.n_orb2
         n_to = self.n_orb1 if l_to == 1 else self.n_orb2
         policy = template.get("term_space_policy")
-        if self.response_semantics == "complete_linear_v2":
+        if self.response_semantics == "complete_linear":
             if policy not in {"complete", "explicit_reduced", "orbit_representative"}:
                 raise ValueError(
-                    "complete_linear_v2 requires every term template to declare "
+                    "complete_linear requires every term template to declare "
                     "term_space_policy: complete, explicit_reduced, or orbit_representative"
                 )
             if policy == "complete":
@@ -3849,7 +2749,7 @@ class ContinuumModelBuilder:
                             "monomial": {"Mz": int(Mz), "Mz_star": int(Mz_star)},
                             "symmetry_orbit_id": None,
                             "generation_mode": generation_mode,
-                            "term_space_policy": str(template.get("term_space_policy", "legacy_unspecified")),
+                            "term_space_policy": str(template.get("term_space_policy", "unspecified")),
                             "response_semantics": self.response_semantics,
                             "generated_by": generated_by,
                             "coefficient_unit": "eV",
@@ -3895,7 +2795,7 @@ class ContinuumModelBuilder:
         #     return term["tag"], term["symmetry_ops"]
         # 如果 term 是对象
         return term.tag, term.symmetry_ops
-    
+
     def get_model(self) -> ContinuumModel:
         return self.model
 
@@ -3927,49 +2827,6 @@ def save_npy(path: str | Path, arr: np.ndarray) -> None:
     np.save(path, arr)
 
 
-def parse_kpath_in(file_path: str | Path) -> Tuple[int, np.ndarray, List[str]]:
-    """
-    Parse a VASPKIT/OpenMX-style `KPATH_*.in` file.
-
-    Returns
-    -------
-    segment_points:
-        int, number of interpolation points per segment.
-    high_symmetry_points:
-        np.ndarray of shape (Nh, 3), fractional coordinates (in reciprocal basis).
-    labels:
-        list[str] of length Nh, labels for each high-symmetry point.
-    """
-    file_path = Path(file_path)
-    lines = file_path.read_text(encoding="utf-8").splitlines()
-    if len(lines) < 5:
-        raise ValueError(f"KPATH file too short: {file_path}")
-
-    try:
-        segment_points = int(lines[1])
-    except Exception as e:
-        raise ValueError(f"Failed to parse segment_points from line 2 of {file_path}: {lines[1]!r}") from e
-
-    high_symmetry_points: list[np.ndarray] = []
-    labels: list[str] = []
-    for i in range(4, len(lines)):
-        parts = lines[i].split()
-        if len(parts) < 3:
-            continue
-        try:
-            coordinates = np.array([float(coord) for coord in parts[:3]], dtype=float)
-        except Exception:
-            continue
-        if coordinates.shape != (3,):
-            continue
-        label = parts[-1] if parts else ""
-        high_symmetry_points.append(coordinates)
-        labels.append(label)
-
-    if not high_symmetry_points:
-        raise ValueError(f"No high-symmetry points found in {file_path}")
-
-    return segment_points, np.array(high_symmetry_points, dtype=float), labels
 
 
 def _pairwise_path(points: Sequence[Sequence[float]], labels: Sequence[str]) -> Tuple[np.ndarray, List[str]]:
@@ -4363,7 +3220,7 @@ def build_model(config: MoireConfig) -> ContinuumModel:
         dict(config.symmetry_map) if config.symmetry_map else None,
         list(config.term_templates),
         list(config.sectors),
-        str(getattr(config, "response_semantics", "legacy_frozen_v1")),
+        str(getattr(config, "response_semantics", "complete_linear")),
     )
     builder.build_terms()
     model = builder.get_model()
@@ -4378,25 +3235,25 @@ def _basis_spectral_weighting_from_fit_objective(
     """Translate user-facing fit objective metadata to response-basis API keys."""
 
     if not objective:
-        return {"mode": "equal_matrix_v1"}
-    mode = str(objective.get("mode", "equal_matrix_v1")).strip().lower()
-    if mode in {"equal_matrix", "equal_matrix_v1"}:
-        return {"mode": "equal_matrix_v1"}
-    if mode == "normalized_low_energy_linear_v1":
+        return {"mode": "equal_matrix"}
+    mode = str(objective.get("mode", "equal_matrix")).strip().lower()
+    if mode == "equal_matrix":
+        return {"mode": "equal_matrix"}
+    if mode == "normalized_low_energy_linear":
         window = objective.get("window", {})
         if not isinstance(window, Mapping):
             raise ValueError(
-                "normalized_low_energy_linear_v1 response_fit_objective.window must be a mapping"
+                "normalized_low_energy_linear response_fit_objective.window must be a mapping"
             )
         window_mode = str(
             window.get("mode", "fixed_count_degeneracy_safe")
         ).strip().lower()
         if window_mode != "fixed_count_degeneracy_safe":
             raise ValueError(
-                "normalized_low_energy_linear_v1 requires a fixed degeneracy-safe window"
+                "normalized_low_energy_linear requires a fixed degeneracy-safe window"
             )
         return {
-            "mode": "normalized_low_energy_linear_v1",
+            "mode": "normalized_low_energy_linear",
             "band_edge": str(objective.get("edge", "top")).strip().lower(),
             "window_mode": "fixed_count_degeneracy_safe",
             "n_bands": int(window.get("bands", 0)),
@@ -4408,8 +3265,8 @@ def _basis_spectral_weighting_from_fit_objective(
         }
     if mode != "target_spectral_linear":
         raise ValueError(
-            "response_fit_objective.mode must be 'equal_matrix_v1', "
-            "'normalized_low_energy_linear_v1', or 'target_spectral_linear'"
+            "response_fit_objective.mode must be 'equal_matrix', "
+            "'normalized_low_energy_linear', or 'target_spectral_linear'"
         )
     if "band_edge" in objective:
         return dict(objective)
@@ -4424,7 +3281,7 @@ def _basis_spectral_weighting_from_fit_objective(
         "alpha": float(objective.get("alpha", 1.0)),
         "degeneracy_atol_ev": float(window.get("degeneracy_tol_mev", 0.1)) * 1.0e-3,
         "degeneracy_rtol": 0.0,
-        "normalization": "global_mean_trace_per_dimension_v1",
+        "normalization": "global_mean_trace_per_dimension",
     }
     projector = objective.get("two_sided_projector")
     if isinstance(projector, Mapping) and bool(projector.get("enabled", False)):
@@ -4461,7 +3318,7 @@ def compute_coefficients(
     -------
     (model, diagnostics)
         `model` is the same object with `r_value_real/r_value_imag` populated;
-        `diagnostics` is the return value of `ContinuumModelBuilder.compute_coefficients_by_tag`.
+        `diagnostics` records the compiled response basis and fitted coefficients.
     """
     if config.Q_set1 is None or config.Q_set2 is None:
         raise ValueError("config.Q_set1 and config.Q_set2 must be provided.")
@@ -4472,129 +3329,98 @@ def compute_coefficients(
     if config.kpoints_fit is None:
         raise ValueError("config.kpoints_fit must be provided for coefficient fitting.")
 
-    if str(getattr(config, "response_semantics", "legacy_frozen_v1")) == "complete_linear_v2":
-        from .response_basis import compile_model_response_basis
+    if config.response_semantics != "complete_linear":
+        raise ValueError(f"unsupported response_semantics: {config.response_semantics!r}")
+    from .response_basis import compile_model_response_basis
 
-        basis = getattr(model, "_compiled_response_basis", None)
-        if basis is None:
-            basis = compile_model_response_basis(
-                model,
-                config,
-                reduce=True,
-                progress_callback=progress_callback,
-            )
-        if progress_callback is not None:
-            candidate = basis.candidate_artifact
-            progress_callback(
-                "response basis vocabulary: "
-                f"authored={int(candidate.get('authored_ordered_seed_count', 0))} "
-                f"adjoint_orbits={int(candidate.get('adjoint_orbit_descriptor_count', 0))} "
-                f"hermitian_ambient={int(candidate.get('hermitian_ambient_channel_count', 0))} "
-                f"fixed={int(len(basis.channels))} "
-                "materialized="
-                f"{int(candidate.get('physically_materialized_projected_channel_count', len(basis.channels)))}",
-                state="done",
-            )
-        kpts = np.asarray(config.kpoints_fit, dtype=float)
-        nk = int(kpts.shape[0])
-        target_raw = np.asarray(config.heff, dtype=np.complex128)
-        if target_raw.ndim == 3:
-            target = target_raw
-        elif target_raw.ndim == 2 and target_raw.shape == (nk * basis.dim, nk * basis.dim):
-            target = np.asarray(
-                [
-                    target_raw[
-                        index * basis.dim : (index + 1) * basis.dim,
-                        index * basis.dim : (index + 1) * basis.dim,
-                    ]
-                    for index in range(nk)
-                ],
-                dtype=np.complex128,
-            )
-        else:
-            raise ValueError(
-                "complete_linear_v2 heff must have shape (Nk,dim,dim) or be the corresponding block diagonal; "
-                f"got {target_raw.shape} for Nk={nk}, dim={basis.dim}"
-            )
-        fit_indices = list(getattr(config, "response_fit_indices", []) or range(nk))
-        band_window = list(getattr(config, "response_band_window", []) or [0, basis.dim])
-        fitted = basis.fit(
-            kpts,
-            target,
-            fit_indices=fit_indices,
-            regularization=float(getattr(config, "response_regularization", 0.0) or 0.0),
-            band_window=band_window,
-            spectral_weighting=_basis_spectral_weighting_from_fit_objective(
-                getattr(config, "response_fit_objective", {"mode": "equal_matrix_v1"})
-            ),
-            coefficient_tolerance=float(config.coeff_tol),
+    basis = getattr(model, "_compiled_response_basis", None)
+    if basis is None:
+        basis = compile_model_response_basis(
+            model,
+            config,
+            reduce=True,
             progress_callback=progress_callback,
         )
-        terms = list(getattr(model, "candidate_terms", ()) or model.terms.values())
-        for term in terms:
-            term.active = False
-            term.r_value_real = 0.0
-            term.r_value_imag = 0.0
-        for channel, coefficient in zip(basis.channels, fitted.coefficients):
-            term_index = int(channel.metadata.get("term_index", -1))
-            if term_index < 0 or term_index >= len(terms):
-                raise ValueError(f"compiled response channel {channel.channel_id!r} has invalid term_index={term_index}")
-            term = terms[term_index]
-            if channel.component == "real":
-                term.r_value_real = float(coefficient)
-            elif channel.component == "imag":
-                term.r_value_imag = float(coefficient)
-            else:
-                raise ValueError(f"compiled response channel has unknown component {channel.component!r}")
-            if coefficient != 0.0:
-                term.active = True
-        setattr(model, "_compiled_response_basis", basis)
-        setattr(model, "_fitted_response_model", fitted)
-        diagnostics = {
-            "response_semantics": "complete_linear_v2",
-            "basis_hash": basis.basis_hash,
-            "fit_hash": fitted.fit_hash,
-            "candidate_response_channels": int(basis.candidate_artifact.get("candidate_channel_count", 0)),
-            "retained_basis_channels": int(len(basis.channels)),
-            "fit_solver_channels": int(len(fitted.fit_solver_channel_ids)),
-            "fit_selected_channels": int(len(fitted.fit_solver_channel_ids)),
-            "fit_rrqr_pivot_channels": int(len(fitted.fit_selected_channel_ids)),
-            "nonzero_coefficient_channels": int(len(fitted.nonzero_channel_ids)),
-            "basis_artifact": basis.artifact(),
-            "fit_artifact": fitted.artifact(),
-        }
-        return model, diagnostics
-
-    Q_set1 = np.asarray(config.Q_set1, dtype=float)
-    Q_set2 = np.asarray(config.Q_set2, dtype=float)
-    nlow_state = config.nlow_state if config.nlow_state is not None else [int(config.n_orb1), int(config.n_orb2)]
-    basis_template = config.symmetry_source_metadata.get("basis_template") if isinstance(config.symmetry_source_metadata, dict) else None
-    symmetry_gen = config.symmetry_gen if config.symmetry_gen is not None else SymmetryGenerator(Q_set1, Q_set2, nlow_state, basis_template=basis_template)
-    builder = ContinuumModelBuilder(
-        Q_set1, Q_set2, int(config.n_orb1), int(config.n_orb2),
-        np.asarray(config.bM1, dtype=float), np.asarray(config.bM2, dtype=float),
-        dict(config.intra_harmonics_map), dict(config.inter_harmonics_map),
-        dict(config.max_order),
-        symmetry_gen,
-        dict(config.symmetry_map) if config.symmetry_map else None,
-        list(config.term_templates),
-        list(config.sectors),
-        str(getattr(config, "response_semantics", "legacy_frozen_v1")),
-    )
-    builder.model = model
-    builder.null_channel_abs_tol = float(getattr(config, "null_channel_abs_tol", 0.0) or 0.0)
-    builder.null_channel_rel_tol = float(getattr(config, "null_channel_rel_tol", 0.0) or 0.0)
-    heff = np.asarray(config.heff)
+    if progress_callback is not None:
+        candidate = basis.candidate_artifact
+        progress_callback(
+            "response basis vocabulary: "
+            f"authored={int(candidate.get('authored_ordered_seed_count', 0))} "
+            f"adjoint_orbits={int(candidate.get('adjoint_orbit_descriptor_count', 0))} "
+            f"hermitian_ambient={int(candidate.get('hermitian_ambient_channel_count', 0))} "
+            f"fixed={int(len(basis.channels))} "
+            "materialized="
+            f"{int(candidate.get('physically_materialized_projected_channel_count', len(basis.channels)))}",
+            state="done",
+        )
     kpts = np.asarray(config.kpoints_fit, dtype=float)
-    diagnostics = builder.compute_coefficients_by_tag(
-        heff,
+    nk = int(kpts.shape[0])
+    target_raw = np.asarray(config.heff, dtype=np.complex128)
+    if target_raw.ndim == 3:
+        target = target_raw
+    elif target_raw.ndim == 2 and target_raw.shape == (nk * basis.dim, nk * basis.dim):
+        target = np.asarray(
+            [
+                target_raw[
+                    index * basis.dim : (index + 1) * basis.dim,
+                    index * basis.dim : (index + 1) * basis.dim,
+                ]
+                for index in range(nk)
+            ],
+            dtype=np.complex128,
+        )
+    else:
+        raise ValueError(
+            "complete_linear heff must have shape (Nk,dim,dim) or be the corresponding block diagonal; "
+            f"got {target_raw.shape} for Nk={nk}, dim={basis.dim}"
+        )
+    fit_indices = list(getattr(config, "response_fit_indices", []) or range(nk))
+    band_window = list(getattr(config, "response_band_window", []) or [0, basis.dim])
+    fitted = basis.fit(
         kpts,
-        tol=float(config.coeff_tol),
+        target,
+        fit_indices=fit_indices,
+        regularization=float(getattr(config, "response_regularization", 0.0) or 0.0),
+        band_window=band_window,
+        spectral_weighting=_basis_spectral_weighting_from_fit_objective(
+            getattr(config, "response_fit_objective", {"mode": "equal_matrix"})
+        ),
+        coefficient_tolerance=float(config.coeff_tol),
         progress_callback=progress_callback,
     )
-    setattr(model, "_null_channel_filter_reports", list(getattr(builder, "_null_channel_filter_reports", [])))
-    setattr(model, "_null_channel_abs_tol", float(getattr(builder, "null_channel_abs_tol", 0.0) or 0.0))
-    setattr(model, "_null_channel_rel_tol", float(getattr(builder, "null_channel_rel_tol", 0.0) or 0.0))
+    terms = list(getattr(model, "candidate_terms", ()) or model.terms.values())
+    for term in terms:
+        term.active = False
+        term.r_value_real = 0.0
+        term.r_value_imag = 0.0
+    for channel, coefficient in zip(basis.channels, fitted.coefficients):
+        term_index = int(channel.metadata.get("term_index", -1))
+        if term_index < 0 or term_index >= len(terms):
+            raise ValueError(f"compiled response channel {channel.channel_id!r} has invalid term_index={term_index}")
+        term = terms[term_index]
+        if channel.component == "real":
+            term.r_value_real = float(coefficient)
+        elif channel.component == "imag":
+            term.r_value_imag = float(coefficient)
+        else:
+            raise ValueError(f"compiled response channel has unknown component {channel.component!r}")
+        if coefficient != 0.0:
+            term.active = True
+    setattr(model, "_compiled_response_basis", basis)
+    setattr(model, "_fitted_response_model", fitted)
+    diagnostics = {
+        "response_semantics": "complete_linear",
+        "basis_hash": basis.basis_hash,
+        "fit_hash": fitted.fit_hash,
+        "candidate_response_channels": int(basis.candidate_artifact.get("candidate_channel_count", 0)),
+        "retained_basis_channels": int(len(basis.channels)),
+        "fit_solver_channels": int(len(fitted.fit_solver_channel_ids)),
+        "fit_selected_channels": int(len(fitted.fit_solver_channel_ids)),
+        "fit_rrqr_pivot_channels": int(len(fitted.fit_selected_channel_ids)),
+        "nonzero_coefficient_channels": int(len(fitted.nonzero_channel_ids)),
+        "basis_artifact": basis.artifact(),
+        "fit_artifact": fitted.artifact(),
+    }
     return model, diagnostics
 
 def _sym_ops_group_key(sym_ops: List[Dict[str, Any]]) -> tuple[Any, ...]:
@@ -4767,7 +3593,7 @@ def compute_bands(
         change the function return type.
     compiled_runtime_out: list[Any | None] | None
         Optional sink receiving the compiled operator runtime, or None when the model
-        requires the legacy term-by-term assembly path.
+        uses the fitted complete response basis.
 
     Returns
     -------
@@ -4782,105 +3608,48 @@ def compute_bands(
     if kpts.shape[1] != 2:
         raise ValueError(f"kpoints must have shape (Nk, 2) (kx,ky), got {kpts.shape}.")
 
-    if str(getattr(config, "response_semantics", "legacy_frozen_v1")) == "complete_linear_v2":
-        from .response_basis import CompiledResponseRuntime
+    if config.response_semantics != "complete_linear":
+        raise ValueError(f"unsupported response_semantics: {config.response_semantics!r}")
+    from .response_basis import CompiledResponseRuntime
 
-        basis = getattr(model, "_compiled_response_basis", None)
-        fitted = getattr(model, "_fitted_response_model", None)
-        if basis is None or fitted is None:
-            raise ValueError("complete_linear_v2 bands require a fitted CompiledResponseBasis")
-        runtime = CompiledResponseRuntime(basis=basis, fitted=fitted)
-        if compiled_runtime_out is not None:
-            compiled_runtime_out.append(runtime)
-        dim_full = int(basis.dim)
-        keep = (
-            np.arange(dim_full, dtype=int)
-            if config.keep_indices is None
-            else np.asarray(config.keep_indices, dtype=int)
-        )
-        remove = (
-            np.asarray(config.remove_indices, dtype=int)
-            if config.remove_indices is not None
-            else np.array([], dtype=int)
-        )
-        state = SimpleNamespace(keep=keep, remove=remove)
-        want_vecs = bool(config.save_eigvecs) if return_eigvecs is None else bool(return_eigvecs)
-        eigvals_out = np.empty((kpts.shape[0], keep.size), dtype=float)
-        eigvecs_out = (
-            np.empty((kpts.shape[0], keep.size, keep.size), dtype=np.complex128)
-            if want_vecs
-            else None
-        )
-        for index, point in enumerate(kpts):
-            hamiltonian = _reduce_and_hermitize_hamiltonian(runtime.hamiltonian(point), state)
-            if hamiltonians_out is not None:
-                hamiltonians_out.append(np.asarray(hamiltonian, dtype=np.complex128).copy())
-            if want_vecs:
-                eigenvalues, eigenvectors = scipy.linalg.eigh(hamiltonian, check_finite=False)
-                eigvals_out[index] = eigenvalues
-                assert eigvecs_out is not None
-                eigvecs_out[index] = eigenvectors
-            else:
-                eigvals_out[index] = scipy.linalg.eigvalsh(hamiltonian, check_finite=False)
-        if eigvecs_out is not None:
-            return eigvals_out, eigvecs_out
-        return eigvals_out
-
-    state = _prepare_band_state(config, model)
-
-    want_vecs = bool(config.save_eigvecs) if return_eigvecs is None else bool(return_eigvecs)
-    nk = kpts.shape[0]
-    dim_kept = int(state.keep.size)
-    eigvals_out = np.empty((nk, dim_kept), dtype=float)
-    eigvecs_out = np.empty((nk, dim_kept, dim_kept), dtype=complex) if want_vecs else None
-
-    from .operator_runtime import CompiledOperatorRuntime, CompiledOperatorUnsupported
-
-    runtime_terms = [
-        term
-        for term in model.terms.values()
-        if bool(getattr(term, "active", True))
-    ]
-    compiled_runtime: CompiledOperatorRuntime | None
-    try:
-        compiled_runtime = CompiledOperatorRuntime.from_terms(
-            runtime_terms,
-            config,
-            state.dim_full,
-        )
-    except CompiledOperatorUnsupported:
-        compiled_runtime = None
+    basis = getattr(model, "_compiled_response_basis", None)
+    fitted = getattr(model, "_fitted_response_model", None)
+    if basis is None or fitted is None:
+        raise ValueError("complete_linear bands require a fitted CompiledResponseBasis")
+    runtime = CompiledResponseRuntime(basis=basis, fitted=fitted)
     if compiled_runtime_out is not None:
-        compiled_runtime_out.append(compiled_runtime)
-
-    eigvals_only = not want_vecs
-    for i in range(nk):
-        if compiled_runtime is None:
-            _H_kept, w, v, _counts, _prof = _compute_one_k(
-                i,
-                kpts[i],
-                state,
-                eigvals_only=eigvals_only,
-            )
-        else:
-            _H_kept = _reduce_and_hermitize_hamiltonian(
-                compiled_runtime.hamiltonian(kpts[i]),
-                state,
-            )
-            if eigvals_only:
-                w = scipy.linalg.eigvalsh(_H_kept, check_finite=False)
-                v = None
-            else:
-                w, v = scipy.linalg.eigh(_H_kept, check_finite=False)
+        compiled_runtime_out.append(runtime)
+    dim_full = int(basis.dim)
+    keep = (
+        np.arange(dim_full, dtype=int)
+        if config.keep_indices is None
+        else np.asarray(config.keep_indices, dtype=int)
+    )
+    remove = (
+        np.asarray(config.remove_indices, dtype=int)
+        if config.remove_indices is not None
+        else np.array([], dtype=int)
+    )
+    state = SimpleNamespace(keep=keep, remove=remove)
+    want_vecs = bool(config.save_eigvecs) if return_eigvecs is None else bool(return_eigvecs)
+    eigvals_out = np.empty((kpts.shape[0], keep.size), dtype=float)
+    eigvecs_out = (
+        np.empty((kpts.shape[0], keep.size, keep.size), dtype=np.complex128)
+        if want_vecs
+        else None
+    )
+    for index, point in enumerate(kpts):
+        hamiltonian = _reduce_and_hermitize_hamiltonian(runtime.hamiltonian(point), state)
         if hamiltonians_out is not None:
-            hamiltonians_out.append(np.asarray(_H_kept, dtype=complex).copy())
-        eigvals_out[i] = w
-        if want_vecs and eigvecs_out is not None:
-            if v is None:
-                raise RuntimeError("Eigenvectors were requested but eigensolver returned eigenvalues only.")
-            eigvecs_out[i] = v
-
-    if want_vecs and eigvecs_out is not None:
+            hamiltonians_out.append(np.asarray(hamiltonian, dtype=np.complex128).copy())
+        if want_vecs:
+            eigenvalues, eigenvectors = scipy.linalg.eigh(hamiltonian, check_finite=False)
+            eigvals_out[index] = eigenvalues
+            assert eigvecs_out is not None
+            eigvecs_out[index] = eigenvectors
+        else:
+            eigvals_out[index] = scipy.linalg.eigvalsh(hamiltonian, check_finite=False)
+    if eigvecs_out is not None:
         return eigvals_out, eigvecs_out
     return eigvals_out
 
@@ -5031,7 +3800,7 @@ def _require_plotting() -> None:
         from matplotlib.collections import LineCollection as _LineCollection
         from matplotlib.ticker import MultipleLocator as _MultipleLocator
         from scipy.interpolate import interp1d as _interp1d
-    except Exception as e:  # pragma: no cover
+    except ImportError as e:  # pragma: no cover
         raise RuntimeError(
             "Plotting dependencies (matplotlib/scipy.interpolate) are required for plotting helpers."
         ) from e
@@ -5115,7 +3884,7 @@ def plot_band_structure_new_(ax, x, bands, values,lw, label, linestyle, offset, 
     #         ax.plot(x, bands[:,i+offset], color=cmap(norm(np.mean(values[:,i+offset]))), linewidth=lw, linestyle=linestyle, label=label)
     #     else:
     #         ax.plot(x, bands[:,i+offset], color=cmap(norm(np.mean(values[:,i+offset]))), linewidth=lw, linestyle=linestyle)
-    
+
 
     sm = plt.cm.ScalarMappable(cmap=cmap, norm=norm)
     sm.set_array([])
@@ -5224,7 +3993,7 @@ def plot_band(ax, kx1, band, c="dodgerblue", lw=1.5, linestyle='-', label='', of
     else:
         bands = band
         kx = kx1
-    
+
     if proj:
         plot_band_structure_new(ax, kx, bands, values, lw, label,linestyle,offset,num,loc,vmin,vmax,cmap=cmap,bar_show=bar_show,**kwargs)
     else:
@@ -5234,7 +4003,7 @@ def plot_band(ax, kx1, band, c="dodgerblue", lw=1.5, linestyle='-', label='', of
                     if i == num-1:
                         ax.scatter(kx, bands[:,i+offset], c=c, s=lw, label=label, **kwargs)
                     else:
-                        ax.scatter(kx, bands[:,i+offset], c=c, s=lw, **kwargs) 
+                        ax.scatter(kx, bands[:,i+offset], c=c, s=lw, **kwargs)
                 else:
                     ax.scatter(kx, bands[:,i+offset], c=c, s=lw, **kwargs)
         else:
@@ -5243,12 +4012,12 @@ def plot_band(ax, kx1, band, c="dodgerblue", lw=1.5, linestyle='-', label='', of
                     if i == num-1:
                         ax.plot(kx, bands[:,i+offset], c=c, linestyle=linestyle, lw=lw, label=label, **kwargs)
                     else:
-                        ax.plot(kx, bands[:,i+offset], c=c, linestyle=linestyle, lw=lw, **kwargs) 
+                        ax.plot(kx, bands[:,i+offset], c=c, linestyle=linestyle, lw=lw, **kwargs)
                 else:
                     ax.plot(kx, bands[:,i+offset], c=c, linestyle=linestyle, lw=lw, **kwargs)
 
 def set_pic(ax,ymin,ymax,ylim = True,meV=True,xticks =np.array([0, 0.125, 0.197, 0.341]),legend_show=True,transparent_flag = False,
-            xlabels = [r'${\Gamma}_{\mathrm{M}}$', r'${\mathrm{M}}_{\mathrm{M}}$', r'${\mathrm{K}}_{\mathrm{M}}$', r'${\Gamma}_{\mathrm{M}}$'], 
+            xlabels = [r'${\Gamma}_{\mathrm{M}}$', r'${\mathrm{M}}_{\mathrm{M}}$', r'${\mathrm{K}}_{\mathrm{M}}$', r'${\Gamma}_{\mathrm{M}}$'],
             title = '4.41 Bilayer tMoTe2 w SOC G vally',save = False,savepath = '',legend_fontsize = 9):
     _require_plotting()
     # Add reference lines
@@ -5274,11 +4043,11 @@ def set_pic(ax,ymin,ymax,ylim = True,meV=True,xticks =np.array([0, 0.125, 0.197,
         # plt.gca().yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: '{:.0f}'.format(x*1000)))
         ax.set_ylabel('Energy (meV)', fontsize=12*scale,fontfamily='Times New Roman')  # Bold y-axis label
     else:
-        ax.set_ylabel('Energy (eV)', fontsize=12*scale,fontfamily='Times New Roman')  # Bold y-axis label 
+        ax.set_ylabel('Energy (eV)', fontsize=12*scale,fontfamily='Times New Roman')  # Bold y-axis label
 
     # ax.set_yticks(fontproperties = 'Times New Roman', size = 12)
     # ax.tick_params(axis='y', labelsize=12, labelfamily='Times New Roman')
-    y1_label = ax.get_yticklabels() 
+    y1_label = ax.get_yticklabels()
     [y1_label_temp.set_fontname('Times New Roman') for y1_label_temp in y1_label]
     [y1_label_temp.set_fontsize(11*scale) for y1_label_temp in y1_label]
     [y1_label_temp.set_position((0.01, y1_label_temp.get_position()[1])) for y1_label_temp in y1_label]  # Adjust the x position

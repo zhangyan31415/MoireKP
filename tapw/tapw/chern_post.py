@@ -817,25 +817,15 @@ def save_qgt_outputs(
         save_table=False,
     )
     if band_indices is not None:
-        try:
-            save_trace_condition_output(
-                trace_condition_prefix or output_prefix,
-                band_indices,
-                qgt_fields["trace_g_cart"],
-                qgt_fields["omega_xy_cart"],
-                b_phys_2d,
-                delta_kappa1,
-                delta_kappa2,
-            )
-        except ValueError:
-            raise
-        except Exception as exc:
-            print(
-                "[WARN] Skipping trace-condition diagnostic for {0}: {1}".format(
-                    output_prefix,
-                    exc,
-                )
-            )
+        save_trace_condition_output(
+            trace_condition_prefix or output_prefix,
+            band_indices,
+            qgt_fields["trace_g_cart"],
+            qgt_fields["omega_xy_cart"],
+            b_phys_2d,
+            delta_kappa1,
+            delta_kappa2,
+        )
 
 
 def parse_lattice_vectors_from_openmx(openmx_path):
@@ -1114,7 +1104,7 @@ def _load_wcc_g_vectors(output_dir, valley_str):
     for root in search_roots:
         try:
             resolved = root.resolve()
-        except Exception:
+        except OSError:
             resolved = root
         if resolved in seen:
             continue
@@ -1352,7 +1342,7 @@ def _read_topology_grid_manifest(output_dir):
     try:
         with manifest_path.open("r", encoding="utf-8") as handle:
             manifest = json.load(handle)
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return None
     if not isinstance(manifest, dict):
         return None
@@ -1388,7 +1378,7 @@ def _update_canonical_chern_summary(
             loaded = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict) and isinstance(loaded.get("entries"), list):
                 summary = loaded
-        except Exception:
+        except (OSError, json.JSONDecodeError):
             summary = {"schema": "tapw_chern_summary/v1", "entries": []}
     entry = {
         "label": str(label),
@@ -1932,7 +1922,7 @@ def main(argv=None, *, prog=None):
     band_vec = np.load(vec_file)
     try:
         band_vec_grid = reshape_wavefunction_grid(band_vec, num_k1, num_k2)
-    except Exception as exc:
+    except ValueError as exc:
         print("[ERROR] 波函数文件形状不正确: {0}".format(exc))
         raise SystemExit(1)
 

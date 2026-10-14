@@ -15,41 +15,72 @@ from scipy import sparse
 
 from ..identity import hash_array
 from ..symmetry.joint_exactification import materialize_block_route_action
-from .response_basis_fixed_subspace import REAL_LINEAR_ACTION_CONVENTION_V1
+from .response_basis_fixed_subspace import REAL_LINEAR_ACTION_CONVENTION
 from .response_basis_local_fixed import (
-    LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
-    LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
-    LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
-    LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
-    LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
-    LOCAL_REYNOLDS_ALGORITHM_V1,
-    LOCAL_REYNOLDS_BLOCK_BACKEND_V1,
-    LOCAL_REYNOLDS_COMPONENT_POLICY_V1,
-    LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1,
-    LOCAL_REYNOLDS_OWNER_POLICY_V1,
-    LOCAL_REYNOLDS_REDUCE_POLICY_V1,
+    LOCAL_FIXED_ABSOLUTE_TOLERANCE,
+    LOCAL_FIXED_GRAY_ZONE_FACTOR,
+    LOCAL_FIXED_PHYSICAL_SEED_DIGEST,
+    LOCAL_FIXED_STRUCTURAL_PLAN_POLICY,
+    LOCAL_FIXED_RELATIVE_TOLERANCE,
+    LOCAL_REYNOLDS_ALGORITHM,
+    LOCAL_REYNOLDS_BLOCK_BACKEND,
+    LOCAL_REYNOLDS_COMPONENT_POLICY,
+    LOCAL_REYNOLDS_MATERIALIZATION_POLICY,
+    LOCAL_REYNOLDS_OWNER_POLICY,
+    LOCAL_REYNOLDS_REDUCE_POLICY,
 )
 
 
-COMPLETE_LINEAR_V2 = "complete_linear_v2"
-LEGACY_FROZEN_V1 = "legacy_frozen_v1"
-COORDINATE_CONVENTION_V1 = "right_handed_model_cartesian_reciprocal_v1"
-RESPONSE_NORMALIZATION_V1 = "reynolds_mean__hermitian_half_sum__dimensionless_k_v1"
-COEFFICIENT_NORMALIZATION_V1 = "response_amplitude_abs_c_times_s_v1"
-REGULARIZATION_NORMALIZATION_V1 = "coefficient_response_norm__energy_1eV_v1"
-FIT_CHANNEL_POLICY_V2 = "confirmed_nonzero_only_v2"
+RESPONSE_SEMANTICS = "complete_linear"
+COORDINATE_CONVENTION = "right_handed_model_cartesian_reciprocal"
+RESPONSE_NORMALIZATION = "reynolds_mean__hermitian_half_sum__dimensionless_k"
+COEFFICIENT_NORMALIZATION = "response_amplitude_abs_c_times_s"
+REGULARIZATION_NORMALIZATION = "coefficient_response_norm__energy_1eV"
+FIT_CHANNEL_POLICY = "confirmed_nonzero_only"
 FITTABLE_CHANNEL_CLASSIFICATIONS = frozenset({"confirmed_nonzero"})
-FIT_SOLVER_POLICY_V2 = "real_svd_global_monomial_propagated_backward_error_v2"
-FIT_SOLVER_POLICY_RIDGE_V3 = "real_ridge_all_confirmed__diagnostic_propagated_rank_v3"
-FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4 = (
-    "real_physical_coefficient_gram_whitened_minimum_norm_svd_v4"
+FIT_SOLVER_SVD = "real_svd_global_monomial_propagated_backward_error"
+FIT_SOLVER_RIDGE = "real_ridge_all_confirmed__diagnostic_propagated_rank"
+FIT_SOLVER_PHYSICAL_MIN_NORM = (
+    "real_physical_coefficient_gram_whitened_minimum_norm_svd"
 )
-FIT_SOLVER_POLICY_LEGACY = "legacy_real_qr_machine_tolerance_v0"
-COMPILER_VERSION = "complete-response-basis-v2-action-block-reynolds-v57"
-TARGET_SPECTRAL_WEIGHTING_V1 = "target_spectral_linear_v1"
-TARGET_SPECTRAL_TRACE_NORMALIZATION_V1 = "global_mean_trace_per_dimension_v1"
-NORMALIZED_LOW_ENERGY_LINEAR_V1 = "normalized-low-energy-linear-v1"
-EQUAL_MATRIX_FIT_OBJECTIVE_V1 = "equal_matrix_v1"
+
+
+def _compiler_fingerprint() -> str:
+    """Hash the installed numerical implementation; no Git lookup or revision counter."""
+
+    package_root = Path(__file__).resolve().parent.parent
+    dependencies = sorted(package_root.rglob("*.py"))
+    digest = hashlib.sha256()
+    for source in dependencies:
+        relative = source.relative_to(package_root).as_posix().encode("utf-8")
+        contents = source.read_bytes()
+        digest.update(len(relative).to_bytes(8, "little"))
+        digest.update(relative)
+        digest.update(len(contents).to_bytes(8, "little"))
+        digest.update(contents)
+    from importlib.util import find_spec
+
+    identity_spec = find_spec("tapw.identity")
+    if identity_spec is None or identity_spec.origin is None:
+        raise ImportError("response compiler requires installed tapw.identity source")
+    identity_contents = Path(identity_spec.origin).read_bytes()
+    digest.update(b"tapw/identity.py\0")
+    digest.update(len(identity_contents).to_bytes(8, "little"))
+    digest.update(identity_contents)
+    # Linear algebra backends also affect compilation/rank certification.
+    import scipy
+
+    for dependency_version in (np.__version__, scipy.__version__):
+        digest.update(dependency_version.encode("ascii"))
+        digest.update(b"\0")
+    return "sha256:" + digest.hexdigest()
+
+
+COMPILER_FINGERPRINT = _compiler_fingerprint()
+TARGET_SPECTRAL_WEIGHTING = "target_spectral_linear"
+TARGET_SPECTRAL_TRACE_NORMALIZATION = "global_mean_trace_per_dimension"
+NORMALIZED_LOW_ENERGY_LINEAR = "normalized-low-energy-linear"
+EQUAL_MATRIX_FIT_OBJECTIVE = "equal_matrix"
 
 
 def _canonical_csr(value: sparse.spmatrix | np.ndarray, *, shape: tuple[int, int] | None = None) -> sparse.csr_matrix:
@@ -200,8 +231,8 @@ def _canonical_json(value: Any) -> str:
 def _equal_matrix_fit_objective() -> dict[str, Any]:
     return {
         "mode": "equal_matrix",
-        "version": EQUAL_MATRIX_FIT_OBJECTIVE_V1,
-        "normalization": "unit_matrix_v1",
+        "version": EQUAL_MATRIX_FIT_OBJECTIVE,
+        "normalization": "unit_matrix",
     }
 
 
@@ -219,7 +250,7 @@ class TargetSpectralWeightingSpec:
     alpha: float = 1.0
     degeneracy_atol_ev: float = 1.0e-10
     degeneracy_rtol: float = 1.0e-10
-    normalization: str = TARGET_SPECTRAL_TRACE_NORMALIZATION_V1
+    normalization: str = TARGET_SPECTRAL_TRACE_NORMALIZATION
     two_sided_projector_weight: float = 0.0
 
     def __post_init__(self) -> None:
@@ -252,7 +283,7 @@ class TargetSpectralWeightingSpec:
             or float(self.degeneracy_rtol) < 0.0
         ):
             raise ValueError("target spectral degeneracy tolerances must be finite and non-negative")
-        if str(self.normalization) != TARGET_SPECTRAL_TRACE_NORMALIZATION_V1:
+        if str(self.normalization) != TARGET_SPECTRAL_TRACE_NORMALIZATION:
             raise ValueError("unsupported target spectral trace normalization")
         projector_weight = float(self.two_sided_projector_weight)
         if not np.isfinite(projector_weight) or projector_weight < 0.0:
@@ -274,7 +305,7 @@ class TargetSpectralWeightingSpec:
     def artifact(self) -> dict[str, Any]:
         artifact = {
             "mode": str(self.mode),
-            "version": TARGET_SPECTRAL_WEIGHTING_V1,
+            "version": TARGET_SPECTRAL_WEIGHTING,
             "band_edge": str(self.band_edge),
             "window_mode": str(self.window_mode),
             "n_bands": None if self.n_bands is None else int(self.n_bands),
@@ -290,14 +321,14 @@ class TargetSpectralWeightingSpec:
             artifact["two_sided_projector"] = {
                 "enabled": True,
                 "weight": float(self.two_sided_projector_weight),
-                "projector_source": "target_spectral_window_v1",
+                "projector_source": "target_spectral_window",
             }
         return artifact
 
 
 @dataclass(frozen=True)
 class NormalizedLowEnergyWeightingSpec:
-    mode: str = "normalized_low_energy_linear_v1"
+    mode: str = "normalized_low_energy_linear"
     band_edge: str = "top"
     window_mode: str = "fixed_count_degeneracy_safe"
     n_bands: int = 1
@@ -307,7 +338,7 @@ class NormalizedLowEnergyWeightingSpec:
     degeneracy_rtol: float = 0.0
 
     def __post_init__(self) -> None:
-        if self.mode != "normalized_low_energy_linear_v1":
+        if self.mode != "normalized_low_energy_linear":
             raise ValueError("normalized low-energy weighting has an invalid mode")
         if self.band_edge not in {"top", "bottom"}:
             raise ValueError("normalized low-energy band_edge must be 'top' or 'bottom'")
@@ -334,14 +365,14 @@ class NormalizedLowEnergyWeightingSpec:
     def artifact(self, *, resolved_band_counts: Sequence[int]) -> dict[str, Any]:
         return {
             "mode": self.mode,
-            "version": NORMALIZED_LOW_ENERGY_LINEAR_V1,
+            "version": NORMALIZED_LOW_ENERGY_LINEAR,
             "band_edge": self.band_edge,
             "window_mode": self.window_mode,
             "requested_bands": int(self.n_bands),
             "resolved_band_counts": [int(value) for value in resolved_band_counts],
             "one_sided_weight": float(self.one_sided_weight),
             "two_sided_weight": float(self.two_sided_weight),
-            "normalization": "dimension_mean_square_v1",
+            "normalization": "dimension_mean_square",
         }
 
 
@@ -581,7 +612,7 @@ class PolynomialCoordinateBasis:
     scale: float
     max_degree: int
     monomials: tuple[tuple[int, int], ...]
-    coordinate_convention: str = COORDINATE_CONVENTION_V1
+    coordinate_convention: str = COORDINATE_CONVENTION
 
     @classmethod
     def from_reciprocal_basis(
@@ -649,7 +680,7 @@ class PolynomialCoordinateBasis:
             reciprocal_basis=metadata["reciprocal_basis"],
             max_degree=int(metadata["max_degree"]),
         )
-        if str(metadata.get("coordinate_convention", COORDINATE_CONVENTION_V1)) != COORDINATE_CONVENTION_V1:
+        if str(metadata['coordinate_convention']) != COORDINATE_CONVENTION:
             raise ValueError("unsupported polynomial coordinate convention")
         if not np.isclose(float(metadata["scale"]), basis.scale, atol=0.0, rtol=1.0e-15):
             raise ValueError("frozen polynomial coordinate scale is inconsistent with reciprocal_basis")
@@ -660,7 +691,7 @@ class PolynomialCoordinateBasis:
 class NullClassificationPolicy:
     numerical_factor: float = 1.0
     confirm_factor: float = 100.0
-    policy_version: str = "absolute_propagated_error_gray_zone_v1"
+    policy_version: str = "absolute_propagated_error_gray_zone"
 
     def __post_init__(self) -> None:
         if self.numerical_factor <= 0.0:
@@ -1074,7 +1105,7 @@ class CandidateResponseSet:
     null_policy: NullClassificationPolicy
     support_artifact: Mapping[str, Any] = field(default_factory=dict)
     adjoint_artifact: Mapping[str, Any] = field(default_factory=dict)
-    response_normalization: str = RESPONSE_NORMALIZATION_V1
+    response_normalization: str = RESPONSE_NORMALIZATION
 
     def artifact(self) -> dict[str, Any]:
         counts: dict[str, int] = {}
@@ -1112,7 +1143,7 @@ class CandidateResponseSet:
             )
         )
         return {
-            "response_semantics": COMPLETE_LINEAR_V2,
+            "response_semantics": RESPONSE_SEMANTICS,
             "response_normalization": self.response_normalization,
             "coordinate": self.coordinate.metadata(),
             "dim": int(self.dim),
@@ -1588,7 +1619,7 @@ def certify_support_closure(
                     "cleaned_component_count": 0,
                     "cleaned_components": [],
                     "support_closure_compiler": (
-                        "exact_boolean_adjoint_group_support_v1"
+                        "exact_boolean_adjoint_group_support"
                     ),
                 }
                 continue
@@ -1663,7 +1694,7 @@ def certify_support_closure(
                 cleaned_by_location[location]
                 for location in sorted(cleaned_by_location)
             ],
-            "support_closure_compiler": "per_seed_propagated_error_v1",
+            "support_closure_compiler": "per_seed_propagated_error",
         }
     return certificates
 
@@ -2027,7 +2058,7 @@ def compile_candidate_responses_adjoint_canonicalized(
         null_policy=physical.null_policy,
         support_artifact=physical.support_artifact,
         adjoint_artifact={
-            "certification": "raw_polynomial_coefficient_adjoint_v1",
+            "certification": "raw_polynomial_coefficient_adjoint",
             "logical_candidate_channel_count": int(len(logical_channels)),
             "authored_ordered_seed_count": int(len(seeds)),
             "adjoint_orbit_descriptor_count": int(len(certified.orbits)),
@@ -2228,195 +2259,6 @@ def _merge_support_certificates(
     return merged
 
 
-def _compile_candidate_group_with_adjoint_fallback(
-    seeds: Sequence[RawPolynomialSeed],
-    *,
-    coordinate: PolynomialCoordinateBasis,
-    group: FiniteGroup,
-    support_masks: Mapping[str, np.ndarray] | None,
-    null_policy: NullClassificationPolicy | None = None,
-    internal_actions_by_word: Mapping[
-        tuple[str, ...], sparse.spmatrix | np.ndarray
-    ]
-    | None = None,
-    internal_action_absolute_error_bound: float = 0.0,
-    factorized_reynolds_artifact: Mapping[str, Any] | None = None,
-) -> CandidateResponseSet:
-    """Compile p=0 adjoint orbits and generic finite-p seeds in one channel set.
-
-    A finite Fourier harmonic need not have an authored ``-p`` seed: the
-    unconditional Hermitian projector already supplies its adjoint response.
-    Moreover, center conversion makes a finite-p adjoint a binomial combination
-    of the reversed seed's nominal degree and lower degrees, so the p=0
-    one-to-one ``real/+imag`` mapping cannot be reused.  Finite-p seeds therefore
-    take the complete per-seed Reynolds path; only the p=0 subset is deduplicated
-    by the raw-coefficient-certified joint-adjoint optimization.
-    """
-
-    if not seeds:
-        raise ValueError("complete response compilation requires at least one raw seed")
-    zero_seeds: list[RawPolynomialSeed] = []
-    finite_seeds: list[RawPolynomialSeed] = []
-    for seed in seeds:
-        term_key = seed.metadata.get("term_key")
-        if not isinstance(term_key, Mapping):
-            raise ValueError(
-                f"adjoint-canonicalized production seed {seed.seed_id!r} lacks term_key metadata"
-            )
-        p_vector = np.asarray(term_key.get("p"), dtype=np.float64)
-        if p_vector.shape != (2,) or not np.all(np.isfinite(p_vector)):
-            raise ValueError(f"seed {seed.seed_id!r} has invalid explicit harmonic vector")
-        if np.all(p_vector == 0.0):
-            zero_seeds.append(seed)
-        else:
-            finite_seeds.append(seed)
-
-    zero_candidates: CandidateResponseSet | None = None
-    zero_fallback_reason: str | None = None
-    if zero_seeds:
-        from .response_basis_adjoint import (
-            AdjointCertificationError,
-            AdjointClosureError,
-        )
-
-        try:
-            zero_candidates = compile_candidate_responses_adjoint_canonicalized(
-                zero_seeds,
-                joint_keys=_zero_harmonic_joint_adjoint_keys(
-                    zero_seeds,
-                    coordinate=coordinate,
-                ),
-                coordinate=coordinate,
-                group=group,
-                null_policy=null_policy,
-                support_masks=support_masks,
-                internal_actions_by_word=internal_actions_by_word,
-                internal_action_absolute_error_bound=internal_action_absolute_error_bound,
-            )
-        except (AdjointClosureError, AdjointCertificationError) as exc:
-            # Pairwise canonicalization is only an optimization.  A valid
-            # authored vocabulary need not contain a raw adjoint partner;
-            # Reynolds followed by P_H still yields its two complete real
-            # response channels.
-            zero_fallback_reason = type(exc).__name__
-            zero_candidates = compile_candidate_responses(
-                zero_seeds,
-                coordinate=coordinate,
-                group=group,
-                null_policy=null_policy,
-                support_masks=support_masks,
-                internal_actions_by_word=internal_actions_by_word,
-                internal_action_absolute_error_bound=internal_action_absolute_error_bound,
-            )
-    if not finite_seeds:
-        assert zero_candidates is not None
-        if zero_fallback_reason is not None:
-            return replace(
-                zero_candidates,
-                adjoint_artifact={
-                    "certification": "p0_full_candidate_reynolds_fallback_v1",
-                    "logical_candidate_channel_count": int(len(zero_candidates.channels)),
-                    "physically_compiled_representative_channel_count": int(
-                        len(zero_candidates.channels)
-                    ),
-                    "adjoint_certified_dropped_channel_count": 0,
-                    "p0_dense_fallback_seed_count": int(len(zero_seeds)),
-                    "p0_dense_fallback_channel_count": int(len(zero_candidates.channels)),
-                    "p0_dense_fallback_reason": zero_fallback_reason,
-                    "reynolds_internal_action": dict(factorized_reynolds_artifact or {}),
-                },
-            )
-        return replace(
-            zero_candidates,
-            adjoint_artifact={
-                **dict(zero_candidates.adjoint_artifact),
-                "reynolds_internal_action": dict(factorized_reynolds_artifact or {}),
-            },
-        )
-
-    finite_candidates = compile_candidate_responses(
-        finite_seeds,
-        coordinate=coordinate,
-        group=group,
-        null_policy=null_policy,
-        support_masks=support_masks,
-        internal_actions_by_word=internal_actions_by_word,
-        internal_action_absolute_error_bound=internal_action_absolute_error_bound,
-    )
-    if zero_candidates is None:
-        return CandidateResponseSet(
-            coordinate=coordinate,
-            channels=finite_candidates.channels,
-            dim=finite_candidates.dim,
-            group_artifact=finite_candidates.group_artifact,
-            null_policy=finite_candidates.null_policy,
-            support_artifact=finite_candidates.support_artifact,
-            adjoint_artifact={
-                "certification": "finite_p_full_candidate_reynolds_v1",
-                "logical_candidate_channel_count": int(len(finite_candidates.channels)),
-                "authored_ordered_seed_count": int(len(finite_seeds)),
-                "adjoint_orbit_descriptor_count": int(len(finite_seeds)),
-                "hermitian_ambient_channel_count": int(
-                    len(finite_candidates.channels)
-                ),
-                "physically_compiled_representative_channel_count": int(
-                    len(finite_candidates.channels)
-                ),
-                "adjoint_certified_dropped_channel_count": 0,
-                "finite_p_fallback_seed_count": int(len(finite_seeds)),
-                "finite_p_fallback_channel_count": int(len(finite_candidates.channels)),
-                "reynolds_internal_action": dict(factorized_reynolds_artifact or {}),
-            },
-        )
-
-    seed_order = {seed.seed_id: index for index, seed in enumerate(seeds)}
-    component_order = {"real": 0, "imag": 1}
-    channels = tuple(
-        sorted(
-            (*zero_candidates.channels, *finite_candidates.channels),
-            key=lambda channel: (
-                seed_order[channel.seed_id],
-                component_order[channel.component],
-            ),
-        )
-    )
-    zero_adjoint = dict(zero_candidates.adjoint_artifact)
-    zero_physical = int(
-        zero_adjoint.get(
-            "physically_compiled_representative_channel_count",
-            len(zero_candidates.channels),
-        )
-    )
-    zero_dropped = int(zero_adjoint.get("adjoint_certified_dropped_channel_count", 0))
-    return CandidateResponseSet(
-        coordinate=coordinate,
-        channels=channels,
-        dim=zero_candidates.dim,
-        group_artifact=zero_candidates.group_artifact,
-        null_policy=zero_candidates.null_policy,
-        support_artifact=_merge_support_certificates(
-            [zero_candidates.support_artifact, finite_candidates.support_artifact]
-        ),
-        adjoint_artifact={
-            "certification": "p0_adjoint_certified__finite_p_full_reynolds_v1",
-            "zero_harmonic": zero_adjoint,
-            "logical_candidate_channel_count": int(len(channels)),
-            "physically_compiled_representative_channel_count": int(
-                zero_physical + len(finite_candidates.channels)
-            ),
-            "adjoint_certified_dropped_channel_count": zero_dropped,
-            "finite_p_fallback_seed_count": int(len(finite_seeds)),
-            "finite_p_fallback_channel_count": int(len(finite_candidates.channels)),
-            "p0_dense_fallback_seed_count": (
-                int(len(zero_seeds)) if zero_fallback_reason is not None else 0
-            ),
-            "p0_dense_fallback_channel_count": (
-                int(len(zero_candidates.channels)) if zero_fallback_reason is not None else 0
-            ),
-            "p0_dense_fallback_reason": zero_fallback_reason,
-            "reynolds_internal_action": dict(factorized_reynolds_artifact or {}),
-        },
-    )
 
 
 def _channel_sparse_vector(
@@ -2656,7 +2498,7 @@ def _reduce_confirmed_channels(
                 ],
                 "real_rank": int(len(certified_selected_global)),
                 "rrqr_proposed_rank": rank,
-                "dependency_acceptance": "per_column_outside_span_not_above_own_algebra_floor_v1",
+                "dependency_acceptance": "per_column_outside_span_not_above_own_algebra_floor",
                 "singular_values": [float(value) for value in singular_values],
                 "rank_tolerance": float(tolerance),
                 "rank_solver_backward_error": float(
@@ -2773,10 +2615,10 @@ class FittedResponseModel:
     coefficient_tolerance: float
     fit_solver_channel_indices: tuple[int, ...] = ()
     fit_solver_channel_ids: tuple[str, ...] = ()
-    coefficient_normalization: str = COEFFICIENT_NORMALIZATION_V1
-    regularization_normalization: str = REGULARIZATION_NORMALIZATION_V1
-    fit_channel_policy: str = FIT_CHANNEL_POLICY_V2
-    fit_solver_policy: str = FIT_SOLVER_POLICY_V2
+    coefficient_normalization: str = COEFFICIENT_NORMALIZATION
+    regularization_normalization: str = REGULARIZATION_NORMALIZATION
+    fit_channel_policy: str = FIT_CHANNEL_POLICY
+    fit_solver_policy: str = FIT_SOLVER_SVD
     fit_design_singular_values: tuple[float, ...] = ()
     fit_design_machine_error_bound: float = 0.0
     fit_design_propagated_error_bound: float = 0.0
@@ -2870,13 +2712,12 @@ class FittedResponseModel:
         if not np.isfinite(float(self.regularization)) or float(self.regularization) < 0.0:
             raise ValueError("regularization must be finite and non-negative")
         if self.fit_solver_policy not in {
-            FIT_SOLVER_POLICY_V2,
-            FIT_SOLVER_POLICY_RIDGE_V3,
-            FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4,
-            FIT_SOLVER_POLICY_LEGACY,
+            FIT_SOLVER_SVD,
+            FIT_SOLVER_RIDGE,
+            FIT_SOLVER_PHYSICAL_MIN_NORM,
         }:
             raise ValueError(f"unsupported fit solver policy: {self.fit_solver_policy!r}")
-        if self.fit_solver_policy == FIT_SOLVER_POLICY_V2:
+        if self.fit_solver_policy == FIT_SOLVER_SVD:
             if certified_rank != len(self.fit_pivots) or certified_rank != len(
                 self.fit_selected_channel_ids
             ):
@@ -2889,7 +2730,7 @@ class FittedResponseModel:
                 raise ValueError(
                     "selected fit response directions are not certified above their error bound"
                 )
-        elif self.fit_solver_policy == FIT_SOLVER_POLICY_RIDGE_V3:
+        elif self.fit_solver_policy == FIT_SOLVER_RIDGE:
             if self.regularization <= 0.0:
                 raise ValueError("ridge fit solver policy requires positive regularization")
             if self.fit_pivots or self.fit_selected_channel_ids:
@@ -2900,7 +2741,7 @@ class FittedResponseModel:
                 raise ValueError("fit design certified rank exceeds stored singular spectrum")
             if solver_ids and self.fit_selected_singular_value_min <= 0.0:
                 raise ValueError("regularized fit design must have positive stabilized singular value")
-        elif self.fit_solver_policy == FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4:
+        elif self.fit_solver_policy == FIT_SOLVER_PHYSICAL_MIN_NORM:
             if self.regularization != 0.0:
                 raise ValueError("physical minimum-norm fit solver policy requires zero ridge")
             if self.fit_pivots or self.fit_selected_channel_ids:
@@ -3054,7 +2895,7 @@ class CompiledResponseRuntime:
                 f"{self.fitted.regularization_normalization!r} != "
                 f"{self.basis.regularization_normalization!r}"
             )
-        if self.fitted.fit_channel_policy != FIT_CHANNEL_POLICY_V2:
+        if self.fitted.fit_channel_policy != FIT_CHANNEL_POLICY:
             raise ValueError(
                 "unsupported complete-response fit channel policy: "
                 f"{self.fitted.fit_channel_policy!r}"
@@ -3066,7 +2907,7 @@ class CompiledResponseRuntime:
         ]
         if invalid_channels:
             raise ValueError(
-                "complete_linear_v2 production coefficients may use only confirmed_nonzero channels; "
+                "complete_linear production coefficients may use only confirmed_nonzero channels; "
                 f"nonzero ineligible channels: {invalid_channels[:8]}"
             )
 
@@ -3093,7 +2934,7 @@ class CompiledResponseRuntime:
         frozen_basis = self.basis.freeze()
         fit_metadata = self.fitted.artifact()
         return {
-            "response_semantics": np.asarray(COMPLETE_LINEAR_V2),
+            "response_semantics": np.asarray(RESPONSE_SEMANTICS),
             "fitted_metadata_json": np.asarray(_canonical_json(fit_metadata)),
             "fitted_coefficients": np.asarray(self.fitted.coefficients, dtype=np.float64),
             **{
@@ -3105,8 +2946,8 @@ class CompiledResponseRuntime:
     @classmethod
     def from_frozen_arrays(cls, arrays: Mapping[str, Any]) -> "CompiledResponseRuntime":
         semantics = str(np.asarray(arrays.get("response_semantics", "")).item())
-        if semantics != COMPLETE_LINEAR_V2:
-            raise ValueError(f"frozen runtime response_semantics is {semantics!r}, expected {COMPLETE_LINEAR_V2!r}")
+        if semantics != RESPONSE_SEMANTICS:
+            raise ValueError(f"frozen runtime response_semantics is {semantics!r}, expected {RESPONSE_SEMANTICS!r}")
         basis_arrays = {
             key[len("basis_") :]: value
             for key, value in arrays.items()
@@ -3117,64 +2958,64 @@ class CompiledResponseRuntime:
         fitted = FittedResponseModel(
             basis_hash=str(metadata["basis_hash"]),
             coefficients=np.asarray(arrays["fitted_coefficients"], dtype=np.float64),
-            fit_pivots=tuple(int(value) for value in metadata.get("fit_pivots", [])),
-            fit_selected_channel_ids=tuple(str(value) for value in metadata.get("fit_selected_channel_ids", [])),
-            nonzero_channel_ids=tuple(str(value) for value in metadata.get("nonzero_channel_ids", [])),
-            regularization=float(metadata.get("regularization", 0.0)),
-            fit_indices=tuple(int(value) for value in metadata.get("fit_indices", [])),
-            band_window=tuple(int(value) for value in metadata.get("band_window", [])),
+            fit_pivots=tuple(int(value) for value in metadata['fit_pivots']),
+            fit_selected_channel_ids=tuple(str(value) for value in metadata['fit_selected_channel_ids']),
+            nonzero_channel_ids=tuple(str(value) for value in metadata['nonzero_channel_ids']),
+            regularization=float(metadata['regularization']),
+            fit_indices=tuple(int(value) for value in metadata['fit_indices']),
+            band_window=tuple(int(value) for value in metadata['band_window']),
             fit_hash=str(metadata["fit_hash"]),
-            coefficient_tolerance=float(metadata.get("coefficient_tolerance", 0.0)),
+            coefficient_tolerance=float(metadata['coefficient_tolerance']),
             fit_solver_channel_indices=tuple(
-                int(value) for value in metadata.get("fit_solver_channel_indices", [])
+                int(value) for value in metadata['fit_solver_channel_indices']
             ),
             fit_solver_channel_ids=tuple(
-                str(value) for value in metadata.get("fit_solver_channel_ids", [])
+                str(value) for value in metadata['fit_solver_channel_ids']
             ),
             coefficient_normalization=str(
-                metadata.get("coefficient_normalization", COEFFICIENT_NORMALIZATION_V1)
+                metadata['coefficient_normalization']
             ),
             regularization_normalization=str(
-                metadata.get("regularization_normalization", REGULARIZATION_NORMALIZATION_V1)
+                metadata['regularization_normalization']
             ),
-            fit_channel_policy=str(metadata.get("fit_channel_policy", FIT_CHANNEL_POLICY_V2)),
-            fit_solver_policy=str(metadata.get("fit_solver_policy", FIT_SOLVER_POLICY_LEGACY)),
+            fit_channel_policy=str(metadata['fit_channel_policy']),
+            fit_solver_policy=str(metadata["fit_solver_policy"]),
             fit_design_singular_values=tuple(
-                float(value) for value in metadata.get("fit_design_singular_values", [])
+                float(value) for value in metadata['fit_design_singular_values']
             ),
             fit_design_machine_error_bound=float(
-                metadata.get("fit_design_machine_error_bound", 0.0)
+                metadata['fit_design_machine_error_bound']
             ),
             fit_design_propagated_error_bound=float(
-                metadata.get("fit_design_propagated_error_bound", 0.0)
+                metadata['fit_design_propagated_error_bound']
             ),
-            fit_design_rank_tolerance=float(metadata.get("fit_design_rank_tolerance", 0.0)),
+            fit_design_rank_tolerance=float(metadata['fit_design_rank_tolerance']),
             fit_design_certified_rank=int(
-                metadata.get("fit_design_certified_rank", len(metadata.get("fit_pivots", [])))
+                metadata['fit_design_certified_rank']
             ),
             fit_selected_condition_number=float(
-                metadata.get("fit_selected_condition_number", 0.0)
+                metadata['fit_selected_condition_number']
             ),
             fit_selected_singular_value_min=float(
-                metadata.get("fit_selected_singular_value_min", 0.0)
+                metadata['fit_selected_singular_value_min']
             ),
-            fit_selected_error_bound=float(metadata.get("fit_selected_error_bound", 0.0)),
+            fit_selected_error_bound=float(metadata['fit_selected_error_bound']),
             fit_response_gram_eigenvalues=tuple(
                 float(value)
-                for value in metadata.get("fit_response_gram_eigenvalues", [])
+                for value in metadata['fit_response_gram_eigenvalues']
             ),
-            fit_response_gram_rank=int(metadata.get("fit_response_gram_rank", 0)),
+            fit_response_gram_rank=int(metadata['fit_response_gram_rank']),
             fit_response_gram_rank_tolerance=float(
-                metadata.get("fit_response_gram_rank_tolerance", 0.0)
+                metadata['fit_response_gram_rank_tolerance']
             ),
             fit_response_gram_condition_number=float(
-                metadata.get("fit_response_gram_condition_number", 0.0)
+                metadata['fit_response_gram_condition_number']
             ),
             fit_response_gram_orthonormality_residual=float(
-                metadata.get("fit_response_gram_orthonormality_residual", 0.0)
+                metadata['fit_response_gram_orthonormality_residual']
             ),
-            max_response_amplitude=float(metadata.get("max_response_amplitude", 0.0)),
-            fit_objective=dict(metadata.get("fit_objective", _equal_matrix_fit_objective())),
+            max_response_amplitude=float(metadata['max_response_amplitude']),
+            fit_objective=dict(metadata['fit_objective']),
         )
         return cls(basis=basis, fitted=fitted)
 
@@ -3189,10 +3030,10 @@ class CompiledResponseBasis:
     reduction_proofs: tuple[Mapping[str, Any], ...]
     dropped_channels: tuple[Mapping[str, Any], ...]
     basis_hash: str
-    response_semantics: str = COMPLETE_LINEAR_V2
-    response_normalization: str = RESPONSE_NORMALIZATION_V1
-    coefficient_normalization: str = COEFFICIENT_NORMALIZATION_V1
-    regularization_normalization: str = REGULARIZATION_NORMALIZATION_V1
+    response_semantics: str = RESPONSE_SEMANTICS
+    response_normalization: str = RESPONSE_NORMALIZATION
+    coefficient_normalization: str = COEFFICIENT_NORMALIZATION
+    regularization_normalization: str = REGULARIZATION_NORMALIZATION
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "channels", tuple(self.channels))
@@ -3326,7 +3167,7 @@ class CompiledResponseBasis:
             "response_normalization": self.response_normalization,
             "coefficient_normalization": self.coefficient_normalization,
             "regularization_normalization": self.regularization_normalization,
-            "compiler_version": COMPILER_VERSION,
+            "compiler_version": COMPILER_FINGERPRINT,
             "coordinate": self.coordinate.metadata(),
             "dim": int(self.dim),
             "identity": self.identity_record,
@@ -3345,7 +3186,7 @@ class CompiledResponseBasis:
             "response_normalization": self.response_normalization,
             "coefficient_normalization": self.coefficient_normalization,
             "regularization_normalization": self.regularization_normalization,
-            "compiler_version": COMPILER_VERSION,
+            "compiler_version": COMPILER_FINGERPRINT,
             "basis_hash": self.basis_hash,
             "dim": int(self.dim),
             "coordinate": self.coordinate.metadata(),
@@ -3755,14 +3596,14 @@ class CompiledResponseBasis:
         equal_weighting_requested = (
             isinstance(spectral_weighting, Mapping)
             and str(spectral_weighting.get("mode", "")).strip().lower()
-            in {"equal_matrix", EQUAL_MATRIX_FIT_OBJECTIVE_V1}
+            in {"equal_matrix", EQUAL_MATRIX_FIT_OBJECTIVE}
         )
         normalized_weighting_requested = isinstance(
             spectral_weighting, NormalizedLowEnergyWeightingSpec
         ) or (
             isinstance(spectral_weighting, Mapping)
             and str(spectral_weighting.get("mode", "")).strip().lower()
-            == "normalized_low_energy_linear_v1"
+            == "normalized_low_energy_linear"
         )
         if normalized_weighting_requested:
             prepared_normalized_weighting = build_normalized_low_energy_weighting(
@@ -3914,7 +3755,7 @@ class CompiledResponseBasis:
                 regularized_singular_value_max / selected_singular_value_min
             )
             selected_error_bound = propagated_error_bound
-            fit_solver_policy = FIT_SOLVER_POLICY_RIDGE_V3
+            fit_solver_policy = FIT_SOLVER_RIDGE
             filter_factors = selected_singular_values / (
                 selected_singular_values**2 + ridge
             )
@@ -4032,7 +3873,7 @@ class CompiledResponseBasis:
                 singular_values[certified_rank - 1]
             )
             selected_error_bound = rank_tolerance
-            fit_solver_policy = FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4
+            fit_solver_policy = FIT_SOLVER_PHYSICAL_MIN_NORM
             physical_theta = right_vectors_h[:certified_rank, :].T @ (
                 (left_vectors[:, :certified_rank].T @ target_vector)
                 / singular_values[:certified_rank]
@@ -4060,8 +3901,8 @@ class CompiledResponseBasis:
             for index in np.flatnonzero(coefficients != 0.0)
         )
         if fit_solver_policy in {
-            FIT_SOLVER_POLICY_RIDGE_V3,
-            FIT_SOLVER_POLICY_PHYSICAL_MIN_NORM_V4,
+            FIT_SOLVER_RIDGE,
+            FIT_SOLVER_PHYSICAL_MIN_NORM,
         }:
             fit_pivots: tuple[int, ...] = ()
             fit_selected_channel_ids: tuple[str, ...] = ()
@@ -4086,7 +3927,7 @@ class CompiledResponseBasis:
             "fit_solver_channel_indices": list(fit_solver_channel_indices),
             "fit_solver_channel_ids": list(fit_solver_channel_ids),
             "eligible_channel_ids": [self.channels[int(index)].channel_id for index in eligible],
-            "fit_channel_policy": FIT_CHANNEL_POLICY_V2,
+            "fit_channel_policy": FIT_CHANNEL_POLICY,
             "fit_solver_policy": fit_solver_policy,
             "fit_design_singular_values": _json_record(singular_values),
             "fit_design_machine_error_bound": machine_error_bound,
@@ -4123,7 +3964,7 @@ class CompiledResponseBasis:
             fit_solver_channel_indices=fit_solver_channel_indices,
             fit_solver_channel_ids=fit_solver_channel_ids,
             coefficient_normalization=self.coefficient_normalization,
-            fit_channel_policy=FIT_CHANNEL_POLICY_V2,
+            fit_channel_policy=FIT_CHANNEL_POLICY,
             fit_solver_policy=fit_solver_policy,
             fit_design_singular_values=tuple(float(value) for value in singular_values),
             fit_design_machine_error_bound=machine_error_bound,
@@ -4180,7 +4021,7 @@ class CompiledResponseBasis:
             "response_normalization": self.response_normalization,
             "coefficient_normalization": self.coefficient_normalization,
             "regularization_normalization": self.regularization_normalization,
-            "compiler_version": COMPILER_VERSION,
+            "compiler_version": COMPILER_FINGERPRINT,
             "basis_hash": self.basis_hash,
             "dim": int(self.dim),
             "coordinate": self.coordinate.metadata(),
@@ -4213,8 +4054,8 @@ class CompiledResponseBasis:
         if missing:
             raise ValueError(f"frozen compiled response basis is missing arrays: {missing}")
         metadata = json.loads(str(np.asarray(arrays["metadata_json"]).item()))
-        if metadata.get("response_semantics") != COMPLETE_LINEAR_V2:
-            raise ValueError("frozen response basis is not complete_linear_v2")
+        if metadata['response_semantics'] != RESPONSE_SEMANTICS:
+            raise ValueError("frozen response basis is not complete_linear")
         coordinate = PolynomialCoordinateBasis.from_metadata(metadata["coordinate"])
         dim = int(metadata["dim"])
         entry_channel = np.asarray(arrays["entry_channel"], dtype=np.int64)
@@ -4302,13 +4143,13 @@ class CompiledResponseBasis:
             dim=dim,
             identity_record=metadata["identity_record"],
             candidate_artifact=metadata["candidate_artifact"],
-            reduction_proofs=tuple(metadata.get("reduction_proofs", [])),
-            dropped_channels=tuple(metadata.get("dropped_channels", [])),
+            reduction_proofs=tuple(metadata['reduction_proofs']),
+            dropped_channels=tuple(metadata['dropped_channels']),
             basis_hash=str(metadata["basis_hash"]),
             response_semantics=str(metadata["response_semantics"]),
             response_normalization=str(metadata["response_normalization"]),
             coefficient_normalization=str(
-                metadata.get("coefficient_normalization", COEFFICIENT_NORMALIZATION_V1)
+                metadata['coefficient_normalization']
             ),
             regularization_normalization=str(metadata["regularization_normalization"]),
         )
@@ -4819,7 +4660,7 @@ def compile_generator_fixed_response_group(
     factorized_action_nnz: dict[str, int] = {}
     factorized_action_hashes: dict[str, str] = {}
     factorized_action_match_residuals: dict[str, float] = {}
-    factorized_fallback_reasons: dict[str, str] = {}
+    matrix_action_backend_reasons: dict[str, str] = {}
     factorized_generator_names: set[str] = set()
     builtin_exact_generator_names: set[str] = set()
     factorized_channel_actions: dict[str, sparse.csc_matrix] = {}
@@ -4828,7 +4669,6 @@ def compile_generator_fixed_response_group(
         str(key): value for key, value in (factorized_actions or {}).items()
     }
     from .response_basis_factorized import FactorizedTermActionError
-    from ..symmetry.factorized_action import FactorizedActionCertificationError
 
     generator_started = time.perf_counter()
     _response_progress(
@@ -4853,7 +4693,7 @@ def compile_generator_fixed_response_group(
             factorized_channel_actions[name] = direct_action
             builtin_exact_generator_names.add(name)
             factorized_action_nnz[name] = int(direct_action.nnz)
-            factorized_action_hashes[name] = "builtin_exact_identity_v1"
+            factorized_action_hashes[name] = "builtin_exact_identity"
             factorized_action_match_residuals[name] = 0.0
             antiunitary_parities[name] = False
             per_column_bounds = tuple(
@@ -4865,131 +4705,119 @@ def compile_generator_fixed_response_group(
             )
             continue
         if factorized_action is not None:
-            try:
-                from .response_basis_factorized import (
-                    compile_factorized_real_channel_action,
+            from .response_basis_factorized import (
+                compile_factorized_real_channel_action,
+            )
+            from ..symmetry.factorized_action import (
+                materialize_factorized_matrix,
+            )
+            if str(getattr(factorized_action, "name", "")) != name:
+                raise FactorizedTermActionError(
+                    f"artifact name {getattr(factorized_action, 'name', None)!r} "
+                    f"does not match generator {name!r}"
                 )
-                from ..symmetry.factorized_action import (
-                    materialize_factorized_matrix,
+            if bool(factorized_action.antiunitary) != bool(element.antiunitary):
+                raise FactorizedTermActionError("antiunitary parity mismatch")
+            if tuple(int(value) for value in factorized_action.q_permutation) != tuple(
+                int(value) for value in element.q_permutation
+            ):
+                raise FactorizedTermActionError("Q permutation mismatch")
+            if tuple(int(value) for value in factorized_action.sector_permutation) != tuple(
+                int(value) for value in element.sector_permutation
+            ):
+                raise FactorizedTermActionError("sector permutation mismatch")
+            expected_forward = np.linalg.inv(
+                np.asarray(element.k_pullback, dtype=np.float64)
+            )
+            actual_forward = np.asarray(
+                factorized_action.k_forward,
+                dtype=np.float64,
+            )
+            map_tolerance = float(
+                128.0
+                * np.finfo(np.float64).eps
+                * max(1.0, np.linalg.norm(expected_forward, ord=2))
+            )
+            if not np.allclose(
+                actual_forward,
+                expected_forward,
+                rtol=0.0,
+                atol=map_tolerance,
+            ):
+                raise FactorizedTermActionError("Cartesian k action mismatch")
+            reconstructed = materialize_factorized_matrix(factorized_action)
+            reference = np.asarray(element.internal_u, dtype=np.complex128)
+            if reconstructed.shape != reference.shape:
+                raise FactorizedTermActionError(
+                    f"full action shape mismatch: {reconstructed.shape} != {reference.shape}"
                 )
-
-                if str(getattr(factorized_action, "name", "")) != name:
-                    raise FactorizedTermActionError(
-                        f"artifact name {getattr(factorized_action, 'name', None)!r} "
-                        f"does not match generator {name!r}"
+            overlap = complex(np.vdot(reconstructed, reference))
+            phase = overlap / abs(overlap) if abs(overlap) > 0.0 else 1.0 + 0.0j
+            action_match_residual = float(
+                np.linalg.norm(reference - phase * reconstructed, ord="fro")
+            )
+            action_match_bound = float(
+                factorized_action.off_route_residual
+                + np.sqrt(max(1, len(factorized_action.q_phases)))
+                * factorized_action.phase_alignment_residual
+                + factorized_action.matrix_certification_bound
+                + 128.0
+                * np.finfo(np.float64).eps
+                * max(1.0, np.linalg.norm(reference, ord="fro"))
+            )
+            if action_match_residual > action_match_bound:
+                raise FactorizedTermActionError(
+                    "reconstructed full action does not match the active generator: "
+                    f"residual={action_match_residual:.6e}, "
+                    f"bound={action_match_bound:.6e}"
+                )
+            direct_action = compile_factorized_real_channel_action(
+                seeds=seeds,
+                logical_channels=raw_logical.channels,
+                physical_channel_ids=tuple(
+                    channel.channel_id for channel in unique_raw
+                ),
+                factorized_action=factorized_action,
+                physical_channel_aliases=exact_duplicate_of,
+            )
+            generator_images[name] = (vocabulary @ direct_action).tocsc()
+            generator_images[name].eliminate_zeros()
+            factorized_channel_actions[name] = direct_action
+            factorized_generator_names.add(name)
+            factorized_action_nnz[name] = int(direct_action.nnz)
+            factorized_action_hashes[name] = str(
+                factorized_action.artifact_hash
+            )
+            factorized_action_match_residuals[name] = action_match_residual
+            antiunitary_parities[name] = bool(element.antiunitary)
+            per_column_bounds = []
+            for channel in unique_raw:
+                raw_norm = float(
+                    np.linalg.norm(
+                        unique_vectors[unique_index_by_id[channel.channel_id]].data
                     )
-                if bool(factorized_action.antiunitary) != bool(element.antiunitary):
-                    raise FactorizedTermActionError("antiunitary parity mismatch")
-                if tuple(int(value) for value in factorized_action.q_permutation) != tuple(
-                    int(value) for value in element.q_permutation
-                ):
-                    raise FactorizedTermActionError("Q permutation mismatch")
-                if tuple(int(value) for value in factorized_action.sector_permutation) != tuple(
-                    int(value) for value in element.sector_permutation
-                ):
-                    raise FactorizedTermActionError("sector permutation mismatch")
-                expected_forward = np.linalg.inv(
-                    np.asarray(element.k_pullback, dtype=np.float64)
                 )
-                actual_forward = np.asarray(
-                    factorized_action.k_forward,
-                    dtype=np.float64,
+                factorization_bound = float(
+                    (2.0 * action_match_residual + action_match_residual**2)
+                    * raw_norm
                 )
-                map_tolerance = float(
-                    128.0
-                    * np.finfo(np.float64).eps
-                    * max(1.0, np.linalg.norm(expected_forward, ord=2))
+                per_column_bounds.append(
+                    raw_error_bounds[channel.channel_id] + factorization_bound
                 )
-                if not np.allclose(
-                    actual_forward,
-                    expected_forward,
-                    rtol=0.0,
-                    atol=map_tolerance,
-                ):
-                    raise FactorizedTermActionError("Cartesian k action mismatch")
-                reconstructed = materialize_factorized_matrix(factorized_action)
-                reference = np.asarray(element.internal_u, dtype=np.complex128)
-                if reconstructed.shape != reference.shape:
-                    raise FactorizedTermActionError(
-                        f"full action shape mismatch: {reconstructed.shape} != {reference.shape}"
-                    )
-                overlap = complex(np.vdot(reconstructed, reference))
-                phase = overlap / abs(overlap) if abs(overlap) > 0.0 else 1.0 + 0.0j
-                action_match_residual = float(
-                    np.linalg.norm(reference - phase * reconstructed, ord="fro")
-                )
-                action_match_bound = float(
-                    factorized_action.off_route_residual
-                    + np.sqrt(max(1, len(factorized_action.q_phases)))
-                    * factorized_action.phase_alignment_residual
-                    + factorized_action.matrix_certification_bound
-                    + 128.0
-                    * np.finfo(np.float64).eps
-                    * max(1.0, np.linalg.norm(reference, ord="fro"))
-                )
-                if action_match_residual > action_match_bound:
-                    raise FactorizedTermActionError(
-                        "reconstructed full action does not match the active generator: "
-                        f"residual={action_match_residual:.6e}, "
-                        f"bound={action_match_bound:.6e}"
-                    )
-                direct_action = compile_factorized_real_channel_action(
-                    seeds=seeds,
-                    logical_channels=raw_logical.channels,
-                    physical_channel_ids=tuple(
-                        channel.channel_id for channel in unique_raw
-                    ),
-                    factorized_action=factorized_action,
-                    physical_channel_aliases=exact_duplicate_of,
-                )
-                generator_images[name] = (vocabulary @ direct_action).tocsc()
-                generator_images[name].eliminate_zeros()
-                factorized_channel_actions[name] = direct_action
-                factorized_generator_names.add(name)
-                factorized_action_nnz[name] = int(direct_action.nnz)
-                factorized_action_hashes[name] = str(
-                    factorized_action.artifact_hash
-                )
-                factorized_action_match_residuals[name] = action_match_residual
-                antiunitary_parities[name] = bool(element.antiunitary)
-                per_column_bounds = []
-                for channel in unique_raw:
-                    raw_norm = float(
-                        np.linalg.norm(
-                            unique_vectors[unique_index_by_id[channel.channel_id]].data
-                        )
-                    )
-                    factorization_bound = float(
-                        (2.0 * action_match_residual + action_match_residual**2)
-                        * raw_norm
-                    )
-                    per_column_bounds.append(
-                        raw_error_bounds[channel.channel_id] + factorization_bound
-                    )
-                generator_column_error_bounds[name] = tuple(per_column_bounds)
-                generator_error_bounds[name] = float(
-                    np.linalg.norm(np.asarray(per_column_bounds, dtype=np.float64))
-                )
-                continue
-            except (FactorizedTermActionError, FactorizedActionCertificationError) as exc:
-                if factorized_actions_required:
-                    raise
-                factorized_fallback_reasons[name] = str(exc)
-                _response_progress(
-                    progress_callback,
-                    "response basis factorized generator fallback "
-                    f"{name}: {exc}",
-                    state="diagnostic",
-                )
+            generator_column_error_bounds[name] = tuple(per_column_bounds)
+            generator_error_bounds[name] = float(
+                np.linalg.norm(np.asarray(per_column_bounds, dtype=np.float64))
+            )
+            continue
         else:
             if factorized_actions_required:
                 raise FactorizedTermActionError(
                     f"missing certified factorized action for generator {name!r}"
                 )
-            factorized_fallback_reasons[name] = "certified factorized action unavailable"
+            matrix_action_backend_reasons[name] = "certified factorized action unavailable"
             _response_progress(
                 progress_callback,
-                "response basis factorized generator fallback "
+                "response basis full-matrix generator action "
                 f"{name}: certified factorized action unavailable",
                 state="diagnostic",
             )
@@ -5080,7 +4908,7 @@ def compile_generator_fixed_response_group(
             generator_column_absolute_error_bounds=generator_column_error_bounds,
             materialize_ambient_vectors=bool(materialize_ambient_vectors),
         )
-        fixed_solver = "generator_fixed_subspace__direct_term_action_metric_v1"
+        fixed_solver = "generator_fixed_subspace__direct_term_action_metric"
     else:
         fixed = compile_generator_fixed_vocabulary(
             vocabulary,
@@ -5239,26 +5067,26 @@ def compile_generator_fixed_response_group(
         support_artifact=support_artifact,
         adjoint_artifact={
             **dict(raw_logical.adjoint_artifact),
-            "compiler": "actual_generator_fixed_subspace_v1",
+            "compiler": "actual_generator_fixed_subspace",
             "generator_names": [name for name, _ in generator_elements],
             "generator_image_raw_transform_count": int(
                 generator_image_raw_transform_count
             ),
             "logical_projection_compiler": (
-                "certified_physical_representative_coordinates_v1"
+                "certified_physical_representative_coordinates"
                 if not bool(materialize_ambient_vectors)
-                else "materialized_ambient_fixed_vectors_v1"
+                else "materialized_ambient_fixed_vectors"
             ),
             "generator_image_compiler": (
-                "analytic_identity_term_action_v1"
+                "analytic_identity_term_action"
                 if len(builtin_exact_generator_names) == len(generator_elements)
                 else (
-                    "factorized_q_route_term_action_v2"
+                    "factorized_q_route_term_action"
                     if len(factorized_generator_names) == len(generator_elements)
                     else (
-                        "mixed_factorized_and_full_matrix_v1"
+                        "mixed_factorized_and_full_matrix"
                         if factorized_generator_names
-                        else "full_matrix_seed_transform_v1"
+                        else "full_matrix_seed_transform"
                     )
                 )
             ),
@@ -5273,8 +5101,8 @@ def compile_generator_fixed_response_group(
             "factorized_action_match_residuals": dict(
                 sorted(factorized_action_match_residuals.items())
             ),
-            "factorized_fallback_reasons": dict(
-                sorted(factorized_fallback_reasons.items())
+            "matrix_action_backend_reasons": dict(
+                sorted(matrix_action_backend_reasons.items())
             ),
             "fixed_space_compiler": str(fixed.metadata.get("compiler", "")),
             "fixed_rank": int(fixed.rank),
@@ -5363,7 +5191,7 @@ def compile_generator_fixed_response_group(
                     "algebra_floor_absolute": own_floor,
                     "algebra_floor_ratio": outside
                     / max(own_floor, np.finfo(float).tiny),
-                    "dependency_policy": "per_column_propagated_error_fail_closed_v1",
+                    "dependency_policy": "per_column_propagated_error_fail_closed",
                 }
         retained = [
             channel
@@ -5540,7 +5368,7 @@ def compile_generator_fixed_response_group(
             for channel in retained
             if channel.classification == "ambiguous"
         ],
-        "dependency_policy": "per_column_propagated_error_fail_closed_v1",
+        "dependency_policy": "per_column_propagated_error_fail_closed",
         "logical_to_fixed_coordinates": {
             channel_id: [float(value) for value in fixed_coordinates[channel_id]]
             for channel_id in sorted(fixed_coordinates)
@@ -5683,7 +5511,7 @@ def response_basis_cache_stats() -> dict[str, Any]:
 
 def _cartesian_action_matrix(action_map: Mapping[str, Any], *, field: str) -> np.ndarray:
     if not isinstance(action_map, Mapping):
-        raise ValueError(f"complete_linear_v2 requires explicit {field} metadata")
+        raise ValueError(f"complete_linear requires explicit {field} metadata")
     map_type = str(action_map.get("type", "")).strip().lower()
     if map_type == "identity":
         return np.eye(2, dtype=np.float64)
@@ -5713,7 +5541,7 @@ def _canonical_lattice_map(
         (np.asarray(bM1, dtype=np.float64), np.asarray(bM2, dtype=np.float64))
     )
     if reciprocal_columns.shape != (2, 2) or abs(float(np.linalg.det(reciprocal_columns))) <= np.finfo(float).eps:
-        raise ValueError("complete_linear_v2 requires a nonsingular explicit reciprocal basis")
+        raise ValueError("complete_linear requires a nonsingular explicit reciprocal basis")
     lattice_map = np.linalg.solve(reciprocal_columns, cartesian_map @ reciprocal_columns)
     rounded = np.rint(lattice_map).astype(np.int64)
     residual = float(np.linalg.norm(lattice_map - rounded))
@@ -5757,7 +5585,7 @@ def _sector_permutation_from_metadata(
             return (1, 0)
         raise ValueError(f"unsupported explicit sector_map {sector_map!r}")
     if not isinstance(sector_map, Mapping):
-        raise ValueError("complete_linear_v2 requires explicit sector_map metadata")
+        raise ValueError("complete_linear requires explicit sector_map metadata")
     result = []
     for slot, name in enumerate(names_by_slot):
         target = sector_map.get(name, sector_map.get(str(slot + 1), name))
@@ -6032,12 +5860,12 @@ def finite_group_from_model_actions(
         if int(count) > 0
     )
     if not active_slots:
-        raise ValueError("complete_linear_v2 requires at least one active orbital sector")
+        raise ValueError("complete_linear requires at least one active orbital sector")
     qsets = (np.asarray(Q_set1), np.asarray(Q_set2))
     q_count = int(sum(qset.shape[0] for qset in qsets))
     if not operations:
         if symmetry_gen is None:
-            raise ValueError("complete_linear_v2 requires an explicit symmetry generator or an empty identity action")
+            raise ValueError("complete_linear requires an explicit symmetry generator or an empty identity action")
         dim = int(getattr(symmetry_gen, "dim", 0) or 0)
         if dim <= 0:
             matrices = getattr(symmetry_gen, "matrices", {})
@@ -6049,7 +5877,7 @@ def finite_group_from_model_actions(
     generators: list[FiniteGroupGenerator] = []
     for raw_operation in operations:
         if not isinstance(raw_operation, Mapping):
-            raise ValueError("complete_linear_v2 symmetry operations must be explicit mappings")
+            raise ValueError("complete_linear symmetry operations must be explicit mappings")
         operation = dict(raw_operation)
         resolved_action = operation.get("internal_resolved_action")
         if isinstance(resolved_action, Mapping):
@@ -6063,11 +5891,11 @@ def finite_group_from_model_actions(
         ]
         if missing:
             if "q_map" in missing:
-                raise ValueError("complete_linear_v2 requires explicit q_map metadata")
-            raise ValueError(f"complete_linear_v2 operation is missing explicit action metadata: {missing}")
+                raise ValueError("complete_linear requires explicit q_map metadata")
+            raise ValueError(f"complete_linear operation is missing explicit action metadata: {missing}")
         name = str(operation.get("name", ""))
         if not name:
-            raise ValueError("complete_linear_v2 operation requires an explicit family name")
+            raise ValueError("complete_linear operation requires an explicit family name")
         forward = _cartesian_action_matrix(operation["k_map"], field="k_map")
         canonical = _canonical_lattice_map(
             forward,
@@ -6097,7 +5925,7 @@ def finite_group_from_model_actions(
         else:
             q_permutation, sector_permutation = projected_permutations
         if symmetry_gen is None:
-            raise ValueError("complete_linear_v2 cannot infer internal U without exactified symmetry matrices")
+            raise ValueError("complete_linear cannot infer internal U without exactified symmetry matrices")
         internal_u = np.asarray(
             symmetry_gen.get_operator(name, operation.get("params")),
             dtype=np.complex128,
@@ -6218,12 +6046,12 @@ def _support_masks_from_seeds(
     }
     support_mask_compilers = {
         component: (
-            "explicit_reduced_authored_v1"
+            "explicit_reduced_authored"
             if policies_by_component[component] == {"explicit_reduced"}
             else (
-                "authored_exact_structural_group_adjoint_closed_v1"
+                "authored_exact_structural_group_adjoint_closed"
                 if component in structurally_closed_components
-                else "per_seed_propagated_error_group_adjoint_closure_v1"
+                else "per_seed_propagated_error_group_adjoint_closure"
             )
         )
         for component in masks
@@ -6301,7 +6129,7 @@ def _support_masks_from_seeds(
             mask[...] = closed_mask
             structurally_closed_components.add(component)
             support_mask_compilers[component] = (
-                "certified_factorized_boolean_group_adjoint_closure_v1"
+                "certified_factorized_boolean_group_adjoint_closure"
             )
 
     def expand_until_certified(
@@ -6392,12 +6220,12 @@ def _support_masks_from_seeds(
         policy_artifact[component] = {
             "term_space_policy": policy,
             "support_mask_policy": (
-                "complete_symmetry_adjoint_closure_v1"
+                "complete_symmetry_adjoint_closure"
                 if policy == "complete"
                 else (
-                    "orbit_representative_symmetry_adjoint_closure_v1"
+                    "orbit_representative_symmetry_adjoint_closure"
                     if policy == "orbit_representative"
-                    else "explicit_reduced_authored_v1"
+                    else "explicit_reduced_authored"
                 )
             ),
             "authored_support_entry_count": authored_counts[component],
@@ -6511,18 +6339,18 @@ def _local_reynolds_cache_identity(
 
     origin_array = np.asarray(coordinate.origin, dtype="<f8")
     return {
-        "algorithm": LOCAL_REYNOLDS_ALGORITHM_V1,
-        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION_V1,
-        "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND_V1,
-        "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
-        "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
-        "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
-        "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
-        "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
-        "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY_V1,
-        "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY_V1,
-        "materialization_policy": LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1,
-        "reduce_policy": LOCAL_REYNOLDS_REDUCE_POLICY_V1,
+        "algorithm": LOCAL_REYNOLDS_ALGORITHM,
+        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION,
+        "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND,
+        "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY,
+        "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST,
+        "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE,
+        "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE,
+        "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR,
+        "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY,
+        "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY,
+        "materialization_policy": LOCAL_REYNOLDS_MATERIALIZATION_POLICY,
+        "reduce_policy": LOCAL_REYNOLDS_REDUCE_POLICY,
         "generator_antiunitary_parities_by_group": (
             generator_parities_by_group
         ),
@@ -6640,10 +6468,10 @@ def _basis_layout_identity(
         ],
         "polynomial_coordinate": coordinate.metadata(),
         "dtype": "complex128",
-        "response_normalization": RESPONSE_NORMALIZATION_V1,
-        "coefficient_normalization": COEFFICIENT_NORMALIZATION_V1,
-        "regularization_normalization": REGULARIZATION_NORMALIZATION_V1,
-        "compiler_version": COMPILER_VERSION,
+        "response_normalization": RESPONSE_NORMALIZATION,
+        "coefficient_normalization": COEFFICIENT_NORMALIZATION,
+        "regularization_normalization": REGULARIZATION_NORMALIZATION,
+        "compiler_version": COMPILER_FINGERPRINT,
         "term_templates": getattr(config, "term_templates", []),
     }
 
@@ -6709,32 +6537,32 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
     """Fail closed unless the cache key sees the complete compiler identity."""
 
     if not isinstance(input_record, Mapping) or not input_record:
-        raise ValueError("complete_linear_v2 persistent cache input is incomplete")
+        raise ValueError("complete_linear persistent cache input is incomplete")
     missing_top = sorted(_PERSISTENT_CACHE_INPUT_FIELDS.difference(input_record))
     if missing_top:
         raise ValueError(
-            "complete_linear_v2 persistent cache input is incomplete; missing "
+            "complete_linear persistent cache input is incomplete; missing "
             + ", ".join(missing_top)
         )
     unexpected_top = sorted(set(input_record).difference(_PERSISTENT_CACHE_INPUT_FIELDS))
     if unexpected_top:
         raise ValueError(
-            "complete_linear_v2 persistent cache input has unexpected fields: "
+            "complete_linear persistent cache input has unexpected fields: "
             + ", ".join(str(value) for value in unexpected_top)
         )
     identity = input_record.get("identity")
     if not isinstance(identity, Mapping):
-        raise ValueError("complete_linear_v2 persistent cache input identity must be a mapping")
+        raise ValueError("complete_linear persistent cache input identity must be a mapping")
     missing_identity = sorted(_PERSISTENT_CACHE_IDENTITY_FIELDS.difference(identity))
     if missing_identity:
         raise ValueError(
-            "complete_linear_v2 persistent cache input identity is incomplete; missing "
+            "complete_linear persistent cache input identity is incomplete; missing "
             + ", ".join(missing_identity)
         )
     unexpected_identity = sorted(set(identity).difference(_PERSISTENT_CACHE_IDENTITY_FIELDS))
     if unexpected_identity:
         raise ValueError(
-            "complete_linear_v2 persistent cache input identity has unexpected fields: "
+            "complete_linear persistent cache input identity has unexpected fields: "
             + ", ".join(str(value) for value in unexpected_identity)
         )
     local_reynolds_identity = identity.get("local_reynolds_response_compiler")
@@ -6743,26 +6571,26 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
         or set(local_reynolds_identity) != _LOCAL_REYNOLDS_CACHE_IDENTITY_FIELDS
     ):
         raise ValueError(
-            "complete_linear_v2 persistent cache local-Reynolds identity is incomplete"
+            "complete_linear persistent cache local-Reynolds identity is incomplete"
         )
     expected_local_reynolds_values = {
-        "algorithm": LOCAL_REYNOLDS_ALGORITHM_V1,
-        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION_V1,
-        "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND_V1,
-        "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1,
-        "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2,
-        "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
-        "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
-        "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
-        "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY_V1,
-        "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY_V1,
-        "materialization_policy": LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1,
-        "reduce_policy": LOCAL_REYNOLDS_REDUCE_POLICY_V1,
+        "algorithm": LOCAL_REYNOLDS_ALGORITHM,
+        "real_linear_action_convention": REAL_LINEAR_ACTION_CONVENTION,
+        "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND,
+        "structural_plan_policy": LOCAL_FIXED_STRUCTURAL_PLAN_POLICY,
+        "physical_seed_digest": LOCAL_FIXED_PHYSICAL_SEED_DIGEST,
+        "absolute_tolerance": LOCAL_FIXED_ABSOLUTE_TOLERANCE,
+        "relative_tolerance": LOCAL_FIXED_RELATIVE_TOLERANCE,
+        "gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR,
+        "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY,
+        "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY,
+        "materialization_policy": LOCAL_REYNOLDS_MATERIALIZATION_POLICY,
+        "reduce_policy": LOCAL_REYNOLDS_REDUCE_POLICY,
     }
     for field_name, expected_value in expected_local_reynolds_values.items():
         if local_reynolds_identity.get(field_name) != expected_value:
             raise ValueError(
-                "complete_linear_v2 persistent cache local-Reynolds policy mismatch: "
+                "complete_linear persistent cache local-Reynolds policy mismatch: "
                 f"{field_name}"
             )
     q_center = local_reynolds_identity.get("q_center")
@@ -6772,26 +6600,26 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
         "dimensionless_scale",
     }:
         raise ValueError(
-            "complete_linear_v2 persistent cache local-fixed q_center is invalid"
+            "complete_linear persistent cache local-fixed q_center is invalid"
         )
     center_hex = str(q_center["serialized_little_endian_hex"])
     try:
         center_payload = bytes.fromhex(center_hex)
     except ValueError as error:
         raise ValueError(
-            "complete_linear_v2 persistent cache local-fixed q_center hex is invalid"
+            "complete_linear persistent cache local-fixed q_center hex is invalid"
         ) from error
     if len(center_payload) != 16 or center_payload.hex() != center_hex:
         raise ValueError(
-            "complete_linear_v2 persistent cache local-fixed q_center hex is invalid"
+            "complete_linear persistent cache local-fixed q_center hex is invalid"
         )
     if (
-        str(q_center["coordinate_convention"]) != COORDINATE_CONVENTION_V1
+        str(q_center["coordinate_convention"]) != COORDINATE_CONVENTION
         or not np.isfinite(float(q_center["dimensionless_scale"]))
         or float(q_center["dimensionless_scale"]) <= 0.0
     ):
         raise ValueError(
-            "complete_linear_v2 persistent cache local-fixed q_center metadata is invalid"
+            "complete_linear persistent cache local-fixed q_center metadata is invalid"
         )
     generator_parities = local_reynolds_identity.get(
         "generator_antiunitary_parities_by_group"
@@ -6803,28 +6631,28 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
         harmonic_provenance, list
     ):
         raise ValueError(
-            "complete_linear_v2 persistent cache local-fixed group metadata is invalid"
+            "complete_linear persistent cache local-fixed group metadata is invalid"
         )
     coordinate = input_record.get("coordinate")
     if not isinstance(coordinate, Mapping) or not coordinate:
-        raise ValueError("complete_linear_v2 persistent cache input coordinate must be a non-empty mapping")
+        raise ValueError("complete_linear persistent cache input coordinate must be a non-empty mapping")
     if _canonical_json(coordinate) != _canonical_json(identity.get("polynomial_coordinate")):
         raise ValueError(
-            "complete_linear_v2 persistent cache coordinate must match identity.polynomial_coordinate"
+            "complete_linear persistent cache coordinate must match identity.polynomial_coordinate"
         )
     if not isinstance(input_record.get("reduce"), bool):
-        raise ValueError("complete_linear_v2 persistent cache input reduce must be bool")
+        raise ValueError("complete_linear persistent cache input reduce must be bool")
     groups = input_record.get("groups")
     group_internal_u = input_record.get("group_internal_u")
     if not isinstance(groups, list) or not groups:
-        raise ValueError("complete_linear_v2 persistent cache input groups must be a non-empty list")
+        raise ValueError("complete_linear persistent cache input groups must be a non-empty list")
     if not isinstance(group_internal_u, list) or len(group_internal_u) != len(groups):
         raise ValueError(
-            "complete_linear_v2 persistent cache input group_internal_u must match groups"
+            "complete_linear persistent cache input group_internal_u must match groups"
         )
     if len(generator_parities) != len(groups) or len(harmonic_provenance) != len(groups):
         raise ValueError(
-            "complete_linear_v2 persistent cache local-fixed group layout must match groups"
+            "complete_linear persistent cache local-fixed group layout must match groups"
         )
     for group_index, parity_record in enumerate(generator_parities):
         if not isinstance(parity_record, Mapping) or any(
@@ -6834,7 +6662,7 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
             for name, parity in parity_record.items()
         ):
             raise ValueError(
-                "complete_linear_v2 persistent cache local-fixed parity record "
+                "complete_linear persistent cache local-fixed parity record "
                 f"for group {group_index} is invalid"
             )
     joint_key_fields = {
@@ -6853,7 +6681,7 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
             "joint_adjoint_keys",
         }:
             raise ValueError(
-                "complete_linear_v2 persistent cache local-fixed harmonic record "
+                "complete_linear persistent cache local-fixed harmonic record "
                 f"for group {group_index} is invalid"
             )
         key_records = provenance_record["joint_adjoint_keys"]
@@ -6865,7 +6693,7 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
             != len(key_records)
         ):
             raise ValueError(
-                "complete_linear_v2 persistent cache local-fixed harmonic count "
+                "complete_linear persistent cache local-fixed harmonic count "
                 f"for group {group_index} is invalid"
             )
         previous_seed_id: str | None = None
@@ -6875,7 +6703,7 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
                 "key",
             }:
                 raise ValueError(
-                    "complete_linear_v2 persistent cache local-fixed harmonic key "
+                    "complete_linear persistent cache local-fixed harmonic key "
                     f"{group_index}:{key_index} is invalid"
                 )
             seed_id = key_record["seed_id"]
@@ -6888,7 +6716,7 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
                 or set(key) != joint_key_fields
             ):
                 raise ValueError(
-                    "complete_linear_v2 persistent cache local-fixed harmonic key "
+                    "complete_linear persistent cache local-fixed harmonic key "
                     f"{group_index}:{key_index} is invalid"
                 )
             previous_seed_id = seed_id
@@ -6898,33 +6726,33 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
                 "coordinate_convention",
             }:
                 raise ValueError(
-                    "complete_linear_v2 persistent cache local-fixed harmonic center "
+                    "complete_linear persistent cache local-fixed harmonic center "
                     f"{group_index}:{key_index} is invalid"
                 )
     if not isinstance(input_record.get("seeds"), list) or not input_record["seeds"]:
-        raise ValueError("complete_linear_v2 persistent cache input seeds must be a non-empty list")
+        raise ValueError("complete_linear persistent cache input seeds must be a non-empty list")
 
     for seed_index, seed in enumerate(input_record["seeds"]):
         if not isinstance(seed, Mapping):
-            raise ValueError(f"complete_linear_v2 persistent cache seed {seed_index} must be a mapping")
+            raise ValueError(f"complete_linear persistent cache seed {seed_index} must be a mapping")
         required_seed_fields = {"seed_id", "support_component", "metadata", "coefficients"}
         if set(seed) != required_seed_fields:
             raise ValueError(
-                f"complete_linear_v2 persistent cache seed {seed_index} fields must be "
+                f"complete_linear persistent cache seed {seed_index} fields must be "
                 f"{sorted(required_seed_fields)}"
             )
         if not isinstance(seed.get("seed_id"), str) or not seed["seed_id"]:
-            raise ValueError(f"complete_linear_v2 persistent cache seed {seed_index} requires seed_id")
+            raise ValueError(f"complete_linear persistent cache seed {seed_index} requires seed_id")
         if not isinstance(seed.get("support_component"), str) or not seed["support_component"]:
             raise ValueError(
-                f"complete_linear_v2 persistent cache seed {seed_index} requires support_component"
+                f"complete_linear persistent cache seed {seed_index} requires support_component"
             )
         if not isinstance(seed.get("metadata"), Mapping):
-            raise ValueError(f"complete_linear_v2 persistent cache seed {seed_index} metadata must be a mapping")
+            raise ValueError(f"complete_linear persistent cache seed {seed_index} metadata must be a mapping")
         coefficients = seed.get("coefficients")
         if not isinstance(coefficients, Mapping) or not coefficients:
             raise ValueError(
-                f"complete_linear_v2 persistent cache seed {seed_index} coefficients must be non-empty"
+                f"complete_linear persistent cache seed {seed_index} coefficients must be non-empty"
             )
 
     action_fields = (
@@ -6940,40 +6768,40 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
         record = identity.get(field_name)
         if not isinstance(record, Mapping) or not record:
             raise ValueError(
-                f"complete_linear_v2 persistent cache input identity.{field_name} must be a non-empty mapping"
+                f"complete_linear persistent cache input identity.{field_name} must be a non-empty mapping"
             )
         keys = {str(key) for key in record}
         if action_keys is None:
             action_keys = keys
         elif keys != action_keys:
             raise ValueError(
-                "complete_linear_v2 persistent cache input action metadata keys do not match"
+                "complete_linear persistent cache input action metadata keys do not match"
             )
 
     group_limits = identity.get("group_limits")
     if not isinstance(group_limits, list) or len(group_limits) != len(groups):
-        raise ValueError("complete_linear_v2 persistent cache identity.group_limits must match groups")
+        raise ValueError("complete_linear persistent cache identity.group_limits must match groups")
     factorized_hashes = identity.get("factorized_action_hashes")
     if not isinstance(factorized_hashes, list) or len(factorized_hashes) != len(groups):
         raise ValueError(
-            "complete_linear_v2 persistent cache identity.factorized_action_hashes must match groups"
+            "complete_linear persistent cache identity.factorized_action_hashes must match groups"
         )
     for group_index, hashes in enumerate(factorized_hashes):
         if not isinstance(hashes, Mapping):
             raise ValueError(
-                "complete_linear_v2 persistent cache factorized action hashes "
+                "complete_linear persistent cache factorized action hashes "
                 f"for group {group_index} must be a mapping"
             )
         for name, value in hashes.items():
             if not str(name) or len(str(value)) != 64:
                 raise ValueError(
-                    "complete_linear_v2 persistent cache factorized action hash "
+                    "complete_linear persistent cache factorized action hash "
                     f"for group {group_index} is invalid"
                 )
     joint_route_hashes = identity.get("joint_route_action_hashes")
     if not isinstance(joint_route_hashes, list) or len(joint_route_hashes) != len(groups):
         raise ValueError(
-            "complete_linear_v2 persistent cache identity.joint_route_action_hashes "
+            "complete_linear persistent cache identity.joint_route_action_hashes "
             "must match groups"
         )
     for group_index, record in enumerate(joint_route_hashes):
@@ -6982,14 +6810,14 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
             "generator_matrix_hashes",
         }:
             raise ValueError(
-                "complete_linear_v2 persistent cache joint route hash record "
+                "complete_linear persistent cache joint route hash record "
                 f"for group {group_index} is invalid"
             )
         artifact_hash = record["joint_artifact_hash"]
         generator_hashes = record["generator_matrix_hashes"]
         if not isinstance(generator_hashes, Mapping):
             raise ValueError(
-                "complete_linear_v2 persistent cache joint route generator hashes "
+                "complete_linear persistent cache joint route generator hashes "
                 f"for group {group_index} must be a mapping"
             )
         if artifact_hash is None:
@@ -7009,7 +6837,7 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
             )
         ):
             raise ValueError(
-                "complete_linear_v2 persistent cache joint route hashes "
+                "complete_linear persistent cache joint route hashes "
                 f"for group {group_index} are invalid"
             )
     expected_action_keys: list[str] = []
@@ -7017,32 +6845,32 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
         zip(groups, group_internal_u, group_limits)
     ):
         if not isinstance(group, Mapping):
-            raise ValueError(f"complete_linear_v2 persistent cache group {group_index} must be a mapping")
+            raise ValueError(f"complete_linear persistent cache group {group_index} must be a mapping")
         required_group_fields = {"max_group_size", "max_word_length", "algebra_residual", "elements"}
         if set(group) != required_group_fields:
             raise ValueError(
-                f"complete_linear_v2 persistent cache group {group_index} fields must be "
+                f"complete_linear persistent cache group {group_index} fields must be "
                 f"{sorted(required_group_fields)}"
             )
         elements = group.get("elements")
         if not isinstance(elements, list) or not elements:
-            raise ValueError(f"complete_linear_v2 persistent cache group {group_index} elements must be non-empty")
+            raise ValueError(f"complete_linear persistent cache group {group_index} elements must be non-empty")
         if not isinstance(internal_matrices, list) or len(internal_matrices) != len(elements):
             raise ValueError(
-                f"complete_linear_v2 persistent cache group_internal_u[{group_index}] must match element order"
+                f"complete_linear persistent cache group_internal_u[{group_index}] must match element order"
             )
         if not isinstance(limits, Mapping) or (
             int(limits.get("max_group_size", -1)) != int(group["max_group_size"])
             or int(limits.get("max_word_length", -1)) != int(group["max_word_length"])
         ):
             raise ValueError(
-                f"complete_linear_v2 persistent cache group {group_index} limits do not match identity"
+                f"complete_linear persistent cache group {group_index} limits do not match identity"
             )
         for element_index, (element, internal_u) in enumerate(zip(elements, internal_matrices)):
             action_key = f"group_{group_index}_element_{element_index}"
             expected_action_keys.append(action_key)
             if not isinstance(element, Mapping):
-                raise ValueError(f"complete_linear_v2 persistent cache {action_key} must be a mapping")
+                raise ValueError(f"complete_linear persistent cache {action_key} must be a mapping")
             reference_u = np.asarray(identity["exactified_matrices"][action_key], dtype=np.complex128)
             candidate_u = np.asarray(internal_u, dtype=np.complex128)
             if (
@@ -7053,19 +6881,19 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
                 or not np.all(np.isfinite(candidate_u))
             ):
                 raise ValueError(
-                    f"complete_linear_v2 persistent cache {action_key} internal matrices are invalid"
+                    f"complete_linear persistent cache {action_key} internal matrices are invalid"
                 )
             phase_residual = _phase_aligned_residual(reference_u, candidate_u)
             phase_tolerance = 64.0 * np.finfo(np.float64).eps * max(1.0, np.sqrt(reference_u.size))
             if phase_residual > phase_tolerance:
                 raise ValueError(
-                    f"complete_linear_v2 persistent cache {action_key} internal U phase-aligned "
+                    f"complete_linear persistent cache {action_key} internal U phase-aligned "
                     f"residual {phase_residual:.3e} exceeds {phase_tolerance:.3e}"
                 )
             expected_antiunitary = bool(identity["antiunitary_parities"][action_key])
             if not isinstance(element.get("antiunitary"), bool) or element["antiunitary"] != expected_antiunitary:
                 raise ValueError(
-                    f"complete_linear_v2 persistent cache {action_key} antiunitary parity mismatch"
+                    f"complete_linear persistent cache {action_key} antiunitary parity mismatch"
                 )
             discrete_fields = (
                 ("canonical_k_map", "canonical_k_maps"),
@@ -7077,7 +6905,7 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
                 identity_value = np.asarray(identity[identity_field][action_key], dtype=np.int64)
                 if element_value.shape != identity_value.shape or not np.array_equal(element_value, identity_value):
                     raise ValueError(
-                        f"complete_linear_v2 persistent cache {action_key} {element_field} mismatch"
+                        f"complete_linear persistent cache {action_key} {element_field} mismatch"
                     )
             element_pullback = np.asarray(element.get("k_pullback"), dtype=np.float64)
             identity_pullback = np.asarray(identity["k_pullbacks"][action_key], dtype=np.float64)
@@ -7089,11 +6917,11 @@ def _validate_persistent_cache_input_record(input_record: Mapping[str, Any]) -> 
                 or not np.array_equal(element_pullback, identity_pullback)
             ):
                 raise ValueError(
-                    f"complete_linear_v2 persistent cache {action_key} k_pullback mismatch"
+                    f"complete_linear persistent cache {action_key} k_pullback mismatch"
                 )
     if action_keys != set(expected_action_keys):
         raise ValueError(
-            "complete_linear_v2 persistent cache action metadata keys do not match group element order"
+            "complete_linear persistent cache action metadata keys do not match group element order"
         )
 
 
@@ -7111,24 +6939,24 @@ def _exactified_polynomial_origin(config: Any) -> np.ndarray:
     metadata = getattr(config, "symmetry_source_metadata", {})
     if not isinstance(metadata, Mapping) or str(metadata.get("exactification_owner", "")) != "kp_symm":
         raise ValueError(
-            "complete_linear_v2 requires kp_symm-owned exactified symmetry metadata; "
+            "complete_linear requires kp_symm-owned exactified symmetry metadata; "
             "rerun `kp symm` before compiling the response basis"
         )
     exactification = metadata.get("kp_symm_exactification")
     coordinate = exactification.get("polynomial_coordinate") if isinstance(exactification, Mapping) else None
     if not isinstance(coordinate, Mapping):
         raise ValueError(
-            "complete_linear_v2 requires kp_symm_exactification.polynomial_coordinate metadata. "
+            "complete_linear requires kp_symm_exactification.polynomial_coordinate metadata. "
             "Rerun `kp symm` with the current release before compiling the response basis"
         )
-    if str(coordinate.get("coordinate_convention", "")) != COORDINATE_CONVENTION_V1:
+    if str(coordinate.get("coordinate_convention", "")) != COORDINATE_CONVENTION:
         raise ValueError(
-            "complete_linear_v2 received an unsupported exactified polynomial coordinate convention: "
+            "complete_linear received an unsupported exactified polynomial coordinate convention: "
             f"{coordinate.get('coordinate_convention')!r}"
         )
     if str(coordinate.get("origin_role", "")) != "exactified_valley_expansion_origin_in_model_cartesian":
         raise ValueError(
-            "complete_linear_v2 requires the exactified valley expansion origin in model Cartesian coordinates"
+            "complete_linear requires the exactified valley expansion origin in model Cartesian coordinates"
         )
     origin = np.asarray(coordinate.get("origin"), dtype=np.float64)
     if origin.shape != (2,) or not np.all(np.isfinite(origin)):
@@ -7153,6 +6981,280 @@ def _cached_symmetry_group_key(
     # grouping pass.
     cache[object_id] = (operations, key)
     return key
+
+
+def _compile_zero_harmonic_response_groups(
+    zero_seeds: Sequence[RawPolynomialSeed],
+    *,
+    coordinate: PolynomialCoordinateBasis,
+    group: FiniteGroup,
+    group_index: int,
+    factorized_actions: Mapping[str, Any] | None,
+    internal_actions: Mapping[tuple[str, ...], sparse.spmatrix] | None,
+    reynolds_artifact: Mapping[str, Any],
+    support_masks: Mapping[str, np.ndarray],
+    reduce: bool,
+    progress_callback: Callable[..., None] | None,
+) -> tuple[list[GeneratorFixedResponseGroup], list[CandidateResponseSet], float]:
+    """Project zero-harmonic vocabularies according to their authored term spaces."""
+
+    compiled_groups: list[CandidateResponseSet] = []
+    fixed_groups: list[GeneratorFixedResponseGroup] = []
+    p0_complete_seconds = 0.0
+    zero_orbit_seeds = [
+        seed
+        for seed in zero_seeds
+        if str(seed.metadata.get("term_space_policy", ""))
+        == "orbit_representative"
+    ]
+    zero_closed_seeds = [
+        seed
+        for seed in zero_seeds
+        if str(seed.metadata.get("term_space_policy", ""))
+        != "orbit_representative"
+    ]
+    zero_complete_seeds = [
+        seed
+        for seed in zero_closed_seeds
+        if str(seed.metadata.get("term_space_policy", "")) == "complete"
+    ]
+    zero_fixed_seeds = [
+        seed
+        for seed in zero_closed_seeds
+        if str(seed.metadata.get("term_space_policy", "")) != "complete"
+    ]
+    if zero_fixed_seeds:
+        try:
+            fixed_group = compile_generator_fixed_response_group(
+                zero_fixed_seeds,
+                joint_keys=_zero_harmonic_joint_adjoint_keys(
+                    zero_fixed_seeds,
+                    coordinate=coordinate,
+                ),
+                coordinate=coordinate,
+                group=group,
+                reduce=bool(reduce),
+                support_masks=support_masks,
+                materialize_ambient_vectors=False,
+                factorized_actions=factorized_actions,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            exc.add_note(
+                "kp model response-basis compilation failed during p=0 "
+                f"fixed-space compilation for group {group_index} "
+                f"({len(zero_fixed_seeds)} seeds)"
+            )
+            raise
+        fixed_groups.append(fixed_group)
+        compiled_groups.append(fixed_group.candidates)
+    if zero_complete_seeds:
+        assert internal_actions is not None
+        try:
+            from .response_basis_graded import (
+                compile_graded_candidate_group,
+            )
+
+            p0_complete_started = time.perf_counter()
+            complete_zero_candidates = compile_graded_candidate_group(
+                zero_complete_seeds,
+                coordinate=coordinate,
+                group=group,
+                factorized_actions=factorized_actions or {},
+                internal_actions_by_word=internal_actions,
+                factorized_group_artifact=reynolds_artifact,
+                joint_adjoint_keys=_zero_harmonic_joint_adjoint_keys(
+                    zero_complete_seeds,
+                    coordinate=coordinate,
+                ),
+            )
+            p0_complete_seconds += (
+                time.perf_counter() - p0_complete_started
+            )
+            if (
+                complete_zero_candidates.adjoint_artifact.get("certification")
+                == "local_small_matrix_reynolds"
+            ):
+                zero_solver = "local_small_matrix_reynolds_p0"
+                zero_block_rule = (
+                    "action_graph_blocks__logical_owner_pivots__raw_owner_injectivity"
+                )
+            else:
+                zero_solver = "graded_filtered_symbolic_p0_reynolds"
+                zero_block_rule = "filtered_degree_residual_owner_pivots"
+            complete_zero_fixed_group = _fixed_group_from_projected_candidates(
+                complete_zero_candidates,
+                # The graded compiler returns independent projected columns. Repeating
+                # a global coefficient-space QR here recreates the p=0
+                # bottleneck this path is meant to remove.
+                reduce=False,
+                solver=zero_solver,
+                block_rule=zero_block_rule,
+            )
+        except Exception as exc:
+            exc.add_note(
+                "kp model response-basis compilation failed during complete "
+                f"p=0 graded projection for group {group_index} "
+                f"({len(zero_complete_seeds)} seeds)"
+            )
+            raise
+        fixed_groups.append(complete_zero_fixed_group)
+        compiled_groups.append(complete_zero_candidates)
+    if zero_orbit_seeds:
+        try:
+            orbit_candidates = compile_candidate_responses(
+                zero_orbit_seeds,
+                coordinate=coordinate,
+                group=group,
+                support_masks=support_masks,
+                internal_actions_by_word=internal_actions,
+                internal_action_absolute_error_bound=float(
+                    reynolds_artifact.get("maximum_action_error_bound", 0.0)
+                ),
+            )
+            orbit_candidates = replace(
+                orbit_candidates,
+                adjoint_artifact={
+                    "certification": (
+                        "declared_orbit_representative_"
+                        "reynolds_hermitian_projection"
+                    ),
+                    "logical_candidate_channel_count": int(
+                        len(orbit_candidates.channels)
+                    ),
+                    "authored_ordered_seed_count": int(len(zero_orbit_seeds)),
+                    "adjoint_orbit_descriptor_count": int(len(zero_orbit_seeds)),
+                    "hermitian_ambient_channel_count": int(
+                        len(orbit_candidates.channels)
+                    ),
+                    "physically_compiled_representative_channel_count": int(
+                        len(orbit_candidates.channels)
+                    ),
+                    "adjoint_certified_dropped_channel_count": 0,
+                },
+            )
+            orbit_fixed_group = _fixed_group_from_projected_candidates(
+                orbit_candidates,
+                reduce=bool(reduce),
+                solver=(
+                    "declared_orbit_representative_"
+                    "reynolds_hermitian_projection"
+                ),
+            )
+        except Exception as exc:
+            exc.add_note(
+                "kp model response-basis compilation failed during declared "
+                f"p=0 orbit-representative projection for group {group_index} "
+                f"({len(zero_orbit_seeds)} seeds)"
+            )
+            raise
+        fixed_groups.append(orbit_fixed_group)
+        compiled_groups.append(orbit_candidates)
+    return fixed_groups, compiled_groups, p0_complete_seconds
+
+
+def _compile_finite_harmonic_response_group(
+    finite_seeds: Sequence[RawPolynomialSeed],
+    *,
+    coordinate: PolynomialCoordinateBasis,
+    group: FiniteGroup,
+    group_index: int,
+    factorized_actions: Mapping[str, Any] | None,
+    internal_actions: Mapping[tuple[str, ...], sparse.spmatrix] | None,
+    reynolds_artifact: Mapping[str, Any],
+    progress_callback: Callable[..., None] | None,
+) -> tuple[GeneratorFixedResponseGroup, float]:
+    """Project finite-harmonic polynomial channels in graded coefficient space."""
+
+    assert internal_actions is not None
+    _response_progress(
+        progress_callback,
+        "response basis finite-p certified sparse group actions "
+        f"certified | elements={len(internal_actions)} "
+        f"compiler={reynolds_artifact['compiler']} "
+        f"max_nnz={int(reynolds_artifact['maximum_element_nnz'])}",
+        state="done",
+    )
+    try:
+        from .response_basis_graded import (
+            compile_graded_candidate_group,
+        )
+
+        finite_complete_started = time.perf_counter()
+        candidate_group = compile_graded_candidate_group(
+            finite_seeds,
+            coordinate=coordinate,
+            group=group,
+            factorized_actions=factorized_actions or {},
+            internal_actions_by_word=internal_actions,
+            factorized_group_artifact=reynolds_artifact,
+        )
+        finite_complete_seconds = (
+            time.perf_counter() - finite_complete_started
+        )
+        finite_solver = "graded_filtered_symbolic_reynolds"
+        finite_block_rule = "filtered_degree_residual_owner_pivots"
+    except Exception as exc:
+        exc.add_note(
+            "kp model response-basis compilation failed during finite-p "
+            f"symbolic-atom compilation for group {group_index} "
+            f"({len(finite_seeds)} seeds)"
+        )
+        raise
+    symbolic_timings = dict(
+        candidate_group.adjoint_artifact.get(
+            "timings_seconds", {}
+        )
+    )
+    selected_ids = {channel.channel_id for channel in candidate_group.channels}
+    logical_ids = {
+        f"{seed.seed_id}:{component}"
+        for seed in finite_seeds
+        for component in ("real", "imag")
+    }
+    symbolic_fixed_group = GeneratorFixedResponseGroup(
+        candidates=candidate_group,
+        retained_channels=tuple(candidate_group.channels),
+        reduction_proofs=(
+            {
+                "solver": finite_solver,
+                "block_rule": finite_block_rule,
+                "selected_channel_ids": sorted(selected_ids),
+                "rank_proof_stage_count": int(
+                    len(
+                        candidate_group.adjoint_artifact.get(
+                            "rank_proofs", ()
+                        )
+                    )
+                ),
+                "certification_space": (
+                    "global_two_dimensional_polynomial_"
+                    "coefficient_space_real_imag_stack"
+                ),
+                "sample_grid_used": False,
+            },
+        ),
+        dropped_channels=tuple(
+            {
+                "channel_id": channel_id,
+                "reason": "target_independent_linear_dependency",
+                "certification": "closed_symbolic_atom_reynolds",
+            }
+            for channel_id in sorted(logical_ids - selected_ids)
+        ),
+    )
+    _response_progress(
+        progress_callback,
+        "response basis finite-p symbolic-atom projection done | "
+        f"logical={2 * len(finite_seeds)} "
+        f"retained={len(candidate_group.channels)} "
+        f"atoms={float(symbolic_timings.get('seed_atoms', 0.0)):.2f}s "
+        f"project={float(symbolic_timings.get('symbolic_projection', 0.0)):.2f}s "
+        f"rank={float(symbolic_timings.get('graded_rank_selection', symbolic_timings.get('rank_selection', 0.0))):.2f}s "
+        f"materialize={float(symbolic_timings.get('channel_materialization', 0.0)):.2f}s",
+        state="done",
+    )
+    return symbolic_fixed_group, finite_complete_seconds
 
 
 def _compile_model_response_basis_uncached(
@@ -7291,295 +7393,36 @@ def _compile_model_response_basis_uncached(
             time.perf_counter() - support_masks_started
         )
 
-        compiled_groups: list[CandidateResponseSet] = []
-        zero_orbit_seeds = [
-            seed
-            for seed in zero_seeds
-            if str(seed.metadata.get("term_space_policy", ""))
-            == "orbit_representative"
-        ]
-        zero_closed_seeds = [
-            seed
-            for seed in zero_seeds
-            if str(seed.metadata.get("term_space_policy", ""))
-            != "orbit_representative"
-        ]
-        zero_complete_seeds = [
-            seed
-            for seed in zero_closed_seeds
-            if str(seed.metadata.get("term_space_policy", "")) == "complete"
-        ]
-        zero_fixed_seeds = [
-            seed
-            for seed in zero_closed_seeds
-            if str(seed.metadata.get("term_space_policy", "")) != "complete"
-        ]
-        if zero_fixed_seeds:
-            try:
-                fixed_group = compile_generator_fixed_response_group(
-                    zero_fixed_seeds,
-                    joint_keys=_zero_harmonic_joint_adjoint_keys(
-                        zero_fixed_seeds,
-                        coordinate=coordinate,
-                    ),
-                    coordinate=coordinate,
-                    group=group,
-                    reduce=bool(reduce),
-                    support_masks=support_masks,
-                    materialize_ambient_vectors=False,
-                    factorized_actions=factorized_actions,
-                    progress_callback=progress_callback,
-                )
-            except Exception as exc:
-                exc.add_note(
-                    "kp model response-basis compilation failed during p=0 "
-                    f"fixed-space compilation for group {group_index} "
-                    f"({len(zero_fixed_seeds)} seeds)"
-                )
-                raise
-            fixed_groups.append(fixed_group)
-            compiled_groups.append(fixed_group.candidates)
-        if zero_complete_seeds:
-            assert internal_actions is not None
-            try:
-                from .response_basis_graded import (
-                    GradedCompilationUnavailable,
-                    compile_graded_candidate_group,
-                )
-
-                try:
-                    p0_complete_started = time.perf_counter()
-                    complete_zero_candidates = compile_graded_candidate_group(
-                        zero_complete_seeds,
-                        coordinate=coordinate,
-                        group=group,
-                        factorized_actions=factorized_actions or {},
-                        internal_actions_by_word=internal_actions,
-                        factorized_group_artifact=reynolds_artifact,
-                        joint_adjoint_keys=_zero_harmonic_joint_adjoint_keys(
-                            zero_complete_seeds,
-                            coordinate=coordinate,
-                        ),
-                    )
-                    outer_timings_seconds["p0_complete_compile"] += (
-                        time.perf_counter() - p0_complete_started
-                    )
-                    if (
-                        complete_zero_candidates.adjoint_artifact.get("certification")
-                        == "local_small_matrix_reynolds_v1"
-                    ):
-                        zero_solver = "local_small_matrix_reynolds_p0_v1"
-                        zero_block_rule = (
-                            "action_graph_blocks__logical_owner_pivots__raw_owner_injectivity"
-                        )
-                    else:
-                        zero_solver = "graded_filtered_symbolic_p0_reynolds_v1"
-                        zero_block_rule = "filtered_degree_residual_owner_pivots"
-                except GradedCompilationUnavailable as graded_error:
-                    from .response_basis_symmetry_first import (
-                        compile_symbolic_atom_candidate_group,
-                    )
-
-                    _response_progress(
-                        progress_callback,
-                        "response basis p=0 graded compiler unavailable; "
-                        f"using symbolic oracle | reason={graded_error.reason}",
-                        state="done",
-                    )
-                    complete_zero_candidates = compile_symbolic_atom_candidate_group(
-                        zero_complete_seeds,
-                        coordinate=coordinate,
-                        group=group,
-                        factorized_actions=factorized_actions or {},
-                        internal_actions_by_word=internal_actions,
-                        factorized_group_artifact=reynolds_artifact,
-                    )
-                    zero_solver = "symbolic_p0_reynolds_typed_fallback_v1"
-                    zero_block_rule = "symbolic_atom_support_components"
-                complete_zero_fixed_group = _fixed_group_from_projected_candidates(
-                    complete_zero_candidates,
-                    # Both the graded compiler and its symbolic oracle fallback
-                    # already return independent projected columns.  Repeating
-                    # a global coefficient-space QR here recreates the p=0
-                    # bottleneck this path is meant to remove.
-                    reduce=False,
-                    solver=zero_solver,
-                    block_rule=zero_block_rule,
-                )
-            except Exception as exc:
-                exc.add_note(
-                    "kp model response-basis compilation failed during complete "
-                    f"p=0 graded projection for group {group_index} "
-                    f"({len(zero_complete_seeds)} seeds)"
-                )
-                raise
-            fixed_groups.append(complete_zero_fixed_group)
-            compiled_groups.append(complete_zero_candidates)
-        if zero_orbit_seeds:
-            try:
-                orbit_candidates = compile_candidate_responses(
-                    zero_orbit_seeds,
-                    coordinate=coordinate,
-                    group=group,
-                    support_masks=support_masks,
-                    internal_actions_by_word=internal_actions,
-                    internal_action_absolute_error_bound=float(
-                        reynolds_artifact.get("maximum_action_error_bound", 0.0)
-                    ),
-                )
-                orbit_candidates = replace(
-                    orbit_candidates,
-                    adjoint_artifact={
-                        "certification": (
-                            "declared_orbit_representative_"
-                            "reynolds_hermitian_projection_v1"
-                        ),
-                        "logical_candidate_channel_count": int(
-                            len(orbit_candidates.channels)
-                        ),
-                        "authored_ordered_seed_count": int(len(zero_orbit_seeds)),
-                        "adjoint_orbit_descriptor_count": int(len(zero_orbit_seeds)),
-                        "hermitian_ambient_channel_count": int(
-                            len(orbit_candidates.channels)
-                        ),
-                        "physically_compiled_representative_channel_count": int(
-                            len(orbit_candidates.channels)
-                        ),
-                        "adjoint_certified_dropped_channel_count": 0,
-                        "fallback_used": False,
-                    },
-                )
-                orbit_fixed_group = _fixed_group_from_projected_candidates(
-                    orbit_candidates,
-                    reduce=bool(reduce),
-                    solver=(
-                        "declared_orbit_representative_"
-                        "reynolds_hermitian_projection_v1"
-                    ),
-                )
-            except Exception as exc:
-                exc.add_note(
-                    "kp model response-basis compilation failed during declared "
-                    f"p=0 orbit-representative projection for group {group_index} "
-                    f"({len(zero_orbit_seeds)} seeds)"
-                )
-                raise
-            fixed_groups.append(orbit_fixed_group)
-            compiled_groups.append(orbit_candidates)
+        zero_fixed_groups, compiled_groups, p0_complete_seconds = (
+            _compile_zero_harmonic_response_groups(
+                zero_seeds,
+                coordinate=coordinate,
+                group=group,
+                group_index=group_index,
+                factorized_actions=factorized_actions,
+                internal_actions=internal_actions,
+                reynolds_artifact=reynolds_artifact,
+                support_masks=support_masks,
+                reduce=reduce,
+                progress_callback=progress_callback,
+            )
+        )
+        fixed_groups.extend(zero_fixed_groups)
+        outer_timings_seconds["p0_complete_compile"] += p0_complete_seconds
         if finite_seeds:
-            assert internal_actions is not None
-            _response_progress(
-                progress_callback,
-                "response basis finite-p certified sparse group actions "
-                f"certified | elements={len(internal_actions)} "
-                f"compiler={reynolds_artifact['compiler']} "
-                f"max_nnz={int(reynolds_artifact['maximum_element_nnz'])}",
-                state="done",
+            finite_group, finite_complete_seconds = _compile_finite_harmonic_response_group(
+                finite_seeds,
+                coordinate=coordinate,
+                group=group,
+                group_index=group_index,
+                factorized_actions=factorized_actions,
+                internal_actions=internal_actions,
+                reynolds_artifact=reynolds_artifact,
+                progress_callback=progress_callback,
             )
-            try:
-                from .response_basis_graded import (
-                    GradedCompilationUnavailable,
-                    compile_graded_candidate_group,
-                )
-
-                try:
-                    finite_complete_started = time.perf_counter()
-                    candidate_group = compile_graded_candidate_group(
-                        finite_seeds,
-                        coordinate=coordinate,
-                        group=group,
-                        factorized_actions=factorized_actions or {},
-                        internal_actions_by_word=internal_actions,
-                        factorized_group_artifact=reynolds_artifact,
-                    )
-                    outer_timings_seconds["finite_complete_compile"] += (
-                        time.perf_counter() - finite_complete_started
-                    )
-                    finite_solver = "graded_filtered_symbolic_reynolds_v1"
-                    finite_block_rule = "filtered_degree_residual_owner_pivots"
-                except GradedCompilationUnavailable as graded_error:
-                    from .response_basis_symmetry_first import (
-                        compile_symbolic_atom_candidate_group,
-                    )
-
-                    _response_progress(
-                        progress_callback,
-                        "response basis finite-p graded compiler unavailable; "
-                        f"using symbolic oracle | reason={graded_error.reason}",
-                        state="done",
-                    )
-                    candidate_group = compile_symbolic_atom_candidate_group(
-                        finite_seeds,
-                        coordinate=coordinate,
-                        group=group,
-                        factorized_actions=factorized_actions or {},
-                        internal_actions_by_word=internal_actions,
-                        factorized_group_artifact=reynolds_artifact,
-                    )
-                    finite_solver = "symbolic_reynolds_typed_fallback_v1"
-                    finite_block_rule = "symbolic_atom_support_components"
-            except Exception as exc:
-                exc.add_note(
-                    "kp model response-basis compilation failed during finite-p "
-                    f"symbolic-atom compilation for group {group_index} "
-                    f"({len(finite_seeds)} seeds)"
-                )
-                raise
-            symbolic_timings = dict(
-                candidate_group.adjoint_artifact.get(
-                    "timings_seconds", {}
-                )
-            )
-            selected_ids = {channel.channel_id for channel in candidate_group.channels}
-            logical_ids = {
-                f"{seed.seed_id}:{component}"
-                for seed in finite_seeds
-                for component in ("real", "imag")
-            }
-            symbolic_fixed_group = GeneratorFixedResponseGroup(
-                candidates=candidate_group,
-                retained_channels=tuple(candidate_group.channels),
-                reduction_proofs=(
-                    {
-                        "solver": finite_solver,
-                        "block_rule": finite_block_rule,
-                        "selected_channel_ids": sorted(selected_ids),
-                        "rank_proof_stage_count": int(
-                            len(
-                                candidate_group.adjoint_artifact.get(
-                                    "rank_proofs", ()
-                                )
-                            )
-                        ),
-                        "certification_space": (
-                            "global_two_dimensional_polynomial_"
-                            "coefficient_space_real_imag_stack"
-                        ),
-                        "sample_grid_used": False,
-                    },
-                ),
-                dropped_channels=tuple(
-                    {
-                        "channel_id": channel_id,
-                        "reason": "target_independent_linear_dependency",
-                        "certification": "closed_symbolic_atom_reynolds_v1",
-                    }
-                    for channel_id in sorted(logical_ids - selected_ids)
-                ),
-            )
-            fixed_groups.append(symbolic_fixed_group)
-            _response_progress(
-                progress_callback,
-                "response basis finite-p symbolic-atom projection done | "
-                f"logical={2 * len(finite_seeds)} "
-                f"retained={len(candidate_group.channels)} "
-                f"atoms={float(symbolic_timings.get('seed_atoms', 0.0)):.2f}s "
-                f"project={float(symbolic_timings.get('symbolic_projection', 0.0)):.2f}s "
-                f"rank={float(symbolic_timings.get('graded_rank_selection', symbolic_timings.get('rank_selection', 0.0))):.2f}s "
-                f"materialize={float(symbolic_timings.get('channel_materialization', 0.0)):.2f}s",
-                state="done",
-            )
-            compiled_groups.append(candidate_group)
+            fixed_groups.append(finite_group)
+            compiled_groups.append(finite_group.candidates)
+            outer_timings_seconds["finite_complete_compile"] += finite_complete_seconds
         group_merge_started = time.perf_counter()
         for candidate_group in compiled_groups:
             merged_support_artifact = {
@@ -7622,7 +7465,7 @@ def _compile_model_response_basis_uncached(
         group_artifact={"action_groups": group_artifacts},
         support_artifact=support_artifact,
         adjoint_artifact={
-            "certification": "raw_polynomial_coefficient_adjoint_v1",
+            "certification": "raw_polynomial_coefficient_adjoint",
             "groups": adjoint_artifacts,
             "outer_timings_seconds": dict(outer_timings_seconds),
             "logical_candidate_channel_count": int(
@@ -7720,14 +7563,14 @@ def compile_model_response_basis(
     reduce: bool,
     progress_callback: Callable[..., None] | None = None,
 ) -> CompiledResponseBasis:
-    if str(getattr(config, "response_semantics", LEGACY_FROZEN_V1)) != COMPLETE_LINEAR_V2:
-        raise ValueError("compile_model_response_basis requires response_semantics=complete_linear_v2")
+    if str(config.response_semantics) != RESPONSE_SEMANTICS:
+        raise ValueError("compile_model_response_basis requires response_semantics=complete_linear")
     terms = list(
         getattr(model, "candidate_terms", ())
         or getattr(model, "terms", {}).values()
     )
     if not terms:
-        raise ValueError("complete_linear_v2 model contains no candidate terms")
+        raise ValueError("complete_linear model contains no candidate terms")
     fingerprint_started = time.perf_counter()
     _response_progress(
         progress_callback,
@@ -7759,7 +7602,7 @@ def compile_model_response_basis(
         policy = str(getattr(term, "registry_metadata", {}).get("term_space_policy", ""))
         if policy not in {"complete", "explicit_reduced", "orbit_representative"}:
             raise ValueError(
-                f"complete_linear_v2 term {term.key!r} lacks an explicit "
+                f"complete_linear term {term.key!r} lacks an explicit "
                 "complete/explicit_reduced/orbit_representative policy"
             )
         authored_sym_ops = getattr(term, "symmetry_ops", [])
@@ -7875,7 +7718,7 @@ def compile_model_response_basis(
                 n_orb2=int(config.n_orb2),
                 coordinate=coordinate,
                 support_component=(
-                    f"{support_component}|structural_generators_v1"
+                    f"{support_component}|structural_generators"
                     if term_index in orbit_representative_term_indices
                     else support_component
                 ),
@@ -7904,7 +7747,7 @@ def compile_model_response_basis(
         joint_artifact_hashes_by_group.append(active_joint_artifact_hash)
         structural_plan_artifacts.append(structural_plan.artifact())
     structural_preselection = {
-        "compiler": "exact_structural_cyclic_generators_v1",
+        "compiler": "exact_structural_cyclic_generators",
         "full_structural_support_count": int(
             sum(
                 int(item["full_structural_support_count"])

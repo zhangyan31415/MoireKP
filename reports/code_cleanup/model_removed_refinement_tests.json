@@ -1,0 +1,10 @@
+[
+  "test_band_refinement_invokes_subspace_and_low_matrix_losses",
+  "test_band_refinement_passes_analytic_jacobian_to_least_squares",
+  "test_band_refinement_acceptance_guard_reverts_worse_plot_window",
+  "test_band_refinement_uses_fit_kpoints_not_full_band_path",
+  "test_band_refinement_accepts_explicit_refine_indices",
+  "test_band_refinement_linear_low_subspace_solver_updates_coefficients",
+  "test_band_refinement_linear_low_subspace_guard_reverts_all_band_degradation",
+  "test_band_refinement_linear_low_subspace_uses_direct_term_response"
+]

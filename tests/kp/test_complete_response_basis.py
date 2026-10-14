@@ -16,9 +16,9 @@ from scipy import sparse
 import kp.model.response_basis as response_basis_module
 
 from kp.model.response_basis import (
-    COMPLETE_LINEAR_V2,
-    COORDINATE_CONVENTION_V1,
-    RESPONSE_NORMALIZATION_V1,
+    RESPONSE_SEMANTICS,
+    COORDINATE_CONVENTION,
+    RESPONSE_NORMALIZATION,
     CandidateResponseSet,
     CompiledResponseRuntime,
     CompiledResponseBasis,
@@ -58,16 +58,9 @@ from kp.model.core import (
     compute_bands,
     compute_coefficients,
 )
-from kp.model.pipeline import (
-    _case_derived_term_templates,
-    _public_band_residual_and_jacobian,
-    _public_hamiltonian_quadratic_residual,
-    _refine_public_nonlinear_complete_response,
-    _model_hamiltonians_for_kpoints,
-    _prune_small_coefficients,
-    _sync_complete_response_coefficients_to_terms,
-    refine_band_coefficients,
-)
+from kp.model.configuration import _case_derived_term_templates
+from kp.model.refinement import _public_band_residual_and_jacobian, _public_hamiltonian_quadratic_residual, _refine_public_nonlinear_complete_response, _model_hamiltonians_for_kpoints, _sync_complete_response_coefficients_to_terms, refine_band_coefficients
+from kp.model.candidates import _prune_small_coefficients
 
 
 def _identity_payload(dim: int) -> dict[str, object]:
@@ -96,7 +89,7 @@ def _toy_coordinate(max_degree: int = 0) -> PolynomialCoordinateBasis:
 def test_coordinate_basis_is_dimensionless_global_and_records_ordering() -> None:
     coordinate = _toy_coordinate(max_degree=2)
 
-    assert coordinate.coordinate_convention == COORDINATE_CONVENTION_V1
+    assert coordinate.coordinate_convention == COORDINATE_CONVENTION
     assert coordinate.scale == pytest.approx(np.sqrt(10.0))
     assert coordinate.monomials == (
         (0, 0),
@@ -327,7 +320,7 @@ def test_support_closure_uses_certified_boolean_orbit_for_dense_internal_mixing(
     np.testing.assert_array_equal(masks["onsite"], np.ones((2, 2), dtype=bool))
     assert policy["onsite"]["structural_support_closure_certified"] is True
     assert policy["onsite"]["support_mask_compiler"] == (
-        "certified_factorized_boolean_group_adjoint_closure_v1"
+        "certified_factorized_boolean_group_adjoint_closure"
     )
 
 
@@ -627,133 +620,8 @@ def test_certified_joint_adjoint_compile_keeps_logical_channels_but_compiles_one
     ]
 
 
-def test_finite_harmonic_fallback_matches_dense_reynolds_without_an_adjoint_partner() -> None:
-    """Finite-p seeds remain complete when the authored vocabulary has no -p seed."""
-
-    coordinate = _toy_coordinate(max_degree=1)
-    e12 = sparse.csr_matrix(
-        np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128)
-    )
-    e21 = e12.getH().tocsr()
-    finite = {
-        (0, 0): sparse.csr_matrix(0.25 * e12),
-        (1, 0): sparse.csr_matrix(1.5 * e12),
-    }
-
-    def metadata(*, row: int, col: int, p: tuple[float, float]) -> dict[str, object]:
-        return {
-            "term_index": row * 2 + col,
-            "term_key": {
-                "Mz": 0,
-                "Mz_star": 0,
-                "layer_from": 1,
-                "layer_to": 1,
-                "orbital_from": row + 1,
-                "orbital_to": col + 1,
-                "p": list(p),
-            },
-        }
-
-    seeds = [
-        RawPolynomialSeed(
-            "zero-E12",
-            {(0, 0): e12},
-            "zero-support",
-            metadata(row=0, col=1, p=(0.0, 0.0)),
-        ),
-        RawPolynomialSeed(
-            "zero-E21",
-            {(0, 0): e21},
-            "zero-support",
-            metadata(row=1, col=0, p=(0.0, 0.0)),
-        ),
-        RawPolynomialSeed(
-            "finite-p-E12",
-            finite,
-            "finite-support",
-            metadata(row=0, col=1, p=(0.25, -0.125)),
-        ),
-    ]
-    group = identity_finite_group(2)
-    dense = compile_candidate_responses(
-        seeds,
-        coordinate=coordinate,
-        group=group,
-    )
-
-    hybrid = response_basis_module._compile_candidate_group_with_adjoint_fallback(
-        seeds,
-        coordinate=coordinate,
-        group=group,
-        support_masks=None,
-    )
-
-    assert [channel.channel_id for channel in hybrid.channels] == [
-        channel.channel_id for channel in dense.channels
-    ]
-    dense_by_id = {channel.channel_id: channel for channel in dense.channels}
-    for channel in hybrid.channels:
-        expected = dense_by_id[channel.channel_id]
-        for monomial in coordinate.monomials:
-            np.testing.assert_allclose(
-                channel.coefficient(*monomial).toarray(),
-                expected.coefficient(*monomial).toarray(),
-                atol=2.0e-15,
-            )
-
-    artifact = hybrid.artifact()
-    assert artifact["logical_candidate_channel_count"] == 6
-    assert artifact["physically_compiled_representative_channel_count"] == 4
-    assert artifact["adjoint_certified_dropped_channel_count"] == 2
-    assert artifact["adjoint"]["finite_p_fallback_seed_count"] == 1
-    assert artifact["adjoint"]["finite_p_fallback_channel_count"] == 2
 
 
-def test_unpaired_zero_harmonic_seed_falls_back_to_complete_dense_channels() -> None:
-    e12 = sparse.csr_matrix(
-        np.array([[0.0, 1.0], [0.0, 0.0]], dtype=np.complex128)
-    )
-    seed = RawPolynomialSeed(
-        "unpaired-zero-E12",
-        {(0, 0): e12},
-        "explicit-zero-support",
-        {
-            "term_space_policy": "explicit_reduced",
-            "term_key": {
-                "Mz": 0,
-                "Mz_star": 0,
-                "layer_from": 1,
-                "layer_to": 1,
-                "orbital_from": 1,
-                "orbital_to": 2,
-                "p": [0.0, 0.0],
-            },
-        },
-    )
-    coordinate = _toy_coordinate(max_degree=0)
-    group = identity_finite_group(2)
-    dense = compile_candidate_responses([seed], coordinate=coordinate, group=group)
-
-    compiled = response_basis_module._compile_candidate_group_with_adjoint_fallback(
-        [seed],
-        coordinate=coordinate,
-        group=group,
-        support_masks=None,
-    )
-
-    assert [channel.channel_id for channel in compiled.channels] == [
-        "unpaired-zero-E12:real",
-        "unpaired-zero-E12:imag",
-    ]
-    for actual, expected in zip(compiled.channels, dense.channels):
-        np.testing.assert_allclose(
-            actual.coefficient(0, 0).toarray(),
-            expected.coefficient(0, 0).toarray(),
-            atol=2.0e-15,
-        )
-    artifact = compiled.artifact()["adjoint"]
-    assert artifact["p0_dense_fallback_seed_count"] == 1
-    assert artifact["p0_dense_fallback_channel_count"] == 2
 
 
 def test_complete_support_policy_closes_authored_harmonic_representative_under_group() -> None:
@@ -801,7 +669,7 @@ def test_complete_support_policy_closes_authored_harmonic_representative_under_g
     )["complete-harmonic"]
     assert certificate["certified"] is True
     assert policy["complete-harmonic"]["support_mask_policy"] == (
-        "complete_symmetry_adjoint_closure_v1"
+        "complete_symmetry_adjoint_closure"
     )
     assert policy["complete-harmonic"]["symmetry_adjoint_added_entry_count"] > 0
 
@@ -817,7 +685,7 @@ def test_complete_support_policy_closes_authored_harmonic_representative_under_g
         coordinate=_toy_coordinate(max_degree=0),
     )
     assert reduced_policy["reduced-harmonic"]["support_mask_policy"] == (
-        "explicit_reduced_authored_v1"
+        "explicit_reduced_authored"
     )
     with pytest.raises(response_basis_module.SupportClosureError, match=r"not (?:adjoint )?closed"):
         response_basis_module.certify_support_closure(
@@ -896,7 +764,7 @@ def test_orbit_representative_support_is_closed_by_group_and_adjoint() -> None:
     )["layer-orbit"]
     assert certificate["certified"] is True
     assert policy["layer-orbit"]["support_mask_policy"] == (
-        "orbit_representative_symmetry_adjoint_closure_v1"
+        "orbit_representative_symmetry_adjoint_closure"
     )
 
 
@@ -1186,7 +1054,7 @@ def test_generator_images_transform_once_per_adjoint_orbit(
     )
     assert (
         fixed.candidates.adjoint_artifact["logical_projection_compiler"]
-        == "certified_physical_representative_coordinates_v1"
+        == "certified_physical_representative_coordinates"
     )
     assert fixed.reduction_proofs[0]["solver"] == "generator_fixed_subspace__small_coordinate_rrqr"
     assert fixed.reduction_proofs[0]["sample_grid_used"] is False
@@ -1606,7 +1474,7 @@ def test_fit_retains_ambiguous_basis_channel_but_excludes_it_from_production() -
     )
 
     ambiguous_index = basis.channel_ids.index("E22:real")
-    assert fitted.fit_channel_policy == "confirmed_nonzero_only_v2"
+    assert fitted.fit_channel_policy == "confirmed_nonzero_only"
     assert "E22:real" not in fitted.fit_selected_channel_ids
     assert fitted.coefficients[ambiguous_index] == pytest.approx(0.0)
     assert "E22:real" not in fitted.nonzero_channel_ids
@@ -1983,8 +1851,8 @@ def test_frozen_basis_round_trip_reproduces_responses_and_hamiltonian() -> None:
     frozen = basis.freeze()
     restored = CompiledResponseBasis.from_frozen(frozen)
 
-    assert restored.response_semantics == COMPLETE_LINEAR_V2
-    assert restored.response_normalization == RESPONSE_NORMALIZATION_V1
+    assert restored.response_semantics == RESPONSE_SEMANTICS
+    assert restored.response_normalization == RESPONSE_NORMALIZATION
     assert restored.basis_hash == basis.basis_hash
     np.testing.assert_allclose(
         restored.response_tensor([[0.0, 0.0], [0.2, -0.3]]),
@@ -2256,7 +2124,7 @@ def test_structurally_closed_support_is_certified_once_without_per_seed_group_im
 
     np.testing.assert_array_equal(masks["toy"], closed)
     assert certificates["toy"]["support_closure_compiler"] == (
-        "exact_boolean_adjoint_group_support_v1"
+        "exact_boolean_adjoint_group_support"
     )
     assert policies["toy"]["structural_support_closure_certified"] is True
 
@@ -2919,13 +2787,13 @@ def _complete_onsite_config(*, q_shift: float = 0.0) -> MoireConfig:
                 "term_space_policy": "complete",
             }
         ],
-        response_semantics=COMPLETE_LINEAR_V2,
+        response_semantics=RESPONSE_SEMANTICS,
         symmetry_source_metadata={
             "exactification_owner": "kp_symm",
             "kp_symm_exactification": {
                 "status": "exactified",
                 "polynomial_coordinate": {
-                    "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
+                    "coordinate_convention": "right_handed_model_cartesian_reciprocal",
                     "origin": [0.0, 0.0],
                     "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
                     "valley": "Gamma",
@@ -2965,7 +2833,7 @@ def _literal_harmonic_record_config(
             {"name": "L1", "qset": "qset1", "n_orb": 2},
             {"name": "L2", "qset": "qset2", "n_orb": 2},
         ],
-        response_semantics=COMPLETE_LINEAR_V2,
+        response_semantics=RESPONSE_SEMANTICS,
     )
 
 
@@ -3331,14 +3199,14 @@ def _gamma_gauge_covariance_config(
         },
         term_templates=templates,
         sectors=sectors,
-        response_semantics=COMPLETE_LINEAR_V2,
+        response_semantics=RESPONSE_SEMANTICS,
         symmetry_source_metadata={
             "exactification_owner": "kp_symm",
             "kp_symm_exactification": {
                 "status": "exactified",
                 "polynomial_coordinate": {
                     "coordinate_convention": (
-                        "right_handed_model_cartesian_reciprocal_v1"
+                        "right_handed_model_cartesian_reciprocal"
                     ),
                     "origin": [0.0, 0.0],
                     "origin_role": (
@@ -3678,7 +3546,7 @@ def test_complete_policy_enumerates_ordered_pairs_and_reduces_in_coefficient_spa
     assert len(model.terms) == 4
 
     def fail_legacy_complex_rank(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("complete_linear_v2 entered legacy complex-rank path")
+        raise AssertionError("complete_linear entered legacy complex-rank path")
 
     monkeypatch.setattr(
         "kp.model.core.ContinuumModelBuilder._orthogonalize_hermitian_matrices_with_support",
@@ -3733,11 +3601,11 @@ def test_complete_p0_model_routes_through_graded_symbolic_compiler(
     basis = compile_model_response_basis(model, config, reduce=True)
     assert calls == 1
     assert any(
-        proof["solver"] == "local_small_matrix_reynolds_p0_v1"
+        proof["solver"] == "local_small_matrix_reynolds_p0"
         for proof in basis.reduction_proofs
     )
     identity_artifact = basis.candidate_artifact["adjoint"]["groups"][0]
-    assert identity_artifact["certification"] == "local_small_matrix_reynolds_v1"
+    assert identity_artifact["certification"] == "local_small_matrix_reynolds"
     outer_timings = basis.candidate_artifact["adjoint"]["outer_timings_seconds"]
     for key in (
         "certified_group_actions",
@@ -3791,9 +3659,8 @@ def test_declared_p0_orbit_representative_uses_primary_reynolds_route() -> None:
     assert len(basis.channels) == 2
     orbit_artifact = basis.candidate_artifact["adjoint"]["groups"][0]
     assert orbit_artifact["certification"] == (
-        "declared_orbit_representative_reynolds_hermitian_projection_v1"
+        "declared_orbit_representative_reynolds_hermitian_projection"
     )
-    assert orbit_artifact["fallback_used"] is False
     coefficients = [channel.coefficient(0, 0).toarray() for channel in basis.channels]
     assert all(np.allclose(matrix, matrix.conj().T) for matrix in coefficients)
     real_vectors = np.column_stack(
@@ -3840,17 +3707,9 @@ def test_complete_finite_p_routes_through_graded_symbolic_compiler(
         metadata={**dict(seed.metadata), "term_index": 1},
     )
 
-    def fail_full_reynolds(*_args, **_kwargs):
-        raise AssertionError("finite-p production entered per-seed CSR Reynolds")
-
     def fail_secondary_reduction(*_args, **_kwargs):
         raise AssertionError("symbolically certified finite-p span was reduced twice")
 
-    monkeypatch.setattr(
-        response_basis_module,
-        "_compile_candidate_group_with_adjoint_fallback",
-        fail_full_reynolds,
-    )
     monkeypatch.setattr(
         response_basis_module,
         "_reduce_confirmed_channels",
@@ -3872,11 +3731,11 @@ def test_complete_finite_p_routes_through_graded_symbolic_compiler(
     assert basis.candidate_artifact["candidate_channel_count"] == 4
     assert basis.candidate_artifact["logical_candidate_channel_count"] == 4
     assert basis.candidate_artifact["adjoint"]["groups"][0]["certification"] == (
-        "graded_filtered_reynolds_v1"
+        "graded_filtered_reynolds"
     )
 
 
-def test_complete_finite_p_typed_graded_fallback_records_symbolic_oracle_provenance(
+def test_complete_finite_p_certification_failure_propagates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import kp.model.response_basis_graded as graded_module
@@ -3918,30 +3777,18 @@ def test_complete_finite_p_typed_graded_fallback_records_symbolic_oracle_provena
         reject_graded,
     )
 
-    basis = response_basis_module._compile_model_response_basis_uncached(
-        coordinate=coordinate,
-        groups=[identity_finite_group(2, q_size=2, sector_size=2)],
-        seeds_by_group=[[seed]],
-        factorized_actions_by_group=[{}],
-        dim=2,
-        identity_payload=_identity_payload(2),
-        reduce=True,
-        cache_key="test-finite-p-typed-graded-fallback-provenance",
-        progress_callback=None,
-    )
-
-    assert basis.candidate_artifact["adjoint"]["groups"][0]["certification"] == (
-        "closed_symbolic_atom_reynolds_v1"
-    )
-    assert [
-        (proof["solver"], proof["block_rule"])
-        for proof in basis.reduction_proofs
-    ] == [
-        (
-            "symbolic_reynolds_typed_fallback_v1",
-            "symbolic_atom_support_components",
+    with pytest.raises(graded_module.GradedCompilationUnavailable):
+        response_basis_module._compile_model_response_basis_uncached(
+            coordinate=coordinate,
+            groups=[identity_finite_group(2, q_size=2, sector_size=2)],
+            seeds_by_group=[[seed]],
+            factorized_actions_by_group=[{}],
+            dim=2,
+            identity_payload=_identity_payload(2),
+            reduce=True,
+            cache_key="test-finite-p-typed-graded-fallback-provenance",
+            progress_callback=None,
         )
-    ]
 
 
 def test_fixed_group_direct_sum_is_certified_from_disjoint_coefficient_rows() -> None:
@@ -3982,7 +3829,7 @@ def test_fixed_group_direct_sum_is_certified_from_disjoint_coefficient_rows() ->
     )
 
 
-def test_complete_p0_uses_symbolic_oracle_for_typed_graded_unavailable(
+def test_complete_p0_certification_failure_does_not_call_oracle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import kp.model.response_basis_graded as graded_module
@@ -4012,14 +3859,9 @@ def test_complete_p0_uses_symbolic_oracle_for_typed_graded_unavailable(
         counted_symbolic,
     )
 
-    basis = compile_model_response_basis(
-        model=build_model(config), config=config, reduce=True
-    )
-    assert symbolic_calls == 1
-    assert any(
-        proof["solver"] == "symbolic_p0_reynolds_typed_fallback_v1"
-        for proof in basis.reduction_proofs
-    )
+    with pytest.raises(graded_module.GradedCompilationUnavailable):
+        compile_model_response_basis(model=build_model(config), config=config, reduce=True)
+    assert symbolic_calls == 0
 
 
 def _p0_factorized_fail_closed_case():
@@ -4185,7 +4027,7 @@ def test_complete_p0_uses_certified_joint_routes_for_nonclosed_authored_span() -
     )
 
     assert compiled.channels
-    assert "joint_route_sparse_group_elements_v1" in str(
+    assert "joint_route_sparse_group_elements" in str(
         compiled.candidate_artifact
     )
 
@@ -4493,32 +4335,32 @@ def test_model_basis_persistent_cache_survives_memory_cache_clear(
     assert str(config.output_dir) not in str(second.artifact())
 
 
-def test_model_basis_persistent_cache_v56_cannot_bypass_v57_action_block_reynolds(
+def test_model_basis_persistent_cache_implementation_change_invalidates(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     clear_response_basis_cache()
-    assert response_basis_module.COMPILER_VERSION == (
-        "complete-response-basis-v2-action-block-reynolds-v57"
-    )
+    current_fingerprint = response_basis_module.COMPILER_FINGERPRINT
+    assert current_fingerprint.startswith("sha256:")
+    assert len(current_fingerprint) == 71
     config = _complete_onsite_config()
     config.output_dir = tmp_path / "model"
 
     monkeypatch.setattr(
         response_basis_module,
-        "COMPILER_VERSION",
-        "complete-response-basis-v2-local-fixed-response-v56",
+        "COMPILER_FINGERPRINT",
+        "sha256:" + "0" * 64,
     )
     compile_model_response_basis(build_model(config), config, reduce=True)
     cache_dir = Path(config.output_dir) / ".compiled_response_basis_cache"
-    v56_files = set(cache_dir.glob("*.npz"))
-    assert len(v56_files) == 1
+    original_files = set(cache_dir.glob("*.npz"))
+    assert len(original_files) == 1
 
     clear_response_basis_cache()
     monkeypatch.setattr(
         response_basis_module,
-        "COMPILER_VERSION",
-        "complete-response-basis-v2-action-block-reynolds-v57",
+        "COMPILER_FINGERPRINT",
+        current_fingerprint,
     )
     cold_calls = 0
     original_cold_compile = response_basis_module._compile_model_response_basis_uncached
@@ -4536,9 +4378,9 @@ def test_model_basis_persistent_cache_v56_cannot_bypass_v57_action_block_reynold
     compile_model_response_basis(build_model(config), config, reduce=True)
 
     assert cold_calls == 1
-    v57_files = set(cache_dir.glob("*.npz"))
-    assert len(v57_files) == 2
-    assert v56_files < v57_files
+    changed_files = set(cache_dir.glob("*.npz"))
+    assert len(changed_files) == 2
+    assert original_files < changed_files
 
 
 def test_model_basis_persistent_cache_local_reynolds_policy_change_invalidates(
@@ -4557,8 +4399,8 @@ def test_model_basis_persistent_cache_local_reynolds_policy_change_invalidates(
     clear_response_basis_cache()
     monkeypatch.setattr(
         response_basis_module,
-        "LOCAL_REYNOLDS_OWNER_POLICY_V1",
-        response_basis_module.LOCAL_REYNOLDS_OWNER_POLICY_V1 + "-changed",
+        "LOCAL_REYNOLDS_OWNER_POLICY",
+        response_basis_module.LOCAL_REYNOLDS_OWNER_POLICY + "-changed",
     )
     cold_calls = 0
     original_cold_compile = response_basis_module._compile_model_response_basis_uncached
@@ -4675,7 +4517,7 @@ def test_model_basis_persistent_cache_is_warm_in_second_python_process(
         f"""
         import numpy as np
         from kp.model.core import MoireConfig, build_model
-        from kp.model.response_basis import COMPLETE_LINEAR_V2, compile_model_response_basis
+        from kp.model.response_basis import RESPONSE_SEMANTICS, compile_model_response_basis
 
         config = MoireConfig(
             Q_set1=np.asarray([[0.0, 0.0]], dtype=float),
@@ -4697,14 +4539,14 @@ def test_model_basis_persistent_cache_is_warm_in_second_python_process(
                 "max_order": 0,
                 "term_space_policy": "complete",
             }}],
-            response_semantics=COMPLETE_LINEAR_V2,
+            response_semantics=RESPONSE_SEMANTICS,
             output_dir={str(cache_output)!r},
             symmetry_source_metadata={{
                 "exactification_owner": "kp_symm",
                 "kp_symm_exactification": {{
                     "status": "exactified",
                     "polynomial_coordinate": {{
-                        "coordinate_convention": "right_handed_model_cartesian_reciprocal_v1",
+                        "coordinate_convention": "right_handed_model_cartesian_reciprocal",
                         "origin": [0.0, 0.0],
                         "origin_role": "exactified_valley_expansion_origin_in_model_cartesian",
                         "valley": "Gamma",
@@ -4840,7 +4682,7 @@ def test_complete_fit_and_bands_consume_one_compiled_basis(
     model = build_model(config)
 
     def fail_legacy_complex_rank(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("complete_linear_v2 entered legacy complex-rank path")
+        raise AssertionError("complete_linear entered legacy complex-rank path")
 
     monkeypatch.setattr(
         "kp.model.core.ContinuumModelBuilder._orthogonalize_hermitian_matrices_with_support",
@@ -4850,7 +4692,7 @@ def test_complete_fit_and_bands_consume_one_compiled_basis(
     basis = fitted_model._compiled_response_basis
     fitted = fitted_model._fitted_response_model
 
-    assert diagnostics["response_semantics"] == COMPLETE_LINEAR_V2
+    assert diagnostics["response_semantics"] == RESPONSE_SEMANTICS
     assert diagnostics["candidate_response_channels"] == 8
     assert diagnostics["retained_basis_channels"] == 4
     assert diagnostics["fit_selected_channels"] == 4
@@ -5040,7 +4882,7 @@ def test_fit_rank_excludes_directions_below_propagated_fit_design_error() -> Non
     assert fitted.fit_design_rank_tolerance >= fitted.fit_design_propagated_error_bound
     assert (
         fitted.fit_solver_policy
-        == "real_physical_coefficient_gram_whitened_minimum_norm_svd_v4"
+        == "real_physical_coefficient_gram_whitened_minimum_norm_svd"
     )
     assert fitted.fit_selected_singular_value_min > fitted.fit_selected_error_bound
     assert basis.artifact() == artifact_before
@@ -5388,7 +5230,7 @@ def test_normalized_public_linear_loss_matches_independent_dense_oracle() -> Non
         regularization=ridge,
         band_window=[0, 2],
         spectral_weighting={
-            "mode": "normalized_low_energy_linear_v1",
+            "mode": "normalized_low_energy_linear",
             "band_edge": "top",
             "window_mode": "fixed_count_degeneracy_safe",
             "n_bands": 1,
@@ -5408,15 +5250,15 @@ def test_normalized_public_linear_loss_matches_independent_dense_oracle() -> Non
 
     np.testing.assert_allclose(fitted.coefficients, expected, rtol=2.0e-11, atol=2.0e-11)
     assert fitted.fit_objective == {
-        "mode": "normalized_low_energy_linear_v1",
-        "version": "normalized-low-energy-linear-v1",
+        "mode": "normalized_low_energy_linear",
+        "version": "normalized-low-energy-linear",
         "band_edge": "top",
         "window_mode": "fixed_count_degeneracy_safe",
         "requested_bands": 1,
         "resolved_band_counts": (1, 1),
         "one_sided_weight": one_sided_weight,
         "two_sided_weight": two_sided_weight,
-        "normalization": "dimension_mean_square_v1",
+        "normalization": "dimension_mean_square",
     }
 
 
@@ -5513,10 +5355,7 @@ def test_public_nonlinear_loss_and_jacobian_match_dense_formula(
 
 @pytest.mark.parametrize("target_bands", ["top", "bottom"])
 def test_public_band_response_cache_matches_sparse_oracle(target_bands: str) -> None:
-    from kp.model.pipeline import (
-        _compiled_response_band_jacobian,
-        _prepare_public_band_response_evaluator,
-    )
+    from kp.model.refinement import _compiled_response_band_jacobian, _prepare_public_band_response_evaluator
 
     basis = _spectral_fit_toy_basis()
     points = np.asarray([[0.0, 0.0], [0.2, -0.1]])
@@ -5567,7 +5406,7 @@ def test_public_band_response_cache_matches_sparse_oracle(target_bands: str) -> 
 def test_public_band_response_cache_compiles_once(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from kp.model.pipeline import _prepare_public_band_response_evaluator
+    from kp.model.refinement import _prepare_public_band_response_evaluator
 
     basis = _spectral_fit_toy_basis()
     points = np.asarray([[0.0, 0.0], [0.2, -0.1]])
@@ -5601,10 +5440,7 @@ def test_public_band_response_cache_compiles_once(
 
 
 def test_public_band_response_cache_uses_low_memory_fallback() -> None:
-    from kp.model.pipeline import (
-        _compiled_response_band_jacobian,
-        _prepare_public_band_response_evaluator,
-    )
+    from kp.model.refinement import _compiled_response_band_jacobian, _prepare_public_band_response_evaluator
 
     basis = _spectral_fit_toy_basis()
     points = np.asarray([[0.0, 0.0], [0.2, -0.1]])
@@ -5644,7 +5480,7 @@ def test_public_nonlinear_starts_from_exact_linear_coefficients(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import kp.model.pipeline as pipeline_module
+    import kp.model.refinement as refinement_module
 
     heff_file = tmp_path / "heff.npy"
     # Keep this coefficient-start test nondegenerate; degeneracy has its own tests.
@@ -5683,19 +5519,18 @@ def test_public_nonlinear_starts_from_exact_linear_coefficients(
         "band_loss_weight": 2.0,
         "max_steps": 17,
     }
-    monkeypatch.setattr(pipeline_module, "_load_kpoints", lambda _config: np.zeros((3, 2)))
+    monkeypatch.setattr("kp.model.configuration._load_kpoints", lambda _config: np.zeros((3, 2)))
     monkeypatch.setattr(
-        pipeline_module,
-        "_current_heff_support_hamiltonians",
+        "kp.model.validation._current_heff_support_hamiltonians",
         lambda heff, **kwargs: np.asarray(heff),
     )
     monkeypatch.setattr(
-        pipeline_module,
+        refinement_module,
         "_public_hamiltonian_quadratic_residual",
         lambda *args, **kwargs: (np.eye(2), np.zeros(2), {"mode": "test"}),
     )
     monkeypatch.setattr(
-        pipeline_module,
+        refinement_module,
         "_public_band_residual_and_jacobian",
         lambda *args, **kwargs: (
             np.asarray([float(np.sum(args[3]))]),
@@ -5716,12 +5551,12 @@ def test_public_nonlinear_starts_from_exact_linear_coefficients(
         return evaluator
 
     monkeypatch.setattr(
-        pipeline_module,
+        refinement_module,
         "_prepare_public_band_response_evaluator",
         fake_prepare_evaluator,
     )
     monkeypatch.setattr(
-        pipeline_module,
+        refinement_module,
         "_sync_complete_response_coefficients_to_terms",
         lambda *args, **kwargs: None,
     )
@@ -5744,7 +5579,7 @@ def test_public_nonlinear_starts_from_exact_linear_coefficients(
             message="test",
         )
 
-    monkeypatch.setattr(pipeline_module.scipy.optimize, "least_squares", fake_least_squares)
+    monkeypatch.setattr(refinement_module.scipy.optimize, "least_squares", fake_least_squares)
 
     report = _refine_public_nonlinear_complete_response(
         moire_config,
@@ -5815,7 +5650,7 @@ def test_target_spectral_two_sided_projector_matches_independent_dense_oracle() 
     assert fitted.fit_objective["two_sided_projector"] == {
         "enabled": True,
         "weight": projector_weight,
-        "projector_source": "target_spectral_window_v1",
+        "projector_source": "target_spectral_window",
     }
 
 
@@ -5858,7 +5693,7 @@ def test_target_spectral_linear_fit_matches_independent_dense_sqrt_oracle() -> N
 
     np.testing.assert_allclose(fitted.coefficients, expected, rtol=2.0e-11, atol=2.0e-11)
     assert fitted.fit_objective["mode"] == "target_spectral_linear"
-    assert fitted.fit_objective["normalization"] == "global_mean_trace_per_dimension_v1"
+    assert fitted.fit_objective["normalization"] == "global_mean_trace_per_dimension"
 
 
 def test_target_spectral_linear_uses_full_target_for_one_sided_off_union_rows() -> None:
@@ -6091,7 +5926,7 @@ def test_compute_coefficients_translates_configured_target_spectral_objective(
         bM2=np.eye(2, dtype=float),
         kpoints_fit=np.zeros((1, 2), dtype=float),
         heff=np.asarray([np.diag([0.0, 1.0])], dtype=complex),
-        response_semantics="complete_linear_v2",
+        response_semantics="complete_linear",
         response_fit_objective={
             "mode": "target_spectral_linear",
             "target_reference": "current_heff_support_mask",
@@ -6119,7 +5954,7 @@ def test_compute_coefficients_translates_configured_target_spectral_objective(
         "alpha": 1.0,
         "degeneracy_atol_ev": 0.0005,
         "degeneracy_rtol": 0.0,
-        "normalization": "global_mean_trace_per_dimension_v1",
+        "normalization": "global_mean_trace_per_dimension",
         "two_sided_projector_weight": 300.0,
     }
 
@@ -6237,7 +6072,7 @@ def test_normalized_low_energy_fit_scales_design_error_with_full_matrix_rows() -
         regularization=0.0,
         band_window=[0, 2],
         spectral_weighting={
-            "mode": "normalized_low_energy_linear_v1",
+            "mode": "normalized_low_energy_linear",
             "band_edge": "top",
             "window_mode": "fixed_count_degeneracy_safe",
             "n_bands": 1,
@@ -6343,14 +6178,10 @@ def test_complete_refinement_uses_retained_basis_responses_only(
         n_orb=(2, 0),
         harmonics_config={},
         fit_selection_metadata={"mode": "manual"},
-        response_semantics="complete_linear_v2",
+        response_semantics="complete_linear",
         raw={"model": {"target_bands": "top"}},
     )
 
-    def fail_legacy_prepare(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("complete refinement entered legacy term response path")
-
-    monkeypatch.setattr("kp.model.pipeline._prepare_band_state", fail_legacy_prepare)
     support_targets: list[np.ndarray] = []
 
     def capture_support_target(values: np.ndarray, **_kwargs: object) -> np.ndarray:
@@ -6358,7 +6189,7 @@ def test_complete_refinement_uses_retained_basis_responses_only(
         return np.asarray(values)
 
     monkeypatch.setattr(
-        "kp.model.pipeline._current_heff_support_hamiltonians",
+        "kp.model.validation._current_heff_support_hamiltonians",
         capture_support_target,
     )
     report = refine_band_coefficients(config, model_config, model)
@@ -6366,7 +6197,7 @@ def test_complete_refinement_uses_retained_basis_responses_only(
     assert report["enabled"] is True
     assert report["reference"] == "current_heff_support_mask"
     assert support_targets
-    assert report["response_basis"]["mode"] == "compiled_response_basis_v2"
+    assert report["response_basis"]["mode"] == "compiled_response_basis"
     assert report["fit_kpoints"]["count"] == 2
     hamiltonians = _model_hamiltonians_for_kpoints(config, model, kpoints)
     np.testing.assert_allclose(hamiltonians, target, atol=2.0e-9)
@@ -6415,7 +6246,7 @@ def test_complete_pruning_uses_response_amplitude_and_updates_fitted_runtime() -
 
     report = _prune_small_coefficients(model, 0.05)
 
-    assert report["normalization"] == "response_amplitude_abs_c_times_s_v1"
+    assert report["normalization"] == "response_amplitude_abs_c_times_s"
     assert report["dropped"] == 1
     assert report["kept"] == 1
     refined = model._fitted_response_model

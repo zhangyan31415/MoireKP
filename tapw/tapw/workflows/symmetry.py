@@ -26,7 +26,7 @@ from ..symmetry.representations import (
     generate_direct_sum_params,
     get_g_vec_perlayer,
     get_any_rot_orb_twostep,
-    legacy_single_valley_c3_layer_centers,
+    analytic_single_valley_c3_layer_centers,
     rot,
     rotate_mat,
     spin_reps,
@@ -133,15 +133,12 @@ def _physics_config_hash(config: Any) -> str:
     return hash_mapping(payload)
 
 
-def _is_canonical_output_layout(config) -> bool:
-    layout = getattr(config, "output_layout", None)
-    return str(getattr(layout, "style", "")).lower() == "canonical_v1"
 
 
 def _canonical_symmetry_output_dir(config) -> Path | None:
     layout = getattr(config, "output_layout", None)
-    if str(getattr(layout, "style", "")).lower() != "canonical_v1":
-        return None
+    if layout is None or layout.style != "canonical":
+        raise ValueError("Symmetry output requires the current canonical output layout")
     valleys = (
         getattr(getattr(config, "symmetry_analysis", None), "valleys", None)
         or getattr(getattr(config, "compute", None), "valleys", None)
@@ -1032,8 +1029,8 @@ def resolve_tapw_valley_center(structure, compute_config):
     return resolve_tapw_valley_context(structure, compute_config).valley_center_cart
 
 
-def compare_transport_against_legacy_c3(transport, legacy):
-    return frobenius_relative_residual(transport, legacy, denominator=legacy)
+def compare_transport_against_analytic_c3(transport, analytic):
+    return frobenius_relative_residual(transport, analytic, denominator=analytic)
 
 
 def classify_residual(value: float | None, tolerance: float) -> str:
@@ -1988,7 +1985,7 @@ def _cached_orbital_rotation_block(orb_name: str, rotation_key: tuple[float, ...
 def _orbital_rotation_block(orb_name: str, rotation_cart: np.ndarray):
     try:
         return _cached_orbital_rotation_block(str(orb_name), _rotation_cache_key(rotation_cart)).copy()
-    except Exception as exc:
+    except ValueError as exc:
         raise SymmetrySupportError(
             "orbital_rotation_unsupported",
             f"Failed to build orbital rotation for orb_name={orb_name!r}: {exc}",
@@ -2047,7 +2044,7 @@ def _build_atom_mapping(structure, operation, tol: float = 5.0e-6):
                 target_group=target_group,
                 tol=tol,
             )
-        except Exception as exc:
+        except ValueError as exc:
             raise SymmetrySupportError(
                 "atom_mapping_missing",
                 f"Atom-type symmetry mapping failed for twist-group match {source_group}->{target_group}: {exc}",
@@ -2613,19 +2610,13 @@ class SymmetryAnalysisRunner:
         self.sr_supercell = kwargs.get("sr_supercell")
         self.logger = kwargs.get("logger")
 
-        canonical_output_dir = _canonical_symmetry_output_dir(self.config)
-        if canonical_output_dir is not None:
-            self.output_dir = str(canonical_output_dir)
-        else:
-            base_output_dir = Path(self.config.paths.output_dir)
-            relative_output_dir = getattr(self.config.symmetry_analysis, "output_dir", "symmetry_analysis")
-            self.output_dir = str(base_output_dir / relative_output_dir)
+        self.output_dir = str(_canonical_symmetry_output_dir(self.config))
         self._operation_mapping_cache: dict[tuple[int, bool], dict[str, Any]] = {}
         self._calculator_cache: dict[int, BandStructureCalculator] = {}
         self._raw_hs_cache: dict[tuple[int, tuple[float, float, float]], tuple[np.ndarray, np.ndarray | None]] = {}
         self._raw_c3_h_orbit_cache: dict[tuple[int, tuple[float, float, float]], list[np.ndarray]] = {}
         self._transport_cache: dict[Any, np.ndarray] = {}
-        self._legacy_c3_matrix_cache: dict[int, np.ndarray] = {}
+        self._analytic_c3_matrix_cache: dict[int, np.ndarray] = {}
         self._valley_context_cache: dict[int, ValleyContext] = {}
         self.timing_breakdown: dict[str, float] = {}
         self.analysis_timing_breakdown: dict[str, Any] = {}
@@ -2721,7 +2712,7 @@ class SymmetryAnalysisRunner:
         if len(orbit) < 3:
             raise SymmetrySupportError(
                 "q_mapping_missing",
-                f"Legacy C3 orbit builder returned {len(orbit)} matrices; expected at least 3.",
+                f"Analytic C3 orbit builder returned {len(orbit)} matrices; expected at least 3.",
             )
         self._raw_c3_h_orbit_cache[cache_key] = [
             np.asarray(matrix, dtype=np.complex128)
@@ -2729,8 +2720,8 @@ class SymmetryAnalysisRunner:
         ]
         return self._raw_c3_h_orbit_cache[cache_key]
 
-    def _legacy_c3_matrix_for_valley(self, valley: int) -> np.ndarray:
-        cached = self._legacy_c3_matrix_cache.get(int(valley))
+    def _analytic_c3_matrix_for_valley(self, valley: int) -> np.ndarray:
+        cached = self._analytic_c3_matrix_cache.get(int(valley))
         if cached is not None:
             return cached
 
@@ -2741,10 +2732,10 @@ class SymmetryAnalysisRunner:
         if params.C3_matrix is None:
             raise SymmetrySupportError(
                 "q_mapping_missing",
-                f"Legacy C3 matrix is unavailable for valley {valley}.",
+                f"Analytic C3 matrix is unavailable for valley {valley}.",
             )
         matrix = params.C3_matrix.tocsr()
-        self._legacy_c3_matrix_cache[int(valley)] = matrix
+        self._analytic_c3_matrix_cache[int(valley)] = matrix
         return matrix
 
     def _validated_generic_c3_transport(self, valley: int, power: int):
@@ -2761,30 +2752,30 @@ class SymmetryAnalysisRunner:
 
         base_key = ("validated_c3_base", int(valley))
         generic_c3 = self._transport_cache.get(base_key)
-        legacy_c3 = self._legacy_c3_matrix_for_valley(valley).tocsr()
+        analytic_c3 = self._analytic_c3_matrix_for_valley(valley).tocsr()
         if generic_c3 is None:
             generic_c3 = self._build_generic_c3_projected_transport(valley, 120.0)
-            residual_c3 = compare_transport_against_legacy_c3(generic_c3, legacy_c3)
+            residual_c3 = compare_transport_against_analytic_c3(generic_c3, analytic_c3)
             if residual_c3 >= 1.0e-8:
                 raise SymmetrySupportError(
                     "generic_C3_builder_failed",
-                    f"Generic C3 transport does not match legacy C3: residual={residual_c3:.3e}.",
+                    f"Generic C3 transport does not match analytic C3: residual={residual_c3:.3e}.",
                 )
             generic_c3 = generic_c3.tocsr()
             self._transport_cache[base_key] = generic_c3
             self._transport_cache[("validated_c3", int(valley), 1)] = generic_c3
 
         generic_power = generic_c3
-        legacy_power = legacy_c3
+        analytic_power = analytic_c3
         for _ in range(1, int(power)):
-            generic_power = (generic_power @ legacy_c3).tocsr()
-            legacy_power = (legacy_power @ legacy_c3).tocsr()
+            generic_power = (generic_power @ analytic_c3).tocsr()
+            analytic_power = (analytic_power @ analytic_c3).tocsr()
 
-        residual_power = compare_transport_against_legacy_c3(generic_power, legacy_power)
+        residual_power = compare_transport_against_analytic_c3(generic_power, analytic_power)
         if residual_power >= 1.0e-8:
             raise SymmetrySupportError(
                 "generic_C3_builder_failed",
-                f"Generic C3^{power} transport does not match legacy C3^{power}: residual={residual_power:.3e}.",
+                f"Generic C3^{power} transport does not match analytic C3^{power}: residual={residual_power:.3e}.",
             )
         self._transport_cache[cache_key] = generic_power
         return generic_power
@@ -3098,7 +3089,7 @@ class SymmetryAnalysisRunner:
         if not removable:
             raise SymmetrySupportError(
                 "seitz_translation_unsupported",
-                f"C2 v1 requires removable Seitz translation; got translation={translation_cart.tolist()} "
+                f"C2 requires removable Seitz translation; got translation={translation_cart.tolist()} "
                 f"(reduced={reduced_translation_cart.tolist()}) with origin-shift residual={origin_shift_residual:.3e}.",
             )
 
@@ -3840,7 +3831,7 @@ class SymmetryAnalysisRunner:
         if resolved is None:
             try:
                 resolved = resolve_reference_m_valley_c2_symmetry(self.structure, params)
-            except Exception as exc:  # noqa: BLE001 - report legacy reference failure without aborting selected path diagnostics.
+            except ValueError as exc:  # An unavailable reference geometry is reported explicitly.
                 reference_resolution_error = str(exc)
 
         reference_match, reference_atom_mapping = find_matching_spatial_operation_for_rotation(
@@ -5043,7 +5034,6 @@ class SymmetryAnalysisRunner:
             ]
         )
         exported_rows = []
-        canonical_layout = _is_canonical_output_layout(self.config)
         packed_keys_seen: set[str] = set()
         for record in representations:
             if record.get("matrix") is None:
@@ -5060,8 +5050,6 @@ class SymmetryAnalysisRunner:
                 matrix_role = "raw_h_action"
             matrix_location = (
                 f"representations.npz:{_packed_raw_h_key_from_record(record, packed_keys_seen)}"
-                if canonical_layout
-                else _raw_h_file_from_record(record)
             )
             exported_rows.append(
                 f"| {valley_label} -> {target_valley} | {operation} | {matrix_location} | {matrix_role} |"
@@ -5173,9 +5161,6 @@ class SymmetryAnalysisRunner:
             encoding="utf-8",
         )
 
-    def _write_summary_json(self, summary: dict[str, Any], output_dir: Path) -> None:
-        path = output_dir / "summary.json"
-        path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     def _canonicalize_operation_outputs(self, summary: dict[str, Any], details: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]]]:
         summary_out = copy.deepcopy(summary)
@@ -5229,14 +5214,6 @@ class SymmetryAnalysisRunner:
         }
         path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    def _write_details_csv(self, details: list[dict[str, Any]], output_dir: Path) -> None:
-        path = output_dir / "details.csv"
-        with path.open("w", encoding="utf-8", newline="") as handle:
-            writer = csv.DictWriter(handle, fieldnames=DETAIL_COLUMNS)
-            writer.writeheader()
-            for row in details:
-                payload = {column: row.get(column, "") for column in DETAIL_COLUMNS}
-                writer.writerow(payload)
 
     def _write_residuals_csv(self, details: list[dict[str, Any]], representations: list[dict[str, Any]], output_dir: Path) -> None:
         path = output_dir / "residuals.csv"
@@ -5395,279 +5372,85 @@ class SymmetryAnalysisRunner:
         *,
         developer_outputs: bool = False,
     ) -> None:
-        canonical_layout = _is_canonical_output_layout(self.config)
-        if canonical_layout:
-            tolerance = float(getattr(self.config.symmetry_analysis, "tolerance", 1.0e-2))
-            require_overlap = self.sr_supercell is not None
-            production_representations = []
-            for record in representations:
-                residual_h = record.get("residual_H_raw")
-                residual_s = record.get("residual_S_raw")
+        tolerance = float(getattr(self.config.symmetry_analysis, "tolerance", 1.0e-2))
+        require_overlap = self.sr_supercell is not None
+        production_representations = []
+        for record in representations:
+            residual_h = record.get("residual_H_raw")
+            residual_s = record.get("residual_S_raw")
+            ready = (
+                bool(record.get("production_validated", False))
+                and str(record.get("status", "")) == "passed"
+                and str(record.get("role", "internal")) == "internal"
+                and bool(record.get("supported", True))
+                and residual_h is not None
+                and np.isfinite(residual_h)
+                and float(residual_h) <= tolerance
+            )
+            if require_overlap:
                 ready = (
-                    bool(record.get("production_validated", False))
-                    and str(record.get("status", "")) == "passed"
-                    and str(record.get("role", "internal")) == "internal"
-                    and bool(record.get("supported", True))
-                    and residual_h is not None
-                    and np.isfinite(residual_h)
-                    and float(residual_h) <= tolerance
+                    ready
+                    and residual_s is not None
+                    and np.isfinite(residual_s)
+                    and float(residual_s) <= tolerance
                 )
-                if require_overlap:
-                    ready = (
-                        ready
-                        and residual_s is not None
-                        and np.isfinite(residual_s)
-                        and float(residual_s) <= tolerance
-                    )
-                if ready:
-                    production_representations.append(record)
-            packed_payload: dict[str, np.ndarray] = {}
-            packed_keys_seen: set[str] = set()
-            metadata_matrices: list[dict[str, Any]] = []
-            for record in production_representations:
-                raw_h_matrix = record.get("raw_h_matrix")
-                if raw_h_matrix is None:
-                    continue
-                if not scipy.sparse.issparse(raw_h_matrix):
-                    raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
-                raw_h_matrix = raw_h_matrix.tocsr()
-                operation = representation_operation_name(record.get("operation", "unknown"))
-                packed_key = _packed_raw_h_key_from_record(record, packed_keys_seen)
-                packed_payload.update(_csr_packed_entries(packed_key, raw_h_matrix))
-                metadata_matrices.append(self._packed_raw_h_metadata_record(record, operation, packed_key, raw_h_matrix))
-            packed_path = output_dir / "representations.npz"
-            if packed_payload:
-                basis_hashes = {
-                    str(record.get("basis_hash", "")).strip()
-                    for record in metadata_matrices
-                    if str(record.get("basis_hash", "")).strip()
-                }
-                if len(basis_hashes) != 1:
-                    raise ValueError(
-                        "representations.npz requires exactly one non-empty basis_hash; "
-                        f"found {{sorted(basis_hashes)}}"
-                    )
-                artifact_identity = self._artifact_identity_for_basis(next(iter(basis_hashes)))
-                metadata = {
-                    "schema": "tapw.raw_h_representations.v1",
-                    **artifact_identity,
-                    "output_schema": "tapw_source_symmetry/v2",
-                    "storage": "scipy_csr_components_v1",
-                    "basis": "tapw_projected",
-                    "basis_order": "spin_outermost; group -> g_index -> atom_type -> orbital",
-                    "operation_name_convention": {
-                        "time_reversal": "TR",
-                        "legacy_input_aliases": {"T": "TR"},
-                    },
-                    "source_action_definition": {
-                        "schema": "tapw_source_action/v1",
-                        "required_fields": ["k_map", "q_map", "sector_map", "source_action"],
-                        "frame": "tapw_source",
-                    },
-                    "matrices": metadata_matrices,
-                }
-                packed_payload["metadata_json"] = np.array(json.dumps(metadata, indent=2, sort_keys=True), dtype=str)
-                np.savez_compressed(packed_path, **packed_payload)
-            elif packed_path.exists():
-                packed_path.unlink()
-            stale_dir = output_dir / "representations"
-            if stale_dir.exists():
-                shutil.rmtree(stale_dir)
-            return
-
-        representations_dir = output_dir / "representations"
-        representations_dir.mkdir(parents=True, exist_ok=True)
-        manifest = {
-            "output_schema": "tapw_source_symmetry/v2",
-            "schema_version": 2,
-            "basis": "tapw_projected",
-            "basis_order": "spin_outermost; group -> g_index -> atom_type -> orbital",
-            "operation_name_convention": {
-                "time_reversal": "TR",
-                "legacy_input_aliases": {"T": "TR"},
-            },
-            "source_action_definition": {
-                "schema": "tapw_source_action/v1",
-                "required_fields": ["k_map", "q_map", "sector_map", "source_action"],
-                "frame": "tapw_source",
-            },
-            "matrices": [],
-        }
-        if canonical_layout:
-            manifest["packed_matrix_file"] = "../representations.npz"
-            manifest["packed_storage_format"] = "scipy_csr_components_v1"
+            if ready:
+                production_representations.append(record)
         packed_payload: dict[str, np.ndarray] = {}
         packed_keys_seen: set[str] = set()
-
-        for record in representations:
-            matrix = record.get("matrix")
-            if matrix is None:
-                continue
-            if not scipy.sparse.issparse(matrix):
-                raise TypeError("Saved symmetry representation matrices must be scipy sparse matrices.")
-            matrix = matrix.tocsr()
-            valley_label = _safe_path_component(record.get("valley_label", record.get("valley", "unknown")))
-            operation = representation_operation_name(record.get("operation", "unknown"))
-            operation_file = _safe_path_component(operation) + ".npz"
-            matrix_dir = representations_dir / valley_label
-            matrix_dir.mkdir(parents=True, exist_ok=True)
-            diagnostics_dir = (
-                representations_dir / "diagnostics"
-                if canonical_layout
-                else representations_dir / "diagnostics" / valley_label
-            )
-            developer_files: dict[str, str] = {}
-            for old_name in (operation_file, _safe_path_component(operation) + "_Pin.npz", _safe_path_component(operation) + "_PG.npz"):
-                old_path = matrix_dir / old_name
-                if old_path.exists():
-                    old_path.unlink()
-                old_diagnostic_path = diagnostics_dir / old_name
-                if old_diagnostic_path.exists() and not developer_outputs:
-                    old_diagnostic_path.unlink()
-            if developer_outputs:
-                diagnostics_dir.mkdir(parents=True, exist_ok=True)
-                relative_path = (
-                    Path("diagnostics") / f"{_safe_path_component(operation)}_source.npz"
-                    if canonical_layout
-                    else Path("diagnostics") / valley_label / operation_file
-                )
-                scipy.sparse.save_npz(representations_dir / relative_path, matrix)
-                developer_files["file"] = relative_path.as_posix()
-
-            pin_matrix = record.get("pin_matrix")
-            pin_shape = None
-            pin_nnz = None
-            if pin_matrix is not None:
-                if not scipy.sparse.issparse(pin_matrix):
-                    raise TypeError("Saved source-shift P_in matrices must be scipy sparse matrices.")
-                pin_matrix = pin_matrix.tocsr()
-                pin_shape = [int(pin_matrix.shape[0]), int(pin_matrix.shape[1])]
-                pin_nnz = int(pin_matrix.nnz)
-                if developer_outputs:
-                    pin_file = (
-                        _safe_path_component(operation) + "_pin.npz"
-                        if canonical_layout
-                        else _safe_path_component(operation) + "_Pin.npz"
-                    )
-                    pin_relative_path = (
-                        Path("diagnostics") / pin_file
-                        if canonical_layout
-                        else Path("diagnostics") / valley_label / pin_file
-                    )
-                    scipy.sparse.save_npz(representations_dir / pin_relative_path, pin_matrix)
-                    developer_files["pin_file"] = pin_relative_path.as_posix()
-
-            pg_matrix = record.get("pg_matrix")
-            pg_shape = None
-            pg_nnz = None
-            if pg_matrix is not None:
-                if not scipy.sparse.issparse(pg_matrix):
-                    raise TypeError("Saved periodic-gauge P_G matrices must be scipy sparse matrices.")
-                pg_matrix = pg_matrix.tocsr()
-                pg_shape = [int(pg_matrix.shape[0]), int(pg_matrix.shape[1])]
-                pg_nnz = int(pg_matrix.nnz)
-                if developer_outputs:
-                    pg_file = (
-                        _safe_path_component(operation) + "_pg.npz"
-                        if canonical_layout
-                        else _safe_path_component(operation) + "_PG.npz"
-                    )
-                    pg_relative_path = (
-                        Path("diagnostics") / pg_file
-                        if canonical_layout
-                        else Path("diagnostics") / valley_label / pg_file
-                    )
-                    scipy.sparse.save_npz(representations_dir / pg_relative_path, pg_matrix)
-                    developer_files["pg_file"] = pg_relative_path.as_posix()
-
+        metadata_matrices: list[dict[str, Any]] = []
+        for record in production_representations:
             raw_h_matrix = record.get("raw_h_matrix")
-            raw_h_relative_path = None
-            raw_h_shape = None
-            raw_h_nnz = None
-            packed_key = None
-            if raw_h_matrix is not None:
-                if not scipy.sparse.issparse(raw_h_matrix):
-                    raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
-                raw_h_matrix = raw_h_matrix.tocsr()
-                raw_h_relative_path = (
-                    Path("raw_h") / f"{_safe_path_component(operation)}.npz"
-                    if canonical_layout
-                    else Path(valley_label) / f"{_safe_path_component(operation)}_rawH.npz"
-                )
-                (representations_dir / raw_h_relative_path).parent.mkdir(parents=True, exist_ok=True)
-                scipy.sparse.save_npz(representations_dir / raw_h_relative_path, raw_h_matrix)
-                raw_h_shape = [int(raw_h_matrix.shape[0]), int(raw_h_matrix.shape[1])]
-                raw_h_nnz = int(raw_h_matrix.nnz)
-                if canonical_layout:
-                    packed_key = _safe_path_component(operation)
-                    if packed_key in packed_keys_seen:
-                        packed_key = f"{valley_label}_{packed_key}"
-                    packed_keys_seen.add(packed_key)
-                    packed_payload.update(_csr_packed_entries(packed_key, raw_h_matrix))
             if raw_h_matrix is None:
                 continue
-            action_metadata, source_action, conventions = self._raw_h_source_action_metadata(record, operation)
-
-            manifest_row = {
-                "valley": int(record.get("valley")),
-                "valley_label": str(record.get("valley_label", "")),
-                "operation": operation,
-                "antiunitary": bool(record.get("antiunitary", False)),
-                "spglib_index": _json_optional_int(record.get("spglib_index", "")),
-                "axis_deg": _json_optional_float(record.get("axis_angle_deg")),
-                "dtype": str(raw_h_matrix.dtype if raw_h_matrix is not None else matrix.dtype),
-                "pin_supported": bool(record.get("pin_supported", False)),
-                "pin_reason": str(record.get("pin_reason", "")),
-                "pin_shift_by_group_coeffs": _json_int_vector_dict(record.get("pin_shift_by_group_coeffs")),
-                "pg_reason": str(record.get("pg_reason", "")),
-                "pg_shift_by_group_coeffs": _json_int_vector_dict(record.get("pg_shift_by_group_coeffs")),
-                "pg_phase_convention": str(record.get("pg_phase_convention", PG_PHASE_CONVENTION)),
-                "raw_h_operator_file": None if raw_h_relative_path is None else raw_h_relative_path.as_posix(),
-                "raw_h_operator_shape": raw_h_shape,
-                "raw_h_operator_nnz": raw_h_nnz,
-                "raw_h_action_rule": str(record.get("raw_h_action_rule", RAW_H_ACTION_RULE)),
-                "source_form": str(record.get("source_form", "ld_source_rule")),
-                "ld_source_rule": str(record.get("ld_source_rule", "")),
-                "basis_hash": str(record.get("basis_hash", "")),
-                "residual_H_raw": _json_optional_float(record.get("residual_H_raw")),
-                "status": record.get("status", ""),
-                "g_perm_max_delta": _json_optional_float(record.get("g_perm_max_delta")),
-                "nonzero_reciprocal_shift_count": _json_optional_int(record.get("nonzero_reciprocal_shift_count", "")),
-                "square_residual": _json_optional_float(record.get("square_residual")),
-                "source_valley": str(record.get("source_valley", record.get("valley_label", ""))),
-                "target_valley": str(record.get("target_valley", record.get("valley_label", ""))),
-                "closed_in_active_set": bool(record.get("closed_in_active_set", True)),
-                "role": str(record.get("role", "internal")),
-                "supported": bool(record.get("supported", True)),
-                "k_pairs": [[0, 0]],
-                "k_pair_source": "symmetry_analysis_reference_k_index",
-                "source_matrix_role": "raw_h_action",
-                "source_gauge": "tapw_raw_hamiltonian",
-                "target_role": "kp_source_action",
-                "matrix_kind": "action",
-                "conventions": conventions,
-                "source_action": source_action,
-                **action_metadata,
-            }
-            if packed_key is not None:
-                manifest_row["packed_matrix_file"] = "../representations.npz"
-                manifest_row["packed_matrix_key"] = packed_key
-                manifest_row["packed_storage_format"] = "scipy_csr_components_v1"
-            if developer_files:
-                manifest_row["developer_outputs"] = developer_files
-            manifest["matrices"].append(manifest_row)
-
-        manifest_path = representations_dir / "manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+            if not scipy.sparse.issparse(raw_h_matrix):
+                raise TypeError("Saved raw-H symmetry operators must be scipy sparse matrices.")
+            raw_h_matrix = raw_h_matrix.tocsr()
+            operation = representation_operation_name(record.get("operation", "unknown"))
+            packed_key = _packed_raw_h_key_from_record(record, packed_keys_seen)
+            packed_payload.update(_csr_packed_entries(packed_key, raw_h_matrix))
+            metadata_matrices.append(self._packed_raw_h_metadata_record(record, operation, packed_key, raw_h_matrix))
         packed_path = output_dir / "representations.npz"
-        if canonical_layout and packed_payload:
+        if packed_payload:
+            basis_hashes = {
+                str(record.get("basis_hash", "")).strip()
+                for record in metadata_matrices
+                if str(record.get("basis_hash", "")).strip()
+            }
+            if len(basis_hashes) != 1:
+                raise ValueError(
+                    "representations.npz requires exactly one non-empty basis_hash; "
+                    f"found {sorted(basis_hashes)}"
+                )
+            artifact_identity = self._artifact_identity_for_basis(next(iter(basis_hashes)))
+            metadata = {
+                "schema": "tapw.raw_h_representations.v1",
+                **artifact_identity,
+                "output_schema": "tapw_source_symmetry/v2",
+                "storage": "scipy_csr_components_v1",
+                "basis": "tapw_projected",
+                "basis_order": "spin_outermost; group -> g_index -> atom_type -> orbital",
+                "operation_name_convention": {
+                    "time_reversal": "TR",
+                    "legacy_input_aliases": {"T": "TR"},
+                },
+                "source_action_definition": {
+                    "schema": "tapw_source_action/v1",
+                    "required_fields": ["k_map", "q_map", "sector_map", "source_action"],
+                    "frame": "tapw_source",
+                },
+                "matrices": metadata_matrices,
+            }
+            packed_payload["metadata_json"] = np.array(json.dumps(metadata, indent=2, sort_keys=True), dtype=str)
             np.savez_compressed(packed_path, **packed_payload)
-        elif canonical_layout and packed_path.exists():
+        elif packed_path.exists():
             packed_path.unlink()
+        stale_dir = output_dir / "representations"
+        if stale_dir.exists():
+            shutil.rmtree(stale_dir)
+        return
 
     def _write_canonical_workflow_manifest(self, output_dir: Path) -> None:
-        if not _is_canonical_output_layout(self.config):
-            return
         _remove_canonical_manifest_files(output_dir)
 
     def run(self):
@@ -5686,17 +5469,16 @@ class SymmetryAnalysisRunner:
         started = time.perf_counter()
         output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        if _is_canonical_output_layout(self.config):
-            for stale_name in ("manifest.json", "summary.json", "details.csv", "debug.json", "residuals.csv"):
-                stale_path = output_dir / stale_name
-                if stale_path.exists():
-                    stale_path.unlink()
-            stale_representations_dir = output_dir / "representations"
-            if stale_representations_dir.exists():
-                shutil.rmtree(stale_representations_dir)
-            stale_diagnostics_dir = output_dir / "diagnostics"
-            if stale_diagnostics_dir.exists():
-                shutil.rmtree(stale_diagnostics_dir)
+        for stale_name in ("manifest.json", "summary.json", "details.csv", "debug.json", "residuals.csv"):
+            stale_path = output_dir / stale_name
+            if stale_path.exists():
+                stale_path.unlink()
+        stale_representations_dir = output_dir / "representations"
+        if stale_representations_dir.exists():
+            shutil.rmtree(stale_representations_dir)
+        stale_diagnostics_dir = output_dir / "diagnostics"
+        if stale_diagnostics_dir.exists():
+            shutil.rmtree(stale_diagnostics_dir)
         timings["prepare_output"] = time.perf_counter() - started
         developer_outputs = bool(getattr(self.config.symmetry_analysis, "developer_outputs", False))
         started = time.perf_counter()
@@ -5707,11 +5489,6 @@ class SymmetryAnalysisRunner:
             developer_outputs=developer_outputs,
         )
         timings["write_summary"] = time.perf_counter() - started
-        if not _is_canonical_output_layout(self.config):
-            started = time.perf_counter()
-            self._write_summary_json(summary, output_dir)
-            self._write_details_csv(details, output_dir)
-            timings["write_tables"] = time.perf_counter() - started
         started = time.perf_counter()
         self._write_representations(
             representations,

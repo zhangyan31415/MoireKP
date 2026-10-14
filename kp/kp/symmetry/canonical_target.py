@@ -28,8 +28,8 @@ from .joint_exactification import (
 )
 
 
-CANONICAL_TARGET_ACTIONS_V1 = "canonical_target_actions_v1"
-LITERAL_ROUTE_SOURCE_ACTIONS_V1 = "literal_route_source_actions_v1"
+CANONICAL_TARGET_ACTIONS_SCHEMA = "canonical_target_actions_v1"
+LITERAL_ROUTE_SOURCE_ACTIONS_SCHEMA = "literal_route_source_actions_v1"
 _LITERAL_STORAGE = "literal_little_endian_complex128_block_routes_v1"
 _POST_STORAGE_CLEANUP = "post_exactification_storage_cleanup_v1"
 
@@ -330,7 +330,7 @@ def encode_canonical_target_actions(
         root_order=order,
     )
     payload: dict[str, Any] = {
-        "version": CANONICAL_TARGET_ACTIONS_V1,
+        "version": CANONICAL_TARGET_ACTIONS_SCHEMA,
         "status": "certified",
         "storage": _LITERAL_STORAGE,
         "root_order": order,
@@ -376,7 +376,7 @@ def encode_literal_route_source_actions(
     )
     try:
         relation_certificate = certify_joint_block_actions(actions, presentation)
-    except Exception as exc:
+    except (ValueError, TypeError, KeyError) as exc:
         raise CanonicalTargetError(
             "literal source actions are not relation certified"
         ) from exc
@@ -386,7 +386,7 @@ def encode_literal_route_source_actions(
             "literal source structure identity must report its classifier status"
         )
     payload: dict[str, Any] = {
-        "version": LITERAL_ROUTE_SOURCE_ACTIONS_V1,
+        "version": LITERAL_ROUTE_SOURCE_ACTIONS_SCHEMA,
         "status": "relation_certified",
         "role": role,
         "storage": _LITERAL_STORAGE,
@@ -465,7 +465,7 @@ def _decode_literal_action_records(
                     record["unitarity_certification_bound"]
                 ),
             )
-        except Exception as exc:
+        except (ValueError, TypeError, KeyError) as exc:
             raise CanonicalTargetError(
                 f"literal source route layout is invalid for {generator.name!r}"
             ) from exc
@@ -489,7 +489,7 @@ def load_literal_route_source_artifact(
     if not expected_artifact_hash or expected_artifact_hash != hash_mapping(root):
         raise CanonicalTargetError("literal source artifact hash mismatch")
     if (
-        root.get("version") != LITERAL_ROUTE_SOURCE_ACTIONS_V1
+        root.get("version") != LITERAL_ROUTE_SOURCE_ACTIONS_SCHEMA
         or root.get("status") != "relation_certified"
         or root.get("storage") != _LITERAL_STORAGE
         or bool(root.get("threshold_cleanup_performed"))
@@ -501,7 +501,7 @@ def load_literal_route_source_artifact(
         raise CanonicalTargetError("literal source lacks its presentation")
     try:
         presentation = magnetic_presentation_from_artifact(presentation_raw)
-    except Exception as exc:
+    except (ValueError, TypeError, KeyError) as exc:
         raise CanonicalTargetError("literal source presentation is invalid") from exc
     config_raw = root.get("joint_config")
     config = _config_from_mapping(
@@ -544,7 +544,7 @@ def load_canonical_target_artifact(
         raise CanonicalTargetError("canonical target artifact hash mismatch")
     cleanup = root.get("post_exactification_storage_cleanup")
     if (
-        root.get("version") != CANONICAL_TARGET_ACTIONS_V1
+        root.get("version") != CANONICAL_TARGET_ACTIONS_SCHEMA
         or root.get("status") != "certified"
         or root.get("storage") != _LITERAL_STORAGE
         or root.get("numeric_entries_modified") != 0
@@ -559,7 +559,7 @@ def load_canonical_target_artifact(
         raise CanonicalTargetError("canonical target lacks its presentation")
     try:
         presentation = magnetic_presentation_from_artifact(presentation_raw)
-    except Exception as exc:
+    except (ValueError, TypeError, KeyError) as exc:
         raise CanonicalTargetError("canonical target presentation is invalid") from exc
     config_raw = root.get("joint_config")
     config = _config_from_mapping(
@@ -637,7 +637,7 @@ def load_canonical_target_artifact(
                     record["unitarity_certification_bound"]
                 ),
             )
-        except Exception as exc:
+        except (ValueError, TypeError, KeyError) as exc:
             raise CanonicalTargetError(
                 f"canonical target route layout is invalid for {generator.name!r}"
             ) from exc
@@ -984,8 +984,8 @@ def certify_fixed_target_exactification(
 
 
 __all__ = [
-    "CANONICAL_TARGET_ACTIONS_V1",
-    "LITERAL_ROUTE_SOURCE_ACTIONS_V1",
+    "CANONICAL_TARGET_ACTIONS_SCHEMA",
+    "LITERAL_ROUTE_SOURCE_ACTIONS_SCHEMA",
     "CanonicalTargetBundle",
     "CanonicalTargetError",
     "LiteralRouteSourceBundle",

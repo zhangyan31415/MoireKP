@@ -57,6 +57,8 @@ class SymmetryAdaptedInternalFrame:
 
     @classmethod
     def from_artifact(cls, artifact: Mapping[str, Any]) -> "SymmetryAdaptedInternalFrame":
+        if artifact.get("version") != SYMMETRY_ADAPTED_GAUGE_VERSION:
+            raise ValueError("unsupported symmetry-adapted internal-frame format")
         real = np.asarray(artifact["unitary_real"], dtype=np.float64)
         imag = np.asarray(artifact["unitary_imag"], dtype=np.float64)
         return cls(
@@ -70,7 +72,7 @@ class SymmetryAdaptedInternalFrame:
             ),
             reason=None if artifact.get("reason") is None else str(artifact["reason"]),
             eigenvalues=tuple(complex(*value) for value in artifact.get("eigenvalues", [])),
-            version=str(artifact.get("version", SYMMETRY_ADAPTED_GAUGE_VERSION)),
+            version=str(artifact["version"]),
         )
 
 
@@ -113,14 +115,20 @@ class SymmetryAdaptedBasisFrame:
 
     @classmethod
     def from_artifact(cls, artifact: Mapping[str, Any]) -> "SymmetryAdaptedBasisFrame":
+        if artifact.get("version") != SYMMETRY_ADAPTED_GAUGE_VERSION:
+            raise ValueError("unsupported symmetry-adapted basis-frame format")
+        ordering = artifact.get("basis_ordering")
+        if ordering not in {"sector__orbital__q_v1", "explicit_full_unitary_v1"}:
+            raise ValueError(f"unsupported symmetry-adapted basis ordering: {ordering!r}")
         stored_hash = artifact.get("frame_hash")
-        if stored_hash not in (None, ""):
-            computed_hash = symmetry_adapted_frame_hash(artifact)
-            if str(stored_hash) != computed_hash:
-                raise ValueError(
-                    "symmetry-adapted frame artifact hash mismatch: "
-                    f"{stored_hash!r} != {computed_hash!r}"
-                )
+        if not stored_hash:
+            raise ValueError("symmetry-adapted frame artifact is missing its content hash")
+        computed_hash = symmetry_adapted_frame_hash(artifact)
+        if str(stored_hash) != computed_hash:
+            raise ValueError(
+                "symmetry-adapted frame artifact hash mismatch: "
+                f"{stored_hash!r} != {computed_hash!r}"
+            )
         sectors_raw = artifact.get("sectors", [])
         if not isinstance(sectors_raw, Sequence) or isinstance(sectors_raw, (str, bytes)):
             raise ValueError("symmetry-adapted frame artifact sectors must be a sequence")
@@ -157,7 +165,7 @@ class SymmetryAdaptedBasisFrame:
                 if isinstance(artifact.get("components"), Mapping)
                 else {}
             ),
-            version=str(artifact.get("version", SYMMETRY_ADAPTED_GAUGE_VERSION)),
+            version=str(artifact["version"]),
         )
 
 

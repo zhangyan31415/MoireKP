@@ -51,6 +51,8 @@ Import and symmetry averaging use the relaxed OpenMX geometry; TAPW uses
 
 ## Construct the models
 
+Runtime class: **external-data**. These commands use the matching H/S inputs generated above.
+
 ```bash
 TAPW_CFG=examples/mote2_3.89/tapw/tapw_K.yaml
 KP_CFG=examples/mote2_3.89/kp/kp_K.yaml

@@ -21,7 +21,7 @@ from .identity import (
     hash_file,
     hash_mapping,
 )
-from .projection_handoff import EXPLICIT_LEGACY_BASIS_KIND
+from .projection_handoff import EXPLICIT_LAYER_BASIS_KIND
 from .selection_artifact import (
     ResolvedCandidateIdentity,
     SelectionArtifactStore,
@@ -138,12 +138,9 @@ def _is_canonical_case_config(cfg: dict[str, Any]) -> bool:
 
 
 def _config_path_uses_canonical_case(config_path: str | Path) -> bool:
-    try:
-        with open(config_path, "r", encoding="utf-8") as handle:
-            cfg = normalize_case_config(yaml.safe_load(handle), config_path=config_path)
-        return _is_canonical_case_config(cfg)
-    except Exception:
-        return False
+    with open(config_path, "r", encoding="utf-8") as handle:
+        cfg = normalize_case_config(yaml.safe_load(handle), config_path=config_path)
+    return _is_canonical_case_config(cfg)
 
 
 def _write_text(path: str | Path, text: str) -> None:
@@ -840,61 +837,57 @@ def _kpath_axis_from_config(
     tmat_raw = kpath_cfg.get("tmat")
     if tmat_raw is None:
         return {}
-    try:
-        labels = kpath_cfg.get("labels")
-        coordinates = kpath_cfg.get("coordinates")
-        if labels is not None or coordinates is not None:
-            from .model.core import generate_kpath_from_symbols
+    labels = kpath_cfg.get("labels")
+    coordinates = kpath_cfg.get("coordinates")
+    if labels is not None or coordinates is not None:
+        from .model.core import generate_kpath_from_symbols
 
-            if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)):
-                raise ValueError("inline kpath.labels must be a sequence")
-            if not isinstance(coordinates, Mapping):
-                raise ValueError("inline kpath.coordinates must be a mapping")
-            points_per_segment = kpath_cfg.get(
-                "points_per_segment", kpath_cfg.get("segment_points")
-            )
-            if points_per_segment is None:
-                raise ValueError("inline kpath.points_per_segment is required")
-            kpath = generate_kpath_from_symbols(
-                Tmat=np.asarray(tmat_raw, dtype=float),
-                symbols=[str(label) for label in labels],
-                segment_points=int(points_per_segment),
-                phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
-                coords=coordinates,
-            )
-        else:
-            from .model.core import generate_kpath_from_file
+        if not isinstance(labels, Sequence) or isinstance(labels, (str, bytes)):
+            raise ValueError("inline kpath.labels must be a sequence")
+        if not isinstance(coordinates, Mapping):
+            raise ValueError("inline kpath.coordinates must be a mapping")
+        points_per_segment = kpath_cfg.get(
+            "points_per_segment", kpath_cfg.get("segment_points")
+        )
+        if points_per_segment is None:
+            raise ValueError("inline kpath.points_per_segment is required")
+        kpath = generate_kpath_from_symbols(
+            Tmat=np.asarray(tmat_raw, dtype=float),
+            symbols=[str(label) for label in labels],
+            segment_points=int(points_per_segment),
+            phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
+            coords=coordinates,
+        )
+    else:
+        from .model.core import generate_kpath_from_file
 
-            file_raw = kpath_cfg.get("file")
-            if file_raw is None:
-                return {}
-            path = Path(str(file_raw))
-            if not path.is_absolute():
-                path = Path(cfg_dir) / path
-            kpath = generate_kpath_from_file(
-                Tmat=np.asarray(tmat_raw, dtype=float),
-                file_path=path,
-                phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
-                segment_points=kpath_cfg.get("segment_points"),
-            )
-        x_all = np.asarray(kpath.x, dtype=float)
-        if x_all.shape[0] == row_count:
-            x_values = x_all
-            full_path = True
-        else:
-            indices = np.asarray(project_indices, dtype=int)
-            if x_all.shape[0] <= int(np.max(indices, initial=-1)):
-                return {}
-            x_values = x_all[indices]
-            full_path = indices.shape[0] == x_all.shape[0] and np.array_equal(indices, np.arange(x_all.shape[0]))
-        payload: dict[str, Any] = {"x_values": x_values}
-        if full_path and len(kpath.x_ticks) == len(kpath.labels_ticks):
-            payload["x_ticks"] = [float(item) for item in kpath.x_ticks]
-            payload["x_ticklabels"] = [_normalize_kpath_tick_label(item) for item in kpath.labels_ticks]
-        return payload
-    except Exception as exc:
-        print(f"[kp] K-path axis warning: {exc}; use k-path point index")
-        return {}
+        file_raw = kpath_cfg.get("file")
+        if file_raw is None:
+            return {}
+        path = Path(str(file_raw))
+        if not path.is_absolute():
+            path = Path(cfg_dir) / path
+        kpath = generate_kpath_from_file(
+            Tmat=np.asarray(tmat_raw, dtype=float),
+            file_path=path,
+            phase_deg=float(kpath_cfg.get("phase_deg", 0.0)),
+            segment_points=kpath_cfg.get("segment_points"),
+        )
+    x_all = np.asarray(kpath.x, dtype=float)
+    if x_all.shape[0] == row_count:
+        x_values = x_all
+        full_path = True
+    else:
+        indices = np.asarray(project_indices, dtype=int)
+        if x_all.shape[0] <= int(np.max(indices, initial=-1)):
+            return {}
+        x_values = x_all[indices]
+        full_path = indices.shape[0] == x_all.shape[0] and np.array_equal(indices, np.arange(x_all.shape[0]))
+    payload: dict[str, Any] = {"x_values": x_values}
+    if full_path and len(kpath.x_ticks) == len(kpath.labels_ticks):
+        payload["x_ticks"] = [float(item) for item in kpath.x_ticks]
+        payload["x_ticklabels"] = [_normalize_kpath_tick_label(item) for item in kpath.labels_ticks]
+    return payload
 
 
 def _as_bool(value: Any) -> bool:
@@ -1843,141 +1836,131 @@ def cmd_plot_from_config(cfg_path: str) -> ResolvedProjectionSelection:
         return f"{z.real:>11.6f}{z.imag:+11.6f}i"
 
 
-    try:
-        # 组装 E2: (nQ, nBands)
-        E2 = np.vstack([np.asarray(ev, dtype=np.float64) for ev in eigs_list])
+    E2 = np.vstack([np.asarray(ev, dtype=np.float64) for ev in eigs_list])
 
-        # 可选重排 Q 顺序
-        if index_order is not None:
-            E2 = E2[index_order]
-            if 'vecs_list' in locals():
-                vecs_ord = [vecs_list[i] for i in index_order]
-            else:
-                vecs_ord = None
+    # 可选重排 Q 顺序
+    if index_order is not None:
+        E2 = E2[index_order]
+        if 'vecs_list' in locals():
+            vecs_ord = [vecs_list[i] for i in index_order]
         else:
-            vecs_ord = vecs_list if 'vecs_list' in locals() else None
+            vecs_ord = None
+    else:
+        vecs_ord = vecs_list if 'vecs_list' in locals() else None
 
-        # 参考 Q
-        ref_q = ref_q_index if 0 <= ref_q_index < E2.shape[0] else 0
+    # 参考 Q
+    ref_q = ref_q_index if 0 <= ref_q_index < E2.shape[0] else 0
 
-        # 选择 EF 附近的带（在 ref_q 这一行）
-        below_n = int(plot_cfg.get('report_below', 2))
-        above_n = int(plot_cfg.get('report_above', 2))
-        top_n   = int(plot_cfg.get('report_components', 8))  # 你示例里是 top-8
+    # 选择 EF 附近的带（在 ref_q 这一行）
+    below_n = int(plot_cfg.get('report_below', 2))
+    above_n = int(plot_cfg.get('report_above', 2))
+    top_n   = int(plot_cfg.get('report_components', 8))  # 你示例里是 top-8
 
-        e_row = E2[ref_q]
-        below_idx = np.where(e_row < efermi)[0]
-        above_idx = np.where(e_row >= efermi)[0]
-        sel_below = below_idx[-below_n:].tolist() if below_idx.size else []
-        sel_above = above_idx[:above_n].tolist() if above_idx.size else []
-        reporter.fields(
-            [("selected bands", f"ref_Q={ref_q}; below EF {sel_below}; above EF {sel_above}")]
+    e_row = E2[ref_q]
+    below_idx = np.where(e_row < efermi)[0]
+    above_idx = np.where(e_row >= efermi)[0]
+    sel_below = below_idx[-below_n:].tolist() if below_idx.size else []
+    sel_above = above_idx[:above_n].tolist() if above_idx.size else []
+    reporter.fields(
+        [("selected bands", f"ref_Q={ref_q}; below EF {sel_below}; above EF {sel_above}")]
+    )
+
+    # 若没有本征矢，跳过
+    if vecs_ord is None or len(vecs_ord) != E2.shape[0]:
+        reporter.warning(
+            "eigenvectors unavailable; orbital decomposition skipped "
+            "(set target='all' or remove band_file)"
+        )
+    elif orb0 is None:
+        reporter.warning("orbital block size unavailable; orbital decomposition skipped")
+    else:
+        # 轨道标签准备（"层内轨道名表"，长度对齐到 orb0）
+        labels_pattern = material.get("orbital_order") if isinstance(material, dict) else None
+        layer_names = [f"L{i + 1}" for i in range(int(sum(num_layer_list)))]
+        labels_by_layer = (
+            expand_orbital_order_by_sector(
+                labels_pattern,
+                layer_names,
+                expected_count=orb0,
+            )
+            if labels_pattern
+            else None
         )
 
-        # 若没有本征矢，跳过
-        if vecs_ord is None or len(vecs_ord) != E2.shape[0]:
-            reporter.warning(
-                "eigenvectors unavailable; orbital decomposition skipped "
-                "(set target='all' or remove band_file)"
-            )
-        elif orb0 is None:
-            reporter.warning("orbital block size unavailable; orbital decomposition skipped")
-        else:
-            # 轨道标签准备（"层内轨道名表"，长度对齐到 orb0）
-            labels_pattern = material.get("orbital_order") if isinstance(material, dict) else None
-            layer_names = [f"L{i + 1}" for i in range(int(sum(num_layer_list)))]
-            labels_by_layer = (
-                expand_orbital_order_by_sector(
-                    labels_pattern,
-                    layer_names,
-                    expected_count=orb0,
-                )
-                if labels_pattern
-                else None
+        Vq = np.asarray(vecs_ord[ref_q])  # 形状 (block_dim, nBands)
+        if Vq.ndim != 2:
+            raise RuntimeError(f"Eigenvector matrix at ref_q has wrong shape: {Vq.shape}")
+
+        block_dim, nBands = Vq.shape
+        half = block_dim // 2 if spin == 'all' else block_dim
+        report_block_layer = None
+        if mode != "gamma" and q1 is not None and q2 is not None:
+            report_block_layer = _plot_report_layer_for_ref_q(
+                ref_q,
+                num_layer_list=num_layer_list,
+                q_lengths=[len(q1), len(q2)],
+                index_order=index_order,
             )
 
-            Vq = np.asarray(vecs_ord[ref_q])  # 形状 (block_dim, nBands)
-            if Vq.ndim != 2:
-                raise RuntimeError(f"Eigenvector matrix at ref_q has wrong shape: {Vq.shape}")
+        def map_index(idx: int, block_layer: int | None = None):
+            """将平面波/原子轨道基底索引 -> (spin_tag, layer, orb_local, label)
 
-            block_dim, nBands = Vq.shape
-            half = block_dim // 2 if spin == 'all' else block_dim
-            report_block_layer = None
-            if mode != "gamma" and q1 is not None and q2 is not None:
-                report_block_layer = _plot_report_layer_for_ref_q(
-                    ref_q,
-                    num_layer_list=num_layer_list,
-                    q_lengths=[len(q1), len(q2)],
-                    index_order=index_order,
+            Args:
+                idx: Orbital index within the reported block.
+                block_layer: Physical layer for non-gamma single-layer blocks.
+            """
+            if spin == 'all':
+                spin_tag = 'up' if idx < half else 'down'
+                idx0 = idx if idx < half else idx - half
+            else:
+                spin_tag = spin
+                idx0 = idx
+
+            if mode == "gamma":
+                # gamma mode: block contains all layers, calculate layer from idx0
+                layer = idx0 // orb0
+            else:
+                # non-gamma mode: block contains only one layer
+                if block_layer is not None:
+                    layer = block_layer
+                else:
+                    layer = 0
+
+            orb_local = idx0 % orb0
+            label = None
+            if labels_by_layer is not None:
+                per_layer_labels = labels_by_layer.get(f"L{int(layer) + 1}")
+                if per_layer_labels is not None and 0 <= orb_local < len(per_layer_labels):
+                    label = per_layer_labels[orb_local]
+            return spin_tag, int(layer), int(orb_local), (label if label is not None else "-")
+
+        # 仅在 ref_q 做分解：对每条被选中的带打印 top-N 分量 + 复系数
+        for b in (sel_below + sel_above):
+            if not (0 <= b < nBands):
+                reporter.warning(f"skip band {b}: out of range 0..{nBands-1}")
+                continue
+
+            vec = np.asarray(Vq[:, b], dtype=np.complex128)  # (block_dim,)
+            w = np.abs(vec) ** 2
+            tot = float(w.sum()) if float(w.sum()) != 0.0 else 1.0
+
+            top_idx = np.argsort(-w)[:top_n]
+            w_top = w[top_idx]
+            frac = w_top / tot
+
+            reporter.line(f"  Band {b}: top-{top_n} orbital components ({ref_q} Q, mode={mode})")
+            # 列定义：rank idx spin layer orb coeff weight frac label
+            reporter.line("        rank   idx   spin  layer  orb        coeff (complex)       frac     label")
+            for rk, t in enumerate(top_idx.tolist(), start=1):
+                coeff = complex(vec[int(t)])
+                wt = float(w[int(t)])
+                fr = float(frac[rk-1])
+                spin_tag, layer, orb_local, label = map_index(int(t), block_layer=report_block_layer)
+                # 与你示例的对齐风格一致（数值宽度匹配），coeff 另外增加一列
+                reporter.line(
+                    f"        {rk:>4}  {int(t):>5}  {spin_tag:<5}  {layer:>5}  "
+                    f"{orb_local:>3}  {_format_complex(coeff)}   {fr*100:>7.2f}%   {label}"
                 )
-
-            def map_index(idx: int, block_layer: int | None = None):
-                """将平面波/原子轨道基底索引 -> (spin_tag, layer, orb_local, label)
-
-                Args:
-                    idx: Orbital index within the reported block.
-                    block_layer: Physical layer for non-gamma single-layer blocks.
-                """
-                if spin == 'all':
-                    spin_tag = 'up' if idx < half else 'down'
-                    idx0 = idx if idx < half else idx - half
-                else:
-                    spin_tag = spin
-                    idx0 = idx
-
-                if mode == "gamma":
-                    # gamma mode: block contains all layers, calculate layer from idx0
-                    layer = idx0 // orb0
-                else:
-                    # non-gamma mode: block contains only one layer
-                    if block_layer is not None:
-                        layer = block_layer
-                    else:
-                        layer = 0
-
-                orb_local = idx0 % orb0
-                label = None
-                if labels_by_layer is not None:
-                    per_layer_labels = labels_by_layer.get(f"L{int(layer) + 1}")
-                    if per_layer_labels is not None and 0 <= orb_local < len(per_layer_labels):
-                        label = per_layer_labels[orb_local]
-                return spin_tag, int(layer), int(orb_local), (label if label is not None else "-")
-
-            # 仅在 ref_q 做分解：对每条被选中的带打印 top-N 分量 + 复系数
-            for b in (sel_below + sel_above):
-                if not (0 <= b < nBands):
-                    reporter.warning(f"skip band {b}: out of range 0..{nBands-1}")
-                    continue
-
-                vec = np.asarray(Vq[:, b], dtype=np.complex128)  # (block_dim,)
-                w = np.abs(vec) ** 2
-                tot = float(w.sum()) if float(w.sum()) != 0.0 else 1.0
-
-                top_idx = np.argsort(-w)[:top_n]
-                w_top = w[top_idx]
-                frac = w_top / tot
-
-                reporter.line(f"  Band {b}: top-{top_n} orbital components ({ref_q} Q, mode={mode})")
-                # 列定义：rank idx spin layer orb coeff weight frac label
-                reporter.line("        rank   idx   spin  layer  orb        coeff (complex)       frac     label")
-                for rk, t in enumerate(top_idx.tolist(), start=1):
-                    coeff = complex(vec[int(t)])
-                    wt = float(w[int(t)])
-                    fr = float(frac[rk-1])
-                    spin_tag, layer, orb_local, label = map_index(int(t), block_layer=report_block_layer)
-                    # 与你示例的对齐风格一致（数值宽度匹配），coeff 另外增加一列
-                    reporter.line(
-                        f"        {rk:>4}  {int(t):>5}  {spin_tag:<5}  {layer:>5}  "
-                        f"{orb_local:>3}  {_format_complex(coeff)}   {fr*100:>7.2f}%   {label}"
-                    )
-
-                # 如需一次性输出该带“所有基底分量”的复系数（可能很长），可打开以下注释：
-                # print(f"[kp] Band {b}: full coefficient vector at ref_Q={ref_q} (index, coeff)")
-                # for idx_full, c_full in enumerate(vec.tolist()):
-                #     print(f"        {idx_full:>5}  {_format_complex(complex(c_full))}")
-
-    except Exception as ex:
-        reporter.warning(f"analysis step: {ex}")
 
     reporter.complete(elapsed=time.perf_counter() - started)
     return selection_preview
@@ -2053,7 +2036,7 @@ def cmd_project_from_config(
                 selection_mode="auto",
                 candidate_id=automatic.decision.selected.candidate_id,
                 candidate_dimension=materialized.candidate_dimension,
-                projection_basis_kind=EXPLICIT_LEGACY_BASIS_KIND,
+                projection_basis_kind=EXPLICIT_LAYER_BASIS_KIND,
                 basis_handoff_hash=materialized.basis_handoff_hash,
                 authoritative_heff_hash=materialized.authoritative_heff_hash,
                 heff_k_indices_hash=materialized.heff_k_indices_hash,
@@ -2119,7 +2102,7 @@ def cmd_project_from_config(
             selection_mode="explicit",
             candidate_id=materialized.candidate_id,
             candidate_dimension=materialized.candidate_dimension,
-            projection_basis_kind=EXPLICIT_LEGACY_BASIS_KIND,
+            projection_basis_kind=EXPLICIT_LAYER_BASIS_KIND,
             basis_handoff_hash=materialized.basis_handoff_hash,
             authoritative_heff_hash=materialized.authoritative_heff_hash,
             heff_k_indices_hash=materialized.heff_k_indices_hash,
@@ -3187,7 +3170,7 @@ def _cmd_project_from_config_impl(
         )
     try:
         original_eigs_all = _load_bands_from_text(band_file)
-    except Exception as ex:
+    except (OSError, ValueError) as ex:
         raise ValueError(f"Failed to load TAPW reference bands from material.band_file={band_file}: {ex}") from ex
     if len(original_eigs_all) != nk:
         raise ValueError(
@@ -3366,54 +3349,50 @@ def _cmd_project_from_config_impl(
     if effective_workers <= 1:
         results = [_project_one_from_context(i, project_context) for i in project_indices]
     else:
-        try:
-            from joblib import Parallel, delayed
-            from tqdm import tqdm
+        from joblib import Parallel, delayed
+        from tqdm import tqdm
 
-            parallel_context = dict(project_context)
-            parallel_context.pop("hamk", None)
-            parallel_context["blas_threads"] = inner_blas_threads
-            batches = _project_batches(project_indices, effective_workers, project_cfg.get("batch_size"))
-            if len(batches) != len(project_indices):
-                reporter.fields(
-                    [
-                        (
-                            "parallel batches",
-                            f"{len(batches)}; batch_size~{len(batches[0])}; progress counts completed k-points",
-                        )
-                    ]
-                )
-            parallel_results = Parallel(
-                n_jobs=effective_workers,
-                backend="loky",
-                return_as="generator",
-                batch_size=1,
-                initializer=_init_project_worker,
-                initargs=(parallel_context,),
-            )(
-                delayed(_project_batch_from_context)(batch, parallel_context)
-                for batch in batches
+        parallel_context = dict(project_context)
+        parallel_context.pop("hamk", None)
+        parallel_context["blas_threads"] = inner_blas_threads
+        batches = _project_batches(project_indices, effective_workers, project_cfg.get("batch_size"))
+        if len(batches) != len(project_indices):
+            reporter.fields(
+                [
+                    (
+                        "parallel batches",
+                        f"{len(batches)}; batch_size~{len(batches[0])}; progress counts completed k-points",
+                    )
+                ]
             )
-            progress = tqdm(
-                total=len(project_indices),
-                desc="[kp] project",
-                unit="k",
-                ncols=80,
-                leave=True,
-                disable=not sys.stderr.isatty(),
-            )
-            batch_results = []
-            try:
-                for batch in parallel_results:
-                    batch_results.append(batch)
-                    progress.update(len(batch))
-            finally:
-                progress.close()
-            result_by_index = {k_index: result for batch in batch_results for k_index, result in batch}
-            results = [result_by_index[int(i)] for i in project_indices]
-        except Exception as ex:
-            reporter.warning(f"parallel projection failed; falling back to serial: {ex}")
-            results = [_project_one_from_context(i, project_context) for i in project_indices]
+        parallel_results = Parallel(
+            n_jobs=effective_workers,
+            backend="loky",
+            return_as="generator",
+            batch_size=1,
+            initializer=_init_project_worker,
+            initargs=(parallel_context,),
+        )(
+            delayed(_project_batch_from_context)(batch, parallel_context)
+            for batch in batches
+        )
+        progress = tqdm(
+            total=len(project_indices),
+            desc="[kp] project",
+            unit="k",
+            ncols=80,
+            leave=True,
+            disable=not sys.stderr.isatty(),
+        )
+        batch_results = []
+        try:
+            for batch in parallel_results:
+                batch_results.append(batch)
+                progress.update(len(batch))
+        finally:
+            progress.close()
+        result_by_index = {k_index: result for batch in batch_results for k_index, result in batch}
+        results = [result_by_index[int(i)] for i in project_indices]
 
     heff_rows = [np.asarray(r[0], dtype=np.complex128) for r in results]  # (nk, M, M)
     heig_list = [np.asarray(r[1], dtype=np.float64) for r in results]      # (nk, M)
@@ -3421,26 +3400,14 @@ def _cmd_project_from_config_impl(
     diag_list = [r[3] for r in results if len(r) > 3]
     spin_operator_rows = [np.asarray(r[4], dtype=np.complex128) for r in results if len(r) > 4]
 
-    # Stack to numeric arrays if possible
-    try:
-        heff_arr = np.stack(heff_rows, axis=0)  # (Q, M, M)
-        heig_arr = np.stack(heig_list, axis=0)  # (Q, M)
-        hvec_arr = np.stack(hvec_list, axis=0)  # (Q, M, M)
-    except Exception:
-        heff_arr = np.array(heff_rows, dtype=object)
-        heig_arr = np.array(heig_list, dtype=object)
-        hvec_arr = np.array(hvec_list, dtype=object)
+    # Every k point must use one numeric model dimension.
+    heff_arr = np.stack(heff_rows, axis=0)  # (Q, M, M)
+    heig_arr = np.stack(heig_list, axis=0)  # (Q, M)
+    hvec_arr = np.stack(hvec_list, axis=0)  # (Q, M, M)
 
     spin_operator_arr: np.ndarray | None = None
     if len(spin_operator_rows) == len(results):
-        try:
-            spin_operator_arr = np.stack(spin_operator_rows, axis=0)
-        except Exception:
-            spin_operator_arr = np.array(spin_operator_rows, dtype=object)
-    if not isinstance(heff_arr, np.ndarray) or heff_arr.dtype == object:
-        raise ValueError("Projection produced ragged/object Heff rows; release outputs require one numeric basis dimension")
-    if not isinstance(hvec_arr, np.ndarray) or hvec_arr.dtype == object:
-        raise ValueError("Projection produced ragged/object eigenvector rows; release outputs require one numeric basis dimension")
+        spin_operator_arr = np.stack(spin_operator_rows, axis=0)
     gauge_frame_hash: str | None = None
     if frame_artifact is not None:
         adapted_frame = SymmetryAdaptedBasisFrame.from_artifact(frame_artifact)
@@ -3455,8 +3422,6 @@ def _cmd_project_from_config_impl(
             heff_arr = transform_basis_hamiltonian(heff_arr, adapted_frame.full_unitary)
             hvec_arr = transform_basis_vectors(hvec_arr, adapted_frame.full_unitary)
             if spin_operator_arr is not None:
-                if spin_operator_arr.dtype == object:
-                    raise ValueError("Projection produced ragged/object spin-operator rows")
                 spin_operator_arr = transform_basis_hamiltonian(
                     spin_operator_arr,
                     adapted_frame.full_unitary,
@@ -3498,7 +3463,7 @@ def _cmd_project_from_config_impl(
         else "absent"
     )
     legacy_handoff_payload = {
-        "projection_basis_kind": np.asarray(EXPLICIT_LEGACY_BASIS_KIND),
+        "projection_basis_kind": np.asarray(EXPLICIT_LAYER_BASIS_KIND),
         "projection_basis_handoff_version": np.asarray(
             PROJECTION_BASIS_HANDOFF_VERSION
         ),
@@ -3758,13 +3723,9 @@ def cmd_sweep_from_config(cfg_path: str, overrides: dict[str, Any] | None = None
             )
 
         if workers > 1:
-            try:
-                from joblib import Parallel, delayed
-                results = Parallel(n_jobs=workers)(delayed(sweep_one)(i) for i in k_indices)
-            except Exception as ex:
-                print(f"[kp] Parallel sweep failed, falling back to serial: {ex}")
-                results = []
-        if not results:
+            from joblib import Parallel, delayed
+            results = Parallel(n_jobs=workers)(delayed(sweep_one)(i) for i in k_indices)
+        else:
             results = [sweep_one(i) for i in k_indices]
         # heig_list = [np.asarray(r[1], dtype=np.float64) for r in results]
         diag_list = [r[3] for r in results if len(r) > 3]

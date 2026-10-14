@@ -385,7 +385,7 @@ def parse_openmx_structure(path: str | Path) -> OpenMXStructure:
 def _species_numbers(species: list[str]) -> np.ndarray:
     try:
         from ase.data import atomic_numbers
-    except Exception:
+    except ImportError:
         atomic_numbers = {}
     assigned: dict[str, int] = {}
     next_unknown = 1000
@@ -1395,7 +1395,7 @@ def _blas_thread_context(blas_threads: int | None):
         return nullcontext()
     try:
         from threadpoolctl import threadpool_limits
-    except Exception:
+    except ImportError:
         return nullcontext()
     return threadpool_limits(limits=int(blas_threads))
 

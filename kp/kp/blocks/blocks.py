@@ -2914,9 +2914,19 @@ def _gamma_source_group_translated_references(
     *,
     num_layer_list: list[int],
     segments: list[tuple[int, int]],
-) -> tuple[list[list[tuple[int, complex]]], list[dict[str, Any]]]:
+) -> tuple[list[list[tuple[int, complex]]], list[dict[str, Any]]] | None:
     total_layers = int(sum(int(n) for n in num_layer_list))
     by_layer = _references_by_layer_from_resolved(resolved, total_layers=total_layers)
+    if len(segments) != 2 * total_layers:
+        raise ValueError("gamma source-group translation requires two spin-resolved layer segments per layer")
+    previous_stop = 0
+    for start, stop in segments:
+        if start != previous_stop or stop <= start:
+            raise ValueError("gamma source-group translation segments must be contiguous nonempty intervals")
+        previous_stop = stop
+    for layer, band_pos in owners:
+        if not 0 <= int(layer) < len(by_layer) or not 0 <= int(band_pos) < len(by_layer[int(layer)]):
+            raise ValueError("gamma source-group translation does not cover all low-state owners")
     changed = False
     details: list[dict[str, Any]] = []
     for group_index, start, stop in _source_group_layer_ranges(num_layer_list):
@@ -2927,9 +2937,7 @@ def _gamma_source_group_translated_references(
         template_refs = by_layer[template_layer]
         for target_layer in active_layers[1:]:
             if len(by_layer[target_layer]) != len(template_refs):
-                raise ValueError(
-                    f"gamma source-group translation requires equal anchor counts inside source group {group_index}"
-                )
+                return None
             translated_refs: list[list[tuple[int, complex]]] = []
             for band_pos, terms in enumerate(template_refs):
                 translated = _translate_gamma_reference_terms_between_layers(
@@ -2952,13 +2960,11 @@ def _gamma_source_group_translated_references(
             by_layer[int(target_layer)] = translated_refs
             changed = True
     if not changed:
-        raise ValueError("gamma source-group translation did not change any anchors")
+        return None
     references_by_band: list[list[tuple[int, complex]]] = []
     for layer, band_pos in owners:
         layer = int(layer)
         band_pos = int(band_pos)
-        if layer >= len(by_layer) or band_pos >= len(by_layer[layer]):
-            raise ValueError("gamma source-group translation does not cover all low-state owners")
         references_by_band.append(list(by_layer[layer][band_pos]))
     return references_by_band, details
 
@@ -3636,13 +3642,14 @@ def resolve_project_gauge_anchor_candidates(
             str,
         ]
     ] = []
-    try:
-        translated_references, translation_details = _gamma_source_group_translated_references(
-            resolved,
-            owners,
-            num_layer_list=[int(n) for n in num_layer_list],
-            segments=segments,
-        )
+    translation = _gamma_source_group_translated_references(
+        resolved,
+        owners,
+        num_layer_list=[int(n) for n in num_layer_list],
+        segments=segments,
+    )
+    if translation is not None:
+        translated_references, translation_details = translation
         candidate_defs.append(
             (
                 "gamma_source_group_translated_model_frame",
@@ -3655,8 +3662,6 @@ def resolve_project_gauge_anchor_candidates(
                 "source_group_layer_translation",
             )
         )
-    except ValueError:
-        pass
     candidate_defs.extend(
         [
         (

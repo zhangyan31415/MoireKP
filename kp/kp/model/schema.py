@@ -37,9 +37,9 @@ def effective_operation_metadata_for_valley(
     alias = M_EFFECTIVE_OPERATION_ALIASES.get(raw)
     if alias is None:
         canonical = canonical_operation_name_for_valley(raw, valley_model)
-        for legacy_name, legacy_meta in M_EFFECTIVE_OPERATION_ALIASES.items():
-            if str(legacy_meta["canonical"]) == canonical:
-                alias = {"operation_alias": legacy_name, **legacy_meta}
+        for operation_name, operation_metadata in M_EFFECTIVE_OPERATION_ALIASES.items():
+            if str(operation_metadata["canonical"]) == canonical:
+                alias = {"operation_alias": operation_name, **operation_metadata}
                 break
     else:
         alias = {"operation_alias": raw, **alias}

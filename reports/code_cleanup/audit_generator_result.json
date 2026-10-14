@@ -1,0 +1,52 @@
+{
+  "coverage": {
+    "inventory_total": 2726,
+    "inventory_covered": 2726,
+    "distinct_version_labels_total": 234,
+    "distinct_version_labels_covered": 234,
+    "agent_records": 788,
+    "current_error_boundaries_reviewed": 36,
+    "needs_review": [],
+    "baseline_snapshot_commit": "060dbc74f105c12463d45d3f4803218c0594cd84",
+    "baseline_source_hashes_verified": 106,
+    "after_source_fingerprint": "af422dc857cfba021f351d054f94f475af6e02ea15eac9340ed764a368298c24"
+  },
+  "after_counts": {
+    "version_tokens": 183,
+    "version_lines": 179,
+    "legacy_mentions": 100,
+    "fallback_mentions": 32,
+    "compatibility_mentions": 25,
+    "files_at_least_2000_lines": 23,
+    "lines_over_300_chars": 3,
+    "lines_over_1000_chars": 0,
+    "debug_blocks": 0,
+    "debug_http_posts": 0,
+    "functions": 3142,
+    "functions_at_least_300_lines": 30,
+    "functions_at_least_20_parameters": 7,
+    "bare_except_handlers": 0,
+    "broad_except_handlers": 31,
+    "silent_except_pass_handlers": 6,
+    "version_literal_nodes": 179,
+    "version_gated_if_nodes": 9
+  },
+  "after_files": 113,
+  "after_lines": 124350,
+  "duplicate_groups": [
+    [
+      {
+        "file": "kp/kp/model/response_basis.py",
+        "name": "_local_fixed_joint_key_cache_artifact",
+        "line": 6242,
+        "lines": 16
+      },
+      {
+        "file": "kp/kp/model/response_basis_graded.py",
+        "name": "_joint_adjoint_key_artifact",
+        "line": 1621,
+        "lines": 16
+      }
+    ]
+  ]
+}

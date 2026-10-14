@@ -1040,7 +1040,7 @@ def infer_fermi_energy(band_dir: Path) -> float:
 
     try:
         import yaml
-    except Exception:
+    except ImportError:
         yaml = None
     if yaml is not None:
         candidates = [band_dir / "config.yaml"]

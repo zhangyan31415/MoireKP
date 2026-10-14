@@ -39,9 +39,9 @@ class AdjointCertificationError(ValueError):
     """Raised when metadata adjoints disagree with raw polynomial coefficients."""
 
 
-CANONICAL_CENTER_CONVENTION_V1 = "dimensionless_global_polynomial__little_endian_f64_v1"
+CANONICAL_CENTER_CONVENTION = "dimensionless_global_polynomial__little_endian_f64"
 ADJOINT_CERTIFICATION_STATUS_PROVISIONAL = "provisional_metadata_only"
-ADJOINT_CERTIFICATION_STATUS_CONFIRMED = "certified_raw_coefficient_adjoint_v1"
+ADJOINT_CERTIFICATION_STATUS_CONFIRMED = "certified_raw_coefficient_adjoint"
 
 
 @dataclass(frozen=True)
@@ -49,10 +49,10 @@ class CanonicalDimensionlessCenter:
     """Serialized identity for a center in the global dimensionless coordinates."""
 
     serialized_little_endian_hex: str
-    coordinate_convention: str = CANONICAL_CENTER_CONVENTION_V1
+    coordinate_convention: str = CANONICAL_CENTER_CONVENTION
 
     def __post_init__(self) -> None:
-        if self.coordinate_convention != CANONICAL_CENTER_CONVENTION_V1:
+        if self.coordinate_convention != CANONICAL_CENTER_CONVENTION:
             raise ValueError(
                 f"unsupported center coordinate convention {self.coordinate_convention!r}"
             )

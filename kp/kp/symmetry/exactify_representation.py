@@ -13,6 +13,7 @@ from .joint_exactification import (
     JointExactificationConfig,
     JointExactificationBranchError,
     JointExactificationError,
+    JointExactificationFeasibilityError,
     compile_continuum_magnetic_presentation,
     extract_block_route_action,
     joint_exactify_block_actions,
@@ -363,7 +364,7 @@ def build_basis_labels(
             q_offset = np.asarray(sector["q_offset"], dtype=float)
             try:
                 canonical_q_coordinates(qset[0], name, bM1, bM2, q_offset, tol)
-            except Exception:
+            except ValueError:
                 if forbid_inferred_q_offset:
                     raise ValueError(f"exactification strict mode forbids inferred q_offset for sector {name!r}")
                 q_offset = infer_q_offset_from_qset(qset, bM1, bM2)
@@ -416,7 +417,7 @@ def build_label_action(
             _, n1, n2 = canonical_q_coordinates(q_target, target_sector, bM1, bM2, q_offsets[target_sector], tol)
             key = (target_sector, n1, n2, target_orbital)
             target_idx = lookup.get(key)
-        except Exception as exc:
+        except ValueError as exc:
             integerize_error = str(exc)
         if target_idx is None:
             candidates = by_sector_orbital.get((target_sector, target_orbital), [])
@@ -463,7 +464,7 @@ def _choose_best_action_candidate(
         try:
             block_groups = build_block_groups(basis_labels, operation, bM1, bM2, q_offsets, tol)
             block_report = analyze_block_support(np.asarray(D_num, dtype=complex), block_groups)
-        except Exception:
+        except ValueError:
             block_groups = None
             block_report = None
         mono_amp = max(abs(mono_report.amplitude_min - 1.0), abs(mono_report.amplitude_max - 1.0))
@@ -513,9 +514,9 @@ def _candidate_support_residuals(
                     row["block_amplitude_deviation"] = float(
                         max(abs(block_report.amplitude_min - 1.0), abs(block_report.amplitude_max - 1.0))
                     )
-                except Exception as exc:
+                except ValueError as exc:
                     row["block_error"] = str(exc)
-        except Exception as exc:
+        except ValueError as exc:
             row["error"] = str(exc)
         rows.append(row)
     return rows
@@ -586,7 +587,7 @@ def build_block_groups(
         try:
             _, n1, n2 = canonical_q_coordinates(q_target, target_sector, bM1, bM2, q_offsets[target_sector], tol)
             target_key = (target_sector, (n1, n2))
-        except Exception:
+        except ValueError:
             # Fallback: nearest group center
             best_key = None
             best_dist = None
@@ -856,13 +857,13 @@ def exactify_1d_monomial_phases(
     if input_report.support_mismatch_count:
         raise ValueError(f"{operation_name} exactification failed: support mismatch count={input_report.support_mismatch_count}")
     if input_report.off_support_rel > reject_if_off_support_rel_gt:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} exactification failed: off-support pollution {input_report.off_support_rel:.3e} exceeds "
             f"{reject_if_off_support_rel_gt:.3e}"
         )
     amp_dev = max(abs(input_report.amplitude_min - 1.0), abs(input_report.amplitude_max - 1.0))
     if amp_dev > reject_if_amplitude_deviation_gt:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} exactification failed: amplitude deviation {amp_dev:.3e} exceeds "
             f"{reject_if_amplitude_deviation_gt:.3e}"
         )
@@ -927,7 +928,7 @@ def exactify_1d_monomial_phases(
     else:
         power_residual = float(np.linalg.norm(np.linalg.matrix_power(exact, int(power)) - complex(central_phase) * ident) / np.sqrt(exact.shape[0]))
     if power_residual > 1.0e-8:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} exactification failed: group power residual {power_residual:.3e} exceeds 1.000e-08"
         )
     alpha = np.vdot(exact, arr) / np.vdot(exact, exact)
@@ -994,13 +995,13 @@ def infer_monomial_perm_from_blocks(
     if report.support_mismatch_count:
         raise ValueError(f"{operation_name} block_monomial cleanup failed: support mismatch count={report.support_mismatch_count}")
     if report.off_support_rel > reject_if_off_support_rel_gt:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} block_monomial cleanup failed: inferred off-support {report.off_support_rel:.3e} exceeds "
             f"{reject_if_off_support_rel_gt:.3e}"
         )
     amp_dev = max(abs(report.amplitude_min - 1.0), abs(report.amplitude_max - 1.0))
     if amp_dev > reject_if_amplitude_deviation_gt:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} block_monomial cleanup failed: amplitude deviation {amp_dev:.3e} exceeds "
             f"{reject_if_amplitude_deviation_gt:.3e}"
         )
@@ -1111,13 +1112,13 @@ def exactify_block_monomial_representation(
     arr = np.asarray(D_num, dtype=complex)
     input_report = analyze_block_support(arr, groups)
     if input_report.off_support_rel > reject_if_off_support_rel_gt:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} block exactification failed: off-support pollution {input_report.off_support_rel:.3e} exceeds "
             f"{reject_if_off_support_rel_gt:.3e}"
         )
     amp_dev = max(abs(input_report.amplitude_min - 1.0), abs(input_report.amplitude_max - 1.0))
     if amp_dev > reject_if_amplitude_deviation_gt:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} block exactification failed: amplitude deviation {amp_dev:.3e} exceeds "
             f"{reject_if_amplitude_deviation_gt:.3e}"
         )
@@ -1157,7 +1158,7 @@ def exactify_block_monomial_representation(
             / np.sqrt(U_exact.shape[0])
         )
     if power_residual > 1.0e-8:
-        raise ValueError(
+        raise JointExactificationFeasibilityError(
             f"{operation_name} block exactification failed: group power residual {power_residual:.3e} exceeds 1.000e-08"
         )
     alpha = np.vdot(exact, arr) / np.vdot(exact, exact)
@@ -1543,7 +1544,7 @@ def exactify_loaded_symmetry_source(
             try:
                 canonical_q_coordinates(qset[0], name, bM1, bM2, q_offset, tol)
                 inferred_q_offsets[name] = False
-            except Exception:
+            except ValueError:
                 if forbid_inferred_q_offset:
                     raise ValueError(
                         f"exactification strict mode forbids inferred q_offset for sector {name!r}"

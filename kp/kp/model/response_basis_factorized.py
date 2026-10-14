@@ -261,7 +261,7 @@ def compile_factorized_group_element_actions(
             }
         )
     return action_by_word, {
-        "compiler": "factorized_sparse_group_elements_v1",
+        "compiler": "factorized_sparse_group_elements",
         "generator_names": sorted(required_names),
         "generator_action_hashes": {
             name: str(actions[name].artifact_hash) for name in sorted(required_names)
@@ -421,7 +421,7 @@ def compile_joint_route_group_element_actions(
             }
         )
     return action_by_word, {
-        "compiler": "joint_route_sparse_group_elements_v1",
+        "compiler": "joint_route_sparse_group_elements",
         "joint_artifact_hash": artifact_hash,
         "generator_names": sorted(required_names),
         "generator_action_hashes": dict(sorted(generator_hashes.items())),

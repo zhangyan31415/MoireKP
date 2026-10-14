@@ -553,7 +553,7 @@ def _solve_config_point_loky_worker(
     sewing_context = _sewing_context_from_calculator(calculator, config)
 
     solve_started = time.perf_counter()
-    eig, vec, _hamk, samk = calculator.calculate_band_01(np.asarray(coords, dtype=float), int(point_index))
+    eig, vec, _hamk, samk = calculator.calculate_band(np.asarray(coords, dtype=float), int(point_index))
     solve_elapsed = time.perf_counter() - solve_started
     if vec is None:
         raise RuntimeError(f"TAPW point solve for {label} did not return eigenvectors; eig_vec_cal must be true.")
@@ -703,7 +703,7 @@ def calculate_config_point_sources(
                 )
             )
         started = time.perf_counter()
-        calculator.parallel_calculate_band_01(
+        calculator.parallel_calculate_band(
             coords_array,
             kpoint_indices=list(range(total_points)),
             nk_total=total_points,
@@ -832,7 +832,7 @@ def _solve_config_point_with_fixed_window(
     if progress is not None:
         progress(f"Diagonalizing {label} with num_bands={num_bands}.")
     started = time.perf_counter()
-    eig, vec, _hamk, samk = calculator.calculate_band_01(coords, point_index)
+    eig, vec, _hamk, samk = calculator.calculate_band(coords, point_index)
     elapsed = time.perf_counter() - started
     if vec is None:
         raise RuntimeError("TAPW point solve did not return eigenvectors; eig_vec_cal must be true.")

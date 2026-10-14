@@ -11,6 +11,24 @@ from typing import Iterable, TextIO
 import numpy as np
 
 
+def write_report_field(
+    reporter,
+    label: str,
+    value,
+    *,
+    width: int | None = None,
+    value_style: str | None = None,
+) -> None:
+    label_width = len(label) if width is None else int(width)
+    lines = str(value).splitlines() or [""]
+    rendered = reporter._style(lines[0], value_style) if value_style else lines[0]
+    reporter.line(f"  {label:<{label_width}}  {rendered}")
+    continuation = " " * (label_width + 4)
+    for line in lines[1:]:
+        rendered = reporter._style(line, value_style) if value_style else line
+        reporter.line(f"{continuation}{rendered}")
+
+
 class TapwReporter:
     """Emit TAPW status lines through a logger or stdout with one style."""
 
@@ -101,27 +119,11 @@ class TapwReporter:
             return
         width = max(len(label) for label, _ in entries)
         for label, value in entries:
-            self._field(label, value, width=width)
+            write_report_field(self, label, value, width=width)
 
-    def _field(
-        self,
-        label: str,
-        value,
-        *,
-        width: int | None = None,
-        value_style: str | None = None,
-    ) -> None:
-        label_width = len(label) if width is None else int(width)
-        lines = str(value).splitlines() or [""]
-        rendered = self._style(lines[0], value_style) if value_style else lines[0]
-        self.line(f"  {label:<{label_width}}  {rendered}")
-        continuation = " " * (label_width + 4)
-        for line in lines[1:]:
-            rendered = self._style(line, value_style) if value_style else line
-            self.line(f"{continuation}{rendered}")
 
     def path(self, label: str, value: str | Path) -> None:
-        self._field(str(label), value, value_style="35")
+        write_report_field(self, str(label), value, value_style="35")
 
     def array(self, label: str, value, *, precision: int = 6) -> None:
         self.line(f"  {label}:")

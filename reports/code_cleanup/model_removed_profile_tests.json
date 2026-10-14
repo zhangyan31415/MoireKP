@@ -1,0 +1,12 @@
+[
+  "test_default_k_term_templates_omit_inter_for_single_active_sector",
+  "test_default_k_term_templates_are_generated_from_active_sectors",
+  "test_default_term_templates_clamp_profile_harmonics_to_requested_count",
+  "test_gamma_2x2_derivative_split_is_case_specific_override",
+  "test_gamma_max_derivative_order_uses_semantic_tunneling_names",
+  "test_gamma_2x2_term_templates_collapse_only_with_sector_exchange_symmetry",
+  "test_exact_gamma_profiles_do_not_also_include_generic_fallback",
+  "test_default_gamma_templates_use_generic_onsite_fallback_for_arbitrary_orbital_count",
+  "test_default_term_templates_are_profile_driven_and_preserve_k_gamma_m_behavior",
+  "test_default_profile_registry_contains_no_complete_valley_profiles"
+]

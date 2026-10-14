@@ -1,0 +1,10 @@
+file,line,test,role
+tapw/tapw/chern_post.py,1349,"str(manifest.get('schema', '')) not in {'tapw_topology_grid/v1', 'tapw_topology_outputs/v1'}","Optional topology grid/collection manifest type recognition; current producer omits manifests, retained reader boundary documented."
+tapw/tapw/symm_rep.py,79,"str(metadata.get('schema', '')) != 'tapw.raw_h_representations.v1'",Exact current packed raw-H representation schema before CSR reconstruction.
+kp/kp/symmetry/candidate_certificate.py,1025,input_payload['version'] != 'kp.candidate-symmetry-input.v1',Exact current candidate input/presentation certificate artifact discriminator and source binding rule.
+kp/kp/symmetry/candidate_certificate.py,1311,presentation['version'] != 'kp.candidate-symmetry-presentation.v1' or presentation['source_identity_bound'] is not False,Exact current candidate input/presentation certificate artifact discriminator and source binding rule.
+kp/kp/selection_artifact.py,1210,payload['schema'] != 'kp.non-gamma-post-selection-symmetry-pending.v2',"Exact current PENDING transaction record schema for Gamma/non-Gamma selection, with status validation."
+kp/kp/selection_artifact.py,1314,payload['schema'] != 'kp.gamma-post-selection-symmetry-pending.v2' or payload['status'] != 'pending',"Exact current PENDING transaction record schema for Gamma/non-Gamma selection, with status validation."
+kp/kp/basis/symmetry_gauge.py,121,"ordering not in {'sector__orbital__q_v1', 'explicit_full_unitary_v1'}","Two declared current basis-ordering data types (sector ordering versus full unitary ordering), not old numerical algorithm generations."
+kp/kp/basis/symmetry_gauge.py,148,artifact.get('basis_ordering') == 'explicit_full_unitary_v1',"Two declared current basis-ordering data types (sector ordering versus full unitary ordering), not old numerical algorithm generations."
+kp/kp/model/physical_runtime.py,55,config.get('schema_version') != 'moirekp-physical-v1',Exact current standalone physical model configuration schema; wrong formats rejected.

@@ -673,7 +673,7 @@ def compile_symmetry_first_fixed_space(
             physical_basis=physical_basis,
             fixed_vocabulary_coordinates=selector,
             metadata={
-                "compiler": "closed_symbolic_atom_reynolds_v1",
+                "compiler": "closed_symbolic_atom_reynolds",
                 "logical_channel_ids": list(channel_ids),
                 "selected_channel_ids": [channel_ids[index] for index in selected],
                 "projected_channel_count": int(projected.shape[1]),
@@ -793,7 +793,7 @@ def compile_symbolic_atom_candidate_group(
                 support_component=str(seed.support_component),
                 metadata={
                     **dict(seed.metadata),
-                    "symbolic_atom_compiler": "closed_symbolic_atom_reynolds_v1",
+                    "symbolic_atom_compiler": "closed_symbolic_atom_reynolds",
                 },
                 error_bound_components=error_components,
             )
@@ -808,7 +808,7 @@ def compile_symbolic_atom_candidate_group(
         group_artifact=group.artifact(),
         null_policy=policy,
         adjoint_artifact={
-            "certification": "closed_symbolic_atom_reynolds_v1",
+            "certification": "closed_symbolic_atom_reynolds",
             "logical_candidate_channel_count": int(logical_count),
             "authored_ordered_seed_count": int(len(ordered)),
             "adjoint_orbit_descriptor_count": int(len(ordered)),

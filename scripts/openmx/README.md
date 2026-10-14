@@ -34,10 +34,8 @@ tapw prepare-hs openmx --input openmx.scfout --structure openmx.dat \
 ```
 
 Load the same oneAPI/MKL runtime used at build time. Add `--symmetrize` for
-separate symmetry outputs. The historical top-level
-`scripts/openmx_symm_hs_scfout.py` and `scripts/openmx_symm_hs_python.py`
-retain their original symmetrized-output behavior; implementations are in
-`scripts/legacy/openmx/`.
+separate symmetry outputs. Use `tapw prepare-hs openmx` or
+`scripts/openmx/prepare_hs.py`.
 The per-backend `prepare_hs.py` accepts the same options as the installed CLI.
 See [common options and TAPW continuation](../README.md).
 

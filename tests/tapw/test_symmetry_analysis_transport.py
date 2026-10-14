@@ -44,7 +44,7 @@ def test_transport_cache_key_distinguishes_valley_and_q_source(monkeypatch):
     runner.config = SimpleNamespace(twist=SimpleNamespace(bravais="hex"))
     runner._operation_mapping_cache = {}
     runner._transport_cache = {}
-    runner._legacy_c3_matrix_cache = {}
+    runner._analytic_c3_matrix_cache = {}
 
     fake_params = SimpleNamespace(g_matrix=scipy.sparse.identity(4, dtype=np.complex128, format="csr"))
     fake_calculator = SimpleNamespace(TAPW_parameters=fake_params)
@@ -121,7 +121,7 @@ def test_build_transport_keeps_sparse_projected_transport(monkeypatch):
     runner.config = SimpleNamespace(twist=SimpleNamespace(bravais="hex"))
     runner._operation_mapping_cache = {}
     runner._transport_cache = {}
-    runner._legacy_c3_matrix_cache = {}
+    runner._analytic_c3_matrix_cache = {}
 
     fake_params = SimpleNamespace(g_matrix=scipy.sparse.identity(4, dtype=np.complex128, format="csr"))
     fake_calculator = SimpleNamespace(TAPW_parameters=fake_params)
@@ -162,7 +162,7 @@ def test_build_transport_keeps_sparse_projected_transport(monkeypatch):
 def test_validated_c3_transport_reuses_validated_base_for_square(monkeypatch):
     runner = symmetry_analysis.SymmetryAnalysisRunner.__new__(symmetry_analysis.SymmetryAnalysisRunner)
     runner._transport_cache = {}
-    runner._legacy_c3_matrix_cache = {}
+    runner._analytic_c3_matrix_cache = {}
 
     legacy = scipy.sparse.csr_matrix(
         np.array(
@@ -186,7 +186,7 @@ def test_validated_c3_transport_reuses_validated_base_for_square(monkeypatch):
     )
     monkeypatch.setattr(
         symmetry_analysis.SymmetryAnalysisRunner,
-        "_legacy_c3_matrix_for_valley",
+        "_analytic_c3_matrix_for_valley",
         lambda self, valley: legacy,
     )
 
@@ -243,7 +243,7 @@ def test_physical_momentum_g_mapping_depends_on_k_centers_and_q_points():
 
 
 def test_generic_c3_transport_matches_legacy_c3_for_supported_gamma_case(monkeypatch):
-    helper = getattr(symmetry_analysis, "compare_transport_against_legacy_c3", None)
+    helper = getattr(symmetry_analysis, "compare_transport_against_analytic_c3", None)
     assert helper is not None
 
     legacy = scipy.sparse.csr_matrix(
@@ -632,7 +632,7 @@ def test_build_unitary_c2_layer_exchange_g_transport_matches_named_formula():
 
 
 def test_legacy_c3_layer_centers_helper_matches_authoritative_k_centers():
-    helper = getattr(symmetry_analysis, "legacy_single_valley_c3_layer_centers", None)
+    helper = getattr(symmetry_analysis, "analytic_single_valley_c3_layer_centers", None)
     assert helper is not None
 
     m_g_vec = np.array(

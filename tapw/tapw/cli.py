@@ -5,7 +5,6 @@ import sys
 import time
 from pathlib import Path
 import os
-import shutil
 from typing import Optional, Tuple
 
 from .config import Config
@@ -79,36 +78,16 @@ def parse_args(argv=None):
     return build_calc_parser().parse_args(argv)
 
 
-def can_reuse_m_valley_c3_band_outputs(compute_cfg) -> bool:
-    # Disabled by default. Real ZnI2 M-valley C3-only outputs show that the saved band
-    # files for M1/M2/M3 are not identical, so direct file reuse is scientifically unsafe.
-    return False
 
 
-def _source_hs_input_is_symmetrized(config_or_compute_cfg) -> bool:
-    paths = getattr(config_or_compute_cfg, "paths", None)
-    if paths is None:
-        return False
-    h_file = os.path.basename(str(getattr(paths, "H_file", "") or ""))
-    s_file = os.path.basename(str(getattr(paths, "S_file", "") or ""))
-    return h_file in {"H_symm.npz", "H_symm.dat"} or s_file in {"S_symm.npz", "S_symm.dat"}
 
 
-def resolve_qshell_dir_name(config_or_compute_cfg, calculator) -> str:
-    compute_cfg = getattr(config_or_compute_cfg, "compute", config_or_compute_cfg)
-    if not bool(getattr(compute_cfg, "TAPW", True)):
-        return "direct"
-    qshell_name = f"Q_shell_{compute_cfg.n_g}"
-    uses_symm = bool(getattr(calculator, "uses_hamiltonian_symmetrization", False)) or _source_hs_input_is_symmetrized(config_or_compute_cfg)
-    if uses_symm:
-        return qshell_name + "_symm"
-    return qshell_name
 
 
-def canonical_target_output_dir(config, calculator) -> Path | None:
+def canonical_target_output_dir(config, calculator) -> Path:
     layout = getattr(config, "output_layout", None)
-    if str(getattr(layout, "style", "")).lower() != "canonical_v1":
-        return None
+    if layout is None or layout.style != "canonical":
+        raise ValueError("TAPW output requires the current canonical output layout")
     profile = canonical_profile_name(
         getattr(calculator, "valley_flag", getattr(config.compute, "valley_flag", "unknown")),
         spin=getattr(config.twist, "spin", True),
@@ -118,10 +97,10 @@ def canonical_target_output_dir(config, calculator) -> Path | None:
     return Path(layout.root) / profile / q_shell
 
 
-def canonical_kpath_output_path(config) -> Path | None:
+def canonical_kpath_output_path(config) -> Path:
     layout = getattr(config, "output_layout", None)
-    if str(getattr(layout, "style", "")).lower() != "canonical_v1":
-        return None
+    if layout is None or layout.style != "canonical":
+        raise ValueError("TAPW output requires the current canonical output layout")
     valley_label = getattr(config.compute, "valley_flag", None)
     if valley_label is None:
         valleys = list(getattr(config.compute, "valleys", []) or [])
@@ -263,7 +242,7 @@ def _resolve_hamiltonian_symmetrization_from_summary(config, payload) -> None:
 def shutdown_parallel_runtime(*, wait: bool = True, kill_workers: bool = False) -> None:
     try:
         import joblib.externals.loky.reusable_executor as reusable_executor
-    except Exception:
+    except ImportError:
         return
 
     executor = getattr(reusable_executor, "_executor", None)
@@ -302,20 +281,6 @@ def finish_calculation_process(code: Optional[int]) -> int:
     return _coerce_exit_code(code)
 
 
-def copy_reused_m_valley_band_outputs(qshell_path: Path, source_valley_flag: str, target_valley_flag: str) -> None:
-    band_dir = Path(qshell_path) / "band"
-    band_dir.mkdir(exist_ok=True)
-    source_files = sorted(band_dir.glob(f"*_{source_valley_flag}_valley*.txt"))
-    if not source_files:
-        raise FileNotFoundError(
-            f"No reusable band files found in {band_dir} for source valley flag {source_valley_flag}"
-        )
-    for source in source_files:
-        target_name = source.name.replace(
-            f"_{source_valley_flag}_valley",
-            f"_{target_valley_flag}_valley",
-        )
-        shutil.copy2(source, band_dir / target_name)
 
 def run_calc(args):
     """Main program"""
@@ -323,7 +288,7 @@ def run_calc(args):
     config = Config.from_yaml(args.config)
 
     mpi_rank, mpi_size = _mpi_world_rank_size()
-    
+
     # Override config with command line arguments
     if getattr(args, "twist_index", None) is not None:
         config.twist.twist_index_m = args.twist_index
@@ -334,7 +299,7 @@ def run_calc(args):
     if getattr(args, "output_dir", None):
         config.paths.output_dir = args.output_dir
         layout = getattr(config, "output_layout", None)
-        if layout is not None and getattr(layout, "style", "") == "canonical_v1":
+        if layout is not None and getattr(layout, "style", "") == "canonical":
             layout.root = args.output_dir
     if getattr(args, "valleys", None):
         config.compute.valleys = args.valleys
@@ -415,7 +380,7 @@ def run_calc(args):
             if "reporter" not in str(exc):
                 raise
             structure.display_properties()
-        
+
         # Process structure (spglib-based atom typing via basis_id + sublayer)
         processor = StructureProcessorSpglib(
             input_data=structure.sorted_species_coordinates,
@@ -497,11 +462,6 @@ def run_calc(args):
         if config.compute.mode == "band":
             if not config.paths.kpath_out:
                 canonical_kpath_out = canonical_kpath_output_path(config)
-                if canonical_kpath_out is None:
-                    raise ValueError(
-                        "Release TAPW band configs require case.output_root so KPATH.out can be placed "
-                        "under the canonical output tree."
-                    )
                 config.paths.kpath_out = str(canonical_kpath_out)
             # Avoid multiple MPI ranks clobbering the same KPATH.out.
             if mpi_size > 1 and mpi_rank != 0:
@@ -525,8 +485,6 @@ def run_calc(args):
             payload = _run_symmetry_analysis(config, processor, hr, sr, logger, reporter=reporter)
             _resolve_hamiltonian_symmetrization_from_summary(config, payload)
 
-        reuse_m_valley_band_outputs = can_reuse_m_valley_c3_band_outputs(config.compute)
-        reused_reference_valley_flag = None
         reusable_m_valley_calculator = None
 
         # TAPW projects around configured valleys. non-TAPW solves the full-space
@@ -540,7 +498,7 @@ def run_calc(args):
                     f"Valley {_valley_label_for_target(target)}",
                     "Build the projected TAPW basis and solve the requested k-points.",
                 )
-            
+
             if reusable_m_valley_calculator is not None:
                 reusable_m_valley_calculator.switch_m_valley(target)
                 calculator = reusable_m_valley_calculator
@@ -561,41 +519,24 @@ def run_calc(args):
                     calculator.config.output_layout = getattr(config, "output_layout", None)
                 if getattr(calculator, "use_M_valley_threefold_symm", False):
                     reusable_m_valley_calculator = calculator
-            
+
             out_path = canonical_target_output_dir(config, calculator)
-            if out_path is None:
-                raise RuntimeError("Release TAPW configs must use canonical case.output_root output layout.")
             out_path.mkdir(parents=True, exist_ok=True)
             reporter.stage("Outputs", "Primary files for this target are written under this run directory.")
             reporter.kv("Target output directory", out_path)
-            
-            if reuse_m_valley_band_outputs and reused_reference_valley_flag is not None:
-                calculator.save_band_static_metadata(str(out_path))
-                copy_reused_m_valley_band_outputs(
-                    out_path,
-                    source_valley_flag=reused_reference_valley_flag,
-                    target_valley_flag=calculator.valley_flag,
-                )
-                logger.info(
-                    "Reused M-valley C3-only band outputs for valley %s from reference valley flag %s",
-                    target,
-                    reused_reference_valley_flag,
-                )
-            else:
-                calculator.run_calculation(str(out_path))
-                if config.compute.mode == "chern" and any(
-                    getattr(config, "topology", {}).get(key)
-                    for key in ("berry_curvature", "quantum_geometry", "wcc")
-                ):
-                    from . import chern_post
 
-                    chern_post.main(["--config", str(args.config), "--output-dir", str(out_path)])
-                if target is None:
-                    logger.info("Completed non-TAPW direct calculation")
-                else:
-                    logger.info(f"Completed calculation for valley {target}")
-                if reuse_m_valley_band_outputs and getattr(calculator, "use_M_valley_threefold_symm", False):
-                    reused_reference_valley_flag = calculator.valley_flag
+            calculator.run_calculation(str(out_path))
+            if config.compute.mode == "chern" and any(
+                getattr(config, "topology", {}).get(key)
+                for key in ("berry_curvature", "quantum_geometry", "wcc")
+            ):
+                from . import chern_post
+
+                chern_post.main(["--config", str(args.config), "--output-dir", str(out_path)])
+            if target is None:
+                logger.info("Completed non-TAPW direct calculation")
+            else:
+                logger.info(f"Completed calculation for valley {target}")
 
         if (
             getattr(config.symmetry_analysis, "enable", False)
@@ -717,9 +658,9 @@ def main(argv=None):
     if command == "topo":
         return main_topo(rest, prog="tapw topo")
     if command == "plot":
-        from . import plot_band_01
+        from . import plot_band
 
-        return plot_band_01.main(rest, prog="tapw plot")
+        return plot_band.main(rest, prog="tapw plot")
     if command == "orbital":
         return _main_orbital(rest)
     if command == "fatband":

@@ -1393,7 +1393,7 @@ def verify_certified_generic_selection_artifact(
             candidate_dimension,
             "candidate_dimension",
         ),
-        "projection_basis_kind": "explicit_legacy",
+        "projection_basis_kind": "explicit_layer",
         "basis_handoff_hash": _require_hash(
             artifact_identity.get("basis_hash"),
             "basis_hash",

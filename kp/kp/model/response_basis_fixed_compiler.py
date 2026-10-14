@@ -1,6 +1,6 @@
 """Certified generator fixed-space compilation in global real coefficient space.
 
-This experimental module contains no fit target or k-point sampling.  Its input is
+This module contains no fit target or k-point sampling.  Its input is
 an authored Hermitian vocabulary ``V`` and the image ``g(V)`` under each actual
 finite-group generator, all represented in the same global polynomial
 coefficient coordinates.  It certifies that the authored span is invariant,
@@ -29,8 +29,8 @@ from .response_basis_fixed_subspace import (
 )
 
 
-FIXED_VOCABULARY_COMPILER_V1 = (
-    "global_real_coefficient_gram__generator_span_certification__fixed_space_v1"
+FIXED_VOCABULARY_COMPILER = (
+    "global_real_coefficient_gram__generator_span_certification__fixed_space"
 )
 
 
@@ -204,7 +204,7 @@ def _certified_generator_support_components(
                     ),
                 )
     return components, {
-        "policy": "actual_generator_support_graph_certified_v1",
+        "policy": "actual_generator_support_graph_certified",
         "component_count": int(len(components)),
         "component_sizes": tuple(len(values) for values in final_components),
         "generator_leakage_tolerances": tolerances,
@@ -625,7 +625,7 @@ def _compile_generator_fixed_vocabulary_unsplit(
             }
         )
     metadata = {
-        "compiler": FIXED_VOCABULARY_COMPILER_V1,
+        "compiler": FIXED_VOCABULARY_COMPILER,
         "target_independent": True,
         "sample_grid_used": False,
         "logical_channel_count": int(matrix.shape[1]),
@@ -867,7 +867,7 @@ def _combine_direct_sum_compilations(
 
     component_sizes = tuple(len(indices) for indices, _ in parts)
     metadata = {
-        "compiler": FIXED_VOCABULARY_COMPILER_V1,
+        "compiler": FIXED_VOCABULARY_COMPILER,
         "target_independent": True,
         "sample_grid_used": False,
         "logical_channel_count": int(len(logical_channel_ids)),
@@ -908,19 +908,19 @@ def _combine_direct_sum_compilations(
         "generator_certification": tuple(generator_certification),
         "fixed_physical_action_certification": tuple(fixed_action_certification),
         "fixed_subspace": {
-            "component_policy": "actual_generator_invariance_certified_v1",
+            "component_policy": "actual_generator_invariance_certified",
             "direct_sum_part_count": int(len(parts)),
             "direct_sum_part_ranks": tuple(int(part.rank) for _, part in parts),
         },
         "invariant_component_certification": {
-            "policy": "actual_generator_support_graph_certified_v1",
+            "policy": "actual_generator_support_graph_certified",
             "component_count": int(len(parts)),
             "component_sizes": component_sizes,
             "generator_leakage_tolerances": {},
             "max_certified_outside_component_leakage": 0.0,
         },
         "early_direct_sum_certification": {
-            "policy": "exact_coefficient_support_overlap_v1",
+            "policy": "exact_coefficient_support_overlap",
             "component_count": int(len(parts)),
             "component_sizes": component_sizes,
             "exact_zero_required": True,
@@ -1323,7 +1323,7 @@ def compile_generator_fixed_vocabulary_from_actions(
         for name in sorted(actions)
     )
     metadata = {
-        "compiler": "direct_term_action__physical_fixed_metric_v1",
+        "compiler": "direct_term_action__physical_fixed_metric",
         "target_independent": True,
         "sample_grid_used": False,
         "logical_channel_count": int(matrix.shape[1]),
@@ -1335,7 +1335,7 @@ def compile_generator_fixed_vocabulary_from_actions(
         "vocabulary_singular_values": tuple(singular_values_all),
         "vocabulary_rank_threshold": max(rank_thresholds, default=0.0),
         "rank_gray_factor": float(rank_gray_factor),
-        "vocabulary_scaling_policy": "independent_positive_column_norm_v1",
+        "vocabulary_scaling_policy": "independent_positive_column_norm",
         "vocabulary_condition_estimate": float(largest / smallest),
         "vocabulary_orthogonality_residual": 0.0,
         "vocabulary_orthogonality_bound": orthogonality_bound,
@@ -1354,17 +1354,17 @@ def compile_generator_fixed_vocabulary_from_actions(
         ),
         "fixed_physical_action_certification": fixed_action_certification,
         "fixed_subspace": {
-            "algorithm": "direct_stacked_A_minus_I__physical_metric_v1",
+            "algorithm": "direct_stacked_A_minus_I__physical_metric",
             "components": tuple(component_records),
         },
         "invariant_component_certification": {
-            "policy": "exact_metric_and_direct_action_support_graph_v1",
+            "policy": "exact_metric_and_direct_action_support_graph",
             "component_count": int(len(components)),
             "component_sizes": tuple(len(values) for values in components),
             "max_certified_outside_component_leakage": 0.0,
         },
         "early_direct_sum_certification": {
-            "policy": "exact_coefficient_support_overlap_v1",
+            "policy": "exact_coefficient_support_overlap",
             "component_count": int(len(components)),
             "component_sizes": tuple(len(values) for values in components),
             "exact_zero_required": True,
@@ -1393,7 +1393,7 @@ def compile_generator_fixed_vocabulary_from_actions(
 
 
 __all__ = [
-    "FIXED_VOCABULARY_COMPILER_V1",
+    "FIXED_VOCABULARY_COMPILER",
     "FixedVocabularyCompilation",
     "GeneratorRepresentationError",
     "GeneratorSpanClosureError",

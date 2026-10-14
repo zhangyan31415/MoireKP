@@ -1,0 +1,49 @@
+{
+  "status": "final3_snapshot_verified_pending_committed_delivery_build",
+  "node": "test001",
+  "build": {
+    "status": "passed",
+    "python": "/data/home/zy/mambaforge/envs/moirekp/bin/python",
+    "source_files": 305,
+    "artifacts": {
+      "moirekp-0.1.0-py3-none-any.whl": {
+        "bytes": 1152824,
+        "sha256": "0df5bad5a1afe6788fc600bfbf297bd83d325faf41e04612f15f4798aa39ecf3"
+      },
+      "moirekp-0.1.0.tar.gz": {
+        "bytes": 1962774,
+        "sha256": "b6c805574d454c488a998b221286fa4160e6810f903afaddf67204a0f8e81b94"
+      }
+    }
+  },
+  "installation": {
+    "status": "passed",
+    "python": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3/bin/python",
+    "environment_prefix": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3",
+    "installed_modules": {
+      "kp": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3/lib/python3.11/site-packages/kp/__init__.py",
+      "tapw": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/check-env-final3/lib/python3.11/site-packages/tapw/__init__.py"
+    },
+    "wheel": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/wheels-final3-20261014/moirekp-0.1.0-py3-none-any.whl",
+    "wheel_sha256": "0df5bad5a1afe6788fc600bfbf297bd83d325faf41e04612f15f4798aa39ecf3",
+    "source_fingerprints": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/packaging-source-final3-20261014.json"
+  },
+  "archive_contract": {
+    "passed": 26,
+    "elapsed_s": 0.24,
+    "log": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/logs/archive-contract-final3-20261014.log"
+  },
+  "archive_source_suite": {
+    "passed": 2556,
+    "skipped": 3,
+    "deselected": 21,
+    "elapsed_s": 277.67,
+    "exit_code": 0,
+    "python": "/data/home/zy/mambaforge/envs/moirekp/bin/python",
+    "root": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/source-archive-final3-20261014/moirekp-0.1.0",
+    "log": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/logs/archive-full-tests-final3-20261014.log",
+    "scope": "Actual source archive, with kp/tapw imports asserted inside extracted archive; no original checkout or installed numerical package used."
+  },
+  "source_fingerprints": "/data/work/tmp/zy/codex/moirekp/cleanup-20261014-wfjw5i69/packaging-source-final3-20261014.json",
+  "limitations": "These are packaging and small regression checks; real published-material KP replays are recorded separately."
+}

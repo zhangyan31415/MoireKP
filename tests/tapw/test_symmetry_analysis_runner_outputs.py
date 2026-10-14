@@ -29,7 +29,7 @@ def _make_runner(tmp_path: Path):
             S_file=str(s_path),
             input_file=str(structure_path),
         ),
-        output_layout=None,
+        output_layout=SimpleNamespace(style="canonical", root=str(tmp_path / "run"), profile=None, q_shell="q06"),
         twist=SimpleNamespace(spin=True),
         compute=SimpleNamespace(n_g=6, valleys=[1]),
         symmetry_analysis=SimpleNamespace(
@@ -123,7 +123,7 @@ def test_c3_g_transport_accepts_moire_q_roundoff():
     assert transport.nnz == 7
 
 
-def test_runner_writes_summary_markdown_json_and_details_csv(tmp_path):
+def test_runner_writes_current_summary_without_obsolete_tables(tmp_path):
     runner = _make_runner(tmp_path)
 
     payload = {
@@ -196,39 +196,21 @@ def test_runner_writes_summary_markdown_json_and_details_csv(tmp_path):
     output_dir = Path(runner.output_dir)
     assert result == payload
     assert (output_dir / "summary.md").is_file()
-    assert (output_dir / "summary.json").is_file()
-    assert (output_dir / "details.csv").is_file()
-
-    summary_json = json.loads((output_dir / "summary.json").read_text(encoding="utf-8"))
-    assert summary_json["valleys"] == [5]
+    assert not (output_dir / "summary.json").exists()
+    assert not (output_dir / "details.csv").exists()
 
     summary_md = (output_dir / "summary.md").read_text(encoding="utf-8")
     assert "Valleys analyzed" in summary_md
     assert "Recommendation" not in summary_md
     assert "not_evaluated_lowdin_disabled" not in summary_md
 
-    details = pd.read_csv(output_dir / "details.csv")
-    assert list(details.columns) == [
-        "valley",
-        "operation",
-        "spglib_index",
-        "R_2d",
-        "k_label",
-        "residual_H_raw",
-        "status",
-        "not_supported_reason",
-        "g_perm_max_delta",
-        "nonzero_reciprocal_shift_count",
-        "square_residual",
-    ]
-    assert "supported" not in details.columns
-    assert "transport_unitarity_residual" not in details.columns
-    assert "not_supported_reason" in details.columns
-    assert details.loc[0, "spglib_index"] == 12
-    assert details.loc[0, "g_perm_max_delta"] == 1.0e-10
-    assert details.loc[0, "square_residual"] == 1.0e-9
-    assert details.loc[1, "not_supported_reason"] == "antiunitary_not_order2"
+    # Full numerical details stay in the returned analysis payload.
+    assert result["details"][0]["spglib_index"] == 12
+    assert result["details"][0]["g_perm_max_delta"] == 1.0e-10
+    assert result["details"][0]["square_residual"] == 1.0e-9
+    assert result["details"][1]["not_supported_reason"] == "antiunitary_not_order2"
     assert not (output_dir / "debug.json").exists()
+
 
 
 def test_raw_h_metadata_records_atomic_fourier_fold_gauge_correction(tmp_path):
@@ -303,126 +285,44 @@ def test_runner_writes_release_rawh_representation_and_manifest_by_default(tmp_p
             }
         ],
     }
+    payload["representations"][0].update(production_validated=True, status="passed")
     runner._analyze = MethodType(lambda self: payload, runner)
 
     runner.run()
 
     output_dir = Path(runner.output_dir)
-    matrix_path = output_dir / "representations" / "K1" / "C2T.npz"
-    pin_path = output_dir / "representations" / "K1" / "C2T_Pin.npz"
-    pg_path = output_dir / "representations" / "K1" / "C2T_PG.npz"
-    raw_h_path = output_dir / "representations" / "K1" / "C2T_rawH.npz"
-    manifest_path = output_dir / "representations" / "manifest.json"
-    assert not matrix_path.exists()
-    assert not pin_path.exists()
-    assert not pg_path.exists()
-    assert not (output_dir / "diagnostics").exists()
-    assert raw_h_path.is_file()
-    assert manifest_path.is_file()
-    loaded_raw_h = scipy.sparse.load_npz(raw_h_path)
-    assert scipy.sparse.isspmatrix_csr(loaded_raw_h)
-    assert np.allclose(loaded_raw_h.toarray(), raw_h_matrix.toarray())
+    assert (output_dir / "representations.npz").is_file()
+    assert not (output_dir / "representations").exists()
+    with np.load(output_dir / "representations.npz", allow_pickle=False) as archive:
+        metadata = json.loads(str(archive["metadata_json"].item()))
+        row = metadata["matrices"][0]
+        key = row["key"]
+        actual = scipy.sparse.csr_matrix((archive[key + "_data"],
+                                         archive[key + "_indices"], archive[key + "_indptr"]),
+                                        shape=tuple(archive[key + "_shape"]))
+    np.testing.assert_allclose(actual.toarray(), raw_h_matrix.toarray())
+    assert metadata["output_schema"] == "tapw_source_symmetry/v2"
+    assert metadata["basis_order"] == "spin_outermost; group -> g_index -> atom_type -> orbital"
+    assert row["operation"] == "C2T"
+    assert row["antiunitary"] is True
+    assert row["basis_hash"] == "basis-test-hash"
+    assert row["residual_H_raw"] == 1e-5
+    assert row["raw_h_operator_shape"] == [2, 2]
+    assert row["raw_h_operator_nnz"] == 2
+    assert row["k_map"]["axis_deg"] == pytest.approx(93.7)
+    assert row["q_map"] == row["k_map"]
+    assert row["sector_map"] == "layer_exchange"
+    assert row["source_action"]["antiunitary"] is True
+    assert row["conventions"]["antiunitary_convention"] == "U_K"
+    assert row["production_validated"] is True
+    assert row["status"] == "passed"
 
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    assert manifest["output_schema"] == "tapw_source_symmetry/v2"
-    assert manifest["schema_version"] == 2
-    assert manifest["basis"] == "tapw_projected"
-    assert manifest["basis_order"] == "spin_outermost; group -> g_index -> atom_type -> orbital"
-    assert manifest["operation_name_convention"]["time_reversal"] == "TR"
-    assert manifest["operation_name_convention"]["legacy_input_aliases"] == {"T": "TR"}
-    assert manifest["source_action_definition"]["required_fields"] == [
-        "k_map",
-        "q_map",
-        "sector_map",
-        "source_action",
-    ]
-    assert manifest["matrices"] == [
-        {
-            "valley": 1,
-            "valley_label": "K1",
-            "operation": "C2T",
-            "antiunitary": True,
-            "spglib_index": 17,
-            "axis_deg": 3.7,
-            "dtype": "complex128",
-            "pin_supported": True,
-            "pin_reason": "",
-            "pin_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
-            "pg_reason": "",
-            "pg_shift_by_group_coeffs": {"0": [0, 0], "1": [0, 0]},
-            "pg_phase_convention": "P_G^atomic=diag(exp(-i DeltaG_group dot r_atom)); P_G^TAPW=g P_G^atomic g^dagger",
-            "raw_h_operator_file": "K1/C2T_rawH.npz",
-            "raw_h_operator_shape": [2, 2],
-            "raw_h_operator_nnz": 2,
-            "raw_h_action_rule": "unitary: D_raw H D_raw^dagger; antiunitary: D_raw H^* D_raw^dagger",
-            "source_form": "ordinary_with_pin",
-            "ld_source_rule": "q_lambda = R_eff^{-1}(k + K_target(lambda)) - K_lambda",
-            "basis_hash": "basis-test-hash",
-            "residual_H_raw": 1.0e-5,
-            "status": "approximate/provisional",
-            "g_perm_max_delta": 2.0e-12,
-            "nonzero_reciprocal_shift_count": 0,
-            "square_residual": 4.0e-9,
-            "source_valley": "K1",
-            "target_valley": "K1",
-            "closed_in_active_set": True,
-            "role": "internal",
-            "supported": True,
-            "k_pairs": [[0, 0]],
-            "k_pair_source": "symmetry_analysis_reference_k_index",
-            "source_matrix_role": "raw_h_action",
-            "source_gauge": "tapw_raw_hamiltonian",
-            "target_role": "kp_source_action",
-            "matrix_kind": "action",
-            "conventions": {
-                "antiunitary_convention": "U_K",
-                "gauge_correction": {"kind": "none"},
-                "source_action_frame": "tapw_source",
-            },
-            "k_map": {
-                "type": "reflection",
-                "axis_deg": 93.7,
-                "reflection_axis_convention": "mirror_axis_deg",
-            },
-            "q_map": {
-                "type": "reflection",
-                "axis_deg": 93.7,
-                "reflection_axis_convention": "mirror_axis_deg",
-            },
-            "sector_map": "layer_exchange",
-            "source_action": {
-                "antiunitary": True,
-                "k_map": {
-                    "type": "reflection",
-                    "axis_deg": 93.7,
-                    "reflection_axis_convention": "mirror_axis_deg",
-                },
-                "q_map": {
-                    "type": "reflection",
-                    "axis_deg": 93.7,
-                    "reflection_axis_convention": "mirror_axis_deg",
-                },
-                "sector_map": "layer_exchange",
-                "spin_map": "from_tapw_source",
-                "valley_map": "identity",
-            },
-        }
-    ]
-    serialized_outputs = "\n".join(
-        [
-            (output_dir / "summary.json").read_text(encoding="utf-8"),
-            (output_dir / "details.csv").read_text(encoding="utf-8"),
-            manifest_path.read_text(encoding="utf-8"),
-        ]
-    )
-    assert "K" + "_C2T" not in serialized_outputs
-    assert "M" + "_C2_eta" not in serialized_outputs
 
 
 def test_runner_writes_canonical_symmetry_two_file_layout_with_packed_metadata(tmp_path):
     runner = _make_runner(tmp_path)
     runner.config.output_layout = SimpleNamespace(
-        style="canonical_v1",
+        style="canonical",
         root=str(tmp_path / "outputs"),
         profile=None,
         q_shell="q06",
@@ -498,7 +398,7 @@ def test_runner_config_identity_changes_with_physics_config(tmp_path, section, f
     assert after != before
 
 
-def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_path):
+def test_developer_flag_does_not_reintroduce_obsolete_representation_layout(tmp_path):
     runner = _make_runner(tmp_path)
     runner.config.symmetry_analysis.developer_outputs = True
     matrix = scipy.sparse.csr_matrix(np.array([[0.0, 1.0], [-1.0, 0.0]], dtype=np.complex128))
@@ -538,33 +438,22 @@ def test_runner_writes_developer_representation_matrices_under_diagnostics(tmp_p
             }
         ],
     }
+    payload["representations"][0].update(production_validated=True, status="passed")
     runner._analyze = MethodType(lambda self: payload, runner)
 
     runner.run()
 
     output_dir = Path(runner.output_dir)
-    assert (output_dir / "representations" / "K1" / "C2T_rawH.npz").is_file()
-    diag_dir = output_dir / "representations" / "diagnostics" / "K1"
-    assert (diag_dir / "C2T.npz").is_file()
-    assert (diag_dir / "C2T_Pin.npz").is_file()
-    assert (diag_dir / "C2T_PG.npz").is_file()
-    assert not (diag_dir / "C2T_rawH.npz").exists()
-
-    manifest = json.loads((output_dir / "representations" / "manifest.json").read_text(encoding="utf-8"))
-    row = manifest["matrices"][0]
-    assert row["raw_h_operator_file"] == "K1/C2T_rawH.npz"
-    assert row["developer_outputs"] == {
-        "file": "diagnostics/K1/C2T.npz",
-        "pin_file": "diagnostics/K1/C2T_Pin.npz",
-        "pg_file": "diagnostics/K1/C2T_PG.npz",
-    }
-
+    assert (output_dir / "representations.npz").is_file()
+    assert not (output_dir / "representations").exists()
+    with np.load(output_dir / "representations.npz", allow_pickle=False) as archive:
+        original = archive["C2T_data"].copy()
     runner.config.symmetry_analysis.developer_outputs = False
     runner.run()
+    assert not (output_dir / "representations").exists()
+    with np.load(output_dir / "representations.npz", allow_pickle=False) as archive:
+        np.testing.assert_array_equal(archive["C2T_data"], original)
 
-    assert not (diag_dir / "C2T.npz").exists()
-    assert not (diag_dir / "C2T_Pin.npz").exists()
-    assert not (diag_dir / "C2T_PG.npz").exists()
 
 
 def test_runner_does_not_write_manifest_row_without_raw_h_matrix(tmp_path):
@@ -589,9 +478,10 @@ def test_runner_does_not_write_manifest_row_without_raw_h_matrix(tmp_path):
 
     runner.run()
 
-    manifest = json.loads((Path(runner.output_dir) / "representations" / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["matrices"] == []
+    assert not (Path(runner.output_dir) / "representations.npz").exists()
+    assert not (Path(runner.output_dir) / "representations").exists()
     assert "T_rawH.npz" not in (Path(runner.output_dir) / "summary.md").read_text(encoding="utf-8")
+
 
 
 def test_runner_canonicalizes_time_reversal_outputs_to_tr(tmp_path):
@@ -631,26 +521,24 @@ def test_runner_canonicalizes_time_reversal_outputs_to_tr(tmp_path):
             }
         ],
     }
+    payload["representations"][0].update(production_validated=True, status="passed",
+                                         basis_hash="time-reversal-basis", residual_H_raw=0.0)
     runner._analyze = MethodType(lambda self: payload, runner)
 
     runner.run()
 
     output_dir = Path(runner.output_dir)
-    assert (output_dir / "representations" / "M1" / "TR_rawH.npz").is_file()
-    assert not (output_dir / "representations" / "M1" / "T_rawH.npz").exists()
-    manifest = json.loads((output_dir / "representations" / "manifest.json").read_text(encoding="utf-8"))
-    assert manifest["matrices"][0]["operation"] == "TR"
-    assert manifest["matrices"][0]["raw_h_operator_file"] == "M1/TR_rawH.npz"
-    text_outputs = "\n".join(
-        [
-            (output_dir / "summary.md").read_text(encoding="utf-8"),
-            (output_dir / "summary.json").read_text(encoding="utf-8"),
-            (output_dir / "details.csv").read_text(encoding="utf-8"),
-            (output_dir / "representations" / "manifest.json").read_text(encoding="utf-8"),
-        ]
-    )
+    assert (output_dir / "representations.npz").is_file()
+    with np.load(output_dir / "representations.npz", allow_pickle=False) as archive:
+        metadata_text = str(archive["metadata_json"].item())
+        metadata = json.loads(metadata_text)
+        assert metadata["matrices"][0]["operation"] == "TR"
+        assert metadata["matrices"][0]["key"] == "TR"
+        assert "T_data" not in archive
+    text_outputs = (output_dir / "summary.md").read_text(encoding="utf-8") + metadata_text
     assert "T_rawH.npz" not in text_outputs
     assert "| TR | built-in | yes | M1 | M1 | yes | yes | exact | yes | internal |  |" in text_outputs
+
 
 
 def test_analyze_collects_only_minimal_supported_representation_generators(tmp_path, monkeypatch):
@@ -860,7 +748,7 @@ def test_raw_projected_hs_projects_overlap_when_source_is_nonorthogonal(tmp_path
 def test_canonical_writer_drops_unvalidated_raw_h_record(tmp_path):
     runner = _make_runner(tmp_path)
     runner.config.output_layout = SimpleNamespace(
-        style="canonical_v1",
+        style="canonical",
         root=str(tmp_path / "outputs"),
         profile=None,
         q_shell="q06",
@@ -1161,8 +1049,8 @@ def test_summary_markdown_is_human_source_symmetry_report(tmp_path):
     assert "- C3z maps M1 -> M2" in text
     assert "not exported as a single-M1 internal matrix" in text
     assert "## Exported Production Matrices" in text
-    assert "| M1 -> M1 | TR | representations/M1/TR_rawH.npz | raw_h_action |" in text
-    assert "| Gamma -> Gamma | C3z | representations/Gamma/C3z_rawH.npz | raw_h_action |" in text
+    assert "| M1 -> M1 | TR | representations.npz:TR | raw_h_action |" in text
+    assert "| Gamma -> Gamma | C3z | representations.npz:C3z | raw_h_action |" in text
     assert "## Diagnostics" in text
     assert "- Developer outputs: disabled" in text
     assert "D0/PG/Pin matrices are not production inputs." in text

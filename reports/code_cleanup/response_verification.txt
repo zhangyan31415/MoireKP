@@ -1,0 +1,11 @@
+Response compiler cleanup verification
+Environment: /data/home/zy/mambaforge/envs/moirekp (Python 3.11.15)
+Source checkout: /data/work/zy/software/1.tapw_code/moirekp-release
+Command:
+PYTHONPATH=/data/work/zy/software/1.tapw_code/moirekp-release/kp:/data/work/zy/software/1.tapw_code/moirekp-release/tapw OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 /data/home/zy/mambaforge/bin/mamba run -p /data/home/zy/mambaforge/envs/moirekp --no-capture-output python -m pytest -q tests/kp/test_response_basis*.py tests/kp/test_complete_response_basis.py --disable-warnings --maxfail=5
+Result: 278 passed in 8.54s, process exit 0.
+Category: small synthetic numerical/serialization/compiler regression suite; not a real-material production acceptance.
+Checks: independent dense Reynolds projection; adjoint certification; local and graded backend equivalence; source-content fingerprint invalidation; current cache/frozen reload; canonical-Q geometric validation; SVD/ridge/physical minimum norm fits; nonlinear target and Jacobian checks.
+Failure behavior: production graded certification failures propagate without symbolic oracle dispatch; local certification failure cannot switch coordinate backend; current frozen records require explicit emitted fields; corrupted cache cannot silently recompile.
+Static: git diff --check clean for owned response modules and response test family.
+Retained numerical conventions and tolerances are mathematically identical. Changed metadata identities intentionally invalidate prior response caches and require regeneration; no migration parser or aliases.

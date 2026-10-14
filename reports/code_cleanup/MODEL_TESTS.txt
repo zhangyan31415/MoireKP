@@ -1,0 +1,19 @@
+Synthetic/configuration/physical-export regression tests; not real material production acceptance.
+Environment: /data/home/zy/mambaforge/envs/moirekp, Python 3.11.15
+Command: PYTHONPATH=/data/work/zy/software/1.tapw_code/moirekp-release/kp:/data/work/zy/software/1.tapw_code/moirekp-release/tapw OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 /data/home/zy/mambaforge/bin/mamba run -p /data/home/zy/mambaforge/envs/moirekp --no-capture-output python -m pytest -q tests/kp/test_configured_model.py tests/kp/test_physical_export.py tests/kp/test_candidate_failures.py
+Skip: PtSe2 release example is absent from this checkout.
+Red check: setting CandidateRejected=Exception in an isolated test interpreter restored the previous broad-catch behavior; both program/metadata propagation tests failed (2 failed, 1 deselected). Correct implementation passes all 3 candidate failure tests.
+
+........................................................................ [ 19%]
+........................................................................ [ 39%]
+...................................................................s.... [ 59%]
+........................................................................ [ 78%]
+........................................................................ [ 98%]
+.....                                                                    [100%]
+=============================== warnings summary ===============================
+tests/kp/test_configured_model.py::test_target_spectral_fit_uses_current_heff_support_target
+  /data/work/zy/software/1.tapw_code/moirekp-release/kp/kp/model/configuration.py:4444: RuntimeWarning: toy_generator is not a validated TAPW low-energy representation
+    loaded_symmetry = load_symmetry_source(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+364 passed, 1 skipped, 1 warning in 97.66s (0:01:37)

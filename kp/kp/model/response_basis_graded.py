@@ -50,8 +50,8 @@ from .response_basis_symmetry_first import (
     build_raw_real_vocabulary,
 )
 from .response_basis_local_fixed import (
-    LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
-    LOCAL_REYNOLDS_ALGORITHM_V1,
+    LOCAL_FIXED_GRAY_ZONE_FACTOR,
+    LOCAL_REYNOLDS_ALGORITHM,
     LocalResponseCompilationError,
     build_local_action_blocks,
     summarize_local_action_blocks,
@@ -287,7 +287,7 @@ def _physical_seed_digest(
         matrices.append((monomial, matrix))
 
     digest = hashlib.sha256()
-    digest.update(b"physical-polynomial-direction-csr-v2")
+    digest.update(b"physical-polynomial-direction-csr")
     digest.update(np.asarray((seed.dim, seed.dim), dtype="<i8").tobytes())
     if leading is None:
         digest.update(b"zero-polynomial-direction")
@@ -1573,7 +1573,7 @@ def _select_filtered_independent_column_blocks(
         degree_proofs=tuple(proofs),
     )
     artifact = {
-        "strategy": "deferred_owner_degree_slices_v2",
+        "strategy": "deferred_owner_degree_slices",
         "single_pass_filtered_selection": True,
         "global_authored_projected_matrix_materialized": False,
         "structural_projection_block_count": int(block_count),
@@ -1922,15 +1922,23 @@ def _compile_graded_candidate_group_local_fixed(
         )
     )
     if len(raw_owner_selection.selected_owner_indices) != len(owner_indices):
-        raise LocalResponseCompilationError(
-            "raw_owner_vocabulary_not_injective",
-            certificate={
-                "raw_owner_count": len(owner_indices),
-                "certified_rank": len(raw_owner_selection.selected_owner_indices),
-                "selected_owner_indices": tuple(
-                    int(raw_owner_map[index])
-                    for index in raw_owner_selection.selected_owner_indices
-                ),
+        # Local owner-coordinate actions require an injective vocabulary. This
+        # rank result selects the applicable backend before generator action
+        # construction; a later certification failure is never caught.
+        compiled = _compile_graded_candidate_group_reynolds(
+            seeds,
+            coordinate=coordinate,
+            group=group,
+            factorized_actions=factorized_actions,
+            internal_actions_by_word=internal_actions,
+            factorized_group_artifact=action_artifact,
+            joint_adjoint_keys=joint_adjoint_keys,
+        )
+        return replace(
+            compiled,
+            adjoint_artifact={
+                **dict(compiled.adjoint_artifact),
+                "backend_selection_reason": "raw_owner_vocabulary_not_injective",
             },
         )
     raw_rank_seconds = time.perf_counter() - raw_rank_started
@@ -2018,7 +2026,6 @@ def _compile_graded_candidate_group_local_fixed(
                 "action_block_count": 1,
                 "maximum_action_block_dimension": len(block.owner_indices),
                 "solve_seconds": float(solve_seconds),
-                "fallback_reason": None,
             }
         )
         if result.fixed_rank == 0:
@@ -2139,7 +2146,7 @@ def _compile_graded_candidate_group_local_fixed(
                 support_component=str(seed.support_component),
                 metadata={
                     **dict(seed.metadata),
-                    "symbolic_atom_compiler": LOCAL_REYNOLDS_ALGORITHM_V1,
+                    "symbolic_atom_compiler": LOCAL_REYNOLDS_ALGORITHM,
                     "graded_nominal_degree": int(descriptors[seed_index].nominal_degree),
                     "graded_structural_support_id": str(
                         descriptors[seed_index].structural_support_id
@@ -2192,9 +2199,9 @@ def _compile_graded_candidate_group_local_fixed(
         group_artifact=group.artifact(),
         null_policy=policy,
         adjoint_artifact={
-            "certification": "local_small_matrix_reynolds_v1",
-            "local_fixed_algorithm": LOCAL_REYNOLDS_ALGORITHM_V1,
-            "local_fixed_gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
+            "certification": "local_small_matrix_reynolds",
+            "local_fixed_algorithm": LOCAL_REYNOLDS_ALGORITHM,
+            "local_fixed_gray_zone_factor": LOCAL_FIXED_GRAY_ZONE_FACTOR,
             "logical_candidate_channel_count": int(logical_count),
             "authored_ordered_seed_count": int(len(ordered)),
             "physical_seed_count": int(len(physical_seed_indices)),
@@ -2237,7 +2244,6 @@ def _compile_graded_candidate_group_local_fixed(
             "raw_owner_injectivity_certificate": raw_owner_artifact,
             "rank_proofs": list(raw_rank_proofs),
             "factorized_group_actions": dict(action_artifact),
-            "fallback_used": False,
             "timings_seconds": {
                 "factorized_group_actions": float(action_seconds),
                 "error_bound_construction": float(error_seconds),
@@ -2508,7 +2514,7 @@ def _compile_graded_candidate_group_reynolds(
                 "candidate_nonzero_count": int(orbit_candidate_nonzero_count),
                 "retained_real_column_count": 0,
                 "selected_global_owner_indices": [],
-                "selection_scope": "global_owner_degree_slices_v1",
+                "selection_scope": "global_owner_degree_slices",
                 "degree_batches": orbit_batches,
             }
         )
@@ -2583,7 +2589,7 @@ def _compile_graded_candidate_group_reynolds(
         **dict(global_owner_artifact),
         "rank_proofs": list(all_rank_proofs),
         "owner_column_materialization_policy": (
-            "selected_global_owner_only_v1"
+            "selected_global_owner_only"
         ),
         "materialized_owner_column_count": int(len(selected_records)),
         "avoided_owner_column_materialization_count": int(
@@ -2639,7 +2645,7 @@ def _compile_graded_candidate_group_reynolds(
                 support_component=str(seed.support_component),
                 metadata={
                     **dict(seed.metadata),
-                    "symbolic_atom_compiler": "graded_filtered_reynolds_v1",
+                    "symbolic_atom_compiler": "graded_filtered_reynolds",
                     "graded_nominal_degree": int(
                         descriptors[seed_index].nominal_degree
                     ),
@@ -2695,7 +2701,7 @@ def _compile_graded_candidate_group_reynolds(
         group_artifact=group.artifact(),
         null_policy=policy,
         adjoint_artifact={
-            "certification": "graded_filtered_reynolds_v1",
+            "certification": "graded_filtered_reynolds",
             "logical_candidate_channel_count": int(logical_count),
             "authored_ordered_seed_count": int(len(ordered)),
             "physical_seed_count": int(
@@ -2822,11 +2828,23 @@ def compile_graded_candidate_group(
     joint_adjoint_keys: Mapping[str, JointAdjointSeedKey] | None = None,
     force_reynolds: bool = False,
 ) -> CandidateResponseSet:
-    """Compile p=0 by local Reynolds; route finite-p directly to the legacy path."""
+    """Select a Reynolds backend from its coefficient-vocabulary preconditions.
 
-    def ambient_reynolds(
-        fallback_reason: str | None = None,
-    ) -> CandidateResponseSet:
+    Local owner actions need certified adjoint/generator routes and an injective
+    raw vocabulary. Finite harmonics and other vocabularies use graded projected
+    coordinates. Both compute the same Reynolds/Hermitian fixed space.
+    """
+
+    selection_reason = None
+    if bool(force_reynolds):
+        selection_reason = "explicit_graded_reynolds"
+    elif joint_adjoint_keys is None:
+        selection_reason = "missing_certified_adjoint_routes"
+    elif not factorized_actions and not (
+        len(tuple(group.elements)) == 1 and not bool(group.elements[0].antiunitary)
+    ):
+        selection_reason = "missing_certified_generator_routes"
+    if selection_reason is not None:
         compiled = _compile_graded_candidate_group_reynolds(
             seeds,
             coordinate=coordinate,
@@ -2836,47 +2854,22 @@ def compile_graded_candidate_group(
             factorized_group_artifact=factorized_group_artifact,
             joint_adjoint_keys=joint_adjoint_keys,
         )
-        if fallback_reason is None:
-            return compiled
         return replace(
             compiled,
             adjoint_artifact={
                 **dict(compiled.adjoint_artifact),
-                "fallback_used": True,
-                "fallback_reason": str(fallback_reason),
+                "backend_selection_reason": selection_reason,
             },
         )
-
-    if bool(force_reynolds):
-        return ambient_reynolds()
-    if joint_adjoint_keys is None:
-        return ambient_reynolds("missing_certified_adjoint_routes")
-    if (
-        not factorized_actions
-        and not (
-            len(tuple(group.elements)) == 1
-            and not bool(group.elements[0].antiunitary)
-        )
-    ):
-        return ambient_reynolds("missing_certified_generator_routes")
-    try:
-        return _compile_graded_candidate_group_local_fixed(
-            seeds,
-            coordinate=coordinate,
-            group=group,
-            factorized_actions=factorized_actions,
-            internal_actions_by_word=internal_actions_by_word,
-            factorized_group_artifact=factorized_group_artifact,
-            joint_adjoint_keys=joint_adjoint_keys,
-        )
-    except LocalResponseCompilationError as error:
-        if error.reason not in {
-            "missing_certified_generator_route",
-            "missing_certified_generator_routes",
-            "raw_owner_vocabulary_not_injective",
-        }:
-            raise
-        return ambient_reynolds(error.reason)
+    return _compile_graded_candidate_group_local_fixed(
+        seeds,
+        coordinate=coordinate,
+        group=group,
+        factorized_actions=factorized_actions,
+        internal_actions_by_word=internal_actions_by_word,
+        factorized_group_artifact=factorized_group_artifact,
+        joint_adjoint_keys=joint_adjoint_keys,
+    )
 
 
 __all__ = [

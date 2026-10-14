@@ -1,6 +1,6 @@
 """Certified row layout and routed-projector primitives for Gamma projection.
 
-The v1 implementation is intentionally narrow.  It supports exactly two TAPW
+Automatic Gamma routing is intentionally narrow.  It supports exactly two TAPW
 source groups, equal ordered Q counts, a uniform physical-layer orbital width,
 and the complete spinful basis.  Unsupported inputs are rejected before any row
 indexing is attempted.
@@ -332,7 +332,7 @@ class GammaRowLayout:
         if len(qsets) != 2 or len(num_layer_list) != 2:
             raise GammaLayoutError(
                 CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
-                "automatic Gamma v1 requires exactly two source groups",
+                "automatic Gamma routing requires exactly two source groups",
             )
         if any(not _strict_integral(value) for value in num_layer_list):
             raise GammaLayoutError(
@@ -354,7 +354,7 @@ class GammaRowLayout:
         if q_arrays[0].shape[0] != q_arrays[1].shape[0]:
             raise GammaLayoutError(
                 CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
-                "automatic Gamma v1 requires equal ordered Q counts",
+                "automatic Gamma routing requires equal ordered Q counts",
             )
         if q_arrays[0].shape[1] != q_arrays[1].shape[1]:
             raise GammaLayoutError(
@@ -397,7 +397,7 @@ class GammaRowLayout:
         if not widths or any(width <= 0 for width in widths) or len(set(widths)) != 1:
             raise GammaLayoutError(
                 CandidateRejectionReason.UNSUPPORTED_GAMMA_LAYOUT,
-                "automatic Gamma v1 requires equal per-physical-layer orbital width",
+                "automatic Gamma routing requires equal per-physical-layer orbital width",
             )
         spin_key = str(spin_convention).strip().lower()
         spin_map = {
@@ -407,7 +407,7 @@ class GammaRowLayout:
         if spin_key not in spin_map:
             raise GammaLayoutError(
                 CandidateRejectionReason.UNSUPPORTED_SPIN_ROUTE,
-                "automatic Gamma v1 supports spinful_all only",
+                "automatic Gamma routing supports spinful_all only",
             )
         spin_scope, spin_labels = spin_map[spin_key]
         if not isinstance(source_basis_hash, str) or not source_basis_hash.strip():

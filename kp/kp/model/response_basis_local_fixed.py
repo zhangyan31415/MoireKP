@@ -11,29 +11,29 @@ import scipy.linalg
 from scipy import sparse
 
 
-LOCAL_REYNOLDS_ALGORITHM_V1 = "exact_action_block__small_matrix_reynolds_v1"
-LOCAL_REYNOLDS_BLOCK_BACKEND_V1 = (
-    "certified_action_graph_blocks__group_average_v1"
+LOCAL_REYNOLDS_ALGORITHM = "exact_action_block__small_matrix_reynolds"
+LOCAL_REYNOLDS_BLOCK_BACKEND = (
+    "certified_action_graph_blocks__group_average"
 )
-LOCAL_REYNOLDS_COMPONENT_POLICY_V1 = "generator__hermitian_action_graph_v1"
-LOCAL_REYNOLDS_OWNER_POLICY_V1 = (
-    "canonical_owner_order__small_projection_gram_schmidt_v1"
+LOCAL_REYNOLDS_COMPONENT_POLICY = "generator__hermitian_action_graph"
+LOCAL_REYNOLDS_OWNER_POLICY = (
+    "canonical_owner_order__small_projection_gram_schmidt"
 )
-LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1 = (
-    "selected_action_block_owners_only_v1"
+LOCAL_REYNOLDS_MATERIALIZATION_POLICY = (
+    "selected_action_block_owners_only"
 )
-LOCAL_REYNOLDS_REDUCE_POLICY_V1 = (
-    "raw_owner_injectivity__no_post_projection_reduction_v1"
+LOCAL_REYNOLDS_REDUCE_POLICY = (
+    "raw_owner_injectivity__no_post_projection_reduction"
 )
-LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1 = (
-    "exact_physical_dedup__skip_legacy_cyclic_image_orbits_v1"
+LOCAL_FIXED_STRUCTURAL_PLAN_POLICY = (
+    "exact_physical_dedup__generator_action_graph"
 )
-LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2 = (
-    "canonical_csr_buffers__global_complex_scale_v2"
+LOCAL_FIXED_PHYSICAL_SEED_DIGEST = (
+    "canonical_csr_buffers__global_complex_scale"
 )
-LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1 = 1.0e-12
-LOCAL_FIXED_RELATIVE_TOLERANCE_V1 = 1.0e-12
-LOCAL_FIXED_GRAY_ZONE_FACTOR_V1 = 100.0
+LOCAL_FIXED_ABSOLUTE_TOLERANCE = 1.0e-12
+LOCAL_FIXED_RELATIVE_TOLERANCE = 1.0e-12
+LOCAL_FIXED_GRAY_ZONE_FACTOR = 100.0
 
 
 def _immutable_array(
@@ -680,9 +680,9 @@ def solve_local_reynolds_block(
     block: LocalActionBlock,
     *,
     group_words: Sequence[Sequence[str]],
-    absolute_tolerance: float = LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1,
-    relative_tolerance: float = LOCAL_FIXED_RELATIVE_TOLERANCE_V1,
-    gray_zone_factor: float = LOCAL_FIXED_GRAY_ZONE_FACTOR_V1,
+    absolute_tolerance: float = LOCAL_FIXED_ABSOLUTE_TOLERANCE,
+    relative_tolerance: float = LOCAL_FIXED_RELATIVE_TOLERANCE,
+    gray_zone_factor: float = LOCAL_FIXED_GRAY_ZONE_FACTOR,
 ) -> LocalFixedCompilation:
     """Average one finite group and Hermitian involution in owner space."""
 
@@ -869,10 +869,10 @@ def solve_local_reynolds_block(
         hermitian_residual=hermitian_residual,
         propagated_error_bounds={name: certification_bound for name in actions},
         certification_metadata={
-            "algorithm": LOCAL_REYNOLDS_ALGORITHM_V1,
-            "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND_V1,
-            "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY_V1,
-            "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY_V1,
+            "algorithm": LOCAL_REYNOLDS_ALGORITHM,
+            "block_backend": LOCAL_REYNOLDS_BLOCK_BACKEND,
+            "component_policy": LOCAL_REYNOLDS_COMPONENT_POLICY,
+            "owner_policy": LOCAL_REYNOLDS_OWNER_POLICY,
             "raw_dimension": dimension,
             "independent_dimension": dimension,
             "fixed_rank": rank,
@@ -893,17 +893,17 @@ def solve_local_reynolds_block(
 
 
 __all__ = [
-    "LOCAL_FIXED_ABSOLUTE_TOLERANCE_V1",
-    "LOCAL_FIXED_GRAY_ZONE_FACTOR_V1",
-    "LOCAL_FIXED_PHYSICAL_SEED_DIGEST_V2",
-    "LOCAL_FIXED_RELATIVE_TOLERANCE_V1",
-    "LOCAL_FIXED_STRUCTURAL_PLAN_POLICY_V1",
-    "LOCAL_REYNOLDS_ALGORITHM_V1",
-    "LOCAL_REYNOLDS_BLOCK_BACKEND_V1",
-    "LOCAL_REYNOLDS_COMPONENT_POLICY_V1",
-    "LOCAL_REYNOLDS_MATERIALIZATION_POLICY_V1",
-    "LOCAL_REYNOLDS_OWNER_POLICY_V1",
-    "LOCAL_REYNOLDS_REDUCE_POLICY_V1",
+    "LOCAL_FIXED_ABSOLUTE_TOLERANCE",
+    "LOCAL_FIXED_GRAY_ZONE_FACTOR",
+    "LOCAL_FIXED_PHYSICAL_SEED_DIGEST",
+    "LOCAL_FIXED_RELATIVE_TOLERANCE",
+    "LOCAL_FIXED_STRUCTURAL_PLAN_POLICY",
+    "LOCAL_REYNOLDS_ALGORITHM",
+    "LOCAL_REYNOLDS_BLOCK_BACKEND",
+    "LOCAL_REYNOLDS_COMPONENT_POLICY",
+    "LOCAL_REYNOLDS_MATERIALIZATION_POLICY",
+    "LOCAL_REYNOLDS_OWNER_POLICY",
+    "LOCAL_REYNOLDS_REDUCE_POLICY",
     "LocalActionBlock",
     "LocalFixedCompilation",
     "LocalResponseCompilationError",

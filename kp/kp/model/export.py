@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 import numpy as np
+from tapw.io.kpath import parse_kpath_in
 import yaml
 
 from ..identity import PROJECTION_ARTIFACT_IDENTITY_FIELDS
@@ -17,17 +18,13 @@ from .core import (
     ContinuumModelBuilder,
     ContinuumTerm,
     ContinuumTermKey,
-    _compute_one_k,
-    _prepare_band_state,
     clear_symmetry_caches,
     reciprocal_Tmat_from_Tmat,
     rot,
 )
-from .pipeline import build_moire_config_from_file
+from .configuration import build_moire_config_from_file
 from .operator_runtime import (
     clear_operator_recipe_cache,
-    compile_operator_recipe,
-    validate_operator_recipe,
 )
 
 SCHEMA_VERSION = "standalone-kp-model-v1"
@@ -158,8 +155,14 @@ def _build_standalone_export(
     operator_data: Mapping[str, Any] | None = None,
     compiled_runtime: Any | None = None,
 ) -> _StandaloneExport:
+    if operator_data is None and compiled_runtime is None:
+        frozen_path = model_output / "model_data.npz"
+        if not frozen_path.is_file():
+            raise FileNotFoundError(f"current frozen response data is required: {frozen_path}")
+        with np.load(frozen_path, allow_pickle=False) as frozen:
+            operator_data = {name: np.asarray(frozen[name]) for name in frozen.files}
+
     clear_symmetry_caches()
-    _ORBIT_RECORD_CACHE.clear()
     clear_operator_recipe_cache()
     case_id = model_output.name
     config_path = _infer_model_config_path(model_output)
@@ -183,43 +186,28 @@ def _build_standalone_export(
     dim = sum(int(block["dim"]) for block in basis_blocks)
     exactified = _load_exactified_matrices(model_config, dim)
     semantic_terms, runtime_terms = _runtime_terms_from_active_terms(active_terms, moire_config)
-    response_semantics = "legacy_frozen_v1"
-    frozen_response_data: dict[str, np.ndarray] | None = None
-    frozen_runtime: Any | None = None
-    if compiled_runtime is not None:
-        response_semantics = "complete_linear_v2"
-    if operator_data is not None and "response_semantics" in operator_data:
-        response_semantics = str(np.asarray(operator_data["response_semantics"]).item())
-    if response_semantics == "complete_linear_v2":
-        from .response_basis import CompiledResponseRuntime
+    response_semantics = "complete_linear"
+    if operator_data is not None:
+        if "response_semantics" not in operator_data:
+            raise ValueError("standalone response data must declare response_semantics")
+        supplied_semantics = str(np.asarray(operator_data["response_semantics"]).item())
+        if supplied_semantics != response_semantics:
+            raise ValueError(f"unsupported response_semantics: {supplied_semantics!r}")
+    from .response_basis import CompiledResponseRuntime
 
-        if compiled_runtime is None:
-            frozen_runtime = CompiledResponseRuntime.from_frozen_arrays(
-                operator_data or {}
-            )
-        else:
-            frozen_runtime = compiled_runtime
-        if int(frozen_runtime.basis.dim) != int(dim):
-            raise ValueError(
-                "complete_linear_v2 frozen basis dimension does not match the configured model: "
-                f"{frozen_runtime.basis.dim} != {dim}"
-            )
-        frozen_response_data = {
-            str(key): np.asarray(value)
-            for key, value in (operator_data or {}).items()
-        }
-        resolved_operator_data = None
-    elif response_semantics == "legacy_frozen_v1":
-        if operator_data is None:
-            resolved_operator_data = _expand_operator_recipe(runtime_terms, moire_config, dim)
-        else:
-            resolved_operator_data = validate_operator_recipe(
-                operator_data,
-                dim=dim,
-                term_count=len(runtime_terms),
-            )
-    else:
-        raise ValueError(f"unsupported response_semantics in standalone operator data: {response_semantics!r}")
+    frozen_runtime = (
+        compiled_runtime
+        if compiled_runtime is not None
+        else CompiledResponseRuntime.from_frozen_arrays(operator_data or {})
+    )
+    if int(frozen_runtime.basis.dim) != int(dim):
+        raise ValueError(
+            "complete response basis dimension does not match the configured model: "
+            f"{frozen_runtime.basis.dim} != {dim}"
+        )
+    frozen_response_data = {
+        str(key): np.asarray(value) for key, value in (operator_data or {}).items()
+    }
 
     reference_eigvals = _load_required_array(model_output / "eigvals.npy", "model reference eigenvalues")
     reference_kpoints = np.asarray(moire_config.kpoints, dtype=float)
@@ -300,26 +288,8 @@ def _build_standalone_export(
         model_data["fit_method_json"] = np.asarray(
             json.dumps(_json_safe(fit_method), sort_keys=True, allow_nan=False)
         )
-    if response_semantics == "complete_linear_v2":
-        assert frozen_response_data is not None
-        model_data.update(frozen_response_data)
-    else:
-        assert resolved_operator_data is not None
-        model_data.update(
-            {
-                "operator_term_index": resolved_operator_data["term_index"],
-                "operator_row": resolved_operator_data["row"],
-                "operator_col": resolved_operator_data["col"],
-                "operator_mz": resolved_operator_data["mz"],
-                "operator_mz_star": resolved_operator_data["mz_star"],
-                "operator_q_center": resolved_operator_data["q_center"],
-                "operator_prefactor_real": resolved_operator_data["prefactor_real"],
-                "operator_prefactor_imag": resolved_operator_data["prefactor_imag"],
-                "dynamic_hermitization_term_index": resolved_operator_data[
-                    "dynamic_hermitization_term_index"
-                ],
-            }
-        )
+    assert frozen_response_data is not None
+    model_data.update(frozen_response_data)
     for key in PROJECTION_ARTIFACT_IDENTITY_FIELDS:
         if key in model_config.artifact_identity:
             model_data[key] = np.asarray(model_config.artifact_identity[key])
@@ -379,19 +349,10 @@ def _build_standalone_export(
         "runtime_recipe": (
             {
                 "array_file": "model_data.npz",
-                "kind": "compiled_response_basis_global_dimensionless_polynomial_v2",
+                "kind": "compiled_response_basis_global_dimensionless_polynomial",
                 "formula": (
                     "u=(k-origin)/scale; w=u_x+i*u_y; "
                     "H[row,col] += coefficient[channel] * value * w**r * conjugate(w)**s"
-                ),
-            }
-            if response_semantics == "complete_linear_v2"
-            else {
-                "array_file": "model_data.npz",
-                "kind": "preexpanded_global_z_zstar_polynomial",
-                "formula": (
-                    "H[row,col] += r_real[t] * prefactor_real[c] * z(k)**mz[c] * z*(k)**mz_star[c] "
-                    "+ r_imag[t] * prefactor_imag[c] * z(k)**mz[c] * z*(k)**mz_star[c]"
                 ),
             }
         ),
@@ -471,8 +432,8 @@ def _physical_files_from_complete_runtime(
     compiled_runtime: Any | None = None,
     n_orb_by_qset: Mapping[str, int] | None = None,
 ) -> dict[str, str]:
-    if response_semantics != "complete_linear_v2" or frozen_response_data is None:
-        return {}
+    if response_semantics != "complete_linear" or frozen_response_data is None:
+        raise ValueError("physical export requires explicit complete response data")
     from .physical_export import (
         build_physical_export_files,
         physical_terms_from_polynomial_coefficients,
@@ -557,7 +518,7 @@ def _find_model_config_near_output(model_output: Path) -> Path | None:
         for candidate in sorted([*search_dir.glob("*.yaml"), *search_dir.glob("*.yml")]):
             try:
                 raw = yaml.safe_load(candidate.read_text(encoding="utf-8"))
-            except Exception:
+            except (OSError, yaml.YAMLError):
                 continue
             if not isinstance(raw, Mapping):
                 continue
@@ -789,7 +750,14 @@ def _standalone_payload_from_kpath_config(model_config: Any, moire_config: Any) 
         path = (model_config.path.parent / path).resolve()
     if not path.exists():
         return None
-    hsp, labels, default_points = _parse_line_mode_kpath_file(path)
+    default_points, vertices, raw_labels = parse_kpath_in(path)
+    hsp: dict[str, list[float]] = {}
+    labels: list[str] = []
+    for vertex, raw_label in zip(vertices, raw_labels):
+        label = _normalise_kpath_label(raw_label)
+        hsp.setdefault(label, np.asarray(vertex[:2], dtype=float).tolist())
+        if not labels or labels[-1] != label:
+            labels.append(label)
     if not hsp or len(labels) < 2:
         return None
     points_per_segment = kpath.get("segment_points", default_points or 80)
@@ -808,35 +776,6 @@ def _standalone_payload_from_kpath_config(model_config: Any, moire_config: Any) 
         moire_config,
         source=f"kpath file {path.name}",
     )
-
-
-def _parse_line_mode_kpath_file(path: Path) -> tuple[dict[str, list[float]], list[str], int | None]:
-    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    default_points = None
-    for line in lines[:4]:
-        try:
-            default_points = int(line.strip().split()[0])
-            break
-        except Exception:
-            continue
-    hsp: dict[str, list[float]] = {}
-    sequence: list[str] = []
-    for line in lines:
-        parts = line.split()
-        if len(parts) < 4:
-            continue
-        try:
-            coords = [float(parts[0]), float(parts[1])]
-        except ValueError:
-            continue
-        label = _normalise_kpath_label(parts[3])
-        hsp.setdefault(label, coords)
-        sequence.append(label)
-    collapsed: list[str] = []
-    for label in sequence:
-        if not collapsed or collapsed[-1] != label:
-            collapsed.append(label)
-    return hsp, collapsed, default_points
 
 
 def _normalise_kpath_label(label: Any) -> str:
@@ -1199,429 +1138,6 @@ def _compact_term_metadata(metadata: Any) -> dict[str, Any]:
         "coefficient_role",
     )
     return {key: _json_safe(metadata[key]) for key in keep if key in metadata}
-
-
-_DENSE_ACTION_ENTRY_TOL = 1.0e-13
-_ORBIT_RECORD_CACHE: dict[tuple[int, tuple[Any, ...]], list[tuple[np.ndarray, Mapping[str, Any] | None]]] = {}
-
-
-def _expand_operator_recipe(runtime_terms: Sequence[ContinuumTerm], moire_config: Any, dim: int) -> dict[str, np.ndarray]:
-    term_index: list[int] = []
-    row: list[int] = []
-    col: list[int] = []
-    mz_values: list[int] = []
-    mz_star_values: list[int] = []
-    q_center: list[tuple[float, float]] = []
-    prefactor_real: list[complex] = []
-    prefactor_imag: list[complex] = []
-    dynamic_hermitization_terms: list[int] = []
-    monomial_transform_cache: dict[
-        tuple[tuple[float, ...], tuple[float, float], int, int],
-        tuple[int, int, tuple[float, float], complex],
-    ] = {}
-
-    def cached_transform_monomial(
-        transform: np.ndarray,
-        q_base: np.ndarray,
-        mz: int,
-        mz_star: int,
-    ) -> tuple[int, int, tuple[float, float], complex]:
-        transform_key = tuple(float(x) for x in np.asarray(transform, dtype=float).ravel())
-        q_key = (float(q_base[0]), float(q_base[1]))
-        cache_key = (transform_key, q_key, int(mz), int(mz_star))
-        cached = monomial_transform_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        mz_new, mz_star_new, q_new, transform_prefactor = _transform_monomial(
-            transform,
-            q_base,
-            mz,
-            mz_star,
-        )
-        cached = (
-            int(mz_new),
-            int(mz_star_new),
-            (float(q_new[0]), float(q_new[1])),
-            complex(transform_prefactor),
-        )
-        monomial_transform_cache[cache_key] = cached
-        return cached
-
-    for idx, term in enumerate(runtime_terms):
-        if not hasattr(term.Y_basis, "eval_sparse"):
-            raise NotImplementedError("standalone export requires sparse term basis metadata")
-
-        rows = np.asarray(getattr(term.Y_basis, "_moire_sparse_rows"), dtype=int)
-        cols = np.asarray(getattr(term.Y_basis, "_moire_sparse_cols"), dtype=int)
-        row_q_idx = np.asarray(getattr(term.Y_basis, "_moire_sparse_row_q_idx"), dtype=int)
-        q_rows = np.asarray(getattr(term.Y_basis, "_moire_sparse_Q_rows"), dtype=float)
-        hermitize_in_basis = bool(getattr(term.Y_basis, "_moire_sparse_hermitize_in_basis", False))
-        if rows.size == 0:
-            continue
-
-        orbit_records = _orbit_records(term.symmetry_ops, moire_config.symmetry_gen)
-        base_components = [(int(term.key.Mz), int(term.key.Mz_star), 1.0 + 0.0j)]
-        if hermitize_in_basis:
-            base_components.append((int(term.key.Mz_star), int(term.key.Mz), 1.0 + 0.0j))
-
-        term_contributions: list[tuple[int, int, int, int, np.ndarray, complex, complex]] = []
-        for transform, action in orbit_records:
-            for sparse_pos, r_out, c_out, matrix_factor, is_anti_total in _iter_transformed_sparse_entries(
-                action,
-                rows,
-                cols,
-            ):
-                q_base = q_rows[row_q_idx[sparse_pos]]
-                for mz_base, mz_star_base, component_prefactor in base_components:
-                    mz_new, mz_star_new, q_new, transform_prefactor = cached_transform_monomial(
-                        transform,
-                        q_base,
-                        mz_base,
-                        mz_star_base,
-                    )
-                    prefactor = component_prefactor * transform_prefactor
-                    if is_anti_total:
-                        prefactor = np.conjugate(prefactor)
-                        mz_new, mz_star_new = mz_star_new, mz_new
-                    prefactor *= matrix_factor
-                    real_pref = prefactor
-                    imag_pref = (1j * (-1.0 if is_anti_total else 1.0)) * prefactor
-                    term_contributions.append(
-                        (
-                            int(r_out),
-                            int(c_out),
-                            int(mz_new),
-                            int(mz_star_new),
-                            np.asarray(q_new, dtype=float),
-                            complex(real_pref),
-                            complex(imag_pref),
-                        )
-                    )
-        has_recorded_flags = hasattr(term, "_moire_needs_hermitize_real") and hasattr(
-            term,
-            "_moire_needs_hermitize_imag",
-        )
-        dynamic_hermitization = has_recorded_flags and bool(
-            getattr(term,
-            "_moire_hermitize_flags_inconsistent",
-            False),
-        )
-        if dynamic_hermitization:
-            dynamic_hermitization_terms.append(idx)
-            needs_herm_real = False
-            needs_herm_imag = False
-        elif has_recorded_flags:
-            needs_herm_real = bool(getattr(term, "_moire_needs_hermitize_real"))
-            needs_herm_imag = bool(getattr(term, "_moire_needs_hermitize_imag"))
-        else:
-            needs_herm_real, needs_herm_imag = _hermitize_flags_from_operator_contributions(
-                term_contributions,
-                dim,
-                probe_k=_standalone_hermitization_probe(moire_config),
-            )
-        for r_out, c_out, mz_new, mz_star_new, q_new, real_pref, imag_pref in term_contributions:
-            _append_operator_contribution(
-                idx,
-                int(r_out),
-                int(c_out),
-                mz_new,
-                mz_star_new,
-                q_new,
-                real_pref,
-                imag_pref,
-                term_index,
-                row,
-                col,
-                mz_values,
-                mz_star_values,
-                q_center,
-                prefactor_real,
-                prefactor_imag,
-            )
-            herm_real_pref = np.conjugate(real_pref) if needs_herm_real else 0.0j
-            herm_imag_pref = np.conjugate(imag_pref) if needs_herm_imag else 0.0j
-            if herm_real_pref != 0.0j or herm_imag_pref != 0.0j:
-                _append_operator_contribution(
-                    idx,
-                    int(c_out),
-                    int(r_out),
-                    mz_star_new,
-                    mz_new,
-                    q_new,
-                    herm_real_pref,
-                    herm_imag_pref,
-                    term_index,
-                    row,
-                    col,
-                    mz_values,
-                    mz_star_values,
-                    q_center,
-                    prefactor_real,
-                    prefactor_imag,
-                )
-
-    if not term_index:
-        raise ValueError("runtime recipe expansion produced no operator contributions")
-    return {
-        "term_index": np.asarray(term_index, dtype=np.int64),
-        "row": np.asarray(row, dtype=np.int64),
-        "col": np.asarray(col, dtype=np.int64),
-        "mz": np.asarray(mz_values, dtype=np.int64),
-        "mz_star": np.asarray(mz_star_values, dtype=np.int64),
-        "q_center": np.asarray(q_center, dtype=float),
-        "prefactor_real": np.asarray(prefactor_real, dtype=np.complex128),
-        "prefactor_imag": np.asarray(prefactor_imag, dtype=np.complex128),
-        "dynamic_hermitization_term_index": np.asarray(dynamic_hermitization_terms, dtype=np.int64),
-    }
-
-
-def _hermitize_flags_from_operator_contributions(
-    contributions: Sequence[tuple[int, int, int, int, np.ndarray, complex, complex]],
-    dim: int,
-    *,
-    probe_k: np.ndarray | None = None,
-) -> tuple[bool, bool]:
-    if not contributions:
-        return False, False
-    if probe_k is None:
-        probe_k = np.array([0.137, -0.219], dtype=float)
-    else:
-        probe_k = np.asarray(probe_k, dtype=float)
-        if probe_k.shape != (2,):
-            raise ValueError(f"hermitianization probe must have shape (2,), got {probe_k.shape}")
-    real_matrix = np.zeros((int(dim), int(dim)), dtype=np.complex128)
-    imag_matrix = np.zeros_like(real_matrix)
-    for row_idx, col_idx, mz, mz_star, q, real_pref, imag_pref in contributions:
-        z = (probe_k[0] - float(q[0])) + 1j * (probe_k[1] - float(q[1]))
-        monomial = (z ** int(mz)) * (np.conjugate(z) ** int(mz_star))
-        real_matrix[int(row_idx), int(col_idx)] += complex(real_pref) * monomial
-        imag_matrix[int(row_idx), int(col_idx)] += complex(imag_pref) * monomial
-    return (not np.allclose(real_matrix, real_matrix.conj().T), not np.allclose(imag_matrix, imag_matrix.conj().T))
-
-
-def _standalone_hermitization_probe(moire_config: Any) -> np.ndarray:
-    """Use a production k-point when exporting legacy active-term payloads."""
-    for attribute in ("kpoints_fit", "kpoints"):
-        values = getattr(moire_config, attribute, None)
-        if values is None:
-            continue
-        points = np.asarray(values, dtype=float)
-        if points.ndim == 2 and points.shape[0] > 0 and points.shape[1] == 2:
-            return points[0]
-    return np.array([0.137, -0.219], dtype=float)
-
-
-def _append_operator_contribution(
-    term_idx: int,
-    row_idx: int,
-    col_idx: int,
-    mz: int,
-    mz_star: int,
-    q: np.ndarray,
-    real_prefactor: complex,
-    imag_prefactor: complex,
-    term_index: list[int],
-    rows: list[int],
-    cols: list[int],
-    mz_values: list[int],
-    mz_star_values: list[int],
-    q_center: list[tuple[float, float]],
-    prefactor_real: list[complex],
-    prefactor_imag: list[complex],
-) -> None:
-    if abs(real_prefactor) <= 1.0e-13 and abs(imag_prefactor) <= 1.0e-13:
-        return
-    term_index.append(int(term_idx))
-    rows.append(int(row_idx))
-    cols.append(int(col_idx))
-    mz_values.append(int(mz))
-    mz_star_values.append(int(mz_star))
-    q_center.append((float(q[0]), float(q[1])))
-    prefactor_real.append(complex(real_prefactor))
-    prefactor_imag.append(complex(imag_prefactor))
-
-
-def _iter_transformed_sparse_entries(
-    action: Mapping[str, Any] | None,
-    rows: np.ndarray,
-    cols: np.ndarray,
-):
-    if action is None:
-        for sparse_pos, (r_out, c_out) in enumerate(zip(rows, cols)):
-            yield sparse_pos, int(r_out), int(c_out), 1.0 + 0.0j, False
-        return
-
-    kind = str(action.get("kind", ""))
-    if kind == "monomial":
-        perm = np.asarray(action["perm"], dtype=int)
-        vals = np.asarray(action["vals"], dtype=np.complex128)
-        inv_vals = np.asarray(action["inv_vals"], dtype=np.complex128)
-        inv_perm = np.empty_like(perm)
-        inv_perm[perm] = np.arange(perm.shape[0], dtype=int)
-        rr = inv_perm[rows]
-        cc = inv_perm[cols]
-        matrix_factor = vals[rr] * inv_vals[cc]
-        is_anti_total = bool(action.get("is_anti_total", False))
-        for sparse_pos, (r_out, c_out, factor) in enumerate(zip(rr, cc, matrix_factor)):
-            yield sparse_pos, int(r_out), int(c_out), complex(factor), is_anti_total
-        return
-
-    if kind == "dense":
-        left = np.asarray(action["left"], dtype=np.complex128)
-        right = np.asarray(action["right"], dtype=np.complex128)
-        is_anti_total = bool(action.get("is_anti_total", False))
-        for sparse_pos, (row_in, col_in) in enumerate(zip(rows, cols)):
-            left_col = left[:, int(row_in)]
-            right_row = right[int(col_in), :]
-            out_rows = np.flatnonzero(np.abs(left_col) > _DENSE_ACTION_ENTRY_TOL)
-            out_cols = np.flatnonzero(np.abs(right_row) > _DENSE_ACTION_ENTRY_TOL)
-            for r_out in out_rows:
-                left_value = left_col[int(r_out)]
-                for c_out in out_cols:
-                    factor = left_value * right_row[int(c_out)]
-                    if abs(factor) <= _DENSE_ACTION_ENTRY_TOL:
-                        continue
-                    yield sparse_pos, int(r_out), int(c_out), complex(factor), is_anti_total
-        return
-
-    raise ValueError(f"unknown standalone export symmetry action kind {kind!r}")
-
-
-def _orbit_records(sym_ops: Sequence[Mapping[str, Any]], symmetry_gen: Any) -> list[tuple[np.ndarray, Mapping[str, Any] | None]]:
-    if not sym_ops:
-        return [(np.eye(2, dtype=float), None)]
-    sym_ops_list = [dict(op) for op in sym_ops if isinstance(op, Mapping)]
-    cache_key = (id(symmetry_gen), ContinuumModelBuilder._sym_ops_cache_key(sym_ops_list))
-    cached = _ORBIT_RECORD_CACHE.get(cache_key)
-    if cached is not None:
-        return cached
-    _points, op_seqs = ContinuumModelBuilder._generate_symmetry_orbit(np.zeros(2, dtype=float), sym_ops_list)
-    records = []
-    for op_seq in op_seqs:
-        transform = _linear_transform_for_op_seq(op_seq, sym_ops_list)
-        if not op_seq:
-            records.append((transform, None))
-            continue
-        op_seq_applied = tuple(reversed(op_seq))
-        action = ContinuumModelBuilder._get_composed_symmetry_action(symmetry_gen, op_seq_applied)
-        if action is not None and ContinuumModelBuilder._validate_composed_symmetry_action_once(
-            symmetry_gen,
-            op_seq_applied,
-            action,
-        ):
-            perm, vals, inv_vals, is_anti_total = action
-            records.append(
-                (
-                    transform,
-                    {
-                        "kind": "monomial",
-                        "perm": perm,
-                        "vals": vals,
-                        "inv_vals": inv_vals,
-                        "is_anti_total": bool(is_anti_total),
-                    },
-                )
-            )
-            continue
-        records.append((transform, _dense_composed_symmetry_action(symmetry_gen, op_seq_applied)))
-    _ORBIT_RECORD_CACHE[cache_key] = records
-    return records
-
-
-def _dense_composed_symmetry_action(symmetry_gen: Any, op_seq_applied: Sequence[tuple[str, Any]]) -> dict[str, Any]:
-    if symmetry_gen is None:
-        raise ValueError("standalone export requires symmetry_gen when sym_ops is non-empty")
-    left_total: np.ndarray | None = None
-    right_total: np.ndarray | None = None
-    is_anti_total = False
-    dim: int | None = None
-    for op_name, param in op_seq_applied:
-        left_op, right_op, is_anti_op = _dense_single_symmetry_action(symmetry_gen, str(op_name), param)
-        left_op = np.asarray(left_op, dtype=np.complex128)
-        right_op = np.asarray(right_op, dtype=np.complex128)
-        if left_op.ndim != 2 or left_op.shape[0] != left_op.shape[1]:
-            raise ValueError(f"symmetry operator {op_name!r} must be square, got {left_op.shape}")
-        if right_op.shape != left_op.shape:
-            raise ValueError(
-                f"right action for symmetry operator {op_name!r} has shape {right_op.shape}, "
-                f"expected {left_op.shape}"
-            )
-        if dim is None:
-            dim = int(left_op.shape[0])
-            left_total = np.eye(dim, dtype=np.complex128)
-            right_total = np.eye(dim, dtype=np.complex128)
-        elif left_op.shape != (dim, dim):
-            raise ValueError(f"symmetry operator {op_name!r} shape {left_op.shape} does not match {(dim, dim)}")
-        assert left_total is not None and right_total is not None
-        if is_anti_op:
-            left_total = left_op @ left_total.conj()
-            right_total = right_total.conj() @ right_op
-            is_anti_total = not is_anti_total
-        else:
-            left_total = left_op @ left_total
-            right_total = right_total @ right_op
-    if left_total is None or right_total is None:
-        raise ValueError("dense composed symmetry action requires at least one operation")
-    return {
-        "kind": "dense",
-        "left": left_total,
-        "right": right_total,
-        "is_anti_total": bool(is_anti_total),
-    }
-
-
-def _dense_single_symmetry_action(symmetry_gen: Any, op_name: str, param: Any) -> tuple[np.ndarray, np.ndarray, bool]:
-    if op_name == "C3z":
-        left = symmetry_gen.get_operator(op_name, param)
-        right = symmetry_gen.get_operator(op_name, -int(param))
-        return left, right, False
-    if op_name in ContinuumModelBuilder._SYMM_ANTIUNITARY_OPS:
-        left = symmetry_gen.get_operator(op_name, param)
-        return left, np.asarray(left).conj().T, True
-    if op_name in ContinuumModelBuilder._SYMM_UNITARY_OPS:
-        left = symmetry_gen.get_operator(op_name, param)
-        return left, np.asarray(left).conj().T, False
-    raise ValueError(f"Unknown symmetry operation: {op_name}")
-
-
-def _linear_transform_for_op_seq(op_seq: Sequence[tuple[str, Any]], sym_ops: Sequence[Mapping[str, Any]]) -> np.ndarray:
-    op_by_name = {str(op["name"]): op for op in sym_ops if isinstance(op, Mapping) and "name" in op}
-    basis = np.eye(2, dtype=float)
-    columns = []
-    for vector in basis:
-        out = np.asarray(vector, dtype=float)
-        for op_name, param in op_seq:
-            operation = op_by_name[str(op_name)]
-            out = ContinuumModelBuilder._apply_k_map_to_vector(
-                out,
-                operation,
-                power=None if param is None else int(param),
-            )
-        columns.append(out)
-    return np.column_stack(columns)
-
-
-def _transform_monomial(transform: np.ndarray, q_base: np.ndarray, mz: int, mz_star: int) -> tuple[int, int, np.ndarray, complex]:
-    q_center = np.linalg.solve(transform, np.asarray(q_base, dtype=float))
-    z_e1 = complex(transform[0, 0], transform[1, 0])
-    z_e2 = complex(transform[0, 1], transform[1, 1])
-    det = float(np.linalg.det(transform))
-    if det > 0:
-        alpha = z_e1
-        if not np.allclose(z_e2, 1j * alpha, atol=1.0e-8, rtol=0.0):
-            raise NotImplementedError("standalone export supports only conformal rotation k maps")
-        prefactor = (alpha**mz) * (np.conjugate(alpha) ** mz_star)
-        return int(mz), int(mz_star), q_center, complex(prefactor)
-    alpha = z_e1
-    if not np.allclose(z_e2, -1j * alpha, atol=1.0e-8, rtol=0.0):
-        raise NotImplementedError("standalone export supports only reflection k maps")
-    prefactor = (alpha**mz) * (np.conjugate(alpha) ** mz_star)
-    return int(mz_star), int(mz), q_center, complex(prefactor)
-
-
-# Keep the historical private exporter name while sharing the production compiler
-# with the in-package band runtime.
-_expand_operator_recipe = compile_operator_recipe
 
 
 def _portable_operations(model_config: Any, exactified: Mapping[str, np.ndarray]) -> list[dict[str, Any]]:
@@ -2345,7 +1861,7 @@ def _render_model_doc(model: Mapping[str, Any], model_data: Mapping[str, np.ndar
     operations_text = _operation_names_text(model)
     operation_table = _render_operation_table(model)
     symmetry_rules = _render_symmetry_reconstruction(model, model_data or {}, include_q_permutation=False)
-    response_semantics = str(model.get("response_semantics", "legacy_frozen_v1"))
+    response_semantics = str(model["response_semantics"])
     fit_method = model.get("fit_method")
     if isinstance(fit_method, Mapping) and fit_method:
         fit_lines = [
@@ -2388,7 +1904,7 @@ $$
 `q_points.csv` is the validated default finite realization; it is not the
 authority for the abstract model. `physical_model.py` can enlarge the basis
 with `set_q_shell(shell)`. The frozen `model_data.npz` response arrays remain a
-reference cache used for exact export validation and legacy workflows."""
+reference cache used for exact export validation."""
         files_description = (
             "readable physical authority files, a default integer-Q realization, "
             "frozen validation arrays, and exactified symmetry matrices"
@@ -2402,7 +1918,7 @@ reference cache used for exact export validation and legacy workflows."""
         limitations_runtime_note = (
             "physical runtime evaluation uses integer Q routes from `model.toml` and `terms.csv`"
         )
-    elif response_semantics == "complete_linear_v2":
+    else:
         runtime_recipe_text = r"""The exported Hamiltonian consumes the frozen compiled response basis directly:
 
 $$
@@ -2429,40 +1945,7 @@ stores the sparse matrix coefficient $B_{j,rs}$; and
         limitations_runtime_note = (
             "runtime evaluation uses the frozen `basis_entry_*` arrays and never calls the compiler"
         )
-    else:
-        runtime_recipe_text = r"""The exported Hamiltonian is evaluated by category:
 
-$$
-H_X(k)=
-\sum_{t\in T_X}
-\sum_{c\in C_t}
-\left[
-r_t^R P_c^R+r_t^I P_c^I
-\right]
-\phi_c(k)|i_c\rangle\langle j_c|.
-$$
-
-$$
-\phi_c(k)=z(k-q_c)^{m_c}\bar z(k-q_c)^{\bar m_c},
-\qquad z(u)=u_x+i u_y.
-$$
-
-Runtime mapping: `operator_term_index -> t`, `operator_row/col -> i_c/j_c`,
-`operator_mz/operator_mz_star -> m_c/\bar m_c`, `operator_q_center -> q_c`,
-and `operator_prefactor_real/imag -> P_c^R/P_c^I`.
-`evaluate.py` combines these arrays with `term_r_value_real` and
-`term_r_value_imag` from `model_data.npz`."""
-        files_description = (
-            "q sets, fitted coefficients, exactified symmetry matrices, operator arrays, "
-            "and compact reference arrays"
-        )
-        term_runtime_note = (
-            "Semantic fields such as `key.Mz`, `key.p`, `operation_names`, and "
-            "`metadata.term_name` explain the source term before export. Editing them does not "
-            "rebuild `operator_*`; re-export with `kp` if the term structure changes."
-        )
-        folded_runtime_arrays = "the pre-expanded `operator_*` arrays"
-        limitations_runtime_note = "runtime evaluation uses the pre-expanded `operator_*` arrays"
     return f"""# Model Description
 
 ## Scope
@@ -2656,136 +2139,66 @@ class StandaloneModel:
     def __init__(self, root):
         self.root = Path(root).resolve()
         self.data = np.load(self.root / "model_data.npz", allow_pickle=False)
-        self.response_semantics = (
-            str(np.asarray(self.data["response_semantics"]).item())
-            if "response_semantics" in self.data.files
-            else "legacy_frozen_v1"
-        )
+        self.response_semantics = str(np.asarray(self.data["response_semantics"]).item())
+        if self.response_semantics != "complete_linear":
+            raise ValueError(f"unsupported response_semantics: {{self.response_semantics!r}}")
         self.dim = int(np.asarray(self.data["dimension_dim"]).item())
         self.hermitianize_before_eigvalsh = bool(
             np.asarray(self.data["runtime_hermitianize_before_eigvalsh"]).item()
         )
-        if self.response_semantics == "complete_linear_v2":
-            self._required = [
-                "basis_metadata_json",
+        self._required = [
+            "basis_metadata_json",
+            "basis_entry_channel",
+            "basis_entry_monomial",
+            "basis_entry_row",
+            "basis_entry_col",
+            "basis_entry_value",
+            "fitted_coefficients",
+        ]
+        missing = [key for key in self._required if key not in self.data.files]
+        if missing:
+            raise KeyError(f"model_data.npz is missing complete-response keys: {{missing}}")
+        metadata = json.loads(str(np.asarray(self.data["basis_metadata_json"]).item()))
+        coordinate = metadata["coordinate"]
+        self.response_origin = np.asarray(coordinate["origin"], dtype=float)
+        self.response_scale = float(coordinate["scale"])
+        self.response_monomials = np.asarray(coordinate["monomials"], dtype=np.int64)
+        self.response_coefficients = np.asarray(self.data["fitted_coefficients"], dtype=float)
+        entry_arrays = [
+            np.asarray(self.data[name])
+            for name in (
                 "basis_entry_channel",
                 "basis_entry_monomial",
                 "basis_entry_row",
                 "basis_entry_col",
                 "basis_entry_value",
-                "fitted_coefficients",
-            ]
-            missing = [key for key in self._required if key not in self.data.files]
-            if missing:
-                raise KeyError(f"model_data.npz is missing complete-response keys: {{missing}}")
-            metadata = json.loads(str(np.asarray(self.data["basis_metadata_json"]).item()))
-            coordinate = metadata["coordinate"]
-            self.response_origin = np.asarray(coordinate["origin"], dtype=float)
-            self.response_scale = float(coordinate["scale"])
-            self.response_monomials = np.asarray(coordinate["monomials"], dtype=np.int64)
-            self.response_coefficients = np.asarray(self.data["fitted_coefficients"], dtype=float)
-            entry_arrays = [
-                np.asarray(self.data[name])
-                for name in (
-                    "basis_entry_channel",
-                    "basis_entry_monomial",
-                    "basis_entry_row",
-                    "basis_entry_col",
-                    "basis_entry_value",
-                )
-            ]
-            if len({{array.size for array in entry_arrays}}) != 1:
-                raise ValueError("complete-response frozen entry arrays have inconsistent lengths")
-            if self.response_origin.shape != (2,) or self.response_scale <= 0.0:
-                raise ValueError("invalid complete-response polynomial coordinate metadata")
-            return
-        if self.response_semantics != "legacy_frozen_v1":
-            raise ValueError(f"unsupported response_semantics: {{self.response_semantics!r}}")
-        self._required = [
-            "dimension_dim",
-            "operator_term_index",
-            "operator_row",
-            "operator_col",
-            "operator_mz",
-            "operator_mz_star",
-            "operator_q_center",
-            "operator_prefactor_real",
-            "operator_prefactor_imag",
-            "term_r_value_real",
-            "term_r_value_imag",
-            "runtime_hermitianize_before_eigvalsh",
+            )
         ]
-        missing = [key for key in self._required if key not in self.data.files]
-        if missing:
-            raise KeyError(f"model_data.npz is missing runtime keys: {{missing}}")
-        self.r_real = np.asarray(self.data["term_r_value_real"], dtype=float)
-        self.r_imag = np.asarray(self.data["term_r_value_imag"], dtype=float)
-        term_index = np.asarray(self.data["operator_term_index"], dtype=np.int64)
-        if self.r_real.shape != self.r_imag.shape or self.r_real.ndim != 1:
-            raise ValueError("term_r_value_real and term_r_value_imag must be one-dimensional arrays of equal shape")
-        if term_index.size and int(np.max(term_index)) >= self.r_real.shape[0]:
-            raise ValueError("operator_term_index references a missing fitted coefficient")
+        if len({{array.size for array in entry_arrays}}) != 1:
+            raise ValueError("complete-response frozen entry arrays have inconsistent lengths")
+        if self.response_origin.shape != (2,) or self.response_scale <= 0.0:
+            raise ValueError("invalid complete-response polynomial coordinate metadata")
+        return
 
     def hamiltonian(self, k):
         k = np.asarray(k, dtype=float)
         if k.shape != (2,):
             raise ValueError(f"k must have shape (2,), got {{k.shape}}")
-        if self.response_semantics == "complete_linear_v2":
-            channel = np.asarray(self.data["basis_entry_channel"], dtype=np.int64)
-            monomial_index = np.asarray(self.data["basis_entry_monomial"], dtype=np.int64)
-            rows = np.asarray(self.data["basis_entry_row"], dtype=np.int64)
-            cols = np.asarray(self.data["basis_entry_col"], dtype=np.int64)
-            values = np.asarray(self.data["basis_entry_value"], dtype=np.complex128)
-            exponents = self.response_monomials[monomial_index]
-            u = (k - self.response_origin) / self.response_scale
-            w = u[0] + 1j * u[1]
-            monomial = (w ** exponents[:, 0]) * (np.conjugate(w) ** exponents[:, 1])
-            h = np.zeros((self.dim, self.dim), dtype=np.complex128)
-            np.add.at(
-                h,
-                (rows, cols),
-                self.response_coefficients[channel] * values * monomial,
-            )
-            return h
-        term_index = np.asarray(self.data["operator_term_index"], dtype=np.int64)
-        rows = np.asarray(self.data["operator_row"], dtype=np.int64)
-        cols = np.asarray(self.data["operator_col"], dtype=np.int64)
-        mz = np.asarray(self.data["operator_mz"], dtype=np.int64)
-        mz_star = np.asarray(self.data["operator_mz_star"], dtype=np.int64)
-        q_center = np.asarray(self.data["operator_q_center"], dtype=float)
-        prefactor_real = np.asarray(self.data["operator_prefactor_real"], dtype=np.complex128)
-        prefactor_imag = np.asarray(self.data["operator_prefactor_imag"], dtype=np.complex128)
-        dynamic_terms = np.asarray(
-            self.data["dynamic_hermitization_term_index"]
-            if "dynamic_hermitization_term_index" in self.data.files
-            else np.array([], dtype=np.int64),
-            dtype=np.int64,
-        )
-        if q_center.ndim != 2 or q_center.shape[1] != 2:
-            raise ValueError(f"operator_q_center must have shape (N, 2), got {{q_center.shape}}")
-        z = (k[0] - q_center[:, 0]) + 1j * (k[1] - q_center[:, 1])
-        monomial = (z ** mz) * (np.conjugate(z) ** mz_star)
+        channel = np.asarray(self.data["basis_entry_channel"], dtype=np.int64)
+        monomial_index = np.asarray(self.data["basis_entry_monomial"], dtype=np.int64)
+        rows = np.asarray(self.data["basis_entry_row"], dtype=np.int64)
+        cols = np.asarray(self.data["basis_entry_col"], dtype=np.int64)
+        values = np.asarray(self.data["basis_entry_value"], dtype=np.complex128)
+        exponents = self.response_monomials[monomial_index]
+        u = (k - self.response_origin) / self.response_scale
+        w = u[0] + 1j * u[1]
+        monomial = (w ** exponents[:, 0]) * (np.conjugate(w) ** exponents[:, 1])
         h = np.zeros((self.dim, self.dim), dtype=np.complex128)
-        dynamic_mask = np.isin(term_index, dynamic_terms) if dynamic_terms.size else np.zeros(term_index.shape, dtype=bool)
-        static_mask = ~dynamic_mask
-        if np.any(static_mask):
-            static_terms = term_index[static_mask]
-            coeff = (
-                self.r_real[static_terms] * prefactor_real[static_mask]
-                + self.r_imag[static_terms] * prefactor_imag[static_mask]
-            )
-            np.add.at(h, (rows[static_mask], cols[static_mask]), coeff * monomial[static_mask])
-        for term in dynamic_terms:
-            mask = term_index == term
-            h_real = np.zeros_like(h)
-            h_imag = np.zeros_like(h)
-            np.add.at(h_real, (rows[mask], cols[mask]), prefactor_real[mask] * monomial[mask])
-            np.add.at(h_imag, (rows[mask], cols[mask]), prefactor_imag[mask] * monomial[mask])
-            if not np.allclose(h_real, h_real.conj().T):
-                h_real += h_real.conj().T
-            if not np.allclose(h_imag, h_imag.conj().T):
-                h_imag += h_imag.conj().T
-            h += self.r_real[term] * h_real + self.r_imag[term] * h_imag
+        np.add.at(
+            h,
+            (rows, cols),
+            self.response_coefficients[channel] * values * monomial,
+        )
         return h
 
     def _hamiltonian_for_eigvalsh(self, k):

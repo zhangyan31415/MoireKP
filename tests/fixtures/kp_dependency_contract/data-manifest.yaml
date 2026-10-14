@@ -1,0 +1,2 @@
+external_data:
+  - tests/fixtures/kp_dependency_contract/external
