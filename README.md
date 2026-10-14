@@ -70,8 +70,4 @@ python scripts/release/build_distribution.py --output dist
 
 Software, repository-authored documentation and small configurations use `LGPL-3.0-or-later`; see [COPYRIGHT](COPYRIGHT), [COPYING.LESSER](COPYING.LESSER) and [COPYING](COPYING).
 
-## Development checks
-
-Small regression tests are saved with the source. Run `python -m pytest -q -m "not slow and not external_data"` or `bash scripts/release/release_gate.sh`. Numerical paper examples require the locally generated H/S or certified TAPW inputs described in their READMEs.
-
 The software license does not automatically cover external first-principles datasets. See `examples/data-manifest.yaml` for the separately recorded data provenance.
