@@ -43,6 +43,7 @@ model:
     intralayer: 2
     interlayer: 6
   target_bands: top
+  # Matches automatic selection; kept explicit for reproducibility.
   harmonics:
     intra:
       count: 4

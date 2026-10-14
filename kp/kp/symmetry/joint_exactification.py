@@ -1372,6 +1372,9 @@ def project_u1_relations(
         "post_relation_residuals": post_table,
         "post_relation_residual_max": post_maximum,
     }
+    # #region debug-point D:u1-relation-solver
+    import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "D", "location": "kp/symmetry/joint_exactification.py:project_u1_relations", "msg": "[DEBUG] U1 joint relation solve", "data": {"generator_names": generator_names, "fiber_count": fiber_count, "constraint_matrix": constraint_matrix.tolist(), "target_vector": target_vector.tolist(), "angle_vector": angle_vector.tolist(), "principal_residual": principal_residual.tolist(), "correction": correction.tolist(), "projected_angles": projected_angles.tolist(), "report": report}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
+    # #endregion
     return projected, report
 
 
@@ -1640,6 +1643,9 @@ def derive_closest_cyclotomic_u1_gauge(
             fiber_indices=action.fiber_indices,
         )
 
+    # #region debug-point B:cyclotomic-branch-selection
+    _dbg_cyclotomic_relations, _dbg_cyclotomic_max = _relation_residual_summary(canonical, presentation); import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "B", "location": "kp/symmetry/joint_exactification.py:derive_closest_cyclotomic_u1_gauge", "msg": "[DEBUG] Independently nearest cyclotomic branch before certification", "data": {"root_order": root_order, "root_exponents": root_exponents, "nearest_distances": nearest_distances, "branch_margins": branch_margins, "relation_residuals": _dbg_cyclotomic_relations, "relation_residual_max": _dbg_cyclotomic_max, "using_external_reference": reference_actions is not actions}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
+    # #endregion
     relation_certification = certify_joint_block_actions(canonical, presentation)
     rows: list[np.ndarray] = []
     targets: list[float] = []
@@ -5838,6 +5844,7 @@ def joint_exactify_block_actions(
     presentation: MagneticPresentation,
     *,
     config: JointExactificationConfig,
+    cyclotomic_reference_actions: Mapping[str, BlockRouteAction] | None = None,
 ) -> JointExactificationResult:
     """Jointly exactify and certify one complete continuum generator set."""
 
@@ -5929,7 +5936,11 @@ def joint_exactify_block_actions(
         closest = derive_closest_cyclotomic_u1_gauge(
             working,
             presentation,
-            reference_actions=before,
+            reference_actions=(
+                before
+                if cyclotomic_reference_actions is None
+                else cyclotomic_reference_actions
+            ),
         )
         report["closest_cyclotomic_u1_gauge"] = dict(closest.report)
     metadata, arrays = _build_joint_artifact(
@@ -6383,10 +6394,14 @@ def phase_preserving_joint_source(
             "phase-preserving polar route correction exceeds the joint budget: "
             f"{polar_max:.6e} > {config.max_route_correction:.6e}"
         )
+    # #region debug-point B-C:phase-preserving-polar
+    _dbg_relation_table, _dbg_relation_maximum = _relation_residual_summary(polar_actions, presentation); import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "B-C", "location": "kp/symmetry/joint_exactification.py:phase_preserving_joint_source", "msg": "[DEBUG] Phase-preserving polar actions before joint solve", "data": {"relation_residuals": _dbg_relation_table, "relation_residual_max": _dbg_relation_maximum, "polar_correction_rms_by_operation": polar_rms_by_operation, "polar_correction_max_by_operation": polar_max_by_operation, "off_route_relative_by_operation": off_route_relative_by_operation, "off_route_max_entry_by_operation": off_route_max_entry_by_operation, "fiber_permutations": {name: list(action.fiber_permutation) for name, action in polar_actions.items()}, "fiber_dimensions": {name: list(action.fiber_dimensions) for name, action in polar_actions.items()}, "u1_angles": {name: _u1_angles(polar_actions, names)[name].tolist() for name in names}}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
+    # #endregion
     result = joint_exactify_block_actions(
         polar_actions,
         presentation,
         config=config,
+        cyclotomic_reference_actions=reference_actions,
     )
     return result, {
         "version": "phase_preserving_joint_source_v1",

@@ -1,0 +1,87 @@
+代码维护性统计（2026-10-14）
+
+工作区：/data/work/zy/software/1.tapw_code/moirekp-release
+源码提交：3b6ca7f93e07d1e12e35d91c228476acce856712（统计包含当前未提交改动）
+本次只读源码并写统计产物，没有修改源码、配置或论文。
+
+统计口径：
+核心包 kp/kp 与 tapw/tapw：106 个 Python 文件，128,857 个物理行，118,486 个非空行，3,233 个函数/方法定义。
+附带 scripts：18 个 rg 可见 Python 文件，3,288 个物理行。核心表不包含 scripts。
+不扫描测试、算例、论文、数据产物、被 rg 忽略的归档和第三方代码。
+物理行包括注释、空行和代码模板字符串。函数长度按 def 至 end_lineno 统计，因此包含长导出模板，不等于执行逻辑语句数。
+每项都给出计数口径；不同分类有重叠，不应把各行加成“问题总数”。模式匹配不等于 bug，也不能据此推断代码作者是否为人或 AI。
+
+核心包统计：
+vN 样式 token（含注释、字符串、标识引用）：687 次，分布在 650 个源码行。
+不同版本标识字符串：234 个（无空白、字符集受限的完整字符串字面量；不把整段报错文案当标识）。
+含版本编号的不同 Python 标识符：41 个，共 161 次 AST 引用/定义；不包括纯 v1/v2 数学变量名。
+版本标识字符串 AST 节点：499 个（包含报错文本与文档字符串中的引用）。
+涉及版本标记的 if/elif 判断：60 处，包含数据格式检查，不全部是旧版本分支。
+与 legacy_frozen_v1 / complete_linear_v2 有关的 if/elif 判断：22 处；确有两条计算路线，并非仅改名。
+版本号命名和值不一致：1 处。
+legacy 文本/标识引用：246 次；compatibility / backward compatible 引用：28 次；fallback 引用：88 次。这些是文本出现次数，不是独立兼容实现数量。
+嵌入式 debug-point 区块：5 处。
+硬编码 HTTP 诊断 POST：5 处。
+Python exec 调用：5 处；全部是上述诊断 POST，不是另外 5 处。
+直接 Exception/BaseException 捕获：109 处；裸 except：1 处。
+直接 except 后仅 pass：7 处；exec 字符串内 except 后仅 pass：5 处。清理临时文件等情况可能合理，不能全部当成错误。
+同一限定名称重复定义候选：2 组；人工复核后，无条件覆盖前定义的类方法 1 组，条件分支局部函数 1 组。
+完全相同的较长 AST 函数体：9 组，涉及 18 个定义；忽略注释/首部 docstring，要求跨度至少 15 行且 AST 至少 40 节点。没有进行语义等价或模糊相似判断。
+文件至少 2,000 行：21 个。
+函数跨度至少 300 行：34 个。
+函数参数至少 20 个：7 个（不计 self/cls，计 *args/**kwargs）。
+单行超过 300 字符：8 行；超过 1,000 字符：1 行。
+response_basis 模块族：11 个文件，共 16,902 行；文件数量本身不能证明每个模块不必要。
+
+版本编号分布（大小写合并）：v0: 1, v1: 489, v2: 177, v3: 13, v4: 6, v57: 1
+
+优先核对的具体项目：
+1. 核心计算中的临时网络打点。5 处 POST 会发送数值诊断到固定地址，执行代码包在 exec 字符串中，发送错误被 pass 吞掉；timeout=3。它们处在计算函数内，没有独立的 debug 配置开关。
+   kp/kp/symmetry/projection.py:4563,4622
+   kp/kp/symmetry/joint_exactification.py:1376,1647,6398
+2. 同一类中重复定义的方法：tapw/tapw/io/structure.py:1098 和 :1160 的 LayeredLatticeAnalyzer.plot_lattice1。后一个定义覆盖前一个，且参数从 periodic 改成 distance_threshold；前一个实现作为方法不可达。
+3. 版本名与值矛盾：kp/kp/model/response_basis_fixed_subspace.py:24 的 DETERMINISTIC_BASIS_CONVENTION_V1，值为 projector_columns__pivoted_qr__first_significant_positive_v2。
+4. 说明文字落后于接入情况：同文件第 5 行说尚未接入 complete_linear_v2，但 response_basis.py:4632 已调用 fixed compiler，fixed compiler 在第 529 和 1214 行调用 solve_generator_fixed_subspace。至少这一处说明需要更新。
+5. 旧计算路径仍在入口里：kp/kp/model/core.py:605 默认 legacy_frozen_v1；:4475 和 :4785 按 complete_linear_v2 分流拟合和能带计算。这是实际两条流程，不只是缓存或文件标签。
+6. 版本标签过于分散。response_basis.py 一文件就有 231 次 vN 样式标记，编译器标识同时带 v2 和 v57。归一化、求解器、坐标约定、文件格式和缓存身份应分别审阅，不能直接删掉所有带 vN 的字符串。
+
+体量最大的核心文件：
+  kp/kp/model/pipeline.py: 16,812 行
+  kp/kp/model/response_basis.py: 8,077 行
+  kp/kp/symmetry/projection.py: 7,586 行
+  kp/kp/symmetry/joint_exactification.py: 6,467 行
+  tapw/tapw/workflows/symmetry.py: 5,739 行
+  kp/kp/model/core.py: 5,299 行
+  tapw/tapw/workflows/band.py: 4,659 行
+  kp/kp/blocks/blocks.py: 4,618 行
+
+跨度最大的函数：
+  kp/kp/model/pipeline.py:13033 refine_band_coefficients: 1,077 行
+  kp/kp/model/response_basis.py:4612 compile_generator_fixed_response_group: 943 行
+  kp/kp/model/pipeline.py:1787 load_model_config: 845 行
+  kp/kp/model/export.py:2573 _evaluate_py_template: 778 行
+  kp/kp/symmetry/projection.py:6536 _exactify_and_write_projection_summary: 607 行
+  kp/kp/model/pipeline.py:16225 run_configured_model: 588 行
+  kp/kp/symmetry/projection.py:870 _derive_projection_basis_frame: 559 行
+  kp/kp/cli.py:3086 _cmd_project_from_config_impl: 558 行
+
+重复函数体清单：
+  kp/kp/identity.py:43 hash_array = tapw/tapw/identity.py:29 hash_array
+  kp/kp/identity.py:78 require_identity_fields = tapw/tapw/identity.py:64 require_identity_fields
+  kp/kp/identity.py:99 require_matching_identity = tapw/tapw/identity.py:85 require_matching_identity
+  kp/kp/identity.py:406 _canonical_value = tapw/tapw/identity.py:114 _canonical_value
+  kp/kp/model/response_basis.py:6414 _local_fixed_joint_key_cache_artifact = kp/kp/model/response_basis_graded.py:1621 _joint_adjoint_key_artifact
+  kp/kp/reporting.py:78 KpReporter._field = tapw/tapw/reporting.py:106 TapwReporter._field
+  tapw/tapw/io/structure.py:964 LayeredLatticeAnalyzer.separate_layers = tapw/tapw/io/structure.py:2830 StructureProcessor.separate_layers
+  tapw/tapw/plot_band_01.py:92 parse_kpath_labels = tapw/tapw/plot_orbital_tool.py:96 parse_kpath_labels
+  tapw/tapw/plot_band_01.py:145 read_kpath = tapw/tapw/plot_orbital_tool.py:150 read_kpath
+
+附带脚本统计：
+  legacy 引用 61 次，compatibility 引用 5 次，直接 Exception/BaseException 捕获 9 处。
+
+文件说明：
+  statistics.json：各文件行数、SHA256、分类计数、全部命中与 AST 结构数据。
+  inventory.csv：逐条命中的分类、文件、行号和摘要。
+  version_labels.csv：234 个核心版本标识字符串及首次位置、字面量引用次数。
+
+检查边界：这是静态维护性统计，没有运行计算、没有判断每项是否必须删除；没有继续处理 NaN 或先前撤回的零轨道反例。

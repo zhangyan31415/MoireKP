@@ -119,6 +119,15 @@ def canonicalize_q_geometry(
 
     if relative_cleanup_tolerance <= 0.0:
         raise QCanonicalizationError("relative_cleanup_tolerance must be positive")
+    if not np.isfinite(relative_cleanup_tolerance):
+        raise QCanonicalizationError("relative_cleanup_tolerance must be finite")
+    if absolute_cleanup_tolerance is not None and (
+        not np.isfinite(absolute_cleanup_tolerance)
+        or absolute_cleanup_tolerance < 0.0
+    ):
+        raise QCanonicalizationError(
+            "absolute_cleanup_tolerance must be finite and nonnegative"
+        )
     raw = _readonly_q_mapping(q_by_sector)
     sector_order = tuple(raw)
     active_sector_order = (

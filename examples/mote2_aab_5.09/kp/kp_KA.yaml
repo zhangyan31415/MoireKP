@@ -78,6 +78,7 @@ model:
     bands: 12
     one_sided_weight: 0.0
     two_sided_weight: 0.0
+  # Matches automatic selection; kept explicit for reproducibility.
   harmonics:
     intra:
       count: 2

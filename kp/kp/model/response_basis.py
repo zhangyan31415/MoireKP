@@ -5839,6 +5839,7 @@ def _projected_basis_permutations(
         np.asarray(Q_set1, dtype=np.float64),
         np.asarray(Q_set2, dtype=np.float64),
     )
+    q_action = _cartesian_action_matrix(operation["q_map"], field="q_map")
     names_by_slot, slot_by_name = _sector_slot_records(sectors)
     offsets = (0, int(qsets[0].shape[0]))
     expected_active_sources = {
@@ -5915,8 +5916,12 @@ def _projected_basis_permutations(
                 f"operation {name!r} model_basis_action is not bijective; target Q slot "
                 f"{(names_by_slot[target_slot], target_index)} is repeated"
             )
-        residual = float(item.get("q_residual", 0.0))
-        if not np.isfinite(residual) or abs(residual) > residual_limit:
+        # Validate the coordinates in use, rather than a pre-canonicalization diagnostic.
+        residual = float(np.linalg.norm(
+            q_action @ qsets[source_slot][source_index]
+            - qsets[target_slot][target_index]
+        ))
+        if not np.isfinite(residual) or residual > residual_limit:
             raise ValueError(
                 f"operation {name!r} model_basis_action Q residual {residual:.3e} "
                 f"exceeds {residual_limit:.3e}"

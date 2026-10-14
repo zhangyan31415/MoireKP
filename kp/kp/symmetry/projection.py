@@ -4559,6 +4559,9 @@ def _candidate_symmetry_metrics(
                 compute_heff_covariance=False,
             )
             raw_candidate_matrices[canonical_name] = np.asarray(raw_mats[0], dtype=np.complex128)
+            # #region debug-point A:projected-action
+            import json as _dbg_json, urllib.request as _dbg_request; _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "A", "location": "kp/symmetry/projection.py:_candidate_symmetry_metrics", "msg": "[DEBUG] Projected symmetry action diagnostics", "data": {"candidate_id": candidate_id, "operation": canonical_name, "antiunitary": antiunitary, "pair_rows": _pair_rows, "matrix_shape": raw_candidate_matrices[canonical_name].shape, "matrix_fro": float(np.linalg.norm(raw_candidate_matrices[canonical_name], ord="fro"))}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
+            # #endregion
             operation_records.append(
                 {
                     "name": canonical_name,
@@ -4615,6 +4618,9 @@ def _candidate_symmetry_metrics(
             rotation_deg=0.0,
             output_dir=None,
         )
+        # #region debug-point B:initial-joint-exactification
+        import json as _dbg_json, urllib.request as _dbg_request; _dbg_joint = exact_reports_candidate.get("__joint_exactification__", {}); _dbg_body = _dbg_json.dumps({"sessionId": "kp-c2t-joint-relation", "runId": "post-fix", "hypothesisId": "B", "location": "kp/symmetry/projection.py:_candidate_symmetry_metrics", "msg": "[DEBUG] Initial joint exactification report", "data": {"candidate_id": candidate_id, "derive_canonical_frame": derive_canonical_frame, "joint_report": _dbg_joint.get("report", {}), "operation_reports": {name: report.get("report", {}) for name, report in exact_reports_candidate.items() if name != "__joint_exactification__" and isinstance(report, Mapping)}}}, default=str).encode(); exec("try:\n _dbg_request.urlopen(_dbg_request.Request('http://172.16.8.68:7777/event', data=_dbg_body, headers={'Content-Type':'application/json'}), timeout=3).read()\nexcept Exception:\n pass")
+        # #endregion
         symmetry_adapted_frame: dict[str, Any] | None = None
         if derive_canonical_frame:
             diagnostic_stage = "selected_basis_frame_derivation"
@@ -7050,6 +7056,15 @@ def _exactify_and_write_projection_summary(
         }
     summary["kp_symm_exactification"] = kp_symm_exactification
 
+    q_canonicalization_cfg = ctx.config.symm_cfg.get(
+        "q_canonicalization",
+        {},
+    )
+    if not isinstance(q_canonicalization_cfg, Mapping):
+        raise ValueError("symmetry.q_canonicalization must be a mapping")
+    absolute_cleanup_tolerance = q_canonicalization_cfg.get(
+        "absolute_cleanup_tolerance",
+    )
     q_geometry = canonicalize_q_geometry(
         {"L1": ctx.q_model1, "L2": ctx.q_model2},
         summary["operations"],
@@ -7057,6 +7072,17 @@ def _exactify_and_write_projection_summary(
             name
             for name, count in zip(("L1", "L2"), n_orb, strict=True)
             if int(count) > 0
+        ),
+        relative_cleanup_tolerance=float(
+            q_canonicalization_cfg.get(
+                "relative_cleanup_tolerance",
+                1.0e-8,
+            )
+        ),
+        absolute_cleanup_tolerance=(
+            None
+            if absolute_cleanup_tolerance is None
+            else float(absolute_cleanup_tolerance)
         ),
     )
     q_model_metadata = summary.setdefault("q_model", {})

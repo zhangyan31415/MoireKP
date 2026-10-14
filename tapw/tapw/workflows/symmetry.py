@@ -3227,6 +3227,7 @@ class SymmetryAnalysisRunner:
             "g_perm_max_delta": 0.0,
             "nonzero_reciprocal_shift_count": 0,
             "layer_exchange_detected": True,
+            "gauge_correction": {"kind": "none"},
         }
         spglib_operation = candidate.get("spglib_layer_exchange_c2")
         if spglib_operation is None:
@@ -3301,11 +3302,31 @@ class SymmetryAnalysisRunner:
         group_index = {group: idx for idx, group in enumerate(unique_groups)}
         spinless_blocks = [[None for _ in unique_groups] for _ in unique_groups]
         spin_rep_override = spin_reps(rotation_cart) @ (1.0j * _SIGMA_Y) if getattr(self.structure, "spin", False) else None
+        pure_d0 = bool(candidate.get("export_pure_d0", False))
 
         for source_group in unique_groups:
             target_group = 1 - source_group
             source_g = np.asarray(valley_ctx.group_g_vectors[source_group], dtype=float)
             target_g = np.asarray(valley_ctx.group_g_vectors[target_group], dtype=float)
+            source_center = np.asarray(valley_ctx.group_k_centers[source_group], dtype=float)
+            target_center = np.asarray(valley_ctx.group_k_centers[target_group], dtype=float)
+            fold_shift = np.linalg.solve(-linear_map, target_center) - source_center
+            has_fold = bool(np.linalg.norm(fold_shift) > 1.0e-8)
+            pair_positions = {}
+            if has_fold:
+                diagnostics["nonzero_reciprocal_shift_count"] += 1
+                if not pure_d0:
+                    mapped_df = atom_mapping["df"]
+                    columns = (["shifted_x", "shifted_y"]
+                               if {"shifted_x", "shifted_y"}.issubset(mapped_df.columns)
+                               else ["x", "y"])
+                    positions = mapped_df[columns].to_numpy(dtype=float)
+                    for atom_type in sorted(df.loc[df["twist_group"] == source_group, "atom_type"].unique()):
+                        records = [record for record in atom_mapping["records"]
+                                   if record["source_atom_type"] == int(atom_type)]
+                        source_indices = [record["source_index"] for record in records]
+                        target_indices = [record["target_index"] for record in records]
+                        pair_positions[int(atom_type)] = (positions[source_indices], positions[target_indices])
             q_transport, max_delta = build_antiunitary_c2_layer_exchange_g_transport(
                 source_g_vectors=source_g,
                 target_g_vectors=target_g,
@@ -3344,6 +3365,23 @@ class SymmetryAnalysisRunner:
                     source_offset, block_dim, _ = group_data.source_offsets[source_atom_type]
                     target_offset, _, _ = group_data.target_offsets[target_atom_type]
                     block = group_data.source_blocks[source_atom_type]
+                    fold_phase = 1.0 + 0.0j
+                    if has_fold and not pure_d0:
+                        source_positions, target_positions = pair_positions[source_atom_type]
+                        # X_t^dagger D_loc X_s^*: conjugate both Fourier phases.
+                        # Sum over the complete mapped atom orbit, in the same
+                        # reference coordinates used by the TAPW projector.
+                        fold_phase = np.mean(np.exp(-1.0j * (
+                            source_positions @ source_g[source_g_index]
+                            + target_positions @ target_g[target_g_index]
+                        )))
+                        diagnostics["gauge_correction"] = {
+                            "kind": "atomic_fourier_fold",
+                            "operation": "C2T",
+                            "phase_convention": "mean(exp(-i*(G_source.r_source + G_target.r_target)))",
+                            "coordinate_columns": columns,
+                        }
+                    block = fold_phase * block
                     row_base = int(target_g_index * group_data.target_dim + target_offset)
                     col_base = int(source_g_index * group_data.source_dim + source_offset)
                     row_idx = row_base + np.arange(block_dim, dtype=np.int64)
@@ -4582,6 +4620,9 @@ class SymmetryAnalysisRunner:
                 default=0,
             ),
             "square_residual": _maximum_validated_residual(candidate_rows, "square_residual"),
+            "gauge_correction": raw_transport_diagnostics.get(
+                "gauge_correction", {"kind": "none"}
+            ),
             "matrix": matrix,
             "matrix_role": "D_g^(0)",
             "pin_supported": bool(pin_diagnostics.get("pin_supported", False)),
@@ -5296,7 +5337,7 @@ class SymmetryAnalysisRunner:
         }
         conventions = {
             "antiunitary_convention": "U_K" if bool(record.get("antiunitary", False)) else "none",
-            "gauge_correction": {"kind": "none"},
+            "gauge_correction": copy.deepcopy(record.get("gauge_correction", {"kind": "none"})),
             "source_action_frame": "tapw_source",
         }
         return action_metadata, source_action, conventions

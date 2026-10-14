@@ -876,6 +876,12 @@ class Config:
         compute_config = ComputeConfig(**compute_raw)
         compute_config.topology = topology_config
         symmetry_analysis_raw = dict(config_dict.get('symmetry_analysis', {}) or {})
+        for section_name, section in (("symmetry", symmetry_raw), ("symmetry_analysis", symmetry_analysis_raw)):
+            if "operation_species_phases_deg" in section:
+                raise ValueError(
+                    f"{section_name}.operation_species_phases_deg has been removed; "
+                    "remove this field. Reciprocal-fold phases are computed from atomic geometry."
+                )
         if symmetry_raw:
             if "enable" in symmetry_raw:
                 symmetry_analysis_raw["enable"] = bool(symmetry_raw["enable"])
