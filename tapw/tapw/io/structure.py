@@ -3,6 +3,8 @@ import re
 from collections import defaultdict
 import os
 import tempfile
+import hashlib
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -81,6 +83,8 @@ def reciprocal_from_Tmat(Tmat: np.ndarray) -> np.ndarray:
 def parse_compact_orbital_spec(value: str) -> int:
     """Return the number of scalar orbitals in a compact ``s/p/d/f`` specification."""
     text = str(value).strip()
+    if text == "pz":
+        return 1
     match = re.fullmatch(r"(?:s(?P<s>\d+))?(?:p(?P<p>\d+))?(?:d(?P<d>\d+))?(?:f(?P<f>\d+))?", text)
     if match is None or not any(match.group(name) for name in ("s", "p", "d", "f")):
         raise ValueError(
@@ -280,15 +284,20 @@ class AseStructureFile:
 
     def _twist_angle_deg(self) -> float:
         m = self.twist_index
-        if m < 1:
-            raise ValueError(f"twist_index must be >= 1, got {m}")
+        if m == 0:
+            return 0.0
+        if m < 0:
+            raise ValueError(f"twist_index must be nonnegative, got {m}")
         if self.bravais == "square":
             return float(np.degrees(2.0 * np.arctan(1.0 / (2.0 * m + 1.0))))
         cosine = (3 * m**2 + 3 * m + 0.5) / (3 * m**2 + 3 * m + 1)
         return float(np.degrees(np.arccos(np.clip(cosine, -1.0, 1.0))))
 
-    def _moire_cell_count(self) -> int:
+    def _moire_cell_count(self) -> int | None:
         m = self.twist_index
+        if m == 0:
+            # The materials have different primitive-cell counts in a mismatch cell.
+            return None
         if self.bravais == "square":
             return int((2 * m + 1) ** 2 + 1)
         return int(3 * m**2 + 3 * m + 1)
@@ -416,6 +425,13 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
         "overlap_basis_dimension": None if s_source is None else s_source.dimension,
         "overlap_dimension_provenance": None if s_source is None else s_source.provenance,
     }
+    if system.primitive_basis is not None:
+        primitive = json.loads(system.primitive_basis.read_text())
+        digest = hashlib.sha256(Path(system.structure).read_bytes()).hexdigest()
+        if primitive.get("structure_sha256") != digest:
+            raise ValueError("system.primitive_basis structure_sha256 does not match system.structure.")
+        structure.primitive_basis = primitive
+        components["primitive_basis_hash"] = hash_file(system.primitive_basis)
     return ResolvedStructureInput(
         structure=structure,
         bravais=structure.bravais,
@@ -624,8 +640,11 @@ class OpenMXFile:
         计算扭转角度。
         """
         m = int(self.twist_index)
-        if m < 1:
-            raise ValueError(f"twist_index must be >= 1, got {self.twist_index}")
+        if m == 0:
+            self.twist_angle_deg = self.twist_angle = 0.0
+            return
+        if m < 0:
+            raise ValueError(f"twist_index must be nonnegative, got {self.twist_index}")
 
         if getattr(self, "bravais", "hex") in {"square", "rect"}:
             # (m, m+1) family for square moiré:
@@ -646,6 +665,9 @@ class OpenMXFile:
         计算单位晶胞的数量。
         """
         m = int(self.twist_index)
+        if m == 0:
+            self.num_unit_cell = None
+            return
         if getattr(self, "bravais", "hex") in {"square", "rect"}:
             # Square coincidence lattice index for tan(theta/2)=1/(2m+1): Σ = (2m+1)^2 + 1
             self.num_unit_cell = int((2 * m + 1) ** 2 + 1)
@@ -3110,10 +3132,14 @@ class StructureProcessorSpglib:
         symprec: float = 10e-1,
         spglib_z_lattice: float = 50.0,
         reporter=None,
+        primitive_basis=None,
     ):
         self.input_data = input_data
         self.num_layers = num_layers
         self.monolayer_reciprocal_list = {}
+        self.group_reciprocal_vectors = {}
+        self.group_lattice_vectors = {}
+        self.primitive_basis = primitive_basis
         self.twist_layer = twist_layer
         self.layer_eps = layer_eps
         self.layer_min_samples = layer_min_samples
@@ -3299,7 +3325,8 @@ class StructureProcessorSpglib:
         n_groups = len(self.twist_layer)
         for twist_group in range(n_groups):
             # Get reciprocal vectors for this twist_group (shared by all phys_layers in the group)
-            b1, b2 = self.monolayer_reciprocal_list[twist_group]
+            group_vectors = getattr(self, 'group_reciprocal_vectors', None) or self.monolayer_reciprocal_list
+            b1, b2 = group_vectors[twist_group]
             # Compute phase for all atoms in this twist_group (all physical layers)
             mask = self.df['twist_group'] == twist_group
             self.phase1[mask] = (self.df.loc[mask, 'x'] * b1[0] + self.df.loc[mask, 'y'] * b1[1]) % self.period
@@ -3332,7 +3359,8 @@ class StructureProcessorSpglib:
 
             # Use twist_group to get reciprocal vectors (shared by all phys_layers in the group)
             twist_group = self.df.loc[mask, 'twist_group'].values[0]
-            b1, b2 = self.monolayer_reciprocal_list[twist_group]
+            group_vectors = getattr(self, 'group_reciprocal_vectors', None) or self.monolayer_reciprocal_list
+            b1, b2 = group_vectors[twist_group]
             A = np.array([b1, b2])  # Shape: (2, 2)
             try:
                 A_inv = np.linalg.inv(A)
@@ -3748,7 +3776,7 @@ class StructureProcessorSpglib:
         a2 = np.asarray(latP[1, :2], dtype=np.float64)
 
         # Store lattice vectors for this twist_group (shared by all physical layers in the group)
-        self.layer_lattice_vectors[twist_group] = [a1, a2]
+        self.group_lattice_vectors[twist_group] = [a1, a2]
         self.reporter.array("Primitive lattice vectors (Angstrom)", np.array([a1, a2]))
 
         area = float(a1[0] * a2[1] - a1[1] * a2[0])
@@ -3758,7 +3786,7 @@ class StructureProcessorSpglib:
         b2 = (2 * np.pi / area) * np.array([-a1[1], a1[0]], dtype=np.float64)
 
         # Store reciprocal vectors for this twist_group (shared by all physical layers in the group)
-        self.monolayer_reciprocal_list[twist_group] = [b1, b2]
+        self.group_reciprocal_vectors[twist_group] = [b1, b2]
 
         self.reporter.array("Reciprocal vectors (1/Angstrom)", np.array([b1, b2]))
 
@@ -3788,6 +3816,40 @@ class StructureProcessorSpglib:
         # Match legacy behaviour: sort by phys_layer/sublayer/atom_type (layer=phys_layer for compatibility)
         self.df = self.df.sort_values(by=["phys_layer", "sublayer", "atom_type"]).reset_index(drop=True)
 
+    def _apply_explicit_primitive_basis(self):
+        """Apply source-owned primitive labels while retaining relaxed coordinates."""
+        reference = self.primitive_basis
+        if reference.get("schema") != "tapw.primitive-basis.v1":
+            raise ValueError("Unsupported primitive_basis schema.")
+        ids = np.asarray(reference.get("basis_ids", []))
+        if ids.shape != (len(self.df),) or ids.dtype.kind not in "iu" or np.any(ids < 0):
+            raise ValueError("primitive_basis.basis_ids must contain one nonnegative integer per source atom.")
+        original = self.df.original_index.to_numpy(dtype=int)-1
+        if not np.array_equal(np.sort(original), np.arange(len(self.df))):
+            raise ValueError("Explicit primitive basis requires consecutive one-based original atom indices.")
+        lattices = np.asarray(reference.get("group_lattice_vectors", []), dtype=float)
+        if lattices.shape != (len(self.twist_layer), 2, 2) or not np.isfinite(lattices).all():
+            raise ValueError("primitive_basis.group_lattice_vectors must have shape (number of groups, 2, 2).")
+        self.df['basis_id'] = ids[original]
+        for group, lattice in enumerate(lattices):
+            if abs(np.linalg.det(lattice)) < 1e-12:
+                raise ValueError("Explicit primitive lattice must be nonsingular.")
+            supercell = np.asarray(self.Tmat)[:2,:2] @ np.linalg.inv(lattice)
+            if not np.allclose(supercell, np.rint(supercell), atol=1e-6, rtol=0):
+                raise ValueError("Explicit primitive lattice is not commensurate with the source supercell.")
+            reciprocal = 2*np.pi*np.linalg.inv(lattice).T
+            self.group_lattice_vectors[group] = list(lattice)
+            self.group_reciprocal_vectors[group] = list(reciprocal)
+            physical_layers = sorted(self.df.loc[self.df.twist_group==group,'phys_layer'].unique())
+            cell_count = int(round(abs(np.linalg.det(supercell))))
+            for layer in physical_layers:
+                layer_df = self.df[self.df.phys_layer==layer]
+                if not (layer_df.groupby('basis_id').size().to_numpy()==cell_count).all():
+                    raise ValueError(f'Primitive basis populations in physical layer {layer} differ from {cell_count}.')
+                self.layer_lattice_vectors[layer] = list(lattice)
+                self.monolayer_reciprocal_list[layer] = list(reciprocal)
+        self.reporter.kv('Primitive basis', 'explicit source reference; relaxed coordinates preserved')
+
     def process(self):
         """
         Full workflow using spglib for lattice and basis assignment.
@@ -3800,14 +3862,17 @@ class StructureProcessorSpglib:
         # spglib: per-twist_group lattice + basis_id mapping
         # All physical layers in the same twist_group share the same lattice vectors
         n_groups = len(self.twist_layer)
-        for twist_group in range(n_groups):
-            self._compute_layer_lattice_and_basis_spglib(twist_group)
+        if self.primitive_basis is None:
+            for twist_group in range(n_groups):
+                self._compute_layer_lattice_and_basis_spglib(twist_group)
+        else:
+            self._apply_explicit_primitive_basis()
 
         # Calculate and print twist angles between twist_groups
         if n_groups >= 2:
             twist_angle_list = []
             for twist_group in range(n_groups):
-                a1, a2 = self.layer_lattice_vectors[twist_group]
+                a1, a2 = self.group_lattice_vectors[twist_group]
                 # Use a1 direction as the orientation angle
                 angle = np.degrees(np.arctan2(a1[1], a1[0]))
                 twist_angle_list.append(angle)

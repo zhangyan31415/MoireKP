@@ -1,0 +1,23 @@
+{
+  "source": "H.dat",
+  "source_sha256": "ab744fb7d65fa557e30799926afa6b72d46d7d61a1ed125afda8752ab6d6e905",
+  "basis_dimension": 19268,
+  "nonzero_records": 1651326,
+  "realspace_blocks": 9,
+  "energy_unit": "eV",
+  "unit_conversion": "none",
+  "basis_order": "source",
+  "prepared_sha256": "986c390853d6373d67ce1449876ec8b8ffd117ba0348a13cb2ffeb74ba670d24",
+  "structure_sha256": "cbcc1ae9967d1b895dc328717d5e78e2c345fce4b483ffdc029682af3808a78f",
+  "source_structure": "POSCAR",
+  "primitive_basis_sha256": "752f89e4d6f9bc0a0b2f00f23c5d28aaf3f1aa3b4fbae2cebeb8f0e1fc53fa4a",
+  "reference_files": {
+    "tapw/Q_shell_6/band_data/band_data_K1_valley.txt": "2e1e329487da450137b2a2f17f5ce3707b98f0da9381680ec87c99aa29c7e199",
+    "tapw/Q_shell_6/g_vec_list_6_K1_1layer.npy": "24a36e6237aeb3f173bac80697e7487643fbd91c9e8899d1458a608bdd5dfb80",
+    "tapw/Q_shell_6/g_vec_list_6_K1_2layer.npy": "b6dd3a932a07429aa2a256363b7eb4a009dd4ce3498922ca4b6b2a5f47ea5854",
+    "tapw/Q_shell_6/band_data/band_data_K2_valley.txt": "e24ca8ebb1a0d4d0e6f924e02a2a339d42b555797e3e7987c72a68d56a04be28",
+    "tapw/Q_shell_6/g_vec_list_6_K2_1layer.npy": "93c4ff1ce4df87693e80c8c57eff91e4a0a3199ad7b32f6e890cff809f5db715",
+    "tapw/Q_shell_6/g_vec_list_6_K2_2layer.npy": "163aec3082b294ec29f2f0086f48c730e418f832875cf05df0d3f7178b103738",
+    "tapw/KPATH.out": "11b8f3a1da35d8de40a99daa65278f6da825e6f0aa9ac9c7be6438709195dd29"
+  }
+}

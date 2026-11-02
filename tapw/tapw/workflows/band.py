@@ -1839,11 +1839,34 @@ class TAPW_parameters:
         n_moire = self.structure.twist_index
 
         if n_moire == 0:
+            if self.bravais != "hex":
+                raise ValueError("Zero-twist lattice-mismatch K valleys require a hexagonal in-plane lattice.")
+            if len(self.structure.twist_layer) < 2:
+                raise ValueError("Zero-twist lattice mismatch requires at least two material groups.")
             self.reporter.kv("n_moire=0 note", "only for non-twisted heterostructures")
-            reciprocal_Tmat_layer1 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]-1]
-            reciprocal_Tmat_layer2 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]]
-            K1 = 1/3 * reciprocal_Tmat_layer1[0][:2] + 2/3 * reciprocal_Tmat_layer1[1][:2]
-            K2 = 1/3 * reciprocal_Tmat_layer2[0][:2] + 2/3 * reciprocal_Tmat_layer2[1][:2]
+            group_vectors = getattr(self.structure, "group_reciprocal_vectors", None)
+            if group_vectors:
+                reciprocal_Tmat_layer1 = group_vectors[0]
+                reciprocal_Tmat_layer2 = group_vectors[1]
+            else:
+                reciprocal_Tmat_layer1 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]-1]
+                reciprocal_Tmat_layer2 = self.structure.monolayer_reciprocal_list[self.structure.twist_layer[0]]
+
+            # Spglib may choose either a 60- or 120-degree primitive basis.
+            # Choose actual first-BZ corners in the same Cartesian direction
+            # for both materials, rather than applying one fractional formula.
+            direction = m_g_unitvec_1 + m_g_unitvec_2
+            def valley_corner(reciprocal):
+                b1, b2 = np.asarray(reciprocal, dtype=float)[:, :2]
+                if np.dot(b1, b2) > 0:
+                    corners = np.array([2*b1-b2, b1+b2, 2*b2-b1]) / 3
+                else:
+                    corners = np.array([2*b1+b2, b1+2*b2, b2-b1]) / 3
+                corners = np.concatenate([corners, -corners])
+                scores = (corners @ direction) / np.linalg.norm(corners, axis=1)
+                return corners[int(np.argmax(scores))]
+            K1 = valley_corner(reciprocal_Tmat_layer1)
+            K2 = valley_corner(reciprocal_Tmat_layer2)
             if self.config.valley == 2:
                 K1 = -K1
                 K2 = -K2

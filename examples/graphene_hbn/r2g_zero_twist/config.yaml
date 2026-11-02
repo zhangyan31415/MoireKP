@@ -1,0 +1,29 @@
+system:
+  output: outputs
+  structure: inputs/POSCAR
+  hamiltonian: inputs/H.npz
+  primitive_basis: inputs/primitive_basis.json
+  orbitals: {C: pz, B: pz, N: pz}
+  twist_index: 0
+  layers: [1, 2]
+  spin: false
+bands:
+  valley: K1
+  q_shell: 6
+  efermi: 0.0
+  num_processes: 4
+  blas_threads: 1
+  num_bands: 202
+  save_hamiltonian: false
+  save_wavefunctions: false
+  kpath:
+    labels: [G, M, K, G]
+    points_per_segment: 20
+    coordinates:
+      G: [0.0, 0.0]
+      M: [0.5, 0.0]
+      K: [0.3333333333, 0.3333333333]
+field:
+  zero_potential_layers: [1, 2]
+  electric_field_eVpA: 0.01
+  inner_symmetric: true

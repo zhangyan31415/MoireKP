@@ -6,8 +6,6 @@ is in `LICENSE.GPL-3.0`. This file remains separately licensed; it is not relice
 under the TAPW package's license. The importer executes it as a separate Python
 process and exchanges matrix files and JSON metadata.
 
-Source checkout used for this snapshot:
-`/data/work/zy/tmp/abacus_hr_analysis/abacus-wanniertools-hs-kit`.
 The converter supports legacy `data-HR/SR-sparse_SPIN*.csr` and current
 `hrs*_nao.csr` / `srs1_nao.csr` matrix families.
 

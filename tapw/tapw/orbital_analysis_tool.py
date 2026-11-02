@@ -179,6 +179,7 @@ class OrbitalAnalyzer:
 
         # 与主流程保持一致：使用 spglib 版本的结构处理器（type_structure 已废弃）
         processor = StructureProcessorSpglib(
+            **({"primitive_basis": openmx_structure.primitive_basis} if getattr(openmx_structure, "primitive_basis", None) is not None else {}),
             input_data=openmx_structure.sorted_species_coordinates,
             num_layers=tapw_config.twist.num_layers,
             twist_layer=tapw_config.twist.twist_layer,

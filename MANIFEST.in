@@ -90,3 +90,14 @@ prune reports
 exclude pytest.ini
 exclude examples/data-manifest.yaml
 exclude scripts/release/release_gate.sh
+
+include examples/graphene_hbn/r2g_zero_twist/README.md
+include examples/graphene_hbn/r2g_zero_twist/config.yaml
+include examples/graphene_hbn/r2g_zero_twist/config_K2.yaml
+include examples/graphene_hbn/r2g_zero_twist/prepare_inputs.py
+include examples/graphene_hbn/r2g_zero_twist/verify_results.py
+include examples/graphene_hbn/r2g_zero_twist/plot_results.py
+include examples/graphene_hbn/r2g_zero_twist/plot_basis.py
+include examples/graphene_hbn/r2g_zero_twist/basis_reference/geometry.json
+include examples/graphene_hbn/r2g_zero_twist/basis_reference/retained_vectors.csv
+include examples/graphene_hbn/r2g_zero_twist/basis_reference/caption.tex

@@ -61,6 +61,20 @@ overlap matrices remain explicit inputs. Omit `system.overlap` only for an
 orthogonal basis. The in-plane Bravais family is inferred from the structure;
 unsupported metrics are rejected.
 
+For an aligned hexagonal lattice-mismatch heterostructure, `system.twist_index: 0`
+selects the zero-twist K/K-prime construction. There is no common monolayer-cell
+count in this case. `system.orbitals` also accepts `pz` for a single scalar pz
+orbital (`p1` still denotes three p orbitals).
+
+An optional `system.primitive_basis` JSON fixes source-owned primitive lattices
+and sublattice labels when relaxed coordinates cannot be classified by exact
+spglib translations. Schema `tapw.primitive-basis.v1` contains `structure_sha256`,
+one integer `basis_ids` entry per atom in original structure-file order, and
+`group_lattice_vectors` with shape `(number of layer groups, 2, 2)` in Angstrom.
+The structure hash, cell commensurability, sublattice populations and species
+consistency are checked before projection. See the
+[graphene/hBN example](../examples/graphene_hbn/r2g_zero_twist/README.md).
+
 The command selects the workflow. Configs do not use per-section `enable`
 switches:
 

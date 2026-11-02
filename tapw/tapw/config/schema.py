@@ -59,8 +59,9 @@ _CANONICAL_SYSTEM_KEYS = {
     "twist_index",
     "layers",
     "spin",
+    "primitive_basis",
 }
-_CANONICAL_SYSTEM_REQUIRED_KEYS = _CANONICAL_SYSTEM_KEYS - {"overlap"}
+_CANONICAL_SYSTEM_REQUIRED_KEYS = _CANONICAL_SYSTEM_KEYS - {"overlap", "primitive_basis"}
 _RELEASE_TOP_LEVEL_KEYS = {
     "system",
     "case",
@@ -93,6 +94,7 @@ class SystemInputConfig:
     layers: Tuple[int, ...]
     spin: bool
     explicit_bravais: Optional[str]
+    primitive_basis: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if self.source_kind not in {"canonical_structure", "legacy_openmx"}:
@@ -106,8 +108,8 @@ class SystemInputConfig:
             raise ValueError("Canonical system.orbitals must be a non-empty species-to-orbitals mapping.")
         if self.source_kind == "legacy_openmx" and self.orbitals is not None:
             raise ValueError("Legacy OpenMX orbitals are source-owned and must not be synthesized in system_input.")
-        if self.twist_index < 1:
-            raise ValueError("system.twist_index must be a positive integer.")
+        if self.twist_index < 0:
+            raise ValueError("system.twist_index must be a nonnegative integer (0 for zero-twist lattice mismatch).")
         if not self.layers or any(value < 1 for value in self.layers):
             raise ValueError("system.layers must be a non-empty list of positive integers.")
         if not isinstance(self.spin, bool):
@@ -164,6 +166,7 @@ def _normalize_canonical_system(
         layers=tuple(int(value) for value in layers),
         spin=raw["spin"],
         explicit_bravais=None,
+        primitive_basis=None if raw.get("primitive_basis") in (None, "") else _resolved_path(raw["primitive_basis"], config_dir),
     )
 
 
@@ -956,6 +959,8 @@ class Config:
             }
             if self.system_input.overlap is not None:
                 config_dict["system"]["overlap"] = portable(self.system_input.overlap)
+            if self.system_input.primitive_basis is not None:
+                config_dict["system"]["primitive_basis"] = portable(self.system_input.primitive_basis)
         else:
             case = dict(self.case or {})
             case["output_root"] = portable(self.paths.output_dir)

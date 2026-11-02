@@ -1,0 +1,16 @@
+inputs/*
+!inputs/POSCAR
+!inputs/H.npz
+!inputs/primitive_basis.json
+!inputs/manifest.json
+outputs/
+reference/*
+!reference/bands_K1.csv.gz
+!reference/bands_K2.csv.gz
+!reference/g_vectors_K1_group1.csv
+!reference/g_vectors_K1_group2.csv
+!reference/g_vectors_K2_group1.csv
+!reference/g_vectors_K2_group2.csv
+!reference/KPATH_reference.txt
+verification/
+*.zip
