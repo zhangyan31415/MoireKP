@@ -10,7 +10,6 @@
   "prepared_sha256": "986c390853d6373d67ce1449876ec8b8ffd117ba0348a13cb2ffeb74ba670d24",
   "structure_sha256": "cbcc1ae9967d1b895dc328717d5e78e2c345fce4b483ffdc029682af3808a78f",
   "source_structure": "POSCAR",
-  "primitive_basis_sha256": "752f89e4d6f9bc0a0b2f00f23c5d28aaf3f1aa3b4fbae2cebeb8f0e1fc53fa4a",
   "reference_files": {
     "tapw/Q_shell_6/band_data/band_data_K1_valley.txt": "2e1e329487da450137b2a2f17f5ce3707b98f0da9381680ec87c99aa29c7e199",
     "tapw/Q_shell_6/g_vec_list_6_K1_1layer.npy": "24a36e6237aeb3f173bac80697e7487643fbd91c9e8899d1458a608bdd5dfb80",
@@ -19,5 +18,19 @@
     "tapw/Q_shell_6/g_vec_list_6_K2_1layer.npy": "93c4ff1ce4df87693e80c8c57eff91e4a0a3199ad7b32f6e890cff809f5db715",
     "tapw/Q_shell_6/g_vec_list_6_K2_2layer.npy": "163aec3082b294ec29f2f0086f48c730e418f832875cf05df0d3f7178b103738",
     "tapw/KPATH.out": "11b8f3a1da35d8de40a99daa65278f6da825e6f0aa9ac9c7be6438709195dd29"
-  }
+  },
+  "reference_structure": "POSCAR_rigid",
+  "reference_structure_sha256": "e96c9ec9bb7d8d4554a81ffc11808828760fb38a1f57c721753e261563d5789d",
+  "rigid_reference_layers": [
+    {
+      "layer": 1,
+      "z_A": 4.420016042226185,
+      "max_inplane_change_A": 0.09152175375681611
+    },
+    {
+      "layer": 2,
+      "z_A": 7.769703330252805,
+      "max_inplane_change_A": 0.00837534130955076
+    }
+  ]
 }

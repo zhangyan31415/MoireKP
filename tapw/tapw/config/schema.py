@@ -3,6 +3,7 @@ from typing import Any, List, Dict, Optional, Sequence, Tuple, Union
 import yaml
 from pathlib import Path
 import os
+import math
 
 from ..artifacts import canonical_qshell_name
 
@@ -59,9 +60,8 @@ _CANONICAL_SYSTEM_KEYS = {
     "twist_index",
     "layers",
     "spin",
-    "primitive_basis",
 }
-_CANONICAL_SYSTEM_REQUIRED_KEYS = _CANONICAL_SYSTEM_KEYS - {"overlap", "primitive_basis"}
+_CANONICAL_SYSTEM_REQUIRED_KEYS = _CANONICAL_SYSTEM_KEYS - {"overlap"}
 _RELEASE_TOP_LEVEL_KEYS = {
     "system",
     "case",
@@ -94,7 +94,6 @@ class SystemInputConfig:
     layers: Tuple[int, ...]
     spin: bool
     explicit_bravais: Optional[str]
-    primitive_basis: Optional[Path] = None
 
     def __post_init__(self) -> None:
         if self.source_kind not in {"canonical_structure", "legacy_openmx"}:
@@ -166,7 +165,6 @@ def _normalize_canonical_system(
         layers=tuple(int(value) for value in layers),
         spin=raw["spin"],
         explicit_bravais=None,
-        primitive_basis=None if raw.get("primitive_basis") in (None, "") else _resolved_path(raw["primitive_basis"], config_dir),
     )
 
 
@@ -441,7 +439,7 @@ class PathConfig:
 
 @dataclass
 class ClusterConfig:
-    """Configuration for clustering parameters with fixed values"""
+    """Structure preprocessing parameters, separate from symmetry analysis."""
     layer_eps: float = 0.5
     layer_min_samples: int = 1
     sublayer_eps: float = 0.5
@@ -450,10 +448,11 @@ class ClusterConfig:
     atom_min_samples: int = 2
     period: float = 2 * 3.14159
     k_max: int = 2
+    spglib_symprec: float = 1.0  # Angstrom; retain the existing default for old configs.
 
     def __post_init__(self):
-        # These parameters are fixed and should not be changed
-        return None
+        if not math.isfinite(self.spglib_symprec) or self.spglib_symprec <= 0:
+            raise ValueError("cluster.spglib_symprec must be finite and positive (Angstrom).")
 
 @dataclass
 class SymmetryAnalysisConfig:
@@ -959,8 +958,6 @@ class Config:
             }
             if self.system_input.overlap is not None:
                 config_dict["system"]["overlap"] = portable(self.system_input.overlap)
-            if self.system_input.primitive_basis is not None:
-                config_dict["system"]["primitive_basis"] = portable(self.system_input.primitive_basis)
         else:
             case = dict(self.case or {})
             case["output_root"] = portable(self.paths.output_dir)

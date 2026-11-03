@@ -1,12 +1,13 @@
 system:
   output: outputs
-  structure: inputs/POSCAR
+  structure: inputs/POSCAR_rigid
   hamiltonian: inputs/H.npz
-  primitive_basis: inputs/primitive_basis.json
   orbitals: {C: pz, B: pz, N: pz}
   twist_index: 0
   layers: [1, 2]
   spin: false
+cluster:
+  spglib_symprec: 0.001
 bands:
   valley: K1
   q_shell: 6

@@ -212,7 +212,7 @@ def _build_point_calculator(config: Config) -> BandStructureCalculator:
     reporter = TapwReporter(logger)
     structure = load_structure_from_config(config, legacy_factory=OpenMXFile)
     processor = StructureProcessorSpglib(
-        **({"primitive_basis": structure.primitive_basis} if getattr(structure, "primitive_basis", None) is not None else {}),
+        symprec=getattr(config.cluster, "spglib_symprec", 1.0),
         input_data=structure.sorted_species_coordinates,
         num_layers=config.twist.num_layers,
         twist_layer=config.twist.twist_layer,

@@ -3,8 +3,6 @@ import re
 from collections import defaultdict
 import os
 import tempfile
-import hashlib
-import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -425,13 +423,6 @@ def resolve_structure_input(config) -> ResolvedStructureInput:
         "overlap_basis_dimension": None if s_source is None else s_source.dimension,
         "overlap_dimension_provenance": None if s_source is None else s_source.provenance,
     }
-    if system.primitive_basis is not None:
-        primitive = json.loads(system.primitive_basis.read_text())
-        digest = hashlib.sha256(Path(system.structure).read_bytes()).hexdigest()
-        if primitive.get("structure_sha256") != digest:
-            raise ValueError("system.primitive_basis structure_sha256 does not match system.structure.")
-        structure.primitive_basis = primitive
-        components["primitive_basis_hash"] = hash_file(system.primitive_basis)
     return ResolvedStructureInput(
         structure=structure,
         bravais=structure.bravais,
@@ -3129,17 +3120,15 @@ class StructureProcessorSpglib:
         twist_index=None,
         Tmat=None,
         reciprocal_Tmat=None,
-        symprec: float = 10e-1,
+        symprec: float = 1.0,
         spglib_z_lattice: float = 50.0,
         reporter=None,
-        primitive_basis=None,
     ):
         self.input_data = input_data
         self.num_layers = num_layers
         self.monolayer_reciprocal_list = {}
         self.group_reciprocal_vectors = {}
         self.group_lattice_vectors = {}
-        self.primitive_basis = primitive_basis
         self.twist_layer = twist_layer
         self.layer_eps = layer_eps
         self.layer_min_samples = layer_min_samples
@@ -3163,6 +3152,7 @@ class StructureProcessorSpglib:
         self.spglib_z_lattice = float(spglib_z_lattice)
         self.layer_lattice_vectors = {}  # {layer: [a1, a2]}
         self.reporter = ensure_reporter(reporter)
+        self.reporter.kv("Primitive-cell tolerance (Angstrom)", self.symprec)
 
         self.load_data()
         self.reporter.step("Structure table", "loaded atom coordinates into a DataFrame")
@@ -3816,40 +3806,6 @@ class StructureProcessorSpglib:
         # Match legacy behaviour: sort by phys_layer/sublayer/atom_type (layer=phys_layer for compatibility)
         self.df = self.df.sort_values(by=["phys_layer", "sublayer", "atom_type"]).reset_index(drop=True)
 
-    def _apply_explicit_primitive_basis(self):
-        """Apply source-owned primitive labels while retaining relaxed coordinates."""
-        reference = self.primitive_basis
-        if reference.get("schema") != "tapw.primitive-basis.v1":
-            raise ValueError("Unsupported primitive_basis schema.")
-        ids = np.asarray(reference.get("basis_ids", []))
-        if ids.shape != (len(self.df),) or ids.dtype.kind not in "iu" or np.any(ids < 0):
-            raise ValueError("primitive_basis.basis_ids must contain one nonnegative integer per source atom.")
-        original = self.df.original_index.to_numpy(dtype=int)-1
-        if not np.array_equal(np.sort(original), np.arange(len(self.df))):
-            raise ValueError("Explicit primitive basis requires consecutive one-based original atom indices.")
-        lattices = np.asarray(reference.get("group_lattice_vectors", []), dtype=float)
-        if lattices.shape != (len(self.twist_layer), 2, 2) or not np.isfinite(lattices).all():
-            raise ValueError("primitive_basis.group_lattice_vectors must have shape (number of groups, 2, 2).")
-        self.df['basis_id'] = ids[original]
-        for group, lattice in enumerate(lattices):
-            if abs(np.linalg.det(lattice)) < 1e-12:
-                raise ValueError("Explicit primitive lattice must be nonsingular.")
-            supercell = np.asarray(self.Tmat)[:2,:2] @ np.linalg.inv(lattice)
-            if not np.allclose(supercell, np.rint(supercell), atol=1e-6, rtol=0):
-                raise ValueError("Explicit primitive lattice is not commensurate with the source supercell.")
-            reciprocal = 2*np.pi*np.linalg.inv(lattice).T
-            self.group_lattice_vectors[group] = list(lattice)
-            self.group_reciprocal_vectors[group] = list(reciprocal)
-            physical_layers = sorted(self.df.loc[self.df.twist_group==group,'phys_layer'].unique())
-            cell_count = int(round(abs(np.linalg.det(supercell))))
-            for layer in physical_layers:
-                layer_df = self.df[self.df.phys_layer==layer]
-                if not (layer_df.groupby('basis_id').size().to_numpy()==cell_count).all():
-                    raise ValueError(f'Primitive basis populations in physical layer {layer} differ from {cell_count}.')
-                self.layer_lattice_vectors[layer] = list(lattice)
-                self.monolayer_reciprocal_list[layer] = list(reciprocal)
-        self.reporter.kv('Primitive basis', 'explicit source reference; relaxed coordinates preserved')
-
     def process(self):
         """
         Full workflow using spglib for lattice and basis assignment.
@@ -3862,11 +3818,8 @@ class StructureProcessorSpglib:
         # spglib: per-twist_group lattice + basis_id mapping
         # All physical layers in the same twist_group share the same lattice vectors
         n_groups = len(self.twist_layer)
-        if self.primitive_basis is None:
-            for twist_group in range(n_groups):
-                self._compute_layer_lattice_and_basis_spglib(twist_group)
-        else:
-            self._apply_explicit_primitive_basis()
+        for twist_group in range(n_groups):
+            self._compute_layer_lattice_and_basis_spglib(twist_group)
 
         # Calculate and print twist angles between twist_groups
         if n_groups >= 2:

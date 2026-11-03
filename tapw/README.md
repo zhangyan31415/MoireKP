@@ -66,14 +66,14 @@ selects the zero-twist K/K-prime construction. There is no common monolayer-cell
 count in this case. `system.orbitals` also accepts `pz` for a single scalar pz
 orbital (`p1` still denotes three p orbitals).
 
-An optional `system.primitive_basis` JSON fixes source-owned primitive lattices
-and sublattice labels when relaxed coordinates cannot be classified by exact
-spglib translations. Schema `tapw.primitive-basis.v1` contains `structure_sha256`,
-one integer `basis_ids` entry per atom in original structure-file order, and
-`group_lattice_vectors` with shape `(number of layer groups, 2, 2)` in Angstrom.
-The structure hash, cell commensurability, sublattice populations and species
-consistency are checked before projection. See the
-[graphene/hBN example](../examples/graphene_hbn/r2g_zero_twist/README.md).
+Use a rigid reference structure, in the same atom/orbital order as the source
+H/S matrices, to identify the primitive lattice and sublattices. The H/S
+matrices may come from the relaxed structure. Set `cluster.spglib_symprec`
+(Angstrom) to control this preprocessing step. This is separate from
+`symmetry.spglib_symprec`, which controls symmetry analysis. The existing
+preprocessing default of 1 Angstrom is retained for configurations that omit
+the setting; the [graphene/hBN example](../examples/graphene_hbn/r2g_zero_twist/README.md)
+explicitly uses 0.001 Angstrom for its rigid reference.
 
 The command selects the workflow. Configs do not use per-section `enable`
 switches:

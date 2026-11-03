@@ -101,3 +101,5 @@ include examples/graphene_hbn/r2g_zero_twist/plot_basis.py
 include examples/graphene_hbn/r2g_zero_twist/basis_reference/geometry.json
 include examples/graphene_hbn/r2g_zero_twist/basis_reference/retained_vectors.csv
 include examples/graphene_hbn/r2g_zero_twist/basis_reference/caption.tex
+include examples/graphene_hbn/r2g_zero_twist/inputs/POSCAR_relaxed
+include examples/graphene_hbn/r2g_zero_twist/inputs/POSCAR_rigid

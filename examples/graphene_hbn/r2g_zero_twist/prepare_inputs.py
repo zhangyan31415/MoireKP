@@ -11,6 +11,47 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent
 
 
+def write_rigid_reference(source, destination):
+    """Reconstruct two ideal graphene sheets without changing source atom order."""
+    from ase.io import read, write
+    atoms = read(source)
+    reference = atoms.copy()
+    carbon = np.flatnonzero(np.asarray(atoms.get_chemical_symbols()) == 'C')
+    n = int(round(np.sqrt(len(carbon)/4)))
+    if not n or len(carbon) != 4*n*n:
+        raise ValueError('Expected two graphene layers with two sublattices per primitive cell.')
+    lattice = atoms.cell.array[:2,:2]/n
+    z = atoms.positions[carbon,2]
+    split = (z.min()+z.max())/2
+    sublattice = np.arange(len(carbon)) % 2
+    report = []
+    for layer, mask in enumerate([z < split, z >= split], 1):
+        if int(mask.sum()) != 2*n*n:
+            raise ValueError('Unequal graphene layer populations in the reference input.')
+        indices = carbon[mask]
+        frac = atoms.positions[indices,:2] @ np.linalg.inv(lattice)
+        candidates = []
+        for delta in [np.array([1/3,2/3]), np.array([2/3,1/3])]:
+            residual = frac-sublattice[mask,None]*delta
+            shift = np.angle(np.mean(np.exp(2j*np.pi*residual),axis=0))/(2*np.pi)
+            cells = np.rint(residual-shift).astype(int)
+            ideal = cells+shift+sublattice[mask,None]*delta
+            displacement = (ideal-frac)@lattice
+            candidates.append((float(np.mean(np.sum(displacement**2,axis=1))),cells,ideal,displacement))
+        _, cells, ideal, displacement = min(candidates,key=lambda item:item[0])
+        for sub in [0,1]:
+            if len(np.unique(cells[sublattice[mask]==sub] % n,axis=0)) != n*n:
+                raise ValueError('Rigid-reference assignment contains missing or duplicate primitive cells.')
+        reference.positions[indices,:2] = ideal@lattice
+        reference.positions[indices,2] = z[mask].mean()
+        report.append({'layer':layer,'z_A':float(z[mask].mean()),
+                       'max_inplane_change_A':float(np.linalg.norm(displacement,axis=1).max())})
+    write(destination,reference,format='vasp',direct=False,sort=False)
+    destination = Path(destination)
+    destination.write_text('\n'.join(line.rstrip() for line in destination.read_text().splitlines())+'\n')
+    return report
+
+
 def sha256(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as stream:
@@ -68,39 +109,14 @@ def main():
             raise FileNotFoundError(source/name)
     inputs, reference = ROOT/'inputs', ROOT/'reference'
     inputs.mkdir(exist_ok=True); reference.mkdir(exist_ok=True)
-    shutil.copy2(source/'POSCAR', inputs/'POSCAR')
-    from ase.io import read
-    atoms = read(inputs/'POSCAR')
-    symbols = np.asarray(atoms.get_chemical_symbols())
-    if len(atoms) != 19268 or not np.array_equal(symbols[:12996], np.full(12996, 'C')):
-        raise ValueError('This preparation expects the supplied hBN/R2G reference site ordering.')
-    basis_ids = np.arange(len(atoms)) % 2
-    basis_ids[symbols == 'B'] = 0
-    basis_ids[symbols == 'N'] = 1
-    lattices = [atoms.cell.array[:2,:2]/n for n in [56,57]]
-    z = atoms.positions[:,2]
-    c_mid = (z[symbols=='C'].min()+z[symbols=='C'].max())/2
-    physical = np.where(symbols=='C', np.where(z<c_mid, 1, 2), 0)
-    # Validate the archived alternating A/B labels against phase coherence;
-    # do not infer a primitive cell from the distorted graphene coordinates.
-    for layer in range(3):
-        reciprocal = 2*np.pi*np.linalg.inv(lattices[0 if layer==0 else 1]).T
-        for sub in [0,1]:
-            mask=(physical==layer)&(basis_ids==sub)
-            expected = 3136 if layer==0 else 3249
-            if int(mask.sum()) != expected:
-                raise ValueError('Unexpected archived layer/sublattice populations.')
-            phase=atoms.positions[mask,:2]@reciprocal.T
-            if np.min(np.abs(np.mean(np.exp(1j*phase),axis=0))) < 0.9:
-                raise ValueError('Archived source-order sublattice labels are inconsistent with the primitive reference.')
-    primitive={'schema':'tapw.primitive-basis.v1','structure_sha256':sha256(inputs/'POSCAR'),
-               'basis_ids':basis_ids.tolist(),'group_lattice_vectors':[x.tolist() for x in lattices],
-               'provenance':'56x56 hBN and 57x57 graphene; alternating C A/B labels in the archived source atom order, checked by phase coherence.'}
-    (inputs/'primitive_basis.json').write_text(json.dumps(primitive,indent=2)+'\n')
+    shutil.copy2(source/'POSCAR', inputs/'POSCAR_relaxed')
+    rigid_report = write_rigid_reference(inputs/'POSCAR_relaxed',inputs/'POSCAR_rigid')
     report = convert_sparse_hamiltonian(source/'H.dat', inputs/'H.npz')
-    report['structure_sha256'] = sha256(inputs/'POSCAR')
+    report['structure_sha256'] = sha256(inputs/'POSCAR_relaxed')
     report['source_structure'] = 'POSCAR'
-    report['primitive_basis_sha256'] = sha256(inputs/'primitive_basis.json')
+    report['reference_structure'] = 'POSCAR_rigid'
+    report['reference_structure_sha256'] = sha256(inputs/'POSCAR_rigid')
+    report['rigid_reference_layers'] = rigid_report
     report['reference_files'] = {}
     for valley in ['K1', 'K2']:
         old = source/f'tapw/Q_shell_6/band_data/band_data_{valley}_valley.txt'

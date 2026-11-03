@@ -399,7 +399,7 @@ def run_calc(args):
             Tmat=structure.Tmat,
             reciprocal_Tmat=structure.reciprocal_Tmat,
             reporter=reporter,
-            **({"primitive_basis": structure.primitive_basis} if getattr(structure, "primitive_basis", None) is not None else {}),
+            symprec=getattr(config.cluster, "spglib_symprec", 1.0),
         )
         if config.compute.TAPW:
             processor.process()
