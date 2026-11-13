@@ -103,9 +103,11 @@ def _normalize_mkl_interface_layer_for_sparse_dot_mkl() -> None:
 # Optional MKL-accelerated sparse GEMM (can be a big speedup for g@H@g^H)
 _normalize_mkl_interface_layer_for_sparse_dot_mkl()
 try:
+    import sparse_dot_mkl as _sparse_dot_mkl
     from sparse_dot_mkl import dot_product_mkl  # type: ignore
     _HAS_SPARSE_DOT_MKL = True
 except (ImportError, OSError, RuntimeError):  # pragma: no cover
+    _sparse_dot_mkl = None
     dot_product_mkl = None
     _HAS_SPARSE_DOT_MKL = False
 
@@ -2682,22 +2684,34 @@ class BandStructureCalculator:
         self._refresh_ef_onsite_orb_cache()
 
     def _get_or_build_realspace_block_cache(self, hr_blocks) -> SimpleNamespace:
+        """Cache only the entry-to-CSR map and immutable CSR structure.
+
+        Coordinates and values remain views of the input blocks. Sorting work
+        arrays are construction-only; none are retained for each k-point worker.
+        """
         cache_key = id(hr_blocks)
         cached = self._realspace_block_cache.get(cache_key)
         if cached is not None:
             return cached
 
-        rows_template_parts = []
-        cols_template_parts = []
         blocks = []
         offset = 0
+        min_num_wann = 0
         for rvec, values_dic in hr_blocks.items():
-            row_index = np.asarray(values_dic["row"], dtype=np.int64)
-            col_index = np.asarray(values_dic["col"], dtype=np.int64)
+            row_index = np.asarray(values_dic["row"])
+            col_index = np.asarray(values_dic["col"])
+            if row_index.dtype.kind not in "iu":
+                row_index = row_index.astype(np.int64)
+            if col_index.dtype.kind not in "iu":
+                col_index = col_index.astype(np.int64)
             values = np.asarray(values_dic["val"], dtype=np.complex128)
             block_nnz = int(values.shape[0])
-            rows_template_parts.append(row_index)
-            cols_template_parts.append(col_index)
+            if row_index.shape != (block_nnz,) or col_index.shape != (block_nnz,):
+                raise ValueError(f"Mismatched real-space row/col/value lengths for rvec={rvec}")
+            if block_nnz:
+                if int(row_index.min()) < 0 or int(col_index.min()) < 0:
+                    raise ValueError("Real-space matrix indices must be nonnegative")
+                min_num_wann = max(min_num_wann, int(row_index.max()) + 1, int(col_index.max()) + 1)
             blocks.append(
                 SimpleNamespace(
                     row_index=row_index,
@@ -2709,101 +2723,152 @@ class BandStructureCalculator:
             )
             offset += block_nnz
 
-        rows_template = (
-            np.concatenate(rows_template_parts, dtype=np.int64)
-            if rows_template_parts
-            else np.empty(0, dtype=np.int64)
-        )
-        cols_template = (
-            np.concatenate(cols_template_parts, dtype=np.int64)
-            if cols_template_parts
-            else np.empty(0, dtype=np.int64)
-        )
-        sort_order = (
-            np.lexsort((cols_template, rows_template)).astype(np.int64, copy=False)
-            if offset
-            else np.empty(0, dtype=np.int64)
-        )
-        rows_sorted = rows_template[sort_order] if offset else rows_template
-        cols_sorted = cols_template[sort_order] if offset else cols_template
+        num_wann = getattr(self, "_num_wann", None)
+        num_wann = min_num_wann if num_wann is None else int(num_wann)
+        if num_wann < min_num_wann:
+            raise ValueError("Real-space index exceeds the Wannier basis dimension")
+        coordinate_dtype = np.int32 if num_wann <= np.iinfo(np.int32).max else np.int64
         if offset:
-            unique_mask = np.empty(int(offset), dtype=bool)
+            rows = np.concatenate([block.row_index for block in blocks], dtype=coordinate_dtype)
+            cols = np.concatenate([block.col_index for block in blocks], dtype=coordinate_dtype)
+            sort_order = np.lexsort((cols, rows))
+            rows_sorted = rows[sort_order]
+            del rows
+            cols_sorted = cols[sort_order]
+            del cols
+            unique_mask = np.empty(offset, dtype=bool)
             unique_mask[0] = True
             unique_mask[1:] = (
                 (rows_sorted[1:] != rows_sorted[:-1])
                 | (cols_sorted[1:] != cols_sorted[:-1])
             )
-            compressed_positions_sorted = np.cumsum(unique_mask, dtype=np.int64) - 1
-            compressed_positions = np.empty(int(offset), dtype=np.int64)
+            csr_nnz = int(np.count_nonzero(unique_mask))
+            position_dtype = np.int32 if csr_nnz <= np.iinfo(np.int32).max else np.int64
+            compressed_positions_sorted = np.cumsum(unique_mask, dtype=position_dtype)
+            compressed_positions_sorted -= 1
+            compressed_positions = np.empty(offset, dtype=position_dtype)
             compressed_positions[sort_order] = compressed_positions_sorted
-            csr_unique_rows = rows_sorted[unique_mask]
-            csr_indices = cols_sorted[unique_mask]
-            csr_nnz = int(csr_indices.shape[0])
-            has_duplicates = bool(csr_nnz != int(offset))
+            del sort_order, compressed_positions_sorted
+            counts = np.bincount(rows_sorted[unique_mask], minlength=num_wann)
+            del rows_sorted
+            # SciPy uses a common dtype for CSR indices and indptr. Match it
+            # here so constructing each k-point matrix does not copy indices.
+            csr_dtype = self._realspace_csr_index_dtype(num_wann, csr_nnz)
+            csr_indices = cols_sorted[unique_mask].astype(csr_dtype, copy=False)
+            del cols_sorted, unique_mask
         else:
-            unique_mask = np.empty(0, dtype=bool)
-            compressed_positions = np.empty(0, dtype=np.int64)
-            csr_unique_rows = np.empty(0, dtype=np.int64)
-            csr_indices = np.empty(0, dtype=np.int64)
             csr_nnz = 0
-            has_duplicates = False
+            csr_dtype = self._realspace_csr_index_dtype(num_wann, 0)
+            compressed_positions = np.empty(0, dtype=np.int32)
+            csr_indices = np.empty(0, dtype=csr_dtype)
+            counts = np.zeros(num_wann, dtype=np.int64)
+        csr_indptr = np.empty(num_wann + 1, dtype=csr_dtype)
+        csr_indptr[0] = 0
+        np.cumsum(counts, out=csr_indptr[1:])
+        for array in (compressed_positions, csr_indices, csr_indptr):
+            array.flags.writeable = False
         cached = SimpleNamespace(
             nnz_total=int(offset),
-            rows_template=rows_template,
-            cols_template=cols_template,
             blocks=blocks,
-            sort_order=sort_order,
             compressed_positions=compressed_positions,
-            csr_unique_rows=csr_unique_rows,
             csr_indices=csr_indices,
             csr_nnz=csr_nnz,
-            has_duplicates=has_duplicates,
-            csr_num_wann=None,
-            csr_indptr=None,
+            has_duplicates=bool(csr_nnz != offset),
+            min_num_wann=min_num_wann,
+            csr_num_wann=num_wann,
+            csr_indptr=csr_indptr,
         )
         self._realspace_block_cache[cache_key] = cached
         return cached
 
+    def _uses_mkl_projection(self) -> bool:
+        # Symmetry validation and the M-valley C3 path explicitly force MKL,
+        # even when the ordinary projection configuration disables it.
+        config = getattr(self, "config", None)
+        return bool(getattr(config, "use_sparse_dot_mkl", False)
+                    or getattr(config, "mode", None) == "symmetry"
+                    or (getattr(self, "use_M_valley_threefold_symm", False)
+                        and not getattr(self, "use_M_valley_d3_symm", False)))
+
+    def _realspace_csr_index_dtype(self, num_wann: int, csr_nnz: int):
+        dtype = np.dtype(np.int32 if max(num_wann, csr_nnz) <= np.iinfo(np.int32).max else np.int64)
+        if _HAS_SPARSE_DOT_MKL and self._uses_mkl_projection():
+            query = getattr(_sparse_dot_mkl, "mkl_interface_integer_dtype", None)
+            # Older sparse_dot_mkl releases do not expose the public query.
+            mkl_dtype = np.dtype(query() if query is not None else
+                                 (np.int64 if os.environ.get("MKL_INTERFACE_LAYER") == "ILP64" else np.int32))
+            if mkl_dtype.itemsize > dtype.itemsize:
+                dtype = mkl_dtype
+        return dtype
+
+    def _realspace_csr_from_data(self, block_cache, data, num_wann: int):
+        """Wrap worker-private values with the shared immutable CSR structure."""
+        num_wann = int(num_wann)
+        if num_wann < block_cache.min_num_wann:
+            raise ValueError("Real-space index exceeds the Wannier basis dimension")
+        if block_cache.csr_num_wann != num_wann:
+            # Usually the exact basis is known during parent preparation. This
+            # also supports standalone callers with trailing zero orbitals.
+            old_indptr = block_cache.csr_indptr
+            dtype = self._realspace_csr_index_dtype(num_wann, block_cache.csr_nnz)
+            indptr = np.full(num_wann + 1, block_cache.csr_nnz, dtype=dtype)
+            count = min(indptr.size, old_indptr.size)
+            indptr[:count] = old_indptr[:count]
+            indptr.flags.writeable = False
+            block_cache.csr_indptr = indptr
+            block_cache.csr_num_wann = num_wann
+        # Tuple construction downcasts int64 indices on small shapes. In
+        # ILP64 that would force MKL to make an int64 copy again in every
+        # worker. Attach the already validated structure without a conversion.
+        matrix = scipy.sparse.csr_matrix((num_wann, num_wann), dtype=np.complex128)
+        matrix.data = data
+        matrix.indices = block_cache.csr_indices
+        matrix.indptr = block_cache.csr_indptr
+        matrix.has_sorted_indices = True
+        matrix.has_canonical_format = True
+        return matrix
+
     def _compress_raw_realspace_data_to_csr(self, block_cache, raw_data, num_wann: int):
         raw_data = np.asarray(raw_data, dtype=np.complex128)
-        if raw_data.shape[0] != block_cache.nnz_total:
-            raise ValueError(
-                f"raw_data length {raw_data.shape[0]} does not match cached nnz_total {block_cache.nnz_total}"
-            )
+        if raw_data.shape != (block_cache.nnz_total,):
+            raise ValueError(f"raw_data length does not match cached nnz_total {block_cache.nnz_total}")
+        data = np.zeros(block_cache.csr_nnz, dtype=np.complex128)
+        chunk_size = int(getattr(self.config, "assembly_chunk_size", 262144)) if hasattr(self, "config") else 262144
+        for start in range(0, block_cache.nnz_total, chunk_size):
+            stop = min(start + chunk_size, block_cache.nnz_total)
+            positions = block_cache.compressed_positions[start:stop]
+            if block_cache.has_duplicates:
+                np.add.at(data, positions, raw_data[start:stop])
+            else:
+                data[positions] = raw_data[start:stop]
+        return self._realspace_csr_from_data(block_cache, data, num_wann)
 
-        if block_cache.csr_num_wann != int(num_wann) or block_cache.csr_indptr is None:
-            counts = np.bincount(
-                block_cache.csr_unique_rows,
-                minlength=int(num_wann),
-            )
-            indptr = np.empty(int(num_wann) + 1, dtype=np.int64)
-            indptr[0] = 0
-            np.cumsum(counts, out=indptr[1:])
-            block_cache.csr_indptr = indptr
-            block_cache.csr_num_wann = int(num_wann)
-
-        if block_cache.has_duplicates:
-            data = (
-                np.bincount(
-                    block_cache.compressed_positions,
-                    weights=raw_data.real,
-                    minlength=block_cache.csr_nnz,
-                )
-                + 1j
-                * np.bincount(
-                    block_cache.compressed_positions,
-                    weights=raw_data.imag,
-                    minlength=block_cache.csr_nnz,
-                )
-            )
-        else:
-            data = raw_data[block_cache.sort_order]
-
-        return scipy.sparse.csr_matrix(
-            (data, block_cache.csr_indices, block_cache.csr_indptr),
-            shape=(int(num_wann), int(num_wann)),
-            dtype=np.complex128,
-        )
+    def _prepare_realspace_caches_for_fork(self) -> None:
+        """Build all k-independent arrays before workers inherit the calculator."""
+        if not bool(getattr(self.config, "fast_getk", True)):
+            return
+        self._ensure_sorted_wann_cache()
+        names = ("hr_supercell",) if getattr(self.config, "orthogonal_basis", False) else ("hr_supercell", "sr_supercell")
+        for name in names:
+            source = getattr(self, name, None)
+            if source is not None:
+                self._get_or_build_realspace_block_cache(source)
+        # MKL may also cast the large right-hand projectors in place. Prepare
+        # those indices once in the parent, including M-valley reference terms.
+        if _HAS_SPARSE_DOT_MKL and self._uses_mkl_projection():
+            parameters = list(getattr(self, "_m_valley_parameters", {}).values())
+            parameters.append(getattr(self, "TAPW_parameters", None))
+            matrices = [getattr(params, name, None) for params in parameters
+                        for name in ("g_matrix", "g_matrix_conj")]
+            terms = (list(getattr(self, "_m_valley_c3_reference_projectors", []))
+                     + list(getattr(self, "_m_valley_d3_reference_projectors", [])))
+            matrices.extend(getattr(term, name, None) for term in terms
+                            for name in ("projector", "projector_h"))
+            for matrix in matrices:
+                if scipy.sparse.issparse(matrix) and matrix.format in {"csr", "csc"}:
+                    dtype = self._realspace_csr_index_dtype(max(matrix.shape), matrix.nnz)
+                    matrix.indices = matrix.indices.astype(dtype, copy=False)
+                    matrix.indptr = matrix.indptr.astype(dtype, copy=False)
 
     def _build_getk_phase_context(self, k) -> SimpleNamespace:
         kvec = self.get_kvec(k)
@@ -2834,12 +2899,25 @@ class BandStructureCalculator:
         use_fast = bool(getattr(self.config, "fast_getk", True))
         if use_fast:
             block_cache = self._get_or_build_realspace_block_cache(hr_blocks)
-            data = np.empty(block_cache.nnz_total, dtype=np.complex128)
+            data = np.zeros(block_cache.csr_nnz, dtype=np.complex128)
+            chunk_size = int(getattr(self.config, "assembly_chunk_size", 262144))
             for block in block_cache.blocks:
                 exp_kR = np.exp(1j * np.dot(kvec, block.rvec_cart))
-                dot_mn = phase_wann[block.row_index] - phase_wann[block.col_index]
-                data[block.data_slice] = block.values * np.exp(-1j * dot_mn) * exp_kR
-            mk = self._compress_raw_realspace_data_to_csr(block_cache, data, num_wann)
+                for start in range(0, block.values.size, chunk_size):
+                    stop = min(start + chunk_size, block.values.size)
+                    dot_mn = phase_wann[block.row_index[start:stop]] - phase_wann[block.col_index[start:stop]]
+                    work = np.empty(stop - start, dtype=np.complex128)
+                    np.multiply(dot_mn, -1j, out=work)
+                    np.exp(work, out=work)
+                    work *= block.values[start:stop]
+                    work *= exp_kR
+                    positions = block_cache.compressed_positions[block.data_slice.start + start:block.data_slice.start + stop]
+                    if block_cache.has_duplicates:
+                        np.add.at(data, positions, work)
+                    else:
+                        data[positions] = work
+                    del work, dot_mn
+            mk = self._realspace_csr_from_data(block_cache, data, num_wann)
         else:
             mk = scipy.sparse.csr_matrix((num_wann, num_wann), dtype=np.complex128)
             for rvec, values_dic in hr_blocks.items():
@@ -3860,17 +3938,9 @@ class BandStructureCalculator:
         g = tapw_parameters.g_matrix
         gH = tapw_parameters.g_matrix_conj
 
-        use_sparse_dot = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
-        if use_sparse_dot and not _HAS_SPARSE_DOT_MKL:
-            _raise_sparse_dot_mkl_unavailable()
-        if use_sparse_dot and _HAS_SPARSE_DOT_MKL and scipy.sparse.issparse(g) and scipy.sparse.issparse(hamk) and scipy.sparse.issparse(gH):
-            # MKL sparse GEMM is multi-threaded and usually much faster than SciPy's sparse matmul.
-            tmp = dot_product_mkl(g, hamk, dense=False)
-            out = dot_product_mkl(tmp, gH, dense=True)
-            return out
-
-        result = g @ hamk @ gH
-        return result.toarray() if scipy.sparse.issparse(result) else np.asarray(result)
+        return self._project_full_space_matrix_with_projector(
+            hamk, g, projector_h=gH, force_sparse_dot=force_sparse_dot,
+        )
 
     def _cal_TAPW_spin_degenerate_overlap_k_cpu(self, overlap, force_sparse_dot: bool = False):
         g = self.TAPW_parameters.g_matrix
@@ -3881,12 +3951,14 @@ class BandStructureCalculator:
 
         row_half = g.shape[0] // 2
         col_half = g.shape[1] // 2
+        if row_half == 0 or col_half == 0:
+            return None
 
         def _max_abs(matrix) -> float:
-            if scipy.sparse.issparse(matrix):
-                return float(np.max(np.abs(matrix.data))) if matrix.nnz else 0.0
-            matrix = np.asarray(matrix)
-            return float(np.max(np.abs(matrix))) if matrix.size else 0.0
+            values = matrix.data if scipy.sparse.issparse(matrix) else np.asarray(matrix).ravel()
+            chunk_size = int(getattr(self.config, "assembly_chunk_size", 262144))
+            return max((float(np.max(np.abs(values[start:start + chunk_size])))
+                        for start in range(0, values.size, chunk_size)), default=0.0)
 
         g_up = g[:row_half, :col_half].tocsr() if scipy.sparse.issparse(g) else np.asarray(g[:row_half, :col_half])
         g_ud = g[:row_half, col_half:]
@@ -3900,34 +3972,34 @@ class BandStructureCalculator:
         if _max_abs(g_up - g_down) > g_tol:
             return None
 
-        s_up = overlap[:col_half, :col_half]
-        s_ud = overlap[:col_half, col_half:]
-        s_du = overlap[col_half:, :col_half]
-        s_down = overlap[col_half:, col_half:]
-
         s_scale = max(1.0, _max_abs(overlap))
         s_tol = 1.0e-10 * s_scale
-        if _max_abs(s_ud) > s_tol or _max_abs(s_du) > s_tol:
-            return None
-        if _max_abs(s_up - s_down) > s_tol:
-            return None
+        # Validate spin degeneracy a few AO rows at a time. Slicing the entire
+        # upper/lower spin blocks would duplicate a sizeable part of S per worker.
+        row_step = int(getattr(self.config, "projection_block_rows", 192))
+        overlap_rows = overlap.tocsr() if scipy.sparse.issparse(overlap) else np.asarray(overlap)
+        for start in range(0, col_half, row_step):
+            stop = min(start + row_step, col_half)
+            upper = overlap_rows[start:stop]
+            lower = overlap_rows[col_half + start:col_half + stop]
+            if _max_abs(upper[:, col_half:]) > s_tol or _max_abs(lower[:, :col_half]) > s_tol:
+                return None
+            if _max_abs(upper[:, :col_half] - lower[:, col_half:]) > s_tol:
+                return None
+        del overlap_rows, upper, lower
 
-        g_up_h = g_up.conj().T.tocsr() if scipy.sparse.issparse(g_up) else g_up.conj().T
-        use_sparse_dot = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
-        if use_sparse_dot and not _HAS_SPARSE_DOT_MKL:
-            _raise_sparse_dot_mkl_unavailable()
-        if (
-            use_sparse_dot
-            and _HAS_SPARSE_DOT_MKL
-            and scipy.sparse.issparse(g_up)
-            and scipy.sparse.issparse(s_up)
-            and scipy.sparse.issparse(g_up_h)
-        ):
-            tmp = dot_product_mkl(g_up, s_up, dense=False)
-            projected_up = np.asarray(dot_product_mkl(tmp, g_up_h, dense=True))
+        # Embed G_up with exactly zero down-spin columns, preserving the fast
+        # path's tolerance semantics. No full-sized S_up copy is needed.
+        if scipy.sparse.issparse(g_up):
+            g_top = scipy.sparse.hstack((g_up, scipy.sparse.csr_matrix((row_half, col_half))), format="csr")
         else:
-            projected_up = g_up @ s_up @ g_up_h
-            projected_up = projected_up.toarray() if scipy.sparse.issparse(projected_up) else np.asarray(projected_up)
+            g_top = np.zeros((row_half, 2 * col_half), dtype=g_up.dtype)
+            g_top[:, :col_half] = g_up
+        del g_up, g_ud, g_du, g_down
+        g_top_h = g_top.conj().T.tocsr() if scipy.sparse.issparse(g_top) else g_top.conj().T
+        projected_up = self._project_full_space_matrix_with_projector(
+            overlap, g_top, projector_h=g_top_h, force_sparse_dot=force_sparse_dot,
+        )
 
         projected = np.zeros((2 * row_half, 2 * row_half), dtype=projected_up.dtype)
         projected[:row_half, :row_half] = projected_up
@@ -3950,6 +4022,7 @@ class BandStructureCalculator:
             tapw_parameters=tapw_parameters,
             force_sparse_dot=force_sparse_dot,
         )
+        del h_full
 
         orthogonal_basis = bool(getattr(getattr(self, "config", None), "orthogonal_basis", False))
         if orthogonal_basis:
@@ -3964,27 +4037,36 @@ class BandStructureCalculator:
         return hamk, samk
 
     def _project_full_space_matrix_with_projector(self, full_matrix, projector, projector_h=None, force_sparse_dot: bool = False):
+        """Compute G A G† with a bounded number of intermediate rows."""
+        use_sparse_dot = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
+        if use_sparse_dot and not _HAS_SPARSE_DOT_MKL:
+            _raise_sparse_dot_mkl_unavailable()
         if scipy.sparse.issparse(projector):
             projector = projector.tocsr()
-            projector_h = projector.conj().T.tocsr() if projector_h is None else projector_h.tocsr()
-            use_sparse_dot = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
-            if use_sparse_dot and not _HAS_SPARSE_DOT_MKL:
-                _raise_sparse_dot_mkl_unavailable()
-            if (
-                use_sparse_dot
-                and _HAS_SPARSE_DOT_MKL
-                and scipy.sparse.issparse(full_matrix)
-            ):
-                tmp = dot_product_mkl(projector, full_matrix, dense=False)
-                out = dot_product_mkl(tmp, projector_h, dense=True)
-                return np.asarray(out)
-            result = projector @ full_matrix @ projector_h
-            return result.toarray() if scipy.sparse.issparse(result) else np.asarray(result)
-
-        projector = np.asarray(projector, dtype=np.complex128)
-        projector_h = projector.conj().T if projector_h is None else np.asarray(projector_h, dtype=np.complex128)
-        full_matrix = full_matrix.toarray() if scipy.sparse.issparse(full_matrix) else np.asarray(full_matrix)
-        return np.asarray(projector @ full_matrix @ projector_h)
+        else:
+            projector = np.asarray(projector, dtype=np.complex128)
+        if projector_h is None:
+            projector_h = projector.conj().T
+        if scipy.sparse.issparse(projector_h):
+            projector_h = projector_h.tocsr()
+        else:
+            projector_h = np.asarray(projector_h)
+        use_mkl = (use_sparse_dot and scipy.sparse.issparse(projector)
+                   and scipy.sparse.issparse(full_matrix) and scipy.sparse.issparse(projector_h))
+        block_rows = int(getattr(self.config, "projection_block_rows", 192))
+        result = np.empty((projector.shape[0], projector_h.shape[1]),
+                          dtype=np.result_type(projector.dtype, full_matrix.dtype, projector_h.dtype))
+        for start in range(0, projector.shape[0], block_rows):
+            stop = min(start + block_rows, projector.shape[0])
+            if use_mkl:
+                temporary = dot_product_mkl(projector[start:stop], full_matrix, dense=False)
+                part = dot_product_mkl(temporary, projector_h, dense=True)
+            else:
+                temporary = projector[start:stop] @ full_matrix
+                part = temporary @ projector_h
+            result[start:stop] = part.toarray() if scipy.sparse.issparse(part) else part
+            del temporary, part
+        return result
 
     def _get_raw_projected_hs_with_projector(self, Hr, Sr, k, mpi_index, projector, projector_h=None, force_sparse_dot: bool = False):
         phase_ctx = self._build_getk_phase_context(k)
@@ -3995,6 +4077,7 @@ class BandStructureCalculator:
             projector_h=projector_h,
             force_sparse_dot=force_sparse_dot,
         )
+        del h_full
 
         orthogonal_basis = bool(getattr(getattr(self, "config", None), "orthogonal_basis", False))
         if orthogonal_basis:
@@ -4353,6 +4436,7 @@ class BandStructureCalculator:
         with _progress_reporter(total=len(kpoints)):
                 if parallel_impl == "mp":
                     # Fork-based pool avoids repeatedly pickling a huge calculator object.
+                    self._prepare_realspace_caches_for_fork()
                     ctx = mp.get_context("fork")
                     _MP_STATE.clear()
                     _MP_STATE.update(
@@ -4439,6 +4523,8 @@ class BandStructureCalculator:
                             )
                         ]
                     else:
+                        if parallel_backend == "multiprocessing":
+                            self._prepare_realspace_caches_for_fork()
                         with _tqdm_joblib(total=len(kpoints), desc="k-points"):
                             results = Parallel(n_jobs=num_processes, backend=parallel_backend)(
                                 delayed(_joblib_worker)(i, kpoint)

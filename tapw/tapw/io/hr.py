@@ -17,6 +17,22 @@ SPARSE_NPZ_SCHEMA_VERSION = 1
 SPARSE_NPZ_METADATA_KEY = "__tapw_sparse_metadata_json__"
 
 
+def _compact_sparse_indices(values):
+    """Keep 32-bit coordinates when possible, without truncating large indices."""
+    indices = np.asarray(values)
+    if indices.dtype.kind not in "iu":
+        indices = indices.astype(np.int64)
+    if indices.size == 0:
+        return indices.astype(np.int32, copy=False)
+    if indices.dtype.kind == "i" and indices.dtype.itemsize <= 4:
+        return indices.astype(np.int32, copy=False)
+    if indices.dtype.kind == "u" and int(indices.max()) > np.iinfo(np.int64).max:
+        raise ValueError("Sparse coordinate cannot be represented by a signed int64 index")
+    limits = np.iinfo(np.int32)
+    dtype = np.int32 if int(indices.min()) >= limits.min and int(indices.max()) <= limits.max else np.int64
+    return indices.astype(dtype, copy=False)
+
+
 def read_sparse_npz_metadata(payload, *, source="<npz>"):
     """Return validated versioned sparse metadata, or ``None`` for legacy NPZ files."""
     if SPARSE_NPZ_METADATA_KEY not in payload.files:
@@ -194,8 +210,8 @@ class HrSparseHandler:
         if basis_dimension is None:
             return
         for key, item in hr_sparse_chunk.items():
-            row = np.asarray(item["row"], dtype=np.int64)
-            col = np.asarray(item["col"], dtype=np.int64)
+            row = np.asarray(item["row"])
+            col = np.asarray(item["col"])
             for attribute, indices in (("row", row), ("col", col)):
                 if indices.size and (int(indices.min()) < 0 or int(indices.max()) >= basis_dimension):
                     raise ValueError(
@@ -218,15 +234,15 @@ class HrSparseHandler:
 
         transformed = {}
         for key in sorted(hr_sparse_chunk.keys()):
-            row = np.asarray(hr_sparse_chunk[key]["row"], dtype=np.int64)
-            col = np.asarray(hr_sparse_chunk[key]["col"], dtype=np.int64)
+            row = np.asarray(hr_sparse_chunk[key]["row"])
+            col = np.asarray(hr_sparse_chunk[key]["col"])
             val = np.asarray(hr_sparse_chunk[key]["val"], dtype=np.complex128)
             matrix = scipy.sparse.csr_matrix((val, (row, col)), shape=(nwann, nwann))
             rotated = self.A.dot(matrix.dot(self.A.T))
             new_row, new_col = rotated.nonzero()
             transformed[key] = {
-                "row": np.asarray(new_row, dtype=np.int64),
-                "col": np.asarray(new_col, dtype=np.int64),
+                "row": _compact_sparse_indices(new_row),
+                "col": _compact_sparse_indices(new_col),
                 "val": np.asarray(rotated.data, dtype=np.complex128),
             }
         return transformed
@@ -243,9 +259,9 @@ class HrSparseHandler:
                 if key_tuple not in data:
                     data[key_tuple] = {'row': None, 'col': None, 'val': None}
                 if attribute == 'row':
-                    data[key_tuple]['row'] = np.asarray(loaded_data[key], dtype=np.int64)
+                    data[key_tuple]['row'] = _compact_sparse_indices(loaded_data[key])
                 elif attribute == 'col':
-                    data[key_tuple]['col'] = np.asarray(loaded_data[key], dtype=np.int64)
+                    data[key_tuple]['col'] = _compact_sparse_indices(loaded_data[key])
                 elif attribute == 'val':
                     data[key_tuple]['val'] = np.asarray(
                         loaded_data[key],
@@ -277,9 +293,9 @@ class HrSparseHandler:
                 if key_tuple not in data:
                     data[key_tuple] = {'row': None, 'col': None, 'val': None}
                 if attribute == 'row':
-                    data[key_tuple]['row'] = loaded_data[key]
+                    data[key_tuple]['row'] = _compact_sparse_indices(loaded_data[key])
                 elif attribute == 'col':
-                    data[key_tuple]['col'] = loaded_data[key]
+                    data[key_tuple]['col'] = _compact_sparse_indices(loaded_data[key])
                 elif attribute == 'val':
                     data[key_tuple]['val'] = loaded_data[key]
         basis_dimension = None if metadata is None else int(metadata["basis_dimension"])

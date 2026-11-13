@@ -246,6 +246,9 @@ def _apply_release_section_to_mapping(target: dict[str, Any], section: dict[str,
         target["eig_vec_cal"] = bool(section["save_wavefunctions"])
     if "use_sparse_dot_mkl" in section:
         target["use_sparse_dot_mkl"] = bool(section["use_sparse_dot_mkl"])
+    for key in ("assembly_chunk_size", "projection_block_rows"):
+        if key in section:
+            target[key] = int(section[key])
     if workflow == "chern":
         mesh = _copy_section(section.get("mesh"))
         if mesh:
@@ -521,6 +524,8 @@ class ComputeConfig:
     kpoint_chunk_id: int = 0  # For job-array sharding: 0-based chunk index
     kpoint_chunk_count: int = 1  # For job-array sharding: total number of chunks
     fast_getk: bool = True  # Faster CSR build in Getk_super_gauge_sparse (recommended)
+    assembly_chunk_size: int = 262144  # Maximum raw entries in each phase/value workspace.
+    projection_block_rows: int = 192  # Maximum projected rows in each G @ H/S workspace.
     use_sparse_dot_mkl: bool = True  # Use sparse_dot_mkl for TAPW sparse projection.
     eigensolver: str = "scipy"  # non-TAPW generalized solver: "scipy" or "slepc" (SLEPc tuning is internal)
     slepc_eps_type: str = "krylovschur"  # e.g. "krylovschur", "jd", "lapack" (small problems)
@@ -593,6 +598,10 @@ class ComputeConfig:
             raise ValueError("num_processes must be >= 1")
         if self.blas_threads < 0:
             raise ValueError("blas_threads must be >= 0")
+        if self.assembly_chunk_size < 1:
+            raise ValueError("assembly_chunk_size must be >= 1")
+        if self.projection_block_rows < 1:
+            raise ValueError("projection_block_rows must be >= 1")
         self.get_chern_grid_shape()
 
         allowed_eigensolver = {"scipy", "slepc"}

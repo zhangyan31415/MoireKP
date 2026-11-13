@@ -16,6 +16,8 @@ bands:
   efermi: -4.6
   num_processes: 61
   blas_threads: 1
+  assembly_chunk_size: 262144  # Raw entries per phase workspace.
+  projection_block_rows: 192  # Rows per H/S projection workspace.
   num_bands: 100
   save_hamiltonian: true
   save_wavefunctions: false
