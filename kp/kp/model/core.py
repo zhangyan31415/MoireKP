@@ -3257,6 +3257,8 @@ def _basis_spectral_weighting_from_fit_objective(
             "band_edge": str(objective.get("edge", "top")).strip().lower(),
             "window_mode": "fixed_count_degeneracy_safe",
             "n_bands": int(window.get("bands", 0)),
+            **{key + "_n_bands": int(objective[key + "_bands"])
+               for key in ("one_sided", "two_sided") if key + "_bands" in objective},
             "one_sided_weight": float(objective.get("one_sided_weight", 0.0)),
             "two_sided_weight": float(objective.get("two_sided_weight", 0.0)),
             "degeneracy_atol_ev": float(window.get("degeneracy_tol_mev", 0.1))

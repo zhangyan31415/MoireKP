@@ -1,0 +1,55 @@
+system:
+  output: ../output/tapw
+  structure: ../openmx/POSCAR_rigid
+  hamiltonian: ../openmx/H.npz
+  overlap: ../openmx/S.npz
+  orbitals:
+    Mo: s3p2d1
+    Te: s3p2d2
+  twist_index: 8
+  layers:
+  - 1
+  - 1
+  - 1
+  spin: true
+bands:
+  valley: K1
+  q_shell: 6
+  efermi: -4.120819804904602
+  num_processes: 1
+  blas_threads: 1
+  num_bands: 40
+  save_hamiltonian: true
+  save_wavefunctions: false
+  kpath:
+    labels:
+    - G
+    - M
+    - K
+    - G
+    points_per_segment: 20
+    coordinates:
+      G:
+      - 0.0
+      - 0.0
+      M:
+      - 0.5
+      - 0.0
+      K:
+      - 0.6666666666666666
+      - 0.3333333333333333
+symmetry:
+  valley: K1
+  q_shell: 6
+  efermi: -4.120819804904602
+  num_processes: 1
+  blas_threads: 1
+  tolerance: 0.02
+  spglib_symprec: 0.005
+field:
+  electric_field_eVpA: 0.0
+  zero_potential_layers:
+  - 1
+  inner_symmetric: false
+cluster:
+  spglib_symprec: 0.005

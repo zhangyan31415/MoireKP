@@ -1,0 +1,87 @@
+system:
+  name: SnSe2
+  output: ../output/kp
+  tapw_output: ../output/tapw
+  layers:
+  - 1
+  - 1
+  spin: all
+  orbital_order: Se-s3p2d1,Sn-s3p2d1,Se-s3p2d1
+  cell:
+  - - 56.313302583039274
+    - 6.0e-15
+    - 0.0
+  - - -28.15665129134424
+    - 48.76875060866059
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 29.999999999999996
+project:
+  valley: Gamma
+  q_shell: 6
+  efermi: -5.0466233429045415
+  target: valence
+  selection:
+    mode: explicit
+  downfold_method: linearized_lowdin
+  workers: 16
+  blas_threads: 2
+  nlow_state_list:
+  - - 48
+    - 49
+  - - 50
+    - 51
+  gauge: auto
+  e_ref: -5.347020041203334
+symmetry:
+  tolerance: 0.02
+bands:
+  kpath:
+    labels:
+    - G
+    - M
+    - K
+    - G
+    points_per_segment: 10
+    coordinates:
+      G:
+      - 0.0
+      - 0.0
+      M:
+      - 0.5
+      - 0.0
+      K:
+      - 0.3333333333333333
+      - 0.3333333333333333
+  compare_to_heff: true
+  plot:
+    top_bands: 6
+    align: top
+model:
+  target_bands: top
+  max_order:
+    kinetic: 10
+    intralayer: 5
+    interlayer: 5
+  fit:
+    method: linear
+    kpoints:
+    - 0
+    - 2
+    - 5
+    - 10
+    - 12
+    - 15
+    - 20
+    - 22
+    - 25
+    - 29
+    bands: 6
+    one_sided_weight: 10.0
+    two_sided_weight: 100.0
+  harmonics:
+    intra:
+      count: 5
+    inter:
+      count: 5

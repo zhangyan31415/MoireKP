@@ -1,0 +1,155 @@
+[
+  {
+    "case": "mote2_2.13",
+    "valley": "K1",
+    "dimension": 54,
+    "coefficients": 246,
+    "band_count": 8,
+    "eval_points": 61,
+    "rms_meV": 0.3645297723565018,
+    "max_meV": 0.9816425926709726,
+    "export_sha256": "09d5254b0e677fcfae4887b0a6227f1a3db2d16d425b3cef48cbdc5dcf9eaef0",
+    "polynomial_orders": {
+      "kinetic": 10,
+      "intralayer": 5,
+      "interlayer": 5
+    },
+    "reference_energy_eV": -4.614105470129998
+  },
+  {
+    "case": "zrs2_2.13",
+    "valley": "Gamma",
+    "dimension": 152,
+    "coefficients": 1350,
+    "band_count": 10,
+    "eval_points": 61,
+    "rms_meV": 0.384568675546337,
+    "max_meV": 0.7917619931427922,
+    "export_sha256": "be3ff0f6a56a9b617d56876fae23bcc11e464af230b0f765ce88e1007d1045e0",
+    "polynomial_orders": {
+      "kinetic": 8,
+      "intralayer": 4,
+      "interlayer": 4
+    },
+    "reference_energy_eV": -6.21
+  },
+  {
+    "case": "zrs2_2.13",
+    "valley": "M1",
+    "dimension": 88,
+    "coefficients": 1039,
+    "band_count": 8,
+    "eval_points": 61,
+    "rms_meV": 1.0572351075506212,
+    "max_meV": 1.8822452706110937,
+    "export_sha256": "178bbfff6add535368a3ee0317733ad41e76def04d25dd50525680342708317d",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 4,
+      "interlayer": 6
+    },
+    "reference_energy_eV": -5.22
+  },
+  {
+    "case": "wse2_2.13",
+    "valley": "K1",
+    "dimension": 54,
+    "coefficients": 144,
+    "band_count": 6,
+    "eval_points": 31,
+    "rms_meV": 0.547253298385997,
+    "max_meV": 1.3773410098414374,
+    "export_sha256": "525907f2ee3b1a670082ec6d1fcc1edfc91c9fe13c617fbf31e4de8717a17f66",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 5,
+      "interlayer": 5
+    },
+    "reference_energy_eV": -4.869434670228333
+  },
+  {
+    "case": "wse2_3.89",
+    "valley": "K1",
+    "dimension": 54,
+    "coefficients": 101,
+    "band_count": 6,
+    "eval_points": 31,
+    "rms_meV": 1.3411456338611594,
+    "max_meV": 3.3831722198343073,
+    "export_sha256": "0a0330106473d180c217cf5788145437afd239c441852a1daf1d87bfe166c27f",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 5,
+      "interlayer": 5
+    },
+    "reference_energy_eV": -4.919165737191666
+  },
+  {
+    "case": "wse2_trilayer_3.89",
+    "valley": "K",
+    "dimension": 81,
+    "coefficients": 680,
+    "band_count": 8,
+    "eval_points": 57,
+    "rms_meV": 1.1261957544489472,
+    "max_meV": 3.0553889803321965,
+    "export_sha256": "afadcda8c927793dc5541d06a833137b446adb86815319901b3a3b942fd62b69",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 4,
+      "interlayer": 4
+    },
+    "reference_energy_eV": null
+  },
+  {
+    "case": "mote2_trilayer_3.89",
+    "valley": "K",
+    "dimension": 81,
+    "coefficients": 740,
+    "band_count": 8,
+    "eval_points": 57,
+    "rms_meV": 0.45669690747623254,
+    "max_meV": 1.3450776090637717,
+    "export_sha256": "748760aaede17e98c0a0825178c3e42810d2359b26ccbf36b829a2575e5a121f",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 4,
+      "interlayer": 4
+    },
+    "reference_energy_eV": null
+  },
+  {
+    "case": "snse2_3.89",
+    "valley": "Gamma",
+    "dimension": 148,
+    "coefficients": 941,
+    "band_count": 6,
+    "eval_points": 31,
+    "rms_meV": 0.7418384863420833,
+    "max_meV": 1.3634663838830718,
+    "export_sha256": "9eedd82350998bd70210dd4119708dbd757a949c51945c84a6b588cd19b64b80",
+    "polynomial_orders": {
+      "kinetic": 10,
+      "intralayer": 5,
+      "interlayer": 5
+    },
+    "reference_energy_eV": -5.347020041203334
+  },
+  {
+    "case": "snse2_3.89",
+    "valley": "M1",
+    "dimension": 88,
+    "coefficients": 770,
+    "band_count": 6,
+    "eval_points": 31,
+    "rms_meV": 0.7071442797187892,
+    "max_meV": 1.718039715459696,
+    "export_sha256": "4bd102167d533e5ac2749c987fbf2af0970d51694e742d19dc94fefc36e54e7e",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 5,
+      "interlayer": 5
+    },
+    "reference_energy_eV": -4.69970923355
+  }
+]

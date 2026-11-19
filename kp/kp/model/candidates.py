@@ -36,7 +36,7 @@ from . import artifacts
 from . import configuration
 from . import fit_sampling
 from . import harmonic_selection
-from . import refinement
+from . import refinement as refinement_module
 from . import validation
 
 
@@ -345,7 +345,7 @@ def _run_model_pipeline(
         if bool(model_config.band_refinement_config.get("enabled", False)):
             refinement = run_stage(
                 "refining band coefficients",
-                lambda: refinement.refine_band_coefficients(
+                lambda: refinement_module.refine_band_coefficients(
                     moire_config,
                     model_config,
                     model,
@@ -990,7 +990,7 @@ def _rank_closed_term_groups_for_edge(
     ranked = []
     for term in terms:
         real_response, imag_response = (
-            refinement._term_response_pair_hamiltonians_for_kpoints(
+            refinement_module._term_response_pair_hamiltonians_for_kpoints(
                 state,
                 term,
                 kpoints,

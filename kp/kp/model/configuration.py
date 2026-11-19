@@ -232,9 +232,11 @@ def _canonical_public_fit_method(
         "bands",
         "one_sided_weight",
         "two_sided_weight",
+        "one_sided_bands",
+        "two_sided_bands",
     }
     if method == "nonlinear":
-        allowed.update({"band_kpoints", "band_loss_weight", "max_steps", "degeneracy_tol_ev"})
+        allowed.update({"band_kpoints", "band_loss_weight", "band_loss_bands", "max_steps", "degeneracy_tol_ev"})
     unsupported = sorted(str(key) for key in fit if key not in allowed)
     if unsupported:
         raise ValueError(
@@ -277,9 +279,20 @@ def _canonical_public_fit_method(
 
     one_sided_weight = checked_weight("one_sided_weight")
     two_sided_weight = checked_weight("two_sided_weight")
+    separate_bands = {}
+    for key in ("one_sided_bands", "two_sided_bands"):
+        if key not in fit:
+            continue
+        value = fit[key]
+        if isinstance(value, bool) or int(value) != value or not 0 < int(value) <= dimension:
+            raise ValueError(f"fit.{key} must be a positive integer not exceeding Hamiltonian dimension {dimension}")
+        separate_bands[key] = int(value)
+    if separate_bands and method != "linear":
+        raise ValueError("separate one_sided_bands/two_sided_bands currently require fit.method: linear")
     band_kpoints: list[int] | None = None
     band_loss_weight: float | None = None
     max_steps: int | None = None
+    band_window_override: dict[str, int] = {}
     degeneracy_tol_ev = float(fit.get("degeneracy_tol_ev", DEFAULT_DEGENERACY_TOL_EV))
     if not np.isfinite(degeneracy_tol_ev) or degeneracy_tol_ev <= 0.0:
         raise ValueError("fit.degeneracy_tol_ev must be positive and finite")
@@ -300,6 +313,7 @@ def _canonical_public_fit_method(
         "requested_bands": requested_bands,
         "one_sided_weight": one_sided_weight,
         "two_sided_weight": two_sided_weight,
+        **separate_bands,
         "band_loss_weight": band_loss_weight,
         "max_steps": max_steps,
         **({"degeneracy_tol_ev": degeneracy_tol_ev} if "degeneracy_tol_ev" in fit else {}),
@@ -2289,6 +2303,7 @@ def load_model_config(path: str | Path) -> ConfiguredModel:
             },
             "one_sided_weight": float(fit_method_config["one_sided_weight"]),
             "two_sided_weight": float(fit_method_config["two_sided_weight"]),
+            **{key: fit_method_config[key] for key in ("one_sided_bands", "two_sided_bands") if key in fit_method_config},
             "normalization": "dimension_mean_square",
         }
     if fit_weighting == "uniform":
@@ -3272,6 +3287,16 @@ def _case_derived_term_templates(
         )
         supported: list[dict[str, Any]] = []
         for record in harmonic_candidates["intra"]:
+            # Same-sector zero transfer belongs exclusively to kinetic/onsite.
+            # Otherwise intralayer order can silently raise the kinetic cutoff.
+            if np.linalg.norm(np.asarray(record["vector"], dtype=float)) <= tol:
+                omitted_harmonics.append({
+                    **record,
+                    "vector": np.asarray(record["vector"], dtype=float).tolist(),
+                    "sector_pair": [sector_name, sector_name],
+                    "reason": "zero_transfer_owned_by_kinetic_and_onsite",
+                })
+                continue
             support_count = _model_q_pair_support_count_for_sector_pair(
                 sector_from=sector,
                 sector_to=sector,

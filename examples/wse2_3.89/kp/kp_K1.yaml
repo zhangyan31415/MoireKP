@@ -1,0 +1,77 @@
+system:
+  name: WSe2
+  layers:
+  - 1
+  - 1
+  spin: up
+  orbital_order: Se-s3p2d1,W-s3p2d2,Se-s3p2d1
+  cell:
+  - - 48.3666859988
+    - -0.0
+    - 0.0
+  - - -24.1833430001
+    - 41.8867787714
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 28.0
+  output: ../output/kp
+  tapw_output: ../output/tapw
+project:
+  valley: K1
+  q_shell: 6
+  efermi: -4.299579
+  target: valence
+  selection:
+    mode: auto
+  gauge: auto
+  downfold_method: linearized_lowdin
+  workers: 4
+  blas_threads: 2
+  e_ref: -4.919165737191666
+symmetry:
+  tolerance: 0.02
+bands:
+  compare_to_heff: true
+  kpath:
+    coordinates:
+      G:
+      - 0.0
+      - 0.0
+      K:
+      - 0.3333333333333333
+      - 0.3333333333333333
+      M:
+      - 0.5
+      - 0.0
+    labels:
+    - G
+    - M
+    - K
+    - G
+    points_per_segment: 10
+  plot:
+    align: top
+    top_bands: 6
+model:
+  harmonics:
+    inter:
+      count: 2
+    intra:
+      count: 2
+  max_order:
+    interlayer: 5
+    intralayer: 5
+    kinetic: 6
+  target_bands: top
+  fit:
+    bands: 6
+    kpoints:
+    - 0
+    - 10
+    - 20
+    method: linear
+    one_sided_bands: 20
+    one_sided_weight: 10.0
+    two_sided_bands: 6
+    two_sided_weight: 100.0

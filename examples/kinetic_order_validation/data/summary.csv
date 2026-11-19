@@ -1,0 +1,133 @@
+setting,case,kinetic_order,raw_rms_mev,aligned_rms_mev,outcome,nfev
+"Weights $(0,0)$",mote2_k,4,9.534590834343899,15.435548800894374,linear,
+"Weights $(0,0)$",mote2_k,6,2.58589809726487,6.3227576917515655,linear,
+"Weights $(0,0)$",mote2_k,8,0.9930083804824631,2.4703680344461816,linear,
+"Weights $(0,0)$",mote2_k,10,0.696090217730081,0.8177536405744413,linear,
+"Weights $(0,0)$",zrs2_m,4,6.932052449092716,1.832068369357029,linear,
+"Weights $(0,0)$",zrs2_m,6,1.4404843115805617,0.6369752813502426,linear,
+"Weights $(0,0)$",zrs2_m,8,0.7679483974715254,0.8011421665871441,linear,
+"Weights $(0,0)$",zrs2_m,10,0.7795443161332798,0.8312432421093081,linear,
+"Weights $(0,0)$",aab_ka,4,11.831575380698062,17.770511770207605,linear,
+"Weights $(0,0)$",aab_ka,6,3.8678453823515153,6.623937842307825,linear,
+"Weights $(0,0)$",aab_ka,8,2.486015330443495,2.1076483855678187,linear,
+"Weights $(0,0)$",aab_ka,10,2.4768298946176164,0.9843141729814541,linear,
+"Weights $(0,0)$",aab_kb,4,16.400408158439067,17.373146634932638,linear,
+"Weights $(0,0)$",aab_kb,6,5.287907030677645,6.080611289740118,linear,
+"Weights $(0,0)$",aab_kb,8,3.3415111724891693,1.559125531498625,linear,
+"Weights $(0,0)$",aab_kb,10,3.106058364844794,1.0661409781115976,linear,
+"Weights $(0,0)$",aab_gamma,4,12.527961676633407,12.527961676633407,linear,
+"Weights $(0,0)$",aab_gamma,6,2.1153070313483644,2.1153070313483644,linear,
+"Weights $(0,0)$",aab_gamma,8,0.6450856876696074,0.6450856876696074,linear,
+"Weights $(0,0)$",aab_gamma,10,0.6643196269437653,0.6643196269437653,linear,
+"Weights $(0,0)$",zrs2_gamma,4,24.932024993951547,24.932024993951547,linear,
+"Weights $(0,0)$",zrs2_gamma,6,11.435382230585772,11.435382230585772,linear,
+"Weights $(0,0)$",zrs2_gamma,8,10.778806401740868,10.778806401740868,linear,
+"Weights $(0,0)$",zrs2_gamma,10,10.76628035600338,10.76628035600338,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",mote2_k,4,1.7681232187102391,2.9400774450872733,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",mote2_k,6,1.2088366824943588,1.0083413471565892,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",mote2_k,8,0.7223817709121182,0.644127959914701,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",mote2_k,10,0.6472815634959495,0.6141225909979026,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_m,4,1.1853166955049383,1.169301506707194,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_m,6,0.7439789143448003,0.7348549857677278,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_m,8,0.6919415079233574,0.7030575836013035,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_m,10,0.7274692252171098,0.7484021762553095,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_gamma,4,26.881650479657957,26.881650479657957,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_gamma,6,4.249022218084478,4.249022218084478,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_gamma,8,4.075633896104709,4.075633896104709,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",zrs2_gamma,10,3.8497588031004333,3.8497588031004333,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_ka,4,7.683231107632108,9.569374468369071,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_ka,6,2.6839343148943495,1.5702941231317875,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_ka,8,2.3753557015198594,1.0839321160795192,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_ka,10,2.381724641583042,1.1287634320019675,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_kb,4,19.285889985881862,21.025506835247597,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_kb,6,3.5092199154472445,1.638250788362729,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_kb,8,3.1231244820752186,1.4380801860711787,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_kb,10,3.0129571214354858,1.4712170281166022,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_gamma,4,0.7294427170284408,0.7294427170284408,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_gamma,6,0.3612616877743998,0.3612616877743998,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_gamma,8,0.3066466122493136,0.3066466122493136,linear,
+"Weights $(2.25,22.5)$, bands $(6,6)$",aab_gamma,10,0.2799614264486705,0.2799614264486705,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",mote2_k,4,2.633321380213584,7.182797215968002,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",mote2_k,6,1.067889316140063,3.1652785920342006,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",mote2_k,8,0.6502771413091646,1.1373093798639757,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",mote2_k,10,0.6272871088719717,0.6493238414400574,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_m,4,0.9390236989988026,0.87884078644504,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_m,6,0.7501661478767154,0.7621214374012792,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_m,8,0.7365652519137995,0.7613974809439539,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_m,10,0.7595503135249517,0.7905230928173612,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_gamma,4,39.20219334544924,39.20219334544924,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_gamma,6,0.7519175245576403,0.7519175245576403,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_gamma,8,0.6184913306471803,0.6184913306471803,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",zrs2_gamma,10,0.5803582405408978,0.5803582405408978,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_ka,4,7.761186596464243,15.475294214679408,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_ka,6,2.805525080739779,3.6775910898207558,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_ka,8,2.4043668073461966,1.1042813155594569,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_ka,10,2.431560827411376,1.0523029837102476,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_kb,4,16.400408158437486,11.489462896395882,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_kb,6,5.287907030674764,3.74700246168407,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_kb,8,3.341511172487402,1.4045779776303682,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_kb,10,3.106058364852264,1.2931491125806707,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_gamma,4,1.5688324193466299,1.5688324193466299,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_gamma,6,0.45787621563071346,0.45787621563071346,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_gamma,8,0.34383494646813245,0.34383494646813245,linear,
+"Weights $(2.25,22.5)$, bands $(20,20)$",aab_gamma,10,0.37019738047417705,0.37019738047417705,linear,
+Nonlinear (10 bands),zrs2_m,2,1.4785065256656502,1.4104179717432885,evaluation_budget_reached,30
+Nonlinear (10 bands),aab_gamma,2,1.3356019313672052,1.3356019313672052,evaluation_budget_reached,30
+Nonlinear (10 bands),mote2_k,2,4.420201927081513,8.021992117398543,evaluation_budget_reached,30
+Nonlinear (10 bands),aab_ka,2,5.42480158821137,11.665423180274585,evaluation_budget_reached,30
+Nonlinear (10 bands),aab_kb,2,19.451061708219196,16.651967876694368,optimizer_converged,13
+Nonlinear (10 bands),zrs2_gamma,2,16.639518033106484,16.639518033106484,evaluation_budget_reached,30
+Nonlinear (10 bands),zrs2_m,4,0.7417127143517889,0.7416499259598976,optimizer_converged,20
+Nonlinear (10 bands),aab_gamma,4,0.6783790833134531,0.6783790833134531,optimizer_converged,22
+Nonlinear (10 bands),mote2_k,4,1.4015351363164534,2.861661798669228,optimizer_converged,6
+Nonlinear (10 bands),aab_ka,4,3.444371992015316,4.209937512661881,evaluation_budget_reached,30
+Nonlinear (10 bands),aab_kb,4,8.491633724203197,7.228747637828768,optimizer_converged,27
+Nonlinear (10 bands),zrs2_gamma,4,2.957725054688559,2.957725054688559,evaluation_budget_reached,30
+Nonlinear (10 bands),zrs2_m,6,0.7393838862988802,0.7435150759489383,optimizer_converged,4
+Nonlinear (10 bands),aab_gamma,6,0.42527345616805245,0.42527345616805245,optimizer_converged,25
+Nonlinear (10 bands),mote2_k,6,0.7573351760950559,1.098450176549458,optimizer_converged,4
+Nonlinear (10 bands),aab_ka,6,2.406861497755941,1.3450227072071947,optimizer_converged,6
+Nonlinear (10 bands),aab_kb,6,3.534663052903919,1.8101404104711298,optimizer_converged,6
+Nonlinear (10 bands),zrs2_gamma,6,0.6599643905506338,0.6599643905506338,optimizer_converged,12
+Nonlinear (10 bands),zrs2_m,8,0.7493876709218635,0.7680348439527291,optimizer_converged,3
+Nonlinear (10 bands),aab_gamma,8,0.35433758901789203,0.35433758901789203,optimizer_converged,16
+Nonlinear (10 bands),mote2_k,8,0.6582325282784347,0.607545027645874,optimizer_converged,3
+Nonlinear (10 bands),aab_ka,8,2.400393279206791,1.1014678100669868,optimizer_converged,5
+Nonlinear (10 bands),aab_kb,8,3.107122795520293,1.4041377971678288,optimizer_converged,7
+Nonlinear (10 bands),zrs2_gamma,8,0.619067855507492,0.619067855507492,optimizer_converged,19
+Nonlinear (10 bands),zrs2_m,10,0.7501306397888629,0.7715142651212152,optimizer_converged,3
+Nonlinear (10 bands),aab_gamma,10,0.34940350948846766,0.34940350948846766,optimizer_converged,8
+Nonlinear (10 bands),mote2_k,10,0.6370052221854273,0.610303766548348,optimizer_converged,3
+Nonlinear (10 bands),aab_ka,10,2.40711549067759,1.1658752767221687,optimizer_converged,4
+Nonlinear (10 bands),aab_kb,10,3.0219267211076772,1.4780957279721605,optimizer_converged,4
+Nonlinear (10 bands),zrs2_gamma,10,0.6008858454495588,0.6008858454495588,optimizer_converged,18
+Nonlinear lambda_b10,zrs2_m,2,0.9868474510526166,0.9863424950673366,evaluation_budget_reached,30
+Nonlinear lambda_b10,aab_gamma,2,0.8928044743552794,0.8928044743552794,evaluation_budget_reached,30
+Nonlinear lambda_b10,mote2_k,2,2.0891322848804825,2.996060171213672,evaluation_budget_reached,30
+Nonlinear lambda_b10,aab_ka,2,3.266424097587329,5.834993291311835,evaluation_budget_reached,30
+Nonlinear lambda_b10,aab_kb,2,16.556835732013344,13.530905733215835,evaluation_budget_reached,30
+Nonlinear lambda_b10,zrs2_gamma,2,15.315807546959649,15.315807546959649,evaluation_budget_reached,30
+Nonlinear lambda_b10,zrs2_m,4,0.7396754207127777,0.73647140626039,evaluation_budget_reached,30
+Nonlinear lambda_b10,aab_gamma,4,0.44857328678256275,0.44857328678256275,evaluation_budget_reached,30
+Nonlinear lambda_b10,mote2_k,4,0.9113554083799836,1.935833032341786,evaluation_budget_reached,30
+Nonlinear lambda_b10,aab_ka,4,3.0744370364085882,2.6482504024857354,evaluation_budget_reached,30
+Nonlinear lambda_b10,aab_kb,4,8.805011342666685,7.545264345153879,evaluation_budget_reached,30
+Nonlinear lambda_b10,zrs2_gamma,4,3.2417003095190746,3.2417003095190746,evaluation_budget_reached,30
+Nonlinear lambda_b10,zrs2_m,6,0.7467686494183815,0.7505760330263163,optimizer_converged,9
+Nonlinear lambda_b10,aab_gamma,6,0.3667476150249552,0.3667476150249552,evaluation_budget_reached,30
+Nonlinear lambda_b10,mote2_k,6,0.6574661432868156,0.9003488315059667,optimizer_converged,9
+Nonlinear lambda_b10,aab_ka,6,2.364964383365156,1.0954356943939199,optimizer_converged,14
+Nonlinear lambda_b10,aab_kb,6,3.45647470034355,1.932396206599391,optimizer_converged,9
+Nonlinear lambda_b10,zrs2_gamma,6,0.4540566814386704,0.4540566814386704,evaluation_budget_reached,30
+Nonlinear lambda_b10,zrs2_m,8,0.7461582993410094,0.761133448693472,optimizer_converged,5
+Nonlinear lambda_b10,aab_gamma,8,0.3392520743690504,0.3392520743690504,optimizer_converged,16
+Nonlinear lambda_b10,mote2_k,8,0.6477019659533189,0.607438939231973,optimizer_converged,6
+Nonlinear lambda_b10,aab_ka,8,2.402787696706648,1.126075999593139,optimizer_converged,9
+Nonlinear lambda_b10,aab_kb,8,3.053311132603286,1.4659675971418054,evaluation_budget_reached,30
+Nonlinear lambda_b10,zrs2_gamma,8,0.37100403529579357,0.37100403529579357,evaluation_budget_reached,30
+Nonlinear lambda_b10,zrs2_m,10,0.7434483081213639,0.7654243416081189,optimizer_converged,4
+Nonlinear lambda_b10,aab_gamma,10,0.3387603149139079,0.3387603149139079,optimizer_converged,9
+Nonlinear lambda_b10,mote2_k,10,0.6390326069806476,0.6214552038074133,optimizer_converged,4
+Nonlinear lambda_b10,aab_ka,10,2.4054138462032246,1.1647981876146294,optimizer_converged,5
+Nonlinear lambda_b10,aab_kb,10,3.028257508297995,1.4926206490842342,optimizer_converged,6
+Nonlinear lambda_b10,zrs2_gamma,10,0.372075327497604,0.372075327497604,optimizer_converged,24

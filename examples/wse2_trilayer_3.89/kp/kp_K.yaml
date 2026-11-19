@@ -1,0 +1,115 @@
+case:
+  profile: K1
+  q_shell: 6
+  output_root: ../output/kp
+valley: K1
+spin: up
+material:
+  name: Alternating trilayer WSe2 at 3.89 deg
+  num_layer_list:
+  - 2
+  - 1
+  num_orb_per_layer:
+  - 1
+  hamk_file: ../output/kp_input/hamiltonian_k.npy
+  kpoints_file: ../output/kp_input/kpoints.npy
+  qset1_file: ../output/kp_input/g_vectors_group1.npy
+  qset2_file: ../output/kp_input/g_vectors_group2.npy
+  band_file: ../output/kp_input/energies_vbm.txt
+  efermi: -4.248779335
+project:
+  nlow_state_list:
+  - - 0
+  - - 0
+  - - 0
+  norb_fix_list:
+  - - 0
+  - - 0
+  - - 0
+  downfold_method: first_order
+  efermi: -4.248779335
+  workers: 1
+  blas_threads: 1
+  out_dir: ../output/kp/projection
+symm:
+  operations:
+  - C3z
+  tapw_symmetry_dir: ../output/kp_input/source_symmetry
+  output_dir: ../output/kp/symmetry
+plot:
+  mode: K1
+  target: valence
+kpath:
+  labels:
+  - G
+  - M
+  - K
+  - G
+  points_per_segment: 20
+  coordinates:
+    G:
+    - 0.0
+    - 0.0
+    M:
+    - 0.5
+    - 0.0
+    K:
+    - 0.6666666666666666
+    - 0.3333333333333333
+  tmat:
+  - - 48.45654852396627
+    - -1.8486668003109234e-14
+    - 0.0
+  - - 24.228274261877658
+    - 41.96460200153903
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 60.0
+model:
+  n_orb:
+  - 1
+  - 1
+  - 1
+  target_bands: top
+  max_order:
+    kinetic: 6
+    intralayer: 4
+    interlayer: 4
+  fit:
+    method: linear
+    kpoints:
+    - 10
+    - 40
+    - 50
+    bands: 8
+    one_sided_weight: 2.25
+    two_sided_weight: 22.5
+  harmonics:
+    intra:
+      count: 4
+    inter:
+      count: 3
+bands:
+  compare_to_heff: true
+  band_slice:
+  - 73
+  - 81
+  plot:
+    align: none
+    top_bands: 8
+    overlap_cmap: Blues
+    overlap_vmin: 0.0
+    overlap_vmax: 1.0
+    figsize:
+    - 4.5
+    - 5.8
+output:
+  dir: ../output/kp/model
+sectors:
+- name: L1
+  qset: qset1
+  n_orb: 2
+- name: L2
+  qset: qset2
+  n_orb: 1

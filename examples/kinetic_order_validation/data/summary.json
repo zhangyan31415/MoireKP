@@ -1,0 +1,2501 @@
+{
+  "groups": [
+    {
+      "label": "Weights $(0,0)$",
+      "source_group": 0,
+      "rows": [
+        {
+          "case": "mote2_k",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 9.534590834343899,
+            "max_mev": 21.31530663835246
+          },
+          "native_paper_aligned": {
+            "rms_mev": 15.435548800894374,
+            "max_mev": 28.86096210004574
+          },
+          "paper_alignment_shift_mev": 21.31530663835246,
+          "bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 2.58589809726487,
+            "max_mev": 7.027354103546379
+          },
+          "native_paper_aligned": {
+            "rms_mev": 6.3227576917515655,
+            "max_mev": 11.885196412104726
+          },
+          "paper_alignment_shift_mev": 7.027354103546379,
+          "bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.9930083804824631,
+            "max_mev": 2.6032520308243434
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.4703680344461816,
+            "max_mev": 4.315947548223953
+          },
+          "paper_alignment_shift_mev": 2.6032520308243434,
+          "bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.696090217730081,
+            "max_mev": 1.9965854592198795
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.8177536405744413,
+            "max_mev": 1.9760876556249585
+          },
+          "paper_alignment_shift_mev": 0.8537324713238092,
+          "bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 6.932052449092716,
+            "max_mev": 8.451209526890935
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.832068369357029,
+            "max_mev": 5.305343735352075
+          },
+          "paper_alignment_shift_mev": -7.967750101658844,
+          "bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 1.4404843115805617,
+            "max_mev": 2.519587298960957
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6369752813502426,
+            "max_mev": 1.3687895017389096
+          },
+          "paper_alignment_shift_mev": -1.1507977972220473,
+          "bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.7679483974715254,
+            "max_mev": 1.3257500157308755
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.8011421665871441,
+            "max_mev": 1.3873906170971395
+          },
+          "paper_alignment_shift_mev": 0.061640601366264036,
+          "bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.7795443161332798,
+            "max_mev": 1.4013435680126918
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.8312432421093081,
+            "max_mev": 1.5398324657986961
+          },
+          "paper_alignment_shift_mev": 0.13848889778600437,
+          "bands": 8
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 11.831575380698062,
+            "max_mev": 28.54422614677521
+          },
+          "native_paper_aligned": {
+            "rms_mev": 17.770511770207605,
+            "max_mev": 30.1979851890799
+          },
+          "paper_alignment_shift_mev": 25.588946038775262,
+          "bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 3.8678453823515153,
+            "max_mev": 9.074412949615862
+          },
+          "native_paper_aligned": {
+            "rms_mev": 6.623937842307825,
+            "max_mev": 10.62157434685762
+          },
+          "paper_alignment_shift_mev": 9.074412949615862,
+          "bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 2.486015330443495,
+            "max_mev": 5.25603646242967
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.1076483855678187,
+            "max_mev": 3.614383740379701
+          },
+          "paper_alignment_shift_mev": 4.033591368561851,
+          "bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 2.4768298946176164,
+            "max_mev": 5.308586332284371
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.9843141729814541,
+            "max_mev": 2.9954035481711827
+          },
+          "paper_alignment_shift_mev": 2.313182784113188,
+          "bands": 6
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 16.400408158439067,
+            "max_mev": 32.80774668768327
+          },
+          "native_paper_aligned": {
+            "rms_mev": 17.373146634932638,
+            "max_mev": 33.57057046571299
+          },
+          "paper_alignment_shift_mev": 25.588946038775262,
+          "bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 5.287907030677645,
+            "max_mev": 9.324021797697313
+          },
+          "native_paper_aligned": {
+            "rms_mev": 6.080611289740118,
+            "max_mev": 11.987683782586522
+          },
+          "paper_alignment_shift_mev": 9.074412949615862,
+          "bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 3.3415111724891693,
+            "max_mev": 5.329974995287756
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.559125531498625,
+            "max_mev": 3.537289630813234
+          },
+          "paper_alignment_shift_mev": 4.033591368561851,
+          "bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 3.106058364844794,
+            "max_mev": 4.782836008802249
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.0661409781115976,
+            "max_mev": 2.4696532246890612
+          },
+          "paper_alignment_shift_mev": 2.313182784113188,
+          "bands": 3
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 12.527961676633407,
+            "max_mev": 27.060104630685977
+          },
+          "native_paper_aligned": {
+            "rms_mev": 12.527961676633407,
+            "max_mev": 27.060104630685977
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 2.1153070313483644,
+            "max_mev": 3.9824068192668705
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.1153070313483644,
+            "max_mev": 3.9824068192668705
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.6450856876696074,
+            "max_mev": 2.5570423519010177
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6450856876696074,
+            "max_mev": 2.5570423519010177
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.6643196269437653,
+            "max_mev": 2.69419889942224
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6643196269437653,
+            "max_mev": 2.69419889942224
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "bands": 8
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 24.932024993951547,
+            "max_mev": 62.64249063809668
+          },
+          "native_paper_aligned": {
+            "rms_mev": 24.932024993951547,
+            "max_mev": 62.64249063809668
+          },
+          "paper_alignment_shift_mev": 0.0
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 11.435382230585772,
+            "max_mev": 32.20542066389687
+          },
+          "native_paper_aligned": {
+            "rms_mev": 11.435382230585772,
+            "max_mev": 32.20542066389687
+          },
+          "paper_alignment_shift_mev": 0.0
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 10.778806401740868,
+            "max_mev": 27.2212268738663
+          },
+          "native_paper_aligned": {
+            "rms_mev": 10.778806401740868,
+            "max_mev": 27.2212268738663
+          },
+          "paper_alignment_shift_mev": 0.0
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 10.76628035600338,
+            "max_mev": 22.37500302428508
+          },
+          "native_paper_aligned": {
+            "rms_mev": 10.76628035600338,
+            "max_mev": 22.37500302428508
+          },
+          "paper_alignment_shift_mev": 0.0
+        }
+      ]
+    },
+    {
+      "label": "Weights $(2.25,22.5)$, bands $(6,6)$",
+      "source_group": 1,
+      "rows": [
+        {
+          "case": "mote2_k",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 1.7681232187102391,
+            "max_mev": 7.513640812327971
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.9400774450872733,
+            "max_mev": 10.059068981609798
+          },
+          "paper_alignment_shift_mev": 2.545428169281827,
+          "validation_bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 1.2088366824943588,
+            "max_mev": 3.76840841745274
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.0083413471565892,
+            "max_mev": 2.955976091500112
+          },
+          "paper_alignment_shift_mev": 0.8124323259526278,
+          "validation_bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.7223817709121182,
+            "max_mev": 2.0520464333904087
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.644127959914701,
+            "max_mev": 1.8318296111017318
+          },
+          "paper_alignment_shift_mev": 0.2202168222886769,
+          "validation_bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.6472815634959495,
+            "max_mev": 1.9428774271705862
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6141225909979026,
+            "max_mev": 1.843983856681497
+          },
+          "paper_alignment_shift_mev": 0.0988935704890892,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 1.1853166955049383,
+            "max_mev": 3.529535680732998
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.169301506707194,
+            "max_mev": 3.5002413841223046
+          },
+          "paper_alignment_shift_mev": 0.029294296610693493,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.7439789143448003,
+            "max_mev": 2.776089613437449
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7348549857677278,
+            "max_mev": 2.728289731172673
+          },
+          "paper_alignment_shift_mev": 0.04779988226477627,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.6919415079233574,
+            "max_mev": 1.4912642165407775
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7030575836013035,
+            "max_mev": 1.4230542757411868
+          },
+          "paper_alignment_shift_mev": 0.06820994079959064,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.7274692252171098,
+            "max_mev": 1.2049130655116258
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7484021762553095,
+            "max_mev": 1.2776702312802257
+          },
+          "paper_alignment_shift_mev": 0.07275716576859992,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 26.881650479657957,
+            "max_mev": 95.3792104600586
+          },
+          "native_paper_aligned": {
+            "rms_mev": 26.881650479657957,
+            "max_mev": 95.3792104600586
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 4.249022218084478,
+            "max_mev": 15.93585903177619
+          },
+          "native_paper_aligned": {
+            "rms_mev": 4.249022218084478,
+            "max_mev": 15.93585903177619
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 4.075633896104709,
+            "max_mev": 14.444940434259479
+          },
+          "native_paper_aligned": {
+            "rms_mev": 4.075633896104709,
+            "max_mev": 14.444940434259479
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 3.8497588031004333,
+            "max_mev": 13.201353647817271
+          },
+          "native_paper_aligned": {
+            "rms_mev": 3.8497588031004333,
+            "max_mev": 13.201353647817271
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 7.683231107632108,
+            "max_mev": 40.87196224616729
+          },
+          "native_paper_aligned": {
+            "rms_mev": 9.569374468369071,
+            "max_mev": 45.61371269001224
+          },
+          "paper_alignment_shift_mev": 4.74175044384495,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 2.6839343148943495,
+            "max_mev": 7.021875806973554
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.5702941231317875,
+            "max_mev": 4.368259351774206
+          },
+          "paper_alignment_shift_mev": 2.653616455199348,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 2.3753557015198594,
+            "max_mev": 4.9950583720521635
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.0839321160795192,
+            "max_mev": 3.1451917794838025
+          },
+          "paper_alignment_shift_mev": 1.849866592568361,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 2.381724641583042,
+            "max_mev": 4.933367659732291
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.1287634320019675,
+            "max_mev": 3.2926949801233008
+          },
+          "paper_alignment_shift_mev": 1.6406726796089899,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 19.285889985881862,
+            "max_mev": 54.37875124976532
+          },
+          "native_paper_aligned": {
+            "rms_mev": 21.025506835247597,
+            "max_mev": 59.12050169361027
+          },
+          "paper_alignment_shift_mev": 4.74175044384495,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 3.5092199154472445,
+            "max_mev": 5.72111021694699
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.638250788362729,
+            "max_mev": 3.0674937617476417
+          },
+          "paper_alignment_shift_mev": 2.653616455199348,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 3.1231244820752186,
+            "max_mev": 4.967478755757426
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4380801860711787,
+            "max_mev": 3.117612163189065
+          },
+          "paper_alignment_shift_mev": 1.849866592568361,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 3.0129571214354858,
+            "max_mev": 4.662188422942748
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4712170281166022,
+            "max_mev": 3.021515743333758
+          },
+          "paper_alignment_shift_mev": 1.6406726796089899,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 0.7294427170284408,
+            "max_mev": 3.069500183697116
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7294427170284408,
+            "max_mev": 3.069500183697116
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.3612616877743998,
+            "max_mev": 1.2010637130144275
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.3612616877743998,
+            "max_mev": 1.2010637130144275
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.3066466122493136,
+            "max_mev": 1.4127521177176305
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.3066466122493136,
+            "max_mev": 1.4127521177176305
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.2799614264486705,
+            "max_mev": 1.4891573625792631
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.2799614264486705,
+            "max_mev": 1.4891573625792631
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        }
+      ]
+    },
+    {
+      "label": "Weights $(2.25,22.5)$, bands $(20,20)$",
+      "source_group": 3,
+      "rows": [
+        {
+          "case": "mote2_k",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 2.633321380213584,
+            "max_mev": 7.307887760065412
+          },
+          "native_paper_aligned": {
+            "rms_mev": 7.182797215968002,
+            "max_mev": 14.237422197370009
+          },
+          "paper_alignment_shift_mev": 7.307887760065412,
+          "validation_bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 1.067889316140063,
+            "max_mev": 3.1574281589099584
+          },
+          "native_paper_aligned": {
+            "rms_mev": 3.1652785920342006,
+            "max_mev": 5.39820152067616
+          },
+          "paper_alignment_shift_mev": 3.1574281589099584,
+          "validation_bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.6502771413091646,
+            "max_mev": 1.6981585516155917
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.1373093798639757,
+            "max_mev": 2.2634716410037115
+          },
+          "paper_alignment_shift_mev": 1.1682459457071914,
+          "validation_bands": 8
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.6272871088719717,
+            "max_mev": 1.8450420069715534
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6493238414400574,
+            "max_mev": 1.53446764602716
+          },
+          "paper_alignment_shift_mev": 0.5071149626143523,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 0.9390236989988026,
+            "max_mev": 2.017894593707048
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.87884078644504,
+            "max_mev": 1.8608575444858388
+          },
+          "paper_alignment_shift_mev": -0.1570370492212092,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.7501661478767154,
+            "max_mev": 1.2580607493868357
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7621214374012792,
+            "max_mev": 1.2885888846660976
+          },
+          "paper_alignment_shift_mev": 0.030528135279261903,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.7365652519137995,
+            "max_mev": 1.340129409332036
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7613974809439539,
+            "max_mev": 1.4145027068996896
+          },
+          "paper_alignment_shift_mev": 0.07437329756765365,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.7595503135249517,
+            "max_mev": 1.350806303864971
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7905230928173612,
+            "max_mev": 1.4444358532550439
+          },
+          "paper_alignment_shift_mev": 0.09362954939007295,
+          "validation_bands": 8
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 39.20219334544924,
+            "max_mev": 181.61635273374532
+          },
+          "native_paper_aligned": {
+            "rms_mev": 39.20219334544924,
+            "max_mev": 181.61635273374532
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.7519175245576403,
+            "max_mev": 2.58360174660055
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7519175245576403,
+            "max_mev": 2.58360174660055
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.6184913306471803,
+            "max_mev": 2.7367064018903875
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6184913306471803,
+            "max_mev": 2.7367064018903875
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.5803582405408978,
+            "max_mev": 1.6560579092503858
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.5803582405408978,
+            "max_mev": 1.6560579092503858
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 7.761186596464243,
+            "max_mev": 29.431925038124973
+          },
+          "native_paper_aligned": {
+            "rms_mev": 15.475294214679408,
+            "max_mev": 44.85838679999077
+          },
+          "paper_alignment_shift_mev": 15.426461761865795,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 2.805525080739779,
+            "max_mev": 5.591438925065084
+          },
+          "native_paper_aligned": {
+            "rms_mev": 3.6775910898207558,
+            "max_mev": 6.559051243430147
+          },
+          "paper_alignment_shift_mev": 5.591438925065084,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 2.4043668073461966,
+            "max_mev": 5.303734198164101
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.1042813155594569,
+            "max_mev": 2.8479089403417035
+          },
+          "paper_alignment_shift_mev": 2.455825257822397,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 2.431560827411376,
+            "max_mev": 5.152541362167362
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.0523029837102476,
+            "max_mev": 3.157369611892058
+          },
+          "paper_alignment_shift_mev": 1.9951717502753041,
+          "validation_bands": 6
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 16.400408158437486,
+            "max_mev": 32.80774668768238
+          },
+          "native_paper_aligned": {
+            "rms_mev": 11.489462896395882,
+            "max_mev": 23.408086188807076
+          },
+          "paper_alignment_shift_mev": 15.426461761865795,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 5.287907030674764,
+            "max_mev": 9.324021797691096
+          },
+          "native_paper_aligned": {
+            "rms_mev": 3.74700246168407,
+            "max_mev": 8.504709758041074
+          },
+          "paper_alignment_shift_mev": 5.591438925065084,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 3.341511172487402,
+            "max_mev": 5.32997499528598
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4045779776303682,
+            "max_mev": 2.8741497374635827
+          },
+          "paper_alignment_shift_mev": 2.455825257822397,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 3.106058364852264,
+            "max_mev": 4.782836008812907
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.2931491125806707,
+            "max_mev": 2.7876642585376032
+          },
+          "paper_alignment_shift_mev": 1.9951717502753041,
+          "validation_bands": 3
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 1.5688324193466299,
+            "max_mev": 3.418627862687096
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.5688324193466299,
+            "max_mev": 3.418627862687096
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.45787621563071346,
+            "max_mev": 1.678471943300508
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.45787621563071346,
+            "max_mev": 1.678471943300508
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.34383494646813245,
+            "max_mev": 1.7578271713407645
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.34383494646813245,
+            "max_mev": 1.7578271713407645
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.37019738047417705,
+            "max_mev": 2.0036180957818672
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.37019738047417705,
+            "max_mev": 2.0036180957818672
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8
+        }
+      ]
+    },
+    {
+      "label": "Nonlinear (10 bands)",
+      "source_group": 4,
+      "rows": [
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 1.4785065256656502,
+            "max_mev": 3.994282610349842
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4104179717432885,
+            "max_mev": 3.832422105973343
+          },
+          "paper_alignment_shift_mev": 0.16186050437649868,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 1.3356019313672052,
+            "max_mev": 3.5050310065347645
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.3356019313672052,
+            "max_mev": 3.5050310065347645
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 4.420201927081513,
+            "max_mev": 20.10512680208265
+          },
+          "native_paper_aligned": {
+            "rms_mev": 8.021992117398543,
+            "max_mev": 25.095135586163053
+          },
+          "paper_alignment_shift_mev": 4.990008784080402,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 5.42480158821137,
+            "max_mev": 13.722954380344987
+          },
+          "native_paper_aligned": {
+            "rms_mev": 11.665423180274585,
+            "max_mev": 23.67787013850009
+          },
+          "paper_alignment_shift_mev": 9.954915758155103,
+          "validation_bands": 6,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 19.451061708219196,
+            "max_mev": 41.54553046413145
+          },
+          "native_paper_aligned": {
+            "rms_mev": 16.651967876694368,
+            "max_mev": 31.59061470597635
+          },
+          "paper_alignment_shift_mev": 9.954915758155103,
+          "validation_bands": 3,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 13,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 16.639518033106484,
+            "max_mev": 38.75901601152165
+          },
+          "native_paper_aligned": {
+            "rms_mev": 16.639518033106484,
+            "max_mev": 38.75901601152165
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 0.7417127143517889,
+            "max_mev": 1.645704343707699
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7416499259598976,
+            "max_mev": 1.6420102972345418
+          },
+          "paper_alignment_shift_mev": -0.0036940464731571865,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 20,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 0.6783790833134531,
+            "max_mev": 1.998918664896543
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6783790833134531,
+            "max_mev": 1.998918664896543
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 22,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 1.4015351363164534,
+            "max_mev": 6.403928351590871
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.861661798669228,
+            "max_mev": 9.01831411777465
+          },
+          "paper_alignment_shift_mev": 2.61438576618378,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 6,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 3.444371992015316,
+            "max_mev": 12.267678925026893
+          },
+          "native_paper_aligned": {
+            "rms_mev": 4.209937512661881,
+            "max_mev": 8.56781553788366
+          },
+          "paper_alignment_shift_mev": 4.8654102354186435,
+          "validation_bands": 6,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 8.491633724203197,
+            "max_mev": 18.3646852767696
+          },
+          "native_paper_aligned": {
+            "rms_mev": 7.228747637828768,
+            "max_mev": 14.003226152784265
+          },
+          "paper_alignment_shift_mev": 4.8654102354186435,
+          "validation_bands": 3,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 27,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 2.957725054688559,
+            "max_mev": 10.273133088954722
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.957725054688559,
+            "max_mev": 10.273133088954722
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.7393838862988802,
+            "max_mev": 1.2550004606852738
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7435150759489383,
+            "max_mev": 1.2724711811831213
+          },
+          "paper_alignment_shift_mev": 0.01747072049784748,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 4,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.42527345616805245,
+            "max_mev": 1.6691573899025869
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.42527345616805245,
+            "max_mev": 1.6691573899025869
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 25,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.7573351760950559,
+            "max_mev": 2.381668519383595
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.098450176549458,
+            "max_mev": 2.7513398762684105
+          },
+          "paper_alignment_shift_mev": 1.1627198612886858,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 4,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 2.406861497755941,
+            "max_mev": 5.764044703187032
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.3450227072071947,
+            "max_mev": 3.027948934399838
+          },
+          "paper_alignment_shift_mev": 2.7360957687871945,
+          "validation_bands": 6,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 6,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 3.534663052903919,
+            "max_mev": 6.129137879502089
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.8101404104711298,
+            "max_mev": 3.3930421107148945
+          },
+          "paper_alignment_shift_mev": 2.7360957687871945,
+          "validation_bands": 3,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 6,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.6599643905506338,
+            "max_mev": 2.4682767784796056
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6599643905506338,
+            "max_mev": 2.4682767784796056
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 12,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.7493876709218635,
+            "max_mev": 1.384931085997465
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7680348439527291,
+            "max_mev": 1.4447594502886574
+          },
+          "paper_alignment_shift_mev": 0.059828364291192315,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 3,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.35433758901789203,
+            "max_mev": 1.8608702563307489
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.35433758901789203,
+            "max_mev": 1.8608702563307489
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 16,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.6582325282784347,
+            "max_mev": 1.9620968535498662
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.607545027645874,
+            "max_mev": 1.69842821015731
+          },
+          "paper_alignment_shift_mev": 0.26366864339255613,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 3,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 2.400393279206791,
+            "max_mev": 5.261970081503975
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.1014678100669868,
+            "max_mev": 3.363134766184217
+          },
+          "paper_alignment_shift_mev": 1.898835315319758,
+          "validation_bands": 6,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 5,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 3.107122795520293,
+            "max_mev": 4.9931051871059395
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4041377971678288,
+            "max_mev": 3.0942698717861816
+          },
+          "paper_alignment_shift_mev": 1.898835315319758,
+          "validation_bands": 3,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 7,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.619067855507492,
+            "max_mev": 2.4408085364227006
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.619067855507492,
+            "max_mev": 2.4408085364227006
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 19,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.7501306397888629,
+            "max_mev": 1.3747236583272482
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7715142651212152,
+            "max_mev": 1.4402484894269207
+          },
+          "paper_alignment_shift_mev": 0.06552483109967255,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 3,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.34940350948846766,
+            "max_mev": 1.9693463561010205
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.34940350948846766,
+            "max_mev": 1.9693463561010205
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 8,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.6370052221854273,
+            "max_mev": 1.8888663576204223
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.610303766548348,
+            "max_mev": 1.7926060362638552
+          },
+          "paper_alignment_shift_mev": 0.09626032135656715,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 3,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 2.40711549067759,
+            "max_mev": 5.185759236924881
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.1658752767221687,
+            "max_mev": 3.542681012982385
+          },
+          "paper_alignment_shift_mev": 1.6430782239424957,
+          "validation_bands": 6,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 4,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 3.0219267211076772,
+            "max_mev": 4.685554617932297
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4780957279721605,
+            "max_mev": 3.0424763939898014
+          },
+          "paper_alignment_shift_mev": 1.6430782239424957,
+          "validation_bands": 3,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 4,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.6008858454495588,
+            "max_mev": 2.308628559066328
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6008858454495588,
+            "max_mev": 2.308628559066328
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 18,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        }
+      ]
+    },
+    {
+      "label": "Nonlinear lambda_b10",
+      "source_group": 5,
+      "rows": [
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 0.9868474510526166,
+            "max_mev": 2.706237786535226
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.9863424950673366,
+            "max_mev": 2.6974862936057775
+          },
+          "paper_alignment_shift_mev": -0.008751492929448546,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 0.8928044743552794,
+            "max_mev": 2.415770095162806
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.8928044743552794,
+            "max_mev": 2.415770095162806
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 2.0891322848804825,
+            "max_mev": 12.993606728056939
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.996060171213672,
+            "max_mev": 14.847782173522006
+          },
+          "paper_alignment_shift_mev": 1.8541754454650672,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 3.266424097587329,
+            "max_mev": 7.106794281941831
+          },
+          "native_paper_aligned": {
+            "rms_mev": 5.834993291311835,
+            "max_mev": 13.012153009908545
+          },
+          "paper_alignment_shift_mev": 5.905358727966714,
+          "validation_bands": 6,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 16.556835732013344,
+            "max_mev": 35.49982892733183
+          },
+          "native_paper_aligned": {
+            "rms_mev": 13.530905733215835,
+            "max_mev": 29.59447019936512
+          },
+          "paper_alignment_shift_mev": 5.905358727966714,
+          "validation_bands": 3,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 2,
+          "native_raw": {
+            "rms_mev": 15.315807546959649,
+            "max_mev": 45.439968923195906
+          },
+          "native_paper_aligned": {
+            "rms_mev": 15.315807546959649,
+            "max_mev": 45.439968923195906
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 0.7396754207127777,
+            "max_mev": 1.2731908940093462
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.73647140626039,
+            "max_mev": 1.2598531820007253
+          },
+          "paper_alignment_shift_mev": -0.013337712008620883,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 0.44857328678256275,
+            "max_mev": 1.967620981991658
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.44857328678256275,
+            "max_mev": 1.967620981991658
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 0.9113554083799836,
+            "max_mev": 3.2856884305205725
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.935833032341786,
+            "max_mev": 5.11890611501542
+          },
+          "paper_alignment_shift_mev": 1.8332176844948478,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 3.0744370364085882,
+            "max_mev": 11.47164607538631
+          },
+          "native_paper_aligned": {
+            "rms_mev": 2.6482504024857354,
+            "max_mev": 8.187233069098632
+          },
+          "paper_alignment_shift_mev": 3.2844130062876786,
+          "validation_bands": 6,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 8.805011342666685,
+            "max_mev": 20.040395216414097
+          },
+          "native_paper_aligned": {
+            "rms_mev": 7.545264345153879,
+            "max_mev": 16.75598221012642
+          },
+          "paper_alignment_shift_mev": 3.2844130062876786,
+          "validation_bands": 3,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 4,
+          "native_raw": {
+            "rms_mev": 3.2417003095190746,
+            "max_mev": 8.253584868691988
+          },
+          "native_paper_aligned": {
+            "rms_mev": 3.2417003095190746,
+            "max_mev": 8.253584868691988
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.7467686494183815,
+            "max_mev": 1.3989526741982061
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7505760330263163,
+            "max_mev": 1.4120925893026381
+          },
+          "paper_alignment_shift_mev": 0.01313991510443202,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 9,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.3667476150249552,
+            "max_mev": 1.9022212632648916
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.3667476150249552,
+            "max_mev": 1.9022212632648916
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.6574661432868156,
+            "max_mev": 1.7802736302794386
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.9003488315059667,
+            "max_mev": 2.164789256438482
+          },
+          "paper_alignment_shift_mev": 0.8721053859375161,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 9,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 2.364964383365156,
+            "max_mev": 5.413900644799519
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.0954356943939199,
+            "max_mev": 3.069848054831681
+          },
+          "paper_alignment_shift_mev": 2.3440525899678377,
+          "validation_bands": 6,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 14,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 3.45647470034355,
+            "max_mev": 5.9856374992284245
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.932396206599391,
+            "max_mev": 3.6415849092605868
+          },
+          "paper_alignment_shift_mev": 2.3440525899678377,
+          "validation_bands": 3,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 9,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 6,
+          "native_raw": {
+            "rms_mev": 0.4540566814386704,
+            "max_mev": 2.931209057336126
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.4540566814386704,
+            "max_mev": 2.931209057336126
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.7461582993410094,
+            "max_mev": 1.3936078235587956
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.761133448693472,
+            "max_mev": 1.4402655534819786
+          },
+          "paper_alignment_shift_mev": 0.046657729923182956,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 5,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.3392520743690504,
+            "max_mev": 1.9136107657020673
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.3392520743690504,
+            "max_mev": 1.9136107657020673
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 16,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.6477019659533189,
+            "max_mev": 1.9167776656185964
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.607438939231973,
+            "max_mev": 1.6807957709188415
+          },
+          "paper_alignment_shift_mev": 0.23598189469975495,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 6,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 2.402787696706648,
+            "max_mev": 5.20358013834521
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.126075999593139,
+            "max_mev": 3.440714273147627
+          },
+          "paper_alignment_shift_mev": 1.7628658651975826,
+          "validation_bands": 6,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 9,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 3.053311132603286,
+            "max_mev": 4.829263949184259
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4659675971418054,
+            "max_mev": 3.0663980839866767
+          },
+          "paper_alignment_shift_mev": 1.7628658651975826,
+          "validation_bands": 3,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 8,
+          "native_raw": {
+            "rms_mev": 0.37100403529579357,
+            "max_mev": 1.7361348409279387
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.37100403529579357,
+            "max_mev": 1.7361348409279387
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "evaluation_budget_reached",
+          "nfev": 30,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        },
+        {
+          "case": "zrs2_m",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.7434483081213639,
+            "max_mev": 1.3808278523779194
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.7654243416081189,
+            "max_mev": 1.4462132818273687
+          },
+          "paper_alignment_shift_mev": 0.06538542944944936,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 4,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            20
+          ]
+        },
+        {
+          "case": "aab_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.3387603149139079,
+            "max_mev": 1.945935168555124
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.3387603149139079,
+            "max_mev": 1.945935168555124
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 9,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            40
+          ]
+        },
+        {
+          "case": "mote2_k",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.6390326069806476,
+            "max_mev": 1.8681849700801223
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.6214552038074133,
+            "max_mev": 1.807472496111906
+          },
+          "paper_alignment_shift_mev": 0.06071247396821633,
+          "validation_bands": 8,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 4,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            0,
+            2,
+            20
+          ]
+        },
+        {
+          "case": "aab_ka",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 2.4054138462032246,
+            "max_mev": 5.1754580507674675
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.1647981876146294,
+            "max_mev": 3.5374766785247758
+          },
+          "paper_alignment_shift_mev": 1.6379813722426917,
+          "validation_bands": 6,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 5,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "aab_kb",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 3.028257508297995,
+            "max_mev": 4.675102650659291
+          },
+          "native_paper_aligned": {
+            "rms_mev": 1.4926206490842342,
+            "max_mev": 3.037121278416599
+          },
+          "paper_alignment_shift_mev": 1.6379813722426917,
+          "validation_bands": 3,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 6,
+          "band_loss_resolved_counts": [
+            10,
+            11,
+            12
+          ],
+          "matrix_fit_indices": [
+            10,
+            50
+          ]
+        },
+        {
+          "case": "zrs2_gamma",
+          "kinetic_order": 10,
+          "native_raw": {
+            "rms_mev": 0.372075327497604,
+            "max_mev": 1.8823897292197245
+          },
+          "native_paper_aligned": {
+            "rms_mev": 0.372075327497604,
+            "max_mev": 1.8823897292197245
+          },
+          "paper_alignment_shift_mev": 0.0,
+          "validation_bands": 10,
+          "nonlinear_outcome": "optimizer_converged",
+          "nfev": 24,
+          "band_loss_resolved_counts": [
+            10
+          ],
+          "matrix_fit_indices": [
+            5,
+            20,
+            40,
+            55
+          ]
+        }
+      ]
+    }
+  ],
+  "stars": {
+    "mote2_k": {
+      "kinetic_order": 10,
+      "aligned_rms_mev": 0.8177536405744413,
+      "raw_rms_mev": 0.696090217730081
+    },
+    "zrs2_m": {
+      "kinetic_order": 6,
+      "aligned_rms_mev": 0.6369752813502426,
+      "raw_rms_mev": 1.4404843115805617
+    },
+    "zrs2_gamma": {
+      "kinetic_order": 8,
+      "aligned_rms_mev": 0.6184913306471803,
+      "raw_rms_mev": 0.6184913306471803
+    },
+    "aab_ka": {
+      "kinetic_order": 10,
+      "aligned_rms_mev": 0.9843141729814541,
+      "raw_rms_mev": 2.4768298946176164
+    },
+    "aab_kb": {
+      "kinetic_order": 10,
+      "aligned_rms_mev": 1.0661409781115976,
+      "raw_rms_mev": 3.106058364844794
+    },
+    "aab_gamma": {
+      "kinetic_order": 8,
+      "aligned_rms_mev": 0.6450856876696074,
+      "raw_rms_mev": 0.6450856876696074
+    }
+  },
+  "scope": "Uniform30-objective-evaluation nonlinear comparison; extended Gamma continuations are separate"
+}

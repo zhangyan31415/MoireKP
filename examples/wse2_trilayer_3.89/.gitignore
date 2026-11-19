@@ -1,0 +1,5 @@
+/output/
+!/openmx/openmx_nsoc.dat
+!/openmx/openmx_soc.dat
+!/kp/projected_input.npz
+!/kp/source_symmetry.npz

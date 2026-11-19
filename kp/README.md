@@ -54,6 +54,18 @@ The [paper examples](../examples/README.md) provide first-principles inputs and
 commands to regenerate the large H/S arrays, run TAPW, and construct the six
 models. The arrays are generated locally.
 
+For automatically generated terms, `model.max_order.kinetic` sets the degree
+of same-sector, zero-momentum-transfer terms. The onsite term supplies the
+constant. The intralayer order applies only to nonzero transfers. The zero-radius
+shell still counts toward the intralayer shell count, and intersector
+zero-transfer couplings remain available.
+
+With `model.fit.method: linear`, the optional `one_sided_bands` and
+`two_sided_bands` keys set the edge-state windows for the residual acting on
+selected states and for the residual projected within selected states,
+respectively. An omitted count uses `bands`. Each window includes any
+degenerate states at its boundary.
+
 ## Band representations
 
 `kp symm-rep` reads `projection/heff.npy`, `projection/kpoints.npy`, and

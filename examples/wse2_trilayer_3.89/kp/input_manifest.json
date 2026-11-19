@@ -1,0 +1,45 @@
+{
+  "material": "WSe2",
+  "stacking": "alternating trilayer",
+  "twist_angle_deg": 3.89,
+  "q_shell": 6,
+  "q_per_orientation": 27,
+  "physical_layers_per_orientation": [
+    2,
+    1
+  ],
+  "source_input_kind": "81-dimensional WSe2 Heff, unused down-spin compatibility block",
+  "active_dimension": 81,
+  "path_kpoints": 61,
+  "outer_layer_states_per_q": 2,
+  "middle_layer_states_per_q": 1,
+  "efermi_eV": -4.248779335,
+  "analytic_c3_action": "analytic Q permutation in rotated WSe2 reduced basis, common spin phase",
+  "reciprocal_Ainv": [
+    [
+      0.1296663815020165,
+      -0.07486292026458156
+    ],
+    [
+      5.712193686251025e-17,
+      0.14972584052981494
+    ]
+  ],
+  "c3_gamma_covariance_max_eV": 0.004781233605798185,
+  "files_sha256": {
+    "kp/energies_vbm.txt": "69ffbc238ce19e3907828d6162a31c28a6866f02560e60238d1d186a89e62c3d",
+    "kp/kp_K.yaml": "b52433321ed6f9bf207257b1f48028c989a1152745708b7094d0dbd66c4e52ff",
+    "kp/prepare_input.py": "e70398ad8a4a46cca3ce890373953946bcbf47a79950bfb55e304a1e37fa2ce5",
+    "kp/projected_input.npz": "6e81200f4d24f7e2290f3829ddfafc587281d0fa2306ff916e9e47f769d5046f",
+    "kp/source_symmetry.npz": "87382d5a27b34deffbdf7463e4c5b954d6c272e07d7e503f707f88e99b232739",
+    "kp/symmetry_manifest.json": "75c425317741459d863989a6ee9eceffc1ea54d57ad528a499d2e72862d49c0a",
+    "openmx/POSCAR_relaxed": "52b68f8416a116a9be11a7bb74bd9186efb6334898e175e7ec9ebb809874af64",
+    "openmx/POSCAR_rigid": "c18468e9a067528082c223db72e91e24299d7231ea45330f2ca7a96b6194a890",
+    "openmx/POSCAR_rigid_input": "e211f37d447074375dd366b2816146860bb8388d2c8116362896a807785dcfe7",
+    "openmx/openmx_nsoc.dat": "804e3aae8ac819929464194e4f3074dd5f98a360b23fe8a726128d958925af4f",
+    "openmx/openmx_soc.dat": "746141dfa7bb13b0a637f576ebca2e3e407b8de0bcdde58ef38706bcfe55d9f4",
+    "tapw/run_corrected_centers.py": "de8857638ed65e18917a2386b5f2c86b3ba1d600f6bd89d63c71e6b654414c4d",
+    "tapw/tapw_K.yaml": "30bae831fb3bd1ce1b829c8aa63aec58f3719565296cd630aaf4af76a228c34b",
+    "tapw/g_vectors.csv": "3a1e795de91940ec998af63ace8c6a0977142057ac599ed55986fa6e67c8a467"
+  }
+}

@@ -336,6 +336,8 @@ class NormalizedLowEnergyWeightingSpec:
     two_sided_weight: float = 1.0
     degeneracy_atol_ev: float = 1.0e-4
     degeneracy_rtol: float = 0.0
+    one_sided_n_bands: int | None = None
+    two_sided_n_bands: int | None = None
 
     def __post_init__(self) -> None:
         if self.mode != "normalized_low_energy_linear":
@@ -346,6 +348,10 @@ class NormalizedLowEnergyWeightingSpec:
             raise ValueError("normalized low-energy weighting requires a fixed degeneracy-safe window")
         if int(self.n_bands) <= 0:
             raise ValueError("normalized low-energy weighting requires positive n_bands")
+        for name in ("one_sided_n_bands", "two_sided_n_bands"):
+            value = getattr(self, name)
+            if value is not None and (int(value) != value or int(value) <= 0):
+                raise ValueError(f"normalized low-energy {name} must be a positive integer")
         for name in ("one_sided_weight", "two_sided_weight"):
             value = float(getattr(self, name))
             if not np.isfinite(value) or value < 0.0:
@@ -382,6 +388,8 @@ class NormalizedLowEnergyWeighting:
     eigenvectors: np.ndarray = field(repr=False, compare=False)
     selected_mask: np.ndarray = field(repr=False, compare=False)
     selected_counts: tuple[int, ...]
+    one_sided_mask: np.ndarray | None = field(default=None, repr=False, compare=False)
+    two_sided_mask: np.ndarray | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         vectors = np.array(self.eigenvectors, dtype=np.complex128, copy=True, order="C")
@@ -390,6 +398,22 @@ class NormalizedLowEnergyWeighting:
         mask.setflags(write=False)
         object.__setattr__(self, "eigenvectors", vectors)
         object.__setattr__(self, "selected_mask", mask)
+        for name in ("one_sided_mask", "two_sided_mask"):
+            value = getattr(self, name)
+            if value is not None:
+                value = np.array(value, dtype=np.bool_, copy=True)
+                if value.shape != mask.shape:
+                    raise ValueError(f"{name} shape must match the target spectrum")
+                value.setflags(write=False)
+                object.__setattr__(self, name, value)
+
+    @property
+    def one_sided_counts(self) -> tuple[int, ...]:
+        return self.selected_counts if self.one_sided_mask is None else tuple(int(n) for n in self.one_sided_mask.sum(axis=1))
+
+    @property
+    def two_sided_counts(self) -> tuple[int, ...]:
+        return self.selected_counts if self.two_sided_mask is None else tuple(int(n) for n in self.two_sided_mask.sum(axis=1))
 
     @property
     def maximum_weight_by_kpoint(self) -> np.ndarray:
@@ -397,7 +421,15 @@ class NormalizedLowEnergyWeighting:
         return np.full(len(self.selected_counts), total, dtype=np.float64)
 
     def artifact(self) -> dict[str, Any]:
-        return self.spec.artifact(resolved_band_counts=self.selected_counts)
+        result = self.spec.artifact(resolved_band_counts=self.selected_counts)
+        if self.spec.one_sided_n_bands is not None or self.spec.two_sided_n_bands is not None:
+            result.update(
+                one_sided_requested_bands=int(self.spec.one_sided_n_bands or self.spec.n_bands),
+                two_sided_requested_bands=int(self.spec.two_sided_n_bands or self.spec.n_bands),
+                one_sided_resolved_band_counts=list(self.one_sided_counts),
+                two_sided_resolved_band_counts=list(self.two_sided_counts),
+            )
+        return result
 
 
 @dataclass(frozen=True)
@@ -597,11 +629,27 @@ def build_normalized_low_energy_weighting(
             selected_mask[k_index, dim - count :] = True
         else:
             selected_mask[k_index, :count] = True
+    separate_masks = {}
+    for family in ("one_sided", "two_sided"):
+        requested = getattr(policy, family + "_n_bands")
+        if requested is None:
+            separate_masks[family + "_mask"] = None
+            continue
+        family_mask = np.zeros_like(selected_mask)
+        family_policy = replace(policy, n_bands=int(requested))
+        for k_index, values in enumerate(eigenvalues):
+            count = _target_spectral_window_count(values, family_policy)
+            if policy.band_edge == "top":
+                family_mask[k_index, dim-count:] = True
+            else:
+                family_mask[k_index, :count] = True
+        separate_masks[family + "_mask"] = family_mask
     return NormalizedLowEnergyWeighting(
         spec=policy,
         eigenvectors=eigenvectors,
         selected_mask=selected_mask,
         selected_counts=tuple(selected_counts),
+        **separate_masks,
     )
 
 
@@ -3525,6 +3573,11 @@ class CompiledResponseBasis:
                 dtype=np.complex128,
             )
             if one_sided_weight > 0.0:
+                mask = getattr(weighting, "one_sided_mask", None)
+                if mask is not None:
+                    selected = np.flatnonzero(mask[k_index])
+                    n_bands = len(selected)
+                    vectors = weighting.eigenvectors[k_index][:, selected]
                 scale = float(np.sqrt(one_sided_weight / (dim * n_bands)))
                 target_times_vectors = target[k_index] @ vectors
                 for row in active_rows:
@@ -3534,6 +3587,10 @@ class CompiledResponseBasis:
                     design_parts.append(scale * row_design)
                     target_parts.append(scale * target_times_vectors[int(row), :])
             if two_sided_weight > 0.0:
+                mask = getattr(weighting, "two_sided_mask", None)
+                selected = np.flatnonzero(weighting.selected_mask[k_index] if mask is None else mask[k_index])
+                n_bands = len(selected)
+                vectors = weighting.eigenvectors[k_index][:, selected]
                 scale = float(np.sqrt(two_sided_weight) / n_bands)
                 left = np.conjugate(vectors[support_rows, :])
                 right = vectors[support_cols, :]
@@ -3623,17 +3680,15 @@ class CompiledResponseBasis:
             # bound.  Using ``1 + w1 + w2`` here would ignore the public
             # dimension normalization and overstate the fit-design error by as
             # much as ``dim`` (76 for the MgI2 Gamma release case).
-            selected_counts = np.asarray(
-                prepared_normalized_weighting.selected_counts,
-                dtype=np.float64,
-            )
+            one_sided_counts = np.asarray(prepared_normalized_weighting.one_sided_counts, dtype=np.float64)
+            two_sided_counts = np.asarray(prepared_normalized_weighting.two_sided_counts, dtype=np.float64)
             dimension = float(self.dim)
             maximum_weight_by_kpoint = (
                 np.full(points.shape[0], 1.0 / dimension**2, dtype=np.float64)
                 + float(prepared_normalized_weighting.spec.one_sided_weight)
-                / (dimension * selected_counts)
+                / (dimension * one_sided_counts)
                 + float(prepared_normalized_weighting.spec.two_sided_weight)
-                / selected_counts**2
+                / two_sided_counts**2
             )
         elif spectral_weighting is not None and not equal_weighting_requested:
             prepared_weighting = build_target_spectral_weighting(target, spectral_weighting)

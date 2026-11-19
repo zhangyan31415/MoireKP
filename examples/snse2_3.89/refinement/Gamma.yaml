@@ -1,0 +1,24 @@
+input: input.npz
+fit:
+  kpoints:
+  - 0
+  - 2
+  - 5
+  - 10
+  - 12
+  - 14
+  - 15
+  - 20
+  - 22
+  - 24
+  - 25
+  - 27
+  - 29
+  one_sided_weight: 10
+  two_sided_weight: 20
+  band_loss_weight: 100
+  max_steps: 300
+  fit_states: 8
+  energy_bands: 8
+  smoothing_eV: 0.0005
+  projector_weight_eV2: 0.001

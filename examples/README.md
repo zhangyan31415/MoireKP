@@ -15,3 +15,8 @@ subsequent results are generated locally.
 An additional [zero-twist hBN / bilayer graphene example](graphene_hbn/r2g_zero_twist/README.md)
 reproduces an archived orthogonal Slater–Koster TAPW band calculation, retaining
 both materials explicitly.
+
+## Additional models and validation
+
+- [Nine additional valley models at 2.13° and 3.89°](additional_models/README.md)
+- [Kinetic-order comparison and figure reproduction](kinetic_order_validation/README.md)

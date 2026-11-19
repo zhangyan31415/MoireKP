@@ -1,0 +1,33 @@
+schema_version = "moirekp-physical-v1"
+model_name = "model_spin_up_projected"
+energy_unit = "eV"
+momentum_unit = "1/angstrom"
+
+[polynomial]
+complex_coordinate = "z_Q=(kx-Qx)+i*(ky-Qy)"
+maximum_order = 10
+
+[q_lattice]
+b1 = [0.07664116487029221, 0.0]
+b2 = [0.03832058243514612, 0.06637319575330454]
+offset_gauge = "explicit_sector_offsets_v1"
+
+[[sectors]]
+id = "L1"
+qset = "qset1"
+q_offset = [0.03832058243514612, -0.02212439858443487]
+number_of_orbitals = 1
+
+[[sectors]]
+id = "L2"
+qset = "qset2"
+q_offset = [0.03832058243514613, 0.02212439858443485]
+number_of_orbitals = 1
+
+[validation]
+lattice_tolerance = 1e-08
+
+[runtime]
+canonical_evaluator = "equation_17_integer_routes"
+terms_file = "terms.csv"
+default_q_points_file = "q_points.csv"
