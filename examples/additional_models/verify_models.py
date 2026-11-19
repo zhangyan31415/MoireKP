@@ -1,4 +1,4 @@
-"""Verify the nine exported models against their archived TAPW band windows."""
+"""Verify the exported models against their archived TAPW band windows."""
 import argparse
 import hashlib
 import importlib.util
@@ -29,7 +29,11 @@ def verify(entry):
             rows = reference["evaluation_rows"]
             edge = str(reference["band_edge"])
         authority = folder / "model_data.npz"
-        if authority.is_file():
+        if entry.get("export_format") == "fixed_angle_gamma":
+            authority = folder / "COEFFICIENTS.npz"
+            with np.load(folder / "MATERIAL_CONTROLS.npz", allow_pickle=False) as archive:
+                count = archive["controls"].size
+        elif authority.is_file():
             with np.load(authority, allow_pickle=False) as archive:
                 count = archive["fitted_coefficients"].size
         else:

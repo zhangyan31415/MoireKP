@@ -1,0 +1,17 @@
+{
+  "case": "cai2_ab_3.89",
+  "valley": "M1",
+  "dimension": 72,
+  "coefficients": 932,
+  "band_count": 6,
+  "eval_points": 20,
+  "rms_meV": 0.03238301523923735,
+  "max_meV": 0.0630967041450603,
+  "export_sha256": "077865f23bfd8e5a6fd5b43583c307fed0672fa2509063f07b15cfd9a4318742",
+  "polynomial_orders": {
+    "kinetic": 6,
+    "intralayer": 5,
+    "interlayer": 5
+  },
+  "reference_energy_eV": -2.749209660355
+}

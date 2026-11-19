@@ -151,5 +151,67 @@
       "interlayer": 5
     },
     "reference_energy_eV": -4.69970923355
+  },
+  {
+    "case": "cai2_ab_3.89",
+    "valley": "Gamma",
+    "dimension": 222,
+    "coefficients": 20,
+    "band_count": 6,
+    "eval_points": 45,
+    "rms_meV": 0.2723496036139731,
+    "max_meV": 0.6343202151334673,
+    "export_format": "fixed_angle_gamma",
+    "export_sha256": "b4b8a81d716d229d7b0cb9bd8eca1aa8c993bff4ed754642c2578eb183476a43",
+    "minimum_sampled_six_band_overlap_squared": 0.963618042065231,
+    "minimum_sampled_pair_overlap_squared": 0.9733318821273027
+  },
+  {
+    "case": "cai2_ab_3.89",
+    "valley": "M1",
+    "dimension": 72,
+    "coefficients": 932,
+    "band_count": 6,
+    "eval_points": 20,
+    "rms_meV": 0.03238301523923735,
+    "max_meV": 0.0630967041450603,
+    "export_sha256": "077865f23bfd8e5a6fd5b43583c307fed0672fa2509063f07b15cfd9a4318742",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 5,
+      "interlayer": 5
+    },
+    "reference_energy_eV": -2.749209660355
+  },
+  {
+    "case": "cai2_ab_2.28",
+    "valley": "Gamma",
+    "dimension": 330,
+    "coefficients": 20,
+    "band_count": 6,
+    "eval_points": 45,
+    "rms_meV": 0.25511179834234715,
+    "max_meV": 0.8028321095354691,
+    "export_format": "fixed_angle_gamma",
+    "export_sha256": "f976ea1fe1943c78a3bee4b62f1e6628e2c4f21e0d59adab6ad27f9c1242a73f",
+    "minimum_sampled_six_band_overlap_squared": 0.9196673558540466,
+    "minimum_sampled_pair_overlap_squared": 0.4725246590810545
+  },
+  {
+    "case": "cai2_ab_2.28",
+    "valley": "M1",
+    "dimension": 96,
+    "coefficients": 937,
+    "band_count": 6,
+    "eval_points": 20,
+    "rms_meV": 0.6165369430342623,
+    "max_meV": 1.2652288461514338,
+    "export_sha256": "f3c664b8d3af313d2c9dfb20aee8ab9002c95e84c07928728fbff4f9496ba019",
+    "polynomial_orders": {
+      "kinetic": 6,
+      "intralayer": 5,
+      "interlayer": 5
+    },
+    "reference_energy_eV": -2.7681962653183336
   }
 ]

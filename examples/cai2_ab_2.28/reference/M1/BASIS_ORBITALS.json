@@ -1,0 +1,141 @@
+{
+  "id": "CaI2_AB_14_2.28_M1_h2_5",
+  "material": "CaI2",
+  "valley": "M1",
+  "angle_deg": 2.2810596,
+  "construction_stage": "exported_model",
+  "fit_quality_status": "reported",
+  "atoms": 3786,
+  "spin_convention": "all",
+  "q_shell": 8,
+  "q_count_per_source_group": 24,
+  "retained_internal_states_per_Q": 4,
+  "retained_group_ranks": [
+    2,
+    2
+  ],
+  "continuum_dimension": 96,
+  "native_TAPW_dimension": 6336,
+  "scalar_AOs_per_layer_per_Q": 66,
+  "realspace_spinful_AO_dimension": 166584,
+  "basis_kind": "explicit_layer",
+  "basis_description": "selected local Bloch states per physical layer, including retained spin components",
+  "joint_local_bands_zero_based": null,
+  "reference_k_index": 0,
+  "reference_Q_index": 0,
+  "reference_k_label": "moire Gamma",
+  "stored_g_vector_L1": [
+    0.39003444272516885,
+    0.6755594715114346
+  ],
+  "stored_g_vector_L2": [
+    0.39003444272516885,
+    0.6755594715114346
+  ],
+  "ao_weights": {
+    "Ca_dz2": 0.19479333757766604,
+    "Ca_dyz": 0.14809507366709568,
+    "Ca_dxy": 0.14747883961718286,
+    "I_dxy": 0.1353161346254044,
+    "I_dz2": 0.10262111462838058,
+    "Ca_dxz": 0.049643100963179664,
+    "Ca_dx2-y2": 0.04937568974155669,
+    "I_dx2-y2": 0.04529960266084837,
+    "I_pz": 0.044896858262393396,
+    "Ca_s": 0.028643445649984157,
+    "I_dyz": 0.024894674208251366,
+    "I_dxz": 0.008332989718698973,
+    "I_py": 0.007370294149374078,
+    "I_s": 0.0057180511931727886,
+    "I_px": 0.002761917897106274,
+    "I_f5z2": 0.0016213443952046692,
+    "I_fxyz": 0.0013833900301103833,
+    "I_f5yz2": 0.0006496062451493423,
+    "I_fzx2": 0.00046389109241548067,
+    "I_fx3": 0.00033198137012078305,
+    "I_f5xz2": 0.00022002300771931918,
+    "Ca_py": 3.042022207049756e-05,
+    "Ca_pz": 2.6579164837914332e-05,
+    "Ca_px": 2.12958054721894e-05,
+    "I_f3yx2": 1.0344106604691113e-05
+  },
+  "physical_layer_weights_in_reference_space": {
+    "L1": 0.5,
+    "L2": 0.5
+  },
+  "layers": [
+    {
+      "layer": 1,
+      "selected_local_bands_zero_based": [
+        24,
+        25
+      ],
+      "selected_states": 2,
+      "ao_weights": {
+        "Ca_dz2": 0.19479334884065053,
+        "Ca_dxy": 0.15412193202267793,
+        "Ca_dyz": 0.14463900964922174,
+        "I_dxy": 0.1413847179621714,
+        "I_dz2": 0.10262111523620437,
+        "Ca_dxz": 0.053099157194028454,
+        "I_pz": 0.04489685639053052,
+        "Ca_dx2-y2": 0.04273260497428642,
+        "I_dx2-y2": 0.03923100575614437,
+        "Ca_s": 0.028643454133844868,
+        "I_dyz": 0.024293450339992365,
+        "I_dxz": 0.008934201241650152,
+        "I_py": 0.0072613313827429695,
+        "I_s": 0.005718051969640764,
+        "I_px": 0.002870883542216492,
+        "I_f5z2": 0.0016213447996456633,
+        "I_fxyz": 0.00144689047793786,
+        "I_f5yz2": 0.0006325428166943703,
+        "I_fzx2": 0.0004003915740228189,
+        "I_fx3": 0.00033198139770668184,
+        "I_f5xz2": 0.00023708689730290804,
+        "Ca_py": 3.9168060449628e-05,
+        "Ca_pz": 2.6580147334437862e-05,
+        "Ca_px": 1.2549087058426394e-05,
+        "I_f3yx2": 1.0344105844777483e-05
+      }
+    },
+    {
+      "layer": 2,
+      "selected_local_bands_zero_based": [
+        24,
+        25
+      ],
+      "selected_states": 2,
+      "ao_weights": {
+        "Ca_dz2": 0.19479332631468158,
+        "Ca_dyz": 0.15155113768496964,
+        "Ca_dxy": 0.1408357472116878,
+        "I_dxy": 0.1292475512886374,
+        "I_dz2": 0.10262111402055679,
+        "Ca_dx2-y2": 0.05601877450882696,
+        "I_dx2-y2": 0.051368199565552365,
+        "Ca_dxz": 0.04618704473233087,
+        "I_pz": 0.04489686013425627,
+        "Ca_s": 0.028643437166123446,
+        "I_dyz": 0.02549589807651037,
+        "I_dxz": 0.007731778195747792,
+        "I_py": 0.007479256916005186,
+        "I_s": 0.005718050416704814,
+        "I_px": 0.002652952251996056,
+        "I_f5z2": 0.0016213439907636752,
+        "I_fxyz": 0.0013198895822829067,
+        "I_f5yz2": 0.0006666696736043142,
+        "I_fzx2": 0.0005273906108081424,
+        "I_fx3": 0.00033198134253488426,
+        "I_f5xz2": 0.00020295911813573032,
+        "Ca_px": 3.004252388595241e-05,
+        "Ca_pz": 2.65781823413908e-05,
+        "Ca_py": 2.1672383691367126e-05,
+        "I_f3yx2": 1.0344107364604743e-05
+      }
+    }
+  ],
+  "projected_L1_weight_eigenvalues": null,
+  "weight_definition": "Mean squared AO amplitude over the complete retained local reference subspace in the orthogonalized TAPW basis; radial channels and equivalent species sites summed.",
+  "limits": "AO character is evaluated at one declared k/Q reference, not a whole-BZ orbital average. Effective states are hybridized, not pure atomic orbitals."
+}

@@ -1,0 +1,54 @@
+{
+  "material": "CaI2",
+  "stacking": "AB",
+  "valley": "Gamma",
+  "angle_law": "fixed_angle",
+  "angle_domain_deg": [
+    3.8902381690076835,
+    3.8902381690076835
+  ],
+  "angle_deg": 3.8902381690076835,
+  "nominal_export_max_angle_deg": 3.8902381690076835,
+  "case": "8_3.89",
+  "real_couplings": 20,
+  "independent_coefficients": 20,
+  "source_Q_shell": 6,
+  "dimension": 222,
+  "internal_components": 6,
+  "train_k": [
+    0,
+    5,
+    8,
+    12,
+    15,
+    20,
+    25,
+    28,
+    32,
+    35,
+    40,
+    45,
+    48,
+    52,
+    55
+  ],
+  "train_wave_indices": [
+    0,
+    15,
+    20,
+    35,
+    40,
+    55
+  ],
+  "held_wave_indices": [
+    7,
+    10,
+    27,
+    30,
+    47,
+    50
+  ],
+  "initialization": "archived joint model evaluated at this angle",
+  "band_units": "electron eV relative to the model Gamma VBM",
+  "momentum_units": "Cartesian inverse angstrom"
+}

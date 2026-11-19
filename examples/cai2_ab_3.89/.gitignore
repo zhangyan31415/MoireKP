@@ -1,0 +1,14 @@
+/output/
+/openmx/DFT_DATA19
+/openmx/openmx_rst/
+/openmx/prepared/
+/openmx/*.out
+/openmx/*.scfout
+/openmx/*.log
+/openmx/*.dat#
+/openmx/*.xyz
+/openmx/*.cif
+/openmx/*.ene
+/openmx/*.md
+/openmx/*.md2
+/openmx/time

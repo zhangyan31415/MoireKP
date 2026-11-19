@@ -1,6 +1,6 @@
 # Additional moiré continuum models
 
-[Band comparisons for the nine models](band_comparisons.pdf) · [Model and error data](models.json)
+[Band comparisons in Fig. R1](band_comparisons.pdf) · [Model and error data](models.json)
 
 | Structure | Twist | Valley | Dimension | Coefficients | RMS (meV) |
 | --- | ---: | --- | ---: | ---: | ---: |
@@ -13,6 +13,10 @@
 | [Alternating trilayer MoTe₂](../mote2_trilayer_3.89/README.md) | 3.89° | K₁ | 81 | 740 | 0.457 |
 | [AA bilayer SnSe₂](../snse2_3.89/README.md) | 3.89° | Γ | 148 | 941 | 0.742 |
 | [AA bilayer SnSe₂](../snse2_3.89/README.md) | 3.89° | M₁ | 88 | 770 | 0.707 |
+| [AB bilayer CaI₂](../cai2_ab_3.89/README.md) | 3.89° | Γ | 222 | 20 | 0.272 |
+| [AB bilayer CaI₂](../cai2_ab_3.89/README.md) | 3.89° | M₁ | 72 | 932 | 0.032 |
+| [AB bilayer CaI₂](../cai2_ab_2.28/README.md) | 2.28° | Γ | 330 | 20 | 0.255 |
+| [AB bilayer CaI₂](../cai2_ab_2.28/README.md) | 2.28° | M₁ | 96 | 937 | 0.617 |
 
 Each example describes its structural inputs, TAPW and KP configuration, and
 the steps available for regenerating the model from those inputs.

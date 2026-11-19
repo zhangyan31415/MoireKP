@@ -1,0 +1,14 @@
+{
+  "case": "cai2_ab_3.89",
+  "valley": "Gamma",
+  "dimension": 222,
+  "coefficients": 20,
+  "band_count": 6,
+  "eval_points": 45,
+  "rms_meV": 0.2723496036139731,
+  "max_meV": 0.6343202151334673,
+  "export_format": "fixed_angle_gamma",
+  "export_sha256": "b4b8a81d716d229d7b0cb9bd8eca1aa8c993bff4ed754642c2578eb183476a43",
+  "minimum_sampled_six_band_overlap_squared": 0.963618042065231,
+  "minimum_sampled_pair_overlap_squared": 0.9733318821273027
+}

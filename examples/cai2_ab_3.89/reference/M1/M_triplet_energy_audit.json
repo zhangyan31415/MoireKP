@@ -1,0 +1,21 @@
+{
+  "method": "C3 rotations of the M1 model, including the momentum rotation",
+  "common_M1_alignment_shift_eV": -1.9405595574895074e-07,
+  "comparison": [
+    {
+      "valley": "M1",
+      "rms_meV": 0.03353402357331498,
+      "max_meV": 0.08303936880027507
+    },
+    {
+      "valley": "M2",
+      "rms_meV": 0.028525125016657465,
+      "max_meV": 0.08532693881413422
+    },
+    {
+      "valley": "M3",
+      "rms_meV": 0.029733622416500228,
+      "max_meV": 0.06772388405895668
+    }
+  ]
+}
