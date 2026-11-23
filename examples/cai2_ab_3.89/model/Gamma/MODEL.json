@@ -15,31 +15,6 @@
   "source_Q_shell": 6,
   "dimension": 222,
   "internal_components": 6,
-  "train_k": [
-    0,
-    5,
-    8,
-    12,
-    15,
-    20,
-    25,
-    28,
-    32,
-    35,
-    40,
-    45,
-    48,
-    52,
-    55
-  ],
-  "train_wave_indices": [
-    0,
-    15,
-    20,
-    35,
-    40,
-    55
-  ],
   "held_wave_indices": [
     7,
     10,

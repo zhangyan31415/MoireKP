@@ -1,5 +1,10 @@
 # AB bilayer CaI2 at 3.89 degrees
 
+| Valley | TAPW configuration | Model configuration | Model and validation data |
+|---|---|---|---|
+| Gamma | [tapw_Gamma.yaml](tapw/tapw_Gamma.yaml) | [kp_Gamma.yaml](kp/kp_Gamma.yaml) | [model/Gamma/](model/Gamma/) |
+| M1 | [tapw_M1.yaml](tapw/tapw_M1.yaml) | [kp_M1.yaml](kp/kp_M1.yaml) | [model/M1/](model/M1/) |
+
 The M1 conduction model uses a 1302-atom fixed-cell MLFF structure with
 the ST OpenMX/SOC basis. Each layer retains one Kramers pair, giving dimension
 72 with TAPW Q shell 6. The 932 real coefficients
@@ -15,15 +20,15 @@ The [fixed-angle Gamma model](model/Gamma/) retains six molecular spinors per
 Q vector. Its **20 real coefficients** were refined at this angle on its own
 TAPW training data. Its six-band RMS and maximum errors on 45 held-out
 path points are **0.272 meV** and **0.634 meV**.
-The [Gamma model configuration](model/Gamma/MODEL.json) lists the training
+The [Gamma fit configuration](kp/kp_Gamma.yaml) lists the training
 momenta. The model directory also contains the fixed basis, operator
 templates, and sampled wave-function overlaps.
 
 ### Refit the 20 Gamma coefficients
 
 The 3.89° Γ entry of Fig. R1 is a fixed-angle, nonlinear molecular model.
-Its [model settings](model/Gamma/MODEL.json), [fixed operators](model/Gamma/FIXED_OPERATOR_TEMPLATES.npz)
-and [training input](kp/input_Gamma.npz) reproduce the fit from the actual pre-refinement seed.
+Its [fit settings](kp/kp_Gamma.yaml), [fixed operators](model/Gamma/FIXED_OPERATOR_TEMPLATES.npz)
+and [training input](kp/input_Gamma.zip) reproduce the fit from the actual pre-refinement seed.
 The archive contains eight TAPW target energies at 61 momenta (relative to the Γ valence edge),
 six TAPW-to-molecular overlap matrices at the wave-function training points,
 and the 20 initial real controls. Fifteen distinct momenta enter the energy loss.
@@ -31,8 +36,9 @@ The highest six bands are the R1 validation window. From the repository root:
 
 ```bash
 CASE=examples/cai2_ab_3.89
+unzip -n "$CASE/kp/input_Gamma.zip" -d "$CASE"
 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
-  python "$CASE/kp/refine_Gamma.py" --workers 1 --output "$CASE/output/refitted_Gamma"
+  python "$CASE/kp/refine_Gamma.py" "$CASE/kp/kp_Gamma.yaml" --workers 1 --output "$CASE/output/refitted_Gamma"
 ```
 
 The output directory must be new. The script requires NumPy and SciPy and writes
@@ -48,19 +54,19 @@ the checkout root:
 python examples/additional_models/verify_models.py --case cai2_ab_3.89
 ```
 
-[Stored TAPW bands, continuum spectra, and rotation audit](reference/M1/)
+[M-valley spectra, orbital weights, and rotation audit](reference/M1/)
 include the M2 and M3 spectra after rotating the local wavevector of M1 by
 the corresponding C3 operation. The three valleys use one common energy shift.
 
 ## Reproduce the M1 coefficient extraction
 
-The [projected input archive](kp/projected_input_M1.zip) contains the saved
+The [projected input archive](kp/input_M1.zip) contains the saved
 effective Hamiltonian, certified projection and symmetry artifacts, Q vectors,
 and small native reference tables. Unpack it into a fresh case directory.
 
 ```bash
 CASE=examples/cai2_ab_3.89
-unzip -n "$CASE/kp/projected_input_M1.zip" -d "$CASE"
+unzip -n "$CASE/kp/input_M1.zip" -d "$CASE"
 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
   kp model -c "$CASE/kp/kp_M1.yaml"
 ```
@@ -143,7 +149,7 @@ To regenerate the training targets using the original molecular frame:
 
 ```bash
 python "$CASE/kp/prepare_gamma_targets.py" "$CASE/output/tapw/Gamma/q06/band" "$CASE/output/targets_Gamma.npz"
-python "$CASE/kp/refine_Gamma.py" --input "$CASE/output/targets_Gamma.npz" --output "$CASE/output/refitted_from_TAPW"
+python "$CASE/kp/refine_Gamma.py" "$CASE/kp/kp_Gamma.yaml" --input "$CASE/output/targets_Gamma.npz" --output "$CASE/output/refitted_from_TAPW"
 ```
 
 ## 61-point TAPW validation
@@ -155,4 +161,4 @@ The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A
 | Gamma | 0.269 | 0.634 |
 | M1 | 0.034 | 0.083 |
 
-The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case cai2_ab_3.89` from the repository root to replay the archived comparisons.
+The `model/` directories contain the corresponding `reference_bands.npz` validation archives. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case cai2_ab_3.89` from the repository root to replay the archived comparisons.

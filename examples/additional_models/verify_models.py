@@ -14,13 +14,13 @@ EXAMPLES = ROOT.parent
 
 
 def verify_overlaps(folder, selected_bands, selected_tapw, selected_model, report):
-    archive = folder / "native_overlaps.npz"
+    archive = folder / "reference_bands.npz"
     with np.load(archive, allow_pickle=False) as data:
-        model = data["model_eV"]
-        native = data["tapw_eV"]
+        model = data["matching_model_eV"]
+        native = data["matching_tapw_eV"]
         overlaps = data["overlap_matrix"]
         matching = data["matching_native_indices"]
-        expected = data["overlap_squared"]
+        expected = data["matching_overlap_squared"]
         tolerance = float(data["cluster_threshold_eV"])
     assert len(model) == len(native) == len(overlaps) == 61
     np.testing.assert_allclose(native[:, selected_bands], selected_tapw, atol=1e-8, rtol=0)
@@ -48,7 +48,7 @@ def verify_overlaps(folder, selected_bands, selected_tapw, selected_model, repor
         np.testing.assert_allclose(reconstructed, saved, atol=1e-7, rtol=0)
 
 
-def verify(entry, report):
+def verify(entry):
     folder = EXAMPLES / entry["case"] / "model" / entry["valley"]
     evaluator = folder / "evaluate.py"
     sys.path.insert(0, str(folder))
@@ -63,6 +63,8 @@ def verify(entry, report):
             shift = reference["model_shift_eV"]
             rows = reference["evaluation_rows"]
             edge = str(reference["band_edge"])
+            frozen = (reference["validation_eigvals_eV"] if "validation_eigvals_eV" in reference
+                      else np.load(folder / "eigvals.npy", allow_pickle=False))
         authority = folder / "model_data.npz"
         if entry.get("export_format") == "fixed_angle_gamma":
             authority = folder / "COEFFICIENTS.npz"
@@ -82,9 +84,6 @@ def verify(entry, report):
     assert energies.shape == (len(kpoints), entry["dimension"])
     assert np.isfinite(energies).all()
     assert tapw.shape[1] == entry["band_count"]
-    frozen = np.load(
-        folder / entry.get("validation_eigvals_file", "eigvals.npy"), allow_pickle=False
-    )
     np.testing.assert_allclose(energies, frozen, atol=1e-8, rtol=0)
     n = entry["band_count"]
     selected = energies[:, -n:] if edge == "valence" else energies[:, :n]
@@ -92,12 +91,9 @@ def verify(entry, report):
     rms, maximum = np.sqrt(np.mean(errors**2)), np.max(np.abs(errors))
     np.testing.assert_allclose([rms, maximum], [entry["rms_meV"], entry["max_meV"]],
                                atol=1e-6, rtol=0)
-    if report is not None:
-        assert report["coefficients_sha256"] == entry["export_sha256"]
-        np.testing.assert_allclose([rms, maximum], [report["rms_meV"], report["max_meV"]],
-                                   atol=1e-6, rtol=0)
+    if "embedding_kind" in entry:
         window = slice(-n, None) if edge == "valence" else slice(0, n)
-        verify_overlaps(folder, window, tapw, selected + shift, report)
+        verify_overlaps(folder, window, tapw, selected + shift, entry)
     print(f"{entry['case']}/{entry['valley']}: RMS {rms:.3f} meV, max {maximum:.3f} meV")
 
 
@@ -109,10 +105,8 @@ def main():
     selected = [entry for entry in entries if args.case is None or entry["case"] == args.case]
     if not selected:
         parser.error(f"unknown case: {args.case}")
-    reports = {r["model"]: r for r in json.loads((ROOT / "validation61.json").read_text())}
-    assert len(reports) == 12 and reports.keys() <= {f"{e['case']}/{e['valley']}" for e in entries}
     for entry in selected:
-        verify(entry, reports.get(f"{entry['case']}/{entry['valley']}"))
+        verify(entry)
 
 
 if __name__ == "__main__":

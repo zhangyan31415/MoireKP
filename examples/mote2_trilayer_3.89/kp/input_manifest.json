@@ -27,18 +27,14 @@
   ],
   "c3_gamma_covariance_max_eV": 1.5169905573401972e-06,
   "files_sha256": {
-    "kp/energies_vbm.txt": "eea5d9374b6b2e2e4937493d777bb1d53abb1ce367bfc0fe4e10adb20e69aed7",
-    "kp/kp_K.yaml": "83d0610a7fb312f7417c8d254c018e08bc5b0bde1c114aa6a6deb361952cd179",
-    "kp/prepare_input.py": "e70398ad8a4a46cca3ce890373953946bcbf47a79950bfb55e304a1e37fa2ce5",
-    "kp/projected_input.npz": "c60f54ec7151639bc4c9d83aa414fcd0d6c2d8bfe95c9337edf8abfc1e787a22",
-    "kp/source_symmetry.npz": "87382d5a27b34deffbdf7463e4c5b954d6c272e07d7e503f707f88e99b232739",
-    "kp/symmetry_manifest.json": "75c425317741459d863989a6ee9eceffc1ea54d57ad528a499d2e72862d49c0a",
     "openmx/POSCAR_relaxed": "ee5917ce2efcdfa2431411edfeae946de2511e863b9ac4d4eee87c1041d120ba",
     "openmx/POSCAR_rigid": "95876a92fbe1161501ccecb6c616411617cba8a86f285dd93c2ed4d156cd10f6",
     "openmx/openmx_nsoc.dat": "ccfcb39afd10e8b3bd5db8234fc6b1ec162b3b8bc96510a7b1631d2e802b8f5b",
     "openmx/openmx_soc.dat": "a2e632f269344dd2c3aff2fe383a95404659b625c383c61e87917ca149cde1dd",
     "tapw/run_corrected_centers.py": "de8857638ed65e18917a2386b5f2c86b3ba1d600f6bd89d63c71e6b654414c4d",
-    "tapw/tapw_K.yaml": "4dc68a14d5db7e218877f455e1b64dc124109759149f969bd6df56f7a002de0e",
-    "tapw/g_vectors.csv": "47223f6f658d8e2ad931fc709ef84a40cbb894209d593287093b8add94cdfe74"
+    "tapw/g_vectors.csv": "47223f6f658d8e2ad931fc709ef84a40cbb894209d593287093b8add94cdfe74",
+    "kp/input_K1.zip": "38b1ac9d4a55d4cd1b6972b2fcd2dc3492234f09709ca40eef2e21284f90a4c4",
+    "kp/kp_K1.yaml": "83d0610a7fb312f7417c8d254c018e08bc5b0bde1c114aa6a6deb361952cd179",
+    "tapw/tapw_K1.yaml": "4dc68a14d5db7e218877f455e1b64dc124109759149f969bd6df56f7a002de0e"
   }
 }

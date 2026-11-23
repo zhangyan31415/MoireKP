@@ -19,12 +19,17 @@
 
 The table lists the twelve models in Fig. R1. A separate [alternating MoTe₂ trilayer example](../mote2_trilayer_3.89/README.md) is also available.
 
-The first path count is the grid on which the original Hamiltonians were constructed. Coefficient extraction can use a subset of those momenta. The second is the grid used for reporting, including any points shared with construction. All reported energies and overlaps use the 61 actual TAPW samples. For the six 31-point construction grids, the original points occupy the even rows of the 61-point path. `eigvals.npy` preserves the construction-grid spectrum; `reference_bands.npz` and `native_overlaps.npz` contain the R1 comparison.
+The first path count is the grid on which the original Hamiltonians were constructed. Coefficient extraction can use a subset of those momenta. The second is the grid used for reporting, including any points shared with construction. All reported energies and overlaps use the 61 actual TAPW samples. For the six 31-point construction grids, the original points occupy the even rows of the 61-point path. `eigvals.npy` preserves the construction-grid spectrum; `reference_bands.npz` contains the R1 comparison.
 
 CaI₂ Γ inputs: [3.89° fitting data and script](../cai2_ab_3.89/kp/) · [2.28° input archive and KP configuration](../cai2_ab_2.28/kp/).
 
-Each example describes its structural inputs, TAPW and KP configuration, and
-the steps available for regenerating the model from those inputs.
+Each structure uses the same layout:
+- `openmx/`: relaxed and rigid structures and the NSOC/SOC inputs.
+- `tapw/tapw_<valley>.yaml`: TAPW inputs and construction grid.
+- `kp/kp_<valley>.yaml`: model settings. Each bundled input is named `kp/input_<valley>.zip`. Unpack it into the example directory before running the commands in its README.
+- `model/<valley>/`: coefficients, evaluator, and one `reference_bands.npz` validation archive.
+
+Use the material README for the commands that consume each input. The CaI₂ 3.89° Γ YAML is read by its fixed-angle refinement driver. SnSe₂ Γ additionally uses `kp/refine_Gamma.yaml` after its linear reference stage.
 The coefficients and NumPy evaluator under each `model/` directory can be used
 directly from a checkout. The stored band validation can be replayed with
 NumPy from the repository root:
@@ -39,4 +44,4 @@ model, and the path indices used in the error calculation. The evaluator
 recomputes the full continuum spectrum, and the verifier compares the
 selected bands and reproduces the table from the stored arrays.
 
-The twelve models in Fig. R1 use the full 61-point Gamma–M–K–Gamma path. Each model edge is aligned to its TAPW edge at Gamma. The [61-point validation summary](validation61.json) records the errors and coefficient checksums. Each model directory includes `native_overlaps.npz`, containing TAPW-to-model overlap matrices, the fixed band assignments, and the 3 meV cluster-averaged overlaps used for coloring. The NumPy verifier replays both the energies and these overlaps. The three cases using an orthonormalized resolvent embedding are the WSe₂ trilayer and the two CaI₂ Γ models. The other nine use the direct retained-state embedding.
+The twelve models in Fig. R1 use the full 61-point Gamma–M–K–Gamma path. Each model edge is aligned to its TAPW edge at Gamma. The [model index](models.json) records the errors and coefficient checksums. Each R1 validation archive also contains TAPW-to-model overlap matrices, the fixed band assignments, and the 3 meV cluster-averaged overlaps used for coloring. The NumPy verifier replays both the energies and these overlaps. The three cases using an orthonormalized resolvent embedding are the WSe₂ trilayer and the two CaI₂ Γ models. The other nine use the direct retained-state embedding.

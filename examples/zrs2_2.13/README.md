@@ -1,5 +1,10 @@
 # AB bilayer ZrS2 at 2.13°
 
+| Valley | TAPW configuration | Model configuration | Model and validation data |
+|---|---|---|---|
+| Gamma | [tapw_Gamma.yaml](tapw/tapw_Gamma.yaml) | [kp_Gamma.yaml](kp/kp_Gamma.yaml) | [model/Gamma/](model/Gamma/) |
+| M1 | [tapw_M1.yaml](tapw/tapw_M1.yaml) | [kp_M1.yaml](kp/kp_M1.yaml) | [model/M1/](model/M1/) |
+
 The 4,326-atom OpenMX supercell uses the Zr7.0-s3p2d1 and S7.0-s2p2d1
 orbital basis. Both input decks use `openmx/POSCAR_relaxed`. TAPW uses
 `openmx/POSCAR_rigid` with the same site and orbital order.
@@ -62,7 +67,7 @@ Use a new `prepared` directory. Large H/S arrays are generated locally.
 From the repository root:
 
 ```bash
-for VALLEY in Gamma M; do
+for VALLEY in Gamma M1; do
   TAPW_CFG="examples/zrs2_2.13/tapw/tapw_${VALLEY}.yaml"
   KP_CFG="examples/zrs2_2.13/kp/kp_${VALLEY}.yaml"
   tapw run  -c "$TAPW_CFG"
@@ -84,4 +89,4 @@ The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A
 | Gamma | 0.385 | 0.792 |
 | M1 | 1.057 | 1.882 |
 
-The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case zrs2_2.13` from the repository root to replay the archived comparisons.
+The `model/` directories contain the corresponding `reference_bands.npz` validation archives. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case zrs2_2.13` from the repository root to replay the archived comparisons.

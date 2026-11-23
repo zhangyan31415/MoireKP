@@ -1,0 +1,29 @@
+input: ../input/Gamma/training.npz
+model_directory: ../model/Gamma
+fit:
+  method: fixed_angle_refinement
+  kpoints:
+  - 0
+  - 5
+  - 8
+  - 12
+  - 15
+  - 20
+  - 25
+  - 28
+  - 32
+  - 35
+  - 40
+  - 45
+  - 48
+  - 52
+  - 55
+  wavefunction_kpoints:
+  - 0
+  - 15
+  - 20
+  - 35
+  - 40
+  - 55
+  ftol: 0.0002
+  max_nfev: 60

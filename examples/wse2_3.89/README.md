@@ -1,5 +1,9 @@
 # AA bilayer WSe2 at 3.89 degrees
 
+| Valley | TAPW configuration | Model configuration | Model and validation data |
+|---|---|---|---|
+| K1 | [tapw_K1.yaml](tapw/tapw_K1.yaml) | [kp_K1.yaml](kp/kp_K1.yaml) | [model/K1/](model/K1/) |
+
 The spin-up K1 valence model has dimension 54, with one local state per
 layer and 27 plane-wave channels per layer (TAPW Q shell 6). The six upper
 valence bands have a TAPW RMS and maximum error of **1.341 / 3.383 meV** on the
@@ -15,14 +19,14 @@ specify how to regenerate the model.
 
 ## Reproduce the coefficient extraction
 
-The [projected input archive](kp/projected_input.zip) contains the saved
+The [projected input archive](kp/input_K1.zip) contains the saved
 effective Hamiltonian, projection and symmetry artifacts, and the small TAPW
 reference tables and Q sets. Unpack it in a fresh example directory and run
 the same KP configuration used for the full build.
 
 ```bash
 CASE=examples/wse2_3.89
-unzip -n "$CASE/kp/projected_input.zip" -d "$CASE"
+unzip -n "$CASE/kp/input_K1.zip" -d "$CASE"
 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
   kp model -c "$CASE/kp/kp_K1.yaml"
 ```
@@ -92,4 +96,4 @@ The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A
 | --- | ---: | ---: |
 | K1 | 1.353 | 3.383 |
 
-The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case wse2_3.89` from the repository root to replay the archived comparisons.
+The `model/` directories contain the corresponding `reference_bands.npz` validation archives. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case wse2_3.89` from the repository root to replay the archived comparisons.

@@ -1,8 +1,7 @@
 # CaI2 AB Gamma valence at 3.89024 degrees
 
 The twenty real coefficients were optimized for this angle using its own training
-data. The six-state basis is shared between angles. `MODEL.json` records the
-training indices. `COEFFICIENTS.npz` stores the contracted polynomial and Fourier
+data. The six-state basis is shared between angles. [The fit YAML](../../kp/kp_Gamma.yaml) records the training indices. `COEFFICIENTS.npz` stores the contracted polynomial and Fourier
 matrices, and `MATERIAL_CONTROLS.npz` stores the twenty physical coefficients.
 The fixed orbitals and operator templates are included alongside the export.
 

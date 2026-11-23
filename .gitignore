@@ -145,3 +145,11 @@ examples/*/openmx/*.dat#
 examples/*/openmx/*.cif
 examples/*/openmx/nsoc.*
 examples/*/openmx/soc.*
+
+# Unpacked per-valley example inputs and standalone evaluator outputs
+/examples/*/input/
+/examples/*/model/*/bands.npy
+/examples/*/model/*/bands.pdf
+/examples/*/model/*/kpoints.npy
+/examples/*/model/*/kdist.npy
+/examples/*/model/*/kpath_ticks.json

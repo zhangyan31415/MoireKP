@@ -18,7 +18,10 @@
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 61
+    "construction_path_points": 61,
+    "mean_squared_overlap": 0.9763204733291808,
+    "minimum_squared_overlap": 0.9331510578980633,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "zrs2_2.13",
@@ -39,7 +42,10 @@
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 61
+    "construction_path_points": 61,
+    "mean_squared_overlap": 0.9937002795807623,
+    "minimum_squared_overlap": 0.9659648089258152,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "zrs2_2.13",
@@ -60,7 +66,10 @@
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 61
+    "construction_path_points": 61,
+    "mean_squared_overlap": 0.922768031582323,
+    "minimum_squared_overlap": 0.9011433670403382,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "wse2_2.13",
@@ -78,11 +87,13 @@
       "interlayer": 5
     },
     "reference_energy_eV": -4.869434670228333,
-    "validation_eigvals_file": "validation_eigvals.npy",
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 31
+    "construction_path_points": 31,
+    "mean_squared_overlap": 0.9594239043958678,
+    "minimum_squared_overlap": 0.7886842687554948,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "wse2_3.89",
@@ -100,15 +111,17 @@
       "interlayer": 5
     },
     "reference_energy_eV": -4.919165737191666,
-    "validation_eigvals_file": "validation_eigvals.npy",
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 31
+    "construction_path_points": 31,
+    "mean_squared_overlap": 0.9680348372602448,
+    "minimum_squared_overlap": 0.7530858288696641,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "wse2_trilayer_3.89",
-    "valley": "K",
+    "valley": "K1",
     "dimension": 81,
     "coefficients": 680,
     "band_count": 8,
@@ -126,11 +139,14 @@
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
     "overlap_matching_bands": 15,
-    "construction_path_points": 61
+    "construction_path_points": 61,
+    "mean_squared_overlap": 0.9901605812029097,
+    "minimum_squared_overlap": 0.834263522437694,
+    "embedding_kind": "orthonormalized resolvent embedding"
   },
   {
     "case": "mote2_trilayer_3.89",
-    "valley": "K",
+    "valley": "K1",
     "dimension": 81,
     "coefficients": 740,
     "band_count": 8,
@@ -161,11 +177,13 @@
       "interlayer": 5
     },
     "reference_energy_eV": -5.347020041203334,
-    "validation_eigvals_file": "validation_eigvals.npy",
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 31
+    "construction_path_points": 31,
+    "mean_squared_overlap": 0.9145289407911299,
+    "minimum_squared_overlap": 0.6432560106984867,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "snse2_3.89",
@@ -183,11 +201,13 @@
       "interlayer": 5
     },
     "reference_energy_eV": -4.69970923355,
-    "validation_eigvals_file": "validation_eigvals.npy",
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 31
+    "construction_path_points": 31,
+    "mean_squared_overlap": 0.769075544491167,
+    "minimum_squared_overlap": 0.7466082172792237,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "cai2_ab_3.89",
@@ -205,7 +225,10 @@
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 61
+    "construction_path_points": 61,
+    "mean_squared_overlap": 0.9824034725687386,
+    "minimum_squared_overlap": 0.9584510219135713,
+    "embedding_kind": "orthonormalized resolvent embedding"
   },
   {
     "case": "cai2_ab_3.89",
@@ -223,11 +246,13 @@
       "interlayer": 5
     },
     "reference_energy_eV": -2.749209660355,
-    "validation_eigvals_file": "validation_eigvals.npy",
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 31
+    "construction_path_points": 31,
+    "mean_squared_overlap": 0.9916711841332623,
+    "minimum_squared_overlap": 0.9889209321777945,
+    "embedding_kind": "bare retained-local-state projection"
   },
   {
     "case": "cai2_ab_2.28",
@@ -247,7 +272,10 @@
       "intralayer": 1
     },
     "harmonic_count": 6,
-    "construction_path_points": 61
+    "construction_path_points": 61,
+    "mean_squared_overlap": 0.9984962506213739,
+    "minimum_squared_overlap": 0.9950372049909946,
+    "embedding_kind": "orthonormalized resolvent embedding"
   },
   {
     "case": "cai2_ab_2.28",
@@ -265,10 +293,12 @@
       "interlayer": 5
     },
     "reference_energy_eV": -2.7681962653183336,
-    "validation_eigvals_file": "validation_eigvals.npy",
     "path_points": 61,
     "overlap_reference": "TAPW",
     "overlap_cluster_threshold_eV": 0.003,
-    "construction_path_points": 31
+    "construction_path_points": 31,
+    "mean_squared_overlap": 0.9879995314564165,
+    "minimum_squared_overlap": 0.983881522139663,
+    "embedding_kind": "bare retained-local-state projection"
   }
 ]

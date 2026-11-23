@@ -1,4 +1,4 @@
-input: input.npz
+input: ../input/Gamma/training.npz
 fit:
   kpoints:
   - 0

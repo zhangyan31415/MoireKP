@@ -1,5 +1,9 @@
 # Alternating trilayer WSe2 at 3.89 degrees
 
+| Valley | TAPW configuration | Model configuration | Model and validation data |
+|---|---|---|---|
+| K1 | [tapw_K1.yaml](tapw/tapw_K1.yaml) | [kp_K1.yaml](kp/kp_K1.yaml) | [model/K1/](model/K1/) |
+
 This example uses the (K_1) valence valley with six plane-wave shells.
 There are 27 Q vectors per orientation and one low-energy valence state
 per physical layer and Q vector. The outer layers share an orientation,
@@ -14,13 +18,13 @@ indices 10, 40 and 50.
   the corrected TAPW calculation, in the relaxed-cell hexagonal frame.
   `POSCAR_rigid_input` contains the supplied rigid geometry before this
   cell adjustment.
-- `tapw/tapw_K.yaml` records the TAPW band settings. The companion
+- `tapw/tapw_K1.yaml` records the TAPW band settings. The companion
   `run_corrected_centers.py` assigns the correct physical K center to the
   outer and middle orientation groups.
 - `kp/` contains the configuration, an archived 81-dimensional reduced
   Hamiltonian along the 61-point path, and the corresponding Q vectors,
   TAPW valence bands and threefold rotation used as KP inputs.
-- `model/K/` contains the exported continuum coefficients and evaluator.
+- `model/K1/` contains the exported continuum coefficients and evaluator.
 
 ## Rebuild the continuum model from the archived input
 
@@ -28,13 +32,13 @@ Run these commands from the repository root with MoireKP installed:
 
 ```bash
 CASE=examples/wse2_trilayer_3.89
-python "$CASE/kp/prepare_input.py"
-kp project -c "$CASE/kp/kp_K.yaml"
-kp symm -c "$CASE/kp/kp_K.yaml"
-kp model -c "$CASE/kp/kp_K.yaml"
+unzip -n "$CASE/kp/input_K1.zip" -d "$CASE"
+kp project -c "$CASE/kp/kp_K1.yaml"
+kp symm -c "$CASE/kp/kp_K1.yaml"
+kp model -c "$CASE/kp/kp_K1.yaml"
 ```
 
-The input script restores the saved spin-up reduced Hamiltonian, with empty
+The archive contains the saved spin-up reduced Hamiltonian, with empty
 spin-down loader slots, and the corresponding rotation matrix. Generated
 files go under `output/`. The reduced input uses the same orientation and
 reciprocal frame as the selected KP model.
@@ -61,7 +65,7 @@ tapw prepare-hs openmx --input "$CASE/openmx/openmx.scfout" \
   --output "$CASE/openmx/prepared" --format npz
 cp "$CASE/openmx/prepared/H.npz" "$CASE/openmx/H.npz"
 cp "$CASE/openmx/prepared/S.npz" "$CASE/openmx/S.npz"
-python "$CASE/tapw/run_corrected_centers.py" run -c "$CASE/tapw/tapw_K.yaml"
+python "$CASE/tapw/run_corrected_centers.py" run -c "$CASE/tapw/tapw_K1.yaml"
 ```
 
 The archived KP input was obtained by a layer-resolved downfolding of
@@ -80,4 +84,4 @@ The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A
 | --- | ---: | ---: |
 | K | 1.143 | 2.973 |
 
-The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case wse2_trilayer_3.89` from the repository root to replay the archived comparisons.
+The `model/` directories contain the corresponding `reference_bands.npz` validation archives. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case wse2_trilayer_3.89` from the repository root to replay the archived comparisons.

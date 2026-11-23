@@ -2,10 +2,10 @@
 import argparse
 from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
-import json
 from pathlib import Path
 
 import numpy as np
+import yaml
 from scipy.linalg import eigh
 from scipy.optimize import least_squares
 from scipy.sparse import csr_matrix
@@ -136,17 +136,19 @@ class Objective:
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("configuration", type=Path, nargs="?", default=Path(__file__).with_name("kp_Gamma.yaml"))
     parser.add_argument("--workers", type=int, default=1, help="parallel training points")
     parser.add_argument("--output", type=Path, required=True, help="new export directory")
-    parser.add_argument("--input", type=Path, help="target archive (default: input_Gamma.npz beside this script)")
+    parser.add_argument("--input", type=Path, help="alternative training NPZ (default: input in configuration)")
     args = parser.parse_args()
-    inputs = Path(__file__).resolve().parent
-    model = inputs.parent / "model/Gamma"
-    settings = json.loads((model / "MODEL.json").read_text())
-    train = settings["train_k"]
-    with np.load(args.input or inputs / "input_Gamma.npz") as z:
+    inputs = args.configuration.resolve().parent
+    config = yaml.safe_load(args.configuration.read_text())
+    fit_settings = config["fit"]
+    model = inputs / config["model_directory"]
+    train = fit_settings["kpoints"]
+    with np.load(args.input or inputs / config["input"]) as z:
         initial, k, target = z["initial_controls"], z["k_cartesian"], -z["target_valence_eV"]
-        np.testing.assert_array_equal(z["wave_rows"], settings["train_wave_indices"])
+        np.testing.assert_array_equal(z["wave_rows"], fit_settings["wavefunction_kpoints"])
         waves = dict(zip(z["wave_rows"], z["tapw_cross"]))
     with np.load(model / "GEOMETRIES.npz") as z:
         q, B = z["q"], z["B"]
@@ -164,7 +166,7 @@ def main():
     with ThreadPoolExecutor(max_workers=args.workers) as pool:
         objective = Objective(pool,cache,train,waves,target,principal,6*len(q))
         fit = least_squares(lambda x: objective(x)[0], initial/scale,
-                            jac=lambda x: objective(x)[1], x_scale="jac", ftol=.0002, max_nfev=60)
+                            jac=lambda x: objective(x)[1], x_scale="jac", ftol=fit_settings["ftol"], max_nfev=fit_settings["max_nfev"])
     coeff = fit.x*scale
     args.output.mkdir(parents=True, exist_ok=False)
     np.savez_compressed(args.output/"MATERIAL_CONTROLS.npz",controls=coeff[None],names=names,kinds=kinds)

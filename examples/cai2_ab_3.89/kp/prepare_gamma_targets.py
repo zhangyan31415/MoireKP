@@ -1,6 +1,6 @@
 """Recompute the Gamma energy and wavefunction targets from orthonormal TAPW output."""
 import argparse
-import json
+import yaml
 from pathlib import Path
 
 import numpy as np
@@ -40,14 +40,14 @@ def main():
     args = parser.parse_args()
     folder = Path(__file__).resolve().parent
     model = folder.parent/"model/Gamma"
-    rows = json.loads((model/"MODEL.json").read_text())["train_wave_indices"]
+    rows = yaml.safe_load((folder/"kp_Gamma.yaml").read_text())["fit"]["wavefunction_kpoints"]
     band = args.band_dir
     q = np.load(band/"g_vectors_group1.npy")
     np.testing.assert_allclose(q, np.load(band/"g_vectors_group2.npy"), atol=1e-8, rtol=0)
     with np.load(model/"GEOMETRIES.npz") as z:
         np.testing.assert_allclose(q,z["q"],atol=1e-8,rtol=0)
         k = np.load(band/"kpoints.npy")[:,:2] @ z["B"]
-    with np.load(folder/"input_Gamma.npz") as z:
+    with np.load(folder.parent/"input/Gamma/training.npz") as z:
         np.testing.assert_allclose(k,z["k_cartesian"],atol=1e-8,rtol=0)
         seed = z["initial_controls"]
     with np.load(model/"FIXED_ORBITALS.npz") as z:

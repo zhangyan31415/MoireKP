@@ -1,5 +1,10 @@
 # AB bilayer CaI2 at 2.28 degrees
 
+| Valley | TAPW configuration | Model configuration | Model and validation data |
+|---|---|---|---|
+| Gamma | [tapw_Gamma.yaml](tapw/tapw_Gamma.yaml) | [kp_Gamma.yaml](kp/kp_Gamma.yaml) | [model/Gamma/](model/Gamma/) |
+| M1 | [tapw_M1.yaml](tapw/tapw_M1.yaml) | [kp_M1.yaml](kp/kp_M1.yaml) | [model/M1/](model/M1/) |
+
 The M1 conduction model uses a 3786-atom fixed-cell MLFF structure with
 the ST OpenMX/SOC basis. Each layer retains one Kramers pair, giving dimension
 96 with TAPW Q shell 8. The 937 real coefficients
@@ -58,19 +63,19 @@ the checkout root:
 python examples/additional_models/verify_models.py --case cai2_ab_2.28
 ```
 
-[Stored TAPW bands, continuum spectra, and rotation audit](reference/M1/)
+[M-valley spectra, orbital weights, and rotation audit](reference/M1/)
 include the M2 and M3 spectra after rotating the local wavevector of M1 by
 the corresponding C3 operation. The three valleys use one common energy shift.
 
 ## Reproduce the M1 coefficient extraction
 
-The [projected input archive](kp/projected_input_M1.zip) contains the saved
+The [projected input archive](kp/input_M1.zip) contains the saved
 effective Hamiltonian, certified projection and symmetry artifacts, Q vectors,
 and small native reference tables. Unpack it into a fresh case directory.
 
 ```bash
 CASE=examples/cai2_ab_2.28
-unzip -n "$CASE/kp/projected_input_M1.zip" -d "$CASE"
+unzip -n "$CASE/kp/input_M1.zip" -d "$CASE"
 OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
   kp model -c "$CASE/kp/kp_M1.yaml"
 ```
@@ -164,4 +169,4 @@ The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A
 | Gamma | 0.039 | 0.123 |
 | M1 | 0.627 | 1.274 |
 
-The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case cai2_ab_2.28` from the repository root to replay the archived comparisons.
+The `model/` directories contain the corresponding `reference_bands.npz` validation archives. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case cai2_ab_2.28` from the repository root to replay the archived comparisons.

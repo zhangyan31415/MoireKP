@@ -1,5 +1,9 @@
 # AA bilayer MoTe2 at 2.13°
 
+| Valley | TAPW configuration | Model configuration | Model and validation data |
+|---|---|---|---|
+| K1 | [tapw_K1.yaml](tapw/tapw_K1.yaml) | [kp_K1.yaml](kp/kp_K1.yaml) | [model/K1/](model/K1/) |
+
 The (K_1) model has dimension 54 and 246 real coefficient entries.
 The 4,326-atom OpenMX supercell uses the Mo7.0-s3p2d2 and Te7.0-s3p2d2f1
 orbital basis. Both OpenMX input decks use the relaxed coordinates in
@@ -52,8 +56,8 @@ Use a new `prepared` directory. Large H/S arrays are generated locally.
 From the repository root:
 
 ```bash
-TAPW_CFG=examples/mote2_2.13/tapw/tapw_K.yaml
-KP_CFG=examples/mote2_2.13/kp/kp_K.yaml
+TAPW_CFG=examples/mote2_2.13/tapw/tapw_K1.yaml
+KP_CFG=examples/mote2_2.13/kp/kp_K1.yaml
 tapw run  -c "$TAPW_CFG"
 tapw symm -c "$TAPW_CFG"
 kp project -c "$KP_CFG"
@@ -76,4 +80,4 @@ The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A
 | --- | ---: | ---: |
 | K1 | 0.422 | 0.999 |
 
-The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case mote2_2.13` from the repository root to replay the archived comparisons.
+The `model/` directories contain the corresponding `reference_bands.npz` validation archives. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case mote2_2.13` from the repository root to replay the archived comparisons.
