@@ -8,7 +8,6 @@ The fixed orbitals and operator templates are included alongside the export.
 
 Use `evaluate.load_model().bands(kpoints)` for all electron energies in eV
 relative to the model valence edge at Gamma. Input momenta are Cartesian,
-in inverse angstrom. TAPW references in `reference_bands.npz` use their own
-Gamma valence edge. RMS and maximum errors use the 45 held-out path points.
+in inverse angstrom. The reference archive contains absolute TAPW energies and the shift that aligns the Gamma valence edge. Table R1 uses all 61 path points. The separate held-out statistic uses 45. See the [refit inputs and instructions](../../README.md#refit-the-20-gamma-coefficients).
 The columns of `pair_overlap_squared` in `overlap_samples.npz` run from the
 highest to the lowest valence pair at the indicated sampled momenta.

@@ -33,7 +33,7 @@ HIGH_SYMMETRY_POINTS = {
 }
 
 KPATH = ['G', 'M', 'K', 'G']
-POINTS_PER_SEGMENT = 10
+POINTS_PER_SEGMENT = 20
 
 # All bands are drawn. These settings only control the plotted y-range.
 WINDOW_BANDS = None
@@ -668,7 +668,13 @@ def main(argv=None):
     model = load_model(root)
     if RUN_BANDS:
         if args.kpoints is None:
-            if "reference_kpoints" in model.data.files:
+            validation = root / "reference_bands.npz"
+            if validation.is_file():
+                with np.load(validation, allow_pickle=False) as data:
+                    kpoints = data["k_cartesian_inv_angstrom"]
+                kdist = _kdist_from_kpoints(kpoints)
+                ticks = _ticks_for_reference_kpath(kdist)
+            elif "reference_kpoints" in model.data.files:
                 kpoints = np.asarray(model.data["reference_kpoints"], dtype=float)
                 kdist = _kdist_from_kpoints(kpoints)
                 ticks = _ticks_for_reference_kpath(kdist)

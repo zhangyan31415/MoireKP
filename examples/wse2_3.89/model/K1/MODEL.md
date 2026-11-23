@@ -49,7 +49,7 @@ $$
 - `bM1 = [0.150004022545, 0]`
 - `bM2 = [0.0750020112723, 0.129907294194]`
 - Default k path: `['G', 'M', 'K', 'G']`
-- Points per segment: `10`
+- Default evaluation: 20 intervals per segment (61 momenta). The original construction used 10 intervals (31 momenta).
 
 ## Hamiltonian And Runtime Recipe
 

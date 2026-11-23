@@ -19,6 +19,25 @@ The [Gamma model configuration](model/Gamma/MODEL.json) lists the training
 momenta. The model directory also contains the fixed basis, operator
 templates, and sampled wave-function overlaps.
 
+### Refit the 20 Gamma coefficients
+
+The 3.89° Γ entry of Fig. R1 is a fixed-angle, nonlinear molecular model.
+Its [model settings](model/Gamma/MODEL.json), [fixed operators](model/Gamma/FIXED_OPERATOR_TEMPLATES.npz)
+and [training input](kp/input_Gamma.npz) reproduce the fit from the actual pre-refinement seed.
+The archive contains eight TAPW target energies at 61 momenta (relative to the Γ valence edge),
+six TAPW-to-molecular overlap matrices at the wave-function training points,
+and the 20 initial real controls. Fifteen distinct momenta enter the energy loss.
+The highest six bands are the R1 validation window. From the repository root:
+
+```bash
+CASE=examples/cai2_ab_3.89
+OPENBLAS_NUM_THREADS=1 MKL_NUM_THREADS=1 OMP_NUM_THREADS=1 \
+  python "$CASE/kp/refine_Gamma.py" --workers 1 --output "$CASE/output/refitted_Gamma"
+```
+
+The output directory must be new. The script requires NumPy and SciPy and writes
+`MATERIAL_CONTROLS.npz` and `COEFFICIENTS.npz` in the same format as the published model.
+
 ## Evaluate the continuum model
 
 The [standalone M1 model](model/M1/) contains the original extracted
@@ -33,7 +52,7 @@ python examples/additional_models/verify_models.py --case cai2_ab_3.89
 include the M2 and M3 spectra after rotating the local wavevector of M1 by
 the corresponding C3 operation. The three valleys use one common energy shift.
 
-## Reproduce the coefficient extraction
+## Reproduce the M1 coefficient extraction
 
 The [projected input archive](kp/projected_input_M1.zip) contains the saved
 effective Hamiltonian, certified projection and symmetry artifacts, Q vectors,
@@ -94,6 +113,38 @@ kp model   -c "$KP_CFG"
 
 Generated H/S, the large TAPW projected matrices, and the regenerated
 model are written locally under `openmx/prepared/` and `output/`.
+
+## Generate the Gamma TAPW inputs from OpenMX
+
+After the SOC run described above, set `CASE=examples/cai2_ab_3.89`.
+The Gamma calculation used **rigid-reference** space-group operations
+(`symprec=0.001` Å, six unitary operations) to average the SOC Hamiltonian
+and overlap matrices, with an element cutoff of `1e-7`. Use separate files
+for these averaged matrices and the raw M-valley input.
+
+```bash
+CASE=examples/cai2_ab_3.89
+mkdir -p "$CASE/output/gamma_symmetry" "$CASE/openmx/prepared"
+cp "$CASE/openmx/openmx_rigid.dat" "$CASE/output/gamma_symmetry/openmx.dat_rigid"
+python -m tapw.io.hs_symmetry --input-dir "$CASE/output/gamma_symmetry" \
+  --output-dir "$CASE/output/gamma_symmetry/analysis" --dry-run --symprec 0.001 \
+  --export-transports-json "$CASE/output/gamma_symmetry/transports.json"
+"$OPENMX_READER" "$CASE/openmx/openmx.scfout" \
+  --symmetry-json "$CASE/output/gamma_symmetry/transports.json" \
+  --output-dir "$CASE/output/gamma_symmetry/averaged" --output-format npz \
+  --threads 1 --cutoff 1e-7 --diagnostics full
+cp "$CASE/output/gamma_symmetry/averaged/H.npz" "$CASE/openmx/prepared/H_symm.npz"
+cp "$CASE/output/gamma_symmetry/averaged/S.npz" "$CASE/openmx/prepared/S_symm.npz"
+tapw run -c "$CASE/tapw/tapw_Gamma.yaml"
+```
+
+The [Gamma TAPW YAML](tapw/tapw_Gamma.yaml) uses shell 6 (37 Q vectors) and a 61-point path.
+To regenerate the training targets using the original molecular frame:
+
+```bash
+python "$CASE/kp/prepare_gamma_targets.py" "$CASE/output/tapw/Gamma/q06/band" "$CASE/output/targets_Gamma.npz"
+python "$CASE/kp/refine_Gamma.py" --input "$CASE/output/targets_Gamma.npz" --output "$CASE/output/refitted_from_TAPW"
+```
 
 ## 61-point TAPW validation
 

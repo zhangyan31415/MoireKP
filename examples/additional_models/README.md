@@ -2,22 +2,26 @@
 
 [Band comparisons in Fig. R1](band_comparisons.pdf) · [Model and error data](models.json)
 
-| Structure | Twist | Valley | Dimension | Coefficients | RMS (meV) |
-| --- | ---: | --- | ---: | ---: | ---: |
-| [AA bilayer MoTe₂](../mote2_2.13/README.md) | 2.13° | K₁ | 54 | 246 | 0.422 |
-| [AB bilayer ZrS₂](../zrs2_2.13/README.md) | 2.13° | Γ | 152 | 1350 | 0.385 |
-| [AB bilayer ZrS₂](../zrs2_2.13/README.md) | 2.13° | M₁ | 88 | 1039 | 1.057 |
-| [AA bilayer WSe₂](../wse2_2.13/README.md) | 2.13° | K₁ | 54 | 144 | 0.549 |
-| [AA bilayer WSe₂](../wse2_3.89/README.md) | 3.89° | K₁ | 54 | 101 | 1.353 |
-| [Alternating trilayer WSe₂](../wse2_trilayer_3.89/README.md) | 3.89° | K₁ | 81 | 680 | 1.143 |
-| [AA bilayer SnSe₂](../snse2_3.89/README.md) | 3.89° | Γ | 148 | 941 | 0.744 |
-| [AA bilayer SnSe₂](../snse2_3.89/README.md) | 3.89° | M₁ | 88 | 770 | 0.710 |
-| [AB bilayer CaI₂](../cai2_ab_3.89/README.md) | 3.89° | Γ | 222 | 20 | 0.269 |
-| [AB bilayer CaI₂](../cai2_ab_3.89/README.md) | 3.89° | M₁ | 72 | 932 | 0.034 |
-| [AB bilayer CaI₂](../cai2_ab_2.28/README.md) | 2.28° | Γ | 186 | 393 | 0.039 |
-| [AB bilayer CaI₂](../cai2_ab_2.28/README.md) | 2.28° | M₁ | 96 | 937 | 0.627 |
+| Structure | Twist | Valley | Path points (construction / validation) | Dimension | Coefficients | RMS (meV) |
+| --- | ---: | --- | ---: | ---: | ---: | ---: |
+| [AA bilayer MoTe₂](../mote2_2.13/README.md) | 2.13° | K₁ | 61 / 61 | 54 | 246 | 0.422 |
+| [AB bilayer ZrS₂](../zrs2_2.13/README.md) | 2.13° | Γ | 61 / 61 | 152 | 1350 | 0.385 |
+| [AB bilayer ZrS₂](../zrs2_2.13/README.md) | 2.13° | M₁ | 61 / 61 | 88 | 1039 | 1.057 |
+| [AA bilayer WSe₂](../wse2_2.13/README.md) | 2.13° | K₁ | 31 / 61 | 54 | 144 | 0.549 |
+| [AA bilayer WSe₂](../wse2_3.89/README.md) | 3.89° | K₁ | 31 / 61 | 54 | 101 | 1.353 |
+| [Alternating trilayer WSe₂](../wse2_trilayer_3.89/README.md) | 3.89° | K₁ | 61 / 61 | 81 | 680 | 1.143 |
+| [AA bilayer SnSe₂](../snse2_3.89/README.md) | 3.89° | Γ | 31 / 61 | 148 | 941 | 0.744 |
+| [AA bilayer SnSe₂](../snse2_3.89/README.md) | 3.89° | M₁ | 31 / 61 | 88 | 770 | 0.710 |
+| [AB bilayer CaI₂](../cai2_ab_3.89/README.md) | 3.89° | Γ | 61 / 61 | 222 | 20 | 0.269 |
+| [AB bilayer CaI₂](../cai2_ab_3.89/README.md) | 3.89° | M₁ | 31 / 61 | 72 | 932 | 0.034 |
+| [AB bilayer CaI₂](../cai2_ab_2.28/README.md) | 2.28° | Γ | 61 / 61 | 186 | 393 | 0.039 |
+| [AB bilayer CaI₂](../cai2_ab_2.28/README.md) | 2.28° | M₁ | 31 / 61 | 96 | 937 | 0.627 |
 
 The table lists the twelve models in Fig. R1. A separate [alternating MoTe₂ trilayer example](../mote2_trilayer_3.89/README.md) is also available.
+
+The first path count is the grid on which the original Hamiltonians were constructed. Coefficient extraction can use a subset of those momenta. The second is the grid used for reporting, including any points shared with construction. All reported energies and overlaps use the 61 actual TAPW samples. For the six 31-point construction grids, the original points occupy the even rows of the 61-point path. `eigvals.npy` preserves the construction-grid spectrum; `reference_bands.npz` and `native_overlaps.npz` contain the R1 comparison.
+
+CaI₂ Γ inputs: [3.89° fitting data and script](../cai2_ab_3.89/kp/) · [2.28° input archive and KP configuration](../cai2_ab_2.28/kp/).
 
 Each example describes its structural inputs, TAPW and KP configuration, and
 the steps available for regenerating the model from those inputs.

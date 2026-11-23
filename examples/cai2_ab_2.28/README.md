@@ -124,6 +124,37 @@ kp model   -c "$KP_CFG"
 Generated H/S, the large TAPW projected matrices, and the regenerated
 model are written locally under `openmx/prepared/` and `output/`.
 
+## Generate the Gamma TAPW inputs from OpenMX
+
+After the SOC run described above, set `CASE=examples/cai2_ab_2.28`.
+The Gamma calculation used **rigid-reference** space-group operations
+(`symprec=0.001` Å, six unitary operations) to average the SOC Hamiltonian
+and overlap matrices, with an element cutoff of `1e-7`. Use separate files
+for these averaged matrices and the raw M-valley input.
+
+```bash
+CASE=examples/cai2_ab_2.28
+mkdir -p "$CASE/output/gamma_symmetry" "$CASE/openmx/prepared"
+cp "$CASE/openmx/openmx_rigid.dat" "$CASE/output/gamma_symmetry/openmx.dat_rigid"
+python -m tapw.io.hs_symmetry --input-dir "$CASE/output/gamma_symmetry" \
+  --output-dir "$CASE/output/gamma_symmetry/analysis" --dry-run --symprec 0.001 \
+  --export-transports-json "$CASE/output/gamma_symmetry/transports.json"
+"$OPENMX_READER" "$CASE/openmx/openmx.scfout" \
+  --symmetry-json "$CASE/output/gamma_symmetry/transports.json" \
+  --output-dir "$CASE/output/gamma_symmetry/averaged" --output-format npz \
+  --threads 1 --cutoff 1e-7 --diagnostics full
+cp "$CASE/output/gamma_symmetry/averaged/H.npz" "$CASE/openmx/prepared/H_symm.npz"
+cp "$CASE/output/gamma_symmetry/averaged/S.npz" "$CASE/openmx/prepared/S_symm.npz"
+tapw run -c "$CASE/tapw/tapw_Gamma.yaml"
+```
+
+The [Gamma TAPW YAML](tapw/tapw_Gamma.yaml) uses shell 5 (31 Q vectors) and a 61-point path.
+The molecular projection command above regenerates `hamiltonian_k.npy` and
+`energies_vbm.txt`. To use these regenerated files in a fresh unpacked example,
+copy them from `input/rebuilt_Gamma/` into `input/Gamma/` before running
+the three KP stages. The supplied symmetry representations and state order
+belong to the fixed molecular frame.
+
 ## 61-point TAPW validation
 
 The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A single constant aligns each model edge with TAPW at Gamma. The table uses all 61 points.
