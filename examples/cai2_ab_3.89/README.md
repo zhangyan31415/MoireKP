@@ -94,3 +94,14 @@ kp model   -c "$KP_CFG"
 
 Generated H/S, the large TAPW projected matrices, and the regenerated
 model are written locally under `openmx/prepared/` and `output/`.
+
+## 61-point TAPW validation
+
+The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A single constant aligns each model edge with TAPW at Gamma. The table uses all 61 points.
+
+| Valley | RMS (meV) | Maximum (meV) |
+| --- | ---: | ---: |
+| Gamma | 0.269 | 0.634 |
+| M1 | 0.034 | 0.083 |
+
+The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case cai2_ab_3.89` from the repository root to replay the archived comparisons.

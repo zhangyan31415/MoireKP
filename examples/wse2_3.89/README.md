@@ -83,3 +83,13 @@ kp model   -c "$KP_CFG"
 ```
 
 These commands write to `output/tapw/` and `output/kp/` under the example.
+
+## 61-point TAPW validation
+
+The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A single constant aligns each model edge with TAPW at Gamma. The table uses all 61 points.
+
+| Valley | RMS (meV) | Maximum (meV) |
+| --- | ---: | ---: |
+| K1 | 1.353 | 3.383 |
+
+The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case wse2_3.89` from the repository root to replay the archived comparisons.

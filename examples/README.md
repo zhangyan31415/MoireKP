@@ -18,5 +18,5 @@ both materials explicitly.
 
 ## Additional models and validation
 
-- [Nine additional valley models at 2.13° and 3.89°](additional_models/README.md)
+- [Additional valley models and 61-point TAPW benchmarks](additional_models/README.md)
 - [Kinetic-order comparison and figure reproduction](kinetic_order_validation/README.md)

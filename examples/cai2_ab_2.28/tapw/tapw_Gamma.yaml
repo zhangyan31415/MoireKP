@@ -1,0 +1,54 @@
+case:
+  output_root: ../output/tapw
+twist:
+  bravais: hex
+  spin: true
+  twist_index_m: 14
+  twist_layer:
+  - 1
+  - 1
+paths:
+  H_file: ../openmx/prepared/H_symm.npz
+  S_file: ../openmx/prepared/S_symm.npz
+  input_file: ../openmx/openmx_rigid.dat
+bands:
+  valley: Gamma
+  q_shell: 5
+  efermi: -4.443137
+  num_processes: 61
+  blas_threads: 2
+  num_bands: 40
+  save_hamiltonian: true
+  save_wavefunctions: true
+  kpath:
+    labels:
+    - G
+    - M
+    - K
+    - G
+    points_per_segment: 20
+    coordinates:
+      G:
+      - 0.0
+      - 0.0
+      M:
+      - 0.5
+      - 0.0
+      K:
+      - 0.3333333333333333
+      - 0.3333333333333333
+symmetry:
+  valley: Gamma
+  q_shell: 5
+  efermi: -4.443137
+  num_processes: 8
+  blas_threads: 2
+  spglib_symprec: 0.05
+  tolerance: 0.02
+  developer_outputs: false
+  debug: false
+field:
+  zero_potential_layers:
+  - 1
+  electric_field_eVpA: 0.0
+  inner_symmetric: false

@@ -91,3 +91,14 @@ python "$CASE/refinement/fit_projector.py" "$CASE/refinement/Gamma.yaml" --outpu
 The input check replays the linear spectrum. The refinement compiles a
 cached response array of about 2.24 GB and needs additional working memory.
 The selected reference run reached its 300-evaluation budget.
+
+## 61-point TAPW validation
+
+The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A single constant aligns each model edge with TAPW at Gamma. The table uses all 61 points.
+
+| Valley | RMS (meV) | Maximum (meV) |
+| --- | ---: | ---: |
+| Gamma | 0.744 | 1.363 |
+| M1 | 0.710 | 1.733 |
+
+The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case snse2_3.89` from the repository root to replay the archived comparisons.

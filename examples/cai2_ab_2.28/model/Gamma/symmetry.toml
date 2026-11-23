@@ -1,0 +1,26 @@
+schema_version = "moirekp-sector-symmetry-v1"
+q_action_convention = "inverse_declared_q_map_on_Q_labels; antiunitarity_is_coefficient_conjugation"
+
+[[operations]]
+name = "C3z"
+antiunitary = false
+cartesian_q_action = [[-0.4999999999999998, 0.8660254037844387], [-0.8660254037844387, -0.4999999999999998]]
+integer_matrix = [[0, 1], [-1, -1]]
+
+[operations.sector_map]
+"L1" = "L1"
+
+[operations.integer_shift_by_source_sector]
+"L1" = [0, 0]
+
+[[operations]]
+name = "C2"
+antiunitary = false
+cartesian_q_action = [[1.0, 0.0], [0.0, -1.0]]
+integer_matrix = [[0, 1], [1, 0]]
+
+[operations.sector_map]
+"L1" = "L1"
+
+[operations.integer_shift_by_source_sector]
+"L1" = [0, 0]

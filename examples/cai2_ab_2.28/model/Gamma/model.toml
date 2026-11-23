@@ -1,0 +1,27 @@
+schema_version = "moirekp-physical-v1"
+model_name = "fixed_linear_r2_h6_p1_spinful"
+energy_unit = "eV"
+momentum_unit = "1/angstrom"
+
+[polynomial]
+complex_coordinate = "z_Q=(kx-Qx)+i*(ky-Qy)"
+maximum_order = 4
+
+[q_lattice]
+b1 = [0.05571920610359555, -0.03216949864222249]
+b2 = [0.05571920610359556, 0.03216949864399121]
+offset_gauge = "explicit_sector_offsets_v1"
+
+[[sectors]]
+id = "L1"
+qset = "qset1"
+q_offset = [0.0, 0.0]
+number_of_orbitals = 6
+
+[validation]
+lattice_tolerance = 1e-08
+
+[runtime]
+canonical_evaluator = "equation_17_integer_routes"
+terms_file = "terms.csv"
+default_q_points_file = "q_points.csv"

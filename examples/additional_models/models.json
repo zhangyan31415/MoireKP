@@ -6,15 +6,18 @@
     "coefficients": 246,
     "band_count": 8,
     "eval_points": 61,
-    "rms_meV": 0.3645297723565018,
-    "max_meV": 0.9816425926709726,
+    "rms_meV": 0.4221546548857155,
+    "max_meV": 0.9989500529146156,
     "export_sha256": "09d5254b0e677fcfae4887b0a6227f1a3db2d16d425b3cef48cbdc5dcf9eaef0",
     "polynomial_orders": {
       "kinetic": 10,
       "intralayer": 5,
       "interlayer": 5
     },
-    "reference_energy_eV": -4.614105470129998
+    "reference_energy_eV": -4.614105470129998,
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "zrs2_2.13",
@@ -23,15 +26,18 @@
     "coefficients": 1350,
     "band_count": 10,
     "eval_points": 61,
-    "rms_meV": 0.384568675546337,
-    "max_meV": 0.7917619931427922,
+    "rms_meV": 0.38456867560969005,
+    "max_meV": 0.7917619949271426,
     "export_sha256": "be3ff0f6a56a9b617d56876fae23bcc11e464af230b0f765ce88e1007d1045e0",
     "polynomial_orders": {
       "kinetic": 8,
       "intralayer": 4,
       "interlayer": 4
     },
-    "reference_energy_eV": -6.21
+    "reference_energy_eV": -6.21,
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "zrs2_2.13",
@@ -40,15 +46,18 @@
     "coefficients": 1039,
     "band_count": 8,
     "eval_points": 61,
-    "rms_meV": 1.0572351075506212,
-    "max_meV": 1.8822452706110937,
+    "rms_meV": 1.0571831375368739,
+    "max_meV": 1.8821626111442669,
     "export_sha256": "178bbfff6add535368a3ee0317733ad41e76def04d25dd50525680342708317d",
     "polynomial_orders": {
       "kinetic": 6,
       "intralayer": 4,
       "interlayer": 6
     },
-    "reference_energy_eV": -5.22
+    "reference_energy_eV": -5.22,
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "wse2_2.13",
@@ -56,16 +65,20 @@
     "dimension": 54,
     "coefficients": 144,
     "band_count": 6,
-    "eval_points": 31,
-    "rms_meV": 0.547253298385997,
-    "max_meV": 1.3773410098414374,
+    "eval_points": 61,
+    "rms_meV": 0.5492964060589836,
+    "max_meV": 1.3773410484327897,
     "export_sha256": "525907f2ee3b1a670082ec6d1fcc1edfc91c9fe13c617fbf31e4de8717a17f66",
     "polynomial_orders": {
       "kinetic": 6,
       "intralayer": 5,
       "interlayer": 5
     },
-    "reference_energy_eV": -4.869434670228333
+    "reference_energy_eV": -4.869434670228333,
+    "validation_eigvals_file": "validation_eigvals.npy",
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "wse2_3.89",
@@ -73,16 +86,20 @@
     "dimension": 54,
     "coefficients": 101,
     "band_count": 6,
-    "eval_points": 31,
-    "rms_meV": 1.3411456338611594,
-    "max_meV": 3.3831722198343073,
+    "eval_points": 61,
+    "rms_meV": 1.352542463597789,
+    "max_meV": 3.3831723669672797,
     "export_sha256": "0a0330106473d180c217cf5788145437afd239c441852a1daf1d87bfe166c27f",
     "polynomial_orders": {
       "kinetic": 6,
       "intralayer": 5,
       "interlayer": 5
     },
-    "reference_energy_eV": -4.919165737191666
+    "reference_energy_eV": -4.919165737191666,
+    "validation_eigvals_file": "validation_eigvals.npy",
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "wse2_trilayer_3.89",
@@ -90,16 +107,20 @@
     "dimension": 81,
     "coefficients": 680,
     "band_count": 8,
-    "eval_points": 57,
-    "rms_meV": 1.1261957544489472,
-    "max_meV": 3.0553889803321965,
+    "eval_points": 61,
+    "rms_meV": 1.1430951608561484,
+    "max_meV": 2.973255507688677,
     "export_sha256": "afadcda8c927793dc5541d06a833137b446adb86815319901b3a3b942fd62b69",
     "polynomial_orders": {
       "kinetic": 6,
       "intralayer": 4,
       "interlayer": 4
     },
-    "reference_energy_eV": null
+    "reference_energy_eV": null,
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003,
+    "overlap_matching_bands": 15
   },
   {
     "case": "mote2_trilayer_3.89",
@@ -124,16 +145,20 @@
     "dimension": 148,
     "coefficients": 941,
     "band_count": 6,
-    "eval_points": 31,
-    "rms_meV": 0.7418384863420833,
-    "max_meV": 1.3634663838830718,
+    "eval_points": 61,
+    "rms_meV": 0.7443615901659979,
+    "max_meV": 1.3634663869712682,
     "export_sha256": "9eedd82350998bd70210dd4119708dbd757a949c51945c84a6b588cd19b64b80",
     "polynomial_orders": {
       "kinetic": 10,
       "intralayer": 5,
       "interlayer": 5
     },
-    "reference_energy_eV": -5.347020041203334
+    "reference_energy_eV": -5.347020041203334,
+    "validation_eigvals_file": "validation_eigvals.npy",
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "snse2_3.89",
@@ -141,16 +166,20 @@
     "dimension": 88,
     "coefficients": 770,
     "band_count": 6,
-    "eval_points": 31,
-    "rms_meV": 0.7071442797187892,
-    "max_meV": 1.718039715459696,
+    "eval_points": 61,
+    "rms_meV": 0.7095301969513829,
+    "max_meV": 1.733475544290819,
     "export_sha256": "4bd102167d533e5ac2749c987fbf2af0970d51694e742d19dc94fefc36e54e7e",
     "polynomial_orders": {
       "kinetic": 6,
       "intralayer": 5,
       "interlayer": 5
     },
-    "reference_energy_eV": -4.69970923355
+    "reference_energy_eV": -4.69970923355,
+    "validation_eigvals_file": "validation_eigvals.npy",
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "cai2_ab_3.89",
@@ -158,13 +187,16 @@
     "dimension": 222,
     "coefficients": 20,
     "band_count": 6,
-    "eval_points": 45,
-    "rms_meV": 0.2723496036139731,
-    "max_meV": 0.6343202151334673,
+    "eval_points": 61,
+    "rms_meV": 0.2691680072445651,
+    "max_meV": 0.6343202151333216,
     "export_format": "fixed_angle_gamma",
     "export_sha256": "b4b8a81d716d229d7b0cb9bd8eca1aa8c993bff4ed754642c2578eb183476a43",
     "minimum_sampled_six_band_overlap_squared": 0.963618042065231,
-    "minimum_sampled_pair_overlap_squared": 0.9733318821273027
+    "minimum_sampled_pair_overlap_squared": 0.9733318821273027,
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "cai2_ab_3.89",
@@ -172,30 +204,39 @@
     "dimension": 72,
     "coefficients": 932,
     "band_count": 6,
-    "eval_points": 20,
-    "rms_meV": 0.03238301523923735,
-    "max_meV": 0.0630967041450603,
+    "eval_points": 61,
+    "rms_meV": 0.0335215227914502,
+    "max_meV": 0.08303934026665516,
     "export_sha256": "077865f23bfd8e5a6fd5b43583c307fed0672fa2509063f07b15cfd9a4318742",
     "polynomial_orders": {
       "kinetic": 6,
       "intralayer": 5,
       "interlayer": 5
     },
-    "reference_energy_eV": -2.749209660355
+    "reference_energy_eV": -2.749209660355,
+    "validation_eigvals_file": "validation_eigvals.npy",
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   },
   {
     "case": "cai2_ab_2.28",
     "valley": "Gamma",
-    "dimension": 330,
-    "coefficients": 20,
+    "dimension": 186,
+    "coefficients": 393,
     "band_count": 6,
-    "eval_points": 45,
-    "rms_meV": 0.25511179834234715,
-    "max_meV": 0.8028321095354691,
-    "export_format": "fixed_angle_gamma",
-    "export_sha256": "f976ea1fe1943c78a3bee4b62f1e6628e2c4f21e0d59adab6ad27f9c1242a73f",
-    "minimum_sampled_six_band_overlap_squared": 0.9196673558540466,
-    "minimum_sampled_pair_overlap_squared": 0.4725246590810545
+    "eval_points": 61,
+    "rms_meV": 0.03873670045961528,
+    "max_meV": 0.12294406598556407,
+    "export_sha256": "f9432eebfb31273fca11774f19264d0b9d890ca6fe43dc7edfe96e0cab8421a5",
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003,
+    "polynomial_orders": {
+      "kinetic": 4,
+      "intralayer": 1
+    },
+    "harmonic_count": 6
   },
   {
     "case": "cai2_ab_2.28",
@@ -203,15 +244,19 @@
     "dimension": 96,
     "coefficients": 937,
     "band_count": 6,
-    "eval_points": 20,
-    "rms_meV": 0.6165369430342623,
-    "max_meV": 1.2652288461514338,
+    "eval_points": 61,
+    "rms_meV": 0.6274880409491098,
+    "max_meV": 1.2740411644451832,
     "export_sha256": "f3c664b8d3af313d2c9dfb20aee8ab9002c95e84c07928728fbff4f9496ba019",
     "polynomial_orders": {
       "kinetic": 6,
       "intralayer": 5,
       "interlayer": 5
     },
-    "reference_energy_eV": -2.7681962653183336
+    "reference_energy_eV": -2.7681962653183336,
+    "validation_eigvals_file": "validation_eigvals.npy",
+    "path_points": 61,
+    "overlap_reference": "TAPW",
+    "overlap_cluster_threshold_eV": 0.003
   }
 ]

@@ -1,0 +1,127 @@
+case:
+  profile: Gamma
+  q_shell: q05
+  output_root: ../output/kp
+valley: Gamma
+spin: all
+material:
+  name: CaI2 projected six-state molecular Heff
+  num_layer_list:
+  - 1
+  - 1
+  num_orb_per_layer:
+  - 3
+  hamk_file: ../input/Gamma/hamiltonian_k.npy
+  kpoints_file: ../input/Gamma/kpoints.npy
+  qset1_file: ../input/Gamma/g_vectors_group1.npy
+  qset2_file: ../input/Gamma/g_vectors_group2.npy
+  band_file: ../input/Gamma/energies_vbm.txt
+  efermi: -4.443137
+project:
+  mode: Gamma
+  target: valence
+  selection:
+    mode: explicit
+  nlow_state_list:
+  - - 0
+    - 1
+    - 2
+    - 3
+    - 4
+    - 5
+  - []
+  norb_fix_list:
+  - - 0
+    - 1
+    - 2
+    - 6
+    - 7
+    - 8
+  - []
+  downfold_method: first_order
+  workers: 16
+  blas_threads: 2
+  out_dir: ../output/kp/Gamma/q05/projection
+symm:
+  operations:
+  - C3z
+  - C2
+  - TR
+  tapw_symmetry_dir: ../input/Gamma/source_symmetry
+  tolerance: 0.02
+  output_dir: ../output/kp/Gamma/q05/symmetry
+plot:
+  mode: Gamma
+  target: valence
+kpath:
+  labels:
+  - G
+  - M
+  - K
+  - G
+  points_per_segment: 20
+  coordinates:
+    G:
+    - 0.0
+    - 0.0
+    M:
+    - 0.5
+    - 0.0
+    K:
+    - 0.3333333333333333
+    - 0.3333333333333333
+  tmat:
+  - - 112.7651620789
+    - -0.0
+    - 0.0
+  - - -56.382581041
+    - 97.6574950217
+    - 0.0
+  - - 0.0
+    - 0.0
+    - 50.0
+model:
+  target_bands: top
+  max_order:
+    kinetic: 4
+    intralayer: 1
+    interlayer: 1
+  harmonics:
+    intra:
+      count: 6
+    inter: {}
+sectors:
+- name: L1
+  qset: qset1
+  n_orb: 6
+  q_offset:
+  - 0.0
+  - 0.0
+fit:
+  method: linear
+  kpoints:
+  - 0
+  - 5
+  - 8
+  - 12
+  - 15
+  - 20
+  - 25
+  - 28
+  - 32
+  - 35
+  - 40
+  - 45
+  - 48
+  - 52
+  - 55
+  bands: 6
+  one_sided_weight: 10.0
+  two_sided_weight: 100.0
+output:
+  dir: ../output/kp/Gamma/q05/model
+bands:
+  compare_to_heff: true
+  plot:
+    top_bands: 6
+    align: top

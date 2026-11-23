@@ -11,13 +11,42 @@ window, and sampling indices are in [the KP YAML](kp/kp_M1.yaml).
 
 ## Gamma valence model
 
-The [fixed-angle Gamma model](model/Gamma/) retains six molecular spinors per
-Q vector. Its **20 real coefficients** were refined at this angle on its own
-TAPW training data. Its six-band RMS and maximum errors on 45 held-out
-path points are **0.255 meV** and **0.803 meV**.
-The [Gamma model configuration](model/Gamma/MODEL.json) lists the training
-momenta. The model directory also contains the fixed basis, operator
-templates, and sampled wave-function overlaps.
+The [Gamma model](model/Gamma/) retains six spinful molecular states that span
+both layers, at each of 31 Q vectors. The Hamiltonian has dimension 186. The
+393 real coefficients are extracted linearly with kinetic order 4, coupling
+order 1, and six harmonic shells including zero transfer. The one-sided and
+two-sided matrix weights are 10 and 100 on the six highest valence states.
+[The configuration](kp/kp_Gamma.yaml) specifies the 15 sampling momenta.
+On the 61-point path, the six-band RMS / maximum energy errors relative to
+TAPW are **0.039 / 0.123 meV**. The mean / minimum squared overlaps are
+**0.9985 / 0.9950**, using the normalized molecular-state resolvent embedding.
+
+To repeat the linear extraction, run from the repository root:
+
+```bash
+CASE=examples/cai2_ab_2.28
+unzip -n "$CASE/kp/input_Gamma.zip" -d "$CASE"
+kp project -c "$CASE/kp/kp_Gamma.yaml"
+kp symm    -c "$CASE/kp/kp_Gamma.yaml"
+kp model   -c "$CASE/kp/kp_Gamma.yaml"
+```
+
+The archive starts from the molecular effective Hamiltonian obtained from
+shell-5 TAPW matrices with symmetrized real-space H and S. Its six physical
+components are packed in the active source group. The second group contains
+uncoupled padding at +10 eV for the two-group input interface. The model
+retains only the six molecular components. The source representations for
+C3z, C2 and time reversal are included in the archive.
+
+The [TAPW configuration](tapw/tapw_Gamma.yaml) expects symmetrized
+`openmx/prepared/H_symm.npz` and `S_symm.npz` and uses the supplied rigid
+OpenMX cell. Given that TAPW band output and the unpacked archive, the
+[molecular projection script](kp/prepare_gamma_input.py) reconstructs the
+matrix and reference spectrum from the [fixed molecular frame](kp/molecular_frame_Gamma.npz):
+
+```bash
+python "$CASE/kp/prepare_gamma_input.py" "$CASE/output/tapw/Gamma/q05/band" "$CASE/input/rebuilt_Gamma"
+```
 
 ## Evaluate the continuum model
 
@@ -33,7 +62,7 @@ python examples/additional_models/verify_models.py --case cai2_ab_2.28
 include the M2 and M3 spectra after rotating the local wavevector of M1 by
 the corresponding C3 operation. The three valleys use one common energy shift.
 
-## Reproduce the coefficient extraction
+## Reproduce the M1 coefficient extraction
 
 The [projected input archive](kp/projected_input_M1.zip) contains the saved
 effective Hamiltonian, certified projection and symmetry artifacts, Q vectors,
@@ -94,3 +123,14 @@ kp model   -c "$KP_CFG"
 
 Generated H/S, the large TAPW projected matrices, and the regenerated
 model are written locally under `openmx/prepared/` and `output/`.
+
+## 61-point TAPW validation
+
+The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A single constant aligns each model edge with TAPW at Gamma. The table uses all 61 points.
+
+| Valley | RMS (meV) | Maximum (meV) |
+| --- | ---: | ---: |
+| Gamma | 0.039 | 0.123 |
+| M1 | 0.627 | 1.274 |
+
+The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case cai2_ab_2.28` from the repository root to replay the archived comparisons.

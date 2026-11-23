@@ -1,6 +1,8 @@
 # Kinetic expansion order
 
-The upper row compares band RMS errors using the manuscript's energy alignment. The
+[Manuscript kinetic-order comparison (Supplementary Fig. S5 / Fig. R2)](figures/kinetic_order.pdf)
+
+In the multi-method comparison below, the upper row compares band RMS errors using the manuscript's energy alignment. The
 lower row uses raw energies. Each column covers one of the six manuscript models.
 Stars mark the orders and linear coefficient-extraction settings used in the manuscript.
 
@@ -18,10 +20,11 @@ specify the six manuscript examples.
 Run from a checkout with NumPy and Matplotlib installed:
 
 ```bash
+python examples/kinetic_order_validation/render_kinetic_order.py
 python examples/kinetic_order_validation/render_figures.py
 ```
 
-The script verifies all 132 model/order/settings combinations against their
+The first command reproduces Supplementary Fig. S5. The second verifies all 132 model/order/settings combinations against their
 61-point model and TAPW spectra in `data/path_bands.npz` and regenerates the
 figure. The arrays use eV. Each pair is named `s{series}_{case}_k{order}_model`
 and `s{series}_{case}_k{order}_tapw`. The alignment offsets, window sizes, and

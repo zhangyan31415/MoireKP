@@ -1,14 +1,42 @@
-# CaI2 AB Gamma valence at 2.28106 degrees
+# AB CaI2, 2.28 degrees, Gamma
 
-The twenty real coefficients were optimized for this angle using its own training
-data. The six-state basis is shared between angles. `MODEL.json` records the
-training indices. `COEFFICIENTS.npz` stores the contracted polynomial and Fourier
-matrices, and `MATERIAL_CONTROLS.npz` stores the twenty physical coefficients.
-The fixed orbitals and operator templates are included alongside the export.
+This directory contains a NumPy-only evaluator for `AB CaI2, 2.28 degrees, Gamma`.
 
-Use `evaluate.load_model().bands(kpoints)` for all electron energies in eV
-relative to the model valence edge at Gamma. Input momenta are Cartesian,
-in inverse angstrom. TAPW references in `reference_bands.npz` use their own
-Gamma valence edge. RMS and maximum errors use the 45 held-out path points.
-The columns of `pair_overlap_squared` in `overlap_samples.npz` run from the
-highest to the lowest valence pair at the indicated sampled momenta.
+## Requirements
+
+Python 3 and NumPy.
+
+## Run
+
+```bash
+python evaluate.py
+```
+
+This writes:
+
+- `kpoints.npy`
+- `bands.npy`
+- `bands.pdf`
+- `kdist.npy`
+- `kpath_ticks.json`
+
+## Edit the k path
+
+Open `evaluate.py` and edit:
+
+- `HIGH_SYMMETRY_POINTS`
+- `KPATH`
+- `POINTS_PER_SEGMENT`
+- `WINDOW_BANDS`
+- `WINDOW_EDGE`
+
+## Files
+
+- `evaluate.py`: standalone evaluator
+- `model_data.npz`: arrays used by the evaluator
+- `MODEL.md`: model formula and basis notes
+
+- `model.toml` + `terms.csv`: authoritative expandable physical model
+- `q_points.csv`: validated default finite Q realization
+- `physical_model.py`: NumPy route evaluator (`load_model('.')`)
+- `symmetry.toml`: sector-aware affine Q actions, when available

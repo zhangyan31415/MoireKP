@@ -67,3 +67,13 @@ at path rows 0, 20, and 40. The top-eight-band RMS and maximum errors are
 0.365 and 0.982 meV relative to TAPW after valence-edge alignment over
 the 61-point path. Workers and BLAS threads in the YAMLs can be adjusted
 to the compute allocation.
+
+## 61-point TAPW validation
+
+The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A single constant aligns each model edge with TAPW at Gamma. The table uses all 61 points.
+
+| Valley | RMS (meV) | Maximum (meV) |
+| --- | ---: | ---: |
+| K1 | 0.422 | 0.999 |
+
+The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case mote2_2.13` from the repository root to replay the archived comparisons.

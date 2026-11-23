@@ -71,3 +71,13 @@ energy-linearized Löwdin reduction at -4.73009299107 eV. The KP commands
 above start at the stored result of that reduction. The OpenMX and TAPW
 commands regenerate the upstream inputs and do not replace the archived
 reduced matrices automatically.
+
+## 61-point TAPW validation
+
+The frozen coefficients were evaluated on the full Gamma–M–K–Gamma path. A single constant aligns each model edge with TAPW at Gamma. The table uses all 61 points.
+
+| Valley | RMS (meV) | Maximum (meV) |
+| --- | ---: | ---: |
+| K | 1.143 | 2.973 |
+
+The `model/` directories contain the corresponding `reference_bands.npz` and `native_overlaps.npz`. Squared overlaps are computed in orthonormal TAPW space, with a common 3 meV grouping threshold for nearby matched bands. Run `python examples/additional_models/verify_models.py --case wse2_trilayer_3.89` from the repository root to replay the archived comparisons.
