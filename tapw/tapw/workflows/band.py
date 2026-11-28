@@ -2635,6 +2635,7 @@ class BandStructureCalculator:
         self._num_wann: int | None = None
         self._ef_onsite_orb: np.ndarray | None = None
         self._realspace_block_cache: dict[int, SimpleNamespace] = {}
+        self._realspace_projection_cache: dict[int, list] = {}
 
         if self.config.TAPW:
             if self.use_M_valley_threefold_symm:
@@ -2781,6 +2782,208 @@ class BandStructureCalculator:
         self._realspace_block_cache[cache_key] = cached
         return cached
 
+    def _get_or_build_projection_block_cache(self, hr_blocks):
+        """Keep R-resolved CSR views without allocating k-dependent AO values."""
+        cache = getattr(self, "_realspace_projection_cache", None)
+        if cache is None:
+            cache = self._realspace_projection_cache = {}
+        key = id(hr_blocks)
+        if key in cache:
+            return cache[key]
+        self._ensure_sorted_wann_cache()
+        size = self._num_wann
+        chunk = int(getattr(self.config, "assembly_chunk_size", 262144))
+        result = []
+        for rvec, block in hr_blocks.items():
+            rows, cols = np.asarray(block["row"]), np.asarray(block["col"])
+            values = np.asarray(block["val"], dtype=np.complex128)
+            if rows.shape != values.shape or cols.shape != values.shape or values.ndim != 1:
+                raise ValueError("Mismatched real-space row/col/value lengths")
+            grouped = True
+            for start in range(0, values.size, chunk):
+                stop = min(start + chunk, values.size)
+                r, c = rows[start:stop], cols[start:stop]
+                if min(int(r.min()), int(c.min())) < 0 or max(int(r.max()), int(c.max())) >= size:
+                    raise ValueError("Real-space index exceeds the Wannier basis dimension")
+                grouped = grouped and not np.any(
+                    rows[max(0, start - 1):stop - 1] > rows[max(1, start):stop])
+            if grouped and rows.dtype.kind in "iu" and cols.dtype.kind in "iu":
+                dtype = self._realspace_csr_index_dtype(size, values.size)
+                matrix = scipy.sparse.csr_matrix((size, size), dtype=np.complex128)
+                matrix.indptr = np.searchsorted(rows, np.arange(size + 1)).astype(dtype)
+                matrix.indices = cols.astype(dtype, copy=False)
+                matrix.data = values
+            else:
+                # Legacy callers may supply unordered or duplicate triplets.
+                matrix = scipy.sparse.csr_matrix((values, (rows, cols)), shape=(size, size))
+                dtype = self._realspace_csr_index_dtype(size, matrix.nnz)
+                matrix.indices = matrix.indices.astype(dtype, copy=False)
+                matrix.indptr = matrix.indptr.astype(dtype, copy=False)
+            result.append(SimpleNamespace(matrix=matrix, rvec_cart=np.dot(rvec, self.structure.Tmat)))
+        cache[key] = result
+        return result
+
+    @staticmethod
+    def _right_projection_panels(right):
+        """Recognize disjoint dense orbital blocks embedded in the sparse projector."""
+        lengths = np.diff(right.indptr)
+        if not lengths.size:
+            return None
+        width = int(lengths[0])
+        if not 0 < width < right.shape[1] or not np.all(lengths == width):
+            return None
+        columns = right.indices.reshape(-1, width)
+        weights = right.data.reshape(-1, width)
+        # In the ordinary TAPW projector, equivalent AO rows have the same
+        # list of retained plane waves. Check every column, not just the first.
+        order = np.argsort(columns[:, 0], kind="stable")
+        splits = np.flatnonzero(np.diff(columns[order, 0])) + 1
+        if (splits.size + 1) * width != right.shape[1]:
+            return None
+        used = np.zeros(right.shape[1], dtype=bool)
+        panels = []
+        for sources in np.split(order, splits):
+            targets = columns[sources[0]]
+            if (sources.size < 2 or np.any(targets[1:] <= targets[:-1])
+                    or used[targets].any() or not np.all(columns[sources] == targets)):
+                return None
+            used[targets] = True
+            panels.append((sources, targets, weights[sources]))
+        return panels
+
+    @staticmethod
+    def _project_dominant_block_rows(rows, right, terms, panels, out):
+        """Form a bounded dense left product, scatter the smaller R terms, then project."""
+        matrix, phase = terms[0]
+        tile = dot_product_mkl(rows, matrix, dense=True)
+        if phase != 1:
+            tile *= phase
+        for matrix, phase in terms[1:]:
+            term = dot_product_mkl(rows, matrix, dense=False)
+            if phase != 1:
+                term.data *= phase
+            # MKL can return repeated columns for noncanonical inputs.
+            for i in range(rows.shape[0]):
+                lo, hi = term.indptr[i:i + 2]
+                np.add.at(tile[i], term.indices[lo:hi], term.data[lo:hi])
+        if panels is None:
+            out[:] = dot_product_mkl(tile, right)
+        else:
+            for sources, targets, weights in panels:
+                out[:, targets] = tile[:, sources] @ weights
+
+    @staticmethod
+    def _equal_spin_csr_view(matrix):
+        """Recognize diag(B, B) exactly; return an upper-block CSR view."""
+        if not scipy.sparse.isspmatrix_csr(matrix):
+            return None
+        nr, nc = matrix.shape
+        if not nr or not nc or nr % 2 or nc % 2:
+            return None
+        rows, cols = nr // 2, nc // 2
+        mid = int(matrix.indptr[rows])
+        if (matrix.nnz != 2 * mid or not np.array_equal(
+                matrix.indptr[:rows+1], matrix.indptr[rows:] - mid)):
+            return None
+        for lo in range(0, mid, 262144):
+            hi = min(lo + 262144, mid)
+            upper = matrix.indices[lo:hi]
+            lower = matrix.indices[mid+lo:mid+hi]
+            if (upper.max() >= cols or not np.array_equal(lower - cols, upper)
+                    or not np.array_equal(matrix.data[lo:hi], matrix.data[mid+lo:mid+hi])):
+                return None
+        view = scipy.sparse.csr_matrix((rows, cols), dtype=matrix.dtype)
+        view.indptr = matrix.indptr[:rows+1]
+        view.indices = matrix.indices[:mid]
+        view.data = matrix.data[:mid]
+        return view
+
+    def _compact_spin_overlap(self, raw, params):
+        """Validate S(R) and both projectors once, including before the fork."""
+        previous = getattr(self, "_compact_overlap_cache", None)
+        if (previous is not None and previous[0] is raw and previous[1] is params.g_matrix
+                and previous[2] is params.g_matrix_conj):
+            return previous[3]
+        g = self._equal_spin_csr_view(params.g_matrix)
+        gh = self._equal_spin_csr_view(params.g_matrix_conj)
+        compact = None
+        if g is not None and gh is not None:
+            blocks = []
+            for block in self._get_or_build_projection_block_cache(raw):
+                matrix = self._equal_spin_csr_view(block.matrix)
+                if matrix is None:
+                    break
+                blocks.append(SimpleNamespace(matrix=matrix, rvec_cart=block.rvec_cart))
+            else:
+                compact = g, gh, blocks
+        self._compact_overlap_cache = raw, params.g_matrix, params.g_matrix_conj, compact
+        return compact
+
+    def _project_realspace_blocks(self, hr_blocks, phase_ctx, projector, projector_h=None,
+                                  type="H", force_sparse_dot=False, blocks=None):
+        """Accumulate all R terms per projected row block before right projection."""
+        use_mkl = bool(force_sparse_dot or getattr(self.config, "use_sparse_dot_mkl", False))
+        if use_mkl and not _HAS_SPARSE_DOT_MKL:
+            _raise_sparse_dot_mkl_unavailable()
+        if blocks is None:
+            blocks = self._get_or_build_projection_block_cache(hr_blocks)
+        phase = np.exp(-1j * phase_ctx.phase_wann)
+        if projector_h is None:
+            projector_h = projector.conj().T
+        if scipy.sparse.issparse(projector):
+            left = projector.multiply(phase[None, :]).tocsr()
+        else:
+            left = np.asarray(projector) * phase[None, :]
+        if scipy.sparse.issparse(projector_h):
+            right = projector_h.multiply(phase.conj()[:, None]).tocsr()
+        else:
+            right = phase.conj()[:, None] * np.asarray(projector_h)
+        use_mkl = use_mkl and scipy.sparse.issparse(left) and scipy.sparse.issparse(right)
+        result = np.zeros((left.shape[0], right.shape[1]), dtype=np.complex128)
+        block_rows = int(getattr(self.config, "projection_block_rows", 192))
+        terms = [(block.matrix, np.exp(1j * np.dot(phase_ctx.kvec, block.rvec_cart)))
+                 for block in blocks if block.matrix.nnz]
+        dense_terms = []
+        panels = None
+        if use_mkl and terms:
+            largest = max(terms, key=lambda term: term[0].nnz)
+            # Require a dominant R and bound the tile to at most one quarter
+            # of its value storage, even when the AO basis grows very large.
+            tile_size = min(block_rows, left.shape[0]) * right.shape[0]
+            if (4 * tile_size <= largest[0].nnz
+                    and 2 * largest[0].nnz >= sum(matrix.nnz for matrix, _ in terms)):
+                dense_terms = [largest] + [term for term in terms if term is not largest]
+                if right.nnz <= tile_size:
+                    panels = self._right_projection_panels(right)
+        for start in range(0, left.shape[0], block_rows):
+            stop = min(start + block_rows, left.shape[0])
+            rows = left[start:stop]
+            # Estimate whether a left-product row reaches a substantial
+            # fraction of AO columns from the input matrices' mean row nnz.
+            if dense_terms and rows.nnz * dense_terms[0][0].nnz >= (
+                    rows.shape[0] * rows.shape[1] * right.shape[0]):
+                self._project_dominant_block_rows(rows, right, dense_terms, panels, result[start:stop])
+            elif terms:
+                accumulated = None
+                for matrix, factor in terms:
+                    term = dot_product_mkl(rows, matrix, dense=False) if use_mkl else rows @ matrix
+                    if factor != 1:
+                        if scipy.sparse.issparse(term):
+                            term.data *= factor
+                        else:
+                            term *= factor
+                    accumulated = term if accumulated is None else accumulated + term
+                part = (dot_product_mkl(accumulated, right, dense=True) if use_mkl
+                        else accumulated @ right)
+                result[start:stop] = part.toarray() if scipy.sparse.issparse(part) else part
+                del accumulated, part, term
+            if type == "H" and self._ef_onsite_orb is not None:
+                onsite = (rows.multiply(self._ef_onsite_orb[None, :]) if scipy.sparse.issparse(rows)
+                          else rows * self._ef_onsite_orb[None, :])
+                part = onsite @ right
+                result[start:stop] += part.toarray() if scipy.sparse.issparse(part) else part
+        return result
+
     def _uses_mkl_projection(self) -> bool:
         # Symmetry validation and the M-valley C3 path explicitly force MKL,
         # even when the ordinary projection configuration disables it.
@@ -2845,14 +3048,18 @@ class BandStructureCalculator:
 
     def _prepare_realspace_caches_for_fork(self) -> None:
         """Build all k-independent arrays before workers inherit the calculator."""
-        if not bool(getattr(self.config, "fast_getk", True)):
+        if not (getattr(self.config, "TAPW", False)
+                or bool(getattr(self.config, "fast_getk", True))):
             return
         self._ensure_sorted_wann_cache()
         names = ("hr_supercell",) if getattr(self.config, "orthogonal_basis", False) else ("hr_supercell", "sr_supercell")
         for name in names:
             source = getattr(self, name, None)
             if source is not None:
-                self._get_or_build_realspace_block_cache(source)
+                if getattr(self.config, "TAPW", False):
+                    self._get_or_build_projection_block_cache(source)
+                else:
+                    self._get_or_build_realspace_block_cache(source)
         # MKL may also cast the large right-hand projectors in place. Prepare
         # those indices once in the parent, including M-valley reference terms.
         if _HAS_SPARSE_DOT_MKL and self._uses_mkl_projection():
@@ -2869,6 +3076,13 @@ class BandStructureCalculator:
                     dtype = self._realspace_csr_index_dtype(max(matrix.shape), matrix.nnz)
                     matrix.indices = matrix.indices.astype(dtype, copy=False)
                     matrix.indptr = matrix.indptr.astype(dtype, copy=False)
+
+        if (getattr(self.structure, "spin", False) and getattr(self.config, "TAPW", False)
+                and not getattr(self.config, "orthogonal_basis", False)
+                and not getattr(self.config, "ge", False)
+                and getattr(self, "sr_supercell", None) is not None
+                and getattr(self, "TAPW_parameters", None) is not None):
+            self._compact_spin_overlap(self.sr_supercell, self.TAPW_parameters)
 
     def _build_getk_phase_context(self, k) -> SimpleNamespace:
         kvec = self.get_kvec(k)
@@ -3839,23 +4053,26 @@ class BandStructureCalculator:
     def Getk_super_gauge_sparse_final_HS(self, Hr, Sr, k):
         """Get final Hamiltonian for orthogonal or non-orthogonal basis (no symmetry)"""
         phase_ctx = self._build_getk_phase_context(k)
-        use_sparse_dot = bool(getattr(self.config, "use_sparse_dot_mkl", False))
-        Hk = self._assemble_sparse_realspace_matrix(Hr, phase_ctx, type="H")
-        Hk = self.cal_TAPW_hamiltonian_k_cpu(Hk, force_sparse_dot=use_sparse_dot)
+        params = self.TAPW_parameters
+        Hk = self._project_realspace_blocks(Hr, phase_ctx, params.g_matrix,
+                                           projector_h=params.g_matrix_conj)
         if self.config.orthogonal_basis:
             return Hk, None
-        else:
-            Sk = self._assemble_sparse_realspace_matrix(Sr, phase_ctx, type="S")
-            Sk_fast = self._cal_TAPW_spin_degenerate_overlap_k_cpu(
-                Sk,
-                force_sparse_dot=use_sparse_dot,
-            )
-            Sk = Sk_fast if Sk_fast is not None else self.cal_TAPW_hamiltonian_k(Sk)
-            if not self.config.ge:
-                Hk = self.gen_H_new(Hk, Sk)
-                return Hk, None
-            else:
-                return Hk, Sk
+        if getattr(self.structure, "spin", False) and not self.config.ge:
+            compact = self._compact_spin_overlap(Sr, params)
+            half = len(phase_ctx.phase_wann) // 2
+            if compact is not None and np.array_equal(phase_ctx.phase_wann[:half], phase_ctx.phase_wann[half:]):
+                g, gh, blocks = compact
+                spin_ctx = SimpleNamespace(kvec=phase_ctx.kvec, phase_wann=phase_ctx.phase_wann[:half])
+                s0 = self._project_realspace_blocks(Sr, spin_ctx, g, gh, type="S", blocks=blocks)
+                if self._is_hermitian_overlap_block(s0):
+                    # Hk is the private, freshly projected output of this call.
+                    return self._lowdin_spin_blocks(Hk, s0, Hk), None
+                Sk = scipy.linalg.block_diag(s0, s0)
+                return self._finalize_tapw_projected_hs(Hk, Sk)
+        Sk = self._project_realspace_blocks(Sr, phase_ctx, params.g_matrix,
+                                           projector_h=params.g_matrix_conj, type="S")
+        return self._finalize_tapw_projected_hs(Hk, Sk)
 
 
     @timing_decorator_factory(process_id=0)
@@ -3917,15 +4134,26 @@ class BandStructureCalculator:
         if hamk.shape != samk.shape:
             return None
 
-        s_eig, s_vec = scipy.linalg.eigh(s0, check_finite=False)
-        s_inv_sqrt = np.diag(1.0 / np.sqrt(s_eig))
-        uminvud = s_vec @ s_inv_sqrt @ s_vec.conj().T
-
         out = np.empty_like(hamk, dtype=np.result_type(hamk, np.complex128))
-        out[:half, :half] = uminvud @ hamk[:half, :half] @ uminvud
-        out[:half, half:] = uminvud @ hamk[:half, half:] @ uminvud
-        out[half:, :half] = uminvud @ hamk[half:, :half] @ uminvud
-        out[half:, half:] = uminvud @ hamk[half:, half:] @ uminvud
+        return self._lowdin_spin_blocks(hamk, s0, out)
+
+    @staticmethod
+    def _is_hermitian_overlap_block(s0):
+        scale = max(1.0, np.max(np.abs(s0)))
+        return np.max(np.abs(s0 - s0.conj().T)) <= 1e-10 * scale
+
+    @staticmethod
+    def _lowdin_spin_blocks(hamk, s0, out):
+        half = s0.shape[0]
+        eig, vec = scipy.linalg.eigh(s0, check_finite=False)
+        inverse = (vec * (1.0 / np.sqrt(eig))) @ vec.conj().T
+        del eig, vec
+        for i in (0, half):
+            for j in (0, half):
+                block = np.s_[i:i+half, j:j+half]
+                work = inverse @ hamk[block]
+                np.matmul(work, inverse, out=out[block])
+                del work
         return out
 
     @timing_decorator_factory(process_id=0)
@@ -4015,26 +4243,10 @@ class BandStructureCalculator:
         tapw_parameters,
         force_sparse_dot: bool = False,
     ):
-        phase_ctx = self._build_getk_phase_context(k)
-        h_full = self._assemble_sparse_realspace_matrix(Hr, phase_ctx, type="H")
-        hamk = self.cal_TAPW_hamiltonian_k_cpu(
-            h_full,
-            tapw_parameters=tapw_parameters,
-            force_sparse_dot=force_sparse_dot,
+        return self._get_raw_projected_hs_with_projector(
+            Hr, Sr, k, mpi_index, tapw_parameters.g_matrix,
+            projector_h=tapw_parameters.g_matrix_conj, force_sparse_dot=force_sparse_dot,
         )
-        del h_full
-
-        orthogonal_basis = bool(getattr(getattr(self, "config", None), "orthogonal_basis", False))
-        if orthogonal_basis:
-            return hamk, None
-
-        s_full = self._assemble_sparse_realspace_matrix(Sr, phase_ctx, type="S")
-        samk = self.cal_TAPW_hamiltonian_k_cpu(
-            s_full,
-            tapw_parameters=tapw_parameters,
-            force_sparse_dot=force_sparse_dot,
-        )
-        return hamk, samk
 
     def _project_full_space_matrix_with_projector(self, full_matrix, projector, projector_h=None, force_sparse_dot: bool = False):
         """Compute G A G† with a bounded number of intermediate rows."""
@@ -4070,26 +4282,12 @@ class BandStructureCalculator:
 
     def _get_raw_projected_hs_with_projector(self, Hr, Sr, k, mpi_index, projector, projector_h=None, force_sparse_dot: bool = False):
         phase_ctx = self._build_getk_phase_context(k)
-        h_full = self._assemble_sparse_realspace_matrix(Hr, phase_ctx, type="H")
-        hamk = self._project_full_space_matrix_with_projector(
-            h_full,
-            projector,
-            projector_h=projector_h,
-            force_sparse_dot=force_sparse_dot,
-        )
-        del h_full
-
-        orthogonal_basis = bool(getattr(getattr(self, "config", None), "orthogonal_basis", False))
-        if orthogonal_basis:
+        hamk = self._project_realspace_blocks(Hr, phase_ctx, projector, projector_h=projector_h,
+                                            force_sparse_dot=force_sparse_dot)
+        if getattr(self.config, "orthogonal_basis", False):
             return hamk, None
-
-        s_full = self._assemble_sparse_realspace_matrix(Sr, phase_ctx, type="S")
-        samk = self._project_full_space_matrix_with_projector(
-            s_full,
-            projector,
-            projector_h=projector_h,
-            force_sparse_dot=force_sparse_dot,
-        )
+        samk = self._project_realspace_blocks(Sr, phase_ctx, projector, projector_h=projector_h,
+                                            type="S", force_sparse_dot=force_sparse_dot)
         return hamk, samk
 
     def _finalize_tapw_projected_hs(self, hamk, samk, mpi_index=0):
@@ -4261,6 +4459,21 @@ class BandStructureCalculator:
                 Hk_new = self.C3_symm(Hk_new_list[0], Hk_new_list[1], Hk_new_list[2], self.TAPW_parameters.C3_matrix)
                 return Hk_new, None
 
+    def _eigsh_lowdin(self, hamk):
+        options = {}
+        if (isinstance(hamk, np.ndarray) and np.iscomplexobj(hamk)
+                and self.config.num_bands_cal < hamk.shape[0] - 1):
+            # LAPACK can factor this single shifted buffer in place. Preserve
+            # the original H for ARPACK and callers that save the Hamiltonian.
+            shifted = np.array(hamk, order="F", copy=True)
+            shifted.flat[::shifted.shape[0] + 1] -= self.config.efermi
+            lu = scipy.linalg.lu_factor(shifted, overwrite_a=True)
+            options["OPinv"] = scipy.sparse.linalg.LinearOperator(
+                hamk.shape, dtype=hamk.dtype,
+                matvec=lambda x: scipy.linalg.lu_solve(lu, x))
+        return eigsh(hamk, k=self.config.num_bands_cal, sigma=self.config.efermi,
+                     which="LM", return_eigenvectors=self.config.eig_vec_cal, **options)
+
     @timing_decorator_factory(process_id=0)
     def calculate_band(self, kpoints, i):
         """Calculate band structure for a single k-point"""
@@ -4294,8 +4507,7 @@ class BandStructureCalculator:
                                  sigma=self.config.efermi, which='LM',
                                  return_eigenvectors=self.config.eig_vec_cal)
                     else:
-                        w = eigsh(hamk, k=self.config.num_bands_cal, sigma=self.config.efermi,
-                                 which='LM', return_eigenvectors=self.config.eig_vec_cal)
+                        w = self._eigsh_lowdin(hamk)
                 else:
                     a = hamk.toarray() if scipy.sparse.issparse(hamk) else hamk
                     if self.config.ge and samk is not None:

@@ -239,6 +239,7 @@ class HrSparseHandler:
             val = np.asarray(hr_sparse_chunk[key]["val"], dtype=np.complex128)
             matrix = scipy.sparse.csr_matrix((val, (row, col)), shape=(nwann, nwann))
             rotated = self.A.dot(matrix.dot(self.A.T))
+            rotated.eliminate_zeros()
             new_row, new_col = rotated.nonzero()
             transformed[key] = {
                 "row": _compact_sparse_indices(new_row),
@@ -247,38 +248,104 @@ class HrSparseHandler:
             }
         return transformed
 
+    def _unit_permutation(self):
+        """Return new-to-old indices only for an exact, square unit permutation."""
+        if self.A is None or self.A.shape[0] != self.A.shape[1]:
+            return None
+        matrix = scipy.sparse.csr_matrix(self.A)
+        size = matrix.shape[0]
+        if (matrix.nnz != size or not np.all(np.diff(matrix.indptr) == 1)
+                or not np.all(matrix.data == 1)
+                or not np.array_equal(np.sort(matrix.indices), np.arange(size))):
+            return None
+        return matrix.indices
+
+    @staticmethod
+    def _read_permuted_npz_block(archive, names, new_to_old, old_to_new, *, source):
+        """Read and permute one R block, releasing source coordinates early."""
+        size = len(new_to_old)
+        def read_indices(name):
+            indices = _compact_sparse_indices(archive[names[name]])
+            if indices.ndim != 1 or (indices.size and
+                    (int(indices.min()) < 0 or int(indices.max()) >= size)):
+                raise ValueError(f"Sparse {name} index outside [0, {size}) in {source}.")
+            return indices
+
+        rows = read_indices("row")
+        count = rows.size
+        chunk_size = 262144
+        grouped = True
+        for start in range(0, count - 1, chunk_size):
+            stop = min(start + chunk_size, count - 1)
+            grouped = grouped and not np.any(rows[start:stop] > rows[start + 1:stop + 1])
+        if grouped:
+            dtype = np.int32 if max(size, count) <= np.iinfo(np.int32).max else np.int64
+            indptr = np.searchsorted(rows, np.arange(size + 1)).astype(dtype)
+            del rows
+        columns = read_indices("col")
+        values = np.asarray(archive[names["val"]], dtype=np.complex128)
+        if columns.shape != (count,) or values.shape != (count,):
+            raise ValueError(f"Mismatched real-space row/col/value lengths in {source}.")
+        if grouped:
+            matrix = scipy.sparse.csr_matrix((size, size), dtype=np.complex128)
+            matrix.indptr = indptr
+            matrix.indices = columns.astype(dtype, copy=False)
+            matrix.data = values
+        else:
+            matrix = scipy.sparse.csr_matrix((values, (rows, columns)), shape=(size, size))
+            del rows
+        del columns, values
+        # A[new, old] = 1. CSR row gathering owns the reordered values and columns.
+        canonical = matrix.has_canonical_format
+        permuted = matrix[new_to_old, :]
+        del matrix
+        for start in range(0, permuted.nnz, chunk_size):
+            columns = permuted.indices[start:start + chunk_size]
+            columns[:] = old_to_new[columns]
+        # A bijection preserves uniqueness, so canonical inputs need no new sort.
+        permuted.has_sorted_indices = False
+        permuted.has_canonical_format = False
+        if not canonical:
+            permuted.sum_duplicates()
+        permuted.eliminate_zeros()
+        rows = np.repeat(np.arange(size, dtype=permuted.indices.dtype), np.diff(permuted.indptr))
+        return dict(row=rows, col=permuted.indices, val=permuted.data)
+
     def _load_npz_common(self, file_path):
         data = {}
-        with np.load(file_path, allow_pickle=False) as loaded_data:
-            metadata = read_sparse_npz_metadata(loaded_data, source=file_path)
-            for key in loaded_data.files:
+        with np.load(file_path, allow_pickle=False) as archive:
+            metadata = read_sparse_npz_metadata(archive, source=file_path)
+            dimension = None if metadata is None else int(metadata["basis_dimension"])
+            if self.A is not None and dimension is not None and dimension != self.A.shape[1]:
+                raise ValueError(f"Sparse basis dimension {dimension} does not match transform input dimension "
+                                 f"{self.A.shape[1]} in {file_path}.")
+            names_by_rvec = {}
+            for key in archive.files:
                 if key == SPARSE_NPZ_METADATA_KEY:
                     continue
-                key_tuple_str, attribute = key.rsplit('_', 1)
-                key_tuple = self._parse_npz_rvec_key(key_tuple_str)
-                if key_tuple not in data:
-                    data[key_tuple] = {'row': None, 'col': None, 'val': None}
-                if attribute == 'row':
-                    data[key_tuple]['row'] = _compact_sparse_indices(loaded_data[key])
-                elif attribute == 'col':
-                    data[key_tuple]['col'] = _compact_sparse_indices(loaded_data[key])
-                elif attribute == 'val':
-                    data[key_tuple]['val'] = np.asarray(
-                        loaded_data[key],
-                        dtype=np.complex128,
-                    )
-
-        for key in data:
-            if data[key]['row'] is None or data[key]['col'] is None or data[key]['val'] is None:
-                raise ValueError(f"Incomplete NPZ sparse block for rvec={key} in {file_path}")
-
-        basis_dimension = None if metadata is None else int(metadata["basis_dimension"])
-        self.basis_dimension = basis_dimension
-        self.hr_sparse = self._apply_basis_transform(
-            data,
-            basis_dimension=basis_dimension,
-            source=file_path,
-        )
+                rvec_key, attribute = key.rsplit('_', 1)
+                rvec = self._parse_npz_rvec_key(rvec_key)
+                names_by_rvec.setdefault(rvec, {})[attribute] = key
+            for rvec, names in names_by_rvec.items():
+                if not {"row", "col", "val"}.issubset(names):
+                    raise ValueError(f"Incomplete NPZ sparse block for rvec={rvec} in {file_path}")
+            new_to_old = self._unit_permutation()
+            if new_to_old is not None:
+                old_to_new = np.empty_like(new_to_old)
+                old_to_new[new_to_old] = np.arange(len(new_to_old))
+            for rvec, names in sorted(names_by_rvec.items()):
+                if new_to_old is not None:
+                    data[rvec] = self._read_permuted_npz_block(
+                        archive, names, new_to_old, old_to_new, source=file_path)
+                else:
+                    block = dict(row=_compact_sparse_indices(archive[names["row"]]),
+                                 col=_compact_sparse_indices(archive[names["col"]]),
+                                 val=np.asarray(archive[names["val"]], dtype=np.complex128))
+                    data[rvec] = self._apply_basis_transform(
+                        {rvec: block}, basis_dimension=dimension, source=file_path)[rvec]
+                    del block
+        self.basis_dimension = dimension
+        self.hr_sparse = data
 
     @timing_decorator_factory(0)
     def load_from_npz(self, file_path):
